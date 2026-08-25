@@ -184,7 +184,86 @@ let private rowsOf (store: Store) (dbName: string) (table: string) : Value[] lis
 let tests =
     testList
         "persistence"
-        [ testCase "attach + reload round-trips one value of every Value case, including datetime fractional seconds"
+        [ testList
+              "group commit queue"
+              [ testCase "writes arriving during a flush share the next batch"
+                <| fun _ ->
+                    let batches = ResizeArray<int list>()
+                    use flushStarted = new Threading.ManualResetEventSlim()
+                    use releaseFlush = new Threading.ManualResetEventSlim()
+
+                    let queue =
+                        Fsdb.GroupCommit.Queue<int>(
+                            8,
+                            (fun batch ->
+                                batches.Add batch
+
+                                if batches.Count = 1 then
+                                    flushStarted.Set()
+                                    releaseFlush.Wait()),
+                            ignore
+                        )
+
+                    let first = queue.Enqueue 1
+                    let firstTask = Threading.Tasks.Task.Run first
+                    Expect.isTrue (flushStarted.Wait(TimeSpan.FromSeconds 5.)) "the first flush starts"
+
+                    let second = queue.Enqueue 2
+                    let third = queue.Enqueue 3
+                    let secondTask = Threading.Tasks.Task.Run second
+                    let thirdTask = Threading.Tasks.Task.Run third
+                    releaseFlush.Set()
+                    Threading.Tasks.Task.WaitAll [| firstTask; secondTask; thirdTask |]
+
+                    Expect.sequenceEqual batches [ [ 1 ]; [ 2; 3 ] ] "followers share one ordered flush"
+
+                testCase "checkpoints split adjacent write batches without reordering"
+                <| fun _ ->
+                    let operations = ResizeArray<string>()
+
+                    let queue =
+                        Fsdb.GroupCommit.Queue<int>(
+                            8,
+                            (fun batch -> operations.Add(sprintf "write:%A" batch)),
+                            (fun () -> operations.Add "checkpoint")
+                        )
+
+                    let first = queue.Enqueue 1
+                    let checkpoint = queue.EnqueueCheckpoint()
+                    let second = queue.Enqueue 2
+                    first ()
+                    checkpoint ()
+                    second ()
+
+                    Expect.sequenceEqual operations [ "write:[1]"; "checkpoint"; "write:[2]" ] "barrier order"
+
+                testCase "a flush failure reaches every waiter and closes the queue"
+                <| fun _ ->
+                    let queue = Fsdb.GroupCommit.Queue<int>(8, (fun _ -> invalidOp "disk failed"), ignore)
+                    let first = queue.Enqueue 1
+                    let second = queue.Enqueue 2
+
+                    Expect.throwsT<InvalidOperationException> first "the leader sees the flush failure"
+                    Expect.throwsT<InvalidOperationException> second "the follower sees the same flush failure"
+
+                    Expect.throwsT<InvalidOperationException>
+                        (fun () -> queue.Enqueue 3 |> ignore)
+                        "a failed queue refuses later writes"
+
+                testCase "capacity applies backpressure until the leader drains"
+                <| fun _ ->
+                    let batches = ResizeArray<int list>()
+                    let queue = Fsdb.GroupCommit.Queue<int>(1, batches.Add, ignore)
+                    let first = queue.Enqueue 1
+                    let follower =
+                        Threading.Tasks.Task.Run<unit -> unit>(System.Func<unit -> unit>(fun () -> queue.Enqueue 2))
+                    Expect.isFalse (follower.Wait(TimeSpan.FromMilliseconds 100.)) "a full queue blocks another producer"
+                    first ()
+                    Expect.isTrue (follower.Wait(TimeSpan.FromSeconds 5.)) "draining releases the producer"
+                    follower.Result ()
+                    Expect.sequenceEqual batches [ [ 1 ]; [ 2 ] ] "both writes retain order" ]
+
+          testCase "attach + reload round-trips one value of every Value case, including datetime fractional seconds"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -377,6 +456,43 @@ let tests =
               let names = rowsOf reloaded defaultDatabase "t" |> List.map (fun r -> r.[1])
               Expect.containsAll names [ VString "before-snapshot"; VString "after-snapshot" ] "both the snapshotted row and the WAL-tail row are back"
 
+          testCase "concurrent same-row commits and a checkpoint replay to the published value"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let columns = [ mkCol "id" (TInt false); mkCol "n" (TInt false) ]
+              createTable store defaultDatabase "counter" columns [] [] None None |> ignore
+              insertRows store defaultDatabase "counter" None [ [ VInt 1L; VInt 0L ] ] |> ignore
+              use start = new Threading.ManualResetEventSlim()
+
+              let increment () =
+                  start.Wait()
+
+                  updateRows
+                      store
+                      defaultDatabase
+                      "counter"
+                      None
+                      (fun _ -> Ok true)
+                      (fun row ->
+                          match row.[1] with
+                          | VInt value -> Ok [| row.[0]; VInt(value + 1L) |]
+                          | value -> failtestf "expected integer counter, got %A" value)
+                  |> function
+                      | Ok 1 -> ()
+                      | result -> failtestf "increment failed: %A" result
+
+              let writers = Array.init 64 (fun _ -> Threading.Tasks.Task.Run increment)
+              let checkpoint = Threading.Tasks.Task.Run(fun () -> start.Wait(); snapshotNow dir store)
+              start.Set()
+              Threading.Tasks.Task.WaitAll(Array.append writers [| checkpoint |])
+
+              let live = rowsOf store defaultDatabase "counter"
+              let reloaded = load dir |> fun reloaded -> rowsOf reloaded defaultDatabase "counter"
+              Expect.equal live [ [| VInt 1L; VInt 64L |] ] "every concurrent update committed"
+              Expect.equal reloaded live "checkpoint and WAL preserve publication order"
+
           testCase "a snapshot larger than the streaming flush threshold round-trips through the chunked writer and streamed reader"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -472,7 +588,7 @@ let tests =
 
               let snapshot = beginTransactionSnapshot store
               insertRows snapshot defaultDatabase "t" None [ [ VNull; VString "never-committed"; VNull ] ] |> ignore
-              // ROLLBACK: just discard `snapshot` — never call `commitTransactionEvents`.
+              // Private snapshots have no durable side effects until publication.
 
               let afterRollback = FileInfo(walPath dir).Length
               Expect.equal afterRollback beforeRollback "rollback wrote nothing to the WAL"

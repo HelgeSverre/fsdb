@@ -11339,8 +11339,7 @@ let private storeTriggerDefinition
                             VInt insertionOrder ] ])
                 |> Result.mapError storageErr
                 |> Result.map (fun _ ->
-                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                    Storage.commitTransactionEvents store snapshot))
+                    Storage.commitCatalogInto store baseCatalog snapshot))
 
 let rec executeAs
     (store: Store)
@@ -11571,8 +11570,7 @@ let rec executeAs
             | Ok outcome when outcome.InsertedRows.IsEmpty ->
                 // Nothing actually inserted (all-duplicate upsert/IGNORE) —
                 // nothing to fire, but the update-path writes still count.
-                Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                Storage.commitTransactionEvents store snapshot
+                Storage.commitCatalogInto store baseCatalog snapshot
                 ok outcome
             | Ok outcome ->
                 let rows = outcome.InsertedRows |> List.map (fun row -> None, Some row)
@@ -11580,8 +11578,7 @@ let rec executeAs
                 match fireTriggers snapshot db table After TriggerInsert triggers rows with
                 | Some err -> ids, err
                 | None ->
-                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                    Storage.commitTransactionEvents store snapshot
+                    Storage.commitCatalogInto store baseCatalog snapshot
                     ok outcome
 
     let onDuplicateUpdater
@@ -11735,8 +11732,7 @@ let rec executeAs
                 deleteRows snapshot "mysql" "check_constraints" (belongsToDatabase 1)
             with
             | Ok _, Ok _, Ok _ ->
-                Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                Storage.commitTransactionEvents store snapshot
+                Storage.commitCatalogInto store baseCatalog snapshot
                 ids, Affected 0UL
             | Error error, _, _
             | _, Error error, _
@@ -11792,8 +11788,7 @@ let rec executeAs
 
                 match created with
                 | Ok affected ->
-                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                    Storage.commitTransactionEvents store snapshot
+                    Storage.commitCatalogInto store baseCatalog snapshot
                     ids, Affected(uint64 affected)
                 | Error error -> ids, storageErr error
             | _ -> ids, Err(1064, "CREATE TABLE ... AS requires a query")
@@ -11890,8 +11885,7 @@ let rec executeAs
 
                     match created with
                     | Ok() ->
-                        Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                        Storage.commitTransactionEvents store snapshot
+                        Storage.commitCatalogInto store baseCatalog snapshot
                         ids, Affected 0UL
                     | Error(TableExists _) when table.IfNotExists -> ids, Affected 0UL
                     | Error e -> ids, storageErr e
@@ -11924,8 +11918,7 @@ let rec executeAs
 
         match names |> traverse dropOne with
         | Ok _ ->
-            Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-            Storage.commitTransactionEvents store snapshot
+            Storage.commitCatalogInto store baseCatalog snapshot
             ids, Affected 0UL
         | Error e -> ids, storageErr e
 
@@ -12198,8 +12191,7 @@ let rec executeAs
 
             match altered with
             | Ok() ->
-                Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                Storage.commitTransactionEvents store snapshot
+                Storage.commitCatalogInto store baseCatalog snapshot
                 ids, Affected 0UL
             | Error e -> ids, storageErr e
 
@@ -12294,8 +12286,7 @@ let rec executeAs
 
             match groups |> traverse retargetTriggers |> Result.bind (fun _ -> groups |> traverse retargetChecks) with
             | Ok _ ->
-                Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                Storage.commitTransactionEvents store snapshot
+                Storage.commitCatalogInto store baseCatalog snapshot
                 ids, Affected 0UL
             | Error error -> ids, storageErr error
         | Error e -> ids, storageErr e
@@ -12519,8 +12510,7 @@ let rec executeAs
                 match changed with
                 | Error error -> ids, storageErr error
                 | Ok _ ->
-                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                    Storage.commitTransactionEvents store snapshot
+                    Storage.commitCatalogInto store baseCatalog snapshot
                     ids, Affected 0UL
 
     | CreateUser(users, ifNotExists, locked) ->
@@ -12956,8 +12946,7 @@ let rec executeAs
                             | Some error -> ids, error
                             | None ->
                                 if useSnapshot then
-                                    Storage.mergeCatalogInto store baseCatalog targetStore.Catalog
-                                    Storage.commitTransactionEvents store targetStore
+                                    Storage.commitCatalogInto store baseCatalog targetStore
 
                                 ids, Affected(uint64 (if foundRows then targetRows.Length else changed))
                         | Error e -> ids, storageErr e
@@ -12970,7 +12959,7 @@ let rec executeAs
         // it so a row reached through more than one join match is still
         // updated at most once (see `Ast.UpdateStmt`'s doc). Runs the writes
         // against a private snapshot store, merged back via
-        // `Storage.mergeCatalogInto` (see its doc), so disjoint row changes
+        // `Storage.commitCatalogInto` (see its doc), so disjoint row changes
         // can combine while overlapping changes fail with a retryable conflict.
         (
             match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
@@ -13187,8 +13176,7 @@ let rec executeAs
 
                         match apply with
                         | Ok counts ->
-                            Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                            Storage.commitTransactionEvents store snapshot
+                            Storage.commitCatalogInto store baseCatalog snapshot
                             // `pending.[i].Count` is the matched-row count per
                             // physical table (every row this JOIN claimed for
                             // it, whether or not the write actually changed
@@ -13307,8 +13295,7 @@ let rec executeAs
                             | Some error -> ids, error
                             | None ->
                                 if useSnapshot then
-                                    Storage.mergeCatalogInto store baseCatalog targetStore.Catalog
-                                    Storage.commitTransactionEvents store targetStore
+                                    Storage.commitCatalogInto store baseCatalog targetStore
 
                                 ids, Affected(uint64 affected)
 

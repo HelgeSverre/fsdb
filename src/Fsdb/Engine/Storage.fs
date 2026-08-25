@@ -225,7 +225,7 @@ type Catalog = Map<string, Database>
 /// TRUNCATE.
 /// `TransactionCommitted` wraps every event a
 /// multi-statement transaction buffered, emitted once at COMMIT — see
-/// `beginTransactionSnapshot`/`commitTransactionEvents`.
+/// `beginTransactionSnapshot`/`commitCatalogInto`.
 type CommitEvent =
     | RowsInserted of db: string * table: string * rows: Value[] list
     | RowsUpdated of db: string * table: string * changes: (Value[] * Value[]) list
@@ -233,6 +233,13 @@ type CommitEvent =
     | SchemaChanged of db: string * Statement
     | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
     | TransactionCommitted of CommitEvent list
+
+type DurableCommitSink =
+    { DataDirectory: string
+      Enqueue: CommitEvent list -> (unit -> unit)
+      EnqueueCheckpoint: unit -> (unit -> unit) }
+
+type DurableCommitSlot = { mutable Sink: DurableCommitSink option }
 
 let defaultDatabase = "fsdb"
 
@@ -281,12 +288,16 @@ type Store =
       /// Lowercase names overlay real tables in the reserved fsdb schema.
       mutable VirtualTables: Map<string, Functions.VirtualTable>
       /// Synchronous ordered subscribers run after catalog publication.
-      /// Handlers must not re-enter the store while `Lock` is held.
+      /// Handlers must not re-enter the store while `CommitLock` is held.
       OnCommit: ResizeArray<CommitEvent -> unit>
+      /// Shared indirection lets durability attach after session clones exist.
+      Durability: DurableCommitSlot
       /// Transaction snapshots buffer physical events until catalog merge.
       mutable PendingEvents: ResizeArray<CommitEvent> option
-      /// Serializes catalog membership, commit delivery, and snapshot rotation.
+      /// Serializes catalog membership and serializable publication.
       Lock: obj
+      /// Orders durable enqueue and observer delivery without covering fsync.
+      CommitLock: obj
       /// Indexed updates coordinate stable row identities before reading
       /// their current values. Logical ownership may span transaction
       /// statements without depending on managed thread affinity.
@@ -312,17 +323,43 @@ let setCatalog (store: Store) (catalog: Catalog) : unit = store.Catalog <- catal
 
 // The mysql bootstrap requires reindexTable, so create is defined below it.
 
-/// Buffers private transaction events or synchronously publishes live ones.
-/// Catalog publication always precedes delivery.
+let private hasCommitConsumer (store: Store) =
+    store.Durability.Sink.IsSome || store.OnCommit.Count > 0
+
+let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
+    match events, store.PendingEvents with
+    | [], _ -> ignore
+    | events, Some buffer ->
+        buffer.AddRange events
+        ignore
+    | events, None when hasCommitConsumer store ->
+        let durableAction, observerError =
+            lock store.CommitLock (fun () ->
+                let action =
+                    match store.Durability.Sink with
+                    | Some sink -> sink.Enqueue events
+                    | None -> ignore
+
+                let error =
+                    try
+                        for event in events do
+                            for observer in store.OnCommit do
+                                observer event
+
+                        None
+                    with error ->
+                        Some error
+
+                action, error)
+
+        fun () ->
+            durableAction ()
+            observerError |> Option.iter raise
+    | _ -> ignore
+
+/// Buffers private transaction events or publishes live ones in durable order.
 let private emit (store: Store) (event: CommitEvent option) : unit =
-    match event with
-    | None -> ()
-    | Some e ->
-        match store.PendingEvents with
-        | Some buffer -> buffer.Add e
-        | None ->
-            if store.OnCommit.Count > 0 then
-                lock store.Lock (fun () -> for f in store.OnCommit do f e)
+    event |> Option.toList |> prepareEvents store |> fun acknowledge -> acknowledge ()
 
 /// Creates a structurally shared private catalog with independent publication
 /// cells. Event buffering is omitted when no outer subscriber needs it.
@@ -341,9 +378,11 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       ConnectionCollation = store.ConnectionCollation
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
+      Durability = store.Durability
       // Nested statement snapshots inherit the outer transaction's buffering.
-      PendingEvents = if store.OnCommit.Count > 0 || store.PendingEvents.IsSome then Some(ResizeArray()) else None
+      PendingEvents = if hasCommitConsumer store || store.PendingEvents.IsSome then Some(ResizeArray()) else None
       Lock = obj ()
+      CommitLock = store.CommitLock
       RowLocks = store.RowLocks
       RowLockSequence = store.RowLockSequence
       TransactionLocks = store.TransactionLocks }
@@ -360,7 +399,7 @@ let beginTransactionContext (store: Store) : Store =
 
     { store with
         OnCommit = ResizeArray()
-        PendingEvents = if store.OnCommit.Count > 0 || store.PendingEvents.IsSome then Some(ResizeArray()) else None
+        PendingEvents = if hasCommitConsumer store || store.PendingEvents.IsSome then Some(ResizeArray()) else None
         Lock = obj ()
         TransactionLocks =
             Some
@@ -396,15 +435,15 @@ let releaseTransactionLocks (store: Store) : unit =
         let stripes = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
         releaseLockStripes context stripes
 
-/// Publishes buffered events after catalog merge. Nested statement snapshots
-/// stay flat; only the outer commit receives a TransactionCommitted wrapper.
-let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
+let private prepareTransactionEvents (store: Store) (snapshot: Store) : unit -> unit =
     match snapshot.PendingEvents with
     | Some buffer when buffer.Count > 0 ->
         match store.PendingEvents with
-        | Some targetBuffer -> targetBuffer.AddRange buffer
-        | None -> emit store (Some(TransactionCommitted(List.ofSeq buffer)))
-    | _ -> ()
+        | Some targetBuffer ->
+            targetBuffer.AddRange buffer
+            ignore
+        | None -> prepareEvents store [ TransactionCommitted(List.ofSeq buffer) ]
+    | _ -> ignore
 
 let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
@@ -429,24 +468,34 @@ let normalizeTableName (name: string) = name.ToLowerInvariant()
 /// coordinates catalog membership with SERIALIZABLE snapshot validation;
 /// row writes remain sharded by database.
 let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
-    lock store.Lock (fun () ->
-        if store.Databases.TryAdd(dbName, ref Map.empty) then
-            emit store (Some(SchemaChanged(dbName, CreateDatabase(dbName, false))))
-            Ok()
-        else
-            Error(DatabaseExists dbName))
+    let slot = ref Map.empty
+
+    let published =
+        lock store.Lock (fun () ->
+            lock slot (fun () ->
+                if store.Databases.TryAdd(dbName, slot) then
+                    Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false)) ])
+                else
+                    Error(DatabaseExists dbName)))
+
+    published |> Result.map (fun acknowledge -> acknowledge ())
 
 /// `DROP DATABASE name` uses the same catalog-membership lock as creation.
 let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
     if dbName.ToLowerInvariant() = "mysql" then
         Error(SystemSchemaAccess "mysql")
     else
-        lock store.Lock (fun () ->
-            match store.Databases.TryRemove dbName with
-            | true, _ ->
-                emit store (Some(SchemaChanged(dbName, DropDatabase(dbName, false))))
-                Ok()
-            | false, _ -> Error(NoSuchDatabase dbName))
+        let published =
+            lock store.Lock (fun () ->
+                match store.Databases.TryGetValue dbName with
+                | false, _ -> Error(NoSuchDatabase dbName)
+                | true, slot ->
+                    lock slot (fun () ->
+                        match store.Databases.TryRemove dbName with
+                        | true, _ -> Ok(prepareEvents store [ SchemaChanged(dbName, DropDatabase(dbName, false)) ])
+                        | false, _ -> Error(NoSuchDatabase dbName)))
+
+        published |> Result.map (fun acknowledge -> acknowledge ())
 
 /// Applies `f` to `dbName`'s current table map and swaps the result into
 /// that database's own `Database ref` cell, under that cell's own lock (see
@@ -454,9 +503,10 @@ let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
 /// disjoint slot per database (see `Store.Databases`'s doc) means a write to
 /// database A never even touches, let alone blocks on, database B's slot —
 /// cross-database writes can't contend by construction.
-let private withDatabase
+let private withDatabasePublishing
     (store: Store)
     (dbName: string)
+    (eventsOf: 'a -> CommitEvent list)
     (f: Database -> Result<Database * 'a, StorageError>)
     : Result<'a, StorageError> =
     match store.Databases.TryGetValue dbName with
@@ -465,36 +515,54 @@ let private withDatabase
         // The database cell is also its mutation lock. Different databases
         // use different cells, while writers within one database publish
         // their immutable replacement maps atomically.
-        lock slot (fun () ->
-            let original = slot.Value
+        let published =
+            lock slot (fun () ->
+                let attached =
+                    match store.Databases.TryGetValue dbName with
+                    | true, current -> obj.ReferenceEquals(current, slot)
+                    | false, _ -> false
 
-            match f original with
-            | Error e -> Error e
-            | Ok(db', result) ->
-                let current = slot.Value
+                if not attached then
+                    Error(NoSuchDatabase dbName)
+                else
+                    let original = slot.Value
 
-                slot.Value <-
-                    if LanguagePrimitives.PhysicalEquality original current then
-                        db'
-                    else
-                        // Trigger bodies may re-enter this slot while the outer
-                        // statement still owns its immutable starting root.
-                        let keys =
-                            Set.union
-                                (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
-                                (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                    match f original with
+                    | Error e -> Error e
+                    | Ok(db', result) ->
+                        let current = slot.Value
 
-                        keys
-                        |> Set.fold
-                            (fun published key ->
-                                match Map.tryFind key original, Map.tryFind key db' with
-                                | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
-                                | _, Some after -> Map.add key after published
-                                | Some _, None -> Map.remove key published
-                                | None, None -> published)
-                            current
+                        slot.Value <-
+                            if LanguagePrimitives.PhysicalEquality original current then
+                                db'
+                            else
+                                // Trigger bodies may re-enter this slot while the outer
+                                // statement still owns its immutable starting root.
+                                let keys =
+                                    Set.union
+                                        (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                                        (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
 
-                Ok result)
+                                keys
+                                |> Set.fold
+                                    (fun published key ->
+                                        match Map.tryFind key original, Map.tryFind key db' with
+                                        | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
+                                        | _, Some after -> Map.add key after published
+                                        | Some _, None -> Map.remove key published
+                                        | None, None -> published)
+                                    current
+
+                        Ok(result, prepareEvents store (eventsOf result)))
+
+        match published with
+        | Error error -> Error error
+        | Ok(result, acknowledge) ->
+            acknowledge ()
+            Ok result
+
+let private withDatabase store dbName f =
+    withDatabasePublishing store dbName (fun _ -> []) f
 
 /// Every database name appearing as a key in `m` — the shared set-of-keys
 /// step `mergeDatabaseSlot`/`mergeCatalogInto`/`bumpAutoIncrementsInto`'s
@@ -2224,8 +2292,10 @@ let create () : Store =
       ConnectionCollation = Collation.defaultCollation
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
+      Durability = { Sink = None }
       PendingEvents = None
       Lock = obj ()
+      CommitLock = obj ()
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       RowLockSequence = [| 0L |]
       TransactionLocks = None }
@@ -3067,6 +3137,22 @@ let createTableSeeded
     ensureDatabase store dbName
     let columns = normalizePrimaryKeyNullability columns
 
+    let createEvent (createTime, columns) =
+        let statement =
+            CreateTable
+                { Name = tableName
+                  Columns = columns
+                  Indexes = indexes
+                  ForeignKeys = foreignKeys
+                  Checks = []
+                  IfNotExists = false
+                  Charset = tableCharset
+                  Collation = tableCollation
+                  AutoIncrementSeed = autoIncrementSeed
+                  Comment = tableComment }
+
+        [ SchemaChangedAt(dbName, statement, createTime) ]
+
     let result =
         tableComment
         |> Option.defaultValue ""
@@ -3075,7 +3161,7 @@ let createTableSeeded
             columns
             |> traverse (normalizeDefault (temporalCoercionMode store))
             |> Result.bind (fun columns ->
-                withDatabase store dbName (fun db ->
+                withDatabasePublishing store dbName createEvent (fun db ->
                     let key = normalizeTableName tableName
 
                     match columns |> traverse validateColumnType with
@@ -3114,23 +3200,7 @@ let createTableSeeded
 
                                         Ok(Map.add key (reindexTable table) db, (createTime, columns)))))
 
-    match result with
-    | Error error -> Error error
-    | Ok(createTime, columns) ->
-        let statement =
-            CreateTable
-                { Name = tableName
-                  Columns = columns
-                  Indexes = indexes
-                  ForeignKeys = foreignKeys
-                  Checks = []
-                  IfNotExists = false
-                  Charset = tableCharset
-                  Collation = tableCollation
-                  AutoIncrementSeed = autoIncrementSeed
-                  Comment = tableComment }
-        emit store (Some(SchemaChangedAt(dbName, statement, createTime)))
-        Ok()
+    result |> Result.map ignore
 
 
 let createTable
@@ -3162,8 +3232,11 @@ let private virtualWriteGuard (store: Store) (dbName: string) (tableName: string
         Ok()
 
 let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    let result =
-        withDatabase store dbName (fun db ->
+    withDatabasePublishing
+        store
+        dbName
+        (fun () -> [ SchemaChanged(dbName, DropTable([ tableName ], false)) ])
+        (fun db ->
             let key = normalizeTableName tableName
 
             match virtualWriteGuard store dbName tableName with
@@ -3171,25 +3244,20 @@ let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit,
             | Ok() when Map.containsKey key db -> Ok(Map.remove key db, ())
             | Ok() -> Error(NoSuchTable tableName))
 
-    if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, DropTable([ tableName ], false))))
-
-    result
-
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
     // MySQL implements TRUNCATE as drop-and-recreate, so CREATE_TIME resets.
-    let result =
-        virtualWriteGuard store dbName tableName
-        |> Result.bind (fun () ->
-            withTable store dbName tableName (fun table ->
+    withDatabasePublishing
+        store
+        dbName
+        (fun createTime -> [ SchemaChangedAt(dbName, Truncate tableName, createTime) ])
+        (fun db ->
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable db tableName)
+            |> Result.map (fun table ->
                 let createTime = DateTime.Now
-                Ok(reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }, createTime)))
-
-    match result with
-    | Error error -> Error error
-    | Ok createTime ->
-        emit store (Some(SchemaChangedAt(dbName, Truncate tableName, createTime)))
-        Ok()
+                let table = reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
+                Map.add (normalizeTableName tableName) table db, createTime))
+    |> Result.map ignore
 
 /// Removes column index `idx` from every row — used by `DropColumn`, since
 /// `Value[]` has no built-in "remove at" the way a `ResizeArray` would.
@@ -3666,8 +3734,11 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
-    let result =
-        withDatabase store dbName (fun db ->
+    withDatabasePublishing
+        store
+        dbName
+        (fun () -> [ SchemaChanged(dbName, AlterTable(tableName, actions)) ])
+        (fun db ->
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
@@ -3693,11 +3764,6 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 // incremental patch — ALTER isn't a hot path.
                 |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey (reindexTable finalTable), ())))
 
-    if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, AlterTable(tableName, actions))))
-
-    result
-
 let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
     alterTable store dbName oldName [ RenameTo newName ]
 
@@ -3709,8 +3775,11 @@ let renameTable (store: Store) (dbName: string) (oldName: string) (newName: stri
 /// event per database, since each database is its own catalog cell — spanning
 /// them would need a lock above the per-database one.
 let renameTables (store: Store) (dbName: string) (pairs: (string * string) list) : Result<unit, StorageError> =
-    let result =
-        withDatabase store dbName (fun db ->
+    withDatabasePublishing
+        store
+        dbName
+        (fun () -> [ SchemaChanged(dbName, RenameTable pairs) ])
+        (fun db ->
             let step acc (oldName, newName) =
                 acc
                 |> Result.bind (fun db ->
@@ -3722,13 +3791,7 @@ let renameTables (store: Store) (dbName: string) (pairs: (string * string) list)
                             let origKey = normalizeTableName oldName
                             let key = newKey |> Option.defaultValue origKey
                             db |> Map.remove origKey |> Map.add key (reindexTable table'))))
-
             pairs |> List.fold step (Ok db) |> Result.map (fun db' -> db', ()))
-
-    if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, RenameTable pairs)))
-
-    result
 
 /// One column's value for one row being inserted, threaded through
 /// `processRow`'s fold: the column's final coerced value, the updated
@@ -4029,19 +4092,21 @@ let private insertRowsPreparedCore
     let key = normalizeTableName tableName
 
     let result =
-        withDatabase store dbName (fun db ->
-            virtualWriteGuard store dbName tableName
-            |> Result.bind (fun () -> tryGetTable db tableName)
-            |> Result.bind (fun table ->
-                resolveInsertColumns table columns
-                |> Result.bind (fun indices ->
-                    insertCore store.ForeignKeyChecks (temporalCoercionMode store) ignoreErrors db key rowsIn indices prepare)))
+        withDatabasePublishing
+            store
+            dbName
+            (fun (_, _, _, (rows: Value[] list), _) ->
+                if rows.IsEmpty then [] else [ RowsInserted(dbName, tableName, rows) ])
+            (fun db ->
+                virtualWriteGuard store dbName tableName
+                |> Result.bind (fun () -> tryGetTable db tableName)
+                |> Result.bind (fun table ->
+                    resolveInsertColumns table columns
+                    |> Result.bind (fun indices ->
+                        insertCore store.ForeignKeyChecks (temporalCoercionMode store) ignoreErrors db key rowsIn indices prepare)))
 
     match result with
     | Ok(lastId, generatedId, affected, rows, ignoredErrors) ->
-        if not rows.IsEmpty then
-            emit store (Some(RowsInserted(dbName, tableName, rows)))
-
         Ok {
             LastInsertId = lastId
             GeneratedId = generatedId
@@ -4304,8 +4369,29 @@ and upsertRowsWithOrdinal
     : Result<InsertOutcome, StorageError> =
         let key = normalizeTableName tableName
 
+        let eventsOf
+            ((_, _, _, (inserted: Value[] list), (updated: (Value[] * Value[]) list)),
+             (cascaded: Map<string, (Value[] * Value[]) list>),
+             (db: Database))
+            =
+            let originalNameOf tableKey =
+                db
+                |> Map.tryFind tableKey
+                |> Option.map (fun table -> table.OriginalName)
+                |> Option.defaultValue tableKey
+
+            [ if not inserted.IsEmpty then
+                  RowsInserted(dbName, tableName, inserted)
+
+              if not updated.IsEmpty then
+                  RowsUpdated(dbName, tableName, updated)
+
+              for KeyValue(tableKey, changes) in cascaded do
+                  if not changes.IsEmpty then
+                      RowsUpdated(dbName, originalNameOf tableKey, changes) ]
+
         let result =
-            withDatabase store dbName (fun db ->
+            withDatabasePublishing store dbName eventsOf (fun db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable db tableName)
                 |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn prepare applyUpdate foundRows)
@@ -4313,20 +4399,6 @@ and upsertRowsWithOrdinal
 
         match result with
         | Ok((lastId, generatedId, affected, inserted, updated), cascaded, db) ->
-            if not inserted.IsEmpty then
-                emit store (Some(RowsInserted(dbName, tableName, inserted)))
-
-            if not updated.IsEmpty then
-                emit store (Some(RowsUpdated(dbName, tableName, updated)))
-
-            // `ON UPDATE CASCADE`/`SET NULL` child rewrites this candidate
-            // batch's `ON DUPLICATE KEY UPDATE` triggered — same `RowsUpdated`
-            // shape a plain `UPDATE` reports (see `cascadeUpdateVisited`'s doc).
-            let originalNameOf tableKey = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
-
-            cascaded
-            |> Map.iter (fun tableKey changes -> if not changes.IsEmpty then emit store (Some(RowsUpdated(dbName, originalNameOf tableKey, changes))))
-
             Ok {
                 LastInsertId = lastId
                 GeneratedId = generatedId
@@ -4695,7 +4767,7 @@ let replaceRows
     let key = normalizeTableName tableName
 
     let result =
-        withDatabase store dbName (fun initialDb ->
+        withDatabasePublishing store dbName snd (fun initialDb ->
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable initialDb tableName)
             |> Result.bind (fun initialTable ->
@@ -4861,9 +4933,7 @@ let replaceRows
                         db, (outcome, events)))))
 
     match result with
-    | Ok(outcome, events) ->
-        events |> List.iter (Some >> emit store)
-        Ok outcome
+    | Ok(outcome, _) -> Ok outcome
     | Error error -> Error error
 
 /// Deletes every candidate matching `predicate`. Returns the number of rows
@@ -4883,8 +4953,28 @@ let private deleteRowsCore
     (candidates: (RowId * Value[]) list option)
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
+    let eventsOf
+        (_,
+         (db: Database),
+         (removed: Map<string, Value[] list>),
+         (blanked: Map<string, (Value[] * Value[]) list>))
+        =
+        let originalNameOf tableKey =
+            db
+            |> Map.tryFind tableKey
+            |> Option.map (fun table -> table.OriginalName)
+            |> Option.defaultValue tableKey
+
+        [ for KeyValue(tableKey, rows) in removed do
+              if not rows.IsEmpty then
+                  RowsDeleted(dbName, originalNameOf tableKey, rows)
+
+          for KeyValue(tableKey, changes) in blanked do
+              if not changes.IsEmpty then
+                  RowsUpdated(dbName, originalNameOf tableKey, changes) ]
+
     let apply =
-        withDatabase store dbName (fun db ->
+        withDatabasePublishing store dbName eventsOf (fun db ->
             let key = normalizeTableName tableName
 
             virtualWriteGuard store dbName tableName
@@ -4916,20 +5006,7 @@ let private deleteRowsCore
             |> fun rowIds -> withRowLocks store dbName tableName rowIds (fun () -> apply)
 
     match result with
-    | Ok(affected, db, removed, blanked) ->
-        let originalNameOf tableKey = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
-
-        removed
-        |> Map.iter (fun tableKey rows -> if not rows.IsEmpty then emit store (Some(RowsDeleted(dbName, originalNameOf tableKey, rows))))
-
-        // `ON DELETE SET NULL`'s blanked child rows — same `RowsUpdated`
-        // shape a plain `UPDATE` reports, so replay rewrites them the same
-        // way instead of a WAL replay resurrecting the pre-blank FK value
-        // (see `cascadeDeleteVisited`'s doc).
-        blanked
-        |> Map.iter (fun tableKey changes -> if not changes.IsEmpty then emit store (Some(RowsUpdated(dbName, originalNameOf tableKey, changes))))
-
-        Ok affected
+    | Ok(affected, _, _, _) -> Ok affected
     | Error e -> Error e
 
 let deleteRows
@@ -5043,7 +5120,14 @@ let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Datab
     | [ tableKey, rowIds ] when not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb -> Some(tableKey, rowIds)
     | _ -> None
 
-let private mergeDatabaseSlot (timeout: TimeSpan) (dbName: string) (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
+let private mergeDatabaseSlotPublishing
+    (timeout: TimeSpan)
+    (dbName: string)
+    (slot: Database ref)
+    (baseDb: Database)
+    (batchDb: Database)
+    (prepare: unit -> (unit -> unit))
+    : unit -> unit =
     if not (Monitor.TryEnter(slot, timeout)) then
         raise (LockWaitTimeout dbName)
 
@@ -5074,8 +5158,13 @@ let private mergeDatabaseSlot (timeout: TimeSpan) (dbName: string) (slot: Databa
 
                 validateMergedForeignKeys dbName merged
                 slot.Value <- merged
+
+        prepare ()
     finally
         Monitor.Exit slot
+
+let private mergeDatabaseSlot (timeout: TimeSpan) (dbName: string) (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
+    mergeDatabaseSlotPublishing timeout dbName slot baseDb batchDb (fun () -> ignore) |> fun acknowledge -> acknowledge ()
 
 /// Merges a private statement or transaction snapshot into the live catalog.
 /// Rows changed from the same base row conflict; disjoint row changes combine
@@ -5101,85 +5190,163 @@ let mergeCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog:
 let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
     mergeCatalogIntoWithTimeout (Fsdb.Limits.lockWaitTimeout ()) store baseCatalog batchCatalog
 
-type private SerializableDatabase =
-    { Name: string
-      Base: Database
-      Slot: Database ref }
+let private commitCatalogIntoWith
+    (timeout: TimeSpan)
+    (validateWholeSnapshot: bool)
+    (store: Store)
+    (baseCatalog: Catalog)
+    (snapshot: Store)
+    : unit =
+    match store.PendingEvents with
+    | Some _ ->
+        mergeCatalogIntoWithTimeout timeout store baseCatalog snapshot.Catalog
+        prepareTransactionEvents store snapshot |> fun acknowledge -> acknowledge ()
+    | None ->
+        let batchCatalog = snapshot.Catalog
 
-/// Publishes a writing SERIALIZABLE transaction only when its entire read
-/// snapshot is still current. Whole-catalog validation prevents write skew
-/// without maintaining predicate read sets.
-let mergeSerializableCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
-    let changedKeys =
-        Set.union (keysOf baseCatalog) (keysOf batchCatalog)
-        |> Set.filter (fun dbName ->
-            match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-            | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
-            | None, None -> false
-            | _ -> true)
+        let changedKeys =
+            Set.union (keysOf baseCatalog) (keysOf batchCatalog)
+            |> Set.filter (fun dbName ->
+                match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+                | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
+                | None, None -> false
+                | _ -> true)
 
-    if not changedKeys.IsEmpty then
-        lock store.Lock (fun () ->
-            let slots =
-                baseCatalog
-                |> Map.toList
-                |> List.map (fun (dbName, baseDb) ->
-                    match store.Databases.TryGetValue dbName with
-                    | true, slot ->
-                        { Name = dbName
-                          Base = baseDb
-                          Slot = slot }
-                    | false, _ -> raise (LockWaitTimeout dbName))
+        if not changedKeys.IsEmpty then
+            let needsCatalogLock =
+                validateWholeSnapshot
+                || changedKeys
+                   |> Seq.exists (fun dbName ->
+                       Map.containsKey dbName baseCatalog <> Map.containsKey dbName batchCatalog)
 
-            let rec withSlots remaining publish =
-                match remaining with
-                | [] -> publish ()
-                | database :: tail -> lock database.Slot (fun () -> withSlots tail publish)
+            let publish () =
+                let existingKeys = if validateWholeSnapshot then keysOf baseCatalog else changedKeys
 
-            withSlots slots (fun () ->
-                for database in slots do
-                    if not (obj.ReferenceEquals(database.Slot.Value, database.Base)) then
-                        raise (LockWaitTimeout database.Name)
+                let newKeys =
+                    changedKeys
+                    |> Set.filter (fun dbName ->
+                        Map.containsKey dbName baseCatalog |> not
+                        && Map.containsKey dbName batchCatalog)
 
-                for dbName in changedKeys do
-                    match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-                    | Some _, None -> store.Databases.TryRemove dbName |> ignore
-                    | None, Some batchDb ->
-                        if not (store.Databases.TryAdd(dbName, ref batchDb)) then
+                let lockedKeys = Set.union existingKeys newKeys
+
+                let databases =
+                    lockedKeys
+                    |> Seq.map (fun dbName ->
+                        match store.Databases.TryGetValue dbName with
+                        | true, slot -> dbName, slot
+                        | false, _ when Set.contains dbName newKeys -> dbName, ref Map.empty
+                        | false, _ -> raise (LockWaitTimeout dbName))
+                    |> Seq.toList
+
+                let rec withSlots remaining publish =
+                    match remaining with
+                    | [] -> publish ()
+                    | (dbName, slot) :: tail ->
+                        if not (Monitor.TryEnter(slot, timeout)) then
                             raise (LockWaitTimeout dbName)
-                    | Some _, Some batchDb ->
-                        let database = slots |> List.find (fun database -> database.Name = dbName)
-                        database.Slot.Value <- batchDb
-                    | None, None -> ()))
+
+                        try
+                            withSlots tail publish
+                        finally
+                            Monitor.Exit slot
+
+                withSlots databases (fun () ->
+                    for dbName, slot in databases do
+                        if not (Set.contains dbName newKeys) then
+                            match store.Databases.TryGetValue dbName with
+                            | true, current when obj.ReferenceEquals(current, slot) -> ()
+                            | _ -> raise (LockWaitTimeout dbName)
+
+                    if validateWholeSnapshot then
+                        for dbName, slot in databases do
+                            match Map.tryFind dbName baseCatalog with
+                            | Some baseDb when not (obj.ReferenceEquals(slot.Value, baseDb)) -> raise (LockWaitTimeout dbName)
+                            | _ -> ()
+
+                    for dbName in changedKeys do
+                        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+                        | Some baseDb, None ->
+                            match store.Databases.TryGetValue dbName with
+                            | true, slot when obj.ReferenceEquals(slot.Value, baseDb) ->
+                                store.Databases.TryRemove dbName |> ignore
+                            | _ -> raise (LockWaitTimeout dbName)
+                        | None, Some batchDb ->
+                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
+                            slot.Value <- batchDb
+
+                            if not (store.Databases.TryAdd(dbName, slot)) then
+                                raise (LockWaitTimeout dbName)
+                        | Some _, Some batchDb when validateWholeSnapshot ->
+                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
+                            slot.Value <- batchDb
+                        | Some baseDb, Some batchDb ->
+                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
+                            mergeDatabaseSlot timeout dbName slot baseDb batchDb
+                        | None, None -> ()
+
+                    prepareTransactionEvents store snapshot)
+
+            let acknowledge =
+                if needsCatalogLock then lock store.Lock publish else publish ()
+
+            acknowledge ()
+
+let commitCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
+    commitCatalogIntoWith timeout false store baseCatalog snapshot
+
+let commitCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
+    commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false store baseCatalog snapshot
+
+let commitSerializableCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
+    commitCatalogIntoWith timeout true store baseCatalog snapshot
+
+let commitSerializableCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
+    commitSerializableCatalogIntoWithTimeout (Fsdb.Limits.lockWaitTimeout ()) store baseCatalog snapshot
 
 let private withPointUpdateDatabase
     (store: Store)
     (dbName: string)
     (tableName: string)
     (rowIds: RowId list)
+    (eventsOf: 'a -> CommitEvent list)
     (operation: Database -> Result<Database * 'a, StorageError>)
     : Result<'a, StorageError> =
     match store.Databases.TryGetValue dbName with
     | false, _ -> Error(NoSuchDatabase dbName)
     | true, slot ->
-        let tableKey = normalizeTableName tableName
         let rowIds = List.distinct rowIds
         let baseDb = slot.Value
 
         operation baseDb
-        |> Result.map (fun (batchDb, result) ->
+        |> Result.bind (fun (batchDb, result) ->
             let published =
                 lock slot (fun () ->
-                    if obj.ReferenceEquals(slot.Value, baseDb) then
+                    let attached =
+                        match store.Databases.TryGetValue dbName with
+                        | true, current -> obj.ReferenceEquals(current, slot)
+                        | false, _ -> false
+
+                    if not attached then
+                        Error(NoSuchDatabase dbName)
+                    elif obj.ReferenceEquals(slot.Value, baseDb) then
                         slot.Value <- batchDb
-                        true
+                        Ok(prepareEvents store (eventsOf result))
                     else
-                        false)
+                        Ok(
+                            mergeDatabaseSlotPublishing
+                                (Fsdb.Limits.lockWaitTimeout ())
+                                dbName
+                                slot
+                                baseDb
+                                batchDb
+                                (fun () -> prepareEvents store (eventsOf result))
+                        ))
 
-            if not published then
-                mergeDatabaseSlot (Fsdb.Limits.lockWaitTimeout ()) dbName slot baseDb batchDb
-
-            result)
+            published
+            |> Result.map (fun acknowledge ->
+                acknowledge ()
+                result))
 
 /// Replaces every row matching `predicate` with `updater row`, coercing the
 /// result back to the table's column types, then checking it against the
@@ -5211,6 +5378,24 @@ let updateRows
     (predicate: Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
+    let eventsOf
+        ((changes: (Value[] * Value[]) list),
+         (cascaded: Map<string, (Value[] * Value[]) list>),
+         (db: Database))
+        =
+        let originalNameOf tableKey =
+            db
+            |> Map.tryFind tableKey
+            |> Option.map (fun table -> table.OriginalName)
+            |> Option.defaultValue tableKey
+
+        [ if not changes.IsEmpty then
+              RowsUpdated(dbName, tableName, changes)
+
+          for KeyValue(tableKey, updates) in cascaded do
+              if not updates.IsEmpty then
+                  RowsUpdated(dbName, originalNameOf tableKey, updates) ]
+
     let apply candidateRows db =
         let key = normalizeTableName tableName
 
@@ -5293,7 +5478,7 @@ let updateRows
 
     let result =
         match candidates with
-        | None -> withDatabase store dbName (apply None)
+        | None -> withDatabasePublishing store dbName eventsOf (apply None)
         | Some rows ->
             let rowIds = rows |> List.map fst
 
@@ -5310,22 +5495,10 @@ let updateRows
 
                     apply (Some refreshed) db
 
-                withPointUpdateDatabase store dbName tableName rowIds operation)
+                withPointUpdateDatabase store dbName tableName rowIds eventsOf operation)
 
     match result with
-    | Ok(changes, cascaded, db) ->
-        if not changes.IsEmpty then
-            emit store (Some(RowsUpdated(dbName, tableName, changes)))
-
-        // `ON UPDATE CASCADE`/`SET NULL` child rewrites this statement
-        // triggered — same `RowsUpdated` shape a plain `UPDATE` reports
-        // (see `cascadeUpdateVisited`'s doc).
-        let originalNameOf tableKey = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
-
-        cascaded
-        |> Map.iter (fun tableKey chg -> if not chg.IsEmpty then emit store (Some(RowsUpdated(dbName, originalNameOf tableKey, chg))))
-
-        Ok changes.Length
+    | Ok(changes, _, _) -> Ok changes.Length
     | Error e -> Error e
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the

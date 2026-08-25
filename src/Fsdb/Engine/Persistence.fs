@@ -1052,7 +1052,8 @@ let private decodeCatalog (format: SnapshotFormat) (r: #IReader) : Catalog =
 /// Writes and fsyncs `.new`, truncates the WAL, then atomically renames the
 /// snapshot. Recovery prefers a verified `.new`, preserving either the old
 /// snapshot plus WAL or the complete replacement across every crash point.
-/// Callers serialize this sequence with `store.Lock`.
+/// Attached stores serialize this through the commit queue; startup tooling
+/// uses the catalog lock before writers exist.
 let private writeSnapshotAndTruncate (dataDir: string) (catalog: Catalog) : unit =
     Directory.CreateDirectory dataDir |> ignore
     let finalPath = Path.Combine(dataDir, snapshotFileName)
@@ -1067,7 +1068,18 @@ let private writeSnapshotAndTruncate (dataDir: string) (catalog: Catalog) : unit
     fsyncDir dataDir
 
 let snapshotNow (dataDir: string) (store: Store) : unit =
-    lock store.Lock (fun () -> writeSnapshotAndTruncate dataDir store.Catalog)
+    let dataDir = Path.GetFullPath dataDir
+
+    let checkpoint =
+        lock store.CommitLock (fun () ->
+            match store.Durability.Sink with
+            | Some sink when String.Equals(sink.DataDirectory, dataDir, StringComparison.Ordinal) ->
+                Some(sink.EnqueueCheckpoint())
+            | _ -> None)
+
+    match checkpoint with
+    | Some wait -> wait ()
+    | None -> lock store.Lock (fun () -> writeSnapshotAndTruncate dataDir store.Catalog)
 
 /// Loads a verified snapshot followed by its valid WAL prefix.
 let load (dataDir: string) : Store =
@@ -1130,11 +1142,9 @@ let load (dataDir: string) : Store =
     Storage.ensureMysqlSchema store
     store
 
-/// Appends and fsyncs one framed WAL record before acknowledging each commit.
-/// A fresh handle observes snapshot truncation without stale stream offsets.
-/// ponytail: group commit requires concurrent publication into a batching
-/// writer rather than invoking subscribers under `Store.Lock`.
+/// Appends ordered WAL batches and acknowledges each commit after their shared fsync.
 let attach (dataDir: string) (store: Store) : unit =
+    let dataDir = Path.GetFullPath dataDir
     Directory.CreateDirectory dataDir |> ignore
     let walPath = Path.Combine(dataDir, walFileName)
     let entryCount = ref 0
@@ -1149,36 +1159,68 @@ let attach (dataDir: string) (store: Store) : unit =
         reindexAllForReplay replica
         writeSnapshotAndTruncate dataDir replica.Catalog
 
-    let appendRecord (event: CommitEvent) =
+    let appendBatch (events: CommitEvent list) =
         let walSize =
-            try
-                use s = new FileStream(walPath, FileMode.Append, FileAccess.Write, FileShare.Read)
+            use s = new FileStream(walPath, FileMode.Append, FileAccess.Write, FileShare.Read)
+
+            for event in events do
                 let bytes = encodeWalRecord event
                 s.Write(bytes, 0, bytes.Length)
-                flushToDisk s
-                s.Length
+
+            flushToDisk s
+            s.Length
+
+        for event in events do
+            // Mirror failure delays snapshot inclusion but cannot invalidate the WAL.
+            try
+                applyEvent replica event
             with ex ->
-                // Publication precedes this callback, so failure leaves no
-                // recoverable way to continue serving a durable catalog.
-                Log.diagnostic "fsdb: WAL append failed, catalog and disk have diverged: %s" ex.Message
-                Environment.FailFast(sprintf "fsdb: fatal WAL append failure: %s" ex.Message, ex)
-                reraise ()
+                Log.diagnostic "fsdb: WAL mirror apply failed: %s" ex.Message
 
-        // Mirror failure delays snapshot inclusion but cannot invalidate the WAL.
-        (try
-            applyEvent replica event
-         with ex ->
-             Log.diagnostic "fsdb: WAL mirror apply failed: %s" ex.Message)
-
-        entryCount := !entryCount + 1
+        entryCount := !entryCount + events.Length
 
         if walSize > Limits.walRotateBytes || !entryCount > Limits.walRotateEntries then
             rotateFromReplica ()
             entryCount := 0
 
-    store.OnCommit.Add appendRecord
+    let commits =
+        GroupCommit.Queue(
+            Limits.walGroupCommitQueueCapacity,
+            List.collect id >> appendBatch,
+            rotateFromReplica
+        )
 
-    let onShutdown (_: PosixSignalContext) = lock store.Lock rotateFromReplica
+    let fail context (error: exn) =
+        // Publication precedes persistence, so continuing would serve a
+        // catalog whose durability can no longer be proven.
+        Log.diagnostic "fsdb: %s failed, catalog and disk have diverged: %s" context error.Message
+        Environment.FailFast(sprintf "fsdb: fatal %s failure: %s" context error.Message, error)
+        raise error
+
+    let fatal context action =
+        fun () ->
+            try
+                action ()
+            with error ->
+                fail context error
+
+    let enqueue context prepare =
+        try
+            prepare () |> fatal context
+        with error ->
+            fail context error
+
+    let sink =
+        { DataDirectory = dataDir
+          Enqueue = fun events -> enqueue "WAL append" (fun () -> commits.Enqueue events)
+          EnqueueCheckpoint = fun () -> enqueue "snapshot checkpoint" commits.EnqueueCheckpoint }
+
+    lock store.CommitLock (fun () ->
+        match store.Durability.Sink with
+        | Some _ -> invalidOp "Durability is already attached to this store."
+        | None -> store.Durability.Sink <- Some sink)
+
+    let onShutdown (_: PosixSignalContext) = sink.EnqueueCheckpoint() ()
 
     shutdownRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGTERM, onShutdown))
     shutdownRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGINT, onShutdown))

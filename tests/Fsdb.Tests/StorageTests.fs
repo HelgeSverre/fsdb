@@ -2540,7 +2540,99 @@ let tests =
 
           testList
               "OnCommit notification hook"
-              [ testCase "insertRows fires RowsInserted with the physically-coerced row (defaults/autoincrement resolved)"
+              [ testCase "durability waits outside commit ordering and database locks"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    use firstWaitStarted = new System.Threading.ManualResetEventSlim()
+                    use releaseFirst = new System.Threading.ManualResetEventSlim()
+                    let mutable enqueueCount = 0
+
+                    store.Durability.Sink <-
+                        Some
+                            { DataDirectory = "test"
+                              Enqueue =
+                                fun _ ->
+                                    let ordinal = System.Threading.Interlocked.Increment(&enqueueCount)
+
+                                    if ordinal = 1 then
+                                        fun () ->
+                                            firstWaitStarted.Set()
+                                            releaseFirst.Wait()
+                                    else
+                                        ignore
+                              EnqueueCheckpoint = fun () -> ignore }
+
+                    let insert id name =
+                        insertRows store defaultDatabase "users" None [ [ VInt id; VString name; VInt 30L ] ]
+                        |> ignore
+
+                    let first = System.Threading.Tasks.Task.Run(fun () -> insert 1L "alice")
+                    Expect.isTrue (firstWaitStarted.Wait(System.TimeSpan.FromSeconds 5.)) "the first commit reaches its durability wait"
+
+                    try
+                        let second = System.Threading.Tasks.Task.Run(fun () -> insert 2L "bob")
+                        Expect.isTrue (second.Wait(System.TimeSpan.FromSeconds 5.)) "the second writer publishes while the first waits"
+
+                        let acquired = System.Threading.Monitor.TryEnter store.CommitLock
+                        Expect.isTrue acquired "the durability wait does not hold the ordering lock"
+
+                        if acquired then
+                            System.Threading.Monitor.Exit store.CommitLock
+                    finally
+                        releaseFirst.Set()
+
+                    Expect.isTrue (first.Wait(System.TimeSpan.FromSeconds 5.)) "the first writer resumes after acknowledgement"
+
+                testCase "transaction events enter durability before a later database publication"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 0L ] ] |> ignore
+                    use enqueueStarted = new System.Threading.ManualResetEventSlim()
+                    use releaseEnqueue = new System.Threading.ManualResetEventSlim()
+                    let batches = ResizeArray<CommitEvent list>()
+
+                    store.Durability.Sink <-
+                        Some
+                            { DataDirectory = "test"
+                              Enqueue =
+                                fun events ->
+                                    lock batches (fun () -> batches.Add events)
+
+                                    if events |> List.exists (function TransactionCommitted _ -> true | _ -> false) then
+                                        enqueueStarted.Set()
+                                        releaseEnqueue.Wait()
+
+                                    ignore
+                              EnqueueCheckpoint = fun () -> ignore }
+
+                    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+
+                    updateRows snapshot defaultDatabase "users" None (fun _ -> Ok true) (fun row -> Ok [| row.[0]; row.[1]; VInt 1L |])
+                    |> ignore
+
+                    let commit = System.Threading.Tasks.Task.Run(fun () -> commitCatalogInto store baseCatalog snapshot)
+                    Expect.isTrue (enqueueStarted.Wait(System.TimeSpan.FromSeconds 5.)) "transaction reaches durable ordering"
+
+                    let later =
+                        System.Threading.Tasks.Task.Run(fun () ->
+                            updateRows store defaultDatabase "users" None (fun _ -> Ok true) (fun row -> Ok [| row.[0]; row.[1]; VInt 2L |])
+                            |> ignore)
+
+                    try
+                        Expect.isFalse (later.Wait(System.TimeSpan.FromMilliseconds 100.)) "later publication waits for transaction enqueue"
+                    finally
+                        releaseEnqueue.Set()
+                        System.Threading.Tasks.Task.WaitAll [| commit; later |]
+
+                    let ordered = lock batches (fun () -> List.ofSeq batches)
+
+                    Expect.isTrue
+                        (match ordered with
+                         | [ [ TransactionCommitted _ ]; [ RowsUpdated _ ] ] -> true
+                         | _ -> false)
+                        "durable batches follow publication order"
+
+                testCase "insertRows fires RowsInserted with the physically-coerced row (defaults/autoincrement resolved)"
                 <| fun _ ->
                     let store = withUsersTable ()
                     let events = ResizeArray<CommitEvent>()
@@ -2711,16 +2803,13 @@ let tests =
                     let events = ResizeArray<CommitEvent>()
                     store.OnCommit.Add events.Add
 
-                    let snapshot = beginTransactionSnapshot store
+                    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
                     insertRows snapshot defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
                     insertRows snapshot defaultDatabase "users" None [ [ VInt 2L; VString "bob"; VInt 40L ] ] |> ignore
 
                     Expect.isEmpty events "nothing visible on the real store until commit"
 
-                    // Merge the snapshot's catalog back in (what
-                    // QueryHandler.commitSession does) and flush its buffer.
-                    setCatalog store snapshot.Catalog
-                    commitTransactionEvents store snapshot
+                    commitCatalogInto store baseCatalog snapshot
 
                     match List.ofSeq events with
                     | [ TransactionCommitted evs ] ->
@@ -2756,8 +2845,7 @@ let tests =
                     let snapshot = beginTransactionSnapshot store
                     insertRows snapshot defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
 
-                    // ROLLBACK: just drop the snapshot — never call
-                    // commitTransactionEvents, never merge its catalog.
+                    // Private snapshots have no live side effects until publication.
                     Expect.isEmpty events "rollback never touched the real store"
 
                     match scan store defaultDatabase "users" with
@@ -2775,34 +2863,27 @@ let tests =
                     // Mirrors `Executor`'s multi-table `UPDATE`/`DELETE`
                     // path exactly: it opens its own private snapshot of
                     // the *transaction's own* snapshot store (not the real
-                    // store) to isolate one statement's writes, then
-                    // commits that nested snapshot back onto the outer one
-                    // via `commitTransactionEvents` — and only later does
-                    // the outer transaction's own COMMIT flush everything
-                    // to the real store.
+                    // store) to isolate one statement's writes, then commits
+                    // that nested snapshot back onto the outer one. Only the
+                    // outer transaction's COMMIT reaches the live store.
                     let store = withUsersTable ()
                     let events = ResizeArray<CommitEvent>()
                     store.OnCommit.Add events.Add
 
-                    let txSnapshot = beginTransactionSnapshot store
+                    let txBase, txSnapshot = beginTransactionSnapshotWithBase store
                     Expect.isSome txSnapshot.PendingEvents "the transaction's own snapshot must buffer — the real store has a subscriber"
 
-                    let nested = beginTransactionSnapshot txSnapshot
+                    let nestedBase, nested = beginTransactionSnapshotWithBase txSnapshot
                     Expect.isSome nested.PendingEvents "regression guard: the nested snapshot must buffer too, even though its own source (txSnapshot) has no OnCommit of its own — only PendingEvents"
 
                     insertRows nested defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ]
                     |> ignore
 
-                    // The nested statement "commits" back onto the
-                    // transaction's own snapshot.
-                    setCatalog txSnapshot nested.Catalog
-                    commitTransactionEvents txSnapshot nested
+                    commitCatalogInto txSnapshot nestedBase nested
 
                     Expect.isEmpty events "still invisible to the real store — only the outer transaction's own COMMIT reaches it"
 
-                    // The outer transaction's real COMMIT.
-                    setCatalog store txSnapshot.Catalog
-                    commitTransactionEvents store txSnapshot
+                    commitCatalogInto store txBase txSnapshot
 
                     match List.ofSeq events with
                     | [ TransactionCommitted [ RowsInserted(_, "users", _) ] ] -> ()

@@ -1048,25 +1048,12 @@ let private commitSession (session: Session) : Session =
         Storage.releaseTransactionLocks tx.Snapshot
         { session with Tx = None }
     | Some tx ->
-        let dbName = session.Database |> Option.defaultValue defaultDatabase
-
         let timeout = lockWaitTimeout session
 
-        let committedSnapshot =
-            match tx.Isolation with
-            | Serializable ->
-                if not (Threading.Monitor.TryEnter(session.Store.Lock, timeout)) then
-                    raise (Storage.LockWaitTimeout dbName)
+        match tx.Isolation with
+        | Serializable -> Storage.commitSerializableCatalogIntoWithTimeout timeout session.Store tx.BaseCatalog tx.Snapshot
+        | _ -> Storage.commitCatalogIntoWithTimeout timeout session.Store tx.BaseCatalog tx.Snapshot
 
-                try
-                    Storage.mergeSerializableCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
-                finally
-                    Threading.Monitor.Exit session.Store.Lock
-            | _ -> Storage.mergeCatalogIntoWithTimeout timeout session.Store tx.BaseCatalog tx.Snapshot.Catalog
-
-            tx.Snapshot
-
-        Storage.commitTransactionEvents session.Store committedSnapshot
         Storage.releaseTransactionLocks tx.Snapshot
 
         { session with Tx = None }

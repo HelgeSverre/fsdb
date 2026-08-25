@@ -83,15 +83,11 @@ let registerTable (table: VirtualTable) (db: Db) : Db =
     db.Store.VirtualTables <- Map.add (table.Name.ToLowerInvariant()) table db.Store.VirtualTables
     db
 
-/// Subscribes `handler` to every committed write (the CDC feed
-/// `Persistence.attach` also rides) — multi-subscriber, so it coexists with
-/// `withDataDir`'s WAL appender and any other handlers. Called
-/// synchronously under the commit lock: keep it fast, and never write back
-/// into the database from inside it (re-entry deadlocks). Subscribe after
-/// `withDataDir` — that builder replaces `db.Store` with the loaded one,
-/// dropping subscriptions made before it.
+/// Subscribes `handler` to every committed write. Delivery is synchronous and
+/// ordered; handlers must stay fast and must not write back into the store.
+/// Subscribe after `withDataDir`, which replaces the store.
 let onCommit (handler: Storage.CommitEvent -> unit) (db: Db) : Db =
-    lock db.Store.Lock (fun () -> db.Store.OnCommit.Add handler)
+    lock db.Store.CommitLock (fun () -> db.Store.OnCommit.Add handler)
     db
 
 /// Distinguishes in-process `connect` sessions from each other (for

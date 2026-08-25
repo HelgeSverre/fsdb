@@ -68,6 +68,7 @@ let mutable cteMaxRecursionDepth = 1000L
 /// an ever-growing WAL.
 let mutable walRotateBytes = 64L * 1024L * 1024L
 let mutable walRotateEntries = 100_000
+let mutable walGroupCommitQueueCapacity = 1024
 
 /// The ReDoS ceiling on every `Regex.Match` fsdb runs against a
 /// user-supplied pattern (the `REGEXP`/`RLIKE` operator and the `REGEXP_*`
@@ -162,6 +163,12 @@ let private knobs =
         Max = 1000000000L
         Set = fun v -> walRotateEntries <- int v
         Get = fun () -> int64 walRotateEntries
+        Reportable = false }
+      { Name = "wal_group_commit_queue_capacity"
+        Min = 1L
+        Max = 1000000L
+        Set = fun v -> walGroupCommitQueueCapacity <- int v
+        Get = fun () -> int64 walGroupCommitQueueCapacity
         Reportable = false } ]
 
 /// MySQL's size suffixes: `64M`, `16K`, `1G`. Plain digits pass through.
