@@ -1217,7 +1217,17 @@ let private handleConnection
                                 | Result.Ok(columns, _rows) ->
                                     let payloads =
                                         (columns
-                                         |> List.map (fun c -> columnDefPayload { Name = c.Name; Metadata = ColumnWire.metadataOfColumn c }))
+                                         |> List.map (fun column ->
+                                             let metadata =
+                                                 { ColumnWire.metadataOfColumn column with
+                                                     Origin =
+                                                         Some
+                                                             { Schema = dbName
+                                                               Table = table
+                                                               OriginalTable = table
+                                                               OriginalName = column.Name } }
+
+                                             columnDefPayload { Name = column.Name; Metadata = metadata }))
                                         @ [ eofPayload capabilities (statusFlagsFor session) ]
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore

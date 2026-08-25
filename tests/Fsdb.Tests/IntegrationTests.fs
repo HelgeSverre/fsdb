@@ -104,7 +104,8 @@ let private readWireDefinition (packet: Packet) =
           ColumnLength = columnLength
           Flags = flags
           Decimals = decimals
-          CollationId = None } }
+          CollationId = None
+          Origin = None } }
 
 let tests =
     testList
@@ -1375,6 +1376,13 @@ let tests =
                   let! fieldList = readPacketAsync stream
                   Expect.isTrue fieldList.IsSome "COM_FIELD_LIST answers"
                   Expect.equal fieldList.Value.Payload.[0] 0x03uy "existing table: first packet is a column definition"
+                  let field = Reader(fieldList.Value.Payload)
+                  Expect.equal (field.ReadLenEncString()) (Some "def") "field catalog"
+                  Expect.equal (field.ReadLenEncString()) (Some "app") "field schema"
+                  Expect.equal (field.ReadLenEncString()) (Some "t") "field table"
+                  Expect.equal (field.ReadLenEncString()) (Some "t") "field physical table"
+                  Expect.equal (field.ReadLenEncString()) (Some "n") "field name"
+                  Expect.equal (field.ReadLenEncString()) (Some "n") "field physical name"
                   let! _ = readPacketAsync stream // trailing EOF
 
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x04uy |] (Array.append (Text.Encoding.UTF8.GetBytes "ghost") [| 0uy |]) }

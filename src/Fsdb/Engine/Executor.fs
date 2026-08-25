@@ -1450,6 +1450,12 @@ let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (p
         | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map (fun c -> fspOfType c.Type)
         | expr, _ -> [ fspOfExpr ctx expr ])
 
+type private OutputColumnSource =
+    { Qualifier: string
+      Schema: string
+      Table: string
+      Columns: ColumnDef list }
+
 /// Static result metadata for each projection, used ahead of the
 /// value-derived fallback whenever the expression determines its own type.
 ///
@@ -1468,8 +1474,13 @@ let private outputColumnWireOverridesFor
     (rollup: bool)
     (ctx: EvalContext)
     (columns: ColumnDef list)
-    (projections: Projection list)
+    (select: SelectStmt)
     : ColumnMetadata option list =
+    let projections = select.Projections
+
+    let sameName left right =
+        System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+
     let rec starQualifierCols (ctx: EvalContext) (qualifier: string) : ColumnDef list =
         match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
         | Some(cols, _) -> cols
@@ -1485,23 +1496,112 @@ let private outputColumnWireOverridesFor
         | TEnum _ when rollup -> Some { ColumnWire.metadataOfColumn c with TypeId = TypeVarString; Flags = 0us }
         | _ -> ColumnWire.resultMetadataOf c
 
-    projections
-    |> List.collect (fun proj ->
-        match proj with
-        | Star None, _ -> columns |> List.map overrideOf
-        | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map overrideOf
-        | expr, _ ->
-            [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
-              | Some ty -> Some ty
-              | None -> metadataOfExpr ctx expr ])
+    let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+
+    let sourceQualifier = function
+        | FromTable table -> table.Alias |> Option.defaultValue table.Table
+        | FromSubquery(_, alias)
+        | FromLateral(_, alias)
+        | FromJsonTable(_, _, _, alias) -> alias
+
+    let physicalSources =
+        sourceItems
+        |> List.choose (function
+            | FromTable table ->
+                let schema = table.Database |> Option.defaultValue ctx.DbName
+                let qualifier = table.Alias |> Option.defaultValue table.Table
+                let isCte =
+                    table.Database.IsNone
+                    && (currentCteScope () |> Map.containsKey (table.Table.ToLowerInvariant()))
+
+                if isCte || (tryStoredView ctx.Store schema table.Table).IsSome then
+                    None
+                else
+                    ctx.Qualifiers
+                    |> Map.tryFind (qualifier.ToLowerInvariant())
+                    |> Option.map (fun (columns, _) ->
+                        { Qualifier = qualifier
+                          Schema = schema
+                          Table = table.Table
+                          Columns = columns })
+            | _ -> None)
+
+    let originFor source (column: ColumnDef) =
+        { Schema = source.Schema
+          Table = source.Qualifier
+          OriginalTable = source.Table
+          OriginalName = column.Name }
+
+    let originsForExpression expression =
+        let byQualifier qualifier name =
+            physicalSources
+            |> List.tryPick (fun source ->
+                if sameName source.Qualifier qualifier then
+                    source.Columns
+                    |> List.tryFind (fun column -> sameName column.Name name)
+                    |> Option.map (originFor source)
+                else
+                    None)
+
+        let byName name =
+            physicalSources
+            |> List.choose (fun source ->
+                source.Columns
+                |> List.tryFind (fun column -> sameName column.Name name)
+                |> Option.map (originFor source))
+            |> function
+                | [ origin ] -> Some origin
+                | _ -> None
+
+        match expression with
+        | Star None ->
+            sourceItems
+            |> List.collect (fun item ->
+                let qualifier = sourceQualifier item
+
+                match physicalSources |> List.tryFind (fun source -> sameName source.Qualifier qualifier) with
+                | Some source -> source.Columns |> List.map (originFor source >> Some)
+                | None -> starQualifierCols ctx qualifier |> List.map (fun _ -> None))
+        | Star(Some qualifier) ->
+            match physicalSources |> List.tryFind (fun source -> sameName source.Qualifier qualifier) with
+            | Some source -> source.Columns |> List.map (originFor source >> Some)
+            | None -> starQualifierCols ctx qualifier |> List.map (fun _ -> None)
+        | Col name -> [ byName name ]
+        | QualifiedCol(qualifier, name) -> [ byQualifier qualifier name ]
+        | _ -> [ None ]
+
+    let overrides =
+        projections
+        |> List.collect (fun proj ->
+            match proj with
+            | Star None, _ -> columns |> List.map overrideOf
+            | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map overrideOf
+            | expr, _ ->
+                [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
+                  | Some ty -> Some ty
+                  | None -> metadataOfExpr ctx expr ])
+
+    let origins = projections |> List.collect (fst >> originsForExpression)
+
+    if origins.Length = overrides.Length then
+        List.map2
+            (fun origin metadata ->
+                metadata
+                |> Option.map (fun value ->
+                    { value with
+                        Origin = origin }))
+            origins
+            overrides
+    else
+        overrides
 
 /// Applies `outputColumnWireOverrides` on top of a data-driven wire-type list,
 /// keeping the data-driven type wherever there's no override. Falls back
 /// wholesale on a length mismatch (both lists come from the same projection
 /// expansion, so they shouldn't disagree) rather than throwing from `map2`.
-/// `outputColumnWireOverridesFor` for the non-grouped paths, which have no
-/// rollup temporary to degrade anything.
-let private outputColumnWireOverrides = outputColumnWireOverridesFor false
+/// The non-grouped wrapper keeps its callers independent of rollup handling.
+let private outputColumnWireOverrides ctx columns select =
+    outputColumnWireOverridesFor false ctx columns select
 
 let private applyWireOverrides (overrides: ColumnMetadata option list) (types: ColumnMetadata list) : ColumnMetadata list =
     if List.length overrides = List.length types then
@@ -7671,7 +7771,7 @@ and private runGroupedSelect
                     let groupCtx = ctxFor (probeRow columns)
                     let groupFsps = outputColumnFsps groupCtx columns select.Projections
                     let groupWireOverrides =
-                        outputColumnWireOverridesFor select.Rollup groupCtx columns select.Projections
+                        outputColumnWireOverridesFor select.Rollup groupCtx columns select
 
                     let paired =
                         sorted
@@ -8899,7 +8999,7 @@ and private runSelect
     // `renderOutputCols`), independent of row values, so it's stable across
     // every row this select emits.
     let outputFsps = outputColumnFsps (ctxFor (probeRow columns)) columns projections
-    let outputWireOverrides = outputColumnWireOverrides (ctxFor (probeRow columns)) columns projections
+    let outputWireOverrides = outputColumnWireOverrides (ctxFor (probeRow columns)) columns select
 
     let pairOf (outputCols: (string * Value) list) : string option list * Value[] =
         renderOutputCols outputFsps outputCols, outputCols |> List.map snd |> Array.ofList

@@ -1056,6 +1056,12 @@ let OnUpdateNowFlag = 0x2000us
 let PartKeyFlag = 0x4000us
 let NumFlag = 0x8000us
 
+type ColumnOrigin =
+    { Schema: string
+      Table: string
+      OriginalTable: string
+      OriginalName: string }
+
 /// The result-column metadata consumed by both the definition packet and
 /// binary-row encoder. Keeping these fields together prevents the encoder
 /// from disagreeing with the type and flags advertised to the client.
@@ -1064,14 +1070,16 @@ type ColumnMetadata =
       ColumnLength: uint32
       Flags: uint16
       Decimals: byte
-      CollationId: uint16 option }
+      CollationId: uint16 option
+      Origin: ColumnOrigin option }
 
 let columnMetadata typeId =
     { TypeId = typeId
       ColumnLength = 0u
       Flags = 0us
       Decimals = 0uy
-      CollationId = None }
+      CollationId = None
+      Origin = None }
 
 let bitBytes (width: int) (value: uint64) : byte[] =
     let byteCount = (width + 7) / 8

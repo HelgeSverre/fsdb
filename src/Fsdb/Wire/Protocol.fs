@@ -314,12 +314,13 @@ let fractionalDigitsOf (values: string option list) : byte =
 
 let columnDefPayload (col: ColumnDef) : byte[] =
     let w = Writer()
+    let origin = col.Metadata.Origin
     w.WriteLenEncString "def" // catalog
-    w.WriteLenEncString "" // schema
-    w.WriteLenEncString "" // table
-    w.WriteLenEncString "" // org_table
+    w.WriteLenEncString(origin |> Option.map _.Schema |> Option.defaultValue "")
+    w.WriteLenEncString(origin |> Option.map _.Table |> Option.defaultValue "")
+    w.WriteLenEncString(origin |> Option.map _.OriginalTable |> Option.defaultValue "")
     w.WriteLenEncString col.Name
-    w.WriteLenEncString col.Name // org_name
+    w.WriteLenEncString(origin |> Option.map _.OriginalName |> Option.defaultValue "")
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
     let isBinary =
         col.Metadata.TypeId <> TypeJson

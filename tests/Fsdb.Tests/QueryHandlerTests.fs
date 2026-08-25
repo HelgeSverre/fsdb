@@ -197,6 +197,41 @@ let tests =
                       "wire charset numbers follow each result expression"
               | _, other -> failtestf "expected empty collation metadata, got %A" other
 
+          testCase "result metadata preserves physical column origins"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE app"
+              let session, _ = handle session "USE app"
+              let session, _ = handle session "CREATE TABLE users (id INT, name VARCHAR(20))"
+
+              match handle session "SELECT u.id AS renamed, u.name, u.id + 1 AS computed FROM users AS u LIMIT 0" with
+              | session, ResultSet(_, []) ->
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.Origin)
+                      [ Some
+                            { Schema = "app"
+                              Table = "u"
+                              OriginalTable = "users"
+                              OriginalName = "id" }
+                        Some
+                            { Schema = "app"
+                              Table = "u"
+                              OriginalTable = "users"
+                              OriginalName = "name" }
+                        None ]
+                      "only physical columns retain their source fields"
+
+                  let session, _ = handle session "CREATE VIEW user_ids AS SELECT id FROM users"
+
+                  match handle session "SELECT v.id, d.name FROM user_ids AS v JOIN (SELECT name FROM users) AS d ON 1 = 1 LIMIT 0" with
+                  | session, ResultSet(_, []) ->
+                      Expect.equal
+                          (session.LastResultColumnMetadata |> List.map _.Origin)
+                          [ None; None ]
+                          "views and derived tables do not claim physical origins"
+                  | _, other -> failtestf "expected empty derived metadata, got %A" other
+              | _, other -> failtestf "expected empty origin metadata, got %A" other
+
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -237,6 +237,25 @@ let tests =
               reader.ReadLenEncInt() |> ignore
               Expect.equal (reader.ReadInt16LE()) 8 "latin1_swedish_ci charset number"
 
+          testCase "column definitions encode physical source fields"
+          <| fun _ ->
+              let metadata =
+                  { columnMetadata TypeLong with
+                      Origin =
+                          Some
+                              { Schema = "app"
+                                Table = "u"
+                                OriginalTable = "users"
+                                OriginalName = "id" } }
+
+              let reader = Reader(columnDefPayload { Name = "renamed"; Metadata = metadata })
+              Expect.equal (reader.ReadLenEncString()) (Some "def") "catalog"
+              Expect.equal (reader.ReadLenEncString()) (Some "app") "schema"
+              Expect.equal (reader.ReadLenEncString()) (Some "u") "table alias"
+              Expect.equal (reader.ReadLenEncString()) (Some "users") "physical table"
+              Expect.equal (reader.ReadLenEncString()) (Some "renamed") "result name"
+              Expect.equal (reader.ReadLenEncString()) (Some "id") "physical column"
+
           testCase "BIT column definitions advertise binary collation and unsigned metadata"
           <| fun _ ->
               let metadata = metadataOfType (TBit 9)
