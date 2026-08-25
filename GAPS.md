@@ -76,7 +76,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Roles: `CREATE/DROP ROLE`, `SET ROLE`, `SET DEFAULT ROLE`, `GRANT role TO user`, dynamic privileges (`BACKUP_ADMIN`…), `GRANT PROXY` | medium | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE` | low | refusal |
-| `ALTER TABLE … COMMENT=` option tails | medium | refusal |
+| `ALTER TABLE … COMMENT=` is accepted, but the value is not retained or exposed through `TABLE_COMMENT` | medium | divergence |
 | `CREATE USER` tails: auth plugin, `REQUIRE SSL/X509`, resource limits, `ACCOUNT LOCK`, `PASSWORD EXPIRE`; `ALTER USER` beyond password change | medium | refusal |
 
 ### SELECT-level syntax gaps
@@ -411,7 +411,7 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | 62 MySQL-accepted feature baselines initially exposed 20 declared missing surfaces across set-operation subqueries, window ranges, DML sources, DDL/admin, stored programs, accounts, and spatial functions; set-operation expression subqueries, temporal window ranges, derived-table mutation sources, functional defaults, and HASH partition declarations now pass, leaving 13 baseline differences. `--syntax-cases 0` runs this inventory without mutations | active gap driver |
+| Executable gap baselines | 62 MySQL-accepted feature baselines initially exposed 20 declared missing surfaces across set-operation subqueries, window ranges, DML sources, DDL/admin, stored programs, accounts, and spatial functions; set-operation expression subqueries, temporal window ranges, derived-table mutation sources, functional defaults, HASH partition declarations, and table-comment alterations now pass, leaving 12 baseline differences. `--syntax-cases 0` runs this inventory without mutations | active gap driver |
 | Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; the 2026-08-25 wait-and-rebase rerun committed all 1,455 non-rollback transactions with exact state parity and zero failures. Throughput remained 86 fsdb tx/s versus 5,246 MySQL tx/s, with p99 9,839 ms versus 13 ms | correctness resolved; performance open |
 | Multi-database scaling | the historical campaign predates sharded database roots; the 2026-08-25 rerun failed during concurrent setup with 1205 before a trustworthy scaling ratio could be measured (`2026-08-17-multidb-concurrency-campaign.md`) | unverified |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |

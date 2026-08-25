@@ -1555,6 +1555,16 @@ let tests =
                     | Err(1146, _) -> ()
                     | other -> failtestf "expected missing table error, got %A" other
 
+                testCase "ALTER TABLE COMMENT accepts metadata-only table comments"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+                    Expect.equal (runDefault store "ALTER TABLE t COMMENT = 'application data'") (Affected 0UL) "comment accepted"
+
+                    match runDefault store "ALTER TABLE missing COMMENT = 'application data'" with
+                    | Err(1146, _) -> ()
+                    | other -> failtestf "expected missing table error, got %A" other
+
                 testCase "ALTER TABLE CONVERT TO CHARACTER SET updates text columns atomically"
                 <| fun _ ->
                     let store = newStore ()

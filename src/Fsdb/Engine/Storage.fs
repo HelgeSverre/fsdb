@@ -3649,7 +3649,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         // Forward only, like InnoDB: a value below what existing rows
         // already claimed leaves the counter where it is.
         Ok({ table with NextAutoId = max value table.NextAutoId }, None)
-    | SetEngine _ -> Ok(table, None)
+    | SetEngine _
+    | SetTableComment _ -> Ok(table, None)
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _ -> Ok(table, None)

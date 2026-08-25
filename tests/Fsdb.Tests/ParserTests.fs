@@ -1781,6 +1781,13 @@ let tests =
                         (AlterTable("t", [ SetEngine "InnoDB" ]))
                         "set engine"
 
+                testCase "ALTER TABLE COMMENT"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t COMMENT = 'application data'")
+                        (AlterTable("t", [ SetTableComment "application data" ]))
+                        "table comment"
+
                 testCase "ALTER TABLE CONVERT TO CHARACTER SET"
                 <| fun _ ->
                     Expect.equal

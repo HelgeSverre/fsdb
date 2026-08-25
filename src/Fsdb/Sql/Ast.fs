@@ -606,6 +606,7 @@ type AlterAction =
     | AddPrimaryKey of columns: string list
     | SetDefault of column: string * value: ColumnDefault option
     | SetEngine of name: string
+    | SetTableComment of comment: string
     | ConvertCharset of charset: string * collation: string option
     /// `ALTER TABLE t AUTO_INCREMENT = n` — moves the counter forward
     /// (never below what existing rows already require, like InnoDB).

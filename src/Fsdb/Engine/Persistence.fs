@@ -574,7 +574,8 @@ let private encodeAlterAction (includeComment: bool) (w: Writer) (a: AlterAction
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _
-    | SetEngine _ -> failwith "Persistence: metadata-only ALTER action must not reach a SchemaChanged event"
+    | SetEngine _
+    | SetTableComment _ -> failwith "Persistence: metadata-only ALTER action must not reach a SchemaChanged event"
 
 let private decodeAlterAction (includeComment: bool) (r: #IReader) : AlterAction =
     match r.ReadByte() with

@@ -2217,6 +2217,12 @@ let private setAutoIncrementAction: Parser<AlterAction, unit> =
 let private setEngineAction: Parser<AlterAction, unit> =
     attempt (keyword "ENGINE" >>. opt (sym "=") >>. identifier) |>> SetEngine
 
+let private setTableCommentAction: Parser<AlterAction, unit> =
+    attempt (keyword "COMMENT" >>. opt (sym "=") >>. stringLit)
+    |>> function
+        | VString comment -> SetTableComment comment
+        | _ -> SetTableComment ""
+
 let private convertCharsetAction: Parser<AlterAction, unit> =
     attempt (
         keyword "CONVERT"
@@ -2249,6 +2255,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           renameColumnAction |>> List.singleton
           setAutoIncrementAction |>> List.singleton
           setEngineAction |>> List.singleton
+          setTableCommentAction |>> List.singleton
           convertCharsetAction |>> List.singleton
           renameToAction |>> List.singleton ]
     <?> "ALTER TABLE action"
