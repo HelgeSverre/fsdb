@@ -2898,17 +2898,17 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Affected _ -> Ok VNull
             | ResultSet(columns, _) when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _) ->
-                let candidates = subquery.Rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
                 let rightOperand = subqueryProjectionOperand ctx select
 
                 match ve, subquery.Int64Membership with
-                | VNull, _ -> if candidates.IsEmpty then Ok(VInt 0L) else Ok VNull
+                | VNull, _ -> if subquery.Rows.IsEmpty then Ok(VInt 0L) else Ok VNull
                 | VInt value, Some membership ->
                     if membership.Values.Contains value then Ok(VInt 1L)
                     elif membership.ContainsNull then Ok VNull
                     else Ok(VInt 0L)
                 | _ ->
-                    candidates
+                    subquery.Rows
+                    |> List.map (Array.tryHead >> Option.defaultValue VNull)
                     |> traverse (quantifiedComparisonResult ctx e ve rightOperand Eq)
                     |> Result.map (fun comparisons ->
                         if comparisons |> List.exists ((=) (VInt 1L)) then VInt 1L
