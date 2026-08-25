@@ -12,21 +12,28 @@ module RowId =
     let internal create value = RowId value
     let internal value (RowId value) = value
 
+type private RowSlot<'T> = RowId * 'T
+
 /// Builds one immutable row-store root without publishing partial changes.
 [<Sealed>]
-type RowStoreBuilder<'T> internal (liveCount: int, slots: PagedVector<'T option>) =
+type RowStoreBuilder<'T> internal (
+    liveCount: int,
+    nextRowId: int,
+    positions: Map<RowId, int>,
+    slots: PagedVector<RowSlot<'T> option>,
+    layoutIdentity: obj
+) =
     let mutable count = liveCount
+    let mutable nextId = nextRowId
+    let mutable positions = positions
     let slots = slots.ToBuilder()
 
     member _.Count = count
 
     member _.TryFind(rowId: RowId) =
-        let index = RowId.value rowId
-
-        if index < 0 || index >= slots.Count then
-            None
-        else
-            slots.[index]
+        positions
+        |> Map.tryFind rowId
+        |> Option.bind (fun index -> slots.[index] |> Option.map snd)
 
     member this.Item
         with get (rowId: RowId) : 'T =
@@ -34,50 +41,60 @@ type RowStoreBuilder<'T> internal (liveCount: int, slots: PagedVector<'T option>
             | Some item -> item
             | None -> raise (KeyNotFoundException(sprintf "Unknown row id %d." (RowId.value rowId)))
         and set (rowId: RowId) (item: 'T) =
-            match this.TryFind rowId with
-            | Some _ -> slots.[RowId.value rowId] <- Some item
+            match Map.tryFind rowId positions with
+            | Some index -> slots.[index] <- Some(rowId, item)
             | None -> raise (KeyNotFoundException(sprintf "Unknown row id %d." (RowId.value rowId)))
 
     member _.Add(item: 'T) =
-        let rowId = RowId.create slots.Count
-        slots.Add(Some item)
+        if nextId = Int32.MaxValue then
+            raise (InvalidOperationException "The row identity space is exhausted.")
+
+        let rowId = RowId.create nextId
+        let index = slots.Count
+        slots.Add(Some(rowId, item))
+        positions <- Map.add rowId index positions
+        nextId <- nextId + 1
         count <- count + 1
         rowId
 
     member this.AddRange(items: seq<'T>) =
         items |> Seq.map this.Add |> List.ofSeq
 
-    member this.Remove(rowId: RowId) =
-        match this.TryFind rowId with
+    member _.Remove(rowId: RowId) =
+        match Map.tryFind rowId positions with
         | None -> false
-        | Some _ ->
-            slots.[RowId.value rowId] <- None
+        | Some index ->
+            slots.[index] <- None
+            positions <- Map.remove rowId positions
             count <- count - 1
             true
 
-    member internal _.Drain() = count, slots.DrainToImmutable()
+    member internal _.Drain() = count, nextId, positions, slots.DrainToImmutable(), layoutIdentity
 
 /// An insertion-ordered immutable row heap with stable, non-reused identities.
-/// ponytail: deleted slots remain addressable tombstones; reclaiming their
-/// directory space needs an identity-to-slot indirection so compaction cannot
-/// retarget a point lookup captured from an older root.
 [<Sealed>]
-type RowStore<'T> internal (liveCount: int, slots: PagedVector<'T option>) =
-    static let empty = RowStore<'T>(0, PagedVector.empty)
+type RowStore<'T> internal (
+    liveCount: int,
+    nextRowId: int,
+    positions: Map<RowId, int>,
+    slots: PagedVector<RowSlot<'T> option>,
+    layoutIdentity: obj
+) =
+    static let empty = RowStore<'T>(0, 0, Map.empty, PagedVector.empty, obj ())
 
     member _.Count = liveCount
     member _.Length = liveCount
     member _.IsEmpty = liveCount = 0
-    /// Deleted slots retained to keep RowId stable across immutable roots.
     member _.TombstoneCount = slots.Count - liveCount
 
-    member _.TryFind(rowId: RowId) =
-        let index = RowId.value rowId
+    member private _.DrainBuilder(builder: RowStoreBuilder<'T>) =
+        let count, nextRowId, positions, slots, layoutIdentity = builder.Drain()
+        RowStore<'T>(count, nextRowId, positions, slots, layoutIdentity)
 
-        if index < 0 || index >= slots.Count then
-            None
-        else
-            slots.[index]
+    member _.TryFind(rowId: RowId) =
+        positions
+        |> Map.tryFind rowId
+        |> Option.bind (fun index -> slots.[index] |> Option.map snd)
 
     member this.Item
         with get (rowId: RowId) : 'T =
@@ -96,49 +113,98 @@ type RowStore<'T> internal (liveCount: int, slots: PagedVector<'T option>) =
     member this.Append(item: 'T) =
         let builder: RowStoreBuilder<'T> = this.ToBuilder()
         let rowId = builder.Add item
-        let count, slots = builder.Drain()
-        rowId, RowStore<'T>(count, slots)
+        rowId, this.DrainBuilder builder
 
     member this.AppendRange(items: seq<'T>) =
         let builder: RowStoreBuilder<'T> = this.ToBuilder()
         let rowIds = builder.AddRange items
-        let count, slots = builder.Drain()
-        rowIds, RowStore<'T>(count, slots)
+        rowIds, this.DrainBuilder builder
 
     member this.SetItem(rowId: RowId, item: 'T) =
         let builder: RowStoreBuilder<'T> = this.ToBuilder()
         builder.[rowId] <- item
-        let count, slots = builder.Drain()
-        RowStore<'T>(count, slots)
+        this.DrainBuilder builder
 
     member this.Remove(rowId: RowId) =
         let builder: RowStoreBuilder<'T> = this.ToBuilder()
         builder.Remove rowId |> ignore
-        let count, slots = builder.Drain()
-        RowStore<'T>(count, slots)
+        this.DrainBuilder builder
 
-    member _.ToBuilder() : RowStoreBuilder<'T> = RowStoreBuilder<'T>(liveCount, slots)
+    member _.ToBuilder() : RowStoreBuilder<'T> =
+        RowStoreBuilder<'T>(liveCount, nextRowId, positions, slots, layoutIdentity)
 
     member private _.Slots = slots
+    member private _.Positions = positions
+    member private _.LayoutIdentity = layoutIdentity
+
+    member internal this.Compact() =
+        if this.TombstoneCount = 0 then
+            this
+        else
+            let denseSlots = PagedVectorBuilder<RowSlot<'T> option>(0, Map.empty)
+            let mutable densePositions = Map.empty
+
+            for rowId, item in this.Indexed do
+                densePositions <- Map.add rowId denseSlots.Count densePositions
+                denseSlots.Add(Some(rowId, item))
+
+            RowStore<'T>(liveCount, nextRowId, densePositions, denseSlots.DrainToImmutable(), obj ())
+
+    member internal this.CompactIfNeeded() =
+        let tombstones = this.TombstoneCount
+
+        if tombstones >= 256 && int64 tombstones * 4L >= int64 slots.Count then
+            this.Compact()
+        else
+            this
 
     member internal this.ChangesFrom(baseline: RowStore<'T>) =
-        seq {
-            for index in slots.ChangedIndices baseline.Slots do
-                let rowId = RowId.create index
-                let before = baseline.TryFind rowId
-                let after = this.TryFind rowId
+        let changed rowId before after =
+            if EqualityComparer<'T option>.Default.Equals(before, after) then
+                None
+            else
+                Some(rowId, before, after)
 
-                if not (EqualityComparer<'T option>.Default.Equals(before, after)) then
-                    yield rowId, before, after
-        }
+        if obj.ReferenceEquals(layoutIdentity, baseline.LayoutIdentity) then
+            seq {
+                for index in slots.ChangedIndices baseline.Slots do
+                    let before =
+                        if index < baseline.Slots.Count then
+                            baseline.Slots.[index]
+                        else
+                            None
+
+                    let after = if index < slots.Count then slots.[index] else None
+
+                    match before, after with
+                    | Some(beforeId, beforeItem), Some(afterId, afterItem) when beforeId = afterId ->
+                        match changed beforeId (Some beforeItem) (Some afterItem) with
+                        | Some change -> yield change
+                        | None -> ()
+                    | Some(beforeId, beforeItem), Some(afterId, afterItem) ->
+                        yield beforeId, Some beforeItem, None
+                        yield afterId, None, Some afterItem
+                    | Some(rowId, item), None -> yield rowId, Some item, None
+                    | None, Some(rowId, item) -> yield rowId, None, Some item
+                    | None, None -> ()
+            }
+        else
+            seq {
+                let rowIds =
+                    Seq.append positions.Keys baseline.Positions.Keys
+                    |> Set.ofSeq
+
+                for rowId in rowIds do
+                    match changed rowId (baseline.TryFind rowId) (this.TryFind rowId) with
+                    | Some change -> yield change
+                    | None -> ()
+            }
 
     member this.Indexed =
         seq {
-            for index = 0 to slots.Count - 1 do
-                let rowId = RowId.create index
-
-                match this.TryFind rowId with
-                | Some item -> yield rowId, item
+            for slot in slots do
+                match slot with
+                | Some(rowId, item) -> yield rowId, item
                 | None -> ()
         }
 
@@ -153,15 +219,15 @@ type RowStore<'T> internal (liveCount: int, slots: PagedVector<'T option>) =
     static member Empty = empty
 
     static member OfSeq(items: seq<'T>) =
-        let builder = RowStoreBuilder<'T>(0, PagedVector.empty)
+        let builder = RowStoreBuilder<'T>(0, 0, Map.empty, PagedVector.empty, obj ())
         builder.AddRange items |> ignore
-        let count, slots = builder.Drain()
-        RowStore<'T>(count, slots)
+        let count, nextRowId, positions, slots, layoutIdentity = builder.Drain()
+        RowStore<'T>(count, nextRowId, positions, slots, layoutIdentity)
 
 type RowStoreBuilder<'T> with
     member this.DrainToImmutable() =
-        let count, slots = this.Drain()
-        RowStore<'T>(count, slots)
+        let count, nextRowId, positions, slots, layoutIdentity = this.Drain()
+        RowStore<'T>(count, nextRowId, positions, slots, layoutIdentity)
 
 [<RequireQualifiedAccess>]
 module RowStore =

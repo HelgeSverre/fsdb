@@ -1803,6 +1803,14 @@ let private reindexRow
     uniqueIndex, secondaryIndex, secondaryOrder
 
 let private publishRows (before: Table) (after: Table) : Table =
+    let compactedRows = after.RowsArray.CompactIfNeeded()
+
+    let after =
+        if obj.ReferenceEquals(compactedRows, after.RowsArray) then
+            after
+        else
+            { after with RowsArray = compactedRows }
+
     if before.Indexes <> after.Indexes || before.Columns <> after.Columns then
         { after with FullTextIndexes = rebuildFullTextIndexes after }
     else

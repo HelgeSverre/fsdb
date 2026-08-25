@@ -3137,7 +3137,62 @@ let tests =
 
                     Expect.sequenceEqual updated [ "A"; "c"; "d" ] "the builder publishes updates and appends in slot order"
                     Expect.equal updated.[cId] "c" "the first appended identity resolves"
-                    Expect.equal updated.[dId] "d" "the second appended identity resolves" ]
+                    Expect.equal updated.[dId] "d" "the second appended identity resolves"
+
+                testCase "compaction preserves logical identities and earlier roots"
+                <| fun _ ->
+                    let original = RowStore.ofSeq [ 0 .. 599 ]
+                    let indexed = original.Indexed |> Array.ofSeq
+                    let retainedId, _ = indexed.[500]
+                    let removed =
+                        indexed.[0..299]
+                        |> Array.fold (fun (rows: RowStore<int>) (rowId, _) -> rows.Remove rowId) original
+                    let compacted = removed.Compact()
+
+                    Expect.equal compacted.TombstoneCount 0 "the dense root has no deleted slots"
+                    Expect.equal compacted.[retainedId] 500 "logical ids survive physical relocation"
+                    Expect.equal original.[retainedId] 500 "the earlier root remains readable"
+                    Expect.equal (compacted.ChangesFrom removed |> Seq.length) 0 "layout changes are not row changes"
+
+                    let appendedId, appended = compacted.Append 600
+                    Expect.notEqual appendedId (fst indexed.[0]) "compaction does not recycle deleted identities"
+                    Expect.sequenceEqual appended [ 300 .. 600 ] "scan order survives compaction and append"
+
+                testCase "delete-heavy tables compact without invalidating snapshots or indexes"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ for id in 1L .. 1000L -> [ VInt id; VString(sprintf "user-%d" id); VInt 0L ] ]
+                    |> ignore
+
+                    let before = store.Catalog.[defaultDatabase].["users"]
+
+                    let retainedId =
+                        before.RowsArray.Indexed
+                        |> Seq.find (fun (_, row) -> row.[0] = VInt 500L)
+                        |> fst
+
+                    deleteRows store defaultDatabase "users" (fun row ->
+                        match row.[0] with
+                        | VInt id -> Ok(id <= 300L)
+                        | _ -> Ok false)
+                    |> function
+                        | Ok 300 -> ()
+                        | result -> failtestf "expected 300 deleted rows, got %A" result
+
+                    let after = store.Catalog.[defaultDatabase].["users"]
+                    Expect.equal after.RowsArray.TombstoneCount 0 "the published root is dense"
+                    Expect.equal after.RowsArray.[retainedId].[0] (VInt 500L) "the retained row keeps its identity"
+                    Expect.equal before.RowsArray.Count 1000 "the captured root retains every row"
+
+                    match insertRows store defaultDatabase "users" None [ [ VInt 500L; VString "duplicate"; VInt 0L ] ] with
+                    | Error(DuplicateKey("PRIMARY", _)) -> ()
+                    | result -> failtestf "expected the compacted primary index to reject a duplicate, got %A" result ]
 
           testList
               "performance canary"

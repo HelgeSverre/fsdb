@@ -38,7 +38,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, PK/unique/secondary range, grouping, and bounded index-order probes | Outer-join, unconstrained composite ordering, and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused |
-| Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; tombstones never reclaimed |
+| Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Direct updatable views with all insert/replace forms; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
 | Routines & events | Zero-parameter, single-statement procedures and one-time event declarations | Compound stored programs and event scheduling |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
@@ -252,7 +252,7 @@ expressions.
 |---|---|---|---|---|
 | Durability default | durable unless configured otherwise | in-memory unless `--data-dir` passed; process death loses everything | medium (deployment) | divergence |
 | Keyless WAL row lookup | redo addresses physical records directly | replay resolves rows through unique indexes when possible; events on tables without a usable unique key use one ordered table pass because the WAL stores row images rather than row ids | low (recovery and durable keyless-write throughput) | divergence |
-| Space reclamation | purge threads reclaim deleted rows | `RowStore` leaves deleted slots as tombstones; long-lived delete-heavy tables grow memory without bound | medium | divergence |
+| Space reclamation | purge threads reclaim deleted rows | Delete-heavy tables compact immutable row roots after at least 256 tombstones occupy one quarter of physical slots; reclamation is foreground and occasionally scans one table root | low | divergence |
 | Platform | portable | durable mode macOS/Linux only (libc fsync design) | low | divergence |
 
 ## 9. Views and triggers
