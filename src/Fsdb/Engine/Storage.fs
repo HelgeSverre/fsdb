@@ -2430,6 +2430,38 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
     | Ok coerced when coerced = value -> Some value
     | _ -> None
 
+type TransientEqualityLookup =
+    { TableColumns: ColumnDef list
+      FindRows: Value -> (RowId * Value[]) list option }
+
+let tryBuildTransientEqualityLookup (store: Store) (dbName: string) (tableName: string) (columnName: string) : TransientEqualityLookup option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table ->
+        resolveColumn table.Columns columnName
+        |> Result.toOption
+        |> Option.map (fun index ->
+            let rowsByKey =
+                table.RowsArray.Indexed
+                |> Seq.fold
+                    (fun buckets (rowId, row) ->
+                        let key = encodeEqualityKey table.Columns [ index ] row
+                        let rows = buckets |> Map.tryFind key |> Option.defaultValue []
+                        Map.add key ((rowId, row) :: rows) buckets)
+                    Map.empty
+
+            let rowsFor value =
+                exactProbeValue store table index value
+                |> Option.map (fun value ->
+                    let probe = Array.create table.Columns.Length VNull
+                    probe.[index] <- value
+                    rowsByKey
+                    |> Map.tryFind (encodeEqualityKey table.Columns [ index ] probe)
+                    |> Option.defaultValue []
+                    |> List.rev)
+
+            { TableColumns = table.Columns
+              FindRows = rowsFor }))
+
 let private tryUniqueKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : (string * int) option =
     tryEqualityIndex table columnName
     |> Option.bind (fun (name, index, unique) ->

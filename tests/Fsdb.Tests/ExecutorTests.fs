@@ -4791,7 +4791,39 @@ let tests =
                         Expect.isTrue (rows |> List.forall (fun row -> row.[1] = Some "20")) "each user has twenty orders"
                     | other -> failtestf "expected correlated counts, got %A" other
 
-                    Expect.isLessThan calls 2000 "the residual evaluates only indexed candidates, not the inner table for every outer row" ]
+                    Expect.isLessThan calls 2000 "the residual evaluates only indexed candidates, not the inner table for every outer row"
+
+                testCase "an unindexed correlated equality materializes keyed candidates once"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values.Head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT)" |> ignore
+                    runDefault store ("INSERT INTO users VALUES " + ([ 1..50 ] |> List.map (sprintf "(%d)") |> String.concat ",")) |> ignore
+
+                    [ 1..1000 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 50) + 1))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO orders VALUES " + rows)
+                    |> ignore
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT users.id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id AND TOUCH(orders.id) = -1) ORDER BY users.id"
+                    with
+                    | ResultSet(_, rows) -> Expect.isEmpty rows "the residual rejects every candidate"
+                    | other -> failtestf "expected an empty resultset, got %A" other
+
+                    Expect.isLessThan calls 1100 "residual work stays proportional to the inner rows plus projection inference" ]
 
           testList
               "streaming SELECT pipeline"

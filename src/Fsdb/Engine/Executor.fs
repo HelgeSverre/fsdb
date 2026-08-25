@@ -120,6 +120,7 @@ type private MemoizedSubquery =
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
+      CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       Views: Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
@@ -127,6 +128,7 @@ let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
 let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
+      CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
       Views = Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
@@ -6213,6 +6215,20 @@ and private tryCorrelatedEqualityLookup
             evalExpr context expression |> Result.toOption
         | _ -> None
 
+    let transientLookup (tableDb: string) (column: string) (value: Value) =
+        let key = tableDb.ToLowerInvariant(), tref.Table.ToLowerInvariant(), column.ToLowerInvariant()
+        let lookups = (currentStatementMemo ()).CorrelatedEqualities
+
+        match lookups.TryGetValue key with
+        | true, lookup -> lookup
+        | _ ->
+            let lookup = Storage.tryBuildTransientEqualityLookup store tableDb tref.Table column
+            lookups.[key] <- lookup
+            lookup
+        |> Option.bind (fun lookup ->
+            lookup.FindRows value
+            |> Option.map (fun rows -> lookup.TableColumns, rows))
+
     outer
     |> Option.bind (fun context ->
         whereExpr
@@ -6234,7 +6250,9 @@ and private tryCorrelatedEqualityLookup
             |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows)
             |> Option.orElseWith (fun () ->
                 equalities
-                |> List.tryPick (fun (column, value) -> Storage.tryEqualityLookup store tableDb tref.Table column value)))
+                |> List.tryPick (fun (column, value) ->
+                    Storage.tryEqualityLookup store tableDb tref.Table column value
+                    |> Option.orElseWith (fun () -> transientLookup tableDb column value))))
 
 and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
