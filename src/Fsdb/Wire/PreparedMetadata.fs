@@ -15,6 +15,99 @@ let private sameName (left: string) (right: string) =
     left.Equals(right, StringComparison.OrdinalIgnoreCase)
 
 let private generic = ColumnWire.parameterMetadataOfType(TVarchar 16383)
+let private signedInteger = ColumnWire.parameterMetadataOfType(TBigInt false)
+let private decimalNumber = ColumnWire.parameterMetadataOfType(TDecimal(65, 30))
+let private floatingPoint = ColumnWire.parameterMetadataOfType TDouble
+let private date = ColumnWire.parameterMetadataOfType TDate
+let private dateTime = ColumnWire.parameterMetadataOfType(TDateTime 6)
+let private time = ColumnWire.parameterMetadataOfType(TTime 6)
+let private json = ColumnWire.parameterMetadataOfType TJson
+let private geometry = ColumnWire.parameterMetadataOfType(TGeometry Geometry)
+let private binary = ColumnWire.parameterMetadataOfType TLongBlob
+
+let private floatingPointFunctions =
+    set [ "ABS"; "ACOS"; "ASIN"; "ATAN"; "ATAN2"; "CEIL"; "CEILING"; "COS"; "COT"; "DEGREES"; "EXP"; "FLOOR"
+          "LN"; "LOG"; "LOG10"; "LOG2"; "POW"; "POWER"; "RADIANS"; "SIGN"; "SIN"; "SQRT"; "TAN" ]
+
+let private dateFunctions = set [ "DATE"; "DATEDIFF"; "LAST_DAY"; "TO_DAYS" ]
+
+let private dateTimeFunctions =
+    set [ "DAY"; "DAYNAME"; "DAYOFMONTH"; "DAYOFWEEK"; "DAYOFYEAR"; "HOUR"; "MICROSECOND"; "MINUTE"; "MONTH"; "MONTHNAME"
+          "QUARTER"; "SECOND"; "UNIX_TIMESTAMP"; "WEEKDAY"; "WEEKOFYEAR"; "YEAR" ]
+
+let private geometryFunctions =
+    set [ "ASTEXT"; "ASBINARY"; "DIMENSION"; "GEOMETRYTYPE"; "ISEMPTY"; "MBRCONTAINS"; "MBRINTERSECTS"; "MBRWITHIN"
+          "ST_ASBINARY"; "ST_ASTEXT"; "ST_ASWKB"; "ST_ASWKT"; "ST_BUFFER"; "ST_CONTAINS"; "ST_CONVEXHULL"; "ST_DIMENSION"
+          "ST_DISJOINT"; "ST_DISTANCE"; "ST_ENVELOPE"; "ST_EQUALS"; "ST_GEOMETRYTYPE"; "ST_INTERSECTS"; "ST_ISEMPTY"; "ST_ISVALID"
+          "ST_SRID"; "ST_TOUCHES"; "ST_WITHIN"; "ST_X"; "ST_Y"; "X"; "Y" ]
+
+let private wkbConstructors =
+    set [ "GEOMFROMWKB"; "ST_GEOMETRYFROMWKB"; "ST_GEOMFROMWKB"; "ST_POINTFROMWKB" ]
+
+let private wktConstructors =
+    set [ "GEOMETRYFROMTEXT"; "GEOMFROMTEXT"; "ST_GEOMETRYFROMTEXT"; "ST_GEOMFROMTEXT"; "ST_LINESTRINGFROMTEXT"
+          "ST_POINTFROMTEXT"; "ST_POLYGONFROMTEXT" ]
+
+let private jsonFirstArgument =
+    set [ "JSON_ARRAY_APPEND"; "JSON_ARRAY_INSERT"; "JSON_CONTAINS"; "JSON_CONTAINS_PATH"; "JSON_DEPTH"; "JSON_EXTRACT"; "JSON_INSERT"
+          "JSON_KEYS"; "JSON_LENGTH"; "JSON_PRETTY"; "JSON_REMOVE"; "JSON_REPLACE"; "JSON_SEARCH"; "JSON_SET"; "JSON_STORAGE_FREE"
+          "JSON_STORAGE_SIZE"; "JSON_TYPE"; "JSON_VALID"; "JSON_VALUE" ]
+
+let private jsonMutationFunctions =
+    set [ "JSON_ARRAY_APPEND"; "JSON_ARRAY_INSERT"; "JSON_INSERT"; "JSON_REPLACE"; "JSON_SET" ]
+
+let private integerFunctions =
+    set [ "FROM_DAYS"; "MAKEDATE"; "PERIOD_ADD"; "PERIOD_DIFF" ]
+
+let private functionParameterMetadata (name: string) index =
+    let name = name.ToUpperInvariant()
+
+    if Set.contains name floatingPointFunctions then
+        Some floatingPoint
+    elif name = "ROUND" || name = "TRUNCATE" then
+        Some(if index = 0 then decimalNumber else signedInteger)
+    elif name = "MOD" || name = "BIT_COUNT" || Set.contains name integerFunctions then
+        Some signedInteger
+    elif Set.contains name dateFunctions then
+        Some date
+    elif (name = "WEEK" || name = "YEARWEEK") && index > 0 then
+        Some signedInteger
+    elif name = "WEEK" || name = "YEARWEEK" then
+        Some dateTime
+    elif Set.contains name dateTimeFunctions || name = "TIME" then
+        Some dateTime
+    elif name = "ADDTIME" || name = "SUBTIME" then
+        Some time
+    elif name = "SEC_TO_TIME" then
+        Some decimalNumber
+    elif name = "MAKETIME" then
+        Some(if index < 2 then signedInteger else decimalNumber)
+    elif name = "FROM_UNIXTIME" then
+        Some decimalNumber
+    elif name = "FORMAT" then
+        Some(if index = 0 then decimalNumber else if index = 1 then signedInteger else generic)
+    elif (name = "SUBSTRING" || name = "SUBSTR" || name = "MID") && index > 0 then
+        Some signedInteger
+    elif name = "SHA2" && index = 1 then
+        Some signedInteger
+    elif Set.contains name jsonMutationFunctions && index % 2 = 0 then
+        Some json
+    elif Set.contains name jsonFirstArgument && index = 0 then
+        Some json
+    elif Set.contains name geometryFunctions && index = 0 then
+        Some geometry
+    elif Set.contains name geometryFunctions && index = 1 && name <> "ST_BUFFER" && name <> "ST_SRID" then
+        Some geometry
+    elif name = "ST_BUFFER" && index = 1 then
+        Some floatingPoint
+    elif name = "ST_SRID" && index = 1 then
+        Some signedInteger
+    elif Set.contains name wkbConstructors && index = 0 then
+        Some binary
+    elif (Set.contains name wkbConstructors || Set.contains name wktConstructors) && index = 1 then
+        Some signedInteger
+    else
+        None
 
 let private metadataOfValue =
     function
@@ -146,6 +239,10 @@ let parameterDefinitions
         | FuncCall(name, [ first; second ]) when name.Equals("NULLIF", StringComparison.OrdinalIgnoreCase) ->
             inferExpected (inferred second |> Option.orElse expected |> Option.orElse (Some generic)) first
             inferExpected (inferred first |> Option.orElse expected |> Option.orElse (Some generic)) second
+        | FuncCall(name, values) ->
+            values
+            |> List.iteri (fun index value ->
+                inferExpected (functionParameterMetadata name index) value)
         | Case(subject, branches, fallback) ->
             subject |> Option.iter inferUnknown
 

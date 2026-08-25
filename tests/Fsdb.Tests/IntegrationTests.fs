@@ -2081,6 +2081,51 @@ let tests =
                         45, parameterMetadataOfType(TVarchar 16383) ]
                       "casts infer a type while context-free parameters remain generic"
 
+                  let! functions =
+                      prepare
+                          "SELECT ABS(?), ROUND(?), DATE(?), TIME(?), JSON_LENGTH(?), ST_ASTEXT(?), MOD(?,2), SEC_TO_TIME(?), ADDTIME(?,?)"
+
+                  Expect.sequenceEqual
+                      (functions |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      [ 63, parameterMetadataOfType TDouble
+                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        45, parameterMetadataOfType TDate
+                        45, parameterMetadataOfType(TDateTime 6)
+                        45, parameterMetadataOfType TJson
+                        63, parameterMetadataOfType(TGeometry Geometry)
+                        63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        45, parameterMetadataOfType(TTime 6)
+                        45, parameterMetadataOfType(TTime 6) ]
+                      "function signatures determine numeric, temporal, JSON, and geometry parameters"
+
+                  let! overloads =
+                      prepare
+                          "SELECT JSON_VALID(?), JSON_UNQUOTE(?), JSON_OVERLAPS(?,?), JSON_SET(?, '$.a', ?), HOUR(?), FROM_DAYS(?), WEEK(?,?), FORMAT(?,?), SUBSTRING(?,?,?), ST_BUFFER(?,?), ST_SRID(?,?)"
+
+                  Expect.sequenceEqual
+                      (overloads |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      [ 45, parameterMetadataOfType TJson
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        45, parameterMetadataOfType TJson
+                        45, parameterMetadataOfType TJson
+                        45, parameterMetadataOfType(TDateTime 6)
+                        63, parameterMetadataOfType(TBigInt false)
+                        45, parameterMetadataOfType(TDateTime 6)
+                        63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        63, parameterMetadataOfType(TBigInt false)
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TGeometry Geometry)
+                        63, parameterMetadataOfType TDouble
+                        63, parameterMetadataOfType(TGeometry Geometry)
+                        63, parameterMetadataOfType(TBigInt false) ]
+                      "overloaded functions retain distinct document, text, and position types"
+
                   let! parameterOnly = prepare "SELECT ? + ?, ? = ?"
 
                   Expect.sequenceEqual
