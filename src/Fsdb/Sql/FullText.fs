@@ -216,19 +216,24 @@ let private naturalTerms (index: Index<'id>) (query: string) : string[] =
 
 /// Element-wise sum of every term's per-doc contribution — the natural and
 /// query-expansion modes are both exactly this over different term sets.
-/// Accumulates into one result array in place rather than mapping every term
-/// to its own row array first, so peak memory stays O(rows), not
+/// Accumulates into one result map rather than retaining one map per term,
+/// so peak memory stays O(rows), not
 /// O(terms × rows) for a query with many distinct terms.
 let private sumTermScores (index: Index<'id>) (terms: string[]) : Map<'id, float> =
-    terms
-    |> Array.fold
-        (fun scores term ->
-            termScores index term
-            |> Map.fold
-                (fun scores id score ->
-                    Map.change id (fun current -> Some(score + Option.defaultValue 0.0 current)) scores)
-                scores)
-        Map.empty
+    match terms with
+    | [||] -> Map.empty
+    | [| term |] -> termScores index term
+    | _ ->
+        terms
+        |> Array.skip 1
+        |> Array.fold
+            (fun scores term ->
+                termScores index term
+                |> Map.fold
+                    (fun scores id score ->
+                        Map.change id (fun current -> Some(score + Option.defaultValue 0.0 current)) scores)
+                    scores)
+            (termScores index terms.[0])
 
 let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
     sumTermScores index (naturalTerms index query)
