@@ -34,13 +34,8 @@ let tests =
                   Int32.MaxValue
                   "a configured timeout beyond Task.Delay's int range saturates instead of wrapping negative"
 
-          // sendQueryResult is the only sequence-id-bearing logic in the
-          // server, and getting a resultset terminator wrong hangs mysql
-          // CLI / mysqlnd forever waiting for a terminator that never
-          // arrives (see the okEndOfResultSetPayload test above).
-          // MySqlConnector always negotiates CLIENT_DEPRECATE_EOF, so the
-          // integration test alone never exercises the legacy EOF path that
-          // PDO/mysqlnd may still use — cover both here directly.
+          // MySqlConnector always negotiates CLIENT_DEPRECATE_EOF; PDO/mysqlnd
+          // can still require the legacy terminator sequence.
           for caps, label, terminator in
               [ ClientProtocol41 ||| ClientDeprecateEof, "CLIENT_DEPRECATE_EOF", 0xfeuy
                 ClientProtocol41, "legacy EOF", 0xfeuy ] do
@@ -104,13 +99,39 @@ let tests =
                   Expect.equal (List.length legacy) (List.length deprecated + 1) "legacy path has one extra packet" }
               |> Async.RunSynchronously
 
-          // A half-open peer that never sends a complete packet (here: never
-          // sends anything at all) must eventually be reaped rather than
-          // pinning a thread and a socket forever — `Socket.ReceiveTimeout`
-          // doesn't bound `ReadAsync`, so this exercises the `Task.WhenAny`
-          // race directly (see `readPacketWithTimeoutMs`'s doc). Uses a real
-          // loopback socket pair, not a `MemoryStream`, since the point is
-          // the socket actually getting closed out from under a stuck read.
+          testCase "result metadata and rows share inferred temporal precision"
+          <| fun _ ->
+              async {
+                  use stream = new IO.MemoryStream()
+                  let metadata = columnMetadata TypeDateTime
+
+                  do!
+                      Fsdb.Server.sendQueryResult
+                          stream
+                          (ClientProtocol41 ||| ClientDeprecateEof)
+                          1uy
+                          StatusAutocommit
+                          0UL
+                          0
+                          [ metadata ]
+                          (ResultSet([ "at" ], [ [ Some "2026-08-25 12:00:00.1234" ] ]))
+
+                  stream.Position <- 0L
+                  let! packets = readAllPackets stream
+                  let definition = Reader(packets.[1].Payload)
+
+                  for _ in 1..6 do
+                      definition.ReadLenEncString() |> ignore
+
+                  definition.ReadLenEncInt() |> ignore
+                  definition.ReadInt16LE() |> ignore
+                  definition.ReadInt32LE() |> ignore
+                  Expect.equal (definition.ReadByte()) TypeDateTime "wire type"
+                  definition.ReadInt16LE() |> ignore
+                  Expect.equal (definition.ReadByte()) 4uy "fractional precision" }
+              |> Async.RunSynchronously
+
+          // ReadAsync timeout behavior requires a real socket that can be closed.
           testCase "readPacketWithTimeoutMs reaps a connection that never sends a packet"
           <| fun _ ->
               async {
@@ -179,13 +200,7 @@ let tests =
                   Expect.equal (second.ReadInt16LE() &&& StatusMoreResultsExists) 0 "last result clears MORE_RESULTS" }
               |> Async.RunSynchronously
 
-          // `readPacketAsync` raises `PacketTooLargeException` synchronously,
-          // before its `Task` (started by `Async.StartAsTask` inside
-          // `readPacketWithTimeoutMs`) ever suspends on real I/O — awaiting
-          // such a task surfaces the fault wrapped in `AggregateException`
-          // rather than the original exception. `Server`'s connection-level
-          // `with` match on `PacketTooLargeException` (the best-effort 1153
-          // reply) needs the unwrapped exception to ever fire.
+          // Synchronous packet faults must retain their protocol exception type.
           testCase "readPacketWithTimeoutMs surfaces PacketTooLargeException unwrapped, not as AggregateException"
           <| fun _ ->
               async {

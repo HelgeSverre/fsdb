@@ -118,9 +118,29 @@ let sendPayloads (stream: IO.Stream) (startSeq: byte) (payloads: byte[] list) : 
 
     loop startSeq payloads
 
-/// Builds the non-row packet payloads of an OK/ERR/resultset reply: the
-/// column count, column defs, and the pre-rows EOF. Rows stream separately
-/// (see `sendResult`) rather than materializing one `byte[]` per row here.
+/// Produces one descriptor list shared by column definitions and row encoding.
+/// Untyped probe results fall back only when the supplied arity is unusable.
+let private resultMetadata columns rows metadata =
+    let metadata =
+        if List.length metadata = List.length columns then
+            metadata
+        else
+            List.replicate (List.length columns) (Value.columnMetadata TypeVarString)
+
+    let withValuePrecision colIndex metadata =
+        if metadata.Decimals = 0uy && (metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTime) then
+            let decimals =
+                rows
+                |> List.map (List.tryItem colIndex >> Option.flatten)
+                |> Protocol.fractionalDigitsOf
+
+            { metadata with Decimals = decimals }
+        else
+            metadata
+
+    List.mapi withValuePrecision metadata
+
+/// Builds the column definitions and pre-row terminator without row packets.
 let private resultHeadPayloads
     (capabilities: uint32)
     (statusFlags: int)
@@ -132,42 +152,16 @@ let private resultHeadPayloads
     match result with
     | Affected affectedRows -> [ okPayloadWithWarnings capabilities statusFlags affectedRows lastInsertId warningCount ]
     | Err(code, message) -> [ errPayload capabilities code message ]
-    | ResultSet(columns, rows) ->
+    | ResultSet(columns, _) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
-
-        // Metadata only applies when the caller has one entry per result
-        // entry per column (a mismatch means "no real info", e.g. a probe
-        // result — see `Session.LastResultColumnMetadata`'s doc). The column
-        // definition packets and `sendResult`'s row encoder reconcile to
-        // this same `types`, so the two can never disagree.
-        let metadata =
-            if List.length columnMetadata = columns.Length then
-                columnMetadata
-            else
-                List.replicate columns.Length (Value.columnMetadata TypeVarString)
 
         let columnCountPayload =
             let w = Writer()
             w.WriteLenEncInt(uint64 columns.Length)
             w.ToArray()
 
-        // The `decimals` (fsp) each column advertises: for a DATETIME/
-        // TIMESTAMP/TIME column, read back the fractional digits the renderer
-        // already emitted into the rows (see `Protocol.fractionalDigitsOf`),
-        // so a client learns a `DATETIME(6)`/`TIME(3)`'s precision even on an
-        // exact second. Non-temporal columns advertise 0.
-        let withValuePrecision (colIndex: int) (metadata: ColumnMetadata) =
-            if metadata.Decimals = 0uy && (metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTime) then
-                let decimals =
-                    rows |> List.map (fun r -> List.tryItem colIndex r |> Option.flatten) |> Protocol.fractionalDigitsOf
-
-                { metadata with Decimals = decimals }
-            else
-                metadata
-
         [ columnCountPayload ]
-        @ (List.zip columns metadata
-           |> List.mapi (fun i (name, metadata) -> columnDefPayload { Name = name; Metadata = withValuePrecision i metadata }))
+        @ (List.map2 (fun name metadata -> columnDefPayload { Name = name; Metadata = metadata }) columns columnMetadata)
         @ (if deprecateEof then [] else [ eofPayloadWithWarnings capabilities statusFlags warningCount ])
 
 /// Writes an OK/ERR/resultset reply. Rows are framed and written in batches —
@@ -186,16 +180,15 @@ let private sendResult
     (result: Executor.QueryResult)
     : Async<byte> =
     async {
-        let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId warningCount columnMetadata result)
+        let metadata =
+            match result with
+            | ResultSet(columns, rows) -> resultMetadata columns rows columnMetadata
+            | _ -> []
+
+        let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId warningCount metadata result)
 
         match result with
-        | ResultSet(columns, rows) ->
-            let metadata =
-                if List.length columnMetadata = columns.Length then
-                    columnMetadata
-                else
-                    List.replicate columns.Length (Value.columnMetadata TypeVarString)
-
+        | ResultSet(_, rows) ->
             let mutable seqId = seqId
             let buf = ResizeArray<byte>()
 
@@ -415,28 +408,8 @@ let private isSocketDead (client: TcpClient) : bool =
 
 let private disconnectPollIntervalMs = 50
 
-/// Why waiting on the *next* command packet needs a timeout of its own (the
-/// value itself is `Limits.waitTimeoutSeconds`): a half-open peer that opens
-/// a connection and sends nothing (or only a partial 4-byte packet header)
-/// would otherwise pin a thread-pool task and a socket forever.
-/// `Socket.ReceiveTimeout` doesn't help here: it only bounds the synchronous
-/// `Read()`, and this server exclusively awaits `ReadAsync` — which .NET does
-/// not honor it for, and which F#'s own cooperative cancellation (including
-/// `Async.StartChild`'s timeout) can't preempt either, since a `Task`-backed
-/// await only resumes when that task actually completes. Only bounds time
-/// spent waiting to *start* reading a packet, not time spent running a long
-/// query in between.
-
-/// `readPacketAsync`, but abandoned if no complete packet arrives within
-/// `timeoutMs` — see `readPacketWithTimeout`'s doc for why this races the
-/// read against `Task.Delay` instead of a cancellation token. When the
-/// timer wins, the stuck read has to be forced to unblock: closing
-/// `client`'s socket faults the pending `ReadAsync` with an exception,
-/// which is what actually reaps the connection (this function then reports
-/// that as `None`, same as any other clean-disconnect path — the caller
-/// already treats `None` as "stop the command loop"). Not private: the
-/// timeout itself is exercised directly by the test suite with a short
-/// `timeoutMs` rather than waiting out the real 5-minute production value.
+/// ReadAsync ignores Socket.ReceiveTimeout and cooperative cancellation.
+/// Closing the client forces a timed-out read to unblock.
 let private readWithTimeoutMs
     (read: IO.Stream -> Async<Packet option>)
     (timeoutMs: int)
@@ -445,11 +418,7 @@ let private readWithTimeoutMs
     : Async<Packet option> =
     async {
         let readTask = Async.StartAsTask(read stream)
-        // Cancelled on the way out so the loser's `Task.Delay` dies with the
-        // read that beat it. Without this, every packet read on every
-        // connection leaves a live five-minute timer behind — a busy
-        // connection accumulates one per statement until they all fire for
-        // nothing.
+        // Cancel the losing timer so active connections do not accumulate delays.
         let timerCts = new CancellationTokenSource()
 
         try
@@ -461,15 +430,8 @@ let private readWithTimeoutMs
                 |> Async.AwaitTask
 
             if obj.ReferenceEquals(winner, readTask) then
-                // `Async.AwaitTask` on a task that faulted synchronously inside
-                // `Async.StartAsTask` (before any real `await`, as
-                // `PacketTooLargeException` does — raised straight out of
-                // `readPacketAsync`'s loop) surfaces the fault wrapped in an
-                // `AggregateException` rather than unwrapped, unlike a task that
-                // faults after suspending on real I/O. The caller's `with` match
-                // on the specific exception type (`PacketTooLargeException`,
-                // for the best-effort 1153 reply) needs the original exception,
-                // not its wrapper.
+                // Synchronous task faults arrive wrapped; command dispatch
+                // matches the original protocol exception type.
                 try
                     return! Async.AwaitTask readTask
                 with :? AggregateException as agg when agg.InnerExceptions.Count = 1 ->

@@ -3027,7 +3027,36 @@ let tests =
                     Expect.sequenceEqual updated [ "a"; "c"; "d" ] "tombstones are absent from scans"
                     Expect.equal updated.[aId] "a" "the first row keeps its identity"
                     Expect.equal updated.[cId] "c" "the last surviving row keeps its identity"
-                    Expect.notEqual dId bId "deleted identities are not reused" ]
+                    Expect.notEqual dId bId "deleted identities are not reused"
+
+                testCase "builders publish updates and expose tombstones"
+                <| fun _ ->
+                    let exactlyTwo =
+                        function
+                        | [ first; second ] -> first, second
+                        | values -> failtestf "expected two values, got %d" values.Length
+
+                    let original = RowStore.ofSeq [ "a"; "b" ]
+                    let (aId, _), (bId, _) = original.Indexed |> List.ofSeq |> exactlyTwo
+                    let builder = original.ToBuilder()
+
+                    builder.[aId] <- "A"
+                    Expect.isTrue (builder.Remove bId) "the live row is removed"
+                    Expect.isFalse (builder.Remove bId) "the tombstone is not removed twice"
+                    let cId, dId = builder.AddRange [ "c"; "d" ] |> exactlyTwo
+                    let updated = builder.DrainToImmutable()
+
+                    Expect.equal updated.Count 3 "the published live count excludes the tombstone"
+                    Expect.equal updated.TombstoneCount 1 "the removed slot remains measurable"
+                    Expect.equal (updated.TryFind bId) None "the removed identity resolves to no row"
+
+                    Expect.throwsT<System.Collections.Generic.KeyNotFoundException>
+                        (fun () -> updated.[bId] |> ignore)
+                        "the removed identity has no value"
+
+                    Expect.sequenceEqual updated [ "A"; "c"; "d" ] "the builder publishes updates and appends in slot order"
+                    Expect.equal updated.[cId] "c" "the first appended identity resolves"
+                    Expect.equal updated.[dId] "d" "the second appended identity resolves" ]
 
           testList
               "performance canary"

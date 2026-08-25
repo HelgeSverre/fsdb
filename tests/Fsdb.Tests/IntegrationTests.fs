@@ -2126,6 +2126,29 @@ let tests =
                         63, parameterMetadataOfType(TBigInt false) ]
                       "overloaded functions retain distinct document, text, and position types"
 
+                  let! specialized =
+                      prepare
+                          "SELECT MAKETIME(?,?,?), FROM_UNIXTIME(?), SHA2(?,?), JSON_ARRAY_APPEND(?,?,?), ST_DISTANCE(?,?), ST_GEOMFROMWKB(?,?), ST_GEOMFROMTEXT(?,?)"
+
+                  Expect.sequenceEqual
+                      (specialized |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      [ 63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        63, parameterMetadataOfType(TBigInt false)
+                        45, parameterMetadataOfType TJson
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        45, parameterMetadataOfType TJson
+                        63, parameterMetadataOfType(TGeometry Geometry)
+                        63, parameterMetadataOfType(TGeometry Geometry)
+                        63, parameterMetadataOfType TLongBlob
+                        63, parameterMetadataOfType(TBigInt false)
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        63, parameterMetadataOfType(TBigInt false) ]
+                      "specialized signatures preserve argument-position metadata"
+
                   let! parameterOnly = prepare "SELECT ? + ?, ? = ?"
 
                   Expect.sequenceEqual

@@ -10,11 +10,7 @@ open Fsdb.Protocol
 open Fsdb.Storage
 open Fsdb.Value
 
-/// Session variable defaults good enough to satisfy mysql CLI / PDO on
-/// connect. Grows as real clients ask for more `@@vars` / SHOW VARIABLES.
-/// Variables backed by a `Limits` knob are deliberately absent — see
-/// `liveDefaults`, which layers those on top so what the server reports can
-/// never drift from what it enforces.
+/// Session defaults not backed by a live Limits setting.
 let defaultVariables: Map<string, string option> =
     Map.ofList
         [ "version", ServerVersion
@@ -32,11 +28,7 @@ let defaultVariables: Map<string, string option> =
           "system_time_zone", "UTC"
           "time_zone", "SYSTEM"
           "auto_increment_increment", "1"
-          // mysqldump's preamble reads these three before ever `SET`-ing
-          // anything (`SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS`,
-          // same for unique_checks/sql_notes) — real defaults, so a fresh
-          // session already knows them instead of only picking them up
-          // once something sets them.
+          // mysqldump reads these before setting them.
           "foreign_key_checks", "1"
           "unique_checks", "1"
           "sql_notes", "1"
@@ -55,44 +47,22 @@ let defaultVariables: Map<string, string option> =
           "block_encryption_mode", "aes-128-ecb" ]
         |> Map.map (fun _ v -> Some v)
 
-/// `defaultVariables` with every `Limits` knob layered over it — the base a
-/// new session, `@@GLOBAL.x`, and SHOW GLOBAL VARIABLES all read from, so
-/// `max_allowed_packet` and `wait_timeout` report whatever the server was
-/// actually configured to enforce rather than a second copy of the number
-/// that drifts from the first. Recomputed per call rather than cached: a
-/// knob configured after this module's static initializer ran would
-/// otherwise never become visible, and folding a handful of entries onto a
-/// `Map` is not worth caching.
+/// Recomputes defaults so configured limits and reported values cannot drift.
 let private liveDefaults () : Map<string, string option> =
     Limits.variables () |> List.fold (fun m (name, value) -> Map.add name (Some value) m) defaultVariables
 
-/// GLOBAL-scope system variable overrides (`SET GLOBAL x = y` / `SET
-/// @@GLOBAL.x = y`), shared by every session on the same underlying
-/// `Store` — keyed off `Store.Lock`, the one field every per-connection
-/// `Store` clone (`create` below) shares by reference with the real store,
-/// since `Storage.Store` has no such map of its own (adding one there
-/// means widening every `{ store with ... }` clone site instead of one
-/// lookup table here). `ConditionalWeakTable` needs no explicit
-/// store-teardown hook and can never outlive the store it's keyed on.
+/// GLOBAL overrides share Store.Lock identity and expire with the store.
 let private globalVariablesByStore =
     ConditionalWeakTable<obj, ConcurrentDictionary<string, string option>>()
 
 let private globalVariablesOf (store: Store) : ConcurrentDictionary<string, string option> =
     globalVariablesByStore.GetValue(store.Lock, (fun _ -> ConcurrentDictionary()))
 
-/// Applies `SET GLOBAL name = value` (or `SET @@GLOBAL.name = value`):
-/// visible to every session created on this store afterwards (`create`
-/// seeds `Variables` from this map) and to `SELECT @@GLOBAL.name` on any
-/// existing one, but never touches the issuing session's own `Variables` —
-/// real MySQL's GLOBAL/SESSION split.
+/// Applies a global override without changing the issuing session.
 let setGlobalVariable (store: Store) (name: string) (value: string option) : unit =
     (globalVariablesOf store).[name.ToLowerInvariant()] <- value
 
-/// Reads a GLOBAL-scope variable, falling back to the same compiled-in
-/// default `create` seeds a new session from, so `SELECT @@GLOBAL.x` for a
-/// variable nobody ever `SET GLOBAL`-ed answers with that default instead
-/// of "unknown". `None` means genuinely unknown (`SELECT @@GLOBAL.bogus`);
-/// `Some None` means known and currently NULL.
+/// `None` is unknown; `Some None` is a known variable holding NULL.
 let tryGlobalVariable (store: Store) (name: string) : string option option =
     let name = name.ToLowerInvariant()
 
@@ -100,24 +70,13 @@ let tryGlobalVariable (store: Store) (name: string) : string option option =
     | true, v -> Some v
     | false, _ -> liveDefaults () |> Map.tryFind name
 
-/// The GLOBAL variable space as a whole — compiled-in defaults with every
-/// `SET GLOBAL` override applied; `SHOW GLOBAL VARIABLES`' row source.
+/// Returns defaults overlaid with the store's GLOBAL assignments.
 let globalVariablesSnapshot (store: Store) : Map<string, string option> =
     globalVariablesOf store
     |> Seq.fold (fun m (kv: System.Collections.Generic.KeyValuePair<string, string option>) -> Map.add kv.Key kv.Value m) (liveDefaults ())
 
-/// A server-side prepared statement (COM_STMT_PREPARE / COM_STMT_EXECUTE).
-/// `Ast` is the parsed statement for everything the grammar produces —
-/// EXECUTE binds parameters as `Value`s into it (see
-/// `QueryHandler.bindPlaceholders`) instead of splicing SQL literals back
-/// into text and re-parsing. It's `None` for the text-probed forms the
-/// grammar doesn't produce (SET/SHOW/transaction control), which still
-/// substitute into `Sql` and re-probe.
-///
-/// `LastParamTypes` caches the (type id, unsigned) pairs from the most
-/// recent EXECUTE that actually sent them — COM_STMT_EXECUTE's
-/// new-params-bound-flag lets a client omit them on a later EXECUTE and
-/// reuse what it sent before.
+/// A connection-local prepared statement. Text-probed commands have no AST;
+/// parameter types persist because later EXECUTEs may omit them.
 type PreparedStmt =
     { Ast: Statement option
       Sql: string
@@ -146,17 +105,9 @@ type Transaction =
       ReadOnly: bool
       /// Set after the first database statement seeds a repeatable-read view.
       Seeded: bool
-      /// `ROLLBACK TO SAVEPOINT` truncates the buffer so WAL never sees writes
-      /// the savepoint rollback just undid. The order lets `ROLLBACK TO
-      /// SAVEPOINT`/`RELEASE SAVEPOINT` drop every savepoint established
-      /// *after* the named one, matching real MySQL — a plain `Map` alone
-      /// has no notion of "after", since re-`SAVEPOINT`-ing an existing name
-      /// moves it, not creates a second entry.
+      /// Sequence numbers preserve establishment order independently of writes.
       Savepoints: Map<string, Savepoint>
-      /// Monotonically increasing counter, one `SAVEPOINT` = one tick —
-      /// never reused even if the savepoint it tagged is later dropped, so
-      /// two savepoints established back-to-back with no write between them
-      /// (same buffered-event count) still compare correctly by this alone.
+      /// Monotonic and never reused after a savepoint is dropped.
       NextSavepointSeq: int }
 
 type Session =
@@ -170,39 +121,15 @@ type Session =
       /// The peer address used for `USER()` and `SESSION_USER()`.
       ClientHost: string
       Database: string option
-      /// Real, known system variables. `string option` per value (not just
-      /// `string`) distinguishes a variable MySQL accepts NULL for (e.g.
-      /// `SET character_set_results = NULL`) from one holding an ordinary
-      /// string — the map lookup's own `None` for a key that isn't in the
-      /// map at all still means "unknown variable" (1193);
-      /// only a *present* key can hold `None`.
+      /// A present key may hold NULL; a missing key is unknown.
       Variables: Map<string, string option>
-      /// `SET @name = ...` user-defined variables — unlike `Variables`
-      /// (real, known system variables), any `@name` is legal in real
-      /// MySQL, so there's no default set and no "unknown variable" error
-      /// path for these. The assigned `Value` stays typed; an absent key
-      /// and `VNull` both read as SQL NULL.
+      /// User variables retain their Value type; missing names read as NULL.
       UserVariables: Map<string, Value>
-      /// The single shared catalog every connection reads/writes through —
-      /// `Session` itself stays an immutable per-connection value; `Store`
-      /// is the one mutable boundary (see `Storage.Store`). Always the
-      /// shared store, even inside a transaction — use `currentStore` to
-      /// get the store statements should actually run against.
+      /// Shared store; currentStore selects a private transaction snapshot.
       Store: Store
-      /// The OK packet's `last_insert_id` (what `PDO::lastInsertId()`/
-      /// `mysql_insert_id()` read) for this session's most recent statement:
-      /// the first AUTO_INCREMENT id it generated, or else the last one it
-      /// explicitly supplied. 0 until the first INSERT that assigns either.
-      /// See `LastGeneratedId` for the narrower value the SQL function
-      /// `LAST_INSERT_ID()` reads — the two diverge for an INSERT that
-      /// supplies its own id instead of letting AUTO_INCREMENT generate one.
+      /// OK-packet insert id; explicit values may change it.
       LastInsertId: int64
-      /// The AUTO_INCREMENT id actually *generated* (never explicitly
-      /// supplied) by this session's most recent statement that generated
-      /// one, for the SQL function `LAST_INSERT_ID()`. 0 until the first
-      /// such INSERT; unlike `LastInsertId`, a statement that generates
-      /// none — including one that supplies its own id — leaves this
-      /// unchanged rather than resetting it, matching real MySQL.
+      /// LAST_INSERT_ID() value; only generated values change it.
       LastGeneratedId: int64
       /// Values exposed by `ROW_COUNT()` and `FOUND_ROWS()` for the previous
       /// statement on this connection.
@@ -213,27 +140,13 @@ type Session =
       PendingFoundRows: uint64 option
       /// Conditions from the most recently executed statement.
       Diagnostics: Condition list
-      /// Per-column MySQL wire types for the most recent statement's
-      /// `ResultSet`, if any — `[]` for anything else (an `Affected`/`Err`
-      /// result, or a `ResultSet` this session's dispatch path didn't
-      /// bother typing, e.g. `SHOW ...`/session-variable probes). `Server`
-      /// reads this right after `QueryHandler.handle` to build the
-      /// resultset's column-definition packets; threaded through `Session`
-      /// like `LastInsertId` instead of widening `handle`'s own return
-      /// type, since dozens of tests destructure `QueryHandler.handle`'s
-      /// plain `Session * QueryResult` pair directly.
+      /// Per-column wire descriptors for the latest typed result set.
       LastResultColumnMetadata: ColumnMetadata list
       /// `Some` between BEGIN/START TRANSACTION and COMMIT/ROLLBACK.
       Tx: Transaction option
       PendingTransactionReadOnly: bool option
       PendingTransactionIsolation: TransactionIsolation option
-      /// Prepared statements registered by this connection's COM_STMT_PREPARE
-      /// calls, by statement id. Threaded through the connection loop like
-      /// the rest of `Session` rather than a mutable dict at the `Server`
-      /// boundary — every other piece of per-connection state (database,
-      /// variables, transaction) already lives here as plain immutable data,
-      /// and a prepared statement is exactly that: state scoped to one
-      /// connection, not shared across them.
+      /// Binary-protocol statements by connection-local id.
       Statements: Map<int, PreparedStmt>
       /// SQL PREPARE names are connection-local strings rather than the
       /// integer ids assigned by COM_STMT_PREPARE.
@@ -246,36 +159,18 @@ type Session =
       LongData: Map<int * int, byte[] list>
       /// Total bytes held in `LongData` for constant-time limit checks.
       LongDataBytes: int64
-      /// (statement id, param index) pairs whose COM_STMT_SEND_LONG_DATA
-      /// chunks together exceeded `Limits.maxAllowedPacket` — the
-      /// send-long-data command itself never gets a reply (per protocol),
-      /// so the overflow surfaces as ER_NET_PACKET_TOO_LARGE (1153) on the
-      /// next COM_STMT_EXECUTE for that statement instead of silently
-      /// truncating the parameter's data. Cleared alongside `LongData` by
-      /// that EXECUTE, or by COM_STMT_RESET/COM_STMT_CLOSE.
+      /// Overflows surface on EXECUTE because SEND_LONG_DATA has no reply.
       LongDataOverflow: Set<int * int>
-      /// Custom functions registered on the embedding `Db` this session's
-      /// connection was accepted on (see `Fsdb.Db.registerScalar`/
-      /// `registerAggregate`) — empty for a session built directly (every
-      /// test). `QueryHandler.registryFor` layers these over the built-ins,
-      /// under session-bound overrides like `DATABASE()`.
+      /// Embedding functions layered over built-ins by QueryHandler.
       CustomFunctions: Fsdb.Functions.Registry
-      /// Effective capabilities negotiated at handshake (`Server`'s
-      /// `resp.Capabilities &&& ServerCapabilities`) — 0 for a session built
-      /// directly (every test that doesn't set it). Only `ClientFoundRows`
-      /// controls matched- vs changed-row counts; `MultiStatementsEnabled`
-      /// begins from the negotiated multi-statement bit and can then be
-      /// changed by COM_SET_OPTION.
+      /// Effective handshake capabilities.
       Capabilities: uint32
       MultiStatementsEnabled: bool
       TlsVersion: string option
       TlsCipher: string option }
 
 let create (connectionId: int) (store: Store) : Session =
-    // Overlays every `SET GLOBAL`-ed override onto the compiled-in
-    // defaults — a fresh session inherits whatever GLOBAL state is live on
-    // this store, matching real MySQL's "new sessions pick up the current
-    // global value" semantics (see `tryGlobalVariable`/`setGlobalVariable`).
+    // New sessions inherit the current GLOBAL values.
     let variables =
         (globalVariablesOf store) |> Seq.fold (fun acc (KeyValue(k, v)) -> Map.add k v acc) (liveDefaults ())
 
@@ -287,16 +182,7 @@ let create (connectionId: int) (store: Store) : Session =
       Database = None
       Variables = variables
       UserVariables = Map.empty
-      // A per-connection clone of `store`, not `store` itself. `Databases`,
-      // `Lock` and `OnCommit` are reference-typed, so the
-      // clone still shares the one real catalog and all of its cross-connection
-      // synchronization (the shared `Lock` still serializes WAL appends) — but
-      // `StrictMode`/`ForeignKeyChecks`/`ConnectionCollation` get their own
-      // independent mutable cells. Those three are re-derived from this
-      // session's own variables before every statement
-      // (`QueryHandler.executeParsed`); without this clone they'd be the literal
-      // same fields every other connection's re-derivation also flips, and
-      // nothing serializes those session-specific assignments across connections.
+      // Reference fields stay shared; mutable SQL-mode settings stay per session.
       Store = { store with StrictMode = store.StrictMode }
       LastInsertId = 0L
       LastGeneratedId = 0L

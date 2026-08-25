@@ -68,6 +68,8 @@ type RowStore<'T> internal (liveCount: int, slots: PagedVector<'T option>) =
     member _.Count = liveCount
     member _.Length = liveCount
     member _.IsEmpty = liveCount = 0
+    /// Deleted slots retained to keep RowId stable across immutable roots.
+    member _.TombstoneCount = slots.Count - liveCount
 
     member _.TryFind(rowId: RowId) =
         let index = RowId.value rowId
