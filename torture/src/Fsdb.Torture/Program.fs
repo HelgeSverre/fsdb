@@ -8,6 +8,7 @@ type private Command =
     | Suite
     | Concurrency
     | MultiDb
+    | Durability
     | Syntax
     | Replay
     | CheckTools
@@ -24,6 +25,7 @@ type private Cli =
       TimeoutSeconds: int
       Workers: int
       OperationsPerWorker: int
+      Restarts: int
       Accounts: int
       HotAccounts: int
       RollbackEvery: int
@@ -46,6 +48,7 @@ Usage:
   fsdb-torture suite [options]
   fsdb-torture concurrency [options]
   fsdb-torture multidb [options]
+  fsdb-torture durability [options]
   fsdb-torture syntax [options]
   fsdb-torture replay --case <artifact-directory> [options]
   fsdb-torture check-tools [--sql-splitter <path>]
@@ -59,6 +62,7 @@ Options:
   --timeout-seconds <n>      Per-statement/query deadline (default 10)
   --workers <n>              Concurrent prepared-statement sessions per database (default 8)
   --operations <n>           Transactions per worker (default 100)
+  --restarts <n>             durability: crash/restart cycles (default 8)
   --accounts <n>             Total initialized accounts per database (default 32)
   --hot-accounts <n>         Contended account set, at least 2 (default 4)
   --rollback-every <n>       Roll back every Nth operation; 0 disables (default 5)
@@ -103,6 +107,7 @@ Options:
             | Some "suite" -> Suite, 1
             | Some "concurrency" -> Concurrency, 1
             | Some "multidb" -> MultiDb, 1
+            | Some "durability" -> Durability, 1
             | Some "syntax" -> Syntax, 1
             | Some "replay" -> Replay, 1
             | Some "check-tools" -> CheckTools, 1
@@ -120,6 +125,7 @@ Options:
         let mutable timeoutSeconds = 10
         let mutable workers = 8
         let mutable operationsPerWorker = 100
+        let mutable restarts = 8
         let mutable accounts = 32
         let mutable hotAccounts = 4
         let mutable rollbackEvery = 5
@@ -185,6 +191,10 @@ Options:
                 match parseInt flag (nextValue flag) with
                 | Ok value -> operationsPerWorker <- value
                 | Error error -> failure <- Some error
+            | "--restarts" ->
+                match parseInt flag (nextValue flag) with
+                | Ok value -> restarts <- value
+                | Error error -> failure <- Some error
             | "--accounts" ->
                 match parseInt flag (nextValue flag) with
                 | Ok value -> accounts <- value
@@ -244,6 +254,7 @@ Options:
                   TimeoutSeconds = timeoutSeconds
                   Workers = workers
                   OperationsPerWorker = operationsPerWorker
+                  Restarts = restarts
                   Accounts = accounts
                   HotAccounts = hotAccounts
                   RollbackEvery = rollbackEvery
@@ -291,6 +302,14 @@ Options:
           TimeoutSeconds = cli.TimeoutSeconds
           ArtifactRoot = cli.Artifacts
           MySqlConnection = cli.MySql }
+
+    let durabilityOptions cli : DurabilityOptions =
+        { Seed = cli.Seed
+          Workers = cli.Workers
+          OperationsPerWorker = cli.OperationsPerWorker
+          Restarts = cli.Restarts
+          TimeoutSeconds = cli.TimeoutSeconds
+          ArtifactRoot = cli.Artifacts }
 
     let syntaxOptions cli : SyntaxOptions =
         { Seed = cli.Seed
@@ -440,6 +459,21 @@ module Program =
             printfn "  detail: %s" report.ClassificationDetail
             printfn "  signature: %s" report.FailureSignature
 
+    let private printDurability (report: DurabilityManifest) directory =
+        printfn "%s: %s — %s" report.CaseId report.Classification directory
+        printfn
+            "  attempted=%d acknowledged=%d ambiguous=%d recovered=%d crash-restarts=%d snapshot=%s"
+            report.AttemptedOperations
+            report.AcknowledgedOperations
+            report.AmbiguousOperations
+            report.RecoveredOperations
+            report.CrashRestarts
+            (if report.SnapshotVerified then "pass" else "fail")
+        printfn "  detail: %s" report.ClassificationDetail
+
+        if not report.Passed then
+            printfn "  signature: %s" report.FailureSignature
+
     let execute argv =
         task {
             let parsed =
@@ -472,6 +506,18 @@ module Program =
                             return 2
                 with error ->
                     eprintfn "concurrency infrastructure exception: %O" error
+                    return 1
+            | Ok cli when cli.Command = Durability ->
+                try
+                    match! DurabilityRunner.run (Cli.durabilityOptions cli) with
+                    | Error error ->
+                        eprintfn "durability infrastructure failure: %s" error
+                        return 1
+                    | Ok(report, directory) ->
+                        printDurability report directory
+                        return if report.Passed then 0 else 2
+                with error ->
+                    eprintfn "durability infrastructure exception: %O" error
                     return 1
             | Ok cli when cli.Command = MultiDb ->
                 try

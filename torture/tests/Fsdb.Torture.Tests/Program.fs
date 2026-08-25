@@ -116,6 +116,34 @@ let tests =
                         Expect.stringContains error.Message "UTF-8" "actionable error" ]
 
           testList
+              "Durability classification"
+              [ testCase "accepts complete ambiguous commits and preserves acknowledgements"
+                <| fun _ ->
+                    let result =
+                        DurabilityChecks.classify
+                            (Set.ofList [ 1L; 2L; 3L ])
+                            (Set.ofList [ 1L; 2L ])
+                            (Set.ofList [ 1L; 2L; 3L ])
+                            (Set.ofList [ 1L; 2L; 3L ])
+
+                    Expect.isTrue result.Passed "an ambiguous commit may be present"
+                    Expect.equal result.RecoveredOperations 3 "all complete operations are counted"
+
+                testCase "rejects lost acknowledgements partial transactions and impossible rows"
+                <| fun _ ->
+                    let result =
+                        DurabilityChecks.classify
+                            (Set.ofList [ 1L; 2L ])
+                            (Set.ofList [ 1L; 2L ])
+                            (Set.ofList [ 1L; 9L ])
+                            (Set.ofList [ 1L; 2L ])
+
+                    Expect.isFalse result.Passed "each durability violation fails the run"
+                    Expect.sequenceEqual result.MissingAcknowledged [| 2L |] "the incomplete acknowledgement is lost"
+                    Expect.sequenceEqual result.PartialTransactions [| 2L; 9L |] "one-sided rows are partial transactions"
+                    Expect.sequenceEqual result.UnattemptedRows [| 9L |] "unattempted rows are impossible" ]
+
+          testList
               "Canonicalization and comparison"
               [ testCase "keeps NULL, empty text, decimal, and binary distinct"
                 <| fun _ ->

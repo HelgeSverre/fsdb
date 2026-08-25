@@ -64,6 +64,14 @@ version counts, committed operation IDs, rollback absence, and total
 conservation have one exact answer regardless of scheduling. MySQL must satisfy
 that answer before FSDB is judged.
 
+The durability lane is also separate from the differential oracle. It runs a
+WAL-backed fsdb child process and repeatedly kills it while synchronized
+workers commit two-table transactions. A returned COMMIT is durable evidence;
+a disconnected COMMIT is ambiguous and may be wholly present or absent.
+Partial transactions, missing acknowledgements, and rows outside the attempted
+set are always failures. A final graceful checkpoint and restart covers the
+snapshot path with the same recovered-state oracle.
+
 The syntax lane starts from known-valid statements spanning recently added
 grammar and execution surfaces. It executes each baseline on both servers,
 then applies a seed-ordered, bounded set of structural mutations. A run may
@@ -118,6 +126,7 @@ Passwords and the MySQL connection string are intentionally not persisted.
 | Tool/generation | `generator_preflight`, `infrastructure` | Tool mismatch, invalid generated corpus, process or oracle setup failure |
 | Oracle | `oracle_rejected`, `oracle_timeout` | MySQL did not accept or complete the supposedly valid input |
 | Concurrency | `oracle_concurrency_failure`, `fsdb_concurrency_execution_gap`, `fsdb_transaction_atomicity_gap` | The reference run failed, FSDB returned a protocol/execution error, or successful transaction replies produced the wrong committed state |
+| Durability | `durability_failure`, `infrastructure` | Crash or snapshot recovery lost an acknowledgement, split a transaction, invented a row, or the child process could not be exercised |
 | Parser | `fsdb_parser_gap`, `fsdb_probe_parser_gap` | MySQL accepted SQL that FSDB cannot parse |
 | Syntax mutation | `matched_syntax_error`, `accepted_mutation`, `fsdb_syntax_acceptance_gap`, `fsdb_syntax_rejection_gap`, `syntax_error_contract_mismatch` | Mutated syntax matched, remained valid, or exposed an acceptance/error-contract difference |
 | Subject execution | `fsdb_execution_gap`, `fsdb_probe_execution_gap`, `contained_internal_error` | Parsed SQL failed in FSDB; error 1105 remains separately visible |
@@ -180,8 +189,9 @@ Scale dimensions independently before combining them:
 7. **Protocol stress:** prepared statements, parameter types, large packets,
    connection churn, concurrent sessions, cancellation, and partial client
    disconnects.
-8. **Durability:** once FSDB has a persistence/restart contract, replay the same
-   snapshot and probes before and after restart/crash boundaries.
+8. **Durability:** vary concurrent writers, crash cadence, WAL volume, and
+   checkpoint boundaries in the implemented restart lane; preserve exact
+   acknowledged/ambiguous evidence for every run.
 
 Do not simply skip a first failing statement to expose later failures; that
 creates meaningless downstream differences. To move behind a known failure
@@ -238,7 +248,7 @@ streamed or FSDB is isolated in a measured child process.
    ideally with FSDB in a separate process so harness and engine allocations
    are distinguishable.
 5. Expand matched negative-oracle coverage beyond syntax, plus connection churn,
-   cancellation, and restart campaigns. The first prepared-transaction and
+   cancellation, and snapshot-rotation campaigns. The first prepared-transaction and
    concurrent-session lane is implemented and recorded in
    [`findings/2026-08-16-concurrency-campaign.md`](findings/2026-08-16-concurrency-campaign.md),
    but it covers one deterministic transfer shape rather than the whole MySQL

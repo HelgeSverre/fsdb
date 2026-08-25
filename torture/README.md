@@ -30,6 +30,8 @@ they are understood and minimized.
   ordered compound-trigger writes.
 - A deterministic syntax lane mutates known-valid feature statements and
   compares MySQL and FSDB error codes and SQLSTATEs.
+- A durability lane runs fsdb as a child process, kills it during concurrent
+  commits, and verifies WAL and snapshot recovery independently of MySQL.
 - Generated artifacts stay under `artifacts/`, which is ignored.
 
 ## Quick start
@@ -72,6 +74,21 @@ operation IDs, rollback absence, total-money conservation, client errors,
 prepared-command counts, throughput, and p50/p95/p99 latency. Its reusable
 phase barrier is asynchronous so the harness does not manufacture thread-pool
 starvation at high connection counts.
+
+Run the crash/restart durability lane without Docker or a MySQL oracle:
+
+```bash
+./scripts/run.sh durability --seed 101 --workers 16 --operations 500 \
+  --restarts 20 --timeout-seconds 15
+```
+
+Each operation inserts the same identity into two tables inside one explicit
+transaction. The harness kills the server during every work phase, restarts it
+against the same data directory, and distinguishes acknowledged commits from
+commits whose reply was lost. Recovery must retain every acknowledgement,
+never expose one side of a transaction, and never invent an operation. The
+last restart follows a graceful snapshot checkpoint and must preserve the
+same recovered sets.
 
 Run the bounded syntax-mutation lane:
 
@@ -167,6 +184,12 @@ Concurrency cases use their own schema-versioned manifest and classifications:
 `fsdb_transaction_atomicity_gap`. A successful COMMIT is not accepted as
 evidence by itself—the final ledger and account oracle must prove that every
 committed transaction survived.
+
+Durability cases record attempted, acknowledged, ambiguous, and recovered
+operations plus missing acknowledgements, partial transactions, impossible
+rows, restart count, snapshot verification, process logs, and the retained
+data directory. A durability mismatch exits `2`; child-process or harness
+failure exits `1`.
 
 Syntax classifications distinguish matched errors, accepted mutations,
 FSDB over-acceptance, FSDB rejection of MySQL-valid syntax, error-contract

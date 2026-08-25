@@ -6,7 +6,7 @@ project="fsdb-torture-${UID}-$$"
 compose=(docker compose --project-name "${project}" --file "${torture_dir}/compose.yaml")
 
 command_name="${1:-suite}"
-if [[ "${command_name}" == "check-tools" || "${command_name}" == "--help" || "${command_name}" == "-h" ]]; then
+if [[ "${command_name}" == "durability" || "${command_name}" == "check-tools" || "${command_name}" == "--help" || "${command_name}" == "-h" ]]; then
   cd "${torture_dir}"
   exec dotnet run --project src/Fsdb.Torture -- "$@"
 fi

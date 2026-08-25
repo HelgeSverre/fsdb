@@ -11,6 +11,7 @@
     <Compile Include="SyntaxFuzz.fs" />
     <Compile Include="Concurrency.fs" />
     <Compile Include="MultiDb.fs" />
+    <Compile Include="Durability.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

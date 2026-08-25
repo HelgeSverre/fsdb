@@ -74,6 +74,43 @@ type ConcurrencyOptions =
       MySqlConnection: string }
 
 [<CLIMutable>]
+type DurabilityOptions =
+    { Seed: uint64
+      Workers: int
+      OperationsPerWorker: int
+      Restarts: int
+      TimeoutSeconds: int
+      ArtifactRoot: string }
+
+[<CLIMutable>]
+type DurabilityManifest =
+    { SchemaVersion: int
+      RunId: string
+      CaseId: string
+      StartedUtc: string
+      FinishedUtc: string
+      FsdbRevision: string
+      FsdbDirty: bool
+      FsdbAssemblySha256: string
+      Seed: uint64
+      Workers: int
+      OperationsPerWorker: int
+      CrashRestarts: int
+      AttemptedOperations: int
+      AcknowledgedOperations: int
+      AmbiguousOperations: int
+      RecoveredOperations: int
+      MissingAcknowledged: int64 array
+      PartialTransactions: int64 array
+      UnattemptedRows: int64 array
+      SnapshotVerified: bool
+      PeakWorkingSetBytes: int64
+      Classification: string
+      ClassificationDetail: string
+      FailureSignature: string
+      Passed: bool }
+
+[<CLIMutable>]
 type ConcurrencyOperationPlan =
     { OperationId: int64
       Worker: int

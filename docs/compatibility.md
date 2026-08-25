@@ -21,6 +21,11 @@ fsdb error codes and SQLSTATEs
 comment operators cover block, hash, dash, executable-version, and
 future-version comments while avoiding unsupported nested comments.
 
+The fsdb-only durability lane kills a WAL-backed child server during
+concurrent two-table commits and verifies acknowledged, ambiguous, atomic, and
+snapshot-restart outcomes (`torture/scripts/run.sh durability --workers 16
+--operations 500 --restarts 20`).
+
 The ordered DML battery covers `REPLACE` values, `REPLACE ... SELECT`, and
 `REPLACE ... SET` in both client affected-row modes. It includes unchanged
 replacements, conflicts spanning separate unique keys, same-statement key
