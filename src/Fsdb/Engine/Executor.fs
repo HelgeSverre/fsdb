@@ -5003,19 +5003,20 @@ and private applyResolvedJoin
 
             let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
 
-            let hashEligible =
-                not equiKeys.IsEmpty
-                && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
-                && keyClasses |> List.forall Option.isSome
-                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
-                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
-
             let residualHolds (combined: Value[]) : Result<bool, EvalError> =
                 residualConjuncts
                 |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
                 |> Result.map (List.forall (fun v -> truthy v = Some true))
 
             let indexedInnerProbe = tryIndexedInnerProbe store join combinedColumnsSoFar joinColumns physicalTable equiKeys
+
+            let hashEligible =
+                indexedInnerProbe.IsNone
+                && not equiKeys.IsEmpty
+                && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
+                && keyClasses |> List.forall Option.isSome
+                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
+                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
 
             let isConstantTrue =
                 function
@@ -6053,7 +6054,13 @@ and private runUnmergedSelectStmt
                         | Error e -> e, [], []
                         | Ok(columns, rows) -> runResolved columns rows select
         | FromTable tref, _ ->
-            match tryQualifiedRangeLookup store dbName tref select.Where with
+            let rangeLookup =
+                if select.Limit.IsSome && select.OrderBy.IsEmpty then
+                    None
+                else
+                    tryQualifiedRangeLookup store dbName tref select.Where
+
+            match rangeLookup with
             | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
             | None ->
                 match resolveFromItem store registry dbName fromItem with
