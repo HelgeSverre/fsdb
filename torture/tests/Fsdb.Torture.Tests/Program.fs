@@ -450,6 +450,15 @@ let tests =
                              |> Array.forall (fun candidate -> candidate.CleanupSql.IsSome))
                             feature
 
+                    let accountCleanup =
+                        candidates
+                        |> Array.find (fun candidate -> candidate.Feature = "account_requirements" && candidate.Baseline)
+                        |> _.CleanupSql
+                        |> Option.defaultWith (fun () -> failtest "expected account cleanup")
+
+                    Expect.stringContains accountCleanup "@'%'" "ordinary account host is removed"
+                    Expect.stringContains accountCleanup "@''" "truncated account host is removed"
+
                 testCase "covers symmetric collation paths and keeps comments outside literals"
                 <| fun _ ->
                     let candidates = SyntaxFuzz.candidates 42UL 1 10000

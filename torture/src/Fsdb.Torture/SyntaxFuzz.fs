@@ -149,9 +149,9 @@ module SyntaxFuzz =
         | "procedure_compound" -> Some(sprintf "DROP PROCEDURE syntax_proc_body_%s" suffix)
         | "scheduled_event" -> Some(sprintf "DROP EVENT syntax_event_%s" suffix)
         | "recurring_event" -> Some(sprintf "DROP EVENT syntax_recurring_%s" suffix)
-        | "role_account" -> Some(sprintf "DROP ROLE 'syntax_role_%s'@'%%'" suffix)
-        | "locked_user" -> Some(sprintf "DROP USER 'syntax_user_%s'@'%%'" suffix)
-        | "account_requirements" -> Some(sprintf "DROP USER 'syntax_secure_%s'@'%%'" suffix)
+        | "role_account" -> Some(sprintf "DROP ROLE IF EXISTS 'syntax_role_%s'@'%%', 'syntax_role_%s'@''" suffix suffix)
+        | "locked_user" -> Some(sprintf "DROP USER IF EXISTS 'syntax_user_%s'@'%%', 'syntax_user_%s'@''" suffix suffix)
+        | "account_requirements" -> Some(sprintf "DROP USER IF EXISTS 'syntax_secure_%s'@'%%', 'syntax_secure_%s'@''" suffix suffix)
         | _ -> None
 
     let private replaceAt index length replacement (value: string) =
