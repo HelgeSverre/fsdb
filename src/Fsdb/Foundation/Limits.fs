@@ -4,11 +4,8 @@
 /// stays next to the rationale that explains it; hoisting those here would
 /// only put every value further from the paragraph that justifies it.
 ///
-/// Compiled second, right after `Log`, so nothing in the dependency-ordered
-/// build (see AGENTS.md) is too early to read it. That's the whole point:
-/// `Functions` and `Packet` each grew their own copy of the 64 MiB packet
-/// ceiling purely because `Functions` compiles first and couldn't see
-/// `Packet`'s.
+/// Compiles before every consumer so early SQL and wire modules share the
+/// same ceilings.
 ///
 /// The mutable integer knobs may change while connections are live. Reads and
 /// writes are atomic; a command already waiting keeps the value it captured,
@@ -84,9 +81,8 @@ let regexpMatchTimeout = TimeSpan.FromMilliseconds 100.0
 let lockWaitTimeout () = TimeSpan.FromSeconds(float lockWaitTimeoutSeconds)
 
 // ---------------------------------------------------------------------------
-// Configuration. One table drives all three of applying a setting,
-// validating it, and reporting it back through SHOW VARIABLES, so a knob
-// added to `knobs` is configurable and reportable with no further edits.
+// Configuration. One table drives setting, validation, and SHOW VARIABLES
+// reporting so those paths cannot drift.
 // ---------------------------------------------------------------------------
 
 /// One configurable knob. `Reportable` is false for the WAL rotation

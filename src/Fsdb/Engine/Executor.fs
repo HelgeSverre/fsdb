@@ -640,7 +640,7 @@ let private substituteExprs (replacements: (Expr * Expr) list) (expr: Expr) : Ex
         expr
 
 /// `substituteExprs` specialized to the window pre-pass: every window node
-/// becomes the synthetic column that now holds its computed value.
+/// becomes its computed synthetic column.
 let private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: Expr) : Expr =
     substituteExprs (synthetic |> List.map (fun (e, name) -> e, Col name)) expr
 
@@ -6690,10 +6690,9 @@ and private runUnionStmtWithOuter
                 | (_, head) :: tail -> tail |> List.fold (fun acc (op, rows) -> applySetOp op acc rows) head
                 | [] -> []
 
-            // `ORDER BY`/`LIMIT` on the combined result — same
-            // alias/positional resolution as an ordinary `SELECT`, and now
-            // the same typed `Value.compare` sort too, via each row's own
-            // paired typed values rather than re-parsing its text.
+            // `ORDER BY`/`LIMIT` on the combined result uses ordinary
+            // alias/positional resolution and typed values rather than
+            // re-parsing rendered text.
             let projections = cols |> List.map (fun c -> Col c, None)
             let resolveOrder = resolvePositionalOrAlias projections
 
@@ -6969,9 +6968,9 @@ and private evalAggregate
             |> List.length
             |> int64
             |> VInt)
-    // `isAggregateCall` (the only caller that routes here) already narrowed
-    // to single-argument aggregate calls (`GROUP_CONCAT`'s optional
-    // `SEPARATOR`, and now `COUNT(DISTINCT a, b)`, aside) — anything else
+    // `isAggregateCall` narrows this to single-argument aggregate calls,
+    // except `GROUP_CONCAT`'s optional `SEPARATOR` and
+    // `COUNT(DISTINCT a, b)`. Anything else
     // multi-argument (e.g. `SUM(DISTINCT a, b)`, which MySQL itself
     // rejects) is a syntax error, not a silent NULL.
     | _ -> Error(1064, sprintf "Incorrect parameter count in the call to native function '%s'" name)
@@ -7095,8 +7094,8 @@ and private resolveGroupByRef (columnIndex: Map<string, int list>) (projections:
 /// `resolveGroupByRef`'s recursive counterpart for `HAVING`: `HAVING c > 1`'s
 /// alias `c` is nested inside a `BinOp`, not bare, so a shallow top-level
 /// check misses it. Same shape as `substituteValuesFunc`'s rewrite, but
-/// `Result`-threaded since a `Col` can now fail with the ambiguous-FROM-table
-/// 1052.
+/// `Result`-threaded because resolving a `Col` can return the
+/// ambiguous-FROM-table error 1052.
 and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
     let sub = resolveHavingRef columnIndex projections
 
@@ -7146,9 +7145,9 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Subquery _
     | InSubquery _ -> Ok expr
 
-/// `ORDER BY`'s 1-based projection position (`ORDER BY 2`) — split out from
-/// `resolvePositionalOrAlias` because ORDER BY's alias case now goes
-/// through `resolveOrderKey`'s output-column matching instead (which needs
+/// `ORDER BY`'s 1-based projection position (`ORDER BY 2`) — separate from
+/// `resolvePositionalOrAlias` because aliases go through
+/// `resolveOrderKey`'s output-column matching (which needs
 /// to see the ambiguous-alias case `resolvePositionalOrAlias`'s
 /// first-match `tryPick` would otherwise hide).
 and private resolveOrderPosition (projections: Projection list) (expr: Expr) : Expr =
@@ -8824,7 +8823,7 @@ and private runSelect
         // — the same data-driven "first non-NULL value" approximation
         // `columnMetadataOf` always used, narrowed to the rows a client can
         // observe. ponytail: a column that's NULL in every *returned* row
-        // but non-NULL further down the matched set (past `LIMIT`) now
+        // but non-NULL further down the matched set (past `LIMIT`)
         // reports `VAR_STRING` instead of that later type; scanning the
         // full matched set just to pick a wire type would defeat the
         // `LIMIT` short-circuit below for every query. Upgrade to schema-

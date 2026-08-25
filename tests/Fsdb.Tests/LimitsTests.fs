@@ -184,7 +184,7 @@ let tests =
 
           // A bare name is MySQL's boolean form, so it has to parse as one —
           // otherwise `skip-name-resolve` gets diagnosed as a syntax error
-          // when what it really is, to fsdb, is an option we don't have.
+          // instead of an unsupported option.
           testCase "a bare option name is read as MySQL's boolean form, not as a syntax error"
           <| fun _ ->
               withSettings [] (fun () ->

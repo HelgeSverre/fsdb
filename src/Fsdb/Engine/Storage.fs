@@ -22,10 +22,9 @@ exception LockWaitTimeout of dbName: string
 /// Storage-layer failures, mapped to MySQL error codes by `toMySqlError`.
 /// `ExpressionError` carries an already-formed MySQL (code, message) pair
 /// through from `Executor`'s row-level expression evaluation (e.g. an
-/// `UPDATE ... SET` right-hand side) — `Storage` doesn't know that
-/// vocabulary, but `updateRows`'s `updater` can now fail per row instead of
-/// silently writing a `VNull`, and its failure needs to travel the same
-/// `Result<_, StorageError>` path every other write error does.
+/// `UPDATE ... SET` right-hand side). `Storage` doesn't know that
+/// vocabulary, so the failure travels through the same
+/// `Result<_, StorageError>` path as every other write error.
 type StorageError =
     | NoSuchDatabase of name: string
     | DatabaseExists of name: string
