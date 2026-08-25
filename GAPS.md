@@ -345,10 +345,10 @@ disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 | Compression | CLIENT_COMPRESS/ZSTD | never offered | low | refusal |
 | Cursors | COM_STMT_EXECUTE CURSOR_TYPE_READ_ONLY + COM_STMT_FETCH | cursor flags are ignored; `Server.handleConnection` returns 1047 for COM_STMT_FETCH | medium (large-result readers) | refusal |
 | LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, one-character field/line separators, `REPLACE`/`IGNORE`, column lists, and header skipping; no server-file loading, `SET`, user variables, or multibyte separators | low | subset |
-| Multi-statement | CLIENT_MULTI_STATEMENTS batching | negotiated COM_QUERY batches and multi-result status flags; COM_SET_OPTION remains unsupported | low | subset |
+| Multi-statement | CLIENT_MULTI_STATEMENTS batching | negotiated COM_QUERY batches, multi-result status flags, and COM_SET_OPTION toggling | low | covered |
 | Session state tracking | CLIENT_SESSION_TRACK info in OK packets | absent | low | refusal |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
-| Unimplemented COM_* | SET_OPTION, CHANGE_USER | both → ERR 1047 (`Server.fs`) | low | refusal |
+| Unimplemented COM_* | CHANGE_USER | returns ERR 1047 (`Server.fs`) | low | refusal |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateHandshake` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | `Protocol.columnDefPayload` leaves source names empty and reports collation 45 for text or 63 for binary regardless of the declared collation | low | divergence |
 | Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | `ColumnWire.metadataOfColumn` does not compose them | low | divergence |

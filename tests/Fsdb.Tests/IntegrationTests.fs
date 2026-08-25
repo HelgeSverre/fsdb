@@ -119,6 +119,44 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "COM_SET_OPTION toggles multi-statements on the live connection"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let! client, stream =
+                      connectRawAsWithCapabilities
+                          server.Port
+                          "root"
+                          (ClientProtocol41 ||| ClientMultiStatements ||| ClientMultiResults)
+
+                  use client = client
+                  let command bytes = writePacketAsync stream { SeqId = 0uy; Payload = bytes } |> Async.Ignore
+                  let query = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1; SELECT 2")
+
+                  do! command [| 0x1buy; 1uy; 0uy |]
+                  let! disabled = readPacketAsync stream
+                  Expect.equal disabled.Value.Payload.[0] 0xfeuy "disable returns EOF"
+                  do! command query
+                  let! rejected = readPacketAsync stream
+                  Expect.equal rejected.Value.Payload.[0] 0xffuy "disabled batches are rejected"
+
+                  do! command [| 0x1buy; 0uy; 0uy |]
+                  let! enabled = readPacketAsync stream
+                  Expect.equal enabled.Value.Payload.[0] 0xfeuy "enable returns EOF"
+                  do! command query
+
+                  let mutable packets = 0
+                  let mutable more = true
+
+                  while more do
+                      let! packet = readPacketAsync stream
+                      packets <- packets + 1
+                      more <- packets < 10
+
+                  Expect.equal packets 10 "both resultsets are returned"
+              }
+              |> Async.RunSynchronously
+
           testCase "CLIENT_MULTI_STATEMENTS stops after an error"
           <| fun _ ->
               async {

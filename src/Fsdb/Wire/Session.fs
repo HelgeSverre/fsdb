@@ -263,10 +263,11 @@ type Session =
       /// Effective capabilities negotiated at handshake (`Server`'s
       /// `resp.Capabilities &&& ServerCapabilities`) — 0 for a session built
       /// directly (every test that doesn't set it). Only `ClientFoundRows`
-      /// is read back out of this today, to pick matched- vs changed-row
-      /// counts for UPDATE, multi-table UPDATE, and INSERT ... ON DUPLICATE
-      /// KEY UPDATE (see `Executor.execute`'s `foundRows` param).
+      /// controls matched- vs changed-row counts; `MultiStatementsEnabled`
+      /// begins from the negotiated multi-statement bit and can then be
+      /// changed by COM_SET_OPTION.
       Capabilities: uint32
+      MultiStatementsEnabled: bool
       TlsVersion: string option
       TlsCipher: string option }
 
@@ -315,6 +316,7 @@ let create (connectionId: int) (store: Store) : Session =
       LongDataOverflow = Set.empty
       CustomFunctions = Fsdb.Functions.empty
       Capabilities = 0u
+      MultiStatementsEnabled = false
       TlsVersion = None
       TlsCipher = None }
 

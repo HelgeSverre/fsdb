@@ -40,6 +40,7 @@ type private Command =
     | StmtSendLongData of payload: byte[]
     | StmtClose of stmtId: int
     | StmtReset of stmtId: int
+    | SetOption of option: int
     | ResetConnection
     | Unsupported of code: byte
     /// A command byte this server recognizes, but whose payload was too
@@ -80,6 +81,7 @@ let private parseCommand (payload: byte[]) : Command option =
                 | 0x18uy -> StmtSendLongData(restBytes ())
                 | 0x19uy -> StmtClose(Reader(restBytes ()).ReadInt32LE())
                 | 0x1auy -> StmtReset(Reader(restBytes ()).ReadInt32LE())
+                | 0x1buy -> SetOption(Reader(restBytes ()).ReadInt16LE())
                 | 0x1fuy -> ResetConnection
                 | b -> Unsupported b
             )
@@ -851,6 +853,7 @@ let private handleConnection
                         Database = resp.Database
                         CustomFunctions = customFunctions
                         Capabilities = capabilities
+                        MultiStatementsEnabled = capabilities &&& ClientMultiStatements <> 0u
                         TlsVersion = tlsVersion
                         TlsCipher = tlsCipher }
 
@@ -985,7 +988,7 @@ let private handleConnection
                                     processEntry.StateSince <- DateTime.Now
                                     processEntry.Info <- None
 
-                                    let multiStatements = capabilities &&& ClientMultiStatements <> 0u && capabilities &&& ClientMultiResults <> 0u
+                                    let multiStatements = session.MultiStatementsEnabled && capabilities &&& ClientMultiResults <> 0u
 
                                     match statements with
                                     | Result.Error(code, message) ->
@@ -1440,6 +1443,29 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
+                            | Some(SetOption option) ->
+                                match option with
+                                | 0
+                                | 1 ->
+                                    let session = { session with MultiStatementsEnabled = option = 0 }
+
+                                    do!
+                                        writePacketAsync
+                                            stream
+                                            { SeqId = seqId
+                                              Payload = eofPayload capabilities (statusFlagsFor session) }
+                                        |> Async.Ignore
+
+                                    return! loop session
+                                | _ ->
+                                    do!
+                                        writePacketAsync
+                                            stream
+                                            { SeqId = seqId
+                                              Payload = errPayload capabilities 1231 "Variable 'option' can't be set to the value supplied" }
+                                        |> Async.Ignore
+
+                                    return! loop session
                             | Some ResetConnection ->
                                 // Resets session state (variables, prepared
                                 // statements, buffered long-data, any open
@@ -1462,6 +1488,7 @@ let private handleConnection
                                         Database = session.Database
                                         CustomFunctions = session.CustomFunctions
                                         Capabilities = session.Capabilities
+                                        MultiStatementsEnabled = capabilities &&& ClientMultiStatements <> 0u
                                         TlsVersion = session.TlsVersion
                                         TlsCipher = session.TlsCipher }
 
