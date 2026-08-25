@@ -1221,7 +1221,7 @@ let private handleConnection
                                     return! loop session
                                 | Result.Ok(ast, paramCount) ->
                                     let stmtId = session.NextStmtId
-                                    let resultColumns = QueryHandler.preparedResultColumns session ast
+                                    let parameterMetadata, resultColumns = QueryHandler.preparedMetadata session ast paramCount
 
                                     let stmt: PreparedStmt =
                                         { Ast = ast
@@ -1250,7 +1250,8 @@ let private handleConnection
 
                                     let payloads =
                                         stmtPrepareOkPayload stmtId resultColumns.Length paramCount
-                                        :: List.replicate paramCount (columnDefPayload { Name = "?"; Metadata = Value.columnMetadata TypeVarString })
+                                        :: (parameterMetadata
+                                            |> List.map (fun metadata -> columnDefPayload { Name = "?"; Metadata = metadata }))
                                         @ paramDefEof
                                         @ (resultColumns
                                            |> List.map (fun column ->

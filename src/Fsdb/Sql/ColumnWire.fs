@@ -104,6 +104,77 @@ let metadataOfColumn (column: ColumnDef) : ColumnMetadata =
 
     { metadata with Flags = flags }
 
+/// Returns MySQL's canonical parameter descriptor for a contextual SQL type.
+let parameterMetadataOfType (ty: ColumnType) : ColumnMetadata =
+    let binary typeId length decimals =
+        { columnMetadata typeId with
+            ColumnLength = length
+            Flags = BinaryFlag
+            Decimals = decimals }
+
+    match ty with
+    | TTinyInt unsigned
+    | TSmallInt unsigned
+    | TMediumInt unsigned
+    | TInt unsigned
+    | TBigInt unsigned ->
+        let metadata = binary TypeLongLong 21u 0uy
+
+        if unsigned then
+            { metadata with Flags = metadata.Flags ||| UnsignedFlag }
+        else
+            metadata
+    | TBool -> binary TypeLongLong 21u 0uy
+    | TBit _ ->
+        { columnMetadata TypeBit with
+            ColumnLength = 64u
+            Flags = UnsignedFlag }
+    | TChar _
+    | TVarchar _
+    | TEnum _
+    | TSet _ ->
+        { columnMetadata TypeVarString with
+            ColumnLength = 65532u
+            Decimals = 31uy }
+    | TTinyText
+    | TText
+    | TMediumText
+    | TLongText ->
+        { columnMetadata TypeBlob with
+            ColumnLength = UInt32.MaxValue
+            Decimals = 31uy }
+    | TBinary _
+    | TVarBinary _ -> binary TypeVarString 65535u 31uy
+    | TTinyBlob
+    | TBlob
+    | TMediumBlob
+    | TLongBlob -> binary TypeBlob UInt32.MaxValue 31uy
+    | TDecimal _ -> binary TypeNewDecimal 67u 30uy
+    | TDouble
+    | TFloat -> binary TypeDouble 23u 31uy
+    | TDate ->
+        { columnMetadata TypeDate with ColumnLength = 40u }
+    | TDateTime _
+    | TTimestamp _ ->
+        { columnMetadata TypeDateTime with
+            ColumnLength = 104u
+            Decimals = 6uy }
+    | TTime _ ->
+        { columnMetadata TypeTime with
+            ColumnLength = 68u
+            Decimals = 6uy }
+    | TYear ->
+        { columnMetadata TypeYear with
+            ColumnLength = 4u
+            Flags = BinaryFlag ||| UnsignedFlag }
+    | TJson ->
+        { columnMetadata TypeJson with
+            ColumnLength = UInt32.MaxValue - 3u
+            Flags = BinaryFlag
+            Decimals = 31uy }
+    | TGeometry _ -> binary TypeGeometry 16777216u 31uy
+    | TVector _ -> binary TypeBlob UInt32.MaxValue 31uy
+
 let wireTypeOf ty = (metadataOfType ty).TypeId
 
 let resultMetadataOf (column: ColumnDef) : ColumnMetadata option =

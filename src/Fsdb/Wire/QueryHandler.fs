@@ -2305,16 +2305,26 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
             | Err(code, msg) -> Result.Error(code, msg)
             | _ -> Result.Error(1064, "syntax error")
 
-let preparedResultColumns (session: Session) (statement: Statement option) : Fsdb.Ast.ColumnDef list =
+let preparedMetadata
+    (session: Session)
+    (statement: Statement option)
+    (parameterCount: int)
+    : ColumnMetadata list * ColumnDef list =
+    let generic = ColumnWire.parameterMetadataOfType(TVarchar 16383)
+
     match statement with
-    | None -> []
+    | None -> List.replicate parameterCount generic, []
     | Some statement ->
         let store = Session.currentStore session
         let schema = session.Database |> Option.defaultValue defaultDatabase
+        let registry = registryFor session
 
         match Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store schema statement) with
-        | Error _ -> []
-        | Ok() -> Executor.statementColumns store (registryFor session) schema statement |> Option.defaultValue []
+        | Error _ -> List.replicate parameterCount generic, []
+        | Ok() ->
+            let parameters = PreparedMetadata.parameterDefinitions store registry schema statement parameterCount
+            let columns = Executor.statementColumns store registry schema statement |> Option.defaultValue []
+            parameters, columns
 
 type private TextPreparedCommand =
     | PrepareText of name: string * source: string

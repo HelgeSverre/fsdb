@@ -11,6 +11,7 @@ open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value
 open Fsdb.Ast
+open Fsdb.ColumnWire
 open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
@@ -79,6 +80,30 @@ let private readPreparedReply (stream: IO.Stream) =
         let! columnDefinitions = readDefinitions columnCount
         return statementId, parameterDefinitions, columnDefinitions
     }
+
+type private WireDefinition =
+    { CharacterSet: int
+      Metadata: ColumnMetadata }
+
+let private readWireDefinition (packet: Packet) =
+    let reader = Reader(packet.Payload)
+
+    for _ in 1..6 do
+        reader.ReadLenEncString() |> ignore
+
+    reader.ReadLenEncInt() |> ignore
+    let characterSet = reader.ReadInt16LE()
+    let columnLength = uint32 (reader.ReadInt32LE())
+    let typeId = reader.ReadByte()
+    let flags = uint16 (reader.ReadInt16LE())
+    let decimals = reader.ReadByte()
+
+    { CharacterSet = characterSet
+      Metadata =
+        { TypeId = typeId
+          ColumnLength = columnLength
+          Flags = flags
+          Decimals = decimals } }
 
 let tests =
     testList
@@ -1989,6 +2014,91 @@ let tests =
                   Expect.isTrue (backBytes = blob) "the blob's bytes survived the round-trip"
 
                   do! conn.CloseAsync() |> Async.AwaitTask
+              }
+              |> Async.RunSynchronously
+
+          testCase "COM_STMT_PREPARE infers canonical parameter types from SQL context"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+
+                  let query (sql: string) =
+                      async {
+                          let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          let! _ = readPacketAsync stream
+                          return ()
+                      }
+
+                  do!
+                      query
+                          "CREATE TABLE typed_params (i INT, u BIGINT UNSIGNED, d DECIMAL(8,2), s VARCHAR(20), dt DATETIME(6), b BLOB, flag BIT(9), j JSON)"
+
+                  do! query "CREATE VIEW typed_view AS SELECT i, d FROM typed_params"
+
+                  let prepare (sql: string) =
+                      async {
+                          let payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          let! _, parameters, _ = readPreparedReply stream
+                          return parameters |> List.map readWireDefinition
+                      }
+
+                  let! insert =
+                      prepare
+                          "INSERT INTO typed_params(i,u,d,s,dt,b,flag,j) VALUES(?,?,?,?,?,?,?,?)"
+
+                  let expected =
+                      [ 63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TBigInt true)
+                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        45, parameterMetadataOfType(TDateTime 6)
+                        63, parameterMetadataOfType TLongBlob
+                        63, parameterMetadataOfType(TBit 64)
+                        45, parameterMetadataOfType TJson ]
+
+                  Expect.sequenceEqual
+                      (insert |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      expected
+                      "INSERT parameters use MySQL's canonical contextual metadata"
+
+                  let! predicates = prepare "SELECT i FROM typed_params WHERE i = ? LIMIT ?"
+
+                  Expect.sequenceEqual
+                      (predicates |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      [ 63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TBigInt true) ]
+                      "comparison and LIMIT parameters have distinct signedness"
+
+                  let! expressions = prepare "SELECT CAST(? AS DECIMAL(8,2)), ?"
+
+                  Expect.sequenceEqual
+                      (expressions |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      [ 63, parameterMetadataOfType(TDecimal(65, 30))
+                        45, parameterMetadataOfType(TVarchar 16383) ]
+                      "casts infer a type while context-free parameters remain generic"
+
+                  let! parameterOnly = prepare "SELECT ? + ?, ? = ?"
+
+                  Expect.sequenceEqual
+                      (parameterOnly |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      [ 63, parameterMetadataOfType TDouble
+                        63, parameterMetadataOfType TDouble
+                        45, parameterMetadataOfType(TVarchar 16383)
+                        45, parameterMetadataOfType(TVarchar 16383) ]
+                      "parameter-only arithmetic and comparison follow distinct default rules"
+
+                  let! nested =
+                      prepare
+                          "WITH c AS (SELECT i FROM typed_view) SELECT i FROM c WHERE i = ?"
+
+                  Expect.sequenceEqual
+                      (nested |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      [ 63, parameterMetadataOfType(TBigInt false) ]
+                      "view and CTE projections preserve source parameter types"
               }
               |> Async.RunSynchronously
 

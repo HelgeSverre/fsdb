@@ -1032,6 +1032,7 @@ let TypeDateTime = 0x0cuy
 let TypeYear = 0x0duy
 let TypeVarchar = 0x0fuy
 let TypeBit = 0x10uy
+let TypeJson = 0xf5uy
 let TypeNewDecimal = 0xf6uy
 let TypeBlob = 0xfcuy
 let TypeVarString = 0xfduy
