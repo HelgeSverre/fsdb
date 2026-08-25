@@ -1116,6 +1116,23 @@ let tests =
                   Expect.isTrue stampCol.OnUpdateCurrentTimestamp "ON UPDATE CURRENT_TIMESTAMP survives the restart"
               | Error e -> failtestf "expected table 'stamped' to reload, got %A" e
 
+          testCase "a functional default expression survives WAL recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let expression = FuncCall("ABS", [ BinOp(Sub, Lit(VInt 0L), Lit(VInt 2L)) ])
+              let column = { mkCol "n" (TInt false) with Default = Some(DExpression expression) }
+              match createTable store defaultDatabase "functional_default" [ column ] [] [] None None with
+              | Ok() -> ()
+              | Error error -> failtestf "expected table creation, got %A" error
+
+              let reloaded = load dir
+
+              match Fsdb.InformationSchema.findTable reloaded.Catalog defaultDatabase "functional_default" with
+              | Ok table -> Expect.equal table.Columns.[0].Default (Some(DExpression expression)) "the expression round-trips"
+              | Error error -> failtestf "expected recovered functional_default, got %A" error
+
           testCase "a torn/zero-filled .new is rejected, not promoted as an empty catalog that wipes the real snapshot"
           <| fun _ ->
               let dir = tempDataDir ()

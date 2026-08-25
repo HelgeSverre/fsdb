@@ -1093,8 +1093,79 @@ let tests =
                     | other -> failtestf "expected 1054, got %A" other ]
 
           testList
-              "DEFAULT CURRENT_TIMESTAMP(N) honors the column's declared fsp"
-              [ testCase "DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) parses, and an omitted column stores 6 fractional digits"
+              "column defaults"
+              [ testCase "functional defaults evaluate per row and may reference supplied columns"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault
+                        store
+                        "CREATE TABLE defaults_expr (id INT PRIMARY KEY, base INT, derived INT DEFAULT (base + 1), magnitude INT DEFAULT (ABS(-2)), token VARCHAR(40) DEFAULT (UUID()))"
+                    |> ignore
+
+                    match runDefault store "SELECT COLUMN_DEFAULT, EXTRA FROM information_schema.columns WHERE TABLE_NAME = 'defaults_expr' AND COLUMN_NAME = 'magnitude'" with
+                    | ResultSet(_, [ [ Some defaultValue; Some "DEFAULT_GENERATED" ] ]) ->
+                        Expect.stringContains defaultValue "abs" "the expression is exposed in metadata"
+                    | other -> failtestf "expected functional-default metadata, got %A" other
+
+                    match runDefault store "INSERT INTO defaults_expr (id, base) VALUES (1, 4), (2, 9)" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected two inserted rows, got %A" other
+
+                    match runDefault store "SELECT id, derived, magnitude, LENGTH(token) FROM defaults_expr ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "5"; Some "2"; Some "36" ]
+                              [ Some "2"; Some "10"; Some "2"; Some "36" ] ]
+                            "each omitted functional default is evaluated in its candidate row"
+                    | other -> failtestf "expected functional defaults, got %A" other
+
+                    match runDefault store "INSERT INTO defaults_expr (id, base, derived) VALUES (3, 4, NULL)" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected an explicit NULL insert, got %A" other
+
+                    match runDefault store "SELECT derived FROM defaults_expr WHERE id = 3" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected explicit NULL to bypass the default, got %A" other
+
+                    match runDefault store "INSERT INTO defaults_expr (id, base) VALUES (1, 20) ON DUPLICATE KEY UPDATE base = VALUES(base), derived = VALUES(derived)" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected the upsert candidate default to be evaluated, got %A" other
+
+                    match runDefault store "REPLACE INTO defaults_expr (id, base) VALUES (2, 30)" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected the replacement default to be evaluated, got %A" other
+
+                    match runDefault store "SELECT base, derived FROM defaults_expr WHERE id IN (1, 2) ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "20"; Some "21" ]; [ Some "30"; Some "31" ] ] "upsert and replace use their candidate defaults"
+                    | other -> failtestf "expected upserted and replaced defaults, got %A" other
+
+                    match runDefault store "ALTER TABLE defaults_expr ADD COLUMN shifted INT DEFAULT (base + 2)" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected the functional column to be added, got %A" other
+
+                    match runDefault store "SELECT shifted FROM defaults_expr ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "22" ]; [ Some "32" ]; [ Some "6" ] ] "existing rows receive the added functional default"
+                    | other -> failtestf "expected backfilled defaults, got %A" other
+
+                testCase "functional defaults reject unsafe or invalid dependencies"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for sql, code in
+                        [ "CREATE TABLE default_subquery (n INT DEFAULT ((SELECT 1)))", 3769
+                          "CREATE TABLE default_variable (n INT DEFAULT (@x + 1))", 3772
+                          "CREATE TABLE default_sleep (n INT DEFAULT (SLEEP(0)))", 3770
+                          "CREATE TABLE default_aggregate (n INT DEFAULT (SUM(1)))", 1111
+                          "CREATE TABLE default_auto (id INT AUTO_INCREMENT PRIMARY KEY, n INT DEFAULT (id + 1))", 3768
+                          "CREATE TABLE default_self (n INT DEFAULT (n + 1))", 3767
+                          "CREATE TABLE default_forward (a INT DEFAULT (b + 1), b INT DEFAULT (ABS(-2)))", 3767 ] do
+                        match runDefault store sql with
+                        | Err(actual, _) -> Expect.equal actual code sql
+                        | other -> failtestf "expected error %d for %s, got %A" code sql other
+
+                testCase "DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) parses, and an omitted column stores 6 fractional digits"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT, c DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6))" |> ignore

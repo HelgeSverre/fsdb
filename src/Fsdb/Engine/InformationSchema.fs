@@ -433,6 +433,7 @@ let private extraText (c: ColumnDef) : string =
     | Some(_, Stored) -> "STORED GENERATED"
     | None ->
         [ if c.AutoIncrement then "auto_increment"
+          if c.Default |> Option.exists (function DExpression _ -> true | _ -> false) then "DEFAULT_GENERATED"
           if c.OnUpdateCurrentTimestamp then
               sprintf "on update CURRENT_TIMESTAMP%s" (onUpdateFspSuffix c) ]
         |> String.concat " "
@@ -462,6 +463,7 @@ let defaultText (c: ColumnDef) : string option =
     | _, None -> None
     | _, Some(DConst value) -> value |> toText
     | _, Some DCurrentTimestamp -> Some "CURRENT_TIMESTAMP"
+    | _, Some(DExpression expression) -> Some("(" + exprToSql expression + ")")
 
 /// One `COLUMNS` row — shared by real tables (with the table's key
 /// metadata and full DML privileges) and information_schema's own
@@ -1772,6 +1774,7 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
             match defaultText c with
             | _ when c.Generated.IsSome -> ""
             | Some d when c.Default = Some DCurrentTimestamp -> sprintf "DEFAULT %s" d
+            | Some d when c.Default |> Option.exists (function DExpression _ -> true | _ -> false) -> sprintf "DEFAULT %s" d
             | Some d when (match c.Type with TBit _ -> true | _ -> false) -> sprintf "DEFAULT %s" d
             | Some d -> sprintf "DEFAULT '%s'" d
             | None -> if c.PrimaryKey || not c.Nullable || defaultless then "" else "DEFAULT NULL"

@@ -1525,6 +1525,7 @@ let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Res
                 | ZeroTemporalForColumn _
                 | DataTooLongForColumn _ -> InvalidDefaultValue col.Name
                 | error -> error)
+    | Some(DExpression _) -> Ok col
     | _ -> Ok col
 
 /// `NOW()` rounded to `col`'s own declared fsp — a `TIMESTAMP(6)` column
@@ -1549,6 +1550,7 @@ let evalDefault (col: ColumnDef) : Value =
     | None -> VNull
     | Some(DConst v) -> v
     | Some DCurrentTimestamp -> currentTimestampForColumn col
+    | Some(DExpression _) -> VNull
 
 let private coerceAndCheck (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     match v with
@@ -3723,14 +3725,14 @@ let renameTables (store: Store) (dbName: string) (pairs: (string * string) list)
 /// `processRow`'s fold: the column's final coerced value, the updated
 /// AUTO_INCREMENT counter, and the id assigned to this row's AUTO_INCREMENT
 /// column (if any) paired with whether `nextAutoId` generated it or it was
-/// supplied explicitly — `insertCore` needs that distinction to compute the
-/// statement's `last_insert_id` the way real MySQL does (see its doc).
+/// supplied explicitly. The omitted-column set lets the executor distinguish
+/// a functional default from an explicitly supplied NULL before triggers run.
 let private processRow
     (mode: TemporalCoercionMode)
     (nextAutoId: int64)
     (rawRow: Value option list)
     (columns: ColumnDef list)
-    : Result<Value list * int64 * (bool * int64) option, StorageError> =
+    : Result<Value list * int64 * (bool * int64) option * Set<int>, StorageError> =
     let step acc (col: ColumnDef, provided: Value option) =
         match acc with
         | Error e -> Error e
@@ -3745,6 +3747,8 @@ let private processRow
                     | Error e -> Error e
                     | Ok(VInt i) -> Ok(VInt i :: valuesRev, max nextAutoId (i + 1L), Some(false, i))
                     | Ok _ -> Error(InvalidValueForColumn(col.Name, "auto_increment"))
+            elif provided.IsNone && (match col.Default with Some(DExpression _) -> true | _ -> false) then
+                Ok(pending :: valuesRev, nextAutoId, assignedId)
             else
                 match coerceAndCheck mode col pending with
                 | Ok v -> Ok(v :: valuesRev, nextAutoId, assignedId)
@@ -3752,7 +3756,9 @@ let private processRow
 
     List.zip columns rawRow
     |> List.fold step (Ok([], nextAutoId, None))
-    |> Result.map (fun (valuesRev, nextAutoId, assignedId) -> List.rev valuesRev, nextAutoId, assignedId)
+    |> Result.map (fun (valuesRev, nextAutoId, assignedId) ->
+        let omitted = rawRow |> List.indexed |> List.choose (fun (index, value) -> if value.IsNone then Some index else None) |> Set.ofList
+        List.rev valuesRev, nextAutoId, assignedId, omitted)
 
 /// Resolves `columns` (the explicit column list, or `None` for "all columns
 /// in table order") to indices against `table`.
@@ -3812,7 +3818,7 @@ let private insertCore
     (tableKey: string)
     (rowsIn: Value list list)
     (idxs: int list)
-    (prepare: Value[] -> Result<Value[], StorageError>)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     : Result<Database * (int64 * int64 option * int * Value[] list * StorageError list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
@@ -3894,10 +3900,10 @@ let private insertCore
 
                 let rowResult =
                     processRow mode nextAutoId rawRow table.Columns
-                    |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
+                    |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
                         let candidate = Array.ofList finalValues
 
-                        prepare candidate
+                        prepare omitted candidate
                         |> Result.bind (fun candidate ->
 
                         // O(log n) per unique group via the running index
@@ -4004,7 +4010,7 @@ let private insertCore
 /// IGNORE`'s per-row skip semantics.
 let private insertRowsPreparedCore
     (ignoreErrors: bool)
-    (prepare: Value[] -> Result<Value[], StorageError>)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -4043,7 +4049,7 @@ let insertRows
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<InsertOutcome, StorageError> =
-    insertRowsPreparedCore false Ok store dbName tableName columns rowsIn
+    insertRowsPreparedCore false (fun _ row -> Ok row) store dbName tableName columns rowsIn
 
 let insertRowsPrepared
     (store: Store)
@@ -4051,7 +4057,7 @@ let insertRowsPrepared
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    (prepare: Value[] -> Result<Value[], StorageError>)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
     insertRowsPreparedCore false prepare store dbName tableName columns rowsIn
 
@@ -4068,7 +4074,7 @@ let insertRowsIgnore
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<InsertOutcome, StorageError> =
-    insertRowsPreparedCore true Ok store dbName tableName columns rowsIn
+    insertRowsPreparedCore true (fun _ row -> Ok row) store dbName tableName columns rowsIn
 
 let insertRowsIgnorePrepared
     (store: Store)
@@ -4076,7 +4082,7 @@ let insertRowsIgnorePrepared
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    (prepare: Value[] -> Result<Value[], StorageError>)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
     insertRowsPreparedCore true prepare store dbName tableName columns rowsIn
 
@@ -4263,7 +4269,7 @@ let rec upsertRows
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    (computeGenerated: Value[] -> Result<Value[], StorageError>)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
@@ -4273,7 +4279,7 @@ let rec upsertRows
         tableName
         columns
         rowsIn
-        computeGenerated
+        prepare
         (fun _ existing candidate -> applyUpdate existing candidate)
         foundRows
 
@@ -4283,7 +4289,7 @@ and upsertRowsWithOrdinal
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    (computeGenerated: Value[] -> Result<Value[], StorageError>)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
@@ -4293,7 +4299,7 @@ and upsertRowsWithOrdinal
             withDatabase store dbName (fun db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable db tableName)
-                |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn computeGenerated applyUpdate foundRows)
+                |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn prepare applyUpdate foundRows)
                 |> Result.map (fun (db', cascaded, summary) -> db', (summary, cascaded, db)))
 
         match result with
@@ -4335,7 +4341,7 @@ and private upsertRowsInTable
     (table: Table)
     (columns: string list option)
     (rowsIn: Value list list)
-    (computeGenerated: Value[] -> Result<Value[], StorageError>)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
     : Result<Database * Map<string, (Value[] * Value[]) list> * (int64 * int64 option * int * Value[] list * (Value[] * Value[]) list), StorageError> =
@@ -4385,7 +4391,7 @@ and private upsertRowsInTable
                                     let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                                     processRow (temporalCoercionMode store) nextAutoId rawRow table.Columns
-                                    |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
+                                    |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
                                         // A unique index over a *generated* column (e.g.
                                         // Laravel Pulse's `key_hash BINARY(16) AS
                                         // (unhex(md5(key)))`) is still NULL in the raw
@@ -4394,7 +4400,7 @@ and private upsertRowsInTable
                                         // DUPLICATE KEY UPDATE actually finds the
                                         // collision instead of degrading into a plain
                                         // INSERT that then trips the unique check.
-                                        computeGenerated (Array.ofList finalValues)
+                                        prepare omitted (Array.ofList finalValues)
                                         |> Result.map (fun candidate -> candidate, findMatch index candidate)
                                         |> Result.bind (function
                                             | candidate, Some(pos, existing) ->
@@ -4675,7 +4681,7 @@ let replaceRows
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    (computeGenerated: Value[] -> Result<Value[], StorageError>)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
     let key = normalizeTableName tableName
 
@@ -4726,8 +4732,8 @@ let replaceRows
                                 let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                                 processRow (temporalCoercionMode store) nextAutoId rawRow table.Columns
-                                |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
-                                    computeGenerated (Array.ofList finalValues)
+                                |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
+                                    prepare omitted (Array.ofList finalValues)
                                     |> Result.bind (fun candidate ->
                                         let uniqueGroups = uniqueKeyGroups table
 

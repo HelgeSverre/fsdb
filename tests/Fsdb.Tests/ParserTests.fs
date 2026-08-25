@@ -999,6 +999,13 @@ let tests =
                     | CreateTable(_, [ { Type = TTimestamp 0; Default = Some DCurrentTimestamp } ], _, _, _, _, _, _, _) -> ()
                     | other -> failtestf "expected a CURRENT_TIMESTAMP default, got %A" other
 
+                testCase "functional default expression"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (n INT DEFAULT (ABS(-2)))" with
+                    | CreateTable(_, [ { Default = Some(DExpression(FuncCall(name, _))) } ], _, _, _, _, _, _, _)
+                        when name.Equals("ABS", System.StringComparison.OrdinalIgnoreCase) -> ()
+                    | other -> failtestf "expected a functional default, got %A" other
+
                 testCase "ENGINE=/CHARSET= are accepted; the table's defaults stay table-level (numeric columns don't inherit them)"
                 <| fun _ ->
                     Expect.equal

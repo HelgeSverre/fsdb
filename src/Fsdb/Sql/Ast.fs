@@ -294,14 +294,13 @@ and WindowFn =
     /// (including `GROUP_CONCAT`/`COUNT(DISTINCT ...)`) works unchanged.
     | WinAggregate of name: string * args: Expr list
 
-/// A column's `DEFAULT`: either a fixed value, or `CURRENT_TIMESTAMP`, which
-/// evaluates fresh at insert time rather than once at parse time — kept as
-/// its own case instead of a `VString "CURRENT_TIMESTAMP"` sentinel value so
-/// storage evaluates it explicitly rather than trying (and failing) to
-/// coerce the marker text itself into the column's type.
+/// A column's `DEFAULT`: a fixed value, `CURRENT_TIMESTAMP`, or an expression
+/// evaluated for each omitted row value. The timestamp has its own case rather
+/// than a marker string so storage can apply the column's declared precision.
 and ColumnDefault =
     | DConst of Value
     | DCurrentTimestamp
+    | DExpression of Expr
 
 /// VIRTUAL vs STORED on a generated column. Both are materialized at write
 /// time in this engine (no recompute-on-read path), so the kind only drives

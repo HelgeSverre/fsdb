@@ -1669,6 +1669,7 @@ let private defaultValueLit: Parser<ColumnDefault, unit> =
     // MariaDB dumps emit the function-call spelling `current_timestamp()`;
     // the empty parens are the same as none.
     (keyword "CURRENT_TIMESTAMP" >>. optional (attempt widthLen) >>. optional (sym "(" >>. sym ")") >>% DCurrentTimestamp)
+    <|> attempt (between (sym "(") (sym ")") expr |>> DExpression)
     <|> (literalValue |>> DConst)
 
 /// A charset/collation name — Laravel emits `COLLATE 'utf8mb4_unicode_ci'`

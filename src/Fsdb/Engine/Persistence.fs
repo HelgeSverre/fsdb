@@ -435,11 +435,14 @@ let private encodeColumnDefault (w: Writer) (d: ColumnDefault) : unit =
     match d with
     | DConst v -> w.WriteByte 0x01uy; encodeValue w v
     | DCurrentTimestamp -> w.WriteByte 0x02uy
+    | DExpression expression -> w.WriteByte 0x03uy; encodeExpr w expression
 
 let private decodeColumnDefault (r: #IReader) : ColumnDefault =
     match r.ReadByte() with
     | 0x01uy -> DConst(decodeValue r)
-    | _ -> DCurrentTimestamp
+    | 0x02uy -> DCurrentTimestamp
+    | 0x03uy -> DExpression(decodeExpr r)
+    | tag -> failwithf "Persistence: unknown ColumnDefault tag 0x%02x" tag
 
 /// `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`) round-trips through
 /// the `Expr` codec above — without it, a generated column silently stopped

@@ -100,7 +100,7 @@ reusable membership set and direct indexed outer-table narrowing, correlated
 scalar/EXISTS/IN/ANY/SOME/ALL
 subqueries with correct NULL
 semantics, bounded top-N sort for ORDER BY+LIMIT, GROUP_CONCAT byte cap,
-WITH ROLLUP expansion, window frames (ROWS/RANGE, numeric offsets),
+WITH ROLLUP expansion, window frames (ROWS/RANGE, numeric and temporal interval offsets),
 COUNT(DISTINCT a,b) tuples, statement-atomic multi-table DML, exact ODKU
 affected-rows semantics (changed=2/no-op=0 under default flags), row-value
 equality/order/null-safe comparisons and literal/subquery `IN`, MySQL's 1241
@@ -163,7 +163,8 @@ canonicalization, DATE/DATETIME(fsp)/TIMESTAMP(fsp)/TIME(fsp) with half-up
 fsp rounding and carry cases, all-zero and partial-zero dates with sql_mode
 enforcement, YEAR, JSON, per-column charset/collation,
 wire-faithful column metadata (`ColumnWire.metadataOfType`), `BIT(1)`–`BIT(64)`
-fields with binary literals and defaults, and OGC WKB geometry values
+fields with binary literals and defaults, per-row functional defaults with
+column references, and OGC WKB geometry values
 (`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
 accessors).
 
@@ -171,7 +172,6 @@ accessors).
 |---|---|---|---|---|
 | Spatial indexes and operations | R-tree indexes, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Contains`, `ST_Within`, `ST_Touches`, `ST_Equals`, `ST_ConvexHull`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | `Executor.recomputeGeneratedColumns` materializes both at write time; no read-path recompute | low | divergence |
-| Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
 | Column-comment character sets | converted through the table/column charset; utf8mb3 stores non-BMP text as `?` | raw .NET text, without charset conversion | low | divergence |
 | ZEROFILL/display width | zero-fill formatting, width in metadata | not tracked beyond static wire lengths; `ColumnWire.metadataOfType` never sets ZEROFILL | low | divergence |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
@@ -411,7 +411,7 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | 62 MySQL-accepted feature baselines initially exposed 20 declared missing surfaces across set-operation subqueries, window ranges, DML sources, DDL/admin, stored programs, accounts, and spatial functions; set-operation expression subqueries, temporal window ranges, and derived-table mutation sources now pass, leaving 15 baseline differences. `--syntax-cases 0` runs this inventory without mutations | active gap driver |
+| Executable gap baselines | 62 MySQL-accepted feature baselines initially exposed 20 declared missing surfaces across set-operation subqueries, window ranges, DML sources, DDL/admin, stored programs, accounts, and spatial functions; set-operation expression subqueries, temporal window ranges, derived-table mutation sources, and functional defaults now pass, leaving 14 baseline differences. `--syntax-cases 0` runs this inventory without mutations | active gap driver |
 | Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; the 2026-08-25 wait-and-rebase rerun committed all 1,455 non-rollback transactions with exact state parity and zero failures. Throughput remained 86 fsdb tx/s versus 5,246 MySQL tx/s, with p99 9,839 ms versus 13 ms | correctness resolved; performance open |
 | Multi-database scaling | the historical campaign predates sharded database roots; the 2026-08-25 rerun failed during concurrent setup with 1205 before a trustworthy scaling ratio could be measured (`2026-08-17-multidb-concurrency-campaign.md`) | unverified |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |

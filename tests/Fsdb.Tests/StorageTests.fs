@@ -8,6 +8,8 @@ open Fsdb.Storage
 open Fsdb.Temporal
 open Fsdb.Engine
 
+let private prepareRow _ row = Ok row
+
 let private col name ty nullable =
     { Name = name
       Type = ty
@@ -1561,7 +1563,7 @@ let tests =
                         "users"
                         None
                         [ [ VInt 3L; VString "carol"; VInt 28L ] ]
-                        Ok
+                        prepareRow
                     |> function
                         | Ok _ -> ()
                         | Error e -> failtestf "expected Ok, got %A" e
@@ -1753,7 +1755,7 @@ let tests =
                     let store = withUsersTable ()
                     let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
 
-                    match upsertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] Ok applyUpdate false with
+                    match upsertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] prepareRow applyUpdate false with
                     | Ok { LastInsertId = lastId; Affected = affected } ->
                         Expect.equal lastId 1L "inserted with a fresh id"
                         Expect.equal affected 1 "one row"
@@ -1767,7 +1769,7 @@ let tests =
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) =
                         Ok [| existing.[0]; existing.[1]; VInt 31L |]
 
-                    match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] Ok applyUpdate false with
+                    match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] prepareRow applyUpdate false with
                     | Ok { Affected = affected } ->
                         // MySQL counts a changed ON DUPLICATE KEY UPDATE match as 2
                         // (the attempted insert plus the update), not 1.
@@ -1801,7 +1803,7 @@ let tests =
                     // stays exactly what it already held) — MySQL's own
                     // `affected_rows` rule for a matched `ON DUPLICATE KEY
                     // UPDATE` row: 0 without `CLIENT_FOUND_ROWS`, 1 with it.
-                    match upsertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] Ok applyUpdate false with
+                    match upsertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] prepareRow applyUpdate false with
                     | Ok { Affected = affected } ->
                         Expect.equal affected 0 "matched via the unique index, but no-op: not counted without CLIENT_FOUND_ROWS"
 
@@ -1810,7 +1812,7 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
-                    match upsertRows store defaultDatabase "emails" None [ [ VInt 3L; VString "a@x.com" ] ] Ok applyUpdate true with
+                    match upsertRows store defaultDatabase "emails" None [ [ VInt 3L; VString "a@x.com" ] ] prepareRow applyUpdate true with
                     | Ok { Affected = affected } -> Expect.equal affected 1 "the same no-op match counts once CLIENT_FOUND_ROWS is negotiated"
                     | Error e -> failtestf "expected Ok, got %A" e ]
 
@@ -2016,7 +2018,7 @@ let tests =
                     let store = withDeptEmployees None
                     let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
 
-                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 999L; VString "alice" ] ] Ok applyUpdate false with
+                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 999L; VString "alice" ] ] prepareRow applyUpdate false with
                     | Error(ForeignKeyParentMissing "fk_dept") -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
@@ -2033,7 +2035,7 @@ let tests =
                     // `UPDATE` already is.
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok [| existing.[0]; VInt 999L; existing.[2] |]
 
-                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ] Ok applyUpdate false with
+                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ] prepareRow applyUpdate false with
                     | Error(ForeignKeyParentMissing "fk_dept") -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
@@ -2612,7 +2614,7 @@ let tests =
                         "users"
                         None
                         [ [ VInt 1L; VString "alice"; VInt 1L ]; [ VInt 2L; VString "carol"; VInt 20L ] ]
-                        Ok
+                        prepareRow
                         applyUpdate
                         false
                     |> ignore
@@ -2643,7 +2645,7 @@ let tests =
                     // "Update" that reasserts the stored row verbatim.
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok(Array.copy existing)
 
-                    upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 99L ] ] Ok applyUpdate false
+                    upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 99L ] ] prepareRow applyUpdate false
                     |> ignore
 
                     Expect.equal (List.ofSeq events) [] "a no-op ODKU match commits nothing"

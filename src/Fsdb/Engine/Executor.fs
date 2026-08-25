@@ -2894,6 +2894,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                             |> Result.map (fun upper -> boolToValue (lower >= 0 && upper <= 0))))))
     | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
         match tryColumnDefForExpr ctx argument with
+        | Some { Default = Some(DExpression expression) } -> eval expression
         | Some column when column.Default.IsSome || column.Nullable -> Ok(Storage.evalDefault column)
         | Some column -> Error(1364, sprintf "Field '%s' doesn't have a default value" column.Name)
         | None -> Error(1054, "Unknown column in 'field list'")
@@ -10320,6 +10321,63 @@ let rec private firstDisallowedCheckShape (expression: Expr) : string option =
     | QualifiedCol _
     | Lit _ -> None
 
+let private validateFunctionalDefaults (registry: Registry) (columns: ColumnDef list) : Result<unit, QueryResult> =
+    let disallowedFunctions = set [ "BENCHMARK"; "SLEEP" ]
+
+    columns
+    |> List.indexed
+    |> List.tryPick (fun (columnIndex, column) ->
+        column.Default
+        |> Option.bind (function
+            | DConst _
+            | DCurrentTimestamp -> None
+            | DExpression expression ->
+                if containsSessionVariable expression then
+                    Some(Err(3772, sprintf "Default value expression of column '%s' cannot refer user or system variables." column.Name))
+                elif containsSubqueryExpr expression || Expression.exists (function WindowOver _ | Placeholder _ | Star _ | MatchAgainst _ -> true | _ -> false) expression then
+                    Some(Err(3769, sprintf "Default value expression of column '%s' contains a disallowed function." column.Name))
+                elif containsAggregate registry expression then
+                    Some(Err(1111, "Invalid use of group function"))
+                else
+                    let disallowed =
+                        Expression.collect
+                            (function
+                            | FuncCall(name, _) when disallowedFunctions.Contains(name.ToUpperInvariant()) -> Some name
+                            | FuncCall(name, _) ->
+                                registry.Extensions
+                                |> Map.tryFind (name.ToUpperInvariant())
+                                |> Option.filter _.DirectOnly
+                                |> Option.map (fun _ -> name)
+                            | _ -> None)
+                            expression
+                        |> List.tryHead
+
+                    match disallowed with
+                    | Some name -> Some(Err(3770, sprintf "Default value expression of column '%s' contains a disallowed function: %s." column.Name (name.ToLowerInvariant())))
+                    | None ->
+                        checkColumnReferences expression
+                        |> List.tryPick (fun (qualifier, name) ->
+                            match qualifier, resolveColumn columns name with
+                            | Some qualifier, _ -> Some(Err(1054, sprintf "Unknown column '%s.%s' in 'DEFAULT'" qualifier name))
+                            | None, Error _ -> Some(Err(1054, sprintf "Unknown column '%s' in 'DEFAULT'" name))
+                            | None, Ok referencedIndex when columns.[referencedIndex].AutoIncrement ->
+                                Some(Err(3768, sprintf "Default value expression of column '%s' cannot refer to an auto-increment column." column.Name))
+                            | None, Ok referencedIndex
+                                when referencedIndex >= columnIndex
+                                     && (columns.[referencedIndex].Generated.IsSome
+                                         || (match columns.[referencedIndex].Default with Some(DExpression _) -> true | _ -> false)) ->
+                                Some(Err(3767, sprintf "Default value expression of column '%s' cannot refer to a column defined after it if that column is a generated column or has an expression as default value." column.Name))
+                            | _ -> None)))
+    |> function
+        | None -> Ok()
+        | Some error -> Error error
+
+let private validateFunctionalDefaultsForStorage (registry: Registry) (columns: ColumnDef list) : Result<unit, StorageError> =
+    match validateFunctionalDefaults registry columns with
+    | Ok() -> Ok()
+    | Error(Err(code, message)) -> Error(ExpressionError(code, message))
+    | Error _ -> Error(ExpressionError(1105, "Invalid functional default"))
+
 let private validateCheckDefinition
     (registry: Registry)
     (columns: ColumnDef list)
@@ -11038,17 +11096,46 @@ let rec executeAs
                 | Error error -> Error(ExpressionError error)
         | _ -> Ok candidate
 
-    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
+    let evaluateFunctionalDefaults
+        (runStore: Store)
+        (db: string)
+        (table: string)
+        (columns: ColumnDef list)
+        (omitted: Set<int>)
+        (candidate: Value[])
+        =
+        let result = Array.copy candidate
+        let context = contextFactory runStore registry db (columnIndexOf columns) (singleQualifier table columns) None
+
+        omitted
+        |> Set.toList
+        |> List.fold
+            (fun state index ->
+                state
+                |> Result.bind (fun () ->
+                    match columns.[index].Default with
+                    | Some(DExpression expression) ->
+                        evalExpr (context result) expression
+                        |> Result.mapError ExpressionError
+                        |> Result.bind (coerceValue runStore.StrictMode columns.[index])
+                        |> Result.map (fun value -> result.[index] <- value)
+                    | _ -> Ok()))
+            (Ok())
+        |> Result.map (fun () -> result)
+
+    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
         let finish candidate =
             computeGeneratedRow runStore registry db table columns candidate
             |> Result.bind (validateViewCandidate runStore db table columns)
 
-        match beforeInsertTriggers runStore db table with
-        | [] -> finish candidate
-        | triggers ->
-            match fireTriggers runStore db table Before TriggerInsert triggers [ None, Some candidate ] with
-            | Some(Err(code, message)) -> Error(ExpressionError(code, message))
-            | _ -> finish candidate
+        evaluateFunctionalDefaults runStore db table columns omitted candidate
+        |> Result.bind (fun candidate ->
+            match beforeInsertTriggers runStore db table with
+            | [] -> finish candidate
+            | triggers ->
+                match fireTriggers runStore db table Before TriggerInsert triggers [ None, Some candidate ] with
+                | Some(Err(code, message)) -> Error(ExpressionError(code, message))
+                | _ -> finish candidate)
 
     /// Runs an insert branch's storage write and fires AFTER INSERT triggers with
     /// MySQL's statement atomicity: when triggers exist, the insert and
@@ -11142,6 +11229,11 @@ let rec executeAs
             let columnIndex = columnIndexOf tableColumns
 
             finishInsert db table (fun s ->
+                let prepare omitted candidate =
+                    evaluateFunctionalDefaults s db table tableColumns omitted candidate
+                    |> Result.bind (computeGeneratedRow s registry db table tableColumns)
+                    |> Result.bind (validateViewCandidate s db table tableColumns)
+
                 let computeGenerated candidate =
                     computeGeneratedRow s registry db table tableColumns candidate
                     |> Result.bind (validateViewCandidate s db table tableColumns)
@@ -11150,7 +11242,7 @@ let rec executeAs
                     onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate
                     |> Result.bind computeGenerated
 
-                upsertRowsWithOrdinal s db table cols rowsValues computeGenerated applyUpdate foundRows)
+                upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows)
 
     let replaceEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) =
         let deleteTriggers =
@@ -11364,11 +11456,12 @@ let rec executeAs
         | Some _ when ifNotExists -> ids, Affected 0UL
         | Some _ -> ids, storageErr (TableExists name)
         | None ->
-            match rejectDirectOnlyGenerated registry columns, rejectQuantifiedComparisonsInGenerated columns, rejectSessionVariablesInGenerated columns with
-            | Some err, _, _
-            | _, Some err, _
-            | _, _, Some err -> ids, err
-            | None, None, None ->
+            match rejectDirectOnlyGenerated registry columns, rejectQuantifiedComparisonsInGenerated columns, rejectSessionVariablesInGenerated columns, validateFunctionalDefaults registry columns with
+            | Some err, _, _, _
+            | _, Some err, _, _
+            | _, _, Some err, _
+            | _, _, _, Error err -> ids, err
+            | None, None, None, Ok() ->
                 let alreadyExists = scan store db name |> Result.isOk
 
                 if alreadyExists && ifNotExists then
@@ -11549,6 +11642,33 @@ let rec executeAs
                         alterTable snapshot db table physicalActions
                         |> withGeneratedRecomputed snapshot registry dbName db table)
 
+            let fillAddedFunctionalDefaults () =
+                let names =
+                    actions
+                    |> List.choose (function
+                        | AddColumn({ Default = Some(DExpression _) } as column, _) -> Some column.Name
+                        | _ -> None)
+
+                if names.IsEmpty then
+                    Ok()
+                else
+                    scan snapshot db finalTable
+                    |> Result.bind (fun (columns, _) ->
+                        names
+                        |> traverse (resolveColumn columns)
+                        |> Result.bind (fun indices ->
+                            let omitted = Set.ofList indices
+
+                            updateRows
+                                snapshot
+                                db
+                                finalTable
+                                None
+                                (fun _ -> Ok true)
+                                (fun row ->
+                                    evaluateFunctionalDefaults snapshot db finalTable columns omitted row)))
+                    |> Result.map ignore
+
             let retargetAlterObjects () =
                 if equal table finalTable then
                     Ok()
@@ -11652,10 +11772,12 @@ let rec executeAs
 
             let altered =
                 alterPhysical
+                |> Result.bind (fun () -> fillAddedFunctionalDefaults ())
                 |> Result.bind (fun () -> retargetAlterObjects ())
                 |> Result.bind (fun () -> scan snapshot db finalTable |> Result.map fst)
                 |> Result.bind (fun columns ->
-                    validateExistingDefinitions columns
+                    validateFunctionalDefaultsForStorage registry columns
+                    |> Result.bind (fun () -> validateExistingDefinitions columns)
                     |> Result.bind (fun () -> actions |> List.fold (fun state action -> state |> Result.bind (fun () -> applyCheckAction columns action)) (Ok()))
                     |> Result.bind (fun () ->
                         snapshot.Catalog
@@ -12215,7 +12337,11 @@ let rec executeAs
         | Ok(tableColumns, _) ->
             let columnIndex = columnIndexOf tableColumns
             let defaults = tableColumns |> List.map evalDefault |> Array.ofList
-            let context = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None defaults
+            let functional =
+                tableColumns
+                |> List.indexed
+                |> List.choose (fun (index, column) -> match column.Default with Some(DExpression _) -> Some index | _ -> None)
+                |> Set.ofList
 
             let substituteDefault =
                 rewriteExprWith (function
@@ -12225,9 +12351,14 @@ let rec executeAs
                         Some(Col column)
                     | _ -> None)
 
-            match assignments |> traverse (fun (name, value) -> evalExpr context (substituteDefault value) |> Result.map (fun result -> name, result)) with
-            | Error(code, message) -> ids, Err(code, message)
-            | Ok values -> replaceEvaluated db table (Some(values |> List.map fst)) [ values |> List.map snd ]
+            match evaluateFunctionalDefaults store db table tableColumns functional defaults with
+            | Error error -> ids, storageErr error
+            | Ok defaults ->
+                let context = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None defaults
+
+                match assignments |> traverse (fun (name, value) -> evalExpr context (substituteDefault value) |> Result.map (fun result -> name, result)) with
+                | Error(code, message) -> ids, Err(code, message)
+                | Ok values -> replaceEvaluated db table (Some(values |> List.map fst)) [ values |> List.map snd ]
 
     | Do expressions ->
         let context = contextFactory store registry dbName Map.empty Map.empty None [||]
