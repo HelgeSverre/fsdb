@@ -965,7 +965,25 @@ let tests =
                   Expect.stringContains ddl "ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY" "stored schedule"
               | other -> failtestf "expected create event, got %A" other
 
-              match handle session "SELECT event_name FROM information_schema.events WHERE event_schema = 'fsdb'" |> snd with
+              let session, recurring =
+                  handle session "CREATE EVENT daily ON SCHEDULE EVERY 1 DAY DO INSERT INTO event_log VALUES (2)"
+              Expect.equal recurring (Affected 0UL) "recurring event created"
+
+              match
+                  handle
+                      session
+                      "SELECT event_type, interval_value, interval_field FROM information_schema.events WHERE event_schema = 'fsdb' AND event_name = 'daily'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "RECURRING"; Some "1"; Some "DAY" ] ]) -> ()
+              | other -> failtestf "expected recurring event metadata, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT event_name FROM information_schema.events WHERE event_schema = 'fsdb' AND event_name = 'tomorrow'"
+                  |> snd
+              with
               | ResultSet(_, [ [ Some "tomorrow" ] ]) -> ()
               | other -> failtestf "expected information_schema event, got %A" other
 
@@ -975,6 +993,8 @@ let tests =
 
               let session, result = handle session "DROP EVENT tomorrow"
               Expect.equal result (Affected 0UL) "dropped"
+              let session, result = handle session "DROP EVENT daily"
+              Expect.equal result (Affected 0UL) "recurring event dropped"
 
               match handle session "SHOW EVENTS" |> snd with
               | ResultSet(_, []) -> ()

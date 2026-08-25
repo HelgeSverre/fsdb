@@ -1186,6 +1186,12 @@ let private eventsColumns =
       strCol "DATABASE_COLLATION" ]
 
 let private eventsRows (catalog: Catalog) =
+    let recurringSchedule =
+        Regex(
+            @"^EVERY\s+(?<value>.+?)\s+(?<field>YEAR_MONTH|DAY_HOUR|DAY_MINUTE|DAY_SECOND|HOUR_MINUTE|HOUR_SECOND|MINUTE_SECOND|YEAR|QUARTER|MONTH|WEEK|DAY|HOUR|MINUTE|SECOND)(?:\s|$)",
+            RegexOptions.IgnoreCase
+        )
+
     let rows =
         catalog
         |> Map.tryFind "mysql"
@@ -1198,9 +1204,17 @@ let private eventsRows (catalog: Catalog) =
         if row.Length < 7 then
             None
         else
+            let schedule = toText row.[2] |> Option.defaultValue ""
+            let recurring = recurringSchedule.Match schedule
+            let eventType, intervalValue, intervalField =
+                if recurring.Success then
+                    vs "RECURRING", vs recurring.Groups.["value"].Value, vs (recurring.Groups.["field"].Value.ToUpperInvariant())
+                else
+                    vs "ONE TIME", VNull, VNull
+
             Some
-                [| vs "def"; row.[0]; row.[1]; row.[5]; vs "SYSTEM"; vs "SQL"; row.[3]; vs "ONE TIME"; VNull
-                   row.[2]; VNull; vs ""; VNull; VNull; row.[6]; vs "NOT PRESERVE"; row.[4]; row.[4]; VNull
+                [| vs "def"; row.[0]; row.[1]; row.[5]; vs "SYSTEM"; vs "SQL"; row.[3]; eventType; VNull
+                   intervalValue; intervalField; vs ""; VNull; VNull; row.[6]; vs "NOT PRESERVE"; row.[4]; row.[4]; VNull
                    vs ""; VInt 1L; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
 
 /// One row per user table with NULL partition fields — what real MySQL

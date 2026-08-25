@@ -67,7 +67,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Statement family | Impact | Class |
 |---|---|---|
 | Zero-parameter, single-statement `CREATE/DROP PROCEDURE` and `CALL` are supported; parameters, functions, definer-context execution, compound `BEGIN…END` bodies, `DECLARE`, cursors, handlers, `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
-| One-time `CREATE/DROP EVENT` declarations and metadata are supported; ALTER, recurring schedules, status changes, definer execution, and the scheduler thread remain absent | low | divergence/refusal |
+| One-time and recurring `CREATE/DROP EVENT` declarations and metadata are supported; ALTER, status changes, definer execution, and the scheduler thread remain absent | low | divergence/refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
 | `LOCK TABLES…READ/WRITE` and `UNLOCK TABLES` are accepted without mutual exclusion or access restriction; `HANDLER` and XA transactions remain absent | low | divergence/refusal |
@@ -288,7 +288,7 @@ OLD/NEW images are rejected when the trigger is created.
 
 Working: zero-parameter procedures with one parsed statement body support
 CREATE/DROP/CALL, SHOW CREATE PROCEDURE, SHOW PROCEDURE STATUS, and persisted
-ROUTINES metadata. One-time event declarations support CREATE/DROP, SHOW
+ROUTINES metadata. One-time and recurring event declarations support CREATE/DROP, SHOW
 CREATE EVENT, SHOW EVENTS, and persisted EVENTS metadata. CREATE ROUTINE,
 ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 
@@ -296,7 +296,7 @@ ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 |---|---|---|---|---|
 | Routine language | parameters, functions, compound bodies, local variables, handlers, cursors, control flow, dynamic SQL | zero-parameter procedures with one statement body | medium | refusal |
 | Routine execution context | SQL SECURITY DEFINER/INVOKER and stored sql_mode/charset | procedure body executes with the caller's session context | medium | divergence |
-| Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and metadata persist, but no event is scheduled or executed | medium | refusal |
+| Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and schedule metadata persist, but no event is scheduled or executed | medium | refusal |
 | Event alteration | ALTER EVENT schedule/status/body/rename | absent | low | refusal |
 
 ## 11. Full-text search
