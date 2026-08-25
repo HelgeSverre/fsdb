@@ -702,18 +702,17 @@ type Statement =
     | Update of UpdateStmt
     | Delete of DeleteStmt
     | Truncate of table: string
-    /// `CREATE USER [IF NOT EXISTS] 'name'@'host' [IDENTIFIED BY 'pw'], ...`
-    /// — each account as `(name, host, password)`; host defaults to `'%'`
-    /// when omitted. Executed against `mysql.user` (see `Auth.createUser`);
-    /// no `REQUIRE`/`WITH`/`ACCOUNT LOCK`/role tail — ponytail, add clauses
-    /// when a client actually sends them.
-    | CreateUser of users: (string * string * string option) list * ifNotExists: bool
+    /// `CREATE USER [IF NOT EXISTS] 'name'@'host' [IDENTIFIED BY 'pw'], ...
+    /// [ACCOUNT LOCK|UNLOCK]`; host defaults to `%` when omitted.
+    | CreateUser of users: (string * string * string option) list * ifNotExists: bool * locked: bool
     /// `DROP USER [IF EXISTS] 'name'@'host', ...`
     | DropUser of users: (string * string) list * ifExists: bool
     | RenameUser of users: ((string * string) * (string * string)) list
     /// `ALTER USER [IF EXISTS] 'name'@'host' IDENTIFIED BY 'pw'` — the one
     /// supported alteration (password change).
     | AlterUser of name: string * host: string * password: string * ifExists: bool
+    | CreateRole of users: (string * string) list * ifNotExists: bool
+    | DropRole of users: (string * string) list * ifExists: bool
     /// `GRANT privs ON level TO users [WITH GRANT OPTION]` — `privs` are the
     /// SQL privilege names (`"ALL"` for ALL PRIVILEGES, `"USAGE"` grants
     /// nothing); `level` is `(db, table)`: `(None, None)` = `*.*`,

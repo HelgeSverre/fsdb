@@ -632,6 +632,15 @@ let private authenticateHandshake
 
         match clientHost |> Option.bind (Auth.resolveAccount store resp.Username) with
         | None -> return! deny firstSeq (resp.AuthResponse.Length > 0)
+        | Some(_, cols, row) when Auth.isAccountLocked cols row ->
+            let message =
+                sprintf
+                    "Access denied for user '%s'@'%s'. Account is locked."
+                    resp.Username
+                    (clientHost |> Option.defaultValue "unknown")
+
+            do! writePacketAsync stream { SeqId = firstSeq; Payload = errPayload capabilities 3118 message } |> Async.Ignore
+            return None
         | Some(selected, cols, row) ->
             let stored = Auth.storedPasswordHash cols row
 

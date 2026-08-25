@@ -3165,8 +3165,10 @@ let private identifiedBy: Parser<string, unit> =
 let private createUserStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
-     .>>. sepBy1 (userRef .>>. opt identifiedBy) (sym ","))
-    |>> fun (ifNotExists, users) -> CreateUser(users |> List.map (fun ((n, h), pw) -> n, h, pw), ifNotExists)
+     .>>. sepBy1 (userRef .>>. opt identifiedBy) (sym ",")
+     .>>. opt ((keyword "ACCOUNT" >>. keyword "LOCK" >>% true) <|> (keyword "ACCOUNT" >>. keyword "UNLOCK" >>% false)))
+    |>> fun ((ifNotExists, users), locked) ->
+        CreateUser(users |> List.map (fun ((n, h), pw) -> n, h, pw), ifNotExists, Option.defaultValue false locked)
 
 let private dropUserStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "USER"
@@ -3185,6 +3187,18 @@ let private alterUserStmt: Parser<Statement, unit> =
      .>>. userRef
      .>>. identifiedBy)
     |>> fun ((ifExists, (name, host)), pw) -> AlterUser(name, host, pw, ifExists)
+
+let private createRoleStmt: Parser<Statement, unit> =
+    (keyword "CREATE" >>. keyword "ROLE"
+     >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. sepBy1 userRef (sym ","))
+    |>> fun (ifNotExists, users) -> CreateRole(users, ifNotExists)
+
+let private dropRoleStmt: Parser<Statement, unit> =
+    (keyword "DROP" >>. keyword "ROLE"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. sepBy1 userRef (sym ","))
+    |>> fun (ifExists, users) -> DropRole(users, ifExists)
 
 // ---------------------------------------------------------------------------
 // CREATE TRIGGER / DROP TRIGGER.
@@ -3330,6 +3344,7 @@ let private revokeStmt: Parser<Statement, unit> =
 statementRef.Value <-
     choice
         [ attempt createUserStmt
+          attempt createRoleStmt
           attempt renameUserStmt
           attempt createTriggerStmt
           attempt createViewStmt
@@ -3339,6 +3354,7 @@ statementRef.Value <-
           attempt createTable
           attempt createIndexStmt
           attempt dropUserStmt
+          attempt dropRoleStmt
           attempt dropTriggerStmt
           attempt dropViewStmt
           attempt dropDatabaseStmt

@@ -2380,18 +2380,35 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE USER 'bob'@'%' IDENTIFIED BY 's3cret'")
-                        (CreateUser([ "bob", "%", Some "s3cret" ], false))
+                        (CreateUser([ "bob", "%", Some "s3cret" ], false, false))
                         "quoted with password"
 
                     Expect.equal
                         (parseOk "CREATE USER IF NOT EXISTS bob")
-                        (CreateUser([ "bob", "%", None ], true))
+                        (CreateUser([ "bob", "%", None ], true, false))
                         "bare name defaults host to %"
 
                     Expect.equal
                         (parseOk "CREATE USER 'a'@'localhost', 'b'@'%' IDENTIFIED BY 'pw'")
-                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false))
+                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false, false))
                         "per-account password in a list"
+
+                    Expect.equal
+                        (parseOk "CREATE USER locked ACCOUNT LOCK")
+                        (CreateUser([ "locked", "%", None ], false, true))
+                        "account state"
+
+                testCase "CREATE ROLE and DROP ROLE parse account lists"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE ROLE IF NOT EXISTS 'reader'@'localhost', writer")
+                        (CreateRole([ "reader", "localhost"; "writer", "%" ], true))
+                        "role accounts"
+
+                    Expect.equal
+                        (parseOk "DROP ROLE IF EXISTS reader, writer@localhost")
+                        (DropRole([ "reader", "%"; "writer", "localhost" ], true))
+                        "drop role accounts"
 
                 testCase "GRANT parses privilege lists, all four ON levels, and WITH GRANT OPTION"
                 <| fun _ ->

@@ -613,7 +613,21 @@ let tests =
                   use create = conn2.CreateCommand()
                   create.CommandText <- "CREATE USER 'carol'@'%' IDENTIFIED BY 'cpw'"
                   let! _ = create.ExecuteNonQueryAsync() |> Async.AwaitTask
+
+                  use createLocked = conn2.CreateCommand()
+                  createLocked.CommandText <- "CREATE USER 'locked'@'%' IDENTIFIED BY 'secret' ACCOUNT LOCK"
+                  let! _ = createLocked.ExecuteNonQueryAsync() |> Async.AwaitTask
                   do! conn2.CloseAsync() |> Async.AwaitTask
+
+                  use locked = new MySqlConnector.MySqlConnection(connStr "locked" "secret")
+                  let! lockedResult = locked.OpenAsync() |> Async.AwaitTask |> Async.Catch
+
+                  match lockedResult with
+                  | Choice1Of2() -> failtest "expected the locked account to be denied"
+                  | Choice2Of2 error ->
+                      match mysqlError error with
+                      | Some mysql -> Expect.equal mysql.Number 3118 "locked-account error"
+                      | None -> raise error
 
                   use conn3 = new MySqlConnector.MySqlConnection(connStr "carol" "cpw")
                   do! conn3.OpenAsync() |> Async.AwaitTask

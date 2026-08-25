@@ -221,6 +221,63 @@ let tests =
               | Err(1396, _) -> ()
               | other -> failtestf "expected missing account error 1396, got %A" other
 
+          testCase "roles are locked accounts and retain role-specific duplicate semantics"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              match handle session "CREATE ROLE 'reader'@'%'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected CREATE ROLE to succeed, got %A" other
+
+              match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account "reader" "%") with
+              | Some(columns, row) -> Expect.isTrue (Fsdb.Auth.isAccountLocked columns row) "roles cannot authenticate"
+              | None -> failtest "expected the role account"
+
+              match handle session "SHOW CREATE USER 'reader'@'%'" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) -> Expect.stringContains ddl "ACCOUNT LOCK" "locked state renders"
+              | other -> failtestf "expected SHOW CREATE USER, got %A" other
+
+              match handle session "CREATE ROLE reader" |> snd with
+              | Err(1396, _) -> ()
+              | other -> failtestf "expected duplicate role error, got %A" other
+
+              match handle session "CREATE ROLE IF NOT EXISTS reader" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected duplicate role no-op, got %A" other
+
+              match handle session "DROP ROLE reader" |> snd with
+              | Affected 0UL -> Expect.isNone (Fsdb.Auth.tryUserRow store "reader") "role removed"
+              | other -> failtestf "expected DROP ROLE, got %A" other
+
+          testCase "CREATE USER ACCOUNT LOCK persists the authentication state"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              match handle session "CREATE USER 'locked'@'%' IDENTIFIED BY 'secret' ACCOUNT LOCK" |> snd with
+              | Affected 0UL ->
+                  match Fsdb.Auth.tryUserRow store "locked" with
+                  | Some(columns, row) -> Expect.isTrue (Fsdb.Auth.isAccountLocked columns row) "locked in mysql.user"
+                  | None -> failtest "expected locked user"
+              | other -> failtestf "expected CREATE USER ACCOUNT LOCK, got %A" other
+
+          testCase "role DDL uses its dedicated global privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE USER role_admin"
+              let root, _ = handle root "GRANT CREATE ROLE ON *.* TO role_admin"
+              let roleAdmin = { create 2 store with User = "role_admin" }
+
+              match handle roleAdmin "CREATE ROLE reader" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected CREATE ROLE privilege to authorize creation, got %A" other
+
+              match handle roleAdmin "DROP ROLE reader" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected DROP ROLE to require its own privilege, got %A" other
+
           testCase "SET PASSWORD is enforced: own password is free, someone else's needs CREATE USER"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

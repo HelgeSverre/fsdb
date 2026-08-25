@@ -12227,13 +12227,37 @@ let rec executeAs
                     Storage.commitTransactionEvents store snapshot
                     ids, Affected 0UL
 
-    | CreateUser(users, ifNotExists) ->
+    | CreateUser(users, ifNotExists, locked) ->
         let createOne (name, host, password) =
             match Auth.createUser store name host password with
             | Error(1396, _) when ifNotExists -> Ok()
-            | r -> r
+            | Ok() -> Auth.setAccountLocked store name host locked
+            | error -> error
 
         match users |> traverse createOne with
+        | Ok _ -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
+    | CreateRole(users, ifNotExists) ->
+        let createOne (name, host) =
+            match Auth.createUser store name host None with
+            | Error(1396, _) when ifNotExists -> Ok()
+            | Error(1396, _) -> Error(1396, sprintf "Operation CREATE ROLE failed for '%s'@'%s'" name host)
+            | Ok() -> Auth.setAccountLocked store name host true
+            | error -> error
+
+        match users |> traverse createOne with
+        | Ok _ -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
+    | DropRole(users, ifExists) ->
+        let dropOne (name, host) =
+            match Auth.dropUser store name host with
+            | Error(1396, _) when ifExists -> Ok()
+            | Error(1396, _) -> Error(1396, sprintf "Operation DROP ROLE failed for '%s'@'%s'" name host)
+            | result -> result
+
+        match users |> traverse dropOne with
         | Ok _ -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 

@@ -417,6 +417,17 @@ let setPassword (store: Store) (name: string) (host: string) (password: string) 
         updateSystemRows store "user" (matchUserRow wanted) [ "authentication_string", VString hash ]
         |> Result.map ignore
 
+let setAccountLocked (store: Store) (name: string) (host: string) (locked: bool) : Result<unit, int * string> =
+    let wanted = account name host
+
+    if (tryUserRowForAccount store wanted).IsNone then
+        operationFailed "ALTER USER" name host
+    else
+        updateSystemRows store "user" (matchUserRow wanted) [ "account_locked", VString(if locked then "Y" else "N") ]
+        |> Result.map ignore
+
+let isAccountLocked (cols: ColumnDef list) (row: Value[]) = userColumnText cols row "account_locked" = "Y"
+
 // ---------------------------------------------------------------------------
 // GRANT / REVOKE and privilege checks. Scope hierarchy is MySQL's:
 // global (mysql.user) ⊃ db (mysql.db) ⊃ table (mysql.tables_priv).
@@ -896,6 +907,8 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | DropUser _
     | RenameUser _
     | AlterUser _ -> [ "CREATE USER", Global ]
+    | CreateRole _ -> [ "CREATE ROLE", Global ]
+    | DropRole _ -> [ "DROP ROLE", Global ]
     | Grant(privs, level, _, _)
     | Revoke(privs, level, _) ->
         // MySQL requires the grantor to hold grant option *at the target's
@@ -1130,15 +1143,17 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
         let host = userColumnText cols row "Host"
         let plugin = userColumnText cols row "plugin"
         let hash = userColumnText cols row "authentication_string"
+        let accountState = if isAccountLocked cols row then "LOCK" else "UNLOCK"
         let account = sprintf "`%s`@`%s`" (name.Replace("`", "``")) (host.Replace("`", "``"))
 
         Ok(
             sprintf "CREATE USER for %s@%s" name host,
             sprintf
-                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT"
+                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT %s PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT"
                 account
                 plugin
                 hash
+                accountState
         )
 
 let renderCreateUser (store: Store) (name: string) = renderCreateUserForAccount store (account name "%")
