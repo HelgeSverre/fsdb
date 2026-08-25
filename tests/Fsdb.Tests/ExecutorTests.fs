@@ -3001,6 +3001,18 @@ let tests =
                             "group 'a' is all-NULL (COUNT 0, SUM/AVG NULL), group 'b' has one real value"
                     | other -> failtestf "expected NULL-aware aggregates per group, got %A" other
 
+                testCase "custom aggregates may replace an optimized built-in"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2)" |> ignore
+
+                    let registry = builtins |> registerAggregate "SUM" (fun _ -> VInt 42L)
+
+                    match run store registry "SELECT SUM(n) FROM t" with
+                    | ResultSet(_, [ [ Some "42" ] ]) -> ()
+                    | other -> failtestf "expected the custom SUM implementation, got %A" other
+
                 testCase "a bare non-aggregated column picks the first row of its group (ANY_VALUE-style, ONLY_FULL_GROUP_BY off)"
                 <| fun _ ->
                     let store = newStore ()

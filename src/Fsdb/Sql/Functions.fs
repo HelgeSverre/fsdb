@@ -5620,3 +5620,8 @@ let builtins: Registry =
     |> registerAggregate "BIT_AND" bitAndAgg
     |> registerAggregate "BIT_OR" bitOrAgg
     |> registerAggregate "BIT_XOR" bitXorAgg
+
+let internal isUnmodifiedBuiltinAggregate (name: string) (registry: Registry) =
+    match lookupAggregate name builtins, lookupAggregate name registry with
+    | Some builtin, Some current -> obj.ReferenceEquals(builtin, current)
+    | _ -> false

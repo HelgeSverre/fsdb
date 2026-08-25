@@ -6816,6 +6816,46 @@ and private evalAggregate
 
     match args with
     | [ Star _ ] when isCount -> Ok(VInt(int64 (List.length rows)))
+    | [ innerExpr ]
+        when (upper = "COUNT" || upper = "SUM" || upper = "AVG")
+             && (match innerExpr with Distinct _ -> false | _ -> true)
+             && Functions.isUnmodifiedBuiltinAggregate name registry ->
+        let mutable count = 0L
+        let mutable exactTotal = 0M
+        let mutable total: Value option = None
+        let mutable failure: EvalError option = None
+
+        let add value =
+            count <- count + 1L
+
+            if upper <> "COUNT" then
+                match total, value with
+                | None, VInt integer -> exactTotal <- exactTotal + decimal integer
+                | None, VUInt unsigned -> exactTotal <- exactTotal + decimal unsigned
+                | None, VDecimal number -> exactTotal <- exactTotal + number
+                | None, value when count = 1L -> total <- Some value
+                | None, value -> total <- Some(Value.add (VDecimal exactTotal) value)
+                | Some current, value -> total <- Some(Value.add current value)
+
+        for row in rows do
+            if failure.IsNone then
+                let ctx = ctxFor row
+
+                match evalExpr ctx innerExpr with
+                | Error error -> failure <- Some error
+                | Ok VNull -> ()
+                | Ok value ->
+                    add (if upper = "COUNT" then value else enumNumericOperand ctx innerExpr value)
+
+        match failure with
+        | Some error -> Error error
+        | None when upper = "COUNT" -> Ok(VInt count)
+        | None when count = 0L -> Ok VNull
+        | None when upper = "SUM" -> Ok(total |> Option.defaultValue (VDecimal exactTotal))
+        | None ->
+            total
+            |> Option.defaultValue (VDecimal exactTotal)
+            |> fun sum -> Ok(Value.div sum (VInt count))
     | arg :: rest when isGroupConcat ->
         // `GROUP_CONCAT` folds entirely here rather than through
         // `registry.Aggregates` — see `isAggregateCall`'s doc. `rest` holds
