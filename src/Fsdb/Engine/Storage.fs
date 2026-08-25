@@ -265,101 +265,27 @@ let private createRowLockStripe () =
     { SyncRoot = obj ()
       Owner = None }
 
-/// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
-/// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
-/// storage-level mirror of MySQL's session `FOREIGN_KEY_CHECKS` variable.
-/// Per-session in practice: `Session.create` gives every connection its own
-/// clone of the master `Store` (sharing `Databases`/`Lock`
-/// but with private `ForeignKeyChecks`/`StrictMode`/`ConnectionCollation`
-/// cells), so one connection's `SET` can't flip another's. `QueryHandler`'s
-/// `SET FOREIGN_KEY_CHECKS = 0|1` probe (and Laravel's
-/// `Schema::disableForeignKeyConstraints`, which sends exactly that) calls
-/// `setForeignKeyChecks` on that clone.
+/// Shared catalog state plus session-local coercion and transaction settings.
+/// Session clones share reference-typed synchronization fields but copy the
+/// mutable SQL-mode, FK, and collation values.
 type Store =
-    { /// Every database's table map, each independently guarded by its own
-      /// `Database ref` cell (locked via that same cell — see `withDatabase`)
-      /// — sharded so one database's writes never contend with another's.
-      /// A `ConcurrentDictionary` so `CREATE`/`DROP DATABASE` (adding/
-      /// removing a whole entry) is itself a lock-free, atomic dictionary
-      /// operation that never contends with an unrelated database's row
-      /// writer either (`createDatabase`/`dropDatabase`, `ensureDatabase`).
-      /// Sharding means database A's writers never see database B's writes at
-      /// all, let alone race them — a single store-wide `Catalog` reference
-      /// would be one `Interlocked.CompareExchange` target where every write
-      /// to *any* database invalidates every other writer's compare-exchange
-      /// and forces a full write retry under contention. Not exposed beyond
-      /// this module (no other module needs to
-      /// touch it directly — everything goes through `Store.Catalog`,
-      /// `scan`, `tryUniqueLookup`, or the write ops below).
+    { /// Each mutable cell is the lock and publication point for one database.
       Databases: ConcurrentDictionary<string, Database ref>
       mutable ForeignKeyChecks: bool
-      /// The storage-level mirror of MySQL's session `sql_mode`
-      /// STRICT_TRANS_TABLES/STRICT_ALL_TABLES: `true` rejects a value that
-      /// doesn't fit its column's type with error 1366 (`coerceValue`'s
-      /// default); `false` coerces to `coerceValue`'s non-strict fallback
-      /// instead — 0 for a numeric column, NULL for a nullable temporal one
-      /// (still a hard 1366 on a NOT NULL temporal column; see
-      /// `coerceValue`'s doc for why). Lives on this session's own private
-      /// `Store` clone (see the `ForeignKeyChecks` note above) and is
-      /// re-derived from the *current* session's own `sql_mode` by
-      /// `QueryHandler.executeParsed` before every statement, so it neither
-      /// leaks between connections nor runs stale inside a transaction — see
-      /// the note there and on `beginTransactionSnapshot`. `QueryHandler`'s
-      /// `SET SESSION sql_mode =
-      /// ...` probe (and Laravel's `'strict' => false` connection config,
-      /// which sends `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`) calls
-      /// `setStrictMode` directly too, so `SELECT @@sql_mode` right after a
-      /// `SET` on the same connection reflects it immediately.
+      /// Re-derived from the session's sql_mode before each statement.
       mutable StrictMode: bool
       mutable NoZeroDate: bool
       mutable NoZeroInDate: bool
-      /// The storage-level mirror of MySQL's session
-      /// `collation_connection` — the collation literal-vs-literal string
-      /// comparisons (and literal ORDER BY/LIKE operands) resolve under.
-      /// On this session's own private `Store` clone like `StrictMode`,
-      /// re-derived from the *current* session's own variable by
-      /// `QueryHandler` before every statement, so it never leaks between
-      /// connections. Column comparisons are unaffected — a column's own
-      /// `COLLATE` always wins.
+      /// Applies only when no column or explicit COLLATE supplies precedence.
       mutable ConnectionCollation: Collation.Collation
-      /// Host-registered read-only tables in the reserved `fsdb` schema
-      /// (`Db.registerTable`) — carried on the store because the store is
-      /// what already reaches every `Executor.resolveTableRef` call site.
-      /// Mutable for registration only: register before serving traffic
-      /// (like `OnCommit` subscription, writes aren't synchronized against
-      /// in-flight queries). An *overlay* on the real `fsdb` database
-      /// (which is also `defaultDatabase`): a registered name wins over a
-      /// same-named real table, other real tables resolve unchanged.
-      /// Lower-invariant keys.
+      /// Lowercase names overlay real tables in the reserved fsdb schema.
       mutable VirtualTables: Map<string, Functions.VirtualTable>
-      /// Fires once per committed write, under `Lock`, right after the
-      /// catalog swap that made it visible — empty (the default) means no
-      /// subscriber, so every write path's event-construction work still
-      /// happens (it's cheap: the row values were already computed for the
-      /// write itself) but delivery is a no-op. Multi-subscriber
-      /// (`Persistence.attach`'s WAL appender and any number of
-      /// `Db.onCommit` handlers coexist), called in registration order;
-      /// subscribe (`store.OnCommit.Add handler`) before serving traffic —
-      /// registration isn't synchronized against in-flight commits, only
-      /// dispatch is (see `emit`). A handler must not write back into the
-      /// store (re-entry would deadlock on `Lock`).
+      /// Synchronous ordered subscribers run after catalog publication.
+      /// Handlers must not re-enter the store while `Lock` is held.
       OnCommit: ResizeArray<CommitEvent -> unit>
-      /// `Some` only for a transaction's private snapshot `Store` (see
-      /// `beginTransactionSnapshot`): while set, every write path appends its
-      /// event here instead of calling `OnCommit`, so nothing is visible
-      /// outside the transaction until `commitTransactionEvents` flushes the
-      /// buffer as one `TransactionCommitted` on the real store — a ROLLBACK
-      /// just discards the snapshot, buffer and all.
+      /// Transaction snapshots buffer physical events until catalog merge.
       mutable PendingEvents: ResizeArray<CommitEvent> option
-      /// Coordinates `OnCommit` dispatch and catalog membership changes.
-      /// Ordinary row and transaction writes lock only
-      /// their database's `Database ref` cell (see `withDatabase`), so writers
-      /// to different databases do not wait here. `OnCommit`'s one subscriber
-      /// (`Persistence.attach`'s WAL appender) isn't safe to call
-      /// concurrently from two databases' writer threads at once — it
-      /// appends to one shared file and tracks rotation state in a plain
-      /// `ref` — so its calls stay ordered by this lock, same as
-      /// `Persistence.snapshotNow`'s own use of it.
+      /// Serializes catalog membership, commit delivery, and snapshot rotation.
       Lock: obj
       /// Indexed updates coordinate stable row identities before reading
       /// their current values. Logical ownership may span transaction
@@ -368,58 +294,26 @@ type Store =
       RowLockSequence: int64 array
       TransactionLocks: TransactionLockContext option }
 
-    /// Assembles a point-in-time `Catalog` (whole-map) view across every
-    /// database's independent slot — an O(number of databases) allocation,
-    /// not O(rows), paid only by callers that genuinely need a snapshot
-    /// spanning every database at once: a transaction's BEGIN/savepoint
-    /// base, `information_schema`, and WAL/snapshot persistence. A
-    /// live-traffic hot path (`scan`, `tryUniqueLookup`, `databaseExists`)
-    /// reads `Databases` directly instead, to avoid paying this rebuild once
-    /// per row/query.
-    ///
-    /// ponytail: this reads each database's slot one at a time while other
-    /// databases' writers keep running, so it isn't a single atomic instant
-    /// across every database — a concurrent cross-database observer could in
-    /// principle see database A's tables as of slightly after database B's.
-    /// The one place this could ever surface is a single `information_schema`
-    /// `SELECT` spanning multiple databases mid another database's unrelated
-    /// commit; each database's own transactional/snapshot correctness (what
-    /// every torture lane actually checks) is untouched — this relaxation
-    /// only affects a *global* view stitched from independent databases, not
-    /// any one database's own consistency. Upgrade to a store-wide epoch
-    /// counter if a caller ever needs `information_schema` to be
-    /// linearizable across databases too.
+    /// Materializes one catalog root in O(database count), with row structures
+    /// shared immutably. Hot single-database paths read `Databases` directly.
+    /// ponytail: slots are sampled independently, so cross-database snapshots
+    /// are not linearizable; add a store epoch if a consumer requires that.
     member this.Catalog
         with get () : Catalog = this.Databases |> Seq.map (fun kv -> kv.Key, kv.Value.Value) |> Map.ofSeq
-        /// Wholesale-replaces every database's slot from `catalog` in one go
-        /// — correct only when nothing else can be reading/writing
-        /// `Databases` concurrently: `Persistence.load`'s snapshot/WAL replay
-        /// (before the server starts accepting connections), a
-        /// transaction's own private snapshot store resetting itself to an
-        /// earlier savepoint (`QueryHandler.rollbackToSavepoint` — that
-        /// snapshot is only ever touched by its one owning connection, never
-        /// shared), and test code building a store's contents directly.
-        /// Never used on the *live, shared* store; see `mergeCatalogInto`/
-        /// `bumpAutoIncrementsInto` for the concurrency-safe, per-database
-        /// merges real commits use instead.
+        /// Whole-catalog replacement is safe only during startup, private
+        /// transaction rollback, or isolated test setup.
         and set (catalog: Catalog) =
             this.Databases.Clear()
 
             for KeyValue(dbName, db) in catalog do
                 this.Databases.[dbName] <- ref db
 
-/// As `store.Catalog <- catalog`, spelled as a function for callers that
-/// prefer piping/partial application over the property-set syntax.
 let setCatalog (store: Store) (catalog: Catalog) : unit = store.Catalog <- catalog
 
-// `create` itself lives after `reindexTable` below — it seeds the built-in
-// `mysql` system schema, whose bootstrap needs the index rebuild.
+// The mysql bootstrap requires reindexTable, so create is defined below it.
 
-/// Delivers `event` (if any): buffers it if `store` is a transaction
-/// snapshot (`PendingEvents` — private to the transaction's own thread, so
-/// no locking needed), otherwise hands it to `OnCommit` under `store.Lock`
-/// if someone's listening (see the doc on `Lock`). Always called after the
-/// catalog swap that made the event's write visible has already landed.
+/// Buffers private transaction events or synchronously publishes live ones.
+/// Catalog publication always precedes delivery.
 let private emit (store: Store) (event: CommitEvent option) : unit =
     match event with
     | None -> ()
@@ -430,21 +324,9 @@ let private emit (store: Store) (event: CommitEvent option) : unit =
             if store.OnCommit.Count > 0 then
                 lock store.Lock (fun () -> for f in store.OnCommit do f e)
 
-/// A private per-transaction catalog snapshot seeded from `store`'s current
-/// catalog (see `Session.Transaction`) — writes against it stay invisible
-/// to `store` until `commitTransactionEvents` flushes its buffered events
-/// and the caller merges its catalog back in; a ROLLBACK just drops it.
-/// Only buffers events at all when `store` actually has a subscriber —
-/// otherwise every write during the transaction skips straight past
-/// `emit`'s buffer check, same zero-overhead-when-nobody's-listening
-/// property as the non-transactional path.
+/// Creates a structurally shared private catalog with independent publication
+/// cells. Event buffering is omitted when no outer subscriber needs it.
 let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : Store =
-    // A fresh `Database ref` cell per database, each wrapping the *value*
-    // `store`'s cell holds right now — sharing the immutable `Database` Map
-    // (cheap, structural sharing) but never the mutable cell itself, so a
-    // write against the snapshot's copy can never be seen by (or race) a
-    // concurrent write against the live store's own cell for the same
-    // database.
     let databases = ConcurrentDictionary<string, Database ref>()
 
     for KeyValue(dbName, database) in catalog do
@@ -452,28 +334,14 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
 
     { Databases = databases
       ForeignKeyChecks = store.ForeignKeyChecks
-      // Not seeded from `store.StrictMode` — `QueryHandler.executeStatement`
-      // re-derives it from the session's own `sql_mode` before every
-      // statement (see the note there), so whatever this starts as is
-      // always overwritten before a transaction's first real statement
-      // runs.
+      // QueryHandler derives the transaction's effective mode before use.
       StrictMode = true
       NoZeroDate = store.NoZeroDate
       NoZeroInDate = store.NoZeroInDate
       ConnectionCollation = store.ConnectionCollation
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
-      // Allocate a buffer whenever `store` itself would ever deliver an
-      // event — either it has a real `OnCommit` subscriber, or `store` is
-      // *itself* a transaction snapshot with its own `PendingEvents` already
-      // buffering. The latter is exactly `Executor`'s multi-table
-      // `UPDATE`/`DELETE` path: it opens a private snapshot of the
-      // *transaction's own* snapshot store to isolate one statement's
-      // writes, then commits that snapshot back via
-      // `commitTransactionEvents`. A snapshot's `OnCommit` is always `None`
-      // (only the real store has one), so `PendingEvents.IsSome` is the only
-      // signal that events built here must be buffered rather than dropped
-      // by `emit`'s no-buffer-no-subscriber branch.
+      // Nested statement snapshots inherit the outer transaction's buffering.
       PendingEvents = if store.OnCommit.Count > 0 || store.PendingEvents.IsSome then Some(ResizeArray()) else None
       Lock = obj ()
       RowLocks = store.RowLocks
@@ -528,24 +396,8 @@ let releaseTransactionLocks (store: Store) : unit =
         let stripes = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
         releaseLockStripes context stripes
 
-/// Flushes a committed transaction's buffered events onto `store`, if it
-/// buffered any — a no-op for an empty or subscriber-less snapshot. Call
-/// after merging `snapshot`'s catalog back in (see
-/// `QueryHandler.commitSession`); there's no rollback counterpart, since
-/// discarding `snapshot` discards its buffer too.
-///
-/// `store` itself being a transaction snapshot (its own `PendingEvents` is
-/// `Some` — the nested-statement case `beginTransactionSnapshot`'s doc
-/// describes) appends `snapshot`'s raw events onto `store`'s own buffer
-/// flat, rather than wrapping them in a nested `TransactionCommitted` —
-/// `Persistence.applyEvent` replays a `TransactionCommitted`'s member events
-/// one level deep, so a `TransactionCommitted [ TransactionCommitted [...] ]`
-/// would need it to recurse (or would silently drop the inner layer) for no
-/// reason: every event this transaction's real COMMIT eventually flushes to
-/// the WAL is already flat by construction, wrapped exactly once at the
-/// real top-level commit. Only when `store` is the real, live store (no
-/// `PendingEvents` of its own) does this wrap `snapshot`'s events in one
-/// `TransactionCommitted`.
+/// Publishes buffered events after catalog merge. Nested statement snapshots
+/// stay flat; only the outer commit receives a TransactionCommitted wrapper.
 let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
     match snapshot.PendingEvents with
     | Some buffer when buffer.Count > 0 ->
@@ -554,14 +406,9 @@ let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
         | None -> emit store (Some(TransactionCommitted(List.ofSeq buffer)))
     | _ -> ()
 
-/// `SET FOREIGN_KEY_CHECKS = 0|1` — wired from `QueryHandler`'s `SET` probe
-/// (see the note on `Store.ForeignKeyChecks`).
 let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
 
-/// `SET SESSION sql_mode = ...` — wired from `QueryHandler`'s `SET` probe
-/// (see the note on `Store.StrictMode`). `strict` is whether the new mode
-/// still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES.
 let setConnectionCollation (store: Store) (collation: Collation.Collation) : unit = store.ConnectionCollation <- collation
 
 let setStrictMode (store: Store) (strict: bool) : unit =
@@ -2076,17 +1923,10 @@ let acquireTransactionRows
     | Some _ -> withRowLocksFor timeout store dbName tableName rowIds ignore
     | None -> invalidArg (nameof store) "transaction row claims require a transaction snapshot"
 
-// ---------------------------------------------------------------------------
-// The built-in `mysql` system schema: real stored tables (not virtual
-// projections), so `USE mysql`, `SELECT ... FROM mysql.user`, SHOW TABLES,
-// direct DML, and WAL/snapshot persistence all ride the ordinary catalog
-// paths with zero special-casing. Column shapes follow MySQL 8.4
-// (oracle-verified); the functionally-relevant subset of MySQL's 38 tables
-// exist. Bootstrapped by `create` below and re-ensured after a snapshot
-// load (`ensureMysqlSchema`) so pre-feature snapshots pick it up.
+// mysql.* uses ordinary stored tables, including DML and persistence paths.
+// Column shapes follow MySQL 8.4.
 // ponytail: no charset/collation fidelity on these columns (MySQL uses
 // utf8mb3_bin/ascii here) — add if a client diff ever cares.
-// ---------------------------------------------------------------------------
 
 let private sysCol (name: string) (ty: ColumnType) (nullable: bool) (dflt: Value option) : ColumnDef =
     { Name = name

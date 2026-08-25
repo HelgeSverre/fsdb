@@ -1,20 +1,6 @@
-/// Opt-in durability (`--data-dir`): WAL + snapshot, replay on startup.
-/// `Db.withDataDir` is the door in: `load` rebuilds a
-/// `Store` from whatever's on disk, `attach` subscribes it (via
-/// `Storage.Store.OnCommit`) to keep writing.
-///
-/// Row-level events (`RowsInserted`/`RowsUpdated`/`RowsDeleted`) already
-/// carry physically-evaluated `Value[]`s — see `Storage.CommitEvent` — so
-/// replaying them is "write exactly these values back", never "re-run an
-/// expression" (the whole point: `INSERT ... VALUES (NOW(), UUID())`
-/// replays to the *same* row, not a freshly-evaluated one).
-///
-/// Both halves of persistence are binary. The WAL is `[len][crc32][payload]`
-/// records over a `CommitEvent` payload; the snapshot is a self-delimiting
-/// tree (`db count` → tables → rows) over the same codecs. Everything encodes
-/// through `Binary.Writer`/`Value.encodeValue` — no JSON anywhere. Replay
-/// calls `Storage`'s own DDL functions directly (`Executor.execute` isn't
-/// reachable — `Executor.fs` compiles *after* this file).
+/// Opt-in binary WAL and snapshot durability. Physical row events preserve
+/// evaluated values during replay; DDL reuses Storage because Executor
+/// compiles after this module.
 module Fsdb.Persistence
 
 open System
@@ -28,11 +14,7 @@ open Fsdb.Storage
 let private walFileName = "wal.bin"
 let private snapshotFileName = "snapshot.fsdb"
 
-/// 4-byte magic that opens every `snapshot.fsdb`/`.new` — the first line of
-/// defense against a torn/zero-filled `.new` being accepted as an empty-but-
-/// valid catalog (a truncated file's leading bytes read as zero, which
-/// `decodeCatalog` alone happily parses as `dbCount = 0`). Paired with the
-/// trailing length+CRC below for the rest of the file.
+/// Snapshot magic prevents a torn zero-filled file from decoding as an empty catalog.
 let private legacySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x31uy |] // "FSN1"
 let private columnCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |] // "FSN2"
 let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x33uy |] // "FSN3"
@@ -43,11 +25,8 @@ type private SnapshotFormat =
 
 let private currentSnapshotFormat = { ColumnComments = true; TableComments = true }
 
-/// Trailer written right after the catalog payload: `[int64 payload
-/// length][uint32 crc32]`. Same incremental IEEE-802.3 CRC as
-/// `Binary.crc32` (reimplemented here, not imported, so it can be folded in
-/// one flushed chunk at a time instead of requiring the whole multi-GB
-/// payload as one `byte[]` — see `writeCatalog`).
+/// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
+/// CRC avoids materializing a multi-gigabyte payload.
 let private snapshotTrailerSize = 12
 
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
@@ -77,41 +56,25 @@ let private crc32Update (crc: uint32) (data: byte[]) (count: int) : uint32 =
 
     c
 
-/// `PosixSignalRegistration.Create` returns a disposable that unregisters
-/// its handler when finalized — `attach`'s SIGTERM/SIGINT registrations
-/// have to stay reachable for the process's whole lifetime, or the first GC
-/// silently stops the shutdown snapshot from firing. See `attach`.
+/// Signal registrations must remain rooted or finalization unregisters them.
 let private shutdownRegistrations = ResizeArray<IDisposable>()
 
 [<DllImport("libc", SetLastError = true)>]
 extern int private fsync(int fd)
 
-/// fsync-before-ack without .NET's `Flush(true)`: on macOS `FileStream.Flush(true)`
-/// issues `fcntl(fd, F_FULLFSYNC)` — a full drive-write-cache flush costing
-/// ~5 ms per call here — while plain `fsync` is ~16 us. MySQL's default
-/// `innodb_flush_method` on macOS is plain `fsync`, so this matches its
-/// durability semantics exactly: a write survives an OS crash, not a power
-/// loss that also drops the drive's write cache. `Flush(false)` pushes the
-/// .NET buffer out first; the raw `fsync` then orders it.
+/// Plain fsync matches MySQL's default macOS durability; Flush(true) uses the
+/// materially stronger and slower F_FULLFSYNC.
 let private flushToDisk (s: FileStream) : unit =
     s.Flush false
     let rc = fsync(s.SafeFileHandle.DangerousGetHandle().ToInt32())
 
     if rc <> 0 then
-        // A `0` return is the only proof the bytes actually reached disk;
-        // silently ignoring EIO/ENOSPC here means every caller above
-        // (WAL append, snapshot write) goes on believing a write is durable
-        // when it isn't. Same "crash rather than serve an unprovable
-        // durability guarantee" call `attach`'s WAL-append failure makes.
+        // Continuing after fsync failure would falsely acknowledge durability.
         let err = Marshal.GetLastWin32Error()
         Environment.FailFast(sprintf "fsdb: fatal fsync failure (errno %d) — write cannot be confirmed durable" err)
 
-/// Fsyncs `dir` itself so a rename into it (`File.Move .new -> snapshot.fsdb`)
-/// survives a crash — a file's own `flushToDisk` only guarantees the file's
-/// *bytes*, not that the directory entry pointing at its new name landed.
-/// POSIX-only, same as `fsync` above (no Windows guard); best-effort since
-/// a directory that fails to `open` here (e.g. already gone) isn't itself
-/// an unwritten row to lose sleep over.
+/// A file fsync does not persist the directory entry created by snapshot rename.
+/// Directory fsync is best-effort because the durable file bytes remain valid.
 [<DllImport("libc", SetLastError = true, EntryPoint = "open")>]
 extern int private posixOpen(string path, int flags)
 
@@ -126,12 +89,7 @@ let private fsyncDir (dir: string) : unit =
         fsync fd |> ignore
         posixClose fd |> ignore
 
-// ---------------------------------------------------------------------
-// Binary codecs: each DU encodes as a tag byte + its fields, written with
-// `Binary.Writer`; `decodeXxx` is each `encodeXxx`'s exact inverse. Options
-// are presence-flagged, lists are length-prefixed, so every record is
-// self-delimiting and a multi-GB snapshot needs no length table.
-// ---------------------------------------------------------------------
+// Tagged, length-delimited codecs keep WAL and snapshots streamable.
 
 let private writeBool (w: Writer) (b: bool) = w.WriteByte(if b then 1uy else 0uy)
 
@@ -160,10 +118,6 @@ let private writeStrList (w: Writer) (xs: string list) =
 let private readStrList (r: #IReader) : string list =
     List.init (r.ReadInt32LE()) (fun _ -> readStr r)
 
-// ---------------------------------------------------------------------
-// `Ast.ColumnType`
-// ---------------------------------------------------------------------
-
 let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     match t with
     | TTinyInt u -> w.WriteByte 0x01uy; writeBool w u
@@ -191,12 +145,7 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TDouble -> w.WriteByte 0x15uy
     | TFloat -> w.WriteByte 0x16uy
     | TDate -> w.WriteByte 0x17uy
-    // An fsp byte rides after the tag for the three fractional-second types
-    // so a `DATETIME(6)` column survives a snapshot/WAL round-trip with its
-    // precision. The persistence format carries no version field, so a
-    // snapshot encoding these tags without the trailing fsp byte would be
-    // misread — acceptable pre-1.0, and self-consistent for any data this
-    // build both wrote and reads.
+    // Fractional precision is part of the persisted type identity.
     | TDateTime fsp -> w.WriteByte 0x18uy; w.WriteByte(byte fsp)
     | TTimestamp fsp -> w.WriteByte 0x19uy; w.WriteByte(byte fsp)
     | TTime fsp -> w.WriteByte 0x1Auy; w.WriteByte(byte fsp)
@@ -265,13 +214,8 @@ let private decodeColumnType (r: #IReader) : ColumnType =
         TGeometry kind
     | tag -> failwithf "Persistence: unknown ColumnType tag 0x%02x in WAL/snapshot" tag
 
-// ---------------------------------------------------------------------
-// `Ast.Expr` — the only place one needs to survive the WAL/snapshot at all
-// is `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`), and MySQL itself
-// rejects a subquery there, so `InSubquery`/quantified comparisons/`Exists`/`Subquery` fail loudly
-// rather than needing a `SelectStmt` encoder too — a real migration can't
-// produce one here to lose in the first place.
-// ---------------------------------------------------------------------
+// Persisted expressions belong to generated columns, where MySQL rejects
+// subqueries; unsupported query-bearing nodes therefore fail explicitly.
 
 let private encodeOp (w: Writer) (op: Op) : unit =
     w.WriteByte(
@@ -441,10 +385,6 @@ let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
 
 let private decodeExpr (r: #IReader) : Expr = decodeExprAt 0 r
 
-// ---------------------------------------------------------------------
-// `Ast.ColumnDefault` / `ColumnDef` / `IndexDef` / `ForeignKeyDef`
-// ---------------------------------------------------------------------
-
 let private encodeColumnDefault (w: Writer) (d: ColumnDefault) : unit =
     match d with
     | DConst v -> w.WriteByte 0x01uy; encodeValue w v
@@ -458,11 +398,7 @@ let private decodeColumnDefault (r: #IReader) : ColumnDefault =
     | 0x03uy -> DExpression(decodeExpr r)
     | tag -> failwithf "Persistence: unknown ColumnDefault tag 0x%02x" tag
 
-/// `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`) round-trips through
-/// the `Expr` codec above — without it, a generated column silently stopped
-/// being computed after a restart (new rows got `NULL` where MySQL computes
-/// a value; Laravel Pulse's `key_hash ... AS (unhex(md5(key)))` is exactly
-/// this shape).
+/// Generated expressions must survive restart or later writes compute NULL.
 let private encodeColumnDef (includeComment: bool) (w: Writer) (c: ColumnDef) : unit =
     writeStr w c.Name
     encodeColumnType w c.Type
@@ -478,8 +414,7 @@ let private encodeColumnDef (includeComment: bool) (w: Writer) (c: ColumnDef) : 
     writeBool w c.PrimaryKey
     writeBool w c.Unique
 
-    // Tag doubles as the VIRTUAL/STORED kind: old snapshots wrote 1uy for
-    // every generated column, which decodes as Virtual (MySQL's default).
+    // Tag 1 remains Virtual for snapshots predating an explicit storage kind.
     match c.Generated with
     | None -> w.WriteByte 0uy
     | Some(g, Virtual) ->
@@ -541,12 +476,7 @@ let private decodeForeignKeyDef (r: #IReader) : ForeignKeyDef =
       OnDelete = readOptStr r
       OnUpdate = readOptStr r }
 
-// ---------------------------------------------------------------------
-// `Ast.AlterAction` / `Ast.Statement` — only the DDL shapes schema events
-// carry;
-// any other `Statement` case reaching here would be a `Storage` bug, not a
-// WAL-format one, so it's a hard `failwithf` rather than a silent skip.
-// ---------------------------------------------------------------------
+// Commit events persist only DDL statement shapes; other statements fail loudly.
 
 let private encodeColumnPosition (w: Writer) (p: ColumnPosition) : unit =
     match p with
@@ -682,11 +612,6 @@ let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
     // 0x07/0x08 are retired — see `encodeStatement`.
     | tag -> failwithf "Persistence: unknown Statement tag 0x%02x in WAL/snapshot" tag
 
-// ---------------------------------------------------------------------
-// `Storage.CommitEvent` — one WAL record each, binary. The [len][crc][payload]
-// framing around the payload lives in `attach` and `replayWal`.
-// ---------------------------------------------------------------------
-
 let private KindRowsInserted = 0x01uy
 let private KindRowsUpdated = 0x02uy
 let private KindRowsDeleted = 0x03uy
@@ -796,9 +721,7 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
 
 let private decodeEvent (r: #IReader) : CommitEvent = decodeEventAt 0 r
 
-/// One framed WAL record: `[int32 payload length][uint32 crc32][payload]`.
-/// Public so the tests can hand-build WAL files (and torn tails) without
-/// reimplementing the framing.
+/// Encodes `[int32 payload length][uint32 crc32][payload]`.
 let encodeWalRecord (event: CommitEvent) : byte[] =
     let payloadWriter = Writer()
     encodeEvent payloadWriter event
@@ -810,12 +733,7 @@ let encodeWalRecord (event: CommitEvent) : byte[] =
     frame.WriteBytes payload
     frame.ToArray()
 
-// ---------------------------------------------------------------------
-// Replay: applies a decoded `CommitEvent` to a live `Store` via `Storage`'s
-// own public write functions — row events write the exact physical values
-// back (see the module doc), DDL events redo the same `Storage` call the
-// original statement made.
-// ---------------------------------------------------------------------
+// Replay preserves physical row values and routes DDL through Storage.
 
 let private warn (context: string) (result: Result<'a, StorageError>) : unit =
     match result with
@@ -971,11 +889,7 @@ let private replayWal (store: Store) (walPath: string) : int64 =
 
         offset
 
-// ---------------------------------------------------------------------
-// Snapshot: the whole catalog, binary, written atomically (tmp + rename).
-// The codec below is the same tag-byte scheme as the WAL; rows reuse
-// `encodeRowBin`/`decodeRowBin` so a snapshot and a WAL share one row format.
-// ---------------------------------------------------------------------
+// Snapshots share the WAL row codec and publish through an atomic rename.
 
 let private encodeTableMeta (w: Writer) (t: Table) : unit =
     writeStr w t.OriginalName
@@ -1135,27 +1049,10 @@ let private decodeCatalog (format: SnapshotFormat) (r: #IReader) : Catalog =
           dbName, tables ]
     |> Map.ofList
 
-/// Snapshots `store`'s whole catalog to `dataDir/snapshot.fsdb` and
-/// truncates the WAL back to empty. Safe to call any time — holds
-/// `store.Lock` for the duration, same as every other write.
-///
-/// Ordered (and fsynced) so a crash at any point still leaves `load` a
-/// consistent state to recover from: write the *whole* catalog to
-/// `snapshot.fsdb.new` through a `FileStream` and `flushToDisk` (an fsync,
-/// matching `attach`'s WAL writes — `File.WriteAllText` never syncs, so the
-/// old tmp-file dance could lose the snapshot to a power loss right after
-/// the WAL truncation it's supposed to be a backup for), *then* truncate
-/// the WAL, *then* rename `.new` into place. A crash between the fsync and
-/// the rename leaves both `.new` (complete) and the old `snapshot.fsdb`
-/// (stale but harmless) plus a truncated WAL on disk; `load` prefers `.new`
-/// when it's there and parses cleanly. A crash *before* the fsync leaves an
-/// incomplete/absent `.new` and the WAL untouched, so `load` falls back to
-/// the old snapshot + full WAL replay — nothing lost either way.
-/// The filesystem half of `snapshotNow`, factored out so `attach`'s
-/// rotation/shutdown paths (see `attach`'s `replica`) can write a snapshot
-/// from a catalog other than the live `store.Catalog` while still sharing
-/// every on-disk guarantee (integrity trailer, fsync, fsynced rename).
-/// Callers are responsible for holding `store.Lock` for the duration.
+/// Writes and fsyncs `.new`, truncates the WAL, then atomically renames the
+/// snapshot. Recovery prefers a verified `.new`, preserving either the old
+/// snapshot plus WAL or the complete replacement across every crash point.
+/// Callers serialize this sequence with `store.Lock`.
 let private writeSnapshotAndTruncate (dataDir: string) (catalog: Catalog) : unit =
     Directory.CreateDirectory dataDir |> ignore
     let finalPath = Path.Combine(dataDir, snapshotFileName)
@@ -1172,11 +1069,7 @@ let private writeSnapshotAndTruncate (dataDir: string) (catalog: Catalog) : unit
 let snapshotNow (dataDir: string) (store: Store) : unit =
     lock store.Lock (fun () -> writeSnapshotAndTruncate dataDir store.Catalog)
 
-/// Loads durable state from `dataDir` into a fresh `Store`: the snapshot if
-/// one exists, then any WAL entries written after it. Call once at startup,
-/// before `attach` subscribes the result to further writes. An empty/
-/// nonexistent `dataDir` loads the same empty `Store` a plain `Storage.create
-/// ()` would.
+/// Loads a verified snapshot followed by its valid WAL prefix.
 let load (dataDir: string) : Store =
     let store = Storage.create ()
     Directory.CreateDirectory dataDir |> ignore
@@ -1184,21 +1077,8 @@ let load (dataDir: string) : Store =
     let newPath = snapshotPath + ".new"
     let walPath = Path.Combine(dataDir, walFileName)
 
-    // See `snapshotNow`: a fully-written `.new` is a superset of whatever's
-    // in the WAL (it's fsynced *before* the WAL is truncated), so prefer it
-    // and skip the WAL entirely rather than double-applying what it already
-    // has. A `.new` that fails to parse means the crash landed mid-write,
-    // before the fsync — it's garbage, not authoritative; fall through to
-    // the untouched old snapshot + full WAL instead.
-    // A streamed reader, not `File.ReadAllBytes`: a multi-GB snapshot would
-    // exceed the `byte[]` size limit if slurped whole. `StreamReader` decodes
-    // it a buffer at a time.
-    // Skip an `FSN1`/`FSN2`/`FSN3` magic only when it's actually there. A committed
-    // `snapshot.fsdb` written before magic/CRC framing existed is pure
-    // payload from offset 0 — seeking +4 unconditionally would drop its
-    // first 4 bytes and crash-loop the server on every start after an
-    // upgrade. `.new` always carries the magic (`verifySnapshotIntegrity`
-    // requires it), so only the legacy committed snapshot needs this.
+    // Streaming permits snapshots larger than the runtime byte-array limit.
+    // Legacy unframed snapshots begin at offset zero; framed versions skip magic.
     let readSnapshot (path: string) : Catalog =
         use s = new FileStream(path, FileMode.Open, FileAccess.Read)
         let header = Array.zeroCreate<byte> snapshotMagic.Length
@@ -1213,10 +1093,7 @@ let load (dataDir: string) : Store =
         s.Seek(start, SeekOrigin.Begin) |> ignore
         decodeCatalog format (StreamReader(s))
 
-    // `verifySnapshotIntegrity` first: a `.new` that fails its magic/length/
-    // CRC check is a torn write from a crash mid-`writeCatalog`, not
-    // authoritative data — falls straight through to the untouched old
-    // snapshot + full WAL below, same as a `.new` that doesn't exist at all.
+    // A torn `.new` cannot supersede the old snapshot and WAL.
     let loadedFromNew =
         File.Exists newPath
         && verifySnapshotIntegrity newPath
@@ -1234,82 +1111,40 @@ let load (dataDir: string) : Store =
         if File.Exists snapshotPath then
             setCatalog store (readSnapshot snapshotPath)
 
-        // A pre-feature snapshot has no `mysql` system schema; re-seed it
-        // *before* replay so WAL events touching mysql.* find their tables.
+        // Legacy snapshots need mysql.* before replay can apply account events.
         Storage.ensureMysqlSchema store
 
-        // The WAL holds rows that already passed every check once, at
-        // commit time — re-validating foreign keys on replay only risks
-        // dropping one written under `SET FOREIGN_KEY_CHECKS = 0` (wired up
-        // at `QueryHandler.fs`, used by Laravel migrations/seeders), since
-        // event order already preserves whatever check *was* enforced.
+        // Physical events already passed the commit-time FK policy.
         store.ForeignKeyChecks <- false
         let goodOffset = replayWal store walPath
         store.ForeignKeyChecks <- true
 
-        // Row replay leaves derived indexes stale until this one rebuild.
+        // Derived indexes are rebuilt once after all physical events land.
         reindexAllForReplay store
 
-        // A torn final line (`kill -9` mid-append) must not poison the WAL
-        // forever — see `replayWal`'s doc comment.
+        // Discard a torn or invalid WAL suffix after the last valid frame.
         if File.Exists walPath && FileInfo(walPath).Length <> goodOffset then
             use fs = new FileStream(walPath, FileMode.Open, FileAccess.Write)
             fs.SetLength goodOffset
 
-    // Covers the `.new`-snapshot path above the same way (no-op if the
-    // snapshot already carried the schema, or the else-branch re-seeded it).
     Storage.ensureMysqlSchema store
     store
 
-/// Subscribes `store` to `Storage.Store.OnCommit`, appending every commit as
-/// one framed binary record to `dataDir/wal.bin`, fsynced before the write
-/// that triggered it returns — durability means fsync-before-ack. Opens,
-/// writes and closes the file fresh per record rather than holding one
-/// long-lived handle: `snapshotNow` (called both below, on rotation, and by
-/// any other caller) truncates this same file by path, and a cached
-/// `FileStream`'s internal position doesn't know that happened — its next
-/// write would land at its old (now-stale) offset, zero-filling the gap in
-/// between. Opening fresh every time always sees the file's true current
-/// end. ponytail: one open + `fsync` per commit, no group-commit batching or
-/// handle reuse; add a batching knob if write throughput ever needs it.
-///
-/// Auto-rotates (snapshot + WAL truncate, via `snapshotNow`) once the WAL
-/// crosses `Limits.walRotateBytes`/`Limits.walRotateEntries`, and does one last rotation
-/// when the process gets a SIGTERM/SIGINT so a graceful shutdown always
-/// leaves a fresh snapshot behind (a `kill -9` skips this — replaying the
-/// WAL from the last snapshot is what that's for).
+/// Appends and fsyncs one framed WAL record before acknowledging each commit.
+/// A fresh handle observes snapshot truncation without stale stream offsets.
+/// ponytail: group commit requires concurrent publication into a batching
+/// writer rather than invoking subscribers under `Store.Lock`.
 let attach (dataDir: string) (store: Store) : unit =
     Directory.CreateDirectory dataDir |> ignore
     let walPath = Path.Combine(dataDir, walFileName)
     let entryCount = ref 0
 
-    // `Storage`'s writers publish a mutation to `store.Catalog` (the
-    // `Database ref` swap in `withDatabase`) and only *afterwards* call
-    // `emit`, which is what actually reaches `appendRecord` below — two
-    // separate, unlocked steps. A rotation/shutdown snapshot that read
-    // `store.Catalog` directly could land in that gap: it'd capture a row
-    // that's visible in the catalog but whose WAL record hasn't been
-    // appended yet, and — since the same snapshot also truncates the WAL —
-    // that record then lands in the *truncated* WAL right after, applying
-    // the row twice on the next replay (`load`'s snapshot-then-WAL replay
-    // has no way to tell the duplicate apart from a real second insert).
-    //
-    // `replica` closes that window by never trusting the live catalog for a
-    // snapshot at all: it starts as a copy of `store`'s catalog at `attach`
-    // time (before any commit can reach it) and from then on only ever
-    // advances by replaying an `event` right here, immediately after that
-    // same event's WAL record is confirmed on disk — both steps inside the
-    // one `store.Lock` critical section `emit` already wraps every
-    // `appendRecord` call in. So `replica.Catalog` is always exactly "what
-    // the WAL can currently prove", never ahead of it — a snapshot taken
-    // from it can truncate the WAL without ever discarding a record that
-    // hasn't been folded in yet.
+    // The replica advances only after fsync, so rotation never snapshots a
+    // catalog mutation whose WAL record is not yet durable.
     let replica = Storage.create ()
     setCatalog replica store.Catalog
     replica.ForeignKeyChecks <- false
 
-    // Rotates from `replica`, not `store` — see `replica`'s doc above.
-    // Each rotation rebuilds the derived indexes after all replayed events.
     let rotateFromReplica () =
         reindexAllForReplay replica
         writeSnapshotAndTruncate dataDir replica.Catalog
@@ -1323,27 +1158,13 @@ let attach (dataDir: string) (store: Store) : unit =
                 flushToDisk s
                 s.Length
             with ex ->
-                // By the time `OnCommit` fires, `Storage` has already
-                // applied the mutation to `store.Catalog` (see
-                // `Storage.emit`) — a WAL append failing here (ENOSPC,
-                // permissions, …) can't be turned into a client-visible
-                // error without silently serving a row that exists only in
-                // memory, invisible to the very durability mechanism whose
-                // job is to keep it. Crash rather than keep serving reads
-                // and writes against a catalog the WAL can no longer prove.
+                // Publication precedes this callback, so failure leaves no
+                // recoverable way to continue serving a durable catalog.
                 Log.diagnostic "fsdb: WAL append failed, catalog and disk have diverged: %s" ex.Message
                 Environment.FailFast(sprintf "fsdb: fatal WAL append failure: %s" ex.Message, ex)
                 reraise ()
 
-        // `event`'s WAL record is durably on disk as of the line above —
-        // safe to fold into `replica` now (see `replica`'s doc). `applyEvent`
-        // is the same function `load` trusts for a cold-start WAL replay, so
-        // a failure here would mean that replay itself can't reproduce this
-        // event either — logged, not fatal, since the WAL (the actual
-        // durability guarantee) already has the record regardless of what
-        // `replica` does with it; only `replica`-sourced rotation snapshots
-        // would miss the row until the next full replay (a fresh `load`)
-        // rebuilds `replica`'s equivalent from scratch.
+        // Mirror failure delays snapshot inclusion but cannot invalidate the WAL.
         (try
             applyEvent replica event
          with ex ->
@@ -1355,16 +1176,9 @@ let attach (dataDir: string) (store: Store) : unit =
             rotateFromReplica ()
             entryCount := 0
 
-    // Appended, never assigned — `OnCommit` is multi-subscriber, so
-    // durability and a host's `Db.onCommit` CDC handlers coexist.
     store.OnCommit.Add appendRecord
 
     let onShutdown (_: PosixSignalContext) = lock store.Lock rotateFromReplica
 
-    // `PosixSignalRegistration` unregisters its handler when finalized —
-    // `attach` returning right after this would leave nothing holding a
-    // reference, so the first GC silently stops the SIGTERM/SIGINT
-    // shutdown snapshot from ever firing again. Root them for the process's
-    // lifetime instead of `|> ignore`-ing the disposable away.
     shutdownRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGTERM, onShutdown))
     shutdownRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGINT, onShutdown))
