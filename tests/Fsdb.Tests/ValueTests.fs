@@ -694,6 +694,14 @@ let tests =
                     let sorted = words |> List.sortWith (fun a b -> compare (VString a) (VString b))
                     Expect.equal sorted [ "ab"; "æb"; "øb"; "zb" ] "ab < æb < øb < zb, as verified against MySQL"
 
+                testCase "full collation ordering preserves unequal primary weights"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    let left = "ssäı"
+                    let right = "ßff"
+                    Expect.notEqual (col.ComparePrimary left right) 0 "the primary weights differ"
+                    Expect.equal (Math.Sign(col.Compare left right)) (Math.Sign(col.ComparePrimary left right)) "the tie-break cannot reverse primary order"
+
                 testCase "tie-breaks among primary-equal strings are stable (ICU CLDR order; documented divergence from MySQL's weight table)"
                 <| fun _ ->
                     // MySQL's own UCA 9.0 table orders these accent variants

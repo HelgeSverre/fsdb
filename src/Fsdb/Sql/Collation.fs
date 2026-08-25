@@ -196,11 +196,19 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             // first (MySQL-verified), same tie-break as the ICU branch.
             if c <> 0 then c else countTrailingSpaces b - countTrailingSpaces a
         else
-            if not spec.PadSpace then
-                ci.Compare(a, b, CompareOptions.None)
+            let primary = ci.Compare(primaryText a, primaryText b, spec.Fold)
+
+            if primary <> 0 then
+                primary
             else
-                let trimmed = ci.Compare(trim a, trim b, CompareOptions.None)
-                if trimmed <> 0 then trimmed else countTrailingSpaces b - countTrailingSpaces a
+                let tieBreak = ci.Compare(trim a, trim b, CompareOptions.None)
+
+                if tieBreak <> 0 then
+                    tieBreak
+                elif spec.PadSpace then
+                    countTrailingSpaces b - countTrailingSpaces a
+                else
+                    0
 
     let comparePrimary (a: string) (b: string) : int =
         if spec.ByteOrder then
