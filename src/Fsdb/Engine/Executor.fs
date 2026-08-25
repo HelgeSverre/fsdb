@@ -8276,8 +8276,12 @@ and private runWindowedSelect
             // computes `(original index, value)` pairs partition by
             // partition.
             |> Result.map (fun pairs ->
-                let byIndex = pairs |> Array.toList |> Map.ofList
-                matched |> List.mapi (fun i _ -> Map.find i byIndex) |> Array.ofList)))
+                let ordered = Array.zeroCreate matched.Length
+
+                for index, value in pairs do
+                    ordered.[index] <- value
+
+                ordered)))
             | _ -> Error(1105, "window pre-pass collected a non-window node")
 
         match windowFuncs |> traverse computeColumn with
