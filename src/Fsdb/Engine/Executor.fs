@@ -5645,6 +5645,76 @@ and private materializeCte
             | Some err -> Error err
             | None -> Ok(columns, List.ofSeq accumulated))
 
+and private tryIntegerSemiJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    (tableRef: TableRef)
+    : Result<(ColumnDef list * Value[] seq * SelectStmt) option, QueryResult> =
+    let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+
+    let columnName =
+        match select.Where with
+        | Some(InSubquery(Col name, _)) -> Some name
+        | Some(InSubquery(QualifiedCol(owner, name), _))
+            when System.String.Equals(owner, qualifier, System.StringComparison.OrdinalIgnoreCase) ->
+            Some name
+        | _ -> None
+
+    match columnName, select.Where with
+    | Some name, Some(InSubquery(_, subquery)) ->
+        tryPhysicalTableRef store dbName tableRef
+        |> Result.bind (function
+            | None -> Ok None
+            | Some table ->
+                let indexedInteger =
+                    table.Columns
+                    |> List.tryFind (fun column -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
+                    |> Option.exists (fun column ->
+                        match column.Type with
+                        | TTinyInt _
+                        | TBool
+                        | TSmallInt _
+                        | TMediumInt _
+                        | TInt _
+                        | TBigInt false -> Storage.tryEqualityLookupInTable store table name (VInt 0L) |> Option.isSome
+                        | _ -> false)
+
+                if
+                    not indexedInteger
+                    || not (isStatementStableSelect store registry dbName emptySubqueryScope subquery)
+                then
+                    Ok None
+                else
+                    let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+                    let materialized = runExpressionSubquery context subquery subquery
+
+                    match materialized.Result with
+                    | Err(code, message) -> Error(Err(code, message))
+                    | Affected _ -> Ok None
+                    | ResultSet(columns, _) when columns.Length <> 1 -> Error(Err(1241, "Operand should contain 1 column(s)"))
+                    | ResultSet(_, _) ->
+                        let values = materialized.Rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
+
+                        if values |> List.exists (function VInt _ | VNull -> false | _ -> true) then
+                            Ok None
+                        else
+                            let rows =
+                                values
+                                |> List.choose (function VInt value -> Some value | VNull -> None | _ -> None)
+                                |> Set.ofList
+                                |> Seq.collect (fun value ->
+                                    Storage.tryEqualityLookupInTable store table name (VInt value)
+                                    |> Option.map snd
+                                    |> Option.defaultValue [])
+                                |> Map.ofSeq
+                                |> Map.toSeq
+                                |> Seq.map snd
+
+                            Ok(Some(table.Columns, rows, { select with Where = None })))
+    | _ -> Ok None
+
 and private runSelectStmt
     (store: Store)
     (registry: Registry)
@@ -5706,9 +5776,13 @@ and private runSelectStmt
 
         match fromItem, select.Joins with
         | FromTable tref, [] ->
-            match tryEqualityLookup store dbName tref select.Where with
-            | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
-            | None ->
+            match tryIntegerSemiJoin store registry dbName select tref with
+            | Error error -> error, [], []
+            | Ok(Some(columns, rows, narrowed)) -> runResolved columns rows narrowed
+            | Ok None ->
+              match tryEqualityLookup store dbName tref select.Where with
+              | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
+              | None ->
                 match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
                 | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
                 | None ->

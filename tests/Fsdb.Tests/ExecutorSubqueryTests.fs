@@ -327,6 +327,19 @@ let tests =
                       "memoized membership retains three-valued IN behavior"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "stable integer IN narrows an indexed outer table"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_rows (id INT PRIMARY KEY, label VARCHAR(10))" |> ignore
+              runDefault store "CREATE TABLE inner_rows (id INT)" |> ignore
+              runDefault store "INSERT INTO outer_rows VALUES (1, 'one'), (2, 'two'), (3, 'three')" |> ignore
+              runDefault store "INSERT INTO inner_rows VALUES (3), (1), (1), (NULL)" |> ignore
+
+              match runDefault store "SELECT id, label FROM outer_rows WHERE id IN (SELECT id FROM inner_rows) ORDER BY id" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "1"; Some "one" ]; [ Some "3"; Some "three" ] ] "outer index candidates retain set semantics"
+              | other -> failtestf "expected a resultset, got %A" other
+
           testCase "EXISTS stops after its first matching row"
           <| fun _ ->
               let mutable touches = 0

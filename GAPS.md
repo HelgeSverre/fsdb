@@ -96,7 +96,8 @@ splicing `/*!NNNNN … */`; and MySQL's single-row `FROM DUAL` source.
 Working: hash joins for equi-joins with collation-folded keys, lazy nested
 loops otherwise, statement-stable scalar/EXISTS/IN/ANY/SOME/ALL subqueries
 materialized once per statement, exact-integer `IN` materializations with a
-reusable membership set, correlated scalar/EXISTS/IN/ANY/SOME/ALL
+reusable membership set and direct indexed outer-table narrowing, correlated
+scalar/EXISTS/IN/ANY/SOME/ALL
 subqueries with correct NULL
 semantics, bounded top-N sort for ORDER BY+LIMIT, GROUP_CONCAT byte cap,
 WITH ROLLUP expansion, window frames (ROWS/RANGE, numeric offsets),
@@ -111,7 +112,7 @@ identities for bit aggregates.
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | fully-bound composite equality probes and matching physical inner joins use B-tree buckets; direct literal ranges feed single-table SELECT/UPDATE/DELETE through primary, unique, and secondary indexes; bounded `ORDER BY`/`GROUP BY` can stream a matching composite index when preceding keys are fixed; outer joins, unconstrained multi-key ordering, and broader grouping still scan/sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | qualified physical inner-join stars choose ready indexed sources by cardinality and push qualified base-table ranges into the initial scan, while `STRAIGHT_JOIN` preserves written order; outer/lateral/derived joins and statements with name-resolution-sensitive unqualified references retain source order; broader pushdown, statistics, and a general cost model remain absent | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, eq_ref, ref, range, index, ALL}; `range` and `index` cover compatible direct composite bounds/orderings; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
-| Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once, exact-integer `IN` reuses an ordered membership set, simple EXISTS stops at one row, and direct correlated equalities probe inner primary/unique/secondary indexes; outer semi-join narrowing is absent, while other correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
+| Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once; exact-integer `IN` reuses an ordered membership set and narrows a direct indexed physical outer table; simple EXISTS stops at one row; direct correlated equalities probe inner primary/unique/secondary indexes; string/decimal and compound semi-joins remain scans, while other correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | `Executor.applyMutationJoin` accepts real base tables only → 1064 | low | refusal |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
