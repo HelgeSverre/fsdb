@@ -2256,6 +2256,16 @@ let tests =
                     | Select { Locking = true } -> ()
                     | other -> failtestf "expected Locking = true, got %A" other
 
+                testCase "FOR UPDATE and FOR SHARE accept locking details"
+                <| fun _ ->
+                    [ "SELECT * FROM t FOR UPDATE NOWAIT"
+                      "SELECT * FROM t FOR UPDATE SKIP LOCKED"
+                      "SELECT * FROM t FOR SHARE OF t NOWAIT" ]
+                    |> List.iter (fun sql ->
+                        match parseOk sql with
+                        | Select { Locking = true } -> ()
+                        | other -> failtestf "expected a locking SELECT, got %A" other)
+
                 testCase "no locking clause leaves Locking false"
                 <| fun _ ->
                     match parseOk "SELECT * FROM t" with

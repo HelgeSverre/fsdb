@@ -2874,7 +2874,10 @@ let private havingClause: Parser<Expr, unit> = keyword "HAVING" >>. expr
 /// see the `Ast.SelectStmt.Locking` doc for why there's nothing else to do
 /// with it.
 let private lockClause: Parser<unit, unit> =
-    (keyword "FOR" >>. (keyword "UPDATE" <|> (keyword "SHARE" >>% ())) >>% ())
+    (keyword "FOR"
+     >>. (keyword "UPDATE" <|> (keyword "SHARE" >>% ()))
+     >>. optional (keyword "OF" >>. sepBy1 identifier (sym ","))
+     >>. optional ((keyword "NOWAIT" >>% ()) <|> (keyword "SKIP" >>. keyword "LOCKED" >>% ())))
     <|> (keyword "LOCK" >>. keyword "IN" >>. keyword "SHARE" >>. keyword "MODE" >>% ())
 
 let private selectModifiers: Parser<bool * bool * bool, unit> =
