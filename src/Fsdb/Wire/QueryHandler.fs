@@ -38,6 +38,10 @@ let private syntaxError (sql: string) =
             truncated
     )
 
+let private parserError (sql: string) (detail: string) =
+    let temporal = Regex.Match(detail, @"Incorrect (?:DATE|DATETIME|TIME) value: '[^\r\n]*'")
+    if temporal.Success then Err(1525, temporal.Value) else syntaxError sql
+
 /// Raw map lookup: the outer `option` is "is `name` even a known variable"
 /// (unchanged since `Session.Variables` grew NULL-capable values) — `None`
 /// there is the true "unknown variable" case (1193 below), while `Some
@@ -1432,7 +1436,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     match Parser.parse sql with
     | Result.Ok stmt -> executeParsed session stmt
-    | Result.Error _ -> { session with LastResultColumnMetadata = [] }, syntaxError sql
+    | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError sql detail
 
 /// Every statement form `dispatch` recognizes purely by text probe
 /// (SET/USE/SHOW/transaction control) rather than `Parser.parse` — one DU
@@ -2291,8 +2295,8 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
                 | _ -> Result.Error(1064, "syntax error")
             else
                 Result.Ok(Some renumbered, count)
-        | Result.Error _ ->
-            match syntaxError sql with
+        | Result.Error detail ->
+            match parserError sql detail with
             | Err(code, msg) -> Result.Error(code, msg)
             | _ -> Result.Error(1064, "syntax error")
 

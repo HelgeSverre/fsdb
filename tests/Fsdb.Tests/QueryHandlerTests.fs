@@ -822,6 +822,16 @@ let tests =
               | ResultSet(_, [ [ Some "0000-00-00" ] ]) -> ()
               | other -> failtestf "expected a zero-date result, got %A" other
 
+          testCase "malformed typed temporal literals return 1525"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql, expected in
+                  [ "SELECT DATE '01/02/2020'", "Incorrect DATE value: '01/02/2020'"
+                    "SELECT TIMESTAMP '2020-01-01'", "Incorrect DATETIME value: '2020-01-01'"
+                    "SELECT TIME '839:00:00'", "Incorrect TIME value: '839:00:00'" ] do
+                  Expect.equal (handle session sql |> snd) (Err(1525, expected)) sql
+
           testCase "SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES') isn't split on the CONCAT's own comma"
           <| fun _ ->
               // `splitSetAssignments` must track paren depth, not just quote

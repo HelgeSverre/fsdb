@@ -1277,10 +1277,6 @@ module private MySqlTemporal =
 /// has to be validated where it's written. Only a string literal follows the
 /// type word, so `DATE(x)`/`TIME(x)` calls are untouched.
 ///
-/// ponytail: a malformed literal fails the *parse*, so it surfaces as 1064
-/// rather than MySQL's 1525 — an honest refusal either way. Give
-/// `Parser.parse` an error-code channel if a client ever matches on 1525.
-///
 /// ponytail: a DATETIME literal's declared fraction width is lost — `VDateTime`
 /// carries no fsp, so `Value.toText` always renders six digits where MySQL
 /// renders the three of `TIMESTAMP '2020-01-01 10:00:00.123'`. The value
