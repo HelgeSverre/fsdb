@@ -8024,9 +8024,14 @@ and private runWindowedSelect
                     |> List.indexed
                     |> List.groupBy (fun (_, (partKey, _, _)) -> partKey)
                     |> List.map (fun (_, group) ->
-                        group
-                        |> List.sortWith (fun (_, (_, ka, _)) (_, (_, kb, _)) -> compareByOrderKeys (windowOrderBy |> List.map snd) ka kb)
-                        |> Array.ofList)
+                        let partition = Array.ofList group
+
+                        partition
+                        |> Array.sortInPlaceWith (fun (leftIndex, (_, leftKey, _)) (rightIndex, (_, rightKey, _)) ->
+                            let compared = compareByOrderKeys dirs leftKey rightKey
+                            if compared = 0 then leftIndex.CompareTo rightIndex else compared)
+
+                        partition)
 
                 // `RANK`'s number for each row in an ORDER BY-sorted partition
                 // group: the 1-based position of the first row in its tie
