@@ -884,6 +884,52 @@ let tests =
               | Err(1222, _) -> ()
               | other -> failtestf "expected target-count error, got %A" other
 
+          testCase "SQL PREPARE binds typed user variables and deallocates by name"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "PREPARE add_values FROM 'SELECT ? + ? AS total'"
+              Expect.equal result (Affected 0UL) "prepared"
+              let session, _ = handle session "SET @left = 2, @right = 3"
+
+              match handle session "EXECUTE add_values USING @left, @right" with
+              | session, ResultSet([ "total" ], [ [ Some "5" ] ]) ->
+                  let session, result = handle session "DEALLOCATE PREPARE add_values"
+                  Expect.equal result (Affected 0UL) "deallocated"
+
+                  match handle session "EXECUTE add_values USING @left, @right" |> snd with
+                  | Err(1243, _) -> ()
+                  | other -> failtestf "expected unknown statement error, got %A" other
+              | _, other -> failtestf "expected prepared result, got %A" other
+
+          testCase "SQL PREPARE accepts user-variable source text and text-probed statements"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @sql = 'SET @answer = ?'"
+              let session, result = handle session "PREPARE `SetAnswer` FROM @sql"
+              Expect.equal result (Affected 0UL) "prepared from variable"
+              let session, _ = handle session "SET @value = 42"
+              let session, result = handle session "EXECUTE setanswer USING @value"
+              Expect.equal result (Affected 0UL) "executed text probe"
+              Expect.equal session.UserVariables.["answer"] (VInt 42L) "bound typed value"
+
+              match handle session "EXECUTE setanswer" |> snd with
+              | Err(1210, _) -> ()
+              | other -> failtestf "expected parameter-count error, got %A" other
+
+          testCase "a failed SQL PREPARE replacement deallocates the previous statement"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "PREPARE s FROM 'SELECT 1'"
+              let session, result = handle session "PREPARE s FROM 'broken'"
+
+              match result with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected invalid replacement error, got %A" other
+
+              match handle session "EXECUTE s" |> snd with
+              | Err(1243, _) -> ()
+              | other -> failtestf "expected the prior statement to be gone, got %A" other
+
           QueryHandlerVariableTests.tests
 
           testCase "SELECT DATABASE() returns NULL before USE"

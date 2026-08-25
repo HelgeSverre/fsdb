@@ -235,6 +235,9 @@ type Session =
       /// and a prepared statement is exactly that: state scoped to one
       /// connection, not shared across them.
       Statements: Map<int, PreparedStmt>
+      /// SQL PREPARE names are connection-local strings rather than the
+      /// integer ids assigned by COM_STMT_PREPARE.
+      TextStatements: Map<string, PreparedStmt>
       /// The next id COM_STMT_PREPARE will assign.
       NextStmtId: int
       /// Bytes buffered by COM_STMT_SEND_LONG_DATA, keyed by (statement id,
@@ -305,6 +308,7 @@ let create (connectionId: int) (store: Store) : Session =
       PendingTransactionReadOnly = None
       PendingTransactionIsolation = None
       Statements = Map.empty
+      TextStatements = Map.empty
       NextStmtId = 1
       LongData = Map.empty
       LongDataBytes = 0L

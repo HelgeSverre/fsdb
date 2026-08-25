@@ -1182,7 +1182,8 @@ let private handleConnection
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
                                     return! loop session
-                            | Some(StmtPrepare _) when session.Statements.Count >= Limits.maxPreparedStmtCount ->
+                            | Some(StmtPrepare _)
+                                when session.Statements.Count + session.TextStatements.Count >= Limits.maxPreparedStmtCount ->
                                 do!
                                     writePacketAsync
                                         stream

@@ -97,7 +97,7 @@ and do not claim syntax parity.
 
 The baseline corpus includes implemented features and declared gaps. The latter
 cover partition selection and maintenance, administration statements, stored programs,
-roles, account options, textual prepared statements, and missing spatial
+roles, account options, and missing spatial
 operations. A baseline-only run therefore acts as an executable gap inventory;
 it is expected to exit with findings until those features land.
 

@@ -2235,13 +2235,68 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
             | Err(code, msg) -> Result.Error(code, msg)
             | _ -> Result.Error(1064, "syntax error")
 
+type private TextPreparedCommand =
+    | PrepareText of name: string * source: string
+    | ExecuteText of name: string * variables: UserVariableRef list
+    | DeallocateText of name: string
+
+let private preparedName = @"(?:`(?<name>(?:``|[^`])+)`|(?<name>[A-Za-z_][A-Za-z0-9_$]*))"
+
+let private prepareTextRe =
+    Regex(@"^\s*PREPARE\s+" + preparedName + @"\s+FROM\s+(?<source>.+?)\s*$", RegexOptions.IgnoreCase)
+
+let private executeTextRe =
+    Regex(@"^\s*EXECUTE\s+" + preparedName + @"(?:\s+USING\s+(?<variables>.+))?\s*$", RegexOptions.IgnoreCase)
+
+let private deallocateTextRe =
+    Regex(@"^\s*(?:DEALLOCATE|DROP)\s+PREPARE\s+" + preparedName + @"\s*$", RegexOptions.IgnoreCase)
+
+let private matchedPreparedName (matched: Match) =
+    matched.Groups.["name"].Captures
+    |> Seq.cast<Capture>
+    |> Seq.last
+    |> _.Value.Replace("``", "`")
+    |> _.ToLowerInvariant()
+
+let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand option, QueryResult> =
+    let prepared = prepareTextRe.Match(sql)
+    let execute = executeTextRe.Match(sql)
+    let deallocate = deallocateTextRe.Match(sql)
+
+    if prepared.Success then
+        Ok(Some(PrepareText(matchedPreparedName prepared, prepared.Groups.["source"].Value)))
+    elif execute.Success then
+        let variables = execute.Groups.["variables"]
+
+        if not variables.Success then
+            Ok(Some(ExecuteText(matchedPreparedName execute, [])))
+        else
+            match Parser.parse ("SELECT " + variables.Value) with
+            | Ok(Select { Projections = projections }) ->
+                projections
+                |> List.fold
+                    (fun state projection ->
+                        state
+                        |> Result.bind (fun variables ->
+                            match projection with
+                            | UserVariable variable, None -> Ok(variable :: variables)
+                            | _ -> Error(Err(1064, "EXECUTE USING requires user variables"))))
+                    (Ok [])
+                |> Result.map List.rev
+                |> Result.map (fun variables -> Some(ExecuteText(matchedPreparedName execute, variables)))
+            | _ -> Error(Err(1064, "Invalid EXECUTE USING clause"))
+    elif deallocate.Success then
+        Ok(Some(DeallocateText(matchedPreparedName deallocate)))
+    else
+        Ok None
+
 /// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
 /// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
 /// no `Placeholder` survives and the statement executes through the ordinary
 /// path. This walk is the one place that must touch every expression position
 /// in the AST, so a placeholder in any legal spot gets bound; DDL is left as
 /// the `_` pass-through since MySQL never accepts a `?` there.
-let private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
+let rec private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = (Parser.stripVersionComments rawSql).Trim().TrimEnd(';').Trim()
 
     // A mysqldump preamble/postamble is a run of `/*!NNNNN ... */;` lines;
@@ -2249,20 +2304,79 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
     // plain `/* ... */`/`-- ...` comment to begin with), what's left is a
     // no-op, same as real MySQL's `Query OK, 0 rows affected` for it —
     // not a syntax error.
+    let runTextPrepared command =
+        match command with
+        | PrepareText(name, source) ->
+            let session = { session with TextStatements = Map.remove name session.TextStatements }
+
+            let sql =
+                match Parser.parseExpression source with
+                | Ok(Lit value) -> toText value
+                | Ok(UserVariable variable) -> session.UserVariables |> Map.tryFind variable.Name |> Option.bind toText
+                | _ -> None
+
+            match sql with
+            | None -> session, syntaxError source
+            | Some sql ->
+                match prepareStatement sql with
+                | Error(code, message) -> session, Err(code, message)
+                | Ok(ast, count) when session.TextStatements.Count + session.Statements.Count < Limits.maxPreparedStmtCount ->
+                    let statement =
+                        { Ast = ast
+                          Sql = sql
+                          ParamCount = count
+                          LastParamTypes = None }
+
+                    { session with TextStatements = Map.add name statement session.TextStatements }, Affected 0UL
+                | Ok _ ->
+                    session,
+                    Err(
+                        1461,
+                        sprintf
+                            "Can't create more than max_prepared_stmt_count statements (current value: %d)"
+                            Limits.maxPreparedStmtCount
+                    )
+        | ExecuteText(name, variables) ->
+            match Map.tryFind name session.TextStatements with
+            | None -> session, Err(1243, sprintf "Unknown prepared statement handler (%s) given to EXECUTE" name)
+            | Some statement when statement.ParamCount <> variables.Length ->
+                session,
+                Err(
+                    1210,
+                    sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" statement.ParamCount variables.Length
+                )
+            | Some statement ->
+                let values =
+                    variables
+                    |> List.map (fun variable -> session.UserVariables |> Map.tryFind variable.Name |> Option.defaultValue VNull)
+
+                match statement.Ast with
+                | Some ast -> executeParsed session (bindPlaceholders ast values)
+                | None -> dispatch session (substitutePlaceholders statement.Sql (values |> List.map valueToSqlLiteral))
+        | DeallocateText name ->
+            if Map.containsKey name session.TextStatements then
+                { session with TextStatements = Map.remove name session.TextStatements }, Affected 0UL
+            else
+                session, Err(1243, sprintf "Unknown prepared statement handler (%s) given to DEALLOCATE PREPARE" name)
+
     if Parser.isBlank sql then
         session, Affected 0UL
-    elif not (placeholderPositions sql |> List.isEmpty) then
+    else
+        match tryTextPreparedCommand sql with
+        | Error result -> session, result
+        | Ok(Some command) -> runTextPrepared command
+        | Ok None when not (placeholderPositions sql |> List.isEmpty) ->
         // A `?` outside a string/comment is a bind parameter, only legal via
         // COM_STMT_PREPARE — over COM_QUERY it's a 1064 in MySQL. Rejecting
         // here also stops a `?` in a spot the prepared binder never reaches
         // (a generated-column DDL expression) from surviving unbound into
         // Storage/Persistence, where it would `FailFast` a --data-dir server.
-        session, syntaxError sql
-    else
-        let upper = sql.ToUpperInvariant()
+            session, syntaxError sql
+        | Ok None ->
+            let upper = sql.ToUpperInvariant()
 
-        match tryProbe sql upper with
-        | Some probe ->
+            match tryProbe sql upper with
+            | Some probe ->
             // Every probe-handled form (SHOW/SET/session-variable SELECT/...)
             // is its own small synthetic `ResultSet` of plain strings — none of
             // them go through `executeStatement`'s typed path, so clear
@@ -2270,9 +2384,9 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
             // session left behind rather than risk it surviving (via `Server`'s
             // VAR_STRING-length-mismatch fallback, a same-column-count
             // coincidence is all it'd take) onto an unrelated resultset.
-            let session, result = runProbe session sql probe
-            { session with LastResultColumnMetadata = [] }, result
-        | None -> executeStatement session sql upper
+                let session, result = runProbe session sql probe
+                { session with LastResultColumnMetadata = [] }, result
+            | None -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and
