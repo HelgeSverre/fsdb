@@ -103,7 +103,8 @@ let private readWireDefinition (packet: Packet) =
         { TypeId = typeId
           ColumnLength = columnLength
           Flags = flags
-          Decimals = decimals } }
+          Decimals = decimals
+          CollationId = None } }
 
 let tests =
     testList

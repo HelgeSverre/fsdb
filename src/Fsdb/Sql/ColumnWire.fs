@@ -6,6 +6,25 @@ open System
 open Fsdb.Ast
 open Fsdb.Value
 
+let private binaryCollationId = 63us
+
+let private collationId name =
+    Collation.idAndSortlen
+    |> Map.tryFind name
+    |> Option.map (fst >> uint16)
+
+let private isTextual =
+    function
+    | TChar _
+    | TVarchar _
+    | TTinyText
+    | TText
+    | TMediumText
+    | TLongText
+    | TEnum _
+    | TSet _ -> true
+    | _ -> false
+
 let private withUnsigned unsigned metadata =
     if unsigned then
         { metadata with Flags = metadata.Flags ||| UnsignedFlag }
@@ -92,6 +111,14 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
 let metadataOfColumn (column: ColumnDef) : ColumnMetadata =
     let metadata = metadataOfType column.Type
 
+    let wireCollation =
+        if isTextual column.Type then
+            column.Collation
+            |> Option.defaultValue Collation.defaultCollation.Name
+            |> collationId
+        else
+            Some binaryCollationId
+
     let flags =
         metadata.Flags
         ||| (if column.Nullable then 0us else NotNullFlag)
@@ -102,7 +129,9 @@ let metadataOfColumn (column: ColumnDef) : ColumnMetadata =
         ||| (if not column.Nullable && column.Default.IsNone && not column.AutoIncrement && column.Generated.IsNone then NoDefaultValueFlag else 0us)
         ||| (if column.OnUpdateCurrentTimestamp then OnUpdateNowFlag else 0us)
 
-    { metadata with Flags = flags }
+    { metadata with
+        Flags = flags
+        CollationId = wireCollation }
 
 /// Returns MySQL's canonical parameter descriptor for a contextual SQL type.
 let parameterMetadataOfType (ty: ColumnType) : ColumnMetadata =

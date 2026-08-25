@@ -1136,6 +1136,11 @@ let rec private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
             |> Option.orElseWith (fun () -> column.Collation |> Option.map Collation.charsetOfCollation))
         |> Option.defaultValue "utf8mb4"
 
+let private metadataCollationId name =
+    Collation.idAndSortlen
+    |> Map.tryFind name
+    |> Option.map (fst >> uint16)
+
 let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
     let simple typeId =
         let columnLength =
@@ -1249,7 +1254,11 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VDouble _) -> simple TypeDouble |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VDecimal _) -> simple TypeNewDecimal |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VString text) ->
-        Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text); Flags = NotNullFlag }
+        Some
+            { Value.columnMetadata TypeVarString with
+                ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text)
+                Flags = NotNullFlag
+                CollationId = metadataCollationId ctx.Store.ConnectionCollation.Name }
     | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
     | Lit(VDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
@@ -1295,7 +1304,11 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | _ -> None
     | BinOp(IntDiv, _, _) -> simple TypeLongLong
     | Cast(_, ty) -> Some(ColumnWire.metadataOfType ty)
-    | Collate(inner, _)
+    | Collate(inner, collation) ->
+        metadataOfExpr ctx inner
+        |> Option.map (fun metadata ->
+            { metadata with
+                CollationId = metadataCollationId collation })
     | Distinct inner
     | OrderBy(inner, _) -> metadataOfExpr ctx inner
     | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->

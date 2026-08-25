@@ -177,6 +177,26 @@ let tests =
                   | metadata -> failtestf "expected seven metadata records, got %A" metadata
               | _, other -> failtestf "expected an empty WEIGHT_STRING metadata result, got %A" other
 
+          testCase "result metadata preserves declared and expression collations"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TABLE wire_collations (latin VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_swedish_ci, binary_text VARCHAR(10) COLLATE utf8mb4_bin, number INT)"
+
+              match
+                  handle
+                      session
+                      "SELECT latin, binary_text, number, 'x' COLLATE utf8mb4_0900_as_cs FROM wire_collations LIMIT 0"
+              with
+              | session, ResultSet(_, []) ->
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.CollationId)
+                      [ Some 8us; Some 46us; Some 63us; Some 278us ]
+                      "wire charset numbers follow each result expression"
+              | _, other -> failtestf "expected empty collation metadata, got %A" other
+
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

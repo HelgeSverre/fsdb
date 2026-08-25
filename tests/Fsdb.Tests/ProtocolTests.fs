@@ -223,6 +223,20 @@ let tests =
               Expect.isTrue (flags &&& 0x0010 <> 0) "BLOB flag"
               Expect.isTrue (flags &&& 0x0080 <> 0) "BINARY flag"
 
+          testCase "column definitions advertise an explicit text collation"
+          <| fun _ ->
+              let metadata =
+                  { columnMetadata TypeVarString with
+                      ColumnLength = 40u
+                      CollationId = Some 8us }
+
+              let reader = Reader(columnDefPayload { Name = "latin"; Metadata = metadata })
+              for _ in 1..6 do
+                  reader.ReadLenEncString() |> ignore
+
+              reader.ReadLenEncInt() |> ignore
+              Expect.equal (reader.ReadInt16LE()) 8 "latin1_swedish_ci charset number"
+
           testCase "BIT column definitions advertise binary collation and unsigned metadata"
           <| fun _ ->
               let metadata = metadataOfType (TBit 9)

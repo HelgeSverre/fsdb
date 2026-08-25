@@ -1063,13 +1063,15 @@ type ColumnMetadata =
     { TypeId: byte
       ColumnLength: uint32
       Flags: uint16
-      Decimals: byte }
+      Decimals: byte
+      CollationId: uint16 option }
 
 let columnMetadata typeId =
     { TypeId = typeId
       ColumnLength = 0u
       Flags = 0us
-      Decimals = 0uy }
+      Decimals = 0uy
+      CollationId = None }
 
 let bitBytes (width: int) (value: uint64) : byte[] =
     let byteCount = (width + 7) / 8

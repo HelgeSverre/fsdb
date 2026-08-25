@@ -324,7 +324,13 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     let isBinary =
         col.Metadata.TypeId <> TypeJson
         && (col.Metadata.Flags &&& BinaryFlag <> 0us || col.Metadata.TypeId = TypeBit)
-    w.WriteInt16LE(if isBinary then BinaryCollation else Utf8Mb4GeneralCi)
+    let collation =
+        if isBinary then
+            BinaryCollation
+        else
+            col.Metadata.CollationId |> Option.map int |> Option.defaultValue Utf8Mb4GeneralCi
+
+    w.WriteInt16LE collation
     w.WriteInt32LE(int col.Metadata.ColumnLength)
     w.WriteByte col.Metadata.TypeId
     w.WriteInt16LE(int col.Metadata.Flags)
