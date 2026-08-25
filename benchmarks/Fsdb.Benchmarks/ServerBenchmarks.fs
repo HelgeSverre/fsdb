@@ -26,6 +26,7 @@ type ServerBenchmarks() =
     // account (created in Setup) — statements on it exercise the db-level
     // privilege-check path instead of root's all-global fast path.
     let mutable limitedConn : MySqlConnection = Unchecked.defaultof<_>
+    let mutable concurrentConnections : MySqlConnection array = [||]
     let mutable fsdbProcess : Process option = None
     let mutable dataDir : string option = None
     let mutable rng = Random(1234)
@@ -73,11 +74,18 @@ type ServerBenchmarks() =
 
         limitedConn <- new MySqlConnection(Schema.userConnectionString this.Target "bench_reader" "benchpw")
         limitedConn.Open()
+        concurrentConnections <-
+            Array.init 16 (fun _ ->
+                let connection = new MySqlConnection(Schema.connectionString this.Target)
+                connection.Open()
+                connection)
         rng <- Random(1234)
         insertCounter <- 0
 
     [<GlobalCleanup>]
     member this.Cleanup() =
+        concurrentConnections |> Array.iter _.Dispose()
+        concurrentConnections <- [||]
         limitedConn.Dispose()
         conn.Dispose()
 
@@ -148,6 +156,20 @@ type ServerBenchmarks() =
             "INSERT INTO users (name, email, age, meta, created_at) VALUES "
             + $"('bench_ins_{i}','bench_ins_{i}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')"
         )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Durability")>]
+    member this.ConcurrentPointUpdateBurst() =
+        concurrentConnections
+        |> Array.mapi (fun index connection ->
+            task {
+                use command = connection.CreateCommand()
+                command.CommandText <- $"UPDATE users SET age = IF(age = 30, 31, 30) WHERE id = {index + 1}"
+                let! _ = command.ExecuteNonQueryAsync()
+                return ()
+            })
+        |> System.Threading.Tasks.Task.WhenAll
+        |> _.GetAwaiter().GetResult()
 
     [<Benchmark>]
     member this.InsertBatch100() =
