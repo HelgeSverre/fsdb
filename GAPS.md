@@ -33,7 +33,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Composite equality/range access, bounded index ordering, restricted join reordering, and stable/correlated index probes | General cost-based planning and broader correlated forms |
-| Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, buffers, and geographic SRS semantics |
+| Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, non-point buffers, and geographic SRS semantics |
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, PK/unique/secondary range, grouping, and bounded index-order probes | Outer-join, unconstrained composite ordering, and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
@@ -137,7 +137,7 @@ CURRENT_USER/USER/SESSION_USER.
 | Missing family | Functions | Impact |
 |---|---|---|
 | JSON Schema recursive regular-expression references | Local reference cycles traversing `pattern` or `patternProperties` return 1235 | low |
-| Geometry topology and relations | overlays, buffers, and geographic SRS semantics; planar `ST_Contains`, `ST_Within`, `ST_Touches`, `ST_Equals`, and `ST_ConvexHull` work | low |
+| Geometry topology and relations | overlays, non-point buffers, buffer strategies, and geographic SRS semantics; planar point `ST_Buffer` and common predicates work | low |
 
 `CONVERT_TZ` resolves numeric offsets and `SYSTEM`, but named zones return NULL
 without loaded time-zone tables;
@@ -169,7 +169,7 @@ accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Contains`, `ST_Within`, `ST_Touches`, `ST_Equals`, `ST_ConvexHull`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
+| Spatial indexes and operations | R-tree indexes, overlays, general buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar point `ST_Buffer`, `ST_Distance`, `ST_Envelope`, topology predicates, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | `Executor.recomputeGeneratedColumns` materializes both at write time; no read-path recompute | low | divergence |
 | Column-comment character sets | converted through the table/column charset; utf8mb3 stores non-BMP text as `?` | raw .NET text, without charset conversion | low | divergence |
 | ZEROFILL/display width | zero-fill formatting, width in metadata | not tracked beyond static wire lengths; `ColumnWire.metadataOfType` never sets ZEROFILL | low | divergence |
@@ -410,7 +410,7 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | 62 MySQL-accepted feature baselines initially exposed 20 declared missing surfaces across set-operation subqueries, window ranges, DML sources, DDL/admin, stored programs, accounts, and spatial functions; set-operation expression subqueries, temporal window ranges, derived-table mutation sources, functional defaults, HASH partition declarations, table-comment alterations, JSON plans, analyzed SELECT plans, table checksums, detailed locking clauses, typed `SELECT INTO @vars`, SQL-text prepared statements, table-lock declarations, single-statement procedures, one-time event declarations, role accounts, and account locks now pass, leaving the spatial-buffer baseline. `--syntax-cases 0` runs this inventory without mutations | active gap driver |
+| Executable gap baselines | 62 MySQL-accepted feature baselines initially exposed 20 declared missing surfaces across set-operation subqueries, window ranges, DML sources, DDL/admin, stored programs, accounts, and spatial functions; every baseline is now implemented, ending with locked role accounts and planar point buffers. `--syntax-cases 0` runs this inventory without mutations | resolved locally; rerun requires the Docker oracle |
 | Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; the 2026-08-25 wait-and-rebase rerun committed all 1,455 non-rollback transactions with exact state parity and zero failures. Throughput remained 86 fsdb tx/s versus 5,246 MySQL tx/s, with p99 9,839 ms versus 13 ms | correctness resolved; performance open |
 | Multi-database scaling | the historical campaign predates sharded database roots; the 2026-08-25 rerun failed during concurrent setup with 1205 before a trustworthy scaling ratio could be measured (`2026-08-17-multidb-concurrency-campaign.md`) | unverified |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |

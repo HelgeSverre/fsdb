@@ -459,6 +459,23 @@ let geometryEnvelope (geometry: Geometry) : Geometry =
 
     { geometry with Shape = shape }
 
+let geometryPointBufferPlanar (distance: float) (geometry: Geometry) : Geometry option =
+    match geometry.Shape with
+    | _ when distance < 0.0 || not (Double.IsFinite distance) -> None
+    | GPoint(x, y) when distance = 0.0 -> Some geometry
+    | GPoint(x, y) ->
+        let ring =
+            [ 0 .. 31 ]
+            |> List.map (fun index ->
+                let angle = float index * Math.PI / 16.0
+                x + distance * Math.Cos angle, y + distance * Math.Sin angle)
+
+        if ring |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y) then
+            Some { geometry with Shape = GPolygon [ ring @ [ List.head ring ] ] }
+        else
+            None
+    | _ -> None
+
 let private pointOnSegment (x, y) ((x1, y1), (x2, y2)) =
     let cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
     let within value lower upper = min lower upper <= value && value <= max lower upper

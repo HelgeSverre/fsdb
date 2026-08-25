@@ -5260,6 +5260,24 @@ let private geometryConvexHullFn: Scalar =
     | [ value ] -> geometryArgument "ST_CONVEXHULL" value |> requirePlanar "ST_CONVEXHULL" |> geometryConvexHullPlanar |> VGeometry
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_convexhull'"))
 
+let private geometryBufferFn: Scalar =
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ value; distanceValue ] ->
+        let geometry = geometryArgument "ST_BUFFER" value |> requirePlanar "ST_BUFFER"
+        let distance = toDouble distanceValue
+
+        if distance < 0.0 || not (Double.IsFinite distance) then
+            raise (SqlError(1210, "Incorrect arguments to st_buffer"))
+
+        match geometryPointBufferPlanar distance geometry with
+        | Some buffer -> VGeometry buffer
+        | None when geometry.Shape |> geometryKind = Point -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))
+        | None -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER for non-point geometries'"))
+    | [ _; _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER strategies'"))
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_buffer'"))
+
 let private geometryRelationFn functionName project: Scalar =
     function
     | [ VNull; _ ]
@@ -5320,9 +5338,6 @@ let private mbrPredicateFn functionName predicate: Scalar =
         | _, None -> VNull
         | Some _, Some _ -> VInt(if predicate first second then 1L else 0L)
     | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" (functionName.ToLowerInvariant())))
-
-let private unsupportedGeometryFn name: Scalar =
-    fun _ -> raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s'" name))
 
 let builtins: Registry =
     empty
@@ -5408,7 +5423,7 @@ let builtins: Registry =
     |> registerScalar "ST_INTERSECTS" (geometryRelationFn "ST_INTERSECTS" id)
     |> registerScalar "ST_DISJOINT" (geometryRelationFn "ST_DISJOINT" not)
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
-    |> registerScalar "ST_BUFFER" (unsupportedGeometryFn "ST_BUFFER")
+    |> registerScalar "ST_BUFFER" geometryBufferFn
     |> registerScalar "ST_CONVEXHULL" geometryConvexHullFn
     |> registerScalar "ST_ENVELOPE" geometryEnvelopeFn
     |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)

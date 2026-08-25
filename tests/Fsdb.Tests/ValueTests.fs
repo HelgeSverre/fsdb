@@ -321,6 +321,45 @@ let tests =
                         (VString "LINESTRING(0 0,2 0)")
                         "collinear hulls retain their endpoints"
 
+                testCase "point buffers preserve the center, radius, and planar contract"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let point = geometry "POINT(2 3)"
+
+                    match call "ST_Buffer" [ point; VInt 1L ] with
+                    | VGeometry { Shape = GPolygon [ ring ] } ->
+                        Expect.equal ring.Length 33 "MySQL's default point buffer has 32 edges"
+                        Expect.equal (List.head ring) (List.last ring) "ring closes"
+                        Expect.floatClose Accuracy.high (fst ring.[0]) 3.0 "positive-x start"
+                        Expect.floatClose Accuracy.high (snd ring.[8]) 4.0 "quarter turn"
+                    | value -> failtestf "expected a polygon buffer, got %A" value
+
+                    Expect.equal (call "ST_Buffer" [ point; VInt 0L ]) point "zero distance preserves the point"
+                    Expect.equal (call "ST_Buffer" [ VNull; VInt 1L ]) VNull "NULL geometry"
+
+                    Expect.throwsC
+                        (fun () -> call "ST_Buffer" [ point; VInt -1L ] |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(1210, _) -> ()
+                        | error -> failtestf "expected 1210, got %A" error)
+
+                    Expect.throwsC
+                        (fun () ->
+                            call
+                                "ST_Buffer"
+                                [ VGeometry { Srid = 0; Shape = GPoint(Double.MaxValue, 0.0) }
+                                  VDouble Double.MaxValue ]
+                            |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(1210, _) -> ()
+                        | error -> failtestf "expected overflowing coordinates to be rejected, got %A" error)
+
+                    Expect.throwsC
+                        (fun () -> call "ST_Buffer" [ geometry "LINESTRING(0 0,1 1)"; VInt 1L ] |> ignore)
+                        (function
+                        | Fsdb.Functions.SqlError(1235, _) -> ()
+                        | error -> failtestf "expected bounded point-only support, got %A" error)
+
                 testCase "planar intersections reject nonzero and mismatched SRIDs"
                 <| fun _ ->
                     let expectError code invoke =
