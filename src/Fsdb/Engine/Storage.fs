@@ -3020,7 +3020,7 @@ let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Resu
             | []
             | [ _ ] -> Ok()
             | first :: rest ->
-                let collationName column =
+                let collationName (column: ColumnDef) =
                     column.Collation |> Option.defaultValue Collation.defaultCollation.Name
 
                 match
@@ -3206,7 +3206,18 @@ let createTableSeeded
     match result with
     | Error error -> Error error
     | Ok(createTime, columns) ->
-        let statement = CreateTable(tableName, columns, indexes, foreignKeys, [], false, tableCharset, tableCollation, autoIncrementSeed, tableComment)
+        let statement =
+            CreateTable
+                { Name = tableName
+                  Columns = columns
+                  Indexes = indexes
+                  ForeignKeys = foreignKeys
+                  Checks = []
+                  IfNotExists = false
+                  Charset = tableCharset
+                  Collation = tableCollation
+                  AutoIncrementSeed = autoIncrementSeed
+                  Comment = tableComment }
         emit store (Some(SchemaChangedAt(dbName, statement, createTime)))
         Ok()
 

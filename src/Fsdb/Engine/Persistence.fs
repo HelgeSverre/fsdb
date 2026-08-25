@@ -618,20 +618,20 @@ let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) 
     match s with
     | CreateDatabase(name, ifNotExists) -> w.WriteByte 0x01uy; writeStr w name; writeBool w ifNotExists
     | DropDatabase(name, ifExists) -> w.WriteByte 0x02uy; writeStr w name; writeBool w ifExists
-    | CreateTable(name, columns, indexes, fks, _checks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed, tableComment) ->
+    | CreateTable table ->
         w.WriteByte 0x03uy
-        writeStr w name
-        w.WriteInt32LE(List.length columns)
-        List.iter (encodeColumnDef format.ColumnComments w) columns
-        w.WriteInt32LE(List.length indexes)
-        List.iter (encodeIndexDef w) indexes
-        w.WriteInt32LE(List.length fks)
-        List.iter (encodeForeignKeyDef w) fks
-        writeBool w ifNotExists
-        writeOptStr w tableCharset
-        writeOptStr w tableCollation
-        writeOptStr w (autoIncrementSeed |> Option.map string)
-        writeOptStr w tableComment
+        writeStr w table.Name
+        w.WriteInt32LE(List.length table.Columns)
+        List.iter (encodeColumnDef format.ColumnComments w) table.Columns
+        w.WriteInt32LE(List.length table.Indexes)
+        List.iter (encodeIndexDef w) table.Indexes
+        w.WriteInt32LE(List.length table.ForeignKeys)
+        List.iter (encodeForeignKeyDef w) table.ForeignKeys
+        writeBool w table.IfNotExists
+        writeOptStr w table.Charset
+        writeOptStr w table.Collation
+        writeOptStr w (table.AutoIncrementSeed |> Option.map string)
+        writeOptStr w table.Comment
     | DropTable(names, ifExists) -> w.WriteByte 0x04uy; writeStrList w names; writeBool w ifExists
     | AlterTable(table, actions) ->
         w.WriteByte 0x05uy
@@ -664,7 +664,17 @@ let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
         let tableCollation = readOptStr r
         let autoIncrementSeed = readOptStr r |> Option.map int64
         let tableComment = if format.TableComments then readOptStr r else None
-        CreateTable(name, columns, indexes, fks, [], ifNotExists, tableCharset, tableCollation, autoIncrementSeed, tableComment)
+        CreateTable
+            { Name = name
+              Columns = columns
+              Indexes = indexes
+              ForeignKeys = fks
+              Checks = []
+              IfNotExists = ifNotExists
+              Charset = tableCharset
+              Collation = tableCollation
+              AutoIncrementSeed = autoIncrementSeed
+              Comment = tableComment }
     | 0x04uy -> DropTable(readStrList r, readBool r)
     | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction format r))
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
@@ -816,8 +826,20 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     match stmt with
     | CreateDatabase(name, _) -> warn "CreateDatabase" (createDatabase store name)
     | DropDatabase(name, _) -> warn "DropDatabase" (dropDatabase store name)
-    | CreateTable(name, columns, indexes, fks, _checks, _, tableCharset, tableCollation, autoIncrementSeed, tableComment) ->
-        warn "CreateTable" (createTableSeeded store db name columns indexes fks tableCharset tableCollation autoIncrementSeed tableComment)
+    | CreateTable table ->
+        warn
+            "CreateTable"
+            (createTableSeeded
+                store
+                db
+                table.Name
+                table.Columns
+                table.Indexes
+                table.ForeignKeys
+                table.Charset
+                table.Collation
+                table.AutoIncrementSeed
+                table.Comment)
     | DropTable(names, _) -> names |> List.iter (fun n -> warn "DropTable" (dropTable store db n))
     | AlterTable(table, actions) ->
         // Replay non-strict, whatever the store's current mode: MODIFY/
@@ -901,8 +923,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         applyDdl store db stmt
 
         match stmt with
-        | CreateTable(name, _, _, _, _, _, _, _, _, _) ->
-            setTableCreateTimeForReplay store db name createTime (Log.diagnostic "fsdb: WAL replay warning: %s")
+        | CreateTable table ->
+            setTableCreateTimeForReplay store db table.Name createTime (Log.diagnostic "fsdb: WAL replay warning: %s")
         | Truncate name -> setTableCreateTimeForReplay store db name createTime (Log.diagnostic "fsdb: WAL replay warning: %s")
         | _ -> Log.diagnostic "fsdb: WAL replay warning (SchemaChangedAt): unexpected statement %A" stmt
     | TransactionCommitted events -> events |> List.iter (applyEventAt (depth + 1) store)

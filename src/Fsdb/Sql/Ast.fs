@@ -632,6 +632,21 @@ type ExplainFormat =
     | ExplainTree
     | ExplainAnalyze
 
+type CreateTableSpec =
+    { Name: string
+      Columns: ColumnDef list
+      Indexes: IndexDef list
+      ForeignKeys: ForeignKeyDef list
+      Checks: CheckConstraintDef list
+      IfNotExists: bool
+      /// The table's own declared `[DEFAULT] CHARSET`/`COLLATE` options;
+      /// `None` means the server default.
+      Charset: string option
+      Collation: string option
+      /// The table-option seed restored before any row is inserted.
+      AutoIncrementSeed: int64 option
+      Comment: string option }
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
     | DropDatabase of name: string * ifExists: bool
@@ -640,25 +655,7 @@ type Statement =
     /// tail (see `Parser.databaseOptions`'s doc); only errors if `name`
     /// itself doesn't exist.
     | AlterDatabase of name: string
-    | CreateTable of
-        name: string *
-        columns: ColumnDef list *
-        indexes: IndexDef list *
-        foreignKeys: ForeignKeyDef list *
-        checks: CheckConstraintDef list *
-        ifNotExists: bool *
-        /// The table's own declared `[DEFAULT] CHARSET`/`COLLATE` options
-        /// (`None` = server default) — kept separate from the per-column
-        /// values they default to, so `SHOW CREATE TABLE` renders the
-        /// table-level declaration MySQL reports rather than the baked-in
-        /// column defaults.
-        tableCharset: string option *
-        tableCollation: string option *
-        /// `AUTO_INCREMENT = n` from the table-options tail — dump files
-        /// carry it on every table so restored inserts continue at the
-        /// dumped counter even before any row lands.
-        autoIncrementSeed: int64 option *
-        tableComment: string option
+    | CreateTable of CreateTableSpec
     | CreateTableLike of name: string * source: string * ifNotExists: bool
     | CreateTableAs of name: string * query: Statement * ifNotExists: bool
     | DropTable of names: string list * ifExists: bool

@@ -11550,27 +11550,31 @@ let rec executeAs
                         ids
                         foundRows
                         currentAccount
-                        (CreateTable(
-                            name,
-                            table.Columns,
-                            table.Indexes,
-                            [],
-                            checks,
-                            ifNotExists,
-                            table.TableCharset,
-                            table.TableCollation,
-                            None,
-                            (if table.TableComment = "" then None else Some table.TableComment)
-                        ))
+                        (CreateTable
+                            { Name = name
+                              Columns = table.Columns
+                              Indexes = table.Indexes
+                              ForeignKeys = []
+                              Checks = checks
+                              IfNotExists = ifNotExists
+                              Charset = table.TableCharset
+                              Collation = table.TableCollation
+                              AutoIncrementSeed = None
+                              Comment = if table.TableComment = "" then None else Some table.TableComment })
 
-    | CreateTable(name, columns, indexes, foreignKeys, checks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed, tableComment) ->
-        let db, name = splitQualified dbName name
+    | CreateTable table ->
+        let db, name = splitQualified dbName table.Name
 
         match tryStoredView store db name with
-        | Some _ when ifNotExists -> ids, Affected 0UL
+        | Some _ when table.IfNotExists -> ids, Affected 0UL
         | Some _ -> ids, storageErr (TableExists name)
         | None ->
-            match rejectDirectOnlyGenerated registry columns, rejectQuantifiedComparisonsInGenerated columns, rejectSessionVariablesInGenerated columns, validateFunctionalDefaults registry columns with
+            match
+                rejectDirectOnlyGenerated registry table.Columns,
+                rejectQuantifiedComparisonsInGenerated table.Columns,
+                rejectSessionVariablesInGenerated table.Columns,
+                validateFunctionalDefaults registry table.Columns
+            with
             | Some err, _, _, _
             | _, Some err, _, _
             | _, _, Some err, _
@@ -11578,7 +11582,7 @@ let rec executeAs
             | None, None, None, Ok() ->
                 let alreadyExists = scan store db name |> Result.isOk
 
-                if alreadyExists && ifNotExists then
+                if alreadyExists && table.IfNotExists then
                     ids, Affected 0UL
                 else
                     let baseCatalog = store.Catalog
@@ -11586,16 +11590,26 @@ let rec executeAs
                     Storage.setStrictMode snapshot store.StrictMode
 
                     let created =
-                        createTableSeeded snapshot db name columns indexes foreignKeys tableCharset tableCollation autoIncrementSeed tableComment
-                        |> Result.bind (fun () -> storeCheckDefinitions snapshot registry db name columns checks)
-                        |> Result.bind (fun () -> validateCheckForeignKeys snapshot db name foreignKeys)
+                        createTableSeeded
+                            snapshot
+                            db
+                            name
+                            table.Columns
+                            table.Indexes
+                            table.ForeignKeys
+                            table.Charset
+                            table.Collation
+                            table.AutoIncrementSeed
+                            table.Comment
+                        |> Result.bind (fun () -> storeCheckDefinitions snapshot registry db name table.Columns table.Checks)
+                        |> Result.bind (fun () -> validateCheckForeignKeys snapshot db name table.ForeignKeys)
 
                     match created with
                     | Ok() ->
                         Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
                         Storage.commitTransactionEvents store snapshot
                         ids, Affected 0UL
-                    | Error(TableExists _) when ifNotExists -> ids, Affected 0UL
+                    | Error(TableExists _) when table.IfNotExists -> ids, Affected 0UL
                     | Error e -> ids, storageErr e
 
     | DropTable(names, ifExists) ->

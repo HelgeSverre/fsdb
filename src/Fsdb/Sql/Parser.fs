@@ -2100,18 +2100,17 @@ let private createTable: Parser<Statement, unit> =
             |> List.filter (fun c -> c.Unique)
             |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true; Kind = BTree })
 
-        CreateTable(
-            name,
-            columns,
-            explicitIndexes @ uniqueColumnIndexes,
-            foreignKeys,
-            checks,
-            ifNotExists,
-            tableCharset,
-            tableCollation,
-            autoIncrementSeed,
-            tableComment
-        )
+        CreateTable
+            { Name = name
+              Columns = columns
+              Indexes = explicitIndexes @ uniqueColumnIndexes
+              ForeignKeys = foreignKeys
+              Checks = checks
+              IfNotExists = ifNotExists
+              Charset = tableCharset
+              Collation = tableCollation
+              AutoIncrementSeed = autoIncrementSeed
+              Comment = tableComment }
 
 let private createTableLike: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
