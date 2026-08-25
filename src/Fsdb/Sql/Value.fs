@@ -1041,12 +1041,19 @@ let TypeGeometry = 0xffuy
 let NotNullFlag = 0x0001us
 let PrimaryKeyFlag = 0x0002us
 let UniqueKeyFlag = 0x0004us
+let MultipleKeyFlag = 0x0008us
 let BlobFlag = 0x0010us
 let UnsignedFlag = 0x0020us
+let ZeroFillFlag = 0x0040us
 let BinaryFlag = 0x0080us
 let EnumFlag = 0x0100us
 let AutoIncrementFlag = 0x0200us
+let TimestampFlag = 0x0400us
 let SetFlag = 0x0800us
+let NoDefaultValueFlag = 0x1000us
+let OnUpdateNowFlag = 0x2000us
+let PartKeyFlag = 0x4000us
+let NumFlag = 0x8000us
 
 /// The result-column metadata consumed by both the definition packet and
 /// binary-row encoder. Keeping these fields together prevents the encoder

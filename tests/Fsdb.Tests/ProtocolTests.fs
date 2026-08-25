@@ -290,7 +290,7 @@ let tests =
               Expect.equal (wireTypeOfColumnType TFloat) TypeFloat "float"
               Expect.equal (wireTypeOfColumnType TDate) TypeDate "date"
               Expect.equal (wireTypeOfColumnType (TDateTime 0)) TypeDateTime "datetime"
-              Expect.equal (wireTypeOfColumnType (TTimestamp 0)) TypeDateTime "timestamp"
+              Expect.equal (wireTypeOfColumnType (TTimestamp 0)) TypeTimestamp "timestamp"
               Expect.equal (wireTypeOfColumnType (TBinary 16)) TypeString "binary"
               Expect.equal (wireTypeOfColumnType (TVarBinary 16)) TypeVarString "varbinary"
               Expect.equal (wireTypeOfColumnType TTinyBlob) TypeBlob "tinyblob"
@@ -306,6 +306,66 @@ let tests =
               Expect.equal (wireTypeOfColumnType TYear) TypeYear "year"
               Expect.equal (wireTypeOfColumnType (TSet [ "a" ])) TypeString "set"
               Expect.equal (wireTypeOfColumnType (TGeometry Point)) TypeGeometry "geometry"
+
+          testCase "declared types report MySQL numeric and temporal metadata"
+          <| fun _ ->
+              let intMetadata = metadataOfType (TInt true)
+              Expect.equal intMetadata.Flags (UnsignedFlag ||| NumFlag) "unsigned integer flags"
+
+              let doubleMetadata = metadataOfType TDouble
+              Expect.equal doubleMetadata.Decimals 31uy "double decimals"
+              Expect.isTrue (doubleMetadata.Flags &&& NumFlag <> 0us) "double numeric flag"
+
+              let timestampMetadata = metadataOfType (TTimestamp 3)
+              Expect.equal timestampMetadata.TypeId TypeTimestamp "timestamp wire type"
+              Expect.equal timestampMetadata.Decimals 3uy "timestamp decimals"
+
+              Expect.equal
+                  timestampMetadata.Flags
+                  (BinaryFlag ||| TimestampFlag)
+                  "timestamp flags"
+
+              let yearMetadata = metadataOfType TYear
+
+              Expect.equal
+                  yearMetadata.Flags
+                  (UnsignedFlag ||| ZeroFillFlag ||| NumFlag)
+                  "year flags"
+
+          testCase "stored columns report key default and update flags"
+          <| fun _ ->
+              let required =
+                  { Name = "n"
+                    Type = TInt false
+                    Nullable = false
+                    Default = None
+                    AutoIncrement = false
+                    PrimaryKey = false
+                    Unique = false
+                    OnUpdateCurrentTimestamp = false
+                    Generated = None
+                    Comment = ""
+                    Collation = None
+                    Charset = None }
+
+              let requiredMetadata = metadataOfColumn required
+              Expect.isTrue (requiredMetadata.Flags &&& NotNullFlag <> 0us) "not null"
+              Expect.isTrue (requiredMetadata.Flags &&& NoDefaultValueFlag <> 0us) "no default"
+
+              let primaryMetadata = metadataOfColumn { required with PrimaryKey = true }
+              Expect.isTrue (primaryMetadata.Flags &&& PrimaryKeyFlag <> 0us) "primary key"
+              Expect.isTrue (primaryMetadata.Flags &&& PartKeyFlag <> 0us) "key part"
+
+              let updatingTimestamp =
+                  { required with
+                      Type = TTimestamp 0
+                      Nullable = true
+                      Default = Some DCurrentTimestamp
+                      OnUpdateCurrentTimestamp = true }
+
+              let timestampMetadata = metadataOfColumn updatingTimestamp
+              Expect.isTrue (timestampMetadata.Flags &&& OnUpdateNowFlag <> 0us) "on update"
+              Expect.isFalse (timestampMetadata.Flags &&& NoDefaultValueFlag <> 0us) "has default"
 
           testCase "textRowPayload encodes NULL and strings in one row"
           <| fun _ ->
