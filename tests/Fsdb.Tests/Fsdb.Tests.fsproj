@@ -13,6 +13,7 @@
     <Compile Include="ValueTests.fs" />
     <Compile Include="ParserTests.fs" />
     <Compile Include="ParserCommentFuzzTests.fs" />
+    <Compile Include="PropertyTests.fs" />
     <Compile Include="StorageTests.fs" />
     <Compile Include="FullTextTests.fs" />
     <Compile Include="FullTextExecutorTests.fs" />
@@ -42,6 +43,7 @@
 
   <ItemGroup>
     <PackageReference Include="Expecto" Version="11.1.0" />
+    <PackageReference Include="Expecto.FsCheck" Version="11.1.0" />
     <PackageReference Include="MySqlConnector" Version="2.6.2" />
   </ItemGroup>
 

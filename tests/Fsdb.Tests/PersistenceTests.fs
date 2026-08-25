@@ -261,7 +261,38 @@ let tests =
                     first ()
                     Expect.isTrue (follower.Wait(TimeSpan.FromSeconds 5.)) "draining releases the producer"
                     follower.Result ()
-                    Expect.sequenceEqual batches [ [ 1 ]; [ 2 ] ] "both writes retain order" ]
+                    Expect.sequenceEqual batches [ [ 1 ]; [ 2 ] ] "both writes retain order"
+
+                testCase "concurrent producers: every acked write lands in exactly one batch, in per-producer order"
+                <| fun _ ->
+                    // Flush callbacks are serialized, so `batches` is confined
+                    // to the active queue leader while producers race for it.
+                    let batches = ResizeArray<int list>()
+                    let queue = Fsdb.GroupCommit.Queue<int>(4, batches.Add, ignore)
+                    let producers = 8
+                    let perProducer = 50
+
+                    let tasks =
+                        [| for p in 0 .. producers - 1 ->
+                               Threading.Tasks.Task.Run(fun () ->
+                                   for i in 0 .. perProducer - 1 do
+                                       queue.Enqueue(p * perProducer + i) ()) |]
+
+                    Expect.isTrue
+                        (Threading.Tasks.Task.WaitAll(tasks, TimeSpan.FromSeconds 30.))
+                        "all producers drain without wedging"
+
+                    let flushed = batches |> List.concat
+                    Expect.equal (List.length flushed) (producers * perProducer) "every acked write flushed exactly once"
+                    Expect.equal (List.sort flushed) [ 0 .. producers * perProducer - 1 ] "no write lost or duplicated"
+
+                    for p in 0 .. producers - 1 do
+                        let mine = flushed |> List.filter (fun v -> v / perProducer = p)
+
+                        Expect.equal
+                            mine
+                            [ p * perProducer .. (p + 1) * perProducer - 1 ]
+                            (sprintf "producer %d's writes flush in the order it acked them" p) ]
 
           testCase "attach + reload round-trips one value of every Value case, including datetime fractional seconds"
           <| fun _ ->
