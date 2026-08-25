@@ -5339,6 +5339,7 @@ and private selectOrUnionTableNames (body: SelectOrUnion) : Set<string> =
             @ select.GroupBy
             @ Option.toList select.Having
             @ (select.OrderBy |> List.map fst)
+            @ (select.Windows |> List.collect (fun (_, spec) -> overExprs (OverSpec spec)))
             @ Option.toList select.Limit
             @ Option.toList select.Offset
 
@@ -9650,7 +9651,13 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
                     acc.Add { Id = None; SelectType = "UNION RESULT"; Table = Some label; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
         )
     | Update u when not u.Ctes.IsEmpty ->
-        withCteQueryResult store registry dbName u.Ctes (fun () -> explainStatement store registry dbName (Update { u with Ctes = [] }))
+        let expressions =
+            (u.Assignments |> List.map _.Value)
+            @ Option.toList u.Where
+            @ (u.OrderBy |> List.map fst)
+            @ Option.toList u.Limit
+        let ctes = referencedMutationCtes u.Ctes u.Joins expressions
+        withCteQueryResult store registry dbName ctes (fun () -> explainStatement store registry dbName (Update { u with Ctes = [] }))
     | Update u ->
         let id = nextId ()
         let extra = [ if u.Where.IsSome then "Using where"
@@ -9662,7 +9669,12 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             |> Result.bind (fun () -> explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs None)
         )
     | Delete d when not d.Ctes.IsEmpty ->
-        withCteQueryResult store registry dbName d.Ctes (fun () -> explainStatement store registry dbName (Delete { d with Ctes = [] }))
+        let expressions =
+            Option.toList d.Where
+            @ (d.OrderBy |> List.map fst)
+            @ Option.toList d.Limit
+        let ctes = referencedMutationCtes d.Ctes d.Joins expressions
+        withCteQueryResult store registry dbName ctes (fun () -> explainStatement store registry dbName (Delete { d with Ctes = [] }))
     | Delete d ->
         let id = nextId ()
         let extra = [ if d.Where.IsSome then "Using where"

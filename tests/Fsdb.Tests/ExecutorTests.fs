@@ -6685,6 +6685,10 @@ let tests =
                     | Affected 5UL -> ()
                     | other -> failtestf "expected the update to ignore its unused CTE, got %A" other
 
+                    match runDefault store "EXPLAIN WITH unused AS (SELECT missing) DELETE FROM t WHERE id < 0" with
+                    | ResultSet _ -> ()
+                    | other -> failtestf "expected EXPLAIN to ignore its unused CTE, got %A" other
+
                 testCase "a CTE referenced twice in one FROM materializes once and joins"
                 <| fun _ ->
                     expectRows "WITH x AS (SELECT 1 AS a) SELECT * FROM x JOIN x AS y ON x.a = y.a" [ [ Some "1"; Some "1" ] ]
