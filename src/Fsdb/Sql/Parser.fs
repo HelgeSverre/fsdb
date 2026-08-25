@@ -3120,7 +3120,9 @@ let private explainStmt: Parser<Statement, unit> =
         >>. sym "="
         >>. ((keyword "TRADITIONAL" >>% ExplainTraditional) <|> (keyword "JSON" >>% ExplainJson))
 
-    (((keyword "EXPLAIN" >>. opt (attempt format)) |>> Option.defaultValue ExplainTraditional)
+    (((keyword "EXPLAIN"
+       >>. ((keyword "ANALYZE" >>% Some ExplainAnalyze) <|> opt (attempt format)))
+      |>> Option.defaultValue ExplainTraditional)
      <|> (keyword "DESCRIBE" >>% ExplainTraditional)
      <|> (keyword "DESC" >>% ExplainTraditional))
     .>>. statement

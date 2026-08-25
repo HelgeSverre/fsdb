@@ -754,8 +754,8 @@ type Statement =
     | CreateView of name: string * columns: string list * definition: string * orReplace: bool
     /// `DROP VIEW [IF EXISTS] view [, ...]`.
     | DropView of names: string list * ifExists: bool
-    /// `EXPLAIN [FORMAT=TRADITIONAL|JSON] stmt` describes the access plan for
-    /// `SELECT`/`UPDATE`/`DELETE`/`INSERT` without running the statement.
+    /// `EXPLAIN [FORMAT=TRADITIONAL|JSON] stmt` describes an access plan;
+    /// `EXPLAIN ANALYZE SELECT` also evaluates the query.
     | Explain of format: ExplainFormat * statement: Statement
 
 /// A `SET` target: `col` or `table.col` — the table qualifier only matters

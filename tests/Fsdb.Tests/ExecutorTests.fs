@@ -1056,6 +1056,19 @@ let tests =
                         Expect.equal (table.GetProperty("key").GetString()) "PRIMARY" "selected key"
                     | other -> failtestf "expected one JSON plan document, got %A" other
 
+                testCase "EXPLAIN ANALYZE executes a SELECT and reports observations"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2)" |> ignore
+
+                    match runDefault store "EXPLAIN ANALYZE SELECT id FROM t WHERE id = 1" with
+                    | ResultSet([ "EXPLAIN" ], [ [ Some root ]; [ Some access ] ]) ->
+                        Expect.stringContains root "actual time=" "runtime is reported"
+                        Expect.stringContains root "rows=1" "actual output cardinality"
+                        Expect.stringContains access "const on t" "observed plan retains its access path"
+                    | other -> failtestf "expected an analyzed plan, got %A" other
+
                 testCase "DESCRIBE statement is an EXPLAIN synonym"
                 <| fun _ ->
                     let store = newStore ()

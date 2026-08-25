@@ -9816,6 +9816,24 @@ let private renderExplainJson (rows: ExplainRow list) : QueryResult =
     let options = JsonSerializerOptions(WriteIndented = true)
     ResultSet([ "EXPLAIN" ], [ [ Some(root.ToJsonString(options)) ] ])
 
+let private renderExplainAnalyze (rows: ExplainRow list) (elapsedMilliseconds: float) (actualRows: int) : QueryResult =
+    let planRows =
+        rows
+        |> List.sortBy (fun row -> row.Id |> Option.defaultValue System.Int32.MaxValue)
+        |> List.map (fun row ->
+            let source = row.Table |> Option.defaultValue "no tables used"
+            let access = row.Type |> Option.defaultValue row.SelectType
+            let estimate = row.Rows |> Option.map string |> Option.defaultValue "unknown"
+            sprintf "    -> %s on %s (estimated rows=%s)" access source estimate)
+
+    let root =
+        sprintf
+            "-> fsdb query plan (actual time=0.000..%.3f rows=%d loops=1)"
+            elapsedMilliseconds
+            actualRows
+
+    ResultSet([ "EXPLAIN" ], (root :: planRows) |> List.map (fun line -> [ Some line ]))
+
 /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — a pure description of what
 /// `execute` would do with `stmt`, never actually running it. Still
 /// validates `stmt` the way actually running it would, though — real MySQL
@@ -9837,6 +9855,9 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         counter.Value
 
     let acc = ResizeArray<ExplainRow>()
+    let mutable analyzedMilliseconds = 0.0
+    let mutable analyzedRows = 0
+    let mutable analyzedStatements = 0
 
     let finish (result: Result<unit, QueryResult>) =
         match result with
@@ -9846,7 +9867,8 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             match format with
             | ExplainTraditional -> renderExplainRows rows
             | ExplainJson -> renderExplainJson rows
-            | ExplainAnalyze -> Err(1235, "EXPLAIN ANALYZE is not supported")
+            | ExplainAnalyze when analyzedStatements = 1 -> renderExplainAnalyze rows analyzedMilliseconds analyzedRows
+            | ExplainAnalyze -> Err(1235, "EXPLAIN ANALYZE currently supports one SELECT")
         | Error e -> e
 
     /// `INSERT`'s target table never goes through `explainJoinBlock` (an
@@ -9856,8 +9878,17 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         resolveTableRef store registry dbName { Database = Some db; Table = tname; Alias = None } |> Result.map ignore
 
     let checkSelect (select: SelectStmt) : Result<unit, QueryResult> =
-        match runSelectStmt store registry dbName select None with
-        | Err(code, message), _, _ -> Error(Err(code, message))
+        let stopwatch = System.Diagnostics.Stopwatch.StartNew()
+        let result, _, rows = runSelectStmt store registry dbName select None
+        stopwatch.Stop()
+
+        if format = ExplainAnalyze then
+            analyzedMilliseconds <- analyzedMilliseconds + stopwatch.Elapsed.TotalMilliseconds
+            analyzedRows <- analyzedRows + List.length rows
+            analyzedStatements <- analyzedStatements + 1
+
+        match result with
+        | Err(code, message) -> Error(Err(code, message))
         | _ -> Ok()
 
     /// `UPDATE`/`DELETE` have no `SelectStmt` to hand `checkSelect`, so
