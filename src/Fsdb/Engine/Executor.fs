@@ -101,8 +101,17 @@ type private FullTextSourcePlan =
 
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
+type private Int64Membership =
+    { Values: Set<int64>
+      ContainsNull: bool }
+
+type private ExpressionSubqueryResult =
+    { Result: QueryResult
+      Rows: Value[] list
+      Int64Membership: Int64Membership option }
+
 type private MemoizedSubquery =
-    | MemoizedSubquery of QueryResult * ColumnMetadata list * Value[] list
+    | MemoizedSubquery of ExpressionSubqueryResult
     | UnmemoizedSubquery
 
 type private StatementMemo =
@@ -2738,11 +2747,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | InSubquery((Row _ as e), select) ->
         evalRowOperand ctx e
         |> Result.bind (fun value ->
-            match runExpressionSubquery ctx select select with
-            | Err(code, message), _, _ -> Error(code, message)
-            | Affected _, _, _ -> Ok VNull
-            | ResultSet(_, _), _, typedRows ->
-                typedRows
+            let subquery = runExpressionSubquery ctx select select
+
+            match subquery.Result with
+            | Err(code, message) -> Error(code, message)
+            | Affected _ -> Ok VNull
+            | ResultSet(_, _) ->
+                subquery.Rows
                 |> traverse (fun row ->
                     subqueryRowOperand ctx select row
                     |> rowComparisonResult ctx Eq value)
@@ -2763,16 +2774,22 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // otherwise wrongly drop every row whose `e` is `NULL`.
         eval e
         |> Result.bind (fun ve ->
-            match runExpressionSubquery ctx select select with
-            | Err(code, message), _, _ -> Error(code, message)
-            | Affected _, _, _ -> Ok VNull
-            | ResultSet(columns, _), _, _ when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
-            | ResultSet(_, _), _, typedRows ->
-                let candidates = typedRows |> List.map (Array.tryHead >> Option.defaultValue VNull)
+            let subquery = runExpressionSubquery ctx select select
+
+            match subquery.Result with
+            | Err(code, message) -> Error(code, message)
+            | Affected _ -> Ok VNull
+            | ResultSet(columns, _) when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
+            | ResultSet(_, _) ->
+                let candidates = subquery.Rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
                 let rightOperand = subqueryProjectionOperand ctx select
 
-                match ve with
-                | VNull -> if candidates.IsEmpty then Ok(VInt 0L) else Ok VNull
+                match ve, subquery.Int64Membership with
+                | VNull, _ -> if candidates.IsEmpty then Ok(VInt 0L) else Ok VNull
+                | VInt value, Some membership ->
+                    if membership.Values.Contains value then Ok(VInt 1L)
+                    elif membership.ContainsNull then Ok VNull
+                    else Ok(VInt 0L)
                 | _ ->
                     candidates
                     |> traverse (quantifiedComparisonResult ctx e ve rightOperand Eq)
@@ -2783,15 +2800,17 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | QuantifiedComparison(e, op, quantifier, select) ->
         eval e
         |> Result.bind (fun left ->
-            match runExpressionSubquery ctx select select with
-            | Err(code, message), _, _ -> Error(code, message)
-            | Affected _, _, _ -> Ok VNull
-            | ResultSet(columns, _), _, _ when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
-            | ResultSet(_, _), _, typedRows ->
+            let subquery = runExpressionSubquery ctx select select
+
+            match subquery.Result with
+            | Err(code, message) -> Error(code, message)
+            | Affected _ -> Ok VNull
+            | ResultSet(columns, _) when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
+            | ResultSet(_, _) ->
                 let rightOperand = subqueryProjectionOperand ctx select
 
                 let comparisons =
-                    typedRows
+                    subquery.Rows
                     |> traverse (fun row ->
                         let right = row |> Array.tryHead |> Option.defaultValue VNull
                         quantifiedComparisonResult ctx e left rightOperand op right)
@@ -3096,25 +3115,27 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->
-        match runExpressionSubquery ctx select (existsEarlyExitSelect select) with
-        | ResultSet(_, rows), _, _ -> Ok(boolToValue (not (List.isEmpty rows)))
-        | Err(code, message), _, _ -> Error(code, message)
+        match (runExpressionSubquery ctx select (existsEarlyExitSelect select)).Result with
+        | ResultSet(_, rows) -> Ok(boolToValue (not (List.isEmpty rows)))
+        | Err(code, message) -> Error(code, message)
         // A `SELECT` under `EXISTS (...)` is never an `INSERT`/`UPDATE`/
         // `DELETE` (the parser's `selectStmtRecord` only builds `SelectStmt`
         // records, nothing else reaches here), so `Affected` can't occur.
-        | Affected _, _, _ -> Ok VNull
+        | Affected _ -> Ok VNull
     | Subquery select ->
         // Reads the subquery's own typed `Value`, not a `VString` re-wrap
         // of its text resultset — a bare-text round trip would make e.g.
         // `(SELECT MAX(n) FROM t) > (SELECT MIN(n) FROM t)` compare
         // lexicographically instead of numerically.
-        match runExpressionSubquery ctx select select with
-        | Err(code, message), _, _ -> Error(code, message)
-        | Affected _, _, _ -> Ok VNull
-        | ResultSet(cols, _), _, _ when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
-        | ResultSet(_, []), _, _ -> Ok VNull
-        | ResultSet(_, [ _ ]), _, [ row ] -> Ok(row |> Array.tryHead |> Option.defaultValue VNull)
-        | ResultSet(_, _), _, _ -> Error(1242, "Subquery returns more than 1 row")
+        let subquery = runExpressionSubquery ctx select select
+
+        match subquery.Result, subquery.Rows with
+        | Err(code, message), _ -> Error(code, message)
+        | Affected _, _ -> Ok VNull
+        | ResultSet(cols, _), _ when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
+        | ResultSet(_, []), _ -> Ok VNull
+        | ResultSet(_, [ _ ]), [ row ] -> Ok(row |> Array.tryHead |> Option.defaultValue VNull)
+        | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
 
 and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, EvalError> =
     match expr with
@@ -3123,12 +3144,14 @@ and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, 
         |> traverse (evalRowOperand ctx)
         |> Result.map RowValues
     | Subquery select ->
-        match runExpressionSubquery ctx select select with
-        | Err(code, message), _, _ -> Error(code, message)
-        | Affected _, _, _ -> Ok(RowValues [])
-        | ResultSet(columns, _), _, [] -> Ok(subqueryRowOperand ctx select (Array.create columns.Length VNull))
-        | ResultSet(_, [ _ ]), _, [ row ] -> Ok(subqueryRowOperand ctx select row)
-        | ResultSet(_, _), _, _ -> Error(1242, "Subquery returns more than 1 row")
+        let subquery = runExpressionSubquery ctx select select
+
+        match subquery.Result, subquery.Rows with
+        | Err(code, message), _ -> Error(code, message)
+        | Affected _, _ -> Ok(RowValues [])
+        | ResultSet(columns, _), [] -> Ok(subqueryRowOperand ctx select (Array.create columns.Length VNull))
+        | ResultSet(_, [ _ ]), [ row ] -> Ok(subqueryRowOperand ctx select row)
+        | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
     | _ ->
         evalExpr ctx expr
         |> Result.map (fun value -> RowScalar(expr, tryColumnDefForExpr ctx expr, value))
@@ -3156,17 +3179,38 @@ and private runExpressionSubquery
     (ctx: EvalContext)
     (cacheKey: SelectStmt)
     (select: SelectStmt)
-    : QueryResult * ColumnMetadata list * Value[] list =
+    : ExpressionSubqueryResult =
     let memo = (currentStatementMemo ()).ExpressionSubqueries
-    let execute outer = runSelectStmt ctx.Store ctx.Registry ctx.DbName select outer
+
+    let int64Membership rows =
+        let values =
+            rows
+            |> List.choose (Array.tryHead >> Option.bind (function VInt value -> Some value | _ -> None))
+
+        let containsNull = rows |> List.exists (Array.tryHead >> Option.exists ((=) VNull))
+
+        let hasOther =
+            rows
+            |> List.exists (Array.tryHead >> Option.exists (function VInt _ | VNull -> false | _ -> true))
+
+        if hasOther then None
+        else Some { Values = Set.ofList values; ContainsNull = containsNull }
+
+    let execute outer =
+        let result, _, rows = runSelectStmt ctx.Store ctx.Registry ctx.DbName select outer
+
+        { Result = result
+          Rows = rows
+          Int64Membership = None }
 
     match memo.TryGetValue cacheKey with
-    | true, MemoizedSubquery(result, metadata, rows) -> result, metadata, rows
+    | true, MemoizedSubquery result -> result
     | true, UnmemoizedSubquery -> execute (Some ctx)
     | _ when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
-        let result, metadata, rows = execute None
-        memo.[cacheKey] <- MemoizedSubquery(result, metadata, rows)
-        result, metadata, rows
+        let result = execute None
+        let result = { result with Int64Membership = int64Membership result.Rows }
+        memo.[cacheKey] <- MemoizedSubquery result
+        result
     | _ ->
         memo.[cacheKey] <- UnmemoizedSubquery
         execute (Some ctx)

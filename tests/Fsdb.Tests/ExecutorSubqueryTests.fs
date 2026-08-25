@@ -307,6 +307,26 @@ let tests =
 
               Expect.isGreaterThan touches allTouches "a correlated quantified subquery runs for every outer row"
 
+          testCase "memoized integer IN preserves NULL and empty-set semantics"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_rows (id INT)" |> ignore
+              runDefault store "CREATE TABLE inner_rows (id INT)" |> ignore
+              runDefault store "INSERT INTO outer_rows VALUES (1), (2), (NULL)" |> ignore
+              runDefault store "INSERT INTO inner_rows VALUES (2), (NULL)" |> ignore
+
+              match
+                  runDefault
+                      store
+                      "SELECT id, id IN (SELECT id FROM inner_rows), id IN (SELECT id FROM inner_rows WHERE FALSE) FROM outer_rows ORDER BY id"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ None; None; Some "0" ]; [ Some "1"; None; Some "0" ]; [ Some "2"; Some "1"; Some "0" ] ]
+                      "memoized membership retains three-valued IN behavior"
+              | other -> failtestf "expected a resultset, got %A" other
+
           testCase "EXISTS stops after its first matching row"
           <| fun _ ->
               let mutable touches = 0
