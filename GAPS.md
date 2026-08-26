@@ -71,6 +71,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
 | `LOCK TABLES…READ/WRITE` and `UNLOCK TABLES` are accepted without mutual exclusion or access restriction; `HANDLER` and XA transactions remain absent | low | divergence/refusal |
+| `ALTER TABLE` accepts `ALGORITHM` and `LOCK` execution hints but does not enforce the requested online-DDL strategy | low | divergence |
 | Partitioning: HASH declarations are accepted as logical table options; partition metadata, pruning, `PARTITION (p)` selection, and `ADD/DROP/COALESCE/REORGANIZE PARTITION` remain absent | medium | divergence/refusal |
 | `CREATE/DROP ROLE` are backed by locked `mysql.user` accounts and `SET ROLE NONE` clears the empty active-role set; other `SET ROLE`, `SET DEFAULT ROLE`, role grants/inheritance, dynamic privileges (`BACKUP_ADMIN`…), and `GRANT PROXY` remain absent | medium | divergence/refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
