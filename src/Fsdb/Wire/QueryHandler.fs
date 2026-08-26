@@ -2587,7 +2587,10 @@ type private TextRoutineCommand =
     | DropProcedure of name: string * ifExists: bool
 
 let private createProcedureRe =
-    Regex(@"^\s*CREATE\s+PROCEDURE\s+(?<name>\S+)\s*\(\s*\)\s+(?<body>.+)$", RegexOptions.IgnoreCase)
+    Regex(
+        @"^\s*CREATE\s+PROCEDURE\s+(?<name>\S+)\s*\(\s*\)\s+(?<body>.+)$",
+        RegexOptions.IgnoreCase ||| RegexOptions.Singleline
+    )
 
 let private callProcedureRe = Regex(@"^\s*CALL\s+(?<name>\S+)\s*\(\s*\)\s*$", RegexOptions.IgnoreCase)
 
@@ -2607,6 +2610,17 @@ let private tryTextRoutineCommand (sql: string) =
         Some(DropProcedure(drop.Groups.["name"].Value, drop.Groups.["ifExists"].Success))
     else
         None
+
+let private routineStatement (body: string) =
+    let trimmed = body.Trim()
+
+    if trimmed.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase)
+       && trimmed.EndsWith("END", StringComparison.OrdinalIgnoreCase) then
+        let statement = trimmed.Substring(5, trimmed.Length - 8).Trim().TrimEnd(';').Trim()
+
+        if statement.Contains(';') then None else Some statement
+    else
+        Some trimmed
 
 type private TextEventCommand =
     | CreateEvent of name: string * schedule: string * body: string
@@ -2719,9 +2733,14 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             | Ok() when routineEntries () |> List.exists (SystemCatalog.Routine.matches database name) ->
                 session, Err(1304, sprintf "PROCEDURE %s already exists" name)
             | Ok() ->
-                let upper = body.Trim().ToUpperInvariant()
+                let statement = routineStatement body
 
-                if Parser.parse body |> Result.isError && tryProbe body upper |> Option.isNone then
+                if
+                    statement
+                    |> Option.forall (fun sql ->
+                        let upper = sql.ToUpperInvariant()
+                        Parser.parse sql |> Result.isError && tryProbe sql upper |> Option.isNone)
+                then
                     session, syntaxError body
                 else
                     let definer = session.User + "@" + session.AccountHost
@@ -2746,7 +2765,10 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             | Some routine ->
                 match authorize "EXECUTE" database with
                 | Error(code, message) -> session, Err(code, message)
-                | Ok() -> dispatch session routine.Definition
+                | Ok() ->
+                    match routineStatement routine.Definition with
+                    | Some statement -> dispatch session statement
+                    | None -> session, Err(1235, "Compound stored procedure bodies are not supported")
         | DropProcedure(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)

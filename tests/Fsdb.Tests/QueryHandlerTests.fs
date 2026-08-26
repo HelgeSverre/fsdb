@@ -1104,6 +1104,22 @@ let tests =
                   | other -> failtestf "expected missing procedure, got %A" other
               | _, other -> failtestf "expected procedure result, got %A" other
 
+          testCase "single-statement procedure blocks persist and execute"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE posts (id INT)"
+              let session, _ = handle session "INSERT INTO posts VALUES (42)"
+
+              let sql =
+                  "CREATE PROCEDURE first_post() BEGIN\nSELECT id FROM posts LIMIT 1;\nEND"
+
+              let session, result = handle session sql
+              Expect.equal result (Affected 0UL) "created"
+
+              match handle session "CALL first_post()" |> snd with
+              | ResultSet([ "id" ], [ [ Some "42" ] ]) -> ()
+              | other -> failtestf "expected procedure result, got %A" other
+
           testCase "scheduled event declarations persist without executing"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
