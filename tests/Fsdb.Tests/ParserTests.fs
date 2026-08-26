@@ -2692,6 +2692,32 @@ let tests =
                       "trigger order does not expose body delimiters"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "statement batches preserve conditional trigger bodies"
+          <| fun _ ->
+              let sql =
+                  "CREATE TRIGGER trg AFTER UPDATE ON t FOR EACH ROW BEGIN IF (NOT(NEW.n <=> OLD.n)) THEN INSERT INTO log VALUES (NEW.n); END IF; END; SELECT 1"
+
+              match splitStatements sql with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ "CREATE TRIGGER trg AFTER UPDATE ON t FOR EACH ROW BEGIN IF (NOT(NEW.n <=> OLD.n)) THEN INSERT INTO log VALUES (NEW.n); END IF; END"
+                        "SELECT 1" ]
+                      "END IF does not close the outer trigger block"
+              | Error error -> failtestf "unexpected split error: %s" error
+
+          testCase "scalar IF calls do not add compound nesting"
+          <| fun _ ->
+              let sql = "CREATE PROCEDURE choose_value() BEGIN SELECT IF(1, 2, 3); END; SELECT 1"
+
+              match splitStatements sql with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ "CREATE PROCEDURE choose_value() BEGIN SELECT IF(1, 2, 3); END"; "SELECT 1" ]
+                      "the function call leaves BEGIN as the only compound level"
+              | Error error -> failtestf "unexpected split error: %s" error
+
           testCase "statement batches preserve compound procedure bodies"
           <| fun _ ->
               let sql = "CREATE PROCEDURE first_post() BEGIN SELECT id FROM posts LIMIT 1; END; SELECT 1"

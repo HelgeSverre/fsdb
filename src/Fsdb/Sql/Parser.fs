@@ -3671,6 +3671,7 @@ let splitStatements (sql: string) : Result<string list, string> =
     let mutable blockComment = false
     let mutable lineComment = false
     let mutable compoundDepth = 0
+    let mutable compoundStatementStart = false
 
     let isWordStart c = Char.IsLetter c || c = '_'
     let isWordPart c = Char.IsLetterOrDigit c || c = '_'
@@ -3745,15 +3746,28 @@ let splitStatements (sql: string) : Result<string list, string> =
             if word.Equals("BEGIN", StringComparison.OrdinalIgnoreCase) then
                 if compoundDepth > 0 || startsCompound i then
                     compoundDepth <- compoundDepth + 1
+                    compoundStatementStart <- true
+            elif compoundDepth > 0 && compoundStatementStart && word.Equals("IF", StringComparison.OrdinalIgnoreCase) then
+                compoundDepth <- compoundDepth + 1
+                compoundStatementStart <- false
             elif compoundDepth > 0 && word.Equals("CASE", StringComparison.OrdinalIgnoreCase) then
                 compoundDepth <- compoundDepth + 1
+                compoundStatementStart <- false
             elif compoundDepth > 0 && word.Equals("END", StringComparison.OrdinalIgnoreCase) then
                 compoundDepth <- compoundDepth - 1
+                compoundStatementStart <- false
+            elif compoundDepth > 0 && word.Equals("THEN", StringComparison.OrdinalIgnoreCase) then
+                compoundStatementStart <- true
+            elif compoundDepth > 0 then
+                compoundStatementStart <- false
 
             i <- stop
         | None when sql.[i] = ';' && compoundDepth = 0 ->
             addStatement i
             start <- i + 1
+            i <- i + 1
+        | None when sql.[i] = ';' ->
+            compoundStatementStart <- true
             i <- i + 1
         | None -> i <- i + 1
 
