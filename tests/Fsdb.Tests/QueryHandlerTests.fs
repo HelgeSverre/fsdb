@@ -1650,6 +1650,31 @@ let tests =
               | ResultSet(_, [ [ Some "root@%"; Some "root@localhost" ] ]) -> ()
               | other -> failtestf "expected the fallback identity, got %A" other
 
+          testCase "advisory locks are reentrant and released with their session"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let second = create 2 store
+
+              let scalar session sql =
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ value ] ]) -> value
+                  | other -> failtestf "expected one scalar value, got %A" other
+
+              Expect.equal (scalar first "SELECT GET_LOCK('migration', 0)") (Some "1") "first owner"
+              Expect.equal (scalar first "SELECT GET_LOCK('migration', 0)") (Some "1") "reentrant owner"
+              Expect.equal (scalar second "SELECT IS_FREE_LOCK('migration')") (Some "0") "held lock is not free"
+              Expect.equal (scalar second "SELECT IS_USED_LOCK('migration')") (Some "1") "owner connection id"
+              Expect.equal (scalar second "SELECT GET_LOCK('migration', 0)") (Some "0") "contended lock"
+              Expect.equal (scalar first "SELECT RELEASE_LOCK('migration')") (Some "1") "one acquisition remains"
+              Expect.equal (scalar second "SELECT GET_LOCK('migration', 0)") (Some "0") "recursive count retains lock"
+              Expect.equal (scalar first "SELECT RELEASE_LOCK('migration')") (Some "1") "final release"
+              Expect.equal (scalar first "SELECT IS_FREE_LOCK('migration')") (Some "1") "released lock is free"
+              Expect.equal (scalar second "SELECT GET_LOCK('migration', 0)") (Some "1") "next owner"
+
+              closeSession second
+              Expect.equal (scalar first "SELECT GET_LOCK('migration', 0)") (Some "1") "disconnect releases locks"
+
           testCase "comments ahead of text-probed statements are stripped like real MySQL's lexer"
           <| fun _ ->
               let session = create 999905 (Fsdb.Storage.create ())

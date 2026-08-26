@@ -8,6 +8,8 @@
 module Fsdb.QueryHandler
 
 open System
+open System.Diagnostics
+open System.Runtime.CompilerServices
 open System.Text
 open System.Text.RegularExpressions
 open Fsdb.Engine
@@ -234,6 +236,120 @@ let private expressionVariables (session: Session) = expressionVariablesFor sess
 
 let private accountOf (session: Session) = Auth.account session.User session.AccountHost
 
+type private AdvisoryLock =
+    { Owner: int
+      Count: int }
+
+let private advisoryLocksByStore =
+    ConditionalWeakTable<obj, System.Collections.Generic.Dictionary<string, AdvisoryLock>>()
+
+let private advisoryLocks (session: Session) =
+    advisoryLocksByStore.GetValue(
+        session.Store.Lock,
+        fun _ -> System.Collections.Generic.Dictionary(StringComparer.Ordinal)
+    )
+
+let private advisoryLockName = function
+    | VNull -> None
+    | value ->
+        let name = Value.toText value |> Option.defaultValue ""
+
+        if name.EnumerateRunes() |> Seq.length > 64 then
+            raise (Functions.SqlError(3057, "User-level lock name is too long"))
+
+        Some name
+
+let private getAdvisoryLock (session: Session) = function
+    | [ name; timeout ] ->
+        match advisoryLockName name, timeout with
+        | None, _
+        | _, VNull -> VNull
+        | Some name, timeout ->
+            let seconds = Value.toDouble timeout
+
+            if Double.IsNaN seconds then
+                VNull
+            else
+                let infinite = seconds < 0.0 || Double.IsPositiveInfinity seconds
+                let deadline = Stopwatch.StartNew()
+                let locks = advisoryLocks session
+
+                lock locks (fun () ->
+                    let rec acquire () =
+                        match locks.TryGetValue name with
+                        | false, _ ->
+                            locks.[name] <- { Owner = session.ConnectionId; Count = 1 }
+                            VInt 1L
+                        | true, current when current.Owner = session.ConnectionId ->
+                            locks.[name] <- { current with Count = current.Count + 1 }
+                            VInt 1L
+                        | _ when not infinite && deadline.Elapsed.TotalSeconds >= seconds -> VInt 0L
+                        | _ ->
+                            Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+
+                            let waitMilliseconds =
+                                if infinite then 50 else max 1 (min 50 (int ((seconds - deadline.Elapsed.TotalSeconds) * 1000.0)))
+
+                            Threading.Monitor.Wait(locks, waitMilliseconds) |> ignore
+                            acquire ()
+
+                    acquire ())
+    | _ -> raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'GET_LOCK'"))
+
+let private releaseAdvisoryLock (session: Session) = function
+    | [ value ] ->
+        match advisoryLockName value with
+        | None -> VNull
+        | Some name ->
+            let locks = advisoryLocks session
+
+            lock locks (fun () ->
+                match locks.TryGetValue name with
+                | false, _ -> VNull
+                | true, current when current.Owner <> session.ConnectionId -> VInt 0L
+                | true, current when current.Count > 1 ->
+                    locks.[name] <- { current with Count = current.Count - 1 }
+                    VInt 1L
+                | true, _ ->
+                    locks.Remove name |> ignore
+                    Threading.Monitor.PulseAll locks
+                    VInt 1L)
+    | _ -> raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'RELEASE_LOCK'"))
+
+let private releaseAllAdvisoryLocks (session: Session) =
+    let locks = advisoryLocks session
+
+    lock locks (fun () ->
+        let owned =
+            locks
+            |> Seq.filter (fun pair -> pair.Value.Owner = session.ConnectionId)
+            |> Seq.map (fun pair -> pair.Key, pair.Value.Count)
+            |> List.ofSeq
+
+        owned |> List.iter (fst >> locks.Remove >> ignore)
+
+        if not owned.IsEmpty then
+            Threading.Monitor.PulseAll locks
+
+        owned |> List.sumBy snd)
+
+let private inspectAdvisoryLock (session: Session) inUse = function
+    | [ value ] ->
+        match advisoryLockName value with
+        | None -> VNull
+        | Some name ->
+            let locks = advisoryLocks session
+
+            lock locks (fun () ->
+                match locks.TryGetValue name with
+                | true, current when inUse -> VInt(int64 current.Owner)
+                | true, _ -> VInt 0L
+                | false, _ when inUse -> VNull
+                | false, _ -> VInt 1L)
+    | _ ->
+        let name = if inUse then "IS_USED_LOCK" else "IS_FREE_LOCK"
+        raise (Functions.SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
+
 let private registryFor (session: Session) : Functions.Registry =
     let collapseExtension name (extension: Functions.ScalarFunction) registry =
         let invoke args =
@@ -273,6 +389,15 @@ let private registryFor (session: Session) : Functions.Registry =
         "VERSION"
         (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
+    |> Functions.registerScalar "GET_LOCK" (getAdvisoryLock session)
+    |> Functions.registerScalar "RELEASE_LOCK" (releaseAdvisoryLock session)
+    |> Functions.registerScalar "IS_FREE_LOCK" (inspectAdvisoryLock session false)
+    |> Functions.registerScalar "IS_USED_LOCK" (inspectAdvisoryLock session true)
+    |> Functions.registerScalar "RELEASE_ALL_LOCKS" (fun args ->
+        if args.IsEmpty then
+            VInt(int64 (releaseAllAdvisoryLocks session))
+        else
+            raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'RELEASE_ALL_LOCKS'")))
     |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@" + session.AccountHost))
     |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
     |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
@@ -1200,6 +1325,7 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
 
 /// Rolls an abandoned connection's transaction back.
 let closeSession (session: Session) : unit =
+    releaseAllAdvisoryLocks session |> ignore
     rollbackSession session |> ignore
 
 let private savepointNotFound (name: string) : QueryResult =
