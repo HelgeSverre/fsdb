@@ -187,6 +187,24 @@ let tests =
               | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some "100"; Some "external" ] ]) -> ()
               | result -> failtestf "expected the original private identity after commit, got %A" result
 
+          testCase "READ COMMITTED reserves auto-increment identities across connections"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let first, _ = handle first "CREATE TABLE tx_rc_auto_concurrent (id INT AUTO_INCREMENT PRIMARY KEY, note VARCHAR(20))"
+              let first, _ = handle first "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+              let first, _ = handle first "BEGIN"
+              let first, inserted = handle first "INSERT INTO tx_rc_auto_concurrent(note) VALUES ('private')"
+              Expect.equal inserted (Affected 1UL) "private insert"
+
+              let second = create 2 store
+              let second, inserted = handle second "INSERT INTO tx_rc_auto_concurrent(note) VALUES ('committed')"
+              Expect.equal inserted (Affected 1UL) "concurrent insert"
+
+              match handle first "SELECT id, note FROM tx_rc_auto_concurrent ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some "2"; Some "committed" ] ]) -> ()
+              | result -> failtestf "expected both reserved identities, got %A" result
+
           testCase "READ COMMITTED savepoint rollback retains concurrent committed rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -1624,10 +1624,28 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
 
     match session.Tx with
     | Some _ ->
-        session
-        |> startTransactionStatement
-        |> prepareTransactionWrite stmt
-        |> execute
+        let executed, result =
+            session
+            |> startTransactionStatement
+            |> prepareTransactionWrite stmt
+            |> execute
+
+        let canAllocateAutoIncrement =
+            match stmt with
+            | Insert _
+            | InsertSelect _
+            | Replace _
+            | ReplaceSelect _
+            | ReplaceSet _
+            | Update _
+            | Delete _ -> true
+            | _ -> false
+
+        if canAllocateAutoIncrement then
+            executed.Tx
+            |> Option.iter (fun transaction -> Storage.bumpAutoIncrementsInto executed.Store transaction.Snapshot.Catalog)
+
+        executed, result
     | None -> execute session
 
 type private TemporaryAction =
