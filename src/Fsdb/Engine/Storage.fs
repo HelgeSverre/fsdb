@@ -3787,8 +3787,24 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                         |> Result.bind (fun () -> applyAlterAction (temporalCoercionMode store) tbl action)
                         |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
 
+                let validateAutoIncrementKey (_, finalTable: Table) =
+                    let indexed column =
+                        column.PrimaryKey
+                        || column.Unique
+                        || (finalTable.Indexes
+                            |> List.exists (fun index ->
+                                index.Columns
+                                |> List.tryHead
+                                |> Option.exists (fun name -> System.String.Equals(name, column.Name, System.StringComparison.OrdinalIgnoreCase))))
+
+                    match finalTable.Columns |> List.tryFind (fun column -> column.AutoIncrement && not (indexed column)) with
+                    | Some _ ->
+                        Error(ExpressionError(1075, "Incorrect table definition; there can be only one auto column and it must be defined as a key"))
+                    | None -> Ok()
+
                 actions
                 |> List.fold step (Ok(origKey, table))
+                |> Result.bind (fun state -> validateAutoIncrementKey state |> Result.map (fun () -> state))
                 // Column positions/count may have shifted (`ADD`/`DROP`/
                 // `MODIFY COLUMN`), so a full rebuild rather than an
                 // incremental patch — ALTER isn't a hot path.

@@ -1757,6 +1757,12 @@ let tests =
 
                     Expect.equal primary [ "id"; "tenant_id" ] "composite primary key"
 
+                    runDefault store "CREATE TABLE lone_auto (id INT AUTO_INCREMENT PRIMARY KEY)" |> ignore
+
+                    match runDefault store "ALTER TABLE lone_auto DROP PRIMARY KEY" with
+                    | Err(1075, _) -> ()
+                    | other -> failtestf "expected an unindexed auto-increment error, got %A" other
+
                 testCase "ALTER TABLE adds a named unique constraint with execution options"
                 <| fun _ ->
                     let store = newStore ()
