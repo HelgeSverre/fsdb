@@ -95,6 +95,22 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (1), (2), (3), (-1)") "fire each branch"
               Expect.equal (rows store "SELECT n FROM t ORDER BY id") [ [ Some "10" ]; [ Some "21" ]; [ Some "30" ]; [ Some "-1" ] ] "each row follows one branch"
 
+          testCase "trigger blocks retain declared values from scalar subqueries"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+              expectOk (runDefault store "CREATE TABLE rates (id INT PRIMARY KEY, rate DECIMAL(10,2))") "create rates"
+              expectOk (runDefault store "INSERT INTO rates VALUES (1, 5.00)") "seed rate"
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TRIGGER local_value BEFORE INSERT ON t FOR EACH ROW BEGIN IF NEW.n > 0 THEN BEGIN DECLARE taxRate DECIMAL(10,2); SET taxRate = (SELECT rate FROM rates WHERE id = 1); SET NEW.n = NEW.n + taxRate; END; ELSE BEGIN SET NEW.n = 0; END; END IF; END")
+                  "create local-value trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (1), (-1)") "fire local-value trigger"
+              Expect.equal (rows store "SELECT n FROM t ORDER BY id") [ [ Some "6" ]; [ Some "0" ] ] "the selected local value reaches the assignment"
+
           testCase "BEFORE INSERT preserves body writes in the subject database"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

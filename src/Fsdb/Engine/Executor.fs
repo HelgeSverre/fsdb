@@ -11237,18 +11237,24 @@ let private beforeInsertTriggers (store: Store) (db: string) (table: string) =
 type private TriggerStatement =
     | TriggerDml of Statement
     | TriggerIf of condition: Expr * whenTrue: TriggerStatement list * whenFalse: TriggerStatement list
+    | TriggerDeclare of name: string
+    | TriggerSetLocal of name: string * value: Expr
 
 let rec private triggerDmlStatements =
     function
     | TriggerDml statement -> [ statement ]
     | TriggerIf(_, whenTrue, whenFalse) ->
         (whenTrue @ whenFalse) |> List.collect triggerDmlStatements
+    | TriggerDeclare _
+    | TriggerSetLocal _ -> []
 
 let rec private triggerConditions =
     function
     | TriggerDml _ -> []
     | TriggerIf(condition, whenTrue, whenFalse) ->
         condition :: ((whenTrue @ whenFalse) |> List.collect triggerConditions)
+    | TriggerDeclare _ -> []
+    | TriggerSetLocal(_, value) -> [ value ]
 
 /// The one table a trigger body statement writes — what 1442's "already
 /// used by the statement which invoked this trigger" check points at.
@@ -11270,6 +11276,7 @@ type private TriggerBoundary =
     | ElseIfBoundary
     | ElseBoundary
     | EndIfBoundary
+    | EndBoundary
     | SemicolonBoundary
 
 let private triggerWordAt (text: string) index (word: string) =
@@ -11305,6 +11312,8 @@ let private triggerBoundaryAt (boundaries: Set<TriggerBoundary>) (text: string) 
                 Some(ThenBoundary, index + 4)
             else
                 None
+    elif boundaries.Contains EndBoundary && triggerWordAt text index "END" then
+        Some(EndBoundary, index + 3)
     elif boundaries.Contains ElseIfBoundary && triggerWordAt text index "ELSEIF" then
         Some(ElseIfBoundary, index + 6)
     elif boundaries.Contains ElseBoundary && triggerWordAt text index "ELSE" then
@@ -11391,14 +11400,20 @@ let private parseTriggerBody (body: string) : Result<TriggerStatement list, stri
                 | None when triggerWordAt inner offset "IF" ->
                     parseIf (offset + 2)
                     |> Result.bind (fun (statement, next) -> parseStatements next stops (statement :: statements))
+                | None when triggerWordAt inner offset "BEGIN" ->
+                    parseStatements (offset + 5) (Set.singleton EndBoundary) []
+                    |> Result.bind (fun (block, next, boundary) ->
+                        match boundary with
+                        | Some EndBoundary -> parseStatements next stops (List.rev block @ statements)
+                        | _ -> Error "BEGIN is missing END")
                 | None ->
                     match findTriggerBoundary (Set.singleton SemicolonBoundary) inner offset with
                     | Some(finishStart, finish, _) ->
-                        Parser.parse (inner.Substring(offset, finishStart - offset).Trim())
-                        |> Result.bind (fun statement -> parseStatements finish stops (TriggerDml statement :: statements))
+                        parseTriggerStatement (inner.Substring(offset, finishStart - offset).Trim())
+                        |> Result.bind (fun statement -> parseStatements finish stops (statement :: statements))
                     | None ->
-                        Parser.parse (inner.Substring(offset).Trim())
-                        |> Result.map (fun statement -> List.rev (TriggerDml statement :: statements), inner.Length, None)
+                        parseTriggerStatement (inner.Substring(offset).Trim())
+                        |> Result.map (fun statement -> List.rev (statement :: statements), inner.Length, None)
 
         and parseIf conditionStart =
             match findTriggerBoundary (Set.singleton ThenBoundary) inner conditionStart with
@@ -11422,6 +11437,18 @@ let private parseTriggerBody (body: string) : Result<TriggerStatement list, stri
                             parseIf next
                             |> Result.map (fun (alternative, finish) -> TriggerIf(condition, whenTrue, [ alternative ]), finish)
                         | _ -> Error "IF is missing END IF"))
+
+        and parseTriggerStatement text =
+            let declaration = Regex.Match(text, @"^DECLARE\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s+.+$", RegexOptions.IgnoreCase)
+            let assignment = Regex.Match(text, @"^SET\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*(?<value>[\s\S]+)$", RegexOptions.IgnoreCase)
+
+            if declaration.Success then
+                Ok(TriggerDeclare(declaration.Groups.["name"].Value.ToLowerInvariant()))
+            elif assignment.Success then
+                Parser.parseExpression assignment.Groups.["value"].Value
+                |> Result.map (fun value -> TriggerSetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))
+            else
+                Parser.parse text |> Result.map TriggerDml
 
         parseStatements 0 Set.empty []
         |> Result.bind (fun (statements, _, _) -> if statements.IsEmpty then Error "Trigger body cannot be empty" else Ok statements)
@@ -11821,6 +11848,27 @@ let rec executeAs
                 // transaction the way an escaped exception would.
                 let runBody (oldRow: Value[] option) (newRow: Value[] option) (statements: TriggerStatement list, account: Auth.Account) : QueryResult =
                     let definerRegistry = registryForDefiner account shadowed
+                    let locals = ref Map.empty<string, Value>
+
+                    let localContext () =
+                        let bindings = locals.Value |> Map.toList
+                        let columns =
+                            bindings
+                            |> List.map (fun (name, _) ->
+                                { Name = name
+                                  Type = TText
+                                  Nullable = true
+                                  Default = None
+                                  AutoIncrement = false
+                                  PrimaryKey = false
+                                  Unique = false
+                                  Generated = None
+                                  Comment = ""
+                                  Collation = None
+                                  Charset = None
+                                  OnUpdateCurrentTimestamp = false })
+                        let values = bindings |> List.map snd |> Array.ofList
+                        contextFactory runStore definerRegistry db (columnIndexOf columns) Map.empty None values
 
                     withTriggerRowScope
                         { Columns = columns
@@ -11832,7 +11880,7 @@ let rec executeAs
                                 | SetTriggerNew(column, expression) ->
                                     match timing, event, newRow, resolveColumn columns column with
                                     | Before, (TriggerInsert | TriggerUpdate), Some row, Ok index ->
-                                        let context = contextFactory runStore definerRegistry db Map.empty Map.empty None [||]
+                                        let context = localContext ()
 
                                         match evalExpr context expression |> Result.mapError Err with
                                         | Error error -> error
@@ -11861,8 +11909,17 @@ let rec executeAs
                             and runStatement =
                                 function
                                 | TriggerDml statement -> runDml statement
+                                | TriggerDeclare name ->
+                                    locals.Value <- Map.add name VNull locals.Value
+                                    Affected 0UL
+                                | TriggerSetLocal(name, expression) ->
+                                    match evalExpr (localContext ()) expression with
+                                    | Error(code, message) -> Err(code, message)
+                                    | Ok value ->
+                                        locals.Value <- Map.add name value locals.Value
+                                        Affected 0UL
                                 | TriggerIf(condition, whenTrue, whenFalse) ->
-                                    let context = contextFactory runStore definerRegistry db Map.empty Map.empty None [||]
+                                    let context = localContext ()
 
                                     match evalExpr context condition with
                                     | Error(code, message) -> Err(code, message)
