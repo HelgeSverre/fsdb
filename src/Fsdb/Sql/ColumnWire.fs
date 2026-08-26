@@ -76,8 +76,8 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
             ColumnLength = uint32 (precision + 2)
             Decimals = byte scale }
         |> numeric
-    | TDouble -> { columnMetadata TypeDouble with ColumnLength = 22u; Decimals = 31uy } |> numeric
-    | TFloat -> { columnMetadata TypeFloat with ColumnLength = 12u; Decimals = 31uy } |> numeric
+    | TDouble unsigned -> { columnMetadata TypeDouble with ColumnLength = 22u; Decimals = 31uy } |> withUnsigned unsigned |> numeric
+    | TFloat unsigned -> { columnMetadata TypeFloat with ColumnLength = 12u; Decimals = 31uy } |> withUnsigned unsigned |> numeric
     | TDate -> { columnMetadata TypeDate with ColumnLength = 10u; Flags = BinaryFlag }
     | TDateTime fsp ->
         { columnMetadata TypeDateTime with
@@ -179,8 +179,8 @@ let parameterMetadataOfType (ty: ColumnType) : ColumnMetadata =
     | TMediumBlob
     | TLongBlob -> binary TypeBlob UInt32.MaxValue 31uy
     | TDecimal _ -> binary TypeNewDecimal 67u 30uy
-    | TDouble
-    | TFloat -> binary TypeDouble 23u 31uy
+    | TDouble _
+    | TFloat _ -> binary TypeDouble 23u 31uy
     | TDate ->
         { columnMetadata TypeDate with ColumnLength = 40u }
     | TDateTime _

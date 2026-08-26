@@ -1128,8 +1128,8 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
 
     match expr with
     | Cast(_, TDecimal(_, scale)) -> Some scale
-    | Cast(_, TDouble)
-    | Cast(_, TFloat) -> Some 6
+    | Cast(_, TDouble _)
+    | Cast(_, TFloat _) -> Some 6
     | Cast(source, TChar _)
     | Cast(source, TVarchar _) -> fspOfExpr ctx source
     | Cast(_, ty) -> fspOfType ty
@@ -1848,8 +1848,8 @@ let private isJoinNumericType =
     | TBigInt _
     | TYear
     | TDecimal _
-    | TDouble
-    | TFloat -> true
+    | TDouble _
+    | TFloat _ -> true
     | _ -> false
 
 let private isJoinTextType =
@@ -3348,7 +3348,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.map (fun v ->
             match ty with
             | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _
-            | TDecimal _ | TDouble | TFloat -> enumOrdinalFor ctx e v |> Option.defaultValue v
+            | TDecimal _ | TDouble _ | TFloat _ -> enumOrdinalFor ctx e v |> Option.defaultValue v
             | _ -> v)
         |> Result.bind (fun v ->
             // Reuses `Storage.coerceValue` against a throwaway column of the
@@ -3382,7 +3382,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | VUInt u, TBigInt false -> VInt(int64 u)
                 | VString s, (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
                     VString(leadingNumericPrefix leadingIntegerPrefixRegex s |> Option.defaultValue "")
-                | VString s, (TDouble | TFloat | TDecimal _) ->
+                | VString s, (TDouble _ | TFloat _ | TDecimal _) ->
                     VString(leadingNumericPrefix leadingFloatPrefixRegex s |> Option.defaultValue "")
                 | _ -> v
 
@@ -3945,7 +3945,7 @@ and private describeQueryColumns
                             |> Option.map (fun (precision, scale) ->
                                 computedColumn name (TDecimal(precision, scale)) false (Some(decimalDefault scale)) None
                                 |> fun column -> describeLiteral column (VDecimal value))
-                        | Lit(VDouble _) -> Some(computedColumn name TDouble false (Some(DConst(VInt 0L))) None |> describeColumn)
+                        | Lit(VDouble _) -> Some(computedColumn name (TDouble false) false (Some(DConst(VInt 0L))) None |> describeColumn)
                         | Lit(VString text) ->
                             Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci") |> describeColumn)
                         | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None |> describeColumn)
@@ -4145,8 +4145,8 @@ and private deriveColumns
         elif column.TypeId = TypeShort then TSmallInt unsigned
         elif column.TypeId = TypeLong then TInt unsigned
         elif column.TypeId = TypeLongLong then TBigInt unsigned
-        elif column.TypeId = TypeFloat then TFloat
-        elif column.TypeId = TypeDouble then TDouble
+        elif column.TypeId = TypeFloat then TFloat false
+        elif column.TypeId = TypeDouble then TDouble false
         elif column.TypeId = TypeNewDecimal then TDecimal(65, int column.Decimals)
         elif column.TypeId = TypeDate then TDate
         elif column.TypeId = TypeDateTime then TDateTime(int column.Decimals)
@@ -8845,7 +8845,7 @@ and private runFullTextSelect
                                         |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> List.ofSeq)
                                     | _ -> source.Table.RowsArray.Indexed |> List.ofSeq
 
-                            let columns = source.Table.Columns @ (synthetic |> List.map (fun (_, name) -> syntheticColumn name TDouble false))
+                            let columns = source.Table.Columns @ (synthetic |> List.map (fun (_, name) -> syntheticColumn name (TDouble false) false))
                             let rows =
                                 rowsForExecution
                                 |> Seq.map (fun (rowId, row) ->
@@ -9896,8 +9896,8 @@ let private explainKeyLen (col: ColumnDef) : int option =
         | TVarchar n -> Some(n * 4 + 2)
         | TBinary n -> Some n
         | TVarBinary n -> Some(n + 2)
-        | TFloat -> Some 4
-        | TDouble -> Some 8
+        | TFloat _ -> Some 4
+        | TDouble _ -> Some 8
         | TDate -> Some 3
         | TEnum values -> Some(if List.length values <= 255 then 1 else 2)
         | _ -> None

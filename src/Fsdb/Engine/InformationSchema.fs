@@ -76,8 +76,8 @@ let private dataTypeName (ty: ColumnType) : string =
     | TEnum _ -> "enum"
     | TSet _ -> "set"
     | TDecimal _ -> "decimal"
-    | TDouble -> "double"
-    | TFloat -> "float"
+    | TDouble _ -> "double"
+    | TFloat _ -> "float"
     | TDate -> "date"
     // `data_type` is the bare name — the `(N)` fsp only shows up in
     // `column_type` below, never here (MySQL-verified).
@@ -121,8 +121,8 @@ let columnTypeText (ty: ColumnType) : string =
     | TEnum vs -> sprintf "enum(%s)" (quotedList vs)
     | TSet vs -> sprintf "set(%s)" (quotedList vs)
     | TDecimal(p, s) -> sprintf "decimal(%d,%d)" p s
-    | TDouble -> "double"
-    | TFloat -> "float"
+    | TDouble unsigned -> if unsigned then "double unsigned" else "double"
+    | TFloat unsigned -> if unsigned then "float unsigned" else "float"
     | TDate -> "date"
     // `datetime(6)` when fsp > 0, bare `datetime` at fsp 0 — the exact
     // strings `SHOW COLUMNS`/`information_schema.columns.column_type` report
@@ -167,8 +167,8 @@ let private numericPrecisionScale (ty: ColumnType) : (int64 * int64) option =
     | TBigInt _ -> Some(19L, 0L)
     | TBit width -> Some(int64 width, 0L)
     | TDecimal(p, s) -> Some(int64 p, int64 s)
-    | TFloat -> Some(10L, 0L)
-    | TDouble -> Some(22L, 0L)
+    | TFloat _ -> Some(10L, 0L)
+    | TDouble _ -> Some(22L, 0L)
     | _ -> None
 
 /// `datetime_precision` — the fsp for a temporal type (0 for a bare

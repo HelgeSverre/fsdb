@@ -68,8 +68,8 @@ type ColumnType =
     /// enforced rather than just accepted.
     | TSet of values: string list
     | TDecimal of precision: int * scale: int
-    | TDouble
-    | TFloat
+    | TDouble of unsigned: bool
+    | TFloat of unsigned: bool
     | TDate
     /// The `int` is the fractional-seconds precision (fsp, 0-6) a
     /// `DATETIME(N)`/`TIMESTAMP(N)`/`TIME(N)` declares — 0 for a bare

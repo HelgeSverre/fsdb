@@ -17,7 +17,7 @@ let private sameName (left: string) (right: string) =
 let private generic = ColumnWire.parameterMetadataOfType(TVarchar 16383)
 let private signedInteger = ColumnWire.parameterMetadataOfType(TBigInt false)
 let private decimalNumber = ColumnWire.parameterMetadataOfType(TDecimal(65, 30))
-let private floatingPoint = ColumnWire.parameterMetadataOfType TDouble
+let private floatingPoint = ColumnWire.parameterMetadataOfType (TDouble false)
 let private date = ColumnWire.parameterMetadataOfType TDate
 let private dateTime = ColumnWire.parameterMetadataOfType(TDateTime 6)
 let private time = ColumnWire.parameterMetadataOfType(TTime 6)
@@ -113,7 +113,7 @@ let private metadataOfValue =
     function
     | VInt _ -> ColumnWire.parameterMetadataOfType(TBigInt false)
     | VUInt _ -> ColumnWire.parameterMetadataOfType(TBigInt true)
-    | VDouble _ -> ColumnWire.parameterMetadataOfType TDouble
+    | VDouble _ -> ColumnWire.parameterMetadataOfType (TDouble false)
     | VDecimal _ -> ColumnWire.parameterMetadataOfType(TDecimal(65, 30))
     | VString _ -> generic
     | VBytes _ -> ColumnWire.parameterMetadataOfType TLongBlob
@@ -204,7 +204,7 @@ let parameterDefinitions
             let fallback =
                 match operator, expected with
                 | (Add | Sub | Mul | Div | IntDiv), None when leftMetadata.IsNone && rightMetadata.IsNone ->
-                    Some(ColumnWire.parameterMetadataOfType TDouble)
+                    Some(ColumnWire.parameterMetadataOfType (TDouble false))
                 | _ -> expected
 
             inferExpected (rightMetadata |> Option.orElse fallback) left

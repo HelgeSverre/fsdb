@@ -99,7 +99,7 @@ module VirtualTable =
     let text (name: string) : Ast.ColumnDef = col name Ast.TText
     let int (name: string) : Ast.ColumnDef = col name (Ast.TInt false)
     let bigint (name: string) : Ast.ColumnDef = col name (Ast.TBigInt false)
-    let double (name: string) : Ast.ColumnDef = col name Ast.TDouble
+    let double (name: string) : Ast.ColumnDef = col name (Ast.TDouble false)
 
     let create (name: string) (columns: Ast.ColumnDef list) (rows: unit -> Value[] list) : VirtualTable =
         { Name = name; Columns = columns; Rows = rows }

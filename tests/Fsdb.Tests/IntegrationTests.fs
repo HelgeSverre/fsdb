@@ -2142,7 +2142,7 @@ let tests =
 
                   Expect.sequenceEqual
                       (functions |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
-                      [ 63, parameterMetadataOfType TDouble
+                      [ 63, parameterMetadataOfType(TDouble false)
                         63, parameterMetadataOfType(TDecimal(65, 30))
                         45, parameterMetadataOfType TDate
                         45, parameterMetadataOfType(TDateTime 6)
@@ -2176,7 +2176,7 @@ let tests =
                         63, parameterMetadataOfType(TBigInt false)
                         63, parameterMetadataOfType(TBigInt false)
                         63, parameterMetadataOfType(TGeometry Geometry)
-                        63, parameterMetadataOfType TDouble
+                        63, parameterMetadataOfType(TDouble false)
                         63, parameterMetadataOfType(TGeometry Geometry)
                         63, parameterMetadataOfType(TBigInt false) ]
                       "overloaded functions retain distinct document, text, and position types"
@@ -2208,8 +2208,8 @@ let tests =
 
                   Expect.sequenceEqual
                       (parameterOnly |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
-                      [ 63, parameterMetadataOfType TDouble
-                        63, parameterMetadataOfType TDouble
+                      [ 63, parameterMetadataOfType(TDouble false)
+                        63, parameterMetadataOfType(TDouble false)
                         45, parameterMetadataOfType(TVarchar 16383)
                         45, parameterMetadataOfType(TVarchar 16383) ]
                       "parameter-only arithmetic and comparison follow distinct default rules"

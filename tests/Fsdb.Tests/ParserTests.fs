@@ -1101,8 +1101,12 @@ let tests =
                         | other -> failtestf "expected generated CREATE TABLE to parse, got %A" other
 
                     match parseOk "CREATE TABLE task (progress DOUBLE PRECISION DEFAULT 0)" with
-                    | CreateTable { Columns = [ { Type = TDouble } ] } -> ()
+                    | CreateTable { Columns = [ { Type = TDouble false } ] } -> ()
                     | other -> failtestf "expected DOUBLE PRECISION to parse, got %A" other
+
+                    match parseOk "CREATE TABLE measurements (single_value FLOAT UNSIGNED, double_value DOUBLE UNSIGNED)" with
+                    | CreateTable { Columns = [ { Type = TFloat true }; { Type = TDouble true } ] } -> ()
+                    | other -> failtestf "expected unsigned floating-point types, got %A" other
 
                     match parseOk "CREATE TABLE app_user (name VARCHAR(255) CHARACTER SET ascii BINARY, CONSTRAINT `uniq.user.name` UNIQUE (name))" with
                     | CreateTable
@@ -1269,8 +1273,8 @@ let tests =
                               { Type = TMediumInt true };
                               { Type = TTime 0 };
                               { Type = TYear };
-                              { Type = TFloat };
-                              { Type = TDouble } ]
+                              { Type = TFloat false };
+                              { Type = TDouble false } ]
                           Indexes = []
                           ForeignKeys = []
                           Checks = []

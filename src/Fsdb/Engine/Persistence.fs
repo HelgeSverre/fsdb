@@ -142,8 +142,10 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TEnum values -> w.WriteByte 0x12uy; writeStrList w values
     | TSet values -> w.WriteByte 0x13uy; writeStrList w values
     | TDecimal(p, s) -> w.WriteByte 0x14uy; w.WriteInt32LE p; w.WriteInt32LE s
-    | TDouble -> w.WriteByte 0x15uy
-    | TFloat -> w.WriteByte 0x16uy
+    | TDouble false -> w.WriteByte 0x15uy
+    | TFloat false -> w.WriteByte 0x16uy
+    | TDouble true -> w.WriteByte 0x21uy
+    | TFloat true -> w.WriteByte 0x22uy
     | TDate -> w.WriteByte 0x17uy
     // Fractional precision is part of the persisted type identity.
     | TDateTime fsp -> w.WriteByte 0x18uy; w.WriteByte(byte fsp)
@@ -189,8 +191,10 @@ let private decodeColumnType (r: #IReader) : ColumnType =
     | 0x12uy -> TEnum(readStrList r)
     | 0x13uy -> TSet(readStrList r)
     | 0x14uy -> TDecimal(r.ReadInt32LE(), r.ReadInt32LE())
-    | 0x15uy -> TDouble
-    | 0x16uy -> TFloat
+    | 0x15uy -> TDouble false
+    | 0x16uy -> TFloat false
+    | 0x21uy -> TDouble true
+    | 0x22uy -> TFloat true
     | 0x17uy -> TDate
     | 0x18uy -> TDateTime(int (r.ReadByte()))
     | 0x19uy -> TTimestamp(int (r.ReadByte()))

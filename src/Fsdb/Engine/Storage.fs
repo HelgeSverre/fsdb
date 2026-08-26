@@ -1088,16 +1088,27 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 | Some d -> Ok(VInt(int64 d))
                 | None -> numericFallback None (fun () -> VInt 0L)
             | _ -> numericFallback None (fun () -> VInt 0L)
-        | TDouble
-        | TFloat ->
+        | TDouble unsigned
+        | TFloat unsigned ->
+            let unsignedUnderflow () =
+                if strict then
+                    outOfRange ()
+                else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
+                    Ok(VDouble 0.0)
+
             match v with
+            | VDouble d when unsigned && d < 0.0 -> unsignedUnderflow ()
             | VDouble d -> Ok(VDouble d)
+            | VInt i when unsigned && i < 0L -> unsignedUnderflow ()
             | VInt i -> Ok(VDouble(float i))
             | VUInt u -> Ok(VDouble(float u))
             | VBit(_, value) -> Ok(VDouble(float value))
+            | VDecimal d when unsigned && d < 0M -> unsignedUnderflow ()
             | VDecimal d -> Ok(VDouble(float d))
             | VString s ->
                 match parseNumeric s with
+                | Some d when unsigned && d < 0.0 -> unsignedUnderflow ()
                 | Some d -> Ok(VDouble d)
                 | None -> numericFallback None (fun () -> VDouble 0.0)
             | _ -> numericFallback None (fun () -> VDouble 0.0)

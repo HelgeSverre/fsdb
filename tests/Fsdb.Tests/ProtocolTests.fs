@@ -370,8 +370,8 @@ let tests =
               Expect.equal (wireTypeOfColumnType (TBigInt false)) TypeLongLong "bigint"
               Expect.equal (wireTypeOfColumnType (TBit 9)) TypeBit "bit"
               Expect.equal (wireTypeOfColumnType (TDecimal(10, 2))) TypeNewDecimal "decimal"
-              Expect.equal (wireTypeOfColumnType TDouble) TypeDouble "double"
-              Expect.equal (wireTypeOfColumnType TFloat) TypeFloat "float"
+              Expect.equal (wireTypeOfColumnType (TDouble false)) TypeDouble "double"
+              Expect.equal (wireTypeOfColumnType (TFloat false)) TypeFloat "float"
               Expect.equal (wireTypeOfColumnType TDate) TypeDate "date"
               Expect.equal (wireTypeOfColumnType (TDateTime 0)) TypeDateTime "datetime"
               Expect.equal (wireTypeOfColumnType (TTimestamp 0)) TypeTimestamp "timestamp"
@@ -396,9 +396,12 @@ let tests =
               let intMetadata = metadataOfType (TInt true)
               Expect.equal intMetadata.Flags (UnsignedFlag ||| NumFlag) "unsigned integer flags"
 
-              let doubleMetadata = metadataOfType TDouble
+              let doubleMetadata = metadataOfType (TDouble false)
               Expect.equal doubleMetadata.Decimals 31uy "double decimals"
               Expect.isTrue (doubleMetadata.Flags &&& NumFlag <> 0us) "double numeric flag"
+
+              let unsignedFloat = metadataOfType (TFloat true)
+              Expect.isTrue (unsignedFloat.Flags &&& UnsignedFlag <> 0us) "unsigned float flag"
 
               let timestampMetadata = metadataOfType (TTimestamp 3)
               Expect.equal timestampMetadata.TypeId TypeTimestamp "timestamp wire type"

@@ -1490,7 +1490,7 @@ let tests =
 
               let columns =
                   [ { (mkCol "id" (TInt false)) with Nullable = false; AutoIncrement = true; PrimaryKey = true }
-                    mkCol "d" TDouble
+                    mkCol "d" (TDouble false)
                     mkCol "dec" (TDecimal(20, 4))
                     mkCol "blb" TBlob
                     mkCol "dt" TDate ]
@@ -1574,8 +1574,10 @@ let tests =
                     mkCol "c_enum" (TEnum [ "a"; "b" ])
                     mkCol "c_set" (TSet [ "x"; "y" ])
                     mkCol "c_decimal" (TDecimal(10, 2))
-                    mkCol "c_double" TDouble
-                    mkCol "c_float" TFloat
+                    mkCol "c_double" (TDouble false)
+                    mkCol "c_float" (TFloat false)
+                    mkCol "c_double_unsigned" (TDouble true)
+                    mkCol "c_float_unsigned" (TFloat true)
                     mkCol "c_date" TDate
                     mkCol "c_datetime" (TDateTime 3)
                     mkCol "c_timestamp" (TTimestamp 6)
