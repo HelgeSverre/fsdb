@@ -17,6 +17,61 @@ let stringValueOfBytes (bytes: byte[]) : Value =
     with :? DecoderFallbackException ->
         VBytes bytes
 
+let decodeSqlBytes (bytes: byte[]) : string =
+    try
+        strictUtf8.GetString bytes
+    with :? DecoderFallbackException ->
+        let sql = StringBuilder(bytes.Length * 2)
+        let mutable index = 0
+
+        while index < bytes.Length do
+            if bytes.[index] <> byte '\'' then
+                sql.Append(char bytes.[index]) |> ignore
+                index <- index + 1
+            else
+                let literal = ResizeArray<byte>()
+                let start = index
+                let mutable closed = false
+                index <- index + 1
+
+                while index < bytes.Length && not closed do
+                    match bytes.[index] with
+                    | 0x27uy when index + 1 < bytes.Length && bytes.[index + 1] = 0x27uy ->
+                        literal.Add 0x27uy
+                        index <- index + 2
+                    | 0x27uy ->
+                        closed <- true
+                        index <- index + 1
+                    | 0x5cuy when index + 1 < bytes.Length ->
+                        let escaped =
+                            match bytes.[index + 1] with
+                            | 0x30uy -> 0uy
+                            | 0x62uy -> 8uy
+                            | 0x6euy -> 10uy
+                            | 0x72uy -> 13uy
+                            | 0x74uy -> 9uy
+                            | 0x5auy -> 26uy
+                            | value -> value
+
+                        literal.Add escaped
+                        index <- index + 2
+                    | value ->
+                        literal.Add value
+                        index <- index + 1
+
+                if closed then
+                    let source = bytes.[start .. index - 1]
+
+                    try
+                        sql.Append(strictUtf8.GetString source) |> ignore
+                    with :? DecoderFallbackException ->
+                        sql.Append("X'").Append(Convert.ToHexString(literal.ToArray())).Append('\'') |> ignore
+                else
+                    sql.Append(char bytes.[start]) |> ignore
+                    literal |> Seq.iter (char >> sql.Append >> ignore)
+
+        sql.ToString()
+
 // Capability flags (the subset this server negotiates).
 // https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html
 let ClientLongPassword = 0x00000001u

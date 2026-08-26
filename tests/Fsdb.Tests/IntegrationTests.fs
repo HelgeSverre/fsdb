@@ -1627,6 +1627,30 @@ let tests =
                   match r.ReadLenEncInt() with
                   | Some len -> Expect.equal (r.ReadBytes(int len)) id "binary string bytes"
                   | None -> failtest "expected a non-NULL binary string value"
+
+                  let! _ = readPacketAsync stream // EOF
+
+                  let queryId = [| 0x02uy; 0xfeuy; 0x03uy; 0xfduy; 0x04uy; 0xfcuy; 0x05uy; 0xfbuy; 0x06uy; 0xfauy; 0x07uy; 0xf9uy; 0x08uy; 0xf8uy; 0x09uy; 0xf7uy |]
+
+                  let rawQuery =
+                      Array.concat
+                          [ [| 0x03uy |]
+                            Text.Encoding.ASCII.GetBytes "INSERT INTO blobs VALUES (0, '"
+                            queryId
+                            Text.Encoding.ASCII.GetBytes "')" ]
+
+                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = rawQuery }
+                  let! _ = readPacketAsync stream // OK
+                  let! _ = query "SELECT id FROM blobs WHERE b = X'30'"
+                  let! _ = readPacketAsync stream // column count
+                  let! _ = readPacketAsync stream // column def
+                  let! _ = readPacketAsync stream // EOF
+                  let! rawRow = readPacketAsync stream
+                  let rawReader = Reader(rawRow.Value.Payload)
+
+                  match rawReader.ReadLenEncInt() with
+                  | Some len -> Expect.equal (rawReader.ReadBytes(int len)) queryId "COM_QUERY binary string bytes"
+                  | None -> failtest "expected a non-NULL COM_QUERY binary string value"
               }
               |> Async.RunSynchronously
 

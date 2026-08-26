@@ -73,6 +73,7 @@ let private parseCommand (payload: byte[]) : Command option =
         None
     else
         let rest () = Encoding.UTF8.GetString(payload, 1, payload.Length - 1)
+        let sql () = payload.[1..] |> decodeSqlBytes
         let restBytes () = payload.[1..]
 
         try
@@ -80,14 +81,14 @@ let private parseCommand (payload: byte[]) : Command option =
                 match payload.[0] with
                 | 0x01uy -> Quit
                 | 0x02uy -> InitDb(rest ())
-                | 0x03uy -> Query(rest ())
+                | 0x03uy -> Query(sql ())
                 | 0x04uy -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
                 | 0x09uy -> Statistics
                 | 0x0auy -> ProcessInfo
                 | 0x0cuy -> ProcessKill(int64 (Reader(restBytes ()).ReadInt32LE()))
                 | 0x0duy -> Debug
                 | 0x0euy -> Ping
-                | 0x16uy -> StmtPrepare(rest ())
+                | 0x16uy -> StmtPrepare(sql ())
                 | 0x17uy -> StmtExecute(restBytes ())
                 | 0x18uy -> StmtSendLongData(restBytes ())
                 | 0x19uy -> StmtClose(Reader(restBytes ()).ReadInt32LE())

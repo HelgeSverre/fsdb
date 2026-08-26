@@ -314,6 +314,20 @@ let tests =
                   (VString "blåbær")
                   "UTF-8 string parameter"
 
+          testCase "SQL packets preserve non-UTF-8 string literal bytes"
+          <| fun _ ->
+              let prefix = Text.Encoding.ASCII.GetBytes "INSERT INTO t VALUES (X'00', 'ok', '"
+              let value = [| 0x01uy; 0xffuy; 0x27uy; 0x5cuy; 0x00uy |]
+              let suffix = Text.Encoding.ASCII.GetBytes "')"
+              let escapedValue = [| 0x01uy; 0xffuy; 0x5cuy; 0x27uy; 0x5cuy; 0x5cuy; 0x5cuy; 0x30uy |]
+
+              Expect.equal
+                  (decodeSqlBytes (Array.concat [ prefix; escapedValue; suffix ]))
+                  "INSERT INTO t VALUES (X'00', 'ok', X'01FF275C00')"
+                  "binary literal"
+
+              Expect.equal (stringValueOfBytes value) (VBytes value) "raw value remains binary"
+
           testCase "binary protocol geometry parameters retain their SRID and WKB"
           <| fun _ ->
               let bytes = Convert.FromHexString "E61000000101000000000000000000F83F00000000000000C0"
