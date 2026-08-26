@@ -50,4 +50,5 @@ php core/scripts/run-tests.sh \
     --sqlite="$results_db" \
     --dburl="$SIMPLETEST_DB" \
     --url="$SIMPLETEST_BASE_URL" \
+    --keep-results \
     --non-html
