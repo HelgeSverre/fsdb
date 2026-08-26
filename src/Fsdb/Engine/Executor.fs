@@ -781,7 +781,7 @@ let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 /// classes without enumerating every accented variant.
 /// `%` matches any run, `_` one character, and the escape character
 /// (default backslash, as the parser leaves it unresolved in the pattern)
-/// un-wildcards the character after it. `LIKE BINARY` (caseSensitive)
+/// makes the following character literal. `LIKE BINARY` (caseSensitive)
 /// compares characters byte-for-byte.
 /// Every backtrack is guarded by `mark < slen`: once the last `%` has been
 /// stretched over the whole subject there is nothing left to give it, and
@@ -800,10 +800,8 @@ let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: st
     let mutable star = -1
     let mutable mark = 0
 
-    // Whether pattern[pi] is an escaped literal `%`/`_`, and the char it
-    // stands for.
     let escapedLiteralAt (p: int) =
-        if p < plen && pattern.[p] = escape && p + 1 < plen && (pattern.[p + 1] = '%' || pattern.[p + 1] = '_') then
+        if p < plen && pattern.[p] = escape && p + 1 < plen then
             Some pattern.[p + 1]
         else
             None

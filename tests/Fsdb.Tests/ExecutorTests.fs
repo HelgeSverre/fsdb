@@ -178,6 +178,10 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected a literal %% match, got %A" other
 
+                    match runDefault store "SELECT 'a\\\\aa' LIKE 'a\\\\\\\\aa'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected an escaped backslash match, got %A" other
+
                 testCase "LIKE ESCAPE names a custom escape character instead of backslash"
                 <| fun _ ->
                     let store = newStore ()
