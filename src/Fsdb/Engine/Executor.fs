@@ -11914,10 +11914,12 @@ let rec executeAs
         | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
-    | AlterDatabase name ->
+    | AlterDatabase requestedName ->
         // The charset/collate tail is parsed and discarded (see
         // `Parser.databaseOptions`'s doc) — nothing in the catalog needs to
         // record it, so this is just an existence check.
+        let name = requestedName |> Option.defaultValue dbName
+
         if Storage.databaseExists store name then
             ids, Affected 0UL
         else

@@ -1344,8 +1344,13 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "ALTER DATABASE x CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-                        (AlterDatabase "x")
-                        "alter database" ]
+                        (AlterDatabase(Some "x"))
+                        "named database"
+
+                    Expect.equal
+                        (parseOk "ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs")
+                        (AlterDatabase None)
+                        "current database" ]
 
           testList
               "INSERT"

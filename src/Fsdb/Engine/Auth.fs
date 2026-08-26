@@ -902,7 +902,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | DropIndexStmt(_, table, _) -> onTables "INDEX" [ split table ]
     | CreateDatabase(name, _) -> [ "CREATE", OnDb name ]
     | DropDatabase(name, _) -> [ "DROP", OnDb name ]
-    | AlterDatabase name -> [ "ALTER", OnDb name ]
+    | AlterDatabase name -> [ "ALTER", OnDb(name |> Option.defaultValue defaultDb) ]
     | CreateUser _
     | DropUser _
     | RenameUser _

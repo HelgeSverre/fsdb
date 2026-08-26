@@ -2203,7 +2203,17 @@ let private dropDatabaseStmt: Parser<Statement, unit> =
     |>> fun (ifExists, name) -> DropDatabase(name, ifExists)
 
 let private alterDatabaseStmt: Parser<Statement, unit> =
-    (keyword "ALTER" >>. (keyword "DATABASE" <|> keyword "SCHEMA") >>. identifier .>> databaseOptions)
+    let optionStart =
+        choice
+            [ attempt (keyword "CHARACTER" >>. keyword "SET")
+              keyword "CHARSET"
+              keyword "COLLATE"
+              keyword "DEFAULT" ]
+
+    (keyword "ALTER"
+     >>. (keyword "DATABASE" <|> keyword "SCHEMA")
+     >>. opt (notFollowedBy optionStart >>. identifier)
+     .>> databaseOptions)
     |>> AlterDatabase
 
 // ---------------------------------------------------------------------------

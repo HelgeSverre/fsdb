@@ -1218,6 +1218,12 @@ let tests =
               | Err(1049, _) -> ()
               | other -> failtestf "expected a 1049 error, got %A" other
 
+              let session, _ = handle session "USE shop"
+
+              match handle session "ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected ALTER DATABASE to target the current database, got %A" other
+
           testCase "SHOW DATABASES returns a resultset"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
