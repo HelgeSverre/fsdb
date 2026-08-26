@@ -9,6 +9,8 @@ open Fsdb.Packet
 open Fsdb.Value
 open Fsdb.Temporal
 
+let private strictUtf8 = UTF8Encoding(false, true)
+
 // Capability flags (the subset this server negotiates).
 // https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html
 let ClientLongPassword = 0x00000001u
@@ -644,9 +646,7 @@ let private readBinaryTime (r: Reader) : Value =
 /// Reads one COM_STMT_EXECUTE binary parameter value of MySQL binary type
 /// id `typeId` off `r`, decoded into an fsdb `Value`. `unsigned` only
 /// matters for the fixed-width integer types. NEWDECIMAL/VARCHAR/
-/// VAR_STRING/STRING/BLOB all arrive as a length-encoded byte string —
-/// decoded as UTF-8 text, matching how the rest of fsdb treats them (see
-/// `Storage.coerceValue`).
+/// VAR_STRING/STRING/BLOB all arrive as a length-encoded byte string.
 let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
     // A length-encoded length is a uint64 off the wire; casting a value
     // above Int32.MaxValue to `int` goes negative and `ReadBytes` would
@@ -661,6 +661,14 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
         match r.ReadLenEncInt() with
         | None -> [||]
         | Some len -> r.ReadBytes(boundedLen len)
+
+    let lenEncStringValue () =
+        let bytes = lenEncBytes ()
+
+        try
+            VString(strictUtf8.GetString bytes)
+        with :? DecoderFallbackException ->
+            VBytes bytes
 
     if typeId = TypeTiny then
         let b = r.ReadByte()
@@ -683,11 +691,12 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
     elif typeId = TypeDouble then
         VDouble(BitConverter.ToDouble(r.ReadBytes 8, 0))
     elif
-        typeId = TypeNewDecimal
-        || typeId = TypeVarchar
+        typeId = TypeVarchar
         || typeId = TypeVarString
         || typeId = TypeString
     then
+        lenEncStringValue ()
+    elif typeId = TypeNewDecimal then
         VString(lenEncText ())
     elif typeId = TypeBlob then
         VBytes(lenEncBytes ())

@@ -295,6 +295,25 @@ let tests =
               writer.WriteLenEncBytes bytes
               Expect.equal (readBinaryValue (Reader(writer.ToArray())) TypeBlob false) (VBytes bytes) "raw BLOB parameter"
 
+          testCase "binary protocol string parameters preserve non-UTF-8 bytes"
+          <| fun _ ->
+              let raw = [| 0x2fuy; 0xbbuy; 0x5fuy; 0xe2uy; 0xe2uy; 0x9auy; 0x4duy; 0x70uy; 0xaauy; 0x58uy; 0x54uy; 0xceuy; 0x7cuy; 0xe3uy; 0xe2uy; 0x0buy |]
+              let binary = Writer()
+              binary.WriteLenEncBytes raw
+
+              Expect.equal
+                  (readBinaryValue (Reader(binary.ToArray())) TypeVarString false)
+                  (VBytes raw)
+                  "binary string parameter"
+
+              let text = Writer()
+              text.WriteLenEncString "blåbær"
+
+              Expect.equal
+                  (readBinaryValue (Reader(text.ToArray())) TypeVarString false)
+                  (VString "blåbær")
+                  "UTF-8 string parameter"
+
           testCase "binary protocol geometry parameters retain their SRID and WKB"
           <| fun _ ->
               let bytes = Convert.FromHexString "E61000000101000000000000000000F83F00000000000000C0"
