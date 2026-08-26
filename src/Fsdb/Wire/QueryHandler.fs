@@ -551,7 +551,7 @@ let private setNames = Regex(@"^NAMES\s+'?(\w+)'?(?:\s+COLLATE\s+'?(\w+)'?)?", R
 /// via `isGlobalScope` to route `GLOBAL`-scoped assignments to the store's
 /// global-variable map instead of this session's own `Variables`.
 let private setVar =
-    Regex(@"^(SESSION\s+|GLOBAL\s+|@@SESSION\.|@@GLOBAL\.|@@)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
+    Regex(@"^(SESSION\s+|GLOBAL\s+|@@SESSION\.|@@GLOBAL\.|@@)?(`[^`]+`|\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
 
 /// Best-effort name extraction for the "this looks like an assignment but
 /// neither `setVar` nor the user-variable parser matched it" error below.
@@ -803,7 +803,7 @@ let private parseSetFragment
 
             if varMatch.Success then
                 let isGlobal = isGlobalScope varMatch.Groups.[1].Value
-                let name = varMatch.Groups.[2].Value.ToLowerInvariant()
+                let name = stripBackticks varMatch.Groups.[2].Value |> _.ToLowerInvariant()
 
                 if Session.tryGlobalVariable session.Store name |> Option.isNone then
                     Error(Err(1193, sprintf "Unknown system variable '%s'" name))

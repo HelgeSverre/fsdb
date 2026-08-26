@@ -620,6 +620,19 @@ let tests =
               | ResultSet(_, [ [ Some "InnoDB" ] ]) -> ()
               | other -> failtestf "expected InnoDB, got %A" other
 
+          testCase "SET accepts backtick-quoted system variable names"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "SET group_concat_max_len = 2048, `sql_mode` = 'ANSI'"
+
+              match result with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected quoted variable assignments to succeed, got %A" other
+
+              match handle session "SELECT @@group_concat_max_len, @@sql_mode" |> snd with
+              | ResultSet(_, [ [ Some "2048"; Some "ANSI" ] ]) -> ()
+              | other -> failtestf "expected both settings, got %A" other
+
           testCase "SET NAMES 'x' COLLATE 'y', SESSION sql_mode='...' applies both assignments"
           <| fun _ ->
               // Laravel's MySqlConnector::configureConnection sends exactly
