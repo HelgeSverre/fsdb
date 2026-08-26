@@ -231,6 +231,7 @@ let private numericSystemVariables =
           "foreign_key_checks"
           "group_concat_max_len"
           "interactive_timeout"
+          "innodb_buffer_pool_size"
           "local_infile"
           "lower_case_table_names"
           "max_allowed_packet"
