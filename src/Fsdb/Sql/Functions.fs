@@ -5344,6 +5344,7 @@ let builtins: Registry =
     |> registerScalar "UPPER" (textMap VBytes (fun s -> s.ToUpperInvariant()))
     |> registerScalar "LOWER" (textMap VBytes (fun s -> s.ToLowerInvariant()))
     |> registerScalar "LENGTH" lengthFn
+    |> registerScalar "OCTET_LENGTH" lengthFn
     |> registerScalar "BIT_LENGTH" bitLengthFn
     |> registerScalar "CHAR_LENGTH" charLengthFn
     |> registerScalar "COALESCE" coalesceFn

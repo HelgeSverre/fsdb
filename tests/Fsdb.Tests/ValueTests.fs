@@ -1700,6 +1700,7 @@ let tests =
                       testCase "LENGTH counts UTF-8 bytes; CHAR_LENGTH counts code points"
                       <| fun _ ->
                           Expect.equal (call "LENGTH" [ VString "é" ]) (VInt 2L) "e-acute is 2 UTF-8 bytes"
+                          Expect.equal (call "OCTET_LENGTH" [ VString "é" ]) (VInt 2L) "octet length is the byte-length synonym"
                           Expect.equal (call "CHAR_LENGTH" [ VString "é" ]) (VInt 1L) "e-acute is 1 code point"
                           Expect.equal (call "CHAR_LENGTH" [ VString "\U0001F600" ]) (VInt 1L) "an astral emoji is 1 code point despite being a UTF-16 surrogate pair"
 
