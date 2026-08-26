@@ -531,10 +531,6 @@ let private statisticsColumns =
       strCol "COLUMN_NAME"
       strCol "COLLATION"
       intCol "CARDINALITY"
-      // A prefix index's `(N)` length (`INDEX(col(10))`) — always NULL
-      // (whole-column) since `Ast.IndexDef` doesn't track a prefix length
-      // to begin with. Doctrine DBAL's `selectIndexColumns` (behind
-      // Laravel's `Blueprint::change()`) projects it unconditionally.
       intCol "SUB_PART"
       strCol "PACKED"
       strCol "NULLABLE"

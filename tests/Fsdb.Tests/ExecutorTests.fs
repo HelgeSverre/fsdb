@@ -1649,6 +1649,17 @@ let tests =
                     | Err(1061, _) -> ()
                     | other -> failtestf "expected duplicate key name error, got %A" other
 
+                testCase "ALTER TABLE adds an enforced UNIQUE prefix index"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (value VARCHAR(50))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('1234567890 foo')" |> ignore
+                    runDefault store "ALTER TABLE t ADD UNIQUE KEY uq_value (value(10))" |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES ('1234567890 bar')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected the shared prefix to collide, got %A" other
+
                 testCase "ALTER TABLE ENGINE accepts InnoDB and rejects unsupported engines"
                 <| fun _ ->
                     let store = newStore ()

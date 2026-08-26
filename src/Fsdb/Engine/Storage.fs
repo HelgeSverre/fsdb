@@ -1584,18 +1584,35 @@ let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (ro
 /// key (if any, named `"PRIMARY"` the way MySQL reports it in error 1062,
 /// and treated as one group across however many columns it spans) plus
 /// every `UNIQUE` index, named after itself.
-let private uniqueKeyGroups (table: Table) : (string * int list) list =
+type private UniqueKeyGroup =
+    { Name: string
+      Indices: int list
+      PrefixLengths: int option list }
+
+let private indexesWholeColumns group = group.PrefixLengths |> List.forall Option.isNone
+
+let private uniqueKeyGroups (table: Table) : UniqueKeyGroup list =
     let primary =
         primaryKeyColumns table
         |> traverse (resolveColumn table.Columns)
         |> Result.toOption
         |> Option.filter (not << List.isEmpty)
-        |> Option.map (fun indices -> "PRIMARY", indices)
+        |> Option.map (fun indices ->
+            { Name = "PRIMARY"
+              Indices = indices
+              PrefixLengths = List.replicate indices.Length None })
 
     let fromIndexes =
         table.Indexes
         |> List.filter (fun index -> index.Unique && not (isPrimaryIndex index))
-        |> List.choose (fun ix -> ix.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption |> Option.map (fun idxs -> ix.Name, idxs))
+        |> List.choose (fun index ->
+            index.KeyColumns
+            |> traverse (fun column -> resolveColumn table.Columns column.Name |> Result.map (fun resolved -> resolved, column.PrefixLength))
+            |> Result.toOption
+            |> Option.map (fun columns ->
+                { Name = index.Name
+                  Indices = columns |> List.map fst
+                  PrefixLengths = columns |> List.map snd }))
 
     Option.toList primary @ fromIndexes
 
@@ -1623,9 +1640,13 @@ let private secondaryKeyGroups (table: Table) : SecondaryKeyGroup list =
 let private orderedKeyGroups (table: Table) : SecondaryKeyGroup list =
     let unique =
         uniqueKeyGroups table
-        |> List.map (fun (name, indices) ->
-            { Name = name
-              Indices = indices })
+        |> List.choose (fun group ->
+            if indexesWholeColumns group then
+                Some
+                    { Name = group.Name
+                      Indices = group.Indices }
+            else
+                None)
 
     unique @ secondaryKeyGroups table
 
@@ -1708,6 +1729,24 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
     else
         Some(encodeEqualityKey columns indices row)
 
+let private encodeUniqueKey (columns: ColumnDef list) (group: UniqueKeyGroup) (row: Value[]) : string option =
+    if group.Indices |> List.exists (fun index -> row.[index] = VNull) then
+        None
+    elif indexesWholeColumns group then
+        Some(encodeEqualityKey columns group.Indices row)
+    else
+        let keyRow = Array.copy row
+
+        List.zip group.Indices group.PrefixLengths
+        |> List.iter (fun (index, prefixLength) ->
+            match prefixLength, keyRow.[index] with
+            | Some length, VString text ->
+                keyRow.[index] <- VString(truncateRunes length text |> Option.defaultValue text)
+            | Some length, VBytes bytes -> keyRow.[index] <- VBytes(Array.truncate length bytes)
+            | _ -> ())
+
+        Some(encodeEqualityKey columns group.Indices keyRow)
+
 let private constraintLookup columns indices rows =
     let lookup = HashSet<string>(StringComparer.Ordinal)
 
@@ -1726,13 +1765,13 @@ let private constraintLookup columns indices rows =
 /// never has two rows actually colliding on a real PK/UNIQUE group.
 let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, RowId>> =
     uniqueKeyGroups table
-    |> List.map (fun (name, idxs) ->
+    |> List.map (fun group ->
         let inner =
             table.RowsArray.Indexed
-            |> Seq.choose (fun (rowId, row) -> encodeConstraintKey table.Columns idxs row |> Option.map (fun key -> key, rowId))
+            |> Seq.choose (fun (rowId, row) -> encodeUniqueKey table.Columns group row |> Option.map (fun key -> key, rowId))
             |> Map.ofSeq
 
-        name, inner)
+        group.Name, inner)
     |> Map.ofList
 
 let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<RowId>>> =
@@ -1809,7 +1848,7 @@ let private sameTableSchema (left: Table) (right: Table) =
 
 let private reindexRow
     (columns: ColumnDef list)
-    (uniqueGroups: (string * int list) list)
+    (uniqueGroups: UniqueKeyGroup list)
     (secondaryGroups: SecondaryKeyGroup list)
     (removed: (RowId * Value[]) option)
     (added: (RowId * Value[]) option)
@@ -1820,11 +1859,11 @@ let private reindexRow
     let uniqueIndex =
         uniqueGroups
         |> List.fold
-            (fun accIndex (name, idxs) ->
-                let group = Map.find name accIndex
-                let group = removed |> Option.fold (fun g (_, row) -> encodeConstraintKey columns idxs row |> Option.fold (fun g' k -> Map.remove k g') g) group
-                let group = added |> Option.fold (fun g (rowId, row) -> encodeConstraintKey columns idxs row |> Option.fold (fun g' k -> Map.add k rowId g') g) group
-                Map.add name group accIndex)
+            (fun accIndex keyGroup ->
+                let group = Map.find keyGroup.Name accIndex
+                let group = removed |> Option.fold (fun g (_, row) -> encodeUniqueKey columns keyGroup row |> Option.fold (fun g' k -> Map.remove k g') g) group
+                let group = added |> Option.fold (fun g (rowId, row) -> encodeUniqueKey columns keyGroup row |> Option.fold (fun g' k -> Map.add k rowId g') g) group
+                Map.add keyGroup.Name group accIndex)
             uniqueIndex
 
     let secondaryIndex =
@@ -1853,9 +1892,13 @@ let private reindexRow
     let secondaryOrder =
         let orderedGroups =
             (uniqueGroups
-             |> List.map (fun (name, indices) ->
-                 { Name = name
-                   Indices = indices }))
+             |> List.choose (fun group ->
+                 if indexesWholeColumns group then
+                     Some
+                         { Name = group.Name
+                           Indices = group.Indices }
+                 else
+                     None))
             @ secondaryGroups
 
         orderedGroups
@@ -1933,9 +1976,9 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
 
     let collides rowId row =
         uniqueGroups
-        |> List.exists (fun (name, columns) ->
-            match encodeConstraintKey liveTable.Columns columns row with
-            | Some key -> Map.tryFind key uniqueIndex.[name] |> Option.exists ((<>) rowId)
+        |> List.exists (fun group ->
+            match encodeUniqueKey liveTable.Columns group row with
+            | Some key -> Map.tryFind key uniqueIndex.[group.Name] |> Option.exists ((<>) rowId)
             | None -> false)
 
     let publish removed added =
@@ -2398,7 +2441,12 @@ let create () : Store =
 /// column order, so this only misses on stale/malformed FK metadata) —
 /// `checkFkParent` falls back to a full scan in that case.
 let private parentUniqueIndex (parent: Table) (refIdxs: int list) : Map<string, RowId> option =
-    uniqueKeyGroups parent |> List.tryPick (fun (name, idxs) -> if idxs = refIdxs then Map.tryFind name parent.UniqueIndex else None)
+    uniqueKeyGroups parent
+    |> List.tryPick (fun group ->
+        if group.Indices = refIdxs && indexesWholeColumns group then
+            Map.tryFind group.Name parent.UniqueIndex
+        else
+            None)
 
 /// A per-statement FK parent-key membership test, either a live `HashSet`
 /// that a self-FK extends row by row (`Mutable`) or a snapshot of the
@@ -2428,7 +2476,11 @@ let tryEqualityIndex (table: Table) (columnName: string) : (string * int * bool)
     | Error _ -> None
     | Ok index ->
         uniqueKeyGroups table
-        |> List.tryPick (fun (name, indices) -> if indices = [ index ] then Some(name, index, true) else None)
+        |> List.tryPick (fun group ->
+            if group.Indices = [ index ] && indexesWholeColumns group then
+                Some(group.Name, index, true)
+            else
+                None)
         |> Option.orElseWith (fun () ->
             secondaryKeyGroups table
             |> List.tryPick (fun group ->
@@ -2637,7 +2689,13 @@ let tryCompositeEqualityLookupInTable
                   LookupColumns = table.Columns
                   LookupRows = rows })
 
-    let unique = uniqueKeyGroups table |> List.map (fun (name, indices) -> name, indices, true)
+    let unique =
+        uniqueKeyGroups table
+        |> List.choose (fun group ->
+            if indexesWholeColumns group then
+                Some(group.Name, group.Indices, true)
+            else
+                None)
 
     let secondary =
         secondaryKeyGroups table
@@ -2662,7 +2720,13 @@ let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : Equal
         let matches (_, (indices: int list), _) =
             indices.Length = requested.Length && Set.ofList indices = Set.ofList requested
 
-        let unique = uniqueKeyGroups table |> List.map (fun (name, indices) -> name, indices, true)
+        let unique =
+            uniqueKeyGroups table
+            |> List.choose (fun group ->
+                if indexesWholeColumns group then
+                    Some(group.Name, group.Indices, true)
+                else
+                    None)
         let secondary = secondaryKeyGroups table |> List.map (fun group -> group.Name, group.Indices, false)
         unique @ secondary
         |> List.tryFind matches
@@ -3566,6 +3630,22 @@ let private tryDuplicateConstraintValue (columns: ColumnDef list) (indices: int 
 
     rows |> List.ofSeq |> loop Set.empty
 
+let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: UniqueKeyGroup) (rows: Value[] seq) =
+    let rec loop seen remaining =
+        match remaining with
+        | [] -> None
+        | row :: rest ->
+            match encodeUniqueKey columns group row with
+            | Some key when Set.contains key seen ->
+                group.Indices
+                |> List.map (fun index -> row.[index] |> toText |> Option.defaultValue "NULL")
+                |> String.concat "-"
+                |> Some
+            | Some key -> loop (Set.add key seen) rest
+            | None -> loop seen rest
+
+    rows |> List.ofSeq |> loop Set.empty
+
 /// Applies one `Ast.AlterAction` to `table`, returning its replacement and,
 /// for `RenameTo`, the new key it should be re-filed under in the database
 /// map (`None` means "same key").
@@ -3760,11 +3840,11 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     // rebuild would silently drop rows from the index.
                     let collision =
                         uniqueKeyGroups candidate
-                        |> List.tryPick (fun (name, idxs) ->
+                        |> List.tryPick (fun group ->
                             rows
                             |> Seq.map snd
-                            |> tryDuplicateConstraintValue candidate.Columns idxs
-                            |> Option.map (fun value -> DuplicateKey(name, value)))
+                            |> tryDuplicateUniqueValue candidate.Columns group
+                            |> Option.map (fun value -> DuplicateKey(group.Name, value)))
 
                     match collision with
                     | Some e -> Error e
@@ -3786,7 +3866,12 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         checkIndexLengths table.Columns [ ix ]
         |> Result.bind (fun () -> ix.Columns |> traverse (resolveColumn table.Columns))
         |> Result.bind (fun idxs ->
-            match tryDuplicateConstraintValue table.Columns idxs table.RowsArray with
+            let group =
+                { Name = ix.Name
+                  Indices = idxs
+                  PrefixLengths = ix.KeyColumns |> List.map _.PrefixLength }
+
+            match tryDuplicateUniqueValue table.Columns group table.RowsArray with
             | Some value -> Error(DuplicateKey(ix.Name, value))
             | None -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None))
     | AddIndex ix ->
@@ -4275,15 +4360,15 @@ let private insertCore
                         // of `table.RowsArray` per candidate.
                         let uniqueCollision =
                             uniqueGroups
-                            |> List.tryPick (fun (name, indices) ->
-                                match encodeConstraintKey table.Columns indices candidate with
-                                | Some key when Map.find name index |> Map.containsKey key ->
+                            |> List.tryPick (fun group ->
+                                match encodeUniqueKey table.Columns group candidate with
+                                | Some key when Map.find group.Name index |> Map.containsKey key ->
                                     let value =
-                                        indices
+                                        group.Indices
                                         |> List.map (fun index -> candidate.[index] |> toText |> Option.defaultValue "NULL")
                                         |> String.concat "-"
 
-                                    Some(DuplicateKey(name, value))
+                                    Some(DuplicateKey(group.Name, value))
                                 | _ -> None)
 
                         match uniqueCollision with
@@ -4736,9 +4821,9 @@ and private upsertRowsInTable
                     // the one row (if any) sharing a key with `candidate` in
                     let findMatch (index: Map<string, Map<string, RowId>>) (candidate: Value[]) : (RowId * Value[]) option =
                         uniqueGroups
-                        |> List.tryPick (fun (name, idxs) ->
-                            encodeConstraintKey table.Columns idxs candidate
-                            |> Option.bind (fun k -> Map.tryFind k (Map.find name index))
+                        |> List.tryPick (fun group ->
+                            encodeUniqueKey table.Columns group candidate
+                            |> Option.bind (fun key -> Map.tryFind key (Map.find group.Name index))
                             |> Option.map (fun rowId -> rowId, rows.[rowId]))
 
                     let step acc (ordinal, rowValues: Value list) =
@@ -4781,17 +4866,17 @@ and private upsertRowsInTable
                                                 |> Result.bind (fun applied ->
                                                     let collision =
                                                         uniqueGroups
-                                                        |> List.tryPick (fun (name, idxs) ->
-                                                            match encodeConstraintKey table.Columns idxs applied with
+                                                        |> List.tryPick (fun group ->
+                                                            match encodeUniqueKey table.Columns group applied with
                                                             | Some key ->
-                                                                match Map.tryFind key (Map.find name index) with
+                                                                match Map.tryFind key (Map.find group.Name index) with
                                                                 | Some otherPos when otherPos <> pos ->
                                                                     let value =
-                                                                        idxs
+                                                                        group.Indices
                                                                         |> List.map (fun i -> applied.[i] |> toText |> Option.defaultValue "NULL")
                                                                         |> String.concat "-"
 
-                                                                    Some(DuplicateKey(name, value))
+                                                                    Some(DuplicateKey(group.Name, value))
                                                                 | _ -> None
                                                             | None -> None)
 
@@ -5111,10 +5196,10 @@ let replaceRows
 
                                         let conflicts =
                                             uniqueGroups
-                                            |> List.choose (fun (name, indices) ->
-                                                encodeConstraintKey table.Columns indices candidate
+                                            |> List.choose (fun group ->
+                                                encodeUniqueKey table.Columns group candidate
                                                 |> Option.bind (fun encoded ->
-                                                    Map.tryFind encoded (Map.find name table.UniqueIndex)
+                                                    Map.tryFind encoded (Map.find group.Name table.UniqueIndex)
                                                     |> Option.map (fun rowId -> rowId, table.RowsArray.[rowId])))
                                             |> List.fold
                                                 (fun (seen, matches) ((rowId, _) as matched) ->
@@ -5364,9 +5449,9 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
             | Some before, Some after, Some live when live = before ->
                 let collision =
                     uniqueGroups
-                    |> List.exists (fun (name, columns) ->
-                        match encodeConstraintKey liveTable.Columns columns after with
-                        | Some key -> Map.tryFind key index.[name] |> Option.exists ((<>) rowId)
+                    |> List.exists (fun group ->
+                        match encodeUniqueKey liveTable.Columns group after with
+                        | Some key -> Map.tryFind key index.[group.Name] |> Option.exists ((<>) rowId)
                         | None -> false)
 
                 if collision then
@@ -5732,13 +5817,13 @@ let updateRows
                                             // rekeyed below) doesn't count.
                                             let collision =
                                                 uniqueGroups
-                                                |> List.tryPick (fun (name, idxs) ->
-                                                    match encodeConstraintKey table.Columns idxs newRow with
+                                                |> List.tryPick (fun group ->
+                                                    match encodeUniqueKey table.Columns group newRow with
                                                     | Some k ->
-                                                        match Map.tryFind k (Map.find name index) with
+                                                        match Map.tryFind k (Map.find group.Name index) with
                                                         | Some otherRowId when otherRowId <> rowId ->
-                                                            let value = idxs |> List.map (fun i -> newRow.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
-                                                            Some(DuplicateKey(name, value))
+                                                            let value = group.Indices |> List.map (fun i -> newRow.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
+                                                            Some(DuplicateKey(group.Name, value))
                                                         | _ -> None
                                                     | None -> None)
 
@@ -5866,9 +5951,9 @@ let private replayRowIds (table: Table) (targets: Value[] list) : RowId option l
 
     let tryIndexed target =
         uniqueGroups
-        |> List.tryPick (fun (name, indices) ->
-            encodeConstraintKey table.Columns indices target
-            |> Option.bind (fun key -> table.UniqueIndex |> Map.tryFind name |> Option.bind (Map.tryFind key)))
+        |> List.tryPick (fun group ->
+            encodeUniqueKey table.Columns group target
+            |> Option.bind (fun key -> table.UniqueIndex |> Map.tryFind group.Name |> Option.bind (Map.tryFind key)))
         |> Option.filter (fun rowId -> table.RowsArray.TryFind rowId = Some target)
 
     let indexed = targets |> List.map tryIndexed

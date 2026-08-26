@@ -775,6 +775,30 @@ let tests =
                         Expect.equal code 1062 "MySQL error code"
                     | other -> failtestf "expected DuplicateKey, got %A" other
 
+                testCase "a UNIQUE prefix index compares only the indexed characters"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "prefixed"
+                        [ col "value" (TVarchar 50) false ]
+                        [ { Name = "uq_value"
+                            KeyColumns = [ { Name = "value"; PrefixLength = Some 10 } ]
+                            Unique = true
+                            Kind = BTree } ]
+                        []
+                        None
+                        None
+                    |> ignore
+
+                    insertRows store defaultDatabase "prefixed" None [ [ VString "1234567890 foo" ] ] |> ignore
+
+                    match insertRows store defaultDatabase "prefixed" None [ [ VString "1234567890 bar" ] ] with
+                    | Error(DuplicateKey("uq_value", _)) -> ()
+                    | other -> failtestf "expected DuplicateKey from the shared prefix, got %A" other
+
                 testCase "a plain INSERT violating the primary key returns error 1062 for key PRIMARY"
                 <| fun _ ->
                     let store = withUsersTable ()
