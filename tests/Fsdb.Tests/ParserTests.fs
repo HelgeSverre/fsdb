@@ -1500,6 +1500,26 @@ let tests =
                         false) -> ()
                     | other -> failtestf "expected an InsertSelect with the ODKU assignments, got %A" other
 
+                testCase "explicit keyword aliases remain usable as qualifiers"
+                <| fun _ ->
+                    let sql =
+                        "INSERT INTO dst (value_id, parent_id) "
+                        + "SELECT values.value_id, options.parent_id AS parent_id "
+                        + "FROM source_values AS values "
+                        + "LEFT JOIN source_options AS options ON values.option_id = options.option_id "
+                        + "ON DUPLICATE KEY UPDATE value_id = VALUES(value_id), parent_id = VALUES(parent_id)"
+
+                    match parseOk sql with
+                    | InsertSelect(
+                        "dst",
+                        [ "value_id"; "parent_id" ],
+                        { Projections = [ QualifiedCol("values", "value_id"), None; QualifiedCol("options", "parent_id"), Some "parent_id" ]
+                          From = Some(FromTable { Table = "source_values"; Alias = Some "values" })
+                          Joins = [ { Table = FromTable { Table = "source_options"; Alias = Some "options" } } ] },
+                        [ "value_id", FuncCall("VALUES", [ Col "value_id" ]); "parent_id", FuncCall("VALUES", [ Col "parent_id" ]) ],
+                        false) -> ()
+                    | other -> failtestf "expected keyword aliases in an InsertSelect, got %A" other
+
                 testCase "INSERT accepts a WITH clause on its SELECT source"
                 <| fun _ ->
                     match parseOk "INSERT INTO t (a) WITH c AS (SELECT 1 AS n) SELECT n FROM c" with

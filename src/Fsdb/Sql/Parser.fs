@@ -323,6 +323,9 @@ let private backtickChar: Parser<char, unit> = (pstring "``" >>% '`') <|> satisf
 
 let private backtickIdent: Parser<string, unit> = pchar '`' >>. manyChars backtickChar .>> pchar '`'
 
+let private identifierWord: Parser<string, unit> =
+    backtickIdent <|> many1Satisfy2 isIdentStart isIdentChar
+
 let private identifier: Parser<string, unit> =
     (backtickIdent <|> attempt bareIdent) .>> ws <?> "identifier"
 
@@ -1356,6 +1359,13 @@ let private identAtom: Parser<Expr, unit> =
     currentUserAtom
     <|> niladicTimeAtom
     <|> funcCallAtom
+    <|> attempt (
+        identifierWord .>> ws .>> sym "."
+        .>>. ((pstring "*" >>. ws >>% Choice1Of2()) <|> (qualifiedIdentifier |>> Choice2Of2))
+        |>> function
+            | name, Choice1Of2() -> Star(Some name)
+            | name, Choice2Of2 col -> QualifiedCol(name, col)
+    )
     <|> (identifier
          >>= fun name ->
              choice
@@ -2557,8 +2567,9 @@ let private localLoadData: Parser<LocalLoad, unit> =
 /// on an actual alias, not the start of the next clause; `attempt`ed so a
 /// comma or clause keyword cleanly falls through to `None`.
 let private projectionAlias: Parser<string option, unit> =
-    let name = identifier <|> (stringLit |>> function VString value -> value | _ -> "")
-    (attempt (keyword "AS" >>. name) |>> Some) <|> (attempt name |>> Some) <|> preturn None
+    let explicitName = (identifierWord .>> ws) <|> (stringLit |>> function VString value -> value | _ -> "")
+    let implicitName = identifier <|> (stringLit |>> function VString value -> value | _ -> "")
+    (attempt (keyword "AS" >>. explicitName) |>> Some) <|> (attempt implicitName |>> Some) <|> preturn None
 
 let private projection: Parser<Projection, unit> = expr .>>. projectionAlias
 
@@ -2601,7 +2612,7 @@ let private indexHint: Parser<unit, unit> =
 
 let private tableRef: Parser<TableRef, unit> =
     (identifier .>>. opt (sym "." >>. qualifiedIdentifier))
-    .>>. opt ((keyword "AS" >>. identifier) <|> identifier)
+    .>>. opt ((keyword "AS" >>. identifierWord .>> ws) <|> identifier)
     .>> many indexHint
     |>> fun ((first, second), alias) ->
         match second with
