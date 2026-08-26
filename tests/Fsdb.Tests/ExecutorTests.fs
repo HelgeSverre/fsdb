@@ -1193,6 +1193,19 @@ let tests =
                     | ResultSet(_, [ [ None ] ]) -> ()
                     | other -> failtestf "expected explicit NULL to bypass the default, got %A" other
 
+                    runDefault
+                        store
+                        "CREATE TABLE explicit_defaults (id INT AUTO_INCREMENT PRIMARY KEY, base INT DEFAULT 7, derived INT DEFAULT (base + 1))"
+                    |> ignore
+
+                    match runDefault store "INSERT INTO explicit_defaults VALUES (DEFAULT, DEFAULT, DEFAULT)" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected explicit defaults to insert, got %A" other
+
+                    match runDefault store "SELECT id, base, derived FROM explicit_defaults" with
+                    | ResultSet(_, [ [ Some "1"; Some "7"; Some "8" ] ]) -> ()
+                    | other -> failtestf "expected declared defaults, got %A" other
+
                     match runDefault store "INSERT INTO defaults_expr (id, base) VALUES (1, 20) ON DUPLICATE KEY UPDATE base = VALUES(base), derived = VALUES(derived)" with
                     | Affected 2UL -> ()
                     | other -> failtestf "expected the upsert candidate default to be evaluated, got %A" other

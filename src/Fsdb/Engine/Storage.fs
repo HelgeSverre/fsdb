@@ -3852,10 +3852,9 @@ let private processRow
 /// in table order") to indices against `table`.
 let private resolveInsertColumns (table: Table) (columns: string list option) : Result<int list, StorageError> =
     match columns with
-    // ponytail: a bare `INSERT INTO t VALUES (...)` still accepts a value in
-    // a generated column's slot and recomputes over it (MySQL demands the
-    // `DEFAULT` keyword per cell, which the parser doesn't have) — add that
-    // once the parser learns `DEFAULT` in a VALUES row.
+    // ponytail: a bare `INSERT INTO t VALUES (...)` still accepts a non-DEFAULT
+    // value in a generated column's slot and recomputes over it. MySQL accepts
+    // only DEFAULT there.
     | None -> Ok [ 0 .. table.Columns.Length - 1 ]
     | Some names -> names |> traverse (resolveAssignableColumn table.Columns table.OriginalName)
 

@@ -2411,12 +2411,13 @@ let private insertValue: Parser<Expr, unit> =
     let cellEnd = followedBy (pchar ',' <|> pchar ')')
     let literal p = attempt (p .>> cellEnd |>> Lit)
 
-    // Numbers/NULL before strings: dump cells are mostly numeric, and a
+    // Keywords and numbers before strings: dump cells are mostly numeric, and a
     // failed string attempt is cheaper than a failed number parse. The
     // negative form goes through the same `negateExpr` the grammar's unary
     // minus uses, so both paths share one negation semantics.
     choice
-        [ literal numberLit
+        [ attempt (keyword "DEFAULT" .>> cellEnd >>% FuncCall("DEFAULT", []))
+          literal numberLit
           literal (keyword "NULL" >>% VNull)
           literal stringLit
           attempt (pchar '-' >>. ws >>. numberLit .>> cellEnd |>> (Lit >> negateExpr))

@@ -1386,6 +1386,13 @@ let tests =
                         (Insert("t", [], [ [ Lit(VInt 1L); Lit(VInt 2L) ] ], [], false))
                         "insert without columns"
 
+                testCase "INSERT VALUES accepts explicit DEFAULT cells"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "INSERT INTO t (a, b) VALUES (DEFAULT, 2)")
+                        (Insert("t", [ "a"; "b" ], [ [ FuncCall("DEFAULT", []); Lit(VInt 2L) ] ], [], false))
+                        "explicit defaults"
+
                 testCase "INSERT IGNORE sets the ignore flag"
                 <| fun _ ->
                     Expect.equal

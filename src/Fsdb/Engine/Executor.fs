@@ -11697,6 +11697,66 @@ let rec executeAs
             (Ok())
         |> Result.map (fun () -> result)
 
+    let evaluateInsertRows
+        (runStore: Store)
+        (db: string)
+        (table: string)
+        (columns: ColumnDef list)
+        (targetColumns: string list)
+        (rows: Expr list list)
+        =
+        let indices =
+            if targetColumns.IsEmpty then
+                Ok [ 0 .. columns.Length - 1 ]
+            else
+                targetColumns |> traverse (resolveAssignableColumn columns table)
+
+        let isDefault = function
+            | FuncCall(name, []) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) -> true
+            | _ -> false
+
+        let context = contextFactory runStore registry dbName Map.empty Map.empty None [||]
+
+        let evaluateRow (indices: int list) (row: Expr list) =
+            if row.Length <> indices.Length then
+                Error(ColumnCountMismatch(indices.Length, row.Length))
+            else
+                row
+                |> traverse (fun expression ->
+                    if isDefault expression then
+                        Ok None
+                    else
+                        evalExpr context expression |> Result.map Some |> Result.mapError ExpressionError)
+                |> Result.bind (fun values ->
+                    let candidate = columns |> List.map evalDefault |> Array.ofList
+
+                    List.zip indices values
+                    |> List.iter (function
+                        | index, Some value -> candidate.[index] <- value
+                        | _ -> ())
+
+                    let defaulted =
+                        List.zip indices values
+                        |> List.choose (function
+                            | index, None -> Some index
+                            | _ -> None)
+
+                    defaulted
+                    |> List.tryPick (fun index ->
+                        let column = columns.[index]
+
+                        if column.Default.IsNone && not column.Nullable && not column.AutoIncrement && column.Generated.IsNone then
+                            Some(Error(ExpressionError(1364, sprintf "Field '%s' doesn't have a default value" column.Name)))
+                        else
+                            None)
+                    |> Option.defaultValue (Ok())
+                    |> Result.bind (fun () ->
+                        evaluateFunctionalDefaults runStore db table columns (Set.ofList defaulted) candidate)
+                    |> Result.map (fun candidate -> indices |> List.map (fun index -> candidate.[index])))
+
+        indices
+        |> Result.bind (fun indices -> rows |> traverse (evaluateRow indices))
+
     let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
         let finish candidate =
             computeGeneratedRow runStore registry db table columns candidate
@@ -12773,32 +12833,29 @@ let rec executeAs
                 executeViewWrite view rewritten
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
-        // INSERT ... VALUES expressions aren't evaluated against any row
-        // (no table columns are in scope), just literals/functions — an
-        // empty column index turns a stray `Col` reference into a clean
-        // 1054 rather than an index-out-of-range.
         let db, table = splitQualified dbName table
 
-        let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
+        match scan store db table with
+        | Error error -> ids, storageErr error
+        | Ok(tableColumns, _) ->
+            match evaluateInsertRows store db table tableColumns columns rowsExprs with
+            | Error error -> ids, storageErr error
+            | Ok rowsValues ->
+                let cols = if columns.IsEmpty then None else Some columns
 
-        match rowsExprs |> traverse (traverse (evalExpr literalCtx)) with
-        | Error(code, message) -> ids, Err(code, message)
-        | Ok rowsValues ->
-            let cols = if columns.IsEmpty then None else Some columns
+                if onDuplicateUpdate.IsEmpty then
+                    finishInsert db table (fun s ->
+                        match scan s db table with
+                        | Error error -> Error error
+                        | Ok(tableColumns, _) ->
+                            let prepare = prepareInsertRow s db table tableColumns
 
-            if onDuplicateUpdate.IsEmpty then
-                finishInsert db table (fun s ->
-                    match scan s db table with
-                    | Error error -> Error error
-                    | Ok(tableColumns, _) ->
-                        let prepare = prepareInsertRow s db table tableColumns
-
-                        if ignoreDuplicates then
-                            insertRowsIgnorePrepared s db table cols rowsValues prepare
-                        else
-                            insertRowsPrepared s db table cols rowsValues prepare)
-            else
-                upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
+                            if ignoreDuplicates then
+                                insertRowsIgnorePrepared s db table cols rowsValues prepare
+                            else
+                                insertRowsPrepared s db table cols rowsValues prepare)
+                else
+                    upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
         let viewDb, viewName = splitQualified dbName table
