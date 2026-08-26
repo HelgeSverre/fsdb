@@ -2956,11 +2956,13 @@ let private tryTextRoutineCommand (sql: string) =
 let private routineStatement (body: string) =
     let trimmed = body.Trim()
 
-    if trimmed.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase)
-       && trimmed.EndsWith("END", StringComparison.OrdinalIgnoreCase) then
-        let statement = trimmed.Substring(5, trimmed.Length - 8).Trim().TrimEnd(';').Trim()
+    if trimmed.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase) then
+        if trimmed.EndsWith("END", StringComparison.OrdinalIgnoreCase) then
+            let statement = trimmed.Substring(5, trimmed.Length - 8).Trim().TrimEnd(';').Trim()
 
-        if statement.Contains(';') then None else Some statement
+            if statement.Contains(';') then None else Some statement
+        else
+            None
     else
         Some trimmed
 

@@ -298,6 +298,8 @@ let private reservedWords =
           // Reserved in MySQL 8 too: without it, `FROM t WINDOW w AS (...)`
           // reads `WINDOW` as `t`'s alias and dies on the window name.
           "window"
+          "partition"
+          "row"
           "lock"
           "with"
           "recursive" ],

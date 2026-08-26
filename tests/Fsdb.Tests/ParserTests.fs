@@ -760,6 +760,11 @@ let tests =
                         (mkSelect([ col "order", None; col "a`b", None ], Some "select", None, [], None, None))
                         "backtick identifiers"
 
+                testCase "ROW and PARTITION cannot become implicit aliases"
+                <| fun _ ->
+                    Expect.isError (parse "SELECT ROW(1, 2) ROW") "ROW alias"
+                    Expect.isError (parse "SELECT id FROM t PARTITION") "PARTITION alias"
+
                 testCase "integer, decimal, and exponent-notation numeric literals"
                 <| fun _ ->
                     Expect.equal

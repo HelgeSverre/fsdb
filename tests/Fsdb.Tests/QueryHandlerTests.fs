@@ -1142,6 +1142,14 @@ let tests =
               | ResultSet([ "id" ], [ [ Some "42" ] ]) -> ()
               | other -> failtestf "expected unparenthesized procedure result, got %A" other
 
+          testCase "unterminated procedure blocks are syntax errors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "CREATE PROCEDURE incomplete() BEGIN" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected syntax error, got %A" other
+
           testCase "scheduled event declarations persist without executing"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
