@@ -323,13 +323,15 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected only the pre-savepoint row, got %A" result
 
-          testCase "SET autocommit = 0 opens an implicit transaction; SET autocommit = 1 commits it"
+          testCase "SET autocommit = 0 starts a transaction on the first table statement; SET autocommit = 1 commits it"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store
               let session, _ = handle session "CREATE TABLE tx_ac (id INT)"
               let session, _ = handle session "SET autocommit = 0"
+              Expect.isNone session.Tx "changing the mode alone does not enter a transaction"
               let session, _ = handle session "INSERT INTO tx_ac VALUES (1)"
+              Expect.isSome session.Tx "the first table write enters a transaction"
               let other = create 2 store
 
               match handle other "SELECT id FROM tx_ac" |> snd with
@@ -342,6 +344,79 @@ let tests =
               match handle other "SELECT id FROM tx_ac" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected the row visible once autocommit = 1 commits it, got %A" result
+
+          testCase "DDL commits an active transaction before executing"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_ddl_rows (id INT PRIMARY KEY)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_ddl_rows VALUES (1)"
+              let session, createResult = handle session "CREATE TABLE tx_ddl_schema (id INT PRIMARY KEY)"
+
+              Expect.equal createResult (Affected 0UL) "the DDL succeeds in its own transaction"
+              Expect.isNone session.Tx "the DDL leaves no active transaction"
+              let session, _ = handle session "ROLLBACK"
+
+              match handle session "SELECT id FROM tx_ddl_rows" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the pre-DDL row to remain committed, got %A" result
+
+          testCase "failed DDL still commits the preceding transaction"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_failed_ddl (id INT PRIMARY KEY)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_failed_ddl VALUES (1)"
+              let session, result = handle session "CREATE TABLE tx_failed_ddl (other INT)"
+
+              match result with
+              | Err(1050, _) -> ()
+              | other -> failtestf "expected the duplicate table error, got %A" other
+
+              Expect.isNone session.Tx "the failed DDL does not restore the old transaction"
+
+              match handle session "SELECT id FROM tx_failed_ddl" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the pre-DDL write to remain committed, got %A" other
+
+          testCase "autocommit zero starts a fresh transaction after DDL"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_ac_ddl (id INT PRIMARY KEY)"
+              let session, _ = handle session "SET autocommit = 0"
+              let session, _ = handle session "INSERT INTO tx_ac_ddl VALUES (1)"
+              let session, _ = handle session "CREATE TABLE tx_ac_schema (id INT PRIMARY KEY)"
+              Expect.isNone session.Tx "DDL ends the first implicit transaction"
+              let session, _ = handle session "INSERT INTO tx_ac_ddl VALUES (2)"
+              Expect.isSome session.Tx "the next write starts a fresh implicit transaction"
+              let session, _ = handle session "ROLLBACK"
+
+              match handle session "SELECT id FROM tx_ac_ddl ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected only the write committed by DDL, got %A" result
+
+          testCase "temporary table DDL does not commit an active transaction"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_temp_rows (id INT PRIMARY KEY)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_temp_rows VALUES (1)"
+              let session, result = handle session "CREATE TEMPORARY TABLE tx_temp_schema (id INT PRIMARY KEY)"
+              Expect.equal result (Affected 0UL) "temporary DDL succeeds"
+              Expect.isSome session.Tx "temporary DDL leaves the transaction active"
+              let session, _ = handle session "ROLLBACK"
+
+              match handle session "SELECT id FROM tx_temp_rows" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected the permanent row to roll back, got %A" result
+
+              match handle session "SELECT COUNT(*) FROM tx_temp_schema" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | result -> failtestf "expected the temporary table to survive rollback, got %A" result
 
           testCase "RELEASE SAVEPOINT on an unknown savepoint is a 1305 error"
           <| fun _ ->

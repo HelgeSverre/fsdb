@@ -1487,10 +1487,7 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
     let session = { session with Variables = Map.add "autocommit" (Some value) session.Variables }
 
     let session =
-        if value = "0" then
-            (if session.Tx.IsNone then beginTransaction (configuredReadOnly session) session else session)
-        else
-            commitSession session
+        if value = "0" then session else commitSession session
 
     session, Affected 0UL
 
@@ -1681,6 +1678,50 @@ type private TemporaryAction =
     | CreateTemporary
     | DropTemporary
 
+let private causesImplicitCommit = function
+    | CreateDatabase _
+    | DropDatabase _
+    | AlterDatabase _
+    | CreateTable _
+    | CreateTableLike _
+    | CreateTableAs _
+    | DropTable _
+    | AlterTable _
+    | RenameTable _
+    | CreateIndex _
+    | DropIndexStmt _
+    | Truncate _
+    | CreateUser _
+    | DropUser _
+    | RenameUser _
+    | AlterUser _
+    | CreateRole _
+    | DropRole _
+    | Grant _
+    | Revoke _
+    | CreateTrigger _
+    | DropTrigger _
+    | CreateView _
+    | DropView _ -> true
+    | _ -> false
+
+let private startsTransaction = function
+    | Insert _
+    | InsertSelect _
+    | Replace _
+    | ReplaceSelect _
+    | ReplaceSet _
+    | Select _
+    | Union _
+    | Update _
+    | Delete _
+    | ChecksumTables _
+    | Explain _ -> true
+    | _ -> false
+
+let private autocommitDisabled (session: Session) =
+    lookupVar session "autocommit" |> Option.flatten = Some "0"
+
 let private tableKey (db: string) (table: string) = db.ToLowerInvariant(), normalizeTableName table
 
 let private temporaryKeys (catalog: Catalog) =
@@ -1811,10 +1852,19 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
 let private executeParsedWithTemporaryAction (action: TemporaryAction option) (session: Session) (stmt: Statement) =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-    if action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt then
-        executeWithTemporaryCatalog action session stmt
+    if action.IsNone && causesImplicitCommit stmt then
+        executeParsedCore (commitSession session) stmt
     else
-        executeParsedCore session stmt
+        let session =
+            if session.Tx.IsNone && autocommitDisabled session && startsTransaction stmt then
+                beginTransaction (configuredReadOnly session) session
+            else
+                session
+
+        if action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt then
+            executeWithTemporaryCatalog action session stmt
+        else
+            executeParsedCore session stmt
 
 let private executeParsed session stmt = executeParsedWithTemporaryAction None session stmt
 

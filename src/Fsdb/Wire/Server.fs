@@ -412,7 +412,12 @@ let sendBinaryQueryResult
 /// bit off the wire, not just whatever `COMMIT`/`ROLLBACK` themselves reply)
 /// see the real transaction state.
 let private statusFlagsFor (session: Session) : int =
-    StatusAutocommit ||| (if session.Tx.IsSome then StatusInTrans else 0)
+    let autocommit =
+        match Map.tryFind "autocommit" session.Variables with
+        | Some(Some "0") -> 0
+        | _ -> StatusAutocommit
+
+    autocommit ||| (if session.Tx.IsSome then StatusInTrans else 0)
 
 let private statusFlagsForMore (session: Session) = statusFlagsFor session ||| StatusMoreResultsExists
 

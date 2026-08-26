@@ -274,8 +274,8 @@ let private okPayloadWithHeader
 
 /// Builds an OK packet payload (header 0x00). Used for command responses
 /// (handshake, COM_QUERY for non-SELECT statements, COM_PING, ...).
-/// `statusFlags` is `StatusAutocommit` alone outside a transaction, or with
-/// `StatusInTrans` also set while one is open (see `Server.statusFlagsFor`) —
+/// `statusFlags` carries the session's autocommit mode and whether a
+/// transaction is open (see `Server.statusFlagsFor`) —
 /// PDO's `inTransaction()`/`beginTransaction()`/`commit()` read this bit
 /// directly off the OK packet rather than tracking transaction state
 /// themselves.

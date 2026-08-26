@@ -138,6 +138,32 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "DDL clears the wire transaction status"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+
+                  let queryStatus (sql: string) =
+                      async {
+                          let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          let! response = readPacketAsync stream
+                          Expect.equal response.Value.Payload.[0] 0uy "the statement returns an OK packet"
+                          let reader = Reader(response.Value.Payload.[1..])
+                          reader.ReadLenEncInt() |> ignore
+                          reader.ReadLenEncInt() |> ignore
+                          return reader.ReadInt16LE()
+                      }
+
+                  let! begun = queryStatus "BEGIN"
+                  Expect.isTrue (begun &&& StatusInTrans <> 0) "BEGIN advertises an active transaction"
+                  let! created = queryStatus "CREATE TABLE ddl_state_schema (id INT PRIMARY KEY)"
+                  Expect.equal (created &&& StatusInTrans) 0 "DDL advertises that its implicit commit ended the transaction"
+              }
+              |> Async.RunSynchronously
+
           testCase "MySqlConnector can negotiate zlib compression"
           <| fun _ ->
               async {
