@@ -20,6 +20,11 @@ gauntlet does not provide:
 | Rails | Ruby mysql2 and Active Record | Full test schema plus a MySQL adapter test |
 | Magento | PHP PDO and Magento DB adapter | Full application install with OpenSearch |
 
+The pinned Nextcloud suite currently has one order-dependent upstream failure:
+`TrashbinTest` retains `test-trashbin-user2`, which changes the following
+recipient-search expectation. The same two-class sequence fails against MySQL
+8.4; it is not an fsdb compatibility difference.
+
 The upstream commits live in `versions.env`. Updating a pin is a deliberate
 compatibility-corpus change: run that target against MySQL 8.4 as well as fsdb
 before classifying new failures.

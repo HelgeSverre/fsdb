@@ -32,23 +32,3 @@ stores column names rather than expressions, so the declaration is rejected
 before the mysql2 adapter suite starts.
 
 Reproduce with `just smoke-apps rails`.
-
-## Background-job reservation and completion lose the selected row
-
-Nextcloud can insert and enumerate background jobs, but selecting past a
-nonexistent class and reserving two consecutive jobs can return null. Updating
-a newly started job to a failed state can also report that no row changed. The
-DB suite exposes these paths through `JobListTest` and `JobRunsTest`.
-
-Reproduce with `just smoke-apps nextcloud`.
-
-## Nextcloud recipient and external-share behavior diverges
-
-The recipient search returns two of three expected users for one limit/offset
-case. Creating a user external share raises a duplicate-key error on
-`sh_external_mp` where MySQL completes the operation.
-
-Reproduce with `just smoke-apps nextcloud`. The current run reaches 5,704 tests
-and 30,621 assertions with one error and four failures; three are the
-background-job cases above, with recipient search and external sharing making
-up the other two failures.
