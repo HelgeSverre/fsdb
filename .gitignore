@@ -8,3 +8,4 @@ test-results/
 spike/
 .claude/worktrees/
 BenchmarkDotNet.Artifacts/
+smoke/results/

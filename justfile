@@ -39,6 +39,18 @@ receipts *ARGS:
 smoke port=PORT:
     {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ port }} -uroot -e 'SELECT 1; SELECT @@version;'
 
+# Run pinned external application compatibility probes in Docker.
+[group('qa')]
+smoke-apps *TARGETS:
+    #!/usr/bin/env bash
+    dotnet fsi --nologo --readline- --exec smoke/run.fsx -- "$@"
+
+# Build the external smoke images without running their database probes.
+[group('qa')]
+smoke-apps-build *TARGETS:
+    #!/usr/bin/env bash
+    dotnet fsi --nologo --readline- --exec smoke/run.fsx -- --build-only "$@"
+
 # === QA ===
 
 # Run the Expecto test suite, passing any arguments through to Expecto

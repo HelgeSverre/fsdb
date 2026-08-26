@@ -1,0 +1,12 @@
+.git/
+.idea/
+.claude/worktrees/
+**/bin/
+**/obj/
+BenchmarkDotNet.Artifacts/
+benchmarks/mysql-data/
+benchmarks/mysql-data-nofsync/
+coverage/
+smoke/results/
+test-results/
+torture/artifacts/

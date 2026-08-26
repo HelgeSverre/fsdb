@@ -1,0 +1,80 @@
+services:
+  fsdb:
+    image: fsdb-smoke-fsdb:local
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: fsdb
+    expose:
+      - "3306"
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+
+  probe:
+    image: mysql:8.4
+    entrypoint:
+      - mysqladmin
+
+  gitea:
+    image: fsdb-smoke-gitea:${GITEA_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: gitea
+      args:
+        GITEA_REF: ${GITEA_REF}
+    init: true
+
+  mediawiki:
+    image: fsdb-smoke-mediawiki:${MEDIAWIKI_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: mediawiki
+      args:
+        MEDIAWIKI_REF: ${MEDIAWIKI_REF}
+    init: true
+
+  drupal:
+    image: fsdb-smoke-drupal:${DRUPAL_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: drupal
+      args:
+        DRUPAL_REF: ${DRUPAL_REF}
+    init: true
+
+  nextcloud:
+    image: fsdb-smoke-nextcloud:${NEXTCLOUD_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: nextcloud
+      args:
+        NEXTCLOUD_REF: ${NEXTCLOUD_REF}
+    init: true
+
+  shopware:
+    image: fsdb-smoke-shopware:${SHOPWARE_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: shopware
+      args:
+        SHOPWARE_REF: ${SHOPWARE_REF}
+    environment:
+      ADMIN_OPENSEARCH_URL: http://127.0.0.1:9200
+      APP_ENV: test
+      APP_SECRET: fsdb-smoke-secret
+      APP_URL: http://127.0.0.1:8000
+      BLUE_GREEN_DEPLOYMENT: "1"
+      DATABASE_URL: mysql://root@fsdb:3306/root
+      FORCE_INSTALL: "1"
+      OPENSEARCH_URL: http://127.0.0.1:9200
+      PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+      REDIS_URL: redis://redis:6379
+    init: true
