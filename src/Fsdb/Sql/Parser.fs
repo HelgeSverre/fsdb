@@ -3189,6 +3189,7 @@ let private createTableAs: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. qualifiedTableName
+     .>> tableOptions
      .>> optional (keyword "AS")
      .>>. selectOrUnionStmt)
     |>> fun ((ifNotExists, name), query) -> CreateTableAs(name, query, ifNotExists)

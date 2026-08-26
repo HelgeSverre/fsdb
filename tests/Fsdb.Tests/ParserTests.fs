@@ -943,6 +943,10 @@ let tests =
                     | CreateTableAs("archive", Select { Projections = [ Col "id", None; Col "name", None ] }, true) -> ()
                     | other -> failtestf "expected CREATE TABLE AS SELECT, got %A" other
 
+                    match parseOk "CREATE TABLE archive ENGINE=MEMORY SELECT name FROM source" with
+                    | CreateTableAs("archive", Select { Projections = [ Col "name", None ] }, false) -> ()
+                    | other -> failtestf "expected CREATE TABLE AS SELECT with options, got %A" other
+
                 testCase "IF NOT EXISTS"
                 <| fun _ ->
                     Expect.equal

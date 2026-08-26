@@ -2645,6 +2645,24 @@ let tests =
 
               Expect.isFalse (Map.containsKey "staging" store.Catalog.[Fsdb.Storage.defaultDatabase]) "temporary table was not published"
 
+          testCase "temporary tables support engine-qualified create-as-select"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE source (name VARCHAR(20))"
+              let session, _ = handle session "INSERT INTO source VALUES ('first'), ('second')"
+
+              let session, created =
+                  handle session "CREATE TEMPORARY TABLE staging ENGINE=MEMORY SELECT name FROM source"
+
+              Expect.equal created (Affected 2UL) "temporary rows copied"
+
+              match handle session "SELECT GROUP_CONCAT(name ORDER BY name) FROM staging" |> snd with
+              | ResultSet(_, [ [ Some "first,second" ] ]) -> ()
+              | other -> failtestf "expected rows copied into temporary table, got %A" other
+
+              Expect.isFalse (Map.containsKey "staging" store.Catalog.[Fsdb.Storage.defaultDatabase]) "temporary table was not published"
+
           testCase "a bare ? over COM_QUERY, incl. in a DDL generated column, is a 1064 (never reaches storage)"
           <| fun _ ->
               let session = create 991001 (Fsdb.Storage.create ())
