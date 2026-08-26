@@ -1027,6 +1027,22 @@ let tests =
                                 Collation = Some "utf8mb4_unicode_ci" })
                         "table defaults kept on the table; an INT column inherits nothing"
 
+                testCase "application-generated indexes, negative defaults, and comma-separated table options parse"
+                <| fun _ ->
+                    let statements =
+                        [ "CREATE TABLE `actor` (actor_id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL, actor_user INT UNSIGNED DEFAULT NULL, actor_name VARBINARY(255) NOT NULL, UNIQUE INDEX actor_user (actor_user), UNIQUE INDEX actor_name (actor_name), PRIMARY KEY(actor_id)) ENGINE=InnoDB, DEFAULT CHARSET=binary"
+                          "CREATE TABLE oc_file_locks (id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL, `lock` INT DEFAULT 0 NOT NULL, `key` VARCHAR(64) NOT NULL, ttl INT DEFAULT -1 NOT NULL, UNIQUE INDEX lock_key_index (`key`), INDEX lock_ttl_index (ttl), PRIMARY KEY(id)) DEFAULT CHARACTER SET UTF8 COLLATE `utf8_bin` ENGINE = InnoDB" ]
+
+                    for sql in statements do
+                        match parseOk sql with
+                        | CreateTable { Columns = columns; Indexes = indexes } ->
+                            Expect.isGreaterThan indexes.Length 1 "inline indexes"
+
+                            columns
+                            |> List.tryFind (fun column -> column.Name = "ttl")
+                            |> Option.iter (fun column -> Expect.equal column.Default (Some(DConst(VInt -1L))) "negative default")
+                        | other -> failtestf "expected generated CREATE TABLE to parse, got %A" other
+
                 testCase "HASH partition declarations are accepted"
                 <| fun _ ->
                     [ "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 4"

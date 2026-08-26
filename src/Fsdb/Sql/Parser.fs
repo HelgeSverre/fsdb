@@ -1714,10 +1714,23 @@ type private ColMod =
 /// requires it to match the column's own declared fsp, and the default is
 /// evaluated at that declared fsp regardless (`Storage.evalDefault`).
 let private defaultValueLit: Parser<ColumnDefault, unit> =
+    let negativeNumber =
+        sym "-"
+        >>. numberLit
+        >>= function
+            | VInt value when value = Int64.MinValue -> preturn (VDecimal(-(decimal value)))
+            | VInt value -> preturn (VInt(-value))
+            | VUInt value when value = 9223372036854775808UL -> preturn (VInt Int64.MinValue)
+            | VUInt value -> preturn (VDecimal(-(decimal value)))
+            | VDecimal value -> preturn (VDecimal(-value))
+            | VDouble value -> preturn (VDouble(-value))
+            | _ -> fail "a numeric default must follow '-'"
+
     // MariaDB dumps emit the function-call spelling `current_timestamp()`;
     // the empty parens are the same as none.
     (keyword "CURRENT_TIMESTAMP" >>. optional (attempt widthLen) >>. optional (sym "(" >>. sym ")") >>% DCurrentTimestamp)
     <|> attempt (between (sym "(") (sym ")") expr |>> DExpression)
+    <|> attempt (negativeNumber |>> DConst)
     <|> (literalValue |>> DConst)
 
 /// A charset/collation name — Laravel emits `COLLATE 'utf8mb4_unicode_ci'`
@@ -2010,7 +2023,7 @@ let private tableOption: Parser<TableOption, unit> =
           attempt hashPartitionOption ]
 
 let private tableOptions: Parser<string option * string option * int64 option * string option, unit> =
-    many tableOption
+    many (optional (sym ",") >>. tableOption)
     |>> fun opts ->
         opts
         |> List.fold
