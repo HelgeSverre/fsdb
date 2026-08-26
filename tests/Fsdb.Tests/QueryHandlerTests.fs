@@ -2514,7 +2514,7 @@ let tests =
               let commits = ResizeArray<Fsdb.Storage.CommitEvent>()
               store.OnCommit.Add commits.Add
 
-              let first, created = handle first "CREATE TEMPORARY TABLE sample (n INT)"
+              let first, created = handle first "CREATE TEMPORARY TABLE sample (n VARCHAR(7))"
               Expect.equal created (Affected 0UL) "temporary table created"
               let first, inserted = handle first "INSERT INTO sample VALUES (2)"
               Expect.equal inserted (Affected 1UL) "temporary row inserted"
@@ -2526,6 +2526,10 @@ let tests =
               match handle second "SELECT n FROM sample" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected the permanent row, got %A" other
+
+              match handle first "DESCRIBE sample" |> snd with
+              | ResultSet(_, [ [ Some "n"; Some "varchar(7)"; _; _; _; _ ] ]) -> ()
+              | other -> failtestf "expected temporary metadata, got %A" other
 
               let first, dropped = handle first "DROP TEMPORARY TABLE sample"
               Expect.equal dropped (Affected 0UL) "temporary table dropped"

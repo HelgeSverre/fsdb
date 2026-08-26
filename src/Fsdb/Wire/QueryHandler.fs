@@ -668,22 +668,34 @@ let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     let visible = rows |> List.filter (function | [ Some db ] -> Auth.canSeeDatabaseForAccount store (accountOf session) db | _ -> false)
     ResultSet(columns, visible)
 
+let private overlayCatalog (catalog: Storage.Catalog) (overlay: Storage.Catalog) =
+    overlay
+    |> Map.fold (fun result db tables ->
+        result
+        |> Map.change db (fun current ->
+            current
+            |> Option.defaultValue Map.empty
+            |> fun existing -> Some(Map.fold (fun acc name table -> Map.add name table acc) existing tables))) catalog
+
 /// The catalog `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX`
-/// should resolve against: a registered `fsdb` virtual table isn't in the
-/// real catalog (and the real `fsdb` database may not even exist while the
-/// registry keeps the schema alive), yet anything `SHOW TABLES` lists must
-/// be describable — clients/ORMs introspect via DESCRIBE. Splicing the
-/// overlay in as a one-table catalog reuses the existing renderers
-/// unchanged instead of teaching each one about the registry.
+/// should resolve against. Session-local and virtual tables aren't in the
+/// shared catalog, but clients still introspect them through these forms.
 let private catalogWithOverlay (session: Session) (dbName: string) (table: string) : Storage.Catalog =
     let store = Session.currentStore session
+    let catalog = overlayCatalog store.Catalog session.TemporaryCatalog
 
     if String.Equals(dbName, Storage.defaultDatabase, StringComparison.OrdinalIgnoreCase) then
         match Map.tryFind (table.ToLowerInvariant()) store.VirtualTables with
-        | Some vt -> Map.ofList [ dbName, Map.ofList [ table.ToLowerInvariant(), Storage.virtualTableStub vt ] ]
-        | None -> store.Catalog
+        | Some vt ->
+            catalog
+            |> Map.change (dbName.ToLowerInvariant()) (fun current ->
+                current
+                |> Option.defaultValue Map.empty
+                |> Map.add (table.ToLowerInvariant()) (Storage.virtualTableStub vt)
+                |> Some)
+        | None -> catalog
     else
-        store.Catalog
+        catalog
 
 let private showColumnsRe =
     Regex(@"^SHOW\s+(FULL\s+)?COLUMNS\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
@@ -1632,15 +1644,6 @@ let private hasTemporaryTable (catalog: Catalog) (db: string) (table: string) =
     catalog
     |> Map.tryFind (db.ToLowerInvariant())
     |> Option.exists (Map.containsKey (normalizeTableName table))
-
-let private overlayCatalog (catalog: Catalog) (temporary: Catalog) =
-    temporary
-    |> Map.fold (fun result db tables ->
-        result
-        |> Map.change db (fun current ->
-            current
-            |> Option.defaultValue Map.empty
-            |> fun existing -> Some(Map.fold (fun acc name table -> Map.add name table acc) existing tables))) catalog
 
 let private setCatalogTable (catalog: Catalog) (db: string) (table: string) (value: Table option) =
     let db = db.ToLowerInvariant()
