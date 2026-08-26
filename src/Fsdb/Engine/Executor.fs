@@ -1874,43 +1874,46 @@ let private equiKeyOf (keyIndices: int[]) (row: Value[]) : Value[] option =
         let key = keyIndices |> Array.map (fun i -> row.[i])
         if key |> Array.exists (fun v -> v = VNull) then None else Some key
 
-/// `Dictionary<Value[], _>` key comparer for the hash join's build/probe
-/// keys — must agree with the equality the nested-loop fallback's `ON`
-/// evaluation uses (the resolved key-pair collation for strings, `Value.
-/// compare`'s numeric cross-type coercion otherwise), not .NET's ordinal/
-/// exact default, or matches the nested loop keeps (`'Alice' = 'alice'` on
-/// an ai_ci column, `1 = 1.0`) would silently vanish from the hash path.
+/// `Dictionary<Value[], _>` key comparer for SQL equality keys. It must
+/// agree with expression equality (the resolved collation for strings,
+/// `Value.compare`'s numeric coercion otherwise), not .NET's ordinal/exact
+/// array equality.
 /// `GetHashCode` only needs to *agree* with `Equals` — every value that
 /// could tie under a column's collation must land in the same bucket — so
 /// it hashes a coarser normalized form (the column collation's folded hash,
-/// or a `double`) while `Equals` still does the exact per-column check.
+/// or a `double`) while `Equals` still does the exact per-column check. The
+/// hash join opts into numeric coercion after validating its runtime key
+/// classes. GROUP BY and window partitions retain the structural equality
+/// of non-string expression results while still honoring string collations.
 /// `keyClassOf`/`rowsMatchKeyClasses` keep this comparer from ever seeing a
 /// pair `Value.compare` treats non-uniformly depending on which side each
 /// value is on (a parseable-as-date string vs. a `DATE`).
-type private JoinKeyComparer(collations: Collation.Collation list) =
+type private SqlValueKeyComparer(collations: Collation.Collation list, coerceNumbers: bool) =
     let bucketOf (i: int) (v: Value) : obj =
         match v with
+        | VString text -> box ((collations.[i]).HashOf text)
         | VInt _
+        | VUInt _
+        | VBit _
         | VDouble _
-        | VDecimal _ -> box (Value.toDouble v)
-        // The collation's hash folds case *and* accents (keeping trailing
-        // spaces significant) — 'åge' and 'age' must land in the same bucket
-        // for `Equals`' folded per-column check to ever see them. A hash,
-        // not `KeyOf`: hashing needs no canonical form, so this avoids a
-        // full sort-key materialization per string per row.
-        | _ -> box ((collations.[i]).HashOf (Value.toText v |> Option.defaultValue ""))
+        | VDecimal _ when coerceNumbers -> box (Value.toDouble v)
+        | _ -> box (hash v)
 
     interface IEqualityComparer<Value[]> with
         member _.Equals(a: Value[], b: Value[]) =
-            a
-            |> Array.mapi (fun i x ->
-                let y = b.[i]
+            let mutable i = 0
+            let mutable equal = a.Length = b.Length
 
-                match x, y with
-                // The resolved key-pair collation decides string equality.
-                | VString sx, VString sy -> (collations.[i]).Equals sx sy
-                | _ -> Value.compare x y = 0)
-            |> Array.forall id
+            while equal && i < a.Length do
+                equal <-
+                    match a.[i], b.[i] with
+                    | VString sx, VString sy -> (collations.[i]).Equals sx sy
+                    | x, y when coerceNumbers -> Value.compare x y = 0
+                    | x, y -> x = y
+
+                i <- i + 1
+
+            equal
 
         member _.GetHashCode(a: Value[]) =
             match a with
@@ -2101,7 +2104,7 @@ let private hashPairs
     (build: (int * 'b) list)
     (probe: (int * 'p) seq)
     : (int * 'b * int * 'p) seq =
-    let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(JoinKeyComparer(collations))
+    let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(SqlValueKeyComparer(collations, true))
 
     for buildIndex, buildItem in build do
         match buildKeyOf buildItem with
@@ -4862,7 +4865,7 @@ and private applyJsonTableJoin
             let leftKeyIndices = usingKeys |> List.map fst |> Array.ofList
             let rightKeyIndices = usingKeys |> List.map snd |> Array.ofList
             let keyComparer =
-                JoinKeyComparer(joinKeyCollations combinedColumnsSoFar joinColumns usingKeys)
+                SqlValueKeyComparer(joinKeyCollations combinedColumnsSoFar joinColumns usingKeys, true)
                 :> System.Collections.Generic.IEqualityComparer<Value[]>
 
             let usingMatches (left: Value[]) (right: Value[]) =
@@ -7683,14 +7686,35 @@ and private runGroupedSelect
                 if groupExprs.IsEmpty then
                     Ok [ [], matched ]
                 else
-                    matched
-                    |> traverse (fun row ->
-                        groupExprs
-                        |> traverse (evalExpr (ctxFor row))
-                        // Collation-aware keys: åge/age/ÅGE group together
-                        // under ai_ci, stay distinct under bin.
-                        |> Result.map (fun key -> List.map2 (collationKeyOf (ctxFor row)) groupExprs key, row))
-                    |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (fun (key, rows) -> key, rows |> List.map snd))
+                    let collations = groupExprs |> List.map (keyCollation (ctxFor (probeRow columns)))
+                    let groupIndex = Dictionary<Value[], int>(SqlValueKeyComparer(collations, false))
+                    let groups = ResizeArray<Value[] * ResizeArray<Value[]>>()
+                    let mutable failure = None
+
+                    for row in matched do
+                        if failure.IsNone then
+                            match groupExprs |> traverse (evalExpr (ctxFor row)) with
+                            | Error error -> failure <- Some error
+                            | Ok values ->
+                                let key = Array.ofList values
+
+                                match groupIndex.TryGetValue key with
+                                | true, index ->
+                                    let _, rows = groups.[index]
+                                    rows.Add row
+                                | false, _ ->
+                                    let rows = ResizeArray()
+                                    rows.Add row
+                                    groupIndex.Add(key, groups.Count)
+                                    groups.Add(key, rows)
+
+                    match failure with
+                    | Some error -> Error error
+                    | None ->
+                        groups
+                        |> Seq.map (fun (key, rows) -> List.ofArray key, List.ofSeq rows)
+                        |> List.ofSeq
+                        |> Ok
 
             // `WITH ROLLUP` adds one super-aggregate row per dropped GROUP BY
             // suffix. MySQL emits them in key order with each subtotal right
@@ -7942,11 +7966,9 @@ and private runWindowedSelect
     | Ok maybeMatched ->
         let matched = maybeMatched |> List.choose id
 
-        // One partitioned-and-ordered pass per distinct window function —
-        // grouping by partition key preserves each group's original
-        // relative order (`List.groupBy` is stable), which only matters as
-        // a tiebreak among rows the window's own ORDER BY doesn't otherwise
-        // distinguish.
+        // One partitioned-and-ordered pass per distinct window function.
+        // Original row indexes break equal ORDER BY keys so peers retain
+        // their input order without requiring a second stable-sort buffer.
         // Every window function's `OVER` clause, resolved: a named window
         // binds to this SELECT's own `WINDOW w AS (...)` list, an inline
         // one is already a spec. MySQL's own error (3579) for an undefined
@@ -8123,9 +8145,7 @@ and private runWindowedSelect
                             | _ -> badRangeOrderType ()))
 
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
-                exprs
-                |> traverse (evalExpr (ctxFor row))
-                |> Result.map (fun key -> List.map2 (collationKeyOf (ctxFor row)) exprs key)
+                exprs |> traverse (evalExpr (ctxFor row))
 
             let orderKeyOf (exprs: Expr list) (row: Value[]) : Result<(Value * Collation.Collation option) list, EvalError> =
                 exprs |> traverse (evalOrderKey (ctxFor row))
@@ -8139,14 +8159,34 @@ and private runWindowedSelect
                 |> Result.bind (fun partKey ->
                     orderKeyOf (windowOrderBy |> List.map fst) row |> Result.map (fun ordKey -> partKey, ordKey, row)))
             |> Result.bind (fun keyed ->
+                let partitionCollations = partitionBy |> List.map (keyCollation (ctxFor (probeRow columns)))
+                let partitionIndex = Dictionary<Value[], int>(SqlValueKeyComparer(partitionCollations, false))
+                let grouped = ResizeArray<ResizeArray<WindowRow>>()
+
+                for item in List.indexed keyed do
+                    let _, (partitionKey, _, _) = item
+                    let key = Array.ofList partitionKey
+
+                    match partitionIndex.TryGetValue key with
+                    | true, index -> grouped.[index].Add item
+                    | false, _ ->
+                        let group = ResizeArray()
+                        group.Add item
+                        partitionIndex.Add(key, grouped.Count)
+                        grouped.Add group
+
                 let partitions =
-                    keyed
-                    |> List.indexed
-                    |> List.groupBy (fun (_, (partKey, _, _)) -> partKey)
-                    |> List.map (fun (_, group) ->
-                        group
-                        |> List.sortWith (fun (_, (_, ka, _)) (_, (_, kb, _)) -> compareByOrderKeys (windowOrderBy |> List.map snd) ka kb)
-                        |> Array.ofList)
+                    grouped
+                    |> Seq.map (fun group ->
+                        let ordered = group.ToArray()
+
+                        ordered
+                        |> Array.sortInPlaceWith (fun (leftIndex, (_, leftKey, _)) (rightIndex, (_, rightKey, _)) ->
+                            let compared = compareByOrderKeys dirs leftKey rightKey
+                            if compared <> 0 then compared else Operators.compare leftIndex rightIndex)
+
+                        ordered)
+                    |> List.ofSeq
 
                 // `RANK`'s number for each row in an ORDER BY-sorted partition
                 // group: the 1-based position of the first row in its tie

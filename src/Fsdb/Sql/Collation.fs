@@ -190,7 +190,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             encodeCharset charset s
 
     let compareFull (a: string) (b: string) : int =
-        if spec.ByteOrder then
+        if String.Equals(a, b, StringComparison.Ordinal) then
+            0
+        elif spec.ByteOrder then
             let c = String.Compare(trim a, trim b, StringComparison.Ordinal)
             // trimmed-equal under PAD SPACE: the extra-space side sorts
             // first (MySQL-verified), same tie-break as the ICU branch.
@@ -211,7 +213,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                     0
 
     let comparePrimary (a: string) (b: string) : int =
-        if spec.ByteOrder then
+        if String.Equals(a, b, StringComparison.Ordinal) then
+            0
+        elif spec.ByteOrder then
             String.Compare(trim a, trim b, StringComparison.Ordinal)
         else
             ci.Compare(primaryText a, primaryText b, spec.Fold)
