@@ -68,16 +68,18 @@ let tests =
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               setup store
+              expectOk (runDefault store "CREATE TABLE second_log (n INT)") "create second log"
               expectOk (runDefault store "INSERT INTO t(n) VALUES (10), (20)") "seed rows"
 
               expectOk
                   (runDefault
                       store
-                      "CREATE TRIGGER changed AFTER UPDATE ON t FOR EACH ROW BEGIN IF (NOT(NEW.n <=> OLD.n)) THEN INSERT INTO log(n) VALUES (NEW.n); END IF; END")
+                      "CREATE TRIGGER changed AFTER UPDATE ON t FOR EACH ROW BEGIN IF (NOT(NEW.n <=> OLD.n)) THEN INSERT INTO log(n) VALUES (NEW.n); END IF; IF (NOT(NEW.n <=> OLD.n)) THEN INSERT INTO second_log(n) VALUES (NEW.n); END IF; END")
                   "create conditional trigger"
 
               expectOk (runDefault store "UPDATE t SET n = IF(n = 10, 11, n)") "update rows"
               Expect.equal (rows store "SELECT n FROM log") [ [ Some "11" ] ] "only the changed row is logged"
+              Expect.equal (rows store "SELECT n FROM second_log") [ [ Some "11" ] ] "later conditions also execute"
 
           testCase "BEFORE INSERT preserves body writes in the subject database"
           <| fun _ ->

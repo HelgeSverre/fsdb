@@ -11265,13 +11265,27 @@ let private parseTriggerBody (body: string) : Result<TriggerStatement list, stri
 
     if compound.Success then
         let inner = compound.Groups.["body"].Value
-        let conditional = Regex.Match(inner, @"^\s*IF\s+(?<condition>[\s\S]+?)\s+THEN\s+(?<body>[\s\S]+?)\s*;\s*END\s+IF\s*;?\s*$", RegexOptions.IgnoreCase)
+        let conditional = Regex(@"\G\s*IF\s+(?<condition>[\s\S]+?)\s+THEN\s+(?<body>[\s\S]+?)\s*;\s*END\s+IF\s*;?", RegexOptions.IgnoreCase)
 
-        if conditional.Success then
-            Parser.parseExpression conditional.Groups.["condition"].Value
-            |> Result.bind (fun condition ->
-                Parser.parse (conditional.Groups.["body"].Value.Trim().TrimEnd(';'))
-                |> Result.map (fun statement -> [ TriggerIf(condition, statement) ]))
+        let rec parseConditionals offset statements =
+            let matched = conditional.Match(inner, offset)
+
+            if matched.Success then
+                Parser.parseExpression matched.Groups.["condition"].Value
+                |> Result.bind (fun condition ->
+                    Parser.parse (matched.Groups.["body"].Value.Trim().TrimEnd(';'))
+                    |> Result.bind (fun statement ->
+                        let next = matched.Index + matched.Length
+
+                        if System.String.IsNullOrWhiteSpace(inner.[next..]) then
+                            Ok(List.rev (TriggerIf(condition, statement) :: statements))
+                        else
+                            parseConditionals next (TriggerIf(condition, statement) :: statements)))
+            else
+                Error "Invalid conditional trigger body"
+
+        if conditional.IsMatch(inner) then
+            parseConditionals 0 []
         else
             Parser.splitStatements inner
             |> Result.bind (fun statements ->
