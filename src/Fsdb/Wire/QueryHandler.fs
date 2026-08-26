@@ -708,7 +708,11 @@ let private showCreateTableRe = Regex(@"^SHOW\s+CREATE\s+TABLE\s+(\S+)\s*$", Reg
 let private showCreateViewRe = Regex(@"^SHOW\s+CREATE\s+VIEW\s+(\S+)\s*$", RegexOptions.IgnoreCase)
 
 let private showIndexRe =
-    Regex(@"^SHOW\s+(?:INDEX|INDEXES|KEYS)\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
+    Regex(@"^SHOW\s+(?:INDEX|INDEXES|KEYS)\s+(?:FROM|IN)\s+(\S+)(\s+(?:FROM|IN)\s+(\S+))?", RegexOptions.IgnoreCase)
+
+let private showIndexNameFilter (sql: string) =
+    let matched = Regex.Match(sql, @"\s+WHERE\s+`?Key_name`?\s*=\s*'([^']*)'\s*$", RegexOptions.IgnoreCase)
+    if matched.Success then Some matched.Groups.[1].Value else None
 
 let private showTableStatusRe = Regex(@"^SHOW\s+TABLE\s+STATUS(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
@@ -2393,6 +2397,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let dbName = dbOverride |> Option.map stripIdentifierQuotes |> Option.defaultValue dbName
         session,
         InformationSchema.showIndex (catalogWithOverlay session dbName table) dbName table
+        |> Result.map (fun (columns, rows) ->
+            match showIndexNameFilter sql with
+            | None -> columns, rows
+            | Some keyName -> columns, rows |> List.filter (fun row -> List.item 2 row = Some keyName))
         |> showTableResult session dbName table
     | ShowGrants userOpt ->
         // No FOR clause or CURRENT_USER selects the authenticated account.

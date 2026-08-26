@@ -1868,6 +1868,17 @@ let tests =
                   Expect.equal (List.length rows) 2 "primary key + the unique index"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "SHOW INDEXES IN filters by Key_name"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE indexed (id INT PRIMARY KEY, code INT, INDEX ix_code(code))"
+
+              match handle session "SHOW INDEXES IN indexed WHERE `Key_name` = 'ix_code'" |> snd with
+              | ResultSet(columns, [ row ]) ->
+                  Expect.equal (List.item 2 columns) "Key_name" "the key-name column"
+                  Expect.equal (List.item 2 row) (Some "ix_code") "only the requested index remains"
+              | other -> failtestf "expected the filtered index row, got %A" other
+
           testCase "an unrecognized statement is a 1064 syntax error naming the query"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
