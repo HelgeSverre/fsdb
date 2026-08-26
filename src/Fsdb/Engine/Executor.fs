@@ -12220,10 +12220,17 @@ let rec executeAs
                     storedChecks snapshot db table
                     |> List.filter (fun check -> not (explicitlyDropped.Contains(check.Name.ToLowerInvariant())))
 
-                let references (column: string) (check: StoredCheck) =
+                let referencedColumns (check: StoredCheck) =
                     match Parser.parseExpression check.Clause with
-                    | Result.Error _ -> false
-                    | Result.Ok expression -> checkColumnReferences expression |> List.exists (fun (_, name) -> equal name column)
+                    | Result.Error _ -> []
+                    | Result.Ok expression -> checkColumnReferences expression |> List.map snd
+
+                let references column check = referencedColumns check |> List.exists (equal column)
+
+                let referencesOnly column check =
+                    match referencedColumns check with
+                    | [] -> false
+                    | columns -> columns |> List.forall (equal column)
 
                 let removeAutomatic (check: StoredCheck) =
                     deleteRows snapshot "mysql" "check_constraints" (fun row ->
@@ -12236,7 +12243,7 @@ let rec executeAs
                         let dependent = activeChecks |> List.filter (references column)
                         let automatic, blocking =
                             dependent
-                            |> List.partition (fun check -> check.Column |> Option.exists (fun owner -> equal owner column))
+                            |> List.partition (referencesOnly column)
 
                         match blocking with
                         | check :: _ ->

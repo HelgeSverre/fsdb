@@ -108,6 +108,10 @@ let tests =
               expectOk (run store "ALTER TABLE t DROP CHECK both_columns, DROP COLUMN a") "drop table check and checked column together"
               Expect.equal (rows store "SELECT * FROM information_schema.CHECK_CONSTRAINTS") [] "column-owned check drops with its column"
 
+              expectOk (run store "CREATE TABLE json_data (id INT, document JSON, CONSTRAINT document_json CHECK (JSON_VALID(document)))") "JSON check"
+              expectOk (run store "ALTER TABLE json_data DROP COLUMN document") "single-column table check drops with its column"
+              Expect.equal (rows store "SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS") [] "table check removed"
+
           testCase "foreign-key referential rewrites cannot bypass checks"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
