@@ -38,8 +38,14 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+test_selection=(--all)
+
+if [[ -n "${DRUPAL_TEST_CLASSES:-}" ]]; then
+    test_selection=(--class "$DRUPAL_TEST_CLASSES")
+fi
+
 php core/scripts/run-tests.sh \
-    --all \
+    "${test_selection[@]}" \
     --concurrency="$concurrency" \
     --sqlite="$results_db" \
     --dburl="$SIMPLETEST_DB" \

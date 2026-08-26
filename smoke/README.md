@@ -75,3 +75,6 @@ runner database, HTTP log, and WebDriver log are kept with the campaign results.
 failure is a candidate fsdb compatibility only when the same pinned test
 succeeds against MySQL 8.4; environment and upstream failures remain separate
 classifications.
+
+Set `DRUPAL_TEST_CLASSES` to a comma-separated list of fully qualified class
+names to resume or isolate part of the Drupal inventory.
