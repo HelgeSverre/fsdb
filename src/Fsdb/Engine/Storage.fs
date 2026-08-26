@@ -5403,14 +5403,13 @@ let private mergeDatabaseSlotPublishing
             match tryPointUpdate baseDb batchDb liveDb with
             | Some(tableKey, rowIds) -> slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
             | None ->
-                let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
+                let tableKeys = Set.union (keysOf baseDb) (keysOf batchDb)
 
                 let merged =
                     tableKeys
                     |> Set.fold
                         (fun acc tableName ->
                             match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
-                            | None, None, Some _ -> acc
                             | Some baseTable, Some batchTable, _ when obj.ReferenceEquals(baseTable, batchTable) -> acc
                             | Some baseTable, None, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.remove tableName acc
                             | None, Some batchTable, None -> Map.add tableName batchTable acc
