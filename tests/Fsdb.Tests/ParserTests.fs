@@ -1031,6 +1031,7 @@ let tests =
                 <| fun _ ->
                     let statements =
                         [ "CREATE TABLE `actor` (actor_id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL, actor_user INT UNSIGNED DEFAULT NULL, actor_name VARBINARY(255) NOT NULL, UNIQUE INDEX actor_user (actor_user), UNIQUE INDEX actor_name (actor_name), PRIMARY KEY(actor_id)) ENGINE=InnoDB, DEFAULT CHARSET=binary"
+                          "CREATE TABLE promotion_sales_channel (id BINARY(16) NOT NULL, promotion_id BINARY(16) NOT NULL, sales_channel_id BINARY(16) NOT NULL, INDEX ix_sales_channel (sales_channel_id ASC), INDEX ix_promotion (promotion_id ASC), PRIMARY KEY (id))"
                           "CREATE TABLE oc_file_locks (id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL, `lock` INT DEFAULT 0 NOT NULL, `key` VARCHAR(64) NOT NULL, ttl INT DEFAULT -1 NOT NULL, UNIQUE INDEX lock_key_index (`key`), INDEX lock_ttl_index (ttl), PRIMARY KEY(id)) DEFAULT CHARACTER SET UTF8 COLLATE `utf8_bin` ENGINE = InnoDB" ]
 
                     for sql in statements do

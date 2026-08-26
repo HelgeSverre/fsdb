@@ -1882,7 +1882,10 @@ let private trailingPrimaryKey: Parser<string list, unit> =
 /// One column inside an index's column list, with its optional MySQL
 /// "key length" (`col(191)`) parsed and discarded — `Ast.IndexDef` doesn't
 /// track prefix lengths.
-let private indexColumn: Parser<string, unit> = identifier .>> optional (between (sym "(") (sym ")") intTok)
+let private indexColumn: Parser<string, unit> =
+    identifier
+    .>> optional (between (sym "(") (sym ")") intTok)
+    .>> optional (keyword "ASC" <|> keyword "DESC")
 
 /// `[UNIQUE] KEY|INDEX name (cols)` — `UNIQUE` alone (no `KEY`/`INDEX`) is
 /// also legal MySQL, so the `KEY`/`INDEX` keyword itself is optional once
