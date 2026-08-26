@@ -222,12 +222,13 @@ try
                             [ yield "--env"
                               yield "SMOKE_RUN_ID=" + runIdentifier
 
-                              match Environment.GetEnvironmentVariable("DRUPAL_CONCURRENCY") with
-                              | null
-                              | "" -> ()
-                              | concurrency ->
-                                  yield "--env"
-                                  yield "DRUPAL_CONCURRENCY=" + concurrency ]
+                              for name in [ "DRUPAL_CONCURRENCY"; "DRUPAL_HTTP_WORKERS" ] do
+                                  match Environment.GetEnvironmentVariable(name) with
+                                  | null
+                                  | "" -> ()
+                                  | value ->
+                                      yield "--env"
+                                      yield name + "=" + value ]
                         else
                             []
 
