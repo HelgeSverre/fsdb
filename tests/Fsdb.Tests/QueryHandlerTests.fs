@@ -620,6 +620,24 @@ let tests =
               | ResultSet(_, [ [ Some "InnoDB" ] ]) -> ()
               | other -> failtestf "expected InnoDB, got %A" other
 
+          testCase "application compatibility variables have MySQL defaults"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT @@GLOBAL.read_only" |> snd with
+              | ResultSet(_, [ [ Some "OFF" ] ]) -> ()
+              | other -> failtestf "expected read_only OFF, got %A" other
+
+              let session, result = handle session "SET sql_generate_invisible_primary_key = OFF"
+
+              match result with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected SET to succeed, got %A" other
+
+              match handle session "SELECT @@sql_generate_invisible_primary_key" |> snd with
+              | ResultSet(_, [ [ Some "OFF" ] ]) -> ()
+              | other -> failtestf "expected invisible primary keys OFF, got %A" other
+
           testCase "SET accepts backtick-quoted system variable names"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
