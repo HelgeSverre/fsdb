@@ -66,6 +66,22 @@ let tests =
               let session, _ = handle session "SELECT 1"
               Expect.isEmpty session.Diagnostics "ordinary statements replace the diagnostics area"
 
+          testCase "non-strict omitted columns report their implicit defaults"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+              let session, _ = handle session "CREATE TABLE t (id INT, name VARCHAR(10) NOT NULL)"
+              let session, result = handle session "INSERT INTO t (id) VALUES (1)"
+              Expect.equal result (Affected 1UL) "insert succeeds"
+
+              match session.Diagnostics with
+              | [ { Level = Fsdb.Diagnostics.Warning; Code = 1364; Message = "Field 'name' doesn't have a default value" } ] -> ()
+              | other -> failtestf "expected the implicit-default warning, got %A" other
+
+              match handle session "SELECT name FROM t" |> snd with
+              | ResultSet(_, [ [ Some "" ] ]) -> ()
+              | other -> failtestf "expected the implicit empty string, got %A" other
+
           testCase "statement errors appear in SHOW ERRORS and SHOW WARNINGS"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

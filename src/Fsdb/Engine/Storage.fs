@@ -3869,25 +3869,40 @@ let private processRow
         match acc with
         | Error e -> Error e
         | Ok(valuesRev, nextAutoId, assignedId) ->
-            let pending = provided |> Option.defaultValue (evalDefault col)
+            let missingRequired =
+                provided.IsNone
+                && col.Default.IsNone
+                && col.Generated.IsNone
+                && not col.Nullable
+                && not col.AutoIncrement
 
-            if col.AutoIncrement then
+            let pending =
+                if missingRequired && not mode.Strict then
+                    Diagnostics.warning 1364 (sprintf "Field '%s' doesn't have a default value" col.Name)
+                    implicitZeroSeed col
+                elif missingRequired then
+                    Error(ExpressionError(1364, sprintf "Field '%s' doesn't have a default value" col.Name))
+                else
+                    Ok(provided |> Option.defaultValue (evalDefault col))
+
+            match pending with
+            | Error error -> Error error
+            | Ok pending when col.AutoIncrement ->
                 match pending with
                 | VNull -> Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some(true, nextAutoId))
-                | _ ->
-                    match coerceStoredValueWithMode mode col pending with
+                | value ->
+                    match coerceStoredValueWithMode mode col value with
                     | Error e -> Error e
                     | Ok(VInt i) -> Ok(VInt i :: valuesRev, nextAfterExplicit nextAutoId i, Some(false, i))
                     | Ok(VUInt value) when value <= uint64 Int64.MaxValue ->
                         let id = int64 value
                         Ok(VUInt value :: valuesRev, nextAfterExplicit nextAutoId id, Some(false, id))
                     | Ok _ -> Error(InvalidValueForColumn(col.Name, "auto_increment"))
-            elif provided.IsNone && (match col.Default with Some(DExpression _) -> true | _ -> false) then
+            | Ok pending when provided.IsNone && (match col.Default with Some(DExpression _) -> true | _ -> false) ->
                 Ok(pending :: valuesRev, nextAutoId, assignedId)
-            else
-                match coerceAndCheck mode col pending with
-                | Ok v -> Ok(v :: valuesRev, nextAutoId, assignedId)
-                | Error e -> Error e
+            | Ok pending ->
+                coerceAndCheck mode col pending
+                |> Result.map (fun value -> value :: valuesRev, nextAutoId, assignedId)
 
     List.zip columns rawRow
     |> List.fold step (Ok([], nextAutoId, None))

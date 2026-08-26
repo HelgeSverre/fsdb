@@ -1537,14 +1537,28 @@ let tests =
                     | Err(1146, _) -> ()
                     | other -> failtestf "expected a 1146 error, got %A" other
 
-                testCase "omitting a NOT NULL column with no default is a 1048 error"
+                testCase "strict omission of a NOT NULL column with no default is a 1364 error"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT, name VARCHAR(10) NOT NULL)" |> ignore
 
                     match runDefault store "INSERT INTO t (id) VALUES (1)" with
-                    | Err(1048, _) -> ()
-                    | other -> failtestf "expected a 1048 error, got %A" other
+                    | Err(1364, _) -> ()
+                    | other -> failtestf "expected a 1364 error, got %A" other
+
+                testCase "non-strict omission uses the column type's implicit default"
+                <| fun _ ->
+                    let store = newStore ()
+                    Fsdb.Storage.setStrictMode store false
+                    runDefault store "CREATE TABLE t (id INT, name VARCHAR(10) NOT NULL, amount DECIMAL(5,2) NOT NULL)" |> ignore
+
+                    match runDefault store "INSERT INTO t (id) VALUES (1)" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the non-strict insert to succeed, got %A" other
+
+                    match runDefault store "SELECT id, name, amount FROM t" with
+                    | ResultSet(_, [ [ Some "1"; Some ""; Some "0.00" ] ]) -> ()
+                    | other -> failtestf "expected implicit defaults, got %A" other
 
                 testCase "an uncoercible value for a column's type is a 1366 error"
                 <| fun _ ->
