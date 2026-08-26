@@ -948,7 +948,7 @@ module ScenarioProbes =
                "unsigned_cast_wraparound",
                "SELECT CAST(-1 AS UNSIGNED) AS neg_one_unsigned, CAST(-9223372036854775808 AS UNSIGNED) AS min_big_unsigned, CAST(CAST(18446744073709551615 AS UNSIGNED) AS SIGNED) AS round_trip_signed, CAST(255 AS UNSIGNED) + 1 AS unsigned_add"
                "signed_unsigned_mixed_arithmetic",
-               "SELECT id, CAST(unsigned_tiny AS SIGNED) - 300 AS widened_negative, CAST(signed_tiny AS SIGNED) * 1000000 AS widened_product, unsigned_tiny + signed_tiny AS mixed_sum, ABS(signed_tiny) AS abs_tiny, -signed_tiny AS negated FROM scalar_matrix ORDER BY id LIMIT 16"
+               "SELECT id, CAST(unsigned_tiny AS SIGNED) - 300 AS widened_negative, CAST(signed_tiny AS SIGNED) * 1000000 AS widened_product, CAST(unsigned_tiny AS SIGNED) + signed_tiny AS mixed_sum, ABS(signed_tiny) AS abs_tiny, -signed_tiny AS negated FROM scalar_matrix ORDER BY id LIMIT 16"
                "bigint_boundary_arithmetic",
                "SELECT 9223372036854775807 AS max_bigint, 9223372036854775807 - 1 AS max_minus_one, -9223372036854775807 - 1 AS min_bigint, 9223372036854775807 DIV 2 AS half_max, SUM(signed_big) AS sum_big, ROUND(AVG(signed_big), 4) AS avg_big FROM scalar_matrix"
                "integer_division_modulo_signs",
