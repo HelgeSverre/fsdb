@@ -702,6 +702,21 @@ let private catalogWithOverlay (session: Session) (dbName: string) (table: strin
 let private showColumnsRe =
     Regex(@"^SHOW\s+(FULL\s+)?COLUMNS\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
+let private showColumnsFieldFilter (sql: string) =
+    let matched =
+        Regex.Match(
+            sql,
+            @"\s+WHERE\s+`?Field`?\s*=\s*(?<value>'(?:\\.|''|[^'])*')\s*$",
+            RegexOptions.IgnoreCase
+        )
+
+    if not matched.Success then
+        None
+    else
+        match Parser.parseExpression matched.Groups.["value"].Value with
+        | Ok(Lit(VString field)) -> Some field
+        | _ -> None
+
 let private describeRe = Regex(@"^(?:DESCRIBE|DESC)\s+(\S+)\s*$", RegexOptions.IgnoreCase)
 
 let private showCreateTableRe = Regex(@"^SHOW\s+CREATE\s+TABLE\s+(\S+)\s*$", RegexOptions.IgnoreCase)
@@ -2382,6 +2397,15 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let viewColumns = Executor.viewColumns store (registryFor session)
         session,
         InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) full dbName table (likeSuffix sql)
+        |> Result.map (fun (columns, rows) ->
+            match showColumnsFieldFilter sql with
+            | None -> columns, rows
+            | Some field ->
+                columns,
+                rows
+                |> List.filter (function
+                    | Some name :: _ -> String.Equals(name, field, StringComparison.OrdinalIgnoreCase)
+                    | _ -> false))
         |> showTableResult session dbName table
     | Describe name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase

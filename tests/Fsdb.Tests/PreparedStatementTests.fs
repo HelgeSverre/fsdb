@@ -100,6 +100,25 @@ let tests =
                   | Result.Ok(None, 0) -> ()
                   | other -> failtestf "expected %s to prepare with 0 placeholders, got %A" sql other
 
+          testCase "a prepared SHOW COLUMNS filters by its bound Field value"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE metadata_fields (id BINARY(16), name VARCHAR(255) NOT NULL)"
+              let sql = "SHOW COLUMNS FROM metadata_fields WHERE Field = ?"
+
+              match prepareStatement sql with
+              | Result.Ok(None, 1) ->
+                  let statement =
+                      { Ast = None
+                        Sql = sql
+                        ParamCount = 1
+                        LastParamTypes = None }
+
+                  match executePrepared session statement [ VString "name" ] |> snd with
+                  | ResultSet(_, [ [ Some "name"; Some "varchar(255)"; Some "NO"; Some ""; None; Some "" ] ]) -> ()
+                  | other -> failtestf "expected only the bound metadata field, got %A" other
+              | other -> failtestf "expected a text-probed prepared SHOW COLUMNS, got %A" other
+
           testCase "a prepared INSERT/SELECT binds values into the parsed AST and executes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
