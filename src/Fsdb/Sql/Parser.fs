@@ -289,7 +289,11 @@ let private reservedWords =
           "all"
           "any"
           "some"
+          "case"
           "when"
+          "then"
+          "else"
+          "end"
           "for"
           // Reserved in MySQL 8 too: without it, `FROM t WINDOW w AS (...)`
           // reads `WINDOW` as `t`'s alias and dies on the window name.
@@ -1322,16 +1326,14 @@ let private caseWhenThen: Parser<Expr * Expr, unit> = (keyword "WHEN" >>. expr .
 
 /// `CASE WHEN cond THEN result ... [ELSE result] END` (searched form) and
 /// `CASE subject WHEN value THEN result ... [ELSE result] END` (simple
-/// form) share one production: `opt expr` right after `CASE` either matches
-/// the simple form's subject or (since `WHEN` is a reserved word and can't
-/// start an expression) consumes nothing and leaves the searched form's
-/// `WHEN` for `caseWhenThen`.
+/// form) share their branch production. The searched form is tried first so
+/// `WHEN (` cannot be mistaken for a function call used as a simple subject.
 let private caseExpr: Parser<Expr, unit> =
-    attempt (
-        keyword "CASE" >>. opt expr .>>. many1 caseWhenThen .>>. opt (keyword "ELSE" >>. expr)
-        .>> keyword "END"
-    )
-    |>> fun ((subject, whens), elseBranch) -> Case(subject, whens, elseBranch)
+    let branches = many1 caseWhenThen .>>. opt (keyword "ELSE" >>. expr)
+    let searched = attempt branches |>> fun (whens, fallback) -> Case(None, whens, fallback)
+    let simple = expr .>>. branches |>> fun (subject, (whens, fallback)) -> Case(Some subject, whens, fallback)
+
+    keyword "CASE" >>. (searched <|> simple) .>> keyword "END"
 
 /// Paren-less `CURRENT_USER` — MySQL's one niladic user function callable
 /// without `()` in expressions (TablePlus/phpMyAdmin both emit `SELECT

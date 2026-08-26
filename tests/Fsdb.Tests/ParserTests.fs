@@ -347,6 +347,17 @@ let tests =
                         (mkSelect([ Star None, None ], Some "t", None, [ col "a", Desc; col "b", Asc ], None, None))
                         "order by"
 
+                    match
+                        parseOk
+                            "SELECT id FROM t ORDER BY CASE WHEN (course = 5 OR name = 'xyz') THEN 0 ELSE 1 END, name, course"
+                    with
+                    | Select select ->
+                        match select.OrderBy with
+                        | (Case(None, _, Some(Lit(VInt 1L))), Asc) :: tail ->
+                            Expect.equal tail [ col "name", Asc; col "course", Asc ] "remaining order keys"
+                        | other -> failtestf "expected searched CASE ordering, got %A" other
+                    | other -> failtestf "expected searched CASE ordering, got %A" other
+
                 testCase "LIMIT n"
                 <| fun _ ->
                     Expect.equal
