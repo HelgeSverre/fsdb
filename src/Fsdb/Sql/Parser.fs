@@ -2263,6 +2263,9 @@ let private addColumnAction: Parser<AlterAction list, unit> =
 let private addPrimaryKeyAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. trailingPrimaryKey) |>> AddPrimaryKey
 
+let private dropPrimaryKeyAction: Parser<AlterAction, unit> =
+    attempt (keyword "DROP" >>. keyword "PRIMARY" >>. keyword "KEY") >>% DropPrimaryKey
+
 let private addIndexAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. indexItem) |>> AddIndex
 
@@ -2359,6 +2362,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           addColumnAction
           dropForeignKeyAction |>> List.singleton
           dropCheckAction |>> List.singleton
+          dropPrimaryKeyAction |>> List.singleton
           dropIndexAction |>> List.singleton
           dropColumnAction |>> List.singleton
           modifyColumnAction

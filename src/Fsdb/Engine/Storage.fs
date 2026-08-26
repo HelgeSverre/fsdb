@@ -3468,6 +3468,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                 checkGeometryKeyColumns
                     (table.Columns |> List.map (fun c -> if List.contains c.Name cols then { c with PrimaryKey = true } else c))
                     [])
+        | DropPrimaryKey -> Ok()
         | _ -> Ok()
 
     let defaultCheck =
@@ -3653,6 +3654,12 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                                     column)
 
                         Ok({ table with Columns = columns }, None))
+    | DropPrimaryKey ->
+        if table.Columns |> List.exists _.PrimaryKey then
+            let columns = table.Columns |> List.map (fun column -> { column with PrimaryKey = false })
+            Ok({ table with Columns = columns }, None)
+        else
+            Error(ExpressionError(1091, "Can't DROP 'PRIMARY'; check that column/key exists"))
     | SetDefault(column, value) ->
         resolveColumn table.Columns column
         |> Result.map (fun index ->

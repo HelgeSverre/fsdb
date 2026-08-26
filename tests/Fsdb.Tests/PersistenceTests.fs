@@ -1675,6 +1675,8 @@ let tests =
                     "ALTER TABLE acts ADD CONSTRAINT fk_p FOREIGN KEY (pid) REFERENCES parent(id)"
                     "ALTER TABLE acts DROP FOREIGN KEY fk_p"
                     "ALTER TABLE acts ADD PRIMARY KEY (id)"
+                    "ALTER TABLE acts DROP PRIMARY KEY"
+                    "ALTER TABLE acts ADD PRIMARY KEY (id, pid)"
                     "ALTER TABLE acts ALTER COLUMN extra SET DEFAULT 9"
                     "ALTER TABLE acts CONVERT TO CHARACTER SET latin1"
                     "ALTER TABLE acts AUTO_INCREMENT = 500" ]
@@ -1725,7 +1727,8 @@ let tests =
                   Expect.isEmpty t.ForeignKeys "the dropped foreign key stayed dropped"
                   Expect.equal (t.Indexes |> List.filter (fun ix -> ix.Name = "ix_extra")) [] "the dropped index stayed dropped"
                   Expect.isTrue (t.Indexes |> List.exists (fun ix -> ix.Name = "ix_new")) "the renamed index replayed"
-                  Expect.isTrue (t.Columns |> List.exists (fun c -> c.PrimaryKey)) "ADD PRIMARY KEY replayed"
+                  let primary = t.Columns |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
+                  Expect.equal primary [ "id"; "pid" ] "primary key replacement replayed"
                   Expect.equal
                       (t.Columns |> List.find (fun c -> c.Name = "extra") |> _.Default)
                       (Some(DConst(VInt 9L)))

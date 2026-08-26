@@ -1740,6 +1740,23 @@ let tests =
                     | ResultSet([ "id"; "extra" ], _) -> ()
                     | other -> failtestf "expected both actions applied, got %A" other
 
+                testCase "ALTER TABLE replaces a primary key in one statement"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, tenant_id INT NOT NULL DEFAULT 0)" |> ignore
+                    runDefault store "INSERT INTO t (tenant_id) VALUES (1), (2)" |> ignore
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (id, tenant_id)")
+                        (Affected 0UL)
+                        "primary key replaced"
+
+                    let primary =
+                        store.Catalog.[defaultDatabase].[normalizeTableName "t"].Columns
+                        |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
+
+                    Expect.equal primary [ "id"; "tenant_id" ] "composite primary key"
+
                 testCase "MODIFY narrowing DATETIME(6) to DATETIME(2) rounds stored values half-up"
                 <| fun _ ->
                     let store = newStore ()

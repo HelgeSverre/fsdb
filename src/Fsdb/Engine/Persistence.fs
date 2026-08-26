@@ -516,6 +516,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | RenameIndex(oldName, newName) -> w.WriteByte 0x0Euy; writeStr w oldName; writeStr w newName
     | ConvertCharset(charset, collation) -> w.WriteByte 0x0Fuy; writeStr w charset; writeOptStr w collation
     | SetTableComment comment when format.TableComments -> w.WriteByte 0x10uy; writeStr w comment
+    | DropPrimaryKey -> w.WriteByte 0x11uy
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _
@@ -542,6 +543,7 @@ let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterActi
     | 0x0Euy -> RenameIndex(readStr r, readStr r)
     | 0x0Fuy -> ConvertCharset(readStr r, readOptStr r)
     | 0x10uy when format.TableComments -> SetTableComment(readStr r)
+    | 0x11uy -> DropPrimaryKey
     | _ -> AddPrimaryKey(readStrList r)
 
 let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) : unit =

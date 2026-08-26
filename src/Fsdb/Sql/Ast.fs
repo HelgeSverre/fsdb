@@ -605,6 +605,7 @@ type AlterAction =
     | DropCheck of name: string
     | SetCheckEnforced of name: string * enforced: bool
     | AddPrimaryKey of columns: string list
+    | DropPrimaryKey
     | SetDefault of column: string * value: ColumnDefault option
     | SetEngine of name: string
     | SetTableComment of comment: string

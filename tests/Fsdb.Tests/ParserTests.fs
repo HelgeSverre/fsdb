@@ -1829,12 +1829,12 @@ let tests =
                           DropForeignKey "fk_old" ]) -> ()
                     | other -> failtestf "expected add/drop foreign key actions, got %A" other
 
-                testCase "ADD PRIMARY KEY (cols)"
+                testCase "ADD and DROP PRIMARY KEY"
                 <| fun _ ->
                     Expect.equal
-                        (parseOk "ALTER TABLE t ADD PRIMARY KEY (id)")
-                        (AlterTable("t", [ AddPrimaryKey [ "id" ] ]))
-                        "add primary key"
+                        (parseOk "ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (id, tenant_id)")
+                        (AlterTable("t", [ DropPrimaryKey; AddPrimaryKey [ "id"; "tenant_id" ] ]))
+                        "replace primary key"
 
                 testCase "ALTER COLUMN SET and DROP DEFAULT"
                 <| fun _ ->
