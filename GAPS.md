@@ -66,7 +66,8 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Statement family | Impact | Class |
 |---|---|---|
-| Zero-parameter, single-statement `CREATE/DROP PROCEDURE` and `CALL` are supported; parameters, functions, definer-context execution, compound `BEGIN…END` bodies, `DECLARE`, cursors, handlers, `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
+| Zero-parameter procedures accept a direct statement or a single statement wrapped in `BEGIN…END`; parameters, functions, definer-context execution, multi-statement bodies, `DECLARE`, cursors, handlers, `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
+| Session-scoped `CREATE/DROP TEMPORARY TABLE` and temporary-table shadowing | medium | refusal |
 | One-time and recurring `CREATE/DROP EVENT` declarations and metadata are supported; ALTER, status changes, definer execution, and the scheduler thread remain absent | low | divergence/refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
@@ -293,7 +294,8 @@ OLD/NEW images are rejected when the trigger is created.
 
 ## 10. Stored routines, events, schedulers
 
-Working: zero-parameter procedures with one parsed statement body support
+Working: zero-parameter procedures with one parsed statement body, optionally
+wrapped in `BEGIN…END`, support
 CREATE/DROP/CALL, SHOW CREATE PROCEDURE, SHOW PROCEDURE STATUS, and persisted
 ROUTINES metadata. One-time and recurring event declarations support CREATE/DROP, SHOW
 CREATE EVENT, SHOW EVENTS, and persisted EVENTS metadata. CREATE ROUTINE,
@@ -301,7 +303,7 @@ ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Routine language | parameters, functions, compound bodies, local variables, handlers, cursors, control flow, dynamic SQL | zero-parameter procedures with one statement body | medium | refusal |
+| Routine language | parameters, functions, compound bodies, local variables, handlers, cursors, control flow, dynamic SQL | zero-parameter procedures with one statement body, directly or inside `BEGIN…END` | medium | refusal |
 | Routine execution context | SQL SECURITY DEFINER/INVOKER and stored sql_mode/charset | procedure body executes with the caller's session context | medium | divergence |
 | Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and schedule metadata persist, but no event is scheduled or executed | medium | refusal |
 | Event alteration | ALTER EVENT schedule/status/body/rename | absent | low | refusal |
