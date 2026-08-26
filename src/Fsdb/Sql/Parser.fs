@@ -2187,7 +2187,8 @@ let private dropIndexStmt: Parser<Statement, unit> =
 let private dropTable: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "TABLE"
      >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
-     .>>. sepBy1 qualifiedTableName (sym ","))
+     .>>. sepBy1 qualifiedTableName (sym ",")
+     .>> optional (keyword "CASCADE" <|> keyword "RESTRICT"))
     |>> fun (ifExists, names) -> DropTable(names, ifExists)
 
 let private truncateTable: Parser<Statement, unit> =
@@ -2268,6 +2269,9 @@ let private dropPrimaryKeyAction: Parser<AlterAction, unit> =
 
 let private addIndexAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. indexItem) |>> AddIndex
+
+let private addUniqueConstraintAction: Parser<AlterAction, unit> =
+    attempt (keyword "ADD" >>. namedUniqueConstraint) |>> AddIndex
 
 let private addForeignKeyAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. foreignKeyItem) |>> AddForeignKey
@@ -2353,11 +2357,17 @@ let private convertCharsetAction: Parser<AlterAction, unit> =
         | Some name when Collation.tryFind name |> Option.isNone -> fail (sprintf "Unknown collation '%s'" name)
         | _ -> preturn (ConvertCharset(charset, collation))
 
+let private alterExecutionOption: Parser<AlterAction list, unit> =
+    let algorithm = keyword "ALGORITHM" >>. opt (sym "=") >>. choice [ keyword "DEFAULT"; keyword "INSTANT"; keyword "INPLACE"; keyword "COPY" ]
+    let lock = keyword "LOCK" >>. opt (sym "=") >>. choice [ keyword "DEFAULT"; keyword "NONE"; keyword "SHARED"; keyword "EXCLUSIVE" ]
+    attempt (algorithm <|> lock) >>% []
+
 let private alterAction: Parser<AlterAction list, unit> =
     choice
         [ addForeignKeyAction |>> List.singleton
           addCheckAction |>> List.singleton
           addPrimaryKeyAction |>> List.singleton
+          addUniqueConstraintAction |>> List.singleton
           addIndexAction |>> List.singleton
           addColumnAction
           dropForeignKeyAction |>> List.singleton
@@ -2375,6 +2385,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           setEngineAction |>> List.singleton
           setTableCommentAction |>> List.singleton
           convertCharsetAction |>> List.singleton
+          alterExecutionOption
           renameToAction |>> List.singleton ]
     <?> "ALTER TABLE action"
 

@@ -1757,6 +1757,20 @@ let tests =
 
                     Expect.equal primary [ "id"; "tenant_id" ] "composite primary key"
 
+                testCase "ALTER TABLE adds a named unique constraint with execution options"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE document_type (technical_name VARCHAR(255))" |> ignore
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE document_type ADD CONSTRAINT `uniq.document_type.name` UNIQUE (technical_name), ALGORITHM=INSTANT")
+                        (Affected 0UL)
+                        "constraint added"
+
+                    match runDefault store "INSERT INTO document_type VALUES ('invoice'), ('invoice')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected duplicate-key error, got %A" other
+
                 testCase "MODIFY narrowing DATETIME(6) to DATETIME(2) rounds stored values half-up"
                 <| fun _ ->
                     let store = newStore ()

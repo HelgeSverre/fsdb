@@ -1836,6 +1836,24 @@ let tests =
                         (AlterTable("t", [ DropPrimaryKey; AddPrimaryKey [ "id"; "tenant_id" ] ]))
                         "replace primary key"
 
+                testCase "ALTER TABLE named unique constraints and execution options"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE document_type ADD CONSTRAINT `uniq.document_type.name` UNIQUE (technical_name), ALGORITHM=INSTANT, LOCK=NONE")
+                        (AlterTable(
+                            "document_type",
+                            [ AddIndex
+                                  { Name = "uniq.document_type.name"
+                                    Columns = [ "technical_name" ]
+                                    Unique = true
+                                    Kind = BTree } ]
+                        ))
+                        "alter options"
+
+                testCase "DROP TABLE accepts referential action suffixes"
+                <| fun _ ->
+                    Expect.equal (parseOk "DROP TABLE unittest_actor CASCADE") (DropTable([ "unittest_actor" ], false)) "drop cascade"
+
                 testCase "ALTER COLUMN SET and DROP DEFAULT"
                 <| fun _ ->
                     Expect.equal
