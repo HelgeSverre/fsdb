@@ -13,6 +13,16 @@ services:
     expose:
       - "6379"
 
+  opensearch:
+    image: opensearchproject/opensearch:3.0.0
+    environment:
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      discovery.type: single-node
+    expose:
+      - "9200"
+
   probe:
     image: mysql:8.4
     entrypoint:
@@ -77,4 +87,54 @@ services:
       OPENSEARCH_URL: http://127.0.0.1:9200
       PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
       REDIS_URL: redis://redis:6379
+    init: true
+
+  ghost:
+    image: fsdb-smoke-ghost:${GHOST_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: ghost
+      args:
+        GHOST_REF: ${GHOST_REF}
+    init: true
+
+  moodle:
+    image: fsdb-smoke-moodle:${MOODLE_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: moodle
+      args:
+        MOODLE_REF: ${MOODLE_REF}
+    init: true
+
+  wordpress:
+    image: fsdb-smoke-wordpress:${WORDPRESS_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: wordpress
+      args:
+        WORDPRESS_REF: ${WORDPRESS_REF}
+    init: true
+
+  rails:
+    image: fsdb-smoke-rails:${RAILS_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: rails
+      args:
+        RAILS_REF: ${RAILS_REF}
+    init: true
+
+  magento:
+    image: fsdb-smoke-magento:${MAGENTO_REF}
+    build:
+      context: ..
+      dockerfile: smoke/Dockerfile
+      target: magento
+      args:
+        MAGENTO_REF: ${MAGENTO_REF}
     init: true

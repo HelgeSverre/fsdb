@@ -4,7 +4,7 @@ These probes run unmodified, pinned upstream projects against a fresh fsdb
 process. Every target gets an isolated Docker network and database server, so a
 failed installer cannot affect another target.
 
-The five applications add compatibility evidence that the Laravel application
+The ten applications add compatibility evidence that the Laravel application
 gauntlet does not provide:
 
 | Target | Client stack | Quick gate |
@@ -14,6 +14,11 @@ gauntlet does not provide:
 | Drupal | PHP PDO and Drupal database API | MySQL connection and schema kernel tests |
 | Nextcloud | PHP PDO and Doctrine DBAL | Full install and DB-tagged PHPUnit tests |
 | Shopware | PHP PDO and Doctrine DBAL | Full migration-driven test database install |
+| Ghost | Node.js MySQL driver and Knex | Schema bootstrap and deep member pagination test |
+| Moodle | PHP mysqli and Moodle DML | PHPUnit bootstrap plus core DDL and DML suites |
+| WordPress | PHP mysqli and wpdb | Database-focused core PHPUnit tests |
+| Rails | Ruby mysql2 and Active Record | Full test schema plus a MySQL adapter test |
+| Magento | PHP PDO and Magento DB adapter | Full application install with OpenSearch |
 
 The upstream commits live in `versions.env`. Updating a pin is a deliberate
 compatibility-corpus change: run that target against MySQL 8.4 as well as fsdb
@@ -25,9 +30,15 @@ The runner uses the repository's .NET toolchain and Docker; the `just` recipes
 also require `just`. The first run builds language runtimes and downloads
 upstream dependencies, so it is much slower than later cached runs.
 
+Application images use separate build and runtime stages. Gitea retains its Go
+module tree because its integration gate compiles the selected test, and Ghost
+retains workspace development dependencies because the gate runs through
+Vitest.
+
 ```sh
 just smoke-apps gitea
 just smoke-apps mediawiki drupal
+just smoke-apps ghost moodle wordpress rails magento
 just smoke-apps
 ```
 

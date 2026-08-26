@@ -13,7 +13,24 @@ type Outcome =
       Description: string
       Passed: bool }
 
-let availableTargets = [ "gitea"; "mediawiki"; "drupal"; "nextcloud"; "shopware" ]
+let availableTargets =
+    [ "gitea"
+      "mediawiki"
+      "drupal"
+      "nextcloud"
+      "shopware"
+      "ghost"
+      "moodle"
+      "wordpress"
+      "rails"
+      "magento" ]
+
+let requiredServices target =
+    match target with
+    | "nextcloud"
+    | "shopware" -> [ "fsdb"; "redis" ]
+    | "magento" -> [ "fsdb"; "opensearch" ]
+    | _ -> [ "fsdb" ]
 
 let usage () =
     printfn "usage: dotnet fsi --nologo --readline- --exec smoke/run.fsx -- [--build-only] [--no-build] [target ...]"
@@ -153,7 +170,7 @@ try
         let serviceArguments =
             [ "up"; "--detach" ]
             @ (if options.SkipBuild then [ "--no-build" ] else [])
-            @ [ "fsdb"; "redis" ]
+            @ requiredServices target
 
         if buildStatus <> 0 then
             outcomes <-

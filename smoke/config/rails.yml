@@ -1,0 +1,24 @@
+connections:
+  mysql2:
+    arunit:
+      adapter: mysql2
+      host: fsdb
+      port: 3306
+      database: activerecord_unittest
+      username: root
+      password: ""
+      encoding: utf8mb4
+      collation: utf8mb4_unicode_ci
+      prepared_statements: false
+      variables:
+        time_zone: "+00:00"
+    arunit2:
+      adapter: mysql2
+      host: fsdb
+      port: 3306
+      database: activerecord_unittest2
+      username: root
+      password: ""
+      encoding: utf8mb4
+      collation: utf8mb4_general_ci
+      prepared_statements: false

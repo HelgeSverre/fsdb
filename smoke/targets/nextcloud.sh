@@ -5,6 +5,7 @@ cd /opt/nextcloud
 mkdir -p data
 cp tests/redis.config.php config/
 cp tests/preseed-config.php config/config.php
+sed -i "s/'host' => 'localhost'/'host' => 'redis'/" config/redis.config.php
 
 NC_setup_create_db_user=false ./occ maintenance:install --verbose \
     --database=mysql \
@@ -17,4 +18,4 @@ NC_setup_create_db_user=false ./occ maintenance:install --verbose \
     --admin-pass=admin
 
 php -f tests/enable_all.php
-composer run test:db -- --log-junit /tmp/nextcloud-junit.xml
+composer run --timeout=0 test:db -- --log-junit /tmp/nextcloud-junit.xml
