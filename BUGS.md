@@ -1,103 +1,35 @@
-# Known bugs
+# Application compatibility bugs
 
-## External MySQL compatibility
+These failures are reproduced by the pinned external smoke targets. Declared
+feature boundaries that have not caused an application failure remain in
+`GAPS.md`.
 
-The SQL examples below succeed on MySQL 8.4.
+## Composite primary-key order is not retained
 
-### Session SQL mode does not enable ANSI identifier quotes
+`ColumnDef.PrimaryKey` records membership but not the order from `PRIMARY KEY
+(second, first)`, so `SHOW INDEX` and schema APIs report declaration order
+instead of key order. Renaming or replacing a composite primary key can expose
+the wrong column sequence.
 
-Status: open
+Reproduce with `just smoke-apps drupal`. The driver-specific schema suite fails
+its primary-key discovery and replacement cases.
 
-Drupal's MySQL driver executes `SET sql_mode = 'ANSI,TRADITIONAL'` and then
-quotes identifiers with double quotes. fsdb acknowledges the session command
-but parses those identifiers as string values. Drupal's installer consequently
-fails on statements such as:
+## Drupal schema limits and unsigned serial checks diverge
 
-```sql
-CREATE TABLE "test14800862drupal_install_test" (id int NOT NULL PRIMARY KEY)
-```
+The Drupal MySQL schema suite still differs on negative values for unsigned
+serial columns, index prefix normalization, oversized index definitions, and
+oversized column definitions. These paths need MySQL-compatible errors and
+limits rather than framework-specific special cases.
 
-Reproduce with `just smoke-apps drupal`. The pinned Drupal
-`ConnectionTest::testMultipleStatementsForNewPhp` fails before the schema test
-can run.
+Reproduce with `just smoke-apps drupal`. The connection test passes; the schema
+suite currently reaches 24 tests and 502 assertions with these remaining
+failures.
 
-### XORM schema creation and introspection do not parse
+## Trigger bodies do not support conditional control flow
 
-Status: open
+Compound trigger bodies support ordered DML and `SET NEW` statements, but not
+`IF`, `ELSEIF`, or `ELSE`. Shopware reaches migration 205 before a `BEFORE
+UPDATE` trigger containing nested conditional branches is rejected.
 
-Gitea connects and creates its test database, but its XORM migration cannot
-create the `user` table. The generated definition combines type display widths,
-inline `PRIMARY KEY AUTO_INCREMENT`, boolean defaults, negative defaults, and
-inline indexes. After that failure, XORM's `INFORMATION_SCHEMA.COLUMNS`
-introspection query also fails to parse; it uses `&&`, `INSTR`,
-`SUBSTRING_INDEX`, `VERSION`, and a qualified `ORDER BY` expression.
-
-Gitea's preceding database-collation adjustment is rejected separately:
-
-```sql
-ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs
-```
-
-Reproduce with `just smoke-apps gitea`. The pinned `TestUser` integration test
-reaches ORM initialization and fails before fixtures load.
-
-### MediaWiki's generated MySQL tables do not parse
-
-Status: open
-
-MediaWiki connects, creates its database, and begins loading its generated
-MySQL schema. fsdb rejects the first table, which combines unsigned columns,
-inline named unique indexes, an auto-increment primary key, and table options:
-
-```sql
-CREATE TABLE `actor` (
-  actor_id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL,
-  actor_user INT UNSIGNED DEFAULT NULL,
-  actor_name VARBINARY(255) NOT NULL,
-  UNIQUE INDEX actor_user (actor_user),
-  UNIQUE INDEX actor_name (actor_name),
-  PRIMARY KEY(actor_id)
-) ENGINE=InnoDB, DEFAULT CHARSET=binary
-```
-
-Reproduce with `just smoke-apps mediawiki`. Installation fails before
-`DatabaseIntegrationTest` can run.
-
-### Nextcloud's Doctrine migration tables do not parse
-
-Status: open
-
-Nextcloud connects and enters its Doctrine DBAL migration sequence. fsdb
-rejects the first lock table, which combines unsigned auto-increment columns,
-a negative default, quoted reserved-word identifiers, inline indexes, and
-Doctrine's table-option form:
-
-```sql
-CREATE TABLE oc_file_locks (
-  id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL,
-  `lock` INT DEFAULT 0 NOT NULL,
-  `key` VARCHAR(64) NOT NULL,
-  ttl INT DEFAULT -1 NOT NULL,
-  UNIQUE INDEX lock_key_index (`key`),
-  INDEX lock_ttl_index (ttl),
-  PRIMARY KEY(id)
-) DEFAULT CHARACTER SET UTF8 COLLATE `utf8_bin` ENGINE = InnoDB
-```
-
-Reproduce with `just smoke-apps nextcloud`. Installation fails before the
-DB-tagged PHPUnit tests can run.
-
-### The default storage engine session variable is missing
-
-Status: open
-
-Shopware connects, creates its test database, imports its base schema, and
-starts its 874 core migrations. The migration runtime stops before the first
-migration because fsdb returns error 1193 for this valid MySQL session setting:
-
-```sql
-SET default_storage_engine=InnoDB
-```
-
-Reproduce with `just smoke-apps shopware`. The bootstrap reports zero completed
-migrations and exits before the test suite can run.
+Reproduce with `just smoke-apps shopware`. This is the trigger-language gap
+tracked in `GAPS.md`, not a failure of the preceding schema or wire protocol.
