@@ -992,6 +992,13 @@ let tests =
                         | CreateTable { Columns = [ { Name = "id"; PrimaryKey = true } ] } -> ()
                         | other -> failtestf "expected constrained primary key, got %A" other
 
+                    let magento =
+                        "CREATE TABLE `admin_analytics_usage_version_log` (`id` int UNSIGNED NOT NULL AUTO_INCREMENT COMMENT \"Log ID\", `last_viewed_in_version` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT \"Viewer last viewed on product version\", CONSTRAINT PRIMARY KEY (`id`), CONSTRAINT `ADMIN_ANALYTICS_USAGE_VERSION_LOG_LAST_VIEWED_IN_VERSION` UNIQUE KEY (`last_viewed_in_version`)) ENGINE=innodb DEFAULT CHARSET=utf8mb4 DEFAULT COLLATE=utf8mb4_general_ci COMMENT=\"Admin Notification Viewer Log Table\""
+
+                    match parseOk magento with
+                    | CreateTable { Columns = [ { PrimaryKey = true }; _ ]; Indexes = [ { Unique = true } ] } -> ()
+                    | other -> failtestf "expected Magento constraints, got %A" other
+
                 testCase "BIGINT UNSIGNED"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (id BIGINT UNSIGNED)" with

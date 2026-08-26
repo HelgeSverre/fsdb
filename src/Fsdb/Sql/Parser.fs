@@ -2054,7 +2054,7 @@ let private tableOption: Parser<TableOption, unit> =
           >>. opt (sym "=")
           >>. knownCharset
           |>> TableCharset
-          keyword "COLLATE"
+          attempt (optional (keyword "DEFAULT") >>. keyword "COLLATE")
           >>. opt (sym "=")
           >>. identOrString
           >>= fun name ->
