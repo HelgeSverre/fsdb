@@ -1988,13 +1988,14 @@ let private constraintName: Parser<string option, unit> =
 
 let private foreignKeyItem: Parser<ForeignKeyDef, unit> =
     (constraintName .>> keyword "FOREIGN" .>> keyword "KEY"
+     .>>. opt (notFollowedBy (pchar '(') >>. identifier)
      .>>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
      .>> keyword "REFERENCES"
      .>>. identifier
      .>>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
      .>>. foreignKeyRefOptions)
-    |>> fun ((((cname, cols), refTable), refCols), (onDelete, onUpdate)) ->
-        { Name = cname |> Option.defaultValue (sprintf "%s_%s_foreign" refTable (List.head cols))
+    |>> fun (((((constraintName, keyName), cols), refTable), refCols), (onDelete, onUpdate)) ->
+        { Name = constraintName |> Option.orElse keyName |> Option.defaultValue (sprintf "%s_%s_foreign" refTable (List.head cols))
           Columns = cols
           RefTable = refTable
           RefColumns = refCols
