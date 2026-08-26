@@ -588,6 +588,34 @@ let private withDatabasePublishing
 let private withDatabase store dbName f =
     withDatabasePublishing store dbName (fun _ -> []) f
 
+/// Holds the named database cells in lexical order while `action` prepares
+/// and publishes a schema change. DML already uses these cells for its short
+/// publication step, so the ordering prevents both stale DDL snapshots and
+/// lock-order cycles when one statement also updates `mysql` metadata.
+let withDatabaseLocks (timeout: TimeSpan) (store: Store) (dbNames: string seq) (action: unit -> 'a) : 'a =
+    let slots =
+        dbNames
+        |> Seq.map _.ToLowerInvariant()
+        |> Set.ofSeq
+        |> Seq.choose (fun dbName ->
+            match store.Databases.TryGetValue dbName with
+            | true, slot -> Some(dbName, slot)
+            | false, _ -> None)
+        |> List.ofSeq
+
+    let rec acquire = function
+        | [] -> action ()
+        | (dbName, slot) :: rest ->
+            if not (Monitor.TryEnter(slot, timeout)) then
+                raise (LockWaitTimeout dbName)
+
+            try
+                acquire rest
+            finally
+                Monitor.Exit slot
+
+    acquire slots
+
 /// Every database name appearing as a key in `m` — the shared set-of-keys
 /// step `mergeDatabaseSlot`/`mergeCatalogInto`/`bumpAutoIncrementsInto`'s
 /// per-database merges all need.

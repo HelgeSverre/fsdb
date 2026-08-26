@@ -1722,6 +1722,21 @@ let private startsTransaction = function
 let private autocommitDisabled (session: Session) =
     lookupVar session "autocommit" |> Option.flatten = Some "0"
 
+let private implicitCommitDatabases dbName stmt =
+    Auth.requiredPrivileges dbName stmt
+    |> List.choose (function
+        | _, Auth.OnDb database
+        | _, Auth.OnTable(database, _) -> Some database
+        | _ -> None)
+    |> Set.ofList
+    |> Set.add "mysql"
+
+let private changesCatalogMembership = function
+    | CreateDatabase _
+    | DropDatabase _
+    | AlterDatabase _ -> true
+    | _ -> false
+
 let private tableKey (db: string) (table: string) = db.ToLowerInvariant(), normalizeTableName table
 
 let private temporaryKeys (catalog: Catalog) =
@@ -1853,7 +1868,16 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
     let dbName = session.Database |> Option.defaultValue defaultDatabase
 
     if action.IsNone && causesImplicitCommit stmt then
-        executeParsedCore (commitSession session) stmt
+        let session = commitSession session
+
+        if changesCatalogMembership stmt then
+            executeParsedCore session stmt
+        else
+            Storage.withDatabaseLocks
+                (lockWaitTimeout session)
+                session.Store
+                (implicitCommitDatabases dbName stmt)
+                (fun () -> executeParsedCore session stmt)
     else
         let session =
             if session.Tx.IsNone && autocommitDisabled session && startsTransaction stmt then
