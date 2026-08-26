@@ -1467,6 +1467,18 @@ let tests =
                               (VDateTime(DateTime(2024, 1, 15, 11, 0, 0)))
                               "a time-bearing string still becomes a datetime"
 
+                      testCase "DATE_ADD accepts compact MySQL dates"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "DATE_ADD" [ VString "19700101"; call "INTERVAL" [ VInt 946771200L; VString "SECOND" ] ])
+                              (VDateTime(DateTime(2000, 1, 2, 0, 0, 0)))
+                              "eight-digit date"
+
+                          Expect.equal
+                              (call "DATE_ADD" [ VString "700101"; call "INTERVAL" [ VInt 0L; VString "SECOND" ] ])
+                              (VDateTime(DateTime(1970, 1, 1, 0, 0, 0)))
+                              "six-digit date"
+
                       testCase "DATEDIFF counts whole days, ignoring time"
                       <| fun _ ->
                           Expect.equal

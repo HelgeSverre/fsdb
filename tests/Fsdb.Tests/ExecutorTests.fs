@@ -6014,6 +6014,12 @@ let tests =
                         "SELECT TIMESTAMPADD(QUARTER, 1, '2020-03-04 05:06:07') a, TIMESTAMPADD(MINUTE, 90, '2020-03-04 05:06:07') b, TIMESTAMPADD(DAY, 5, '2020-03-04') c"
                         [ Some "2020-06-04 05:06:07"; Some "2020-03-04 06:36:07"; Some "2020-03-09" ]
 
+                testCase "DATE_FORMAT accepts DATE_ADD from a compact epoch literal"
+                <| fun _ ->
+                    expectRow
+                        "SELECT DATE_FORMAT(DATE_ADD('19700101', INTERVAL 946771200 SECOND), '%Y%m%d') a, DATE_FORMAT(DATE_ADD('700101', INTERVAL 0 SECOND), '%Y%m%d') b"
+                        [ Some "20000102"; Some "19700101" ]
+
                 testCase "composite INTERVAL units read their components right-aligned"
                 <| fun _ ->
                     expectRow

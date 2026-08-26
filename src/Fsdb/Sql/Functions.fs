@@ -2011,6 +2011,8 @@ let private convertFn: Scalar =
 let private dateTimeFormats =
     [| "yyyy-MM-dd HH:mm:ss"
        "yyyy-MM-dd"
+       "yyyyMMdd"
+       "yyMMdd"
        "yyyy-MM-ddTHH:mm:ss"
        "yyyy/MM/dd" |]
 
