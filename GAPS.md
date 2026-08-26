@@ -285,7 +285,7 @@ OLD/NEW images are rejected when the trigger is created.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Updatable-view breadth | joins, expressions, and nested views where MySQL deems the view writable | direct single-table projections with a simple base-table WHERE predicate; insert, ODKU, replace, update, and delete forms map through it | medium | refusal |
-| ALGORITHM / SQL SECURITY INVOKER / ALTER VIEW | supported | absent; `InformationSchema.viewsRows` reports SECURITY_TYPE as DEFINER | low | refusal |
+| ALGORITHM / explicit DEFINER / ALTER VIEW | supported | SQL SECURITY DEFINER and INVOKER execute with their respective identities; algorithm selection, explicit definers, and alteration remain absent | low | refusal |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | `InformationSchema.showCreateView` returns raw user text without the wrapper | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
 | Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML and SET NEW statement sequences; DECLARE, handlers, IF/CASE/loops, SIGNAL, and dynamic SQL remain absent | medium | refusal |

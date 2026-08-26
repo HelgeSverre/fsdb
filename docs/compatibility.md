@@ -152,8 +152,9 @@ SELECT`, `REPLACE` in each supported source form, `ON DUPLICATE KEY UPDATE`,
 `UPDATE`, and `DELETE`. Every written or referenced column must be exposed by
 the view, and base-table writes run under the view definer's privileges. `WITH
 CHECK OPTION` is enforced on this direct subset and reported by `SHOW CREATE
-VIEW` and `information_schema.VIEWS`. `ALTER VIEW`, `ALGORITHM`, explicit
-`DEFINER`, and `SQL SECURITY` remain unsupported. Creation validates
+VIEW` and `information_schema.VIEWS`. `SQL SECURITY DEFINER` and `SQL SECURITY
+INVOKER` use their respective privilege identities. `ALTER VIEW`, `ALGORITHM`,
+and explicit `DEFINER` remain unsupported. Creation validates
 the saved SQL grammar but defers missing dependency and output-shape errors
 until the first read; `SELECT *` follows the base table's current columns
 instead of freezing them at creation.

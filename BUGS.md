@@ -25,14 +25,6 @@ Reproduce with `just smoke-apps drupal`. The connection test passes; the schema
 suite currently reaches 24 tests and 529 assertions with one error and seven
 failures.
 
-## SQL SECURITY INVOKER views are unavailable
-
-Ghost reaches `CREATE OR REPLACE SQL SECURITY INVOKER VIEW` after completing
-its preceding migrations. fsdb only models definer-security views, so accepting
-the syntax without changing execution identity would be incorrect.
-
-Reproduce with `just smoke-apps ghost`.
-
 ## Functional indexes are unavailable
 
 Rails creates a unique index over `LOWER(external_id)`. `IndexDef` currently
