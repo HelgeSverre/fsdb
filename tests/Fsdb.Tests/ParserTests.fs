@@ -1005,6 +1005,12 @@ let tests =
                     | CreateTable { Columns = [ { Type = TBigInt true } ] } -> ()
                     | other -> failtestf "expected an unsigned bigint column, got %A" other
 
+                testCase "NUMERIC precision defaults to scale zero"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (grade NUMERIC(20), percent NUMERIC(5,2)) DEFAULT COLLATE utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC" with
+                    | CreateTable { Columns = [ { Type = TDecimal(20, 0) }; { Type = TDecimal(5, 2) } ] } -> ()
+                    | other -> failtestf "expected numeric precision and scale, got %A" other
+
                 testCase "BIT keeps its declared width and defaults to one bit"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (one BIT, three BIT(3), all_bits BIT(64))" with

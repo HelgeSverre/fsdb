@@ -598,10 +598,10 @@ let private columnType: Parser<ColumnType, unit> =
           keyword "ENUM" >>. stringListParen |>> TEnum
           keyword "SET" >>. stringListParen |>> TSet
           (keyword "DECIMAL" <|> keyword "NUMERIC")
-          >>. opt (between (sym "(") (sym ")") ((intTok .>> sym ",") .>>. intTok))
+          >>. opt (between (sym "(") (sym ")") (intTok .>>. opt (sym "," >>. intTok)))
           .>> unsignedFlag
           |>> function
-              | Some(p, s) -> TDecimal(p, s)
+              | Some(p, scale) -> TDecimal(p, Option.defaultValue 0 scale)
               | None -> TDecimal(10, 0)
           keyword "DOUBLE" >>. optional (keyword "PRECISION") >>. ignoredWidth >>. unsignedFlag >>% TDouble
           keyword "FLOAT" >>. ignoredWidth >>. unsignedFlag >>% TFloat
