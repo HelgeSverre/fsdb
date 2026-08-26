@@ -778,6 +778,11 @@ let private parseNumeric (s: string) : float option =
     | true, d -> Some d
     | false, _ -> None
 
+let private parseDecimal (s: string) : decimal option =
+    match Decimal.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
+    | true, value -> Some value
+    | false, _ -> None
+
 /// MySQL-style coercion of a value to a column's declared type
 /// (`'12' -> 12` for an INT column); error 1366 when it's not possible and
 /// `strict` (the session's STRICT_TRANS_TABLES/STRICT_ALL_TABLES, see
@@ -939,11 +944,12 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             else
                 finish (Math.Truncate(decimal number))
         | VString text ->
-            match parseNumeric text with
-            | Some number when number < float lo || number > float hi ->
+            match parseDecimal text, parseNumeric text with
+            | Some number, _ -> finish (Math.Truncate number)
+            | None, Some number when number < float lo || number > float hi ->
                 if strict then outOfRange () else finish (if number < 0.0 then lo else hi)
-            | Some number -> finish (Math.Truncate(decimal number))
-            | None -> numericFallback (Some "integer") (fun () -> VInt 0L)
+            | None, Some number -> finish (Math.Truncate(decimal number))
+            | None, None -> numericFallback (Some "integer") (fun () -> VInt 0L)
         | _ -> numericFallback (Some "integer") (fun () -> VInt 0L)
 
     match col.Type, v with
@@ -993,8 +999,9 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
             | VDecimal d -> narrow (Math.Truncate d)
             | VString s ->
-                match parseNumeric s with
-                | Some d ->
+                match parseDecimal s, parseNumeric s with
+                | Some d, _ -> narrow (Math.Truncate d)
+                | None, Some d ->
                     if d >= 0.0 && d < 1.8446744073709552e19 then
                         narrow (Math.Truncate(decimal d))
                     elif strict then
@@ -1002,7 +1009,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     else
                         warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                         Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
-                | None -> numericFallback (Some "integer") (fun () -> VUInt 0UL)
+                | None, None -> numericFallback (Some "integer") (fun () -> VUInt 0UL)
             | _ -> numericFallback (Some "integer") (fun () -> VUInt 0UL)
         | TBit width ->
             let maxValue = if width = 64 then UInt64.MaxValue else (1UL <<< width) - 1UL
@@ -1103,8 +1110,8 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             | VBit(_, value) -> Ok(VDecimal(rescale (decimal value)))
             | VDouble d -> Ok(VDecimal(rescale (decimal d)))
             | VString s ->
-                match parseNumeric s with
-                | Some d -> Ok(VDecimal(rescale (decimal d)))
+                match parseDecimal s with
+                | Some d -> Ok(VDecimal(rescale d))
                 | None -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
             | _ -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
         | TChar length

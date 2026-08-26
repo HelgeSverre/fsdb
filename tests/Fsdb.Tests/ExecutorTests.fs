@@ -5552,6 +5552,27 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected only row 1, got %A" other
 
+                testCase "numeric strings retain BIGINT precision"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE ids (id BIGINT PRIMARY KEY)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "INSERT INTO ids VALUES ('122092114329652993'), ('122092114329653001')"
+                    with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected distinct string-bound ids, got %A" other
+
+                    match runDefault store "SELECT id FROM ids ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "122092114329652993" ]; [ Some "122092114329653001" ] ]
+                            "BIGINT strings remain exact beyond double precision"
+                    | other -> failtestf "expected exact ids, got %A" other
+
                 testCase "the scalar-function family answers in the unsigned domain instead of saturating"
                 <| fun _ ->
                     match
