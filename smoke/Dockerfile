@@ -89,10 +89,12 @@ RUN git init \
     && git fetch --depth=1 origin "${DRUPAL_REF}" \
     && git checkout --detach FETCH_HEAD
 RUN composer install --no-interaction --prefer-dist --no-progress
-RUN rm -rf .git
 
-FROM php-base AS drupal
+FROM php-build AS drupal
 WORKDIR /opt/drupal
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends chromium chromium-driver \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=drupal-build /opt/drupal/ ./
 COPY smoke/targets/drupal.sh /usr/local/bin/fsdb-smoke
 ENTRYPOINT ["/usr/local/bin/fsdb-smoke"]

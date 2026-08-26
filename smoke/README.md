@@ -11,7 +11,7 @@ gauntlet does not provide:
 |---|---|---|
 | Gitea | Go MySQL driver and XORM | Current schema, fixtures, and one integration test |
 | MediaWiki | PHP mysqli and MediaWiki RDBMS | Full install and `DatabaseIntegrationTest` |
-| Drupal | PHP PDO and Drupal database API | MySQL connection and schema kernel tests |
+| Drupal | PHP PDO and Drupal database API | All upstream component, unit, kernel, functional, JavaScript-functional, and build tests |
 | Nextcloud | PHP PDO and Doctrine DBAL | Full install and DB-tagged PHPUnit tests |
 | Shopware | PHP PDO and Doctrine DBAL | Full migration-driven test database install |
 | Ghost | Node.js MySQL driver and Knex | Schema bootstrap and deep member pagination test |
@@ -65,6 +65,8 @@ continues through all selected targets and exits nonzero when any target fails.
 
 Reproducible fsdb failures found by these probes are tracked in `BUGS.md`.
 
-These are compatibility gates, not the projects' entire suites. A failure is a
-candidate fsdb incompatibility only when the same pinned probe succeeds against
-MySQL 8.4; environment and upstream failures remain separate classifications.
+Most targets remain focused compatibility gates. Drupal is the exception: its
+target runs every upstream PHPUnit suite (28,475 tests at the current pin),
+including tests that do not access a database. A failure is a candidate fsdb
+incompatibility only when the same pinned test succeeds against MySQL 8.4;
+environment and upstream failures remain separate classifications.
