@@ -3387,6 +3387,15 @@ let private renameIndexColumn oldName newName (indexes: IndexDef list) =
         { index with
             Columns = index.Columns |> List.map rename })
 
+let private removeIndexColumn columnName (indexes: IndexDef list) =
+    indexes
+    |> List.choose (fun index ->
+        let columns =
+            index.Columns
+            |> List.filter (fun name -> not (String.Equals(name, columnName, StringComparison.OrdinalIgnoreCase)))
+
+        if columns.IsEmpty then None else Some { index with Columns = columns })
+
 /// Resolves `FIRST`/`AFTER col`/no-clause-given to a concrete 0-based index
 /// into `columnsExcludingSelf` (the table's columns with the column being
 /// added/moved already removed, so an `AFTER`/`FIRST` offset means the same
@@ -3566,7 +3575,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         |> Result.map (fun idx ->
             { table with
                 Columns = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> idx) |> List.map snd
-                RowsArray = table.RowsArray |> RowStore.map (removeColumnAt idx) },
+                RowsArray = table.RowsArray |> RowStore.map (removeColumnAt idx)
+                Indexes = removeIndexColumn name table.Indexes },
             None)
     | ModifyColumn(newDef, position)
     | ChangeColumn(_, newDef, position) ->

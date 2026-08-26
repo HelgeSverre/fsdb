@@ -1790,6 +1790,17 @@ let tests =
                     let renamed = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
                     Expect.equal (primaryKeyColumns renamed) [ "account_id"; "id" ] "renamed key column"
 
+                    runDefault store "ALTER TABLE t DROP COLUMN account_id" |> ignore
+
+                    let shortened = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
+                    Expect.equal (primaryKeyColumns shortened) [ "id" ] "dropping a key column retains the remaining key"
+
+                    runDefault store "CREATE TABLE drop_only_key (id INT PRIMARY KEY, value INT)" |> ignore
+                    runDefault store "ALTER TABLE drop_only_key DROP COLUMN id" |> ignore
+
+                    let withoutPrimary = store.Catalog.[defaultDatabase].[normalizeTableName "drop_only_key"]
+                    Expect.isEmpty (primaryKeyColumns withoutPrimary) "dropping the only key column removes the primary key"
+
                     runDefault store "CREATE TABLE lone_auto (id INT AUTO_INCREMENT PRIMARY KEY)" |> ignore
 
                     match runDefault store "ALTER TABLE lone_auto DROP PRIMARY KEY" with
