@@ -424,13 +424,13 @@ let tests =
                     | Error(ColumnCountMismatch(3, 2)) -> ()
                     | other -> failtestf "expected ColumnCountMismatch(3, 2), got %A" other
 
-                testCase "omitting a NOT NULL column with no default returns NotNullViolation"
+                testCase "omitting a NOT NULL column with no default returns 1364"
                 <| fun _ ->
                     let store = withUsersTable ()
 
                     match insertRows store defaultDatabase "users" (Some [ "id" ]) [ [ VNull ] ] with
-                    | Error(NotNullViolation "name") -> ()
-                    | other -> failtestf "expected NotNullViolation on 'name', got %A" other
+                    | Error(ExpressionError(1364, "Field 'name' doesn't have a default value")) -> ()
+                    | other -> failtestf "expected 1364 for the omitted 'name', got %A" other
 
                 testCase "explicit NULL for a NOT NULL column returns NotNullViolation"
                 <| fun _ ->
