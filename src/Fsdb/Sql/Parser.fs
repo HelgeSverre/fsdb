@@ -1881,6 +1881,11 @@ let private trailingPrimaryKey: Parser<string list, unit> =
     >>. opt (notFollowedBy (sym "(") >>. identifier)
     >>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
 
+let private constrainedPrimaryKey: Parser<string list, unit> =
+    keyword "CONSTRAINT"
+    >>. opt (notFollowedBy (keyword "PRIMARY") >>. identifier)
+    >>. trailingPrimaryKey
+
 /// One column inside an index's column list, with its optional MySQL
 /// "key length" (`col(191)`) parsed and discarded — `Ast.IndexDef` doesn't
 /// track prefix lengths.
@@ -1981,6 +1986,7 @@ type private CreateItem =
 let private createTableItem: Parser<CreateItem, unit> =
     choice
         [ attempt (namedUniqueConstraint |>> CIndex)
+          attempt (constrainedPrimaryKey |>> CPrimaryKey)
           attempt (foreignKeyItem |>> CForeignKey)
           attempt (
               checkDefinition

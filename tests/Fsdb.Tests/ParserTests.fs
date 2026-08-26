@@ -983,6 +983,15 @@ let tests =
                         ))
                         "trailing primary key"
 
+                testCase "CONSTRAINT accepts an optional primary-key symbol"
+                <| fun _ ->
+                    for sql in
+                        [ "CREATE TABLE t (id INT, CONSTRAINT PRIMARY KEY (id))"
+                          "CREATE TABLE t (id INT, CONSTRAINT pk_t PRIMARY KEY (id))" ] do
+                        match parseOk sql with
+                        | CreateTable { Columns = [ { Name = "id"; PrimaryKey = true } ] } -> ()
+                        | other -> failtestf "expected constrained primary key, got %A" other
+
                 testCase "BIGINT UNSIGNED"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (id BIGINT UNSIGNED)" with
