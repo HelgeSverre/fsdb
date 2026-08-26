@@ -1543,10 +1543,7 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          // COM_STMT_SEND_LONG_DATA chunks must stay raw bytes — decoding
-          // them as UTF-8 corrupts any invalid sequence. A BLOB param's
-          // bytes must round-trip byte-identical.
-          testCase "COM_STMT_SEND_LONG_DATA round-trips non-UTF-8 bytes for a BLOB parameter"
+          testCase "COM_STMT_SEND_LONG_DATA preserves non-UTF-8 BLOB and string parameters"
           <| fun _ ->
               async {
                   use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
@@ -1575,26 +1572,25 @@ let tests =
                   let query (sql: string) =
                       writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
 
-                  let! _ = query "CREATE TABLE blobs (b BLOB)"
+                  let! _ = query "CREATE TABLE blobs (b BLOB, id BINARY(16))"
                   let! _ = readPacketAsync stream
 
-                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "INSERT INTO blobs VALUES (?)") }
+                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "INSERT INTO blobs VALUES (?, ?)") }
                   let! stmtId, _, _ = readPreparedReply stream
 
-                  // Invalid UTF-8: a lone continuation byte and a byte
-                  // that's never valid in UTF-8 at all — decoding this
-                  // as UTF-8 and re-encoding would change the bytes.
                   let bytes = [| 0uy; 0xffuy; 0x80uy; 65uy; 66uy; 0xC0uy |]
+                  let id = [| 0x01uy; 0xffuy; 0x3buy; 0x80uy; 0x66uy; 0x31uy; 0x72uy; 0x31uy; 0xaauy; 0xbbuy; 0x42uy; 0x45uy; 0xccuy; 0xdduy; 0xeeuy; 0x6cuy |]
 
-                  let longDataPayload =
+                  let longDataPayload parameter value =
                       let w = Writer()
                       w.WriteByte 0x18uy
                       w.WriteInt32LE stmtId
-                      w.WriteInt16LE 0
-                      w.WriteBytes bytes
+                      w.WriteInt16LE parameter
+                      w.WriteBytes value
                       w.ToArray()
 
-                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = longDataPayload }
+                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = longDataPayload 0 bytes }
+                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = longDataPayload 1 id }
 
                   let execPayload =
                       let w = Writer()
@@ -1602,18 +1598,22 @@ let tests =
                       w.WriteInt32LE stmtId
                       w.WriteByte 0uy
                       w.WriteInt32LE 1
-                      w.WriteByte 0uy // null bitmap: param not NULL
+                      w.WriteByte 0uy // null bitmap: params not NULL
                       w.WriteByte 1uy // new-params-bound
                       w.WriteByte TypeBlob
                       w.WriteByte 0uy // not unsigned
+                      w.WriteByte TypeVarString
+                      w.WriteByte 0uy
+                      w.WriteLenEncString "" // placeholder values; long data wins
                       w.WriteLenEncString "" // placeholder value; long data wins
                       w.ToArray()
 
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = execPayload }
                   let! _ = readPacketAsync stream // OK (INSERT)
 
-                  let! _ = query "SELECT b FROM blobs"
+                  let! _ = query "SELECT b, id FROM blobs"
                   let! _ = readPacketAsync stream // column count
+                  let! _ = readPacketAsync stream // column def
                   let! _ = readPacketAsync stream // column def
                   let! _ = readPacketAsync stream // EOF
                   let! row = readPacketAsync stream
@@ -1621,8 +1621,12 @@ let tests =
                   let r = Reader(row.Value.Payload)
 
                   match r.ReadLenEncInt() with
-                  | Some len -> Expect.equal (r.ReadBytes(int len)) bytes "BLOB long-data bytes survive byte-identical"
+                  | Some len -> Expect.equal (r.ReadBytes(int len)) bytes "BLOB bytes"
                   | None -> failtest "expected a non-NULL blob value"
+
+                  match r.ReadLenEncInt() with
+                  | Some len -> Expect.equal (r.ReadBytes(int len)) id "binary string bytes"
+                  | None -> failtest "expected a non-NULL binary string value"
               }
               |> Async.RunSynchronously
 

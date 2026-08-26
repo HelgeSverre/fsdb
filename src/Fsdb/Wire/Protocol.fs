@@ -11,6 +11,12 @@ open Fsdb.Temporal
 
 let private strictUtf8 = UTF8Encoding(false, true)
 
+let stringValueOfBytes (bytes: byte[]) : Value =
+    try
+        VString(strictUtf8.GetString bytes)
+    with :? DecoderFallbackException ->
+        VBytes bytes
+
 // Capability flags (the subset this server negotiates).
 // https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html
 let ClientLongPassword = 0x00000001u
@@ -663,12 +669,7 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
         | Some len -> r.ReadBytes(boundedLen len)
 
     let lenEncStringValue () =
-        let bytes = lenEncBytes ()
-
-        try
-            VString(strictUtf8.GetString bytes)
-        with :? DecoderFallbackException ->
-            VBytes bytes
+        lenEncBytes () |> stringValueOfBytes
 
     if typeId = TypeTiny then
         let b = r.ReadByte()

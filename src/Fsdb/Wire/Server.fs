@@ -1407,7 +1407,7 @@ let private handleConnection
                                                                 | Some geometry -> VGeometry geometry
                                                                 | None -> raise (GeometryError "Invalid GIS data provided to binary parameter")
                                                             else
-                                                                VString(Encoding.UTF8.GetString bytes)
+                                                                stringValueOfBytes bytes
                                                         | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)
 
                                                 Result.Ok(types, values)
