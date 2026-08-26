@@ -2504,6 +2504,56 @@ let tests =
                   Expect.equal ctx (db + "|" + (user.Split '@').[0]) "context Database/User match the SQL-visible session"
               | other -> failtestf "expected one row, got %A" other
 
+          testCase "temporary tables shadow permanent tables per session"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let second = create 2 store
+              let first, _ = handle first "CREATE TABLE sample (n INT)"
+              let first, _ = handle first "INSERT INTO sample VALUES (1)"
+              let commits = ResizeArray<Fsdb.Storage.CommitEvent>()
+              store.OnCommit.Add commits.Add
+
+              let first, created = handle first "CREATE TEMPORARY TABLE sample (n INT)"
+              Expect.equal created (Affected 0UL) "temporary table created"
+              let first, inserted = handle first "INSERT INTO sample VALUES (2)"
+              Expect.equal inserted (Affected 1UL) "temporary row inserted"
+
+              match handle first "SELECT n FROM sample" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the temporary row, got %A" other
+
+              match handle second "SELECT n FROM sample" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the permanent row, got %A" other
+
+              let first, dropped = handle first "DROP TEMPORARY TABLE sample"
+              Expect.equal dropped (Affected 0UL) "temporary table dropped"
+
+              match handle first "SELECT n FROM sample" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the permanent row after DROP TEMPORARY, got %A" other
+
+              Expect.isEmpty first.TemporaryCatalog "session catalog is empty"
+              Expect.equal store.Catalog.[Fsdb.Storage.defaultDatabase].Count 1 "shared catalog contains only the permanent table"
+              Expect.isEmpty commits "temporary changes emit no shared commit events"
+
+          testCase "temporary sources can feed permanent writes without publication"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE destination (n INT)"
+              let session, _ = handle session "CREATE TEMPORARY TABLE staging (n INT)"
+              let session, _ = handle session "INSERT INTO staging VALUES (3), (4)"
+              let session, inserted = handle session "INSERT INTO destination SELECT n FROM staging"
+              Expect.equal inserted (Affected 2UL) "permanent rows inserted"
+
+              match handle session "SELECT GROUP_CONCAT(n ORDER BY n) FROM destination" |> snd with
+              | ResultSet(_, [ [ Some "3,4" ] ]) -> ()
+              | other -> failtestf "expected rows copied from the temporary table, got %A" other
+
+              Expect.isFalse (Map.containsKey "staging" store.Catalog.[Fsdb.Storage.defaultDatabase]) "temporary table was not published"
+
           testCase "a bare ? over COM_QUERY, incl. in a DDL generated column, is a 1064 (never reaches storage)"
           <| fun _ ->
               let session = create 991001 (Fsdb.Storage.create ())

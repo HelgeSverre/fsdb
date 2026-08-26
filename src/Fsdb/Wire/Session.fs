@@ -138,6 +138,8 @@ type Session =
       UserVariables: Map<string, Value>
       /// Shared store; currentStore selects a private transaction snapshot.
       Store: Store
+      /// Connection-local tables keyed by their logical database and name.
+      TemporaryCatalog: Catalog
       /// OK-packet insert id; explicit values may change it.
       LastInsertId: int64
       /// LAST_INSERT_ID() value; only generated values change it.
@@ -197,6 +199,7 @@ let create (connectionId: int) (store: Store) : Session =
       UserVariables = Map.empty
       // Reference fields stay shared; mutable SQL-mode settings stay per session.
       Store = { store with StrictMode = store.StrictMode }
+      TemporaryCatalog = Map.empty
       LastInsertId = 0L
       LastGeneratedId = 0L
       LastRowCount = 0L

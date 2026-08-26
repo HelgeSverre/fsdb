@@ -1454,7 +1454,7 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
 /// execute) and COM_STMT_EXECUTE (bind placeholders then execute), so the
 /// prepared path reuses this one execution body instead of splicing literals
 /// back into SQL text and re-parsing.
-let private executeParsed (session: Session) (stmt: Statement) : Session * QueryResult =
+let private executeParsedCore (session: Session) (stmt: Statement) : Session * QueryResult =
     match stmt with
     | Select _
     | Union _ -> InformationSchema.recordCommand InformationSchema.SelectCommand
@@ -1613,11 +1613,169 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         |> execute
     | None -> execute session
 
+type private TemporaryAction =
+    | CreateTemporary
+    | DropTemporary
+
+let private tableKey (db: string) (table: string) = db.ToLowerInvariant(), normalizeTableName table
+
+let private temporaryKeys (catalog: Catalog) =
+    catalog
+    |> Map.toSeq
+    |> Seq.collect (fun (db, tables) -> tables |> Map.keys |> Seq.map (fun table -> tableKey db table))
+    |> Set.ofSeq
+
+let private hasTemporaryTable (catalog: Catalog) (db: string) (table: string) =
+    catalog
+    |> Map.tryFind (db.ToLowerInvariant())
+    |> Option.exists (Map.containsKey (normalizeTableName table))
+
+let private overlayCatalog (catalog: Catalog) (temporary: Catalog) =
+    temporary
+    |> Map.fold (fun result db tables ->
+        result
+        |> Map.change db (fun current ->
+            current
+            |> Option.defaultValue Map.empty
+            |> fun existing -> Some(Map.fold (fun acc name table -> Map.add name table acc) existing tables))) catalog
+
+let private setCatalogTable (catalog: Catalog) (db: string) (table: string) (value: Table option) =
+    let db = db.ToLowerInvariant()
+    let table = normalizeTableName table
+
+    Map.change
+        db
+        (fun current ->
+            let tables = Option.defaultValue Map.empty current
+
+            let tables =
+                match value with
+                | Some item -> Map.add table item tables
+                | None -> Map.remove table tables
+
+            if Map.isEmpty tables then None else Some tables)
+        catalog
+
+let private catalogTable (catalog: Catalog) (db: string, table: string) =
+    catalog |> Map.tryFind (db.ToLowerInvariant()) |> Option.bind (Map.tryFind (normalizeTableName table))
+
+let private temporaryTargets (dbName: string) (action: TemporaryAction option) (stmt: Statement) =
+    match action, stmt with
+    | Some CreateTemporary, CreateTable table -> [ splitQualified dbName table.Name ]
+    | Some CreateTemporary, CreateTableLike(name, _, _)
+    | Some CreateTemporary, CreateTableAs(name, _, _) -> [ splitQualified dbName name ]
+    | Some DropTemporary, DropTable(names, _) -> names |> List.map (splitQualified dbName)
+    | _ -> []
+
+let private statementUsesTemporary (catalog: Catalog) (dbName: string) (stmt: Statement) =
+    Auth.requiredPrivileges dbName stmt
+    |> List.exists (function
+        | _, Auth.OnTable(db, table) -> hasTemporaryTable catalog db table
+        | _ -> false)
+
+let rec private filterTemporaryEvent keys event =
+    let isTemporary db table = Set.contains (tableKey db table) keys
+
+    match event with
+    | RowsInserted(db, table, _)
+    | RowsUpdated(db, table, _)
+    | RowsDeleted(db, table, _) when isTemporary db table -> None
+    | SchemaChanged(db, statement)
+    | SchemaChangedAt(db, statement, _) ->
+        let touchesTemporary =
+            Auth.requiredPrivileges db statement
+            |> List.exists (function
+                | _, Auth.OnTable(targetDb, table) -> isTemporary targetDb table
+                | _ -> false)
+
+        if touchesTemporary then None else Some event
+    | TransactionCommitted events ->
+        let retained = events |> List.choose (filterTemporaryEvent keys)
+        if retained.IsEmpty then None else Some(TransactionCommitted retained)
+    | _ -> Some event
+
+let private executeWithTemporaryCatalog (action: TemporaryAction option) (session: Session) (stmt: Statement) =
+    let dbName = session.Database |> Option.defaultValue defaultDatabase
+    let baseStore = Session.currentStore session
+    let baseCatalog = baseStore.Catalog
+    let beforeKeys = temporaryKeys session.TemporaryCatalog
+    let targets = temporaryTargets dbName action stmt |> List.map (fun (db, table) -> tableKey db table) |> Set.ofList
+
+    // The private root lets temporary names shadow shared tables without
+    // publishing their schema, rows, or commit events.
+    let combined = overlayCatalog baseCatalog session.TemporaryCatalog
+
+    let combined =
+        targets
+        |> Set.fold (fun catalog (db, table) -> if Set.contains (db, table) beforeKeys then catalog else setCatalogTable catalog db table None) combined
+
+    let working = Storage.beginTransactionSnapshotFromCatalog baseStore combined
+    let workingSession = { session with Store = working; Tx = None }
+    let executed, result = executeParsedCore workingSession stmt
+
+    match result with
+    | Err _ -> { executed with Store = session.Store; Tx = session.Tx }, result
+    | _ ->
+        let afterKeys =
+            match action with
+            | Some CreateTemporary -> Set.union beforeKeys targets
+            | Some DropTemporary -> Set.difference beforeKeys targets
+            | None -> beforeKeys
+
+        let temporaryCatalog =
+            afterKeys
+            |> Set.fold
+                (fun catalog (db, table) ->
+                    match catalogTable working.Catalog (db, table) with
+                    | Some value -> setCatalogTable catalog db table (Some value)
+                    | None -> catalog)
+                Map.empty
+
+        let overlayKeys = Set.unionMany [ beforeKeys; afterKeys; targets ]
+
+        let permanentCatalog =
+            overlayKeys
+            |> Set.fold (fun catalog (db, table) -> setCatalogTable catalog db table (catalogTable baseCatalog (db, table))) working.Catalog
+
+        working.Catalog <- permanentCatalog
+
+        working.PendingEvents
+        |> Option.iter (fun events ->
+            let retained = events |> Seq.choose (filterTemporaryEvent overlayKeys) |> Seq.toArray
+            events.Clear()
+            events.AddRange retained)
+
+        Storage.commitCatalogInto baseStore baseCatalog working
+
+        { executed with
+            Store = session.Store
+            Tx = session.Tx
+            TemporaryCatalog = temporaryCatalog },
+        result
+
+let private executeParsedWithTemporaryAction (action: TemporaryAction option) (session: Session) (stmt: Statement) =
+    let dbName = session.Database |> Option.defaultValue defaultDatabase
+
+    if action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt then
+        executeWithTemporaryCatalog action session stmt
+    else
+        executeParsedCore session stmt
+
+let private executeParsed session stmt = executeParsedWithTemporaryAction None session stmt
+
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     let ansiQuotes = lookupVar session "sql_mode" |> Option.flatten |> Option.exists usesAnsiQuotes
 
-    match Parser.parseWithAnsiQuotes ansiQuotes sql with
-    | Result.Ok stmt -> executeParsed session stmt
+    let action, parsedSql =
+        if Regex.IsMatch(sql, @"^\s*CREATE\s+TEMPORARY\s+TABLE\b", RegexOptions.IgnoreCase) then
+            Some CreateTemporary, Regex.Replace(sql, @"^(\s*CREATE\s+)TEMPORARY\s+", "$1", RegexOptions.IgnoreCase)
+        elif Regex.IsMatch(sql, @"^\s*DROP\s+TEMPORARY\s+TABLE\b", RegexOptions.IgnoreCase) then
+            Some DropTemporary, Regex.Replace(sql, @"^(\s*DROP\s+)TEMPORARY\s+", "$1", RegexOptions.IgnoreCase)
+        else
+            None, sql
+
+    match Parser.parseWithAnsiQuotes ansiQuotes parsedSql with
+    | Result.Ok stmt -> executeParsedWithTemporaryAction action session stmt
     | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError sql detail
 
 /// Every statement form `dispatch` recognizes purely by text probe

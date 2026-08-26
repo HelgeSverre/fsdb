@@ -400,6 +400,9 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
 let beginTransactionSnapshot (store: Store) : Store =
     transactionSnapshotFromCatalog store store.Catalog
 
+let beginTransactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : Store =
+    transactionSnapshotFromCatalog store catalog
+
 let beginTransactionSnapshotWithBase (store: Store) : Catalog * Store =
     let catalog = store.Catalog
     catalog, transactionSnapshotFromCatalog store catalog
