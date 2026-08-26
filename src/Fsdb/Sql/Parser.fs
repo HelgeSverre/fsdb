@@ -484,6 +484,17 @@ let private hexBytesLit: Parser<Value, unit> =
         else
             preturn (VBytes(Convert.FromHexString digits))
 
+let private introducedBinaryHexLit: Parser<Value, unit> =
+    attempt (pstringCI "_binary" .>> ws .>> pstringCI "X" .>> pchar '\'')
+    >>. manyChars (satisfy Uri.IsHexDigit)
+    .>> pchar '\''
+    .>> ws
+    >>= fun digits ->
+        if digits.Length % 2 <> 0 then
+            fail "a hexadecimal binary literal must contain an even number of digits"
+        else
+            preturn (VBytes(Convert.FromHexString digits))
+
 let private bytesOfBits (digits: string) : byte[] =
     if digits.Length = 0 then
         [||]
@@ -515,7 +526,8 @@ let private nationalStringLit: Parser<Value, unit> =
 
 let private literalValue: Parser<Value, unit> =
     choice
-        [ bitBytesLit
+        [ introducedBinaryHexLit
+          bitBytesLit
           numberLit
           hexBytesLit
           nationalStringLit
@@ -1477,6 +1489,7 @@ let private atom: Parser<Expr, unit> =
           temporalLit
           windowCallAtom
           groupConcatAtom
+          introducedBinaryHexLit |>> Lit
           bitBytesLit |>> Lit
           numberLit |>> Lit
           hexBytesLit |>> Lit

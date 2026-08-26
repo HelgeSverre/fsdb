@@ -2773,6 +2773,13 @@ let tests =
               | Ok(Select { Projections = [ FuncCall("POSITION", [ Lit(VString "ood"); Lit(VString "Moodle") ]), None ] }) -> ()
               | other -> failtestf "unexpected POSITION parse: %A" other
 
+          testCase "binary-introduced hexadecimal literals allow adjacent introducers"
+          <| fun _ ->
+              for sql in [ "SELECT _binaryX'00ff'"; "SELECT _binary X'00ff'" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Ok(Select { Projections = [ Lit(VBytes [| 0uy; 255uy |]), None ] }) -> ()
+                  | other -> failtestf "unexpected binary hexadecimal parse for %s: %A" sql other
+
           testCase "REGEXP, ANY, and SOME are reserved in expression position"
           <| fun _ ->
               for sql in [ "SELECT REGEXP"; "SELECT 1 = ANY (SELE)"; "SELECT SOME(1)" ] do

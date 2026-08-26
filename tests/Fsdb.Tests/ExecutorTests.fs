@@ -58,6 +58,12 @@ let tests =
                     | ResultSet(_, [ [ Some "2"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected POSITION offsets 2 and 0, got %A" other
 
+                testCase "binary-introduced hexadecimal literals retain their bytes"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT HEX(_binaryX'01A03D')" with
+                    | ResultSet(_, [ [ Some "01A03D" ] ]) -> ()
+                    | other -> failtestf "expected the introduced bytes, got %A" other
+
                 testCase "FROM DUAL provides MySQL's single-row source"
                 <| fun _ ->
                     match runDefault (newStore ()) "SELECT 1 + 1 AS two FROM DUAL" with
