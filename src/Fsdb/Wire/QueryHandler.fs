@@ -223,12 +223,44 @@ let private resolveAtRef (session: Session) (sigil: string) (scope: string) (nam
 
 let private maxUserVariables = 65536
 
+let private numericSystemVariables =
+    Set.ofList
+        [ "auto_increment_increment"
+          "autocommit"
+          "cte_max_recursion_depth"
+          "foreign_key_checks"
+          "group_concat_max_len"
+          "interactive_timeout"
+          "local_infile"
+          "lower_case_table_names"
+          "max_allowed_packet"
+          "max_connections"
+          "max_heap_table_size"
+          "max_prepared_stmt_count"
+          "net_write_timeout"
+          "performance_schema"
+          "query_cache_size"
+          "sql_notes"
+          "transaction_read_only"
+          "tx_read_only"
+          "unique_checks"
+          "wait_timeout" ]
+
+let private systemVariableValue (name: string) =
+    function
+    | Some(value: string) when Set.contains (name.ToLowerInvariant()) numericSystemVariables ->
+        match UInt64.TryParse value with
+        | true, number -> Some(VUInt number)
+        | false, _ -> Some(VString value)
+    | Some value -> Some(VString value)
+    | None -> None
+
 let private expressionVariablesFor (session: Session) (userVariables: Map<string, Value>) : Executor.VariableContext =
     { UserVariables = ref userVariables
       ReadSystemVariable =
         fun scope name ->
             match lookupAtRef session "@@" scope name with
-            | Some value -> Ok value
+            | Some value -> Ok(systemVariableValue name value)
             | None -> Error(1193, sprintf "Unknown system variable '%s'" name)
       MaxUserVariables = maxUserVariables }
 

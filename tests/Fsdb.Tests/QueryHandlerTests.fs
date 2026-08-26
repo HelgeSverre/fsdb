@@ -482,6 +482,19 @@ let tests =
               let session, _ = handle session "SELECT @@version"
               Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeVarString ] "system variables report text metadata"
 
+              let session, result = handle session "SELECT @@max_allowed_packet, @@innodb_file_per_table, @@restrict_fk_on_non_standard_key"
+
+              match result with
+              | ResultSet(_, [ [ Some packet; Some filePerTable; Some restrictForeignKeys ] ]) ->
+                  Expect.equal packet (string Fsdb.Limits.maxAllowedPacket) "live packet limit"
+                  Expect.equal filePerTable "ON" "InnoDB capability"
+                  Expect.equal restrictForeignKeys "ON" "MySQL 8.4 foreign-key behavior"
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeLongLong; TypeVarString; TypeVarString ]
+                      "numeric variables retain numeric wire metadata"
+              | other -> failtestf "unexpected system-variable result: %A" other
+
           testCase "RANK/DENSE_RANK/NTILE report LONGLONG and PERCENT_RANK reports DOUBLE over the wire"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

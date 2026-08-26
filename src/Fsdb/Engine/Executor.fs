@@ -30,7 +30,7 @@ type private EvalError = int * string
 
 type VariableContext =
     { UserVariables: Map<string, Value> ref
-      ReadSystemVariable: string -> string -> Result<string option, int * string>
+      ReadSystemVariable: string -> string -> Result<Value option, int * string>
       MaxUserVariables: int }
 
 type private TriggerRowScope =
@@ -1272,7 +1272,14 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
         |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
         |> Option.orElse (simple TypeVarString)
-    | SystemVariable _ -> simple TypeVarString
+    | SystemVariable(scope, variable) ->
+        currentVariableContext ()
+        |> Option.bind (fun bindings ->
+            bindings.ReadSystemVariable (scope |> Option.defaultValue "") variable
+            |> Result.toOption
+            |> Option.flatten)
+        |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
+        |> Option.orElse (simple TypeVarString)
     | AssignUserVariable(_, value) -> metadataOfExpr ctx value
     | Lit(VGeometry _) ->
         Some { Value.columnMetadata TypeGeometry with
@@ -2816,7 +2823,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             |> Ok
     | SystemVariable(scope, variable) ->
         match currentVariableContext () with
-        | Some bindings -> bindings.ReadSystemVariable (scope |> Option.defaultValue "") variable |> Result.map (Option.map VString >> Option.defaultValue VNull)
+        | Some bindings -> bindings.ReadSystemVariable (scope |> Option.defaultValue "") variable |> Result.map (Option.defaultValue VNull)
         | None -> Error(1193, sprintf "Unknown system variable '%s'" variable)
     | AssignUserVariable(variable, value) ->
         match UserVariableRef.validationError variable with

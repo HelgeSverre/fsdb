@@ -46,7 +46,9 @@ let defaultVariables: Map<string, string option> =
           "query_cache_type", "OFF"
           "block_encryption_mode", "aes-128-ecb"
           "default_storage_engine", "InnoDB"
+          "innodb_file_per_table", "ON"
           "read_only", "OFF"
+          "restrict_fk_on_non_standard_key", "ON"
           "sql_generate_invisible_primary_key", "OFF" ]
         |> Map.map (fun _ v -> Some v)
 
