@@ -1030,6 +1030,65 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "MySqlConnector reads JSON columns as JSON text"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+
+                  let connStr =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                          server.Port
+
+                  use conn = new MySqlConnector.MySqlConnection(connStr)
+                  do! conn.OpenAsync() |> Async.AwaitTask
+
+                  use setup = conn.CreateCommand()
+                  setup.CommandText <- "CREATE TABLE documents (payload JSON); INSERT INTO documents VALUES ('{\"ok\":true}')"
+                  do! setup.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+
+                  use command = conn.CreateCommand()
+                  command.CommandText <- "SELECT payload FROM documents"
+                  use! reader = command.ExecuteReaderAsync() |> Async.AwaitTask
+                  let! hasRow = reader.ReadAsync() |> Async.AwaitTask
+                  Expect.isTrue hasRow "JSON row present"
+                  Expect.equal (reader.GetDataTypeName 0) "JSON" "JSON type"
+                  Expect.equal (reader.GetString 0) "{\"ok\":true}" "JSON text"
+              }
+              |> Async.RunSynchronously
+
+          testCase "empty grouped windows retain result metadata"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+
+                  let connStr =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                          server.Port
+
+                  use conn = new MySqlConnector.MySqlConnection(connStr)
+                  do! conn.OpenAsync() |> Async.AwaitTask
+
+                  use setup = conn.CreateCommand()
+                  setup.CommandText <- "CREATE TABLE volume_rows (bucket INT, signed_value BIGINT)"
+                  do! setup.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+
+                  use command = conn.CreateCommand()
+                  command.CommandText <-
+                      "SELECT bucket, COUNT(*) AS row_count, ROUND(AVG(signed_value), 4) AS avg_value, "
+                      + "SUM(COUNT(*)) OVER (ORDER BY bucket ROWS UNBOUNDED PRECEDING) AS running_rows "
+                      + "FROM volume_rows WHERE bucket < 64 GROUP BY bucket ORDER BY bucket"
+
+                  use! reader = command.ExecuteReaderAsync() |> Async.AwaitTask
+                  Expect.isFalse reader.HasRows "result is empty"
+                  Expect.equal
+                      [ for index in 0 .. reader.FieldCount - 1 -> reader.GetDataTypeName index ]
+                      [ "INT"; "BIGINT"; "DECIMAL"; "DECIMAL" ]
+                      "static result types"
+              }
+              |> Async.RunSynchronously
+
           // Forces the binary COM_STMT_PREPARE/COM_STMT_EXECUTE path via
           // MySqlCommand.Prepare() (MySqlConnector otherwise inlines
           // parameters as literal text over COM_QUERY) — the only way this

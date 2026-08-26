@@ -1397,8 +1397,8 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VBit(width, _) -> { columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag }
     | VDouble _ -> columnMetadata TypeDouble
     | VDecimal _ -> columnMetadata TypeNewDecimal
-    | VString _
-    | VJson _ -> columnMetadata TypeVarString
+    | VString _ -> columnMetadata TypeVarString
+    | VJson _ -> { columnMetadata TypeJson with Flags = BinaryFlag }
     | VGeometry _ -> { columnMetadata TypeGeometry with Flags = BlobFlag ||| BinaryFlag }
     | VBytes _ -> { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
     | VDate _ -> columnMetadata TypeDate

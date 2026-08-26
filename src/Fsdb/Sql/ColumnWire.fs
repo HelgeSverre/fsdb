@@ -99,7 +99,10 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
         { columnMetadata TypeYear with
             ColumnLength = 4u
             Flags = UnsignedFlag ||| ZeroFillFlag ||| NumFlag }
-    | TJson -> { columnMetadata TypeVarString with ColumnLength = UInt32.MaxValue }
+    | TJson ->
+        { columnMetadata TypeJson with
+            ColumnLength = UInt32.MaxValue
+            Flags = BinaryFlag }
     | TGeometry _ ->
         { columnMetadata TypeGeometry with
             ColumnLength = UInt32.MaxValue

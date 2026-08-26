@@ -593,10 +593,9 @@ let private collectCallsNamed (name: string) (expr: Expr) : Expr list =
 /// `collectWindowFuncs`. `runWindowedSelect` uses it to spot a `HAVING`
 /// clause referencing a windowed projection's alias, which MySQL rejects
 /// with a dedicated error (3594) rather than resolving.
-/// A synthetic pre-pass column (`__fsdb_window_N__`/`__fsdb_match_N__`):
-/// the declared type is only ever read for `Nullable` — the row's actual
-/// `Value` drives the fallback wire metadata downstream (see
-/// `columnMetadataOf`).
+/// A synthetic pre-pass column (`__fsdb_window_N__`/`__fsdb_match_N__`).
+/// Callers with expression metadata should prefer `deriveColumns`, since an
+/// empty result has no runtime value from which to recover the wire type.
 let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : ColumnDef =
     { Name = name
       Type = ty
@@ -1295,7 +1294,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VTime _) -> Some { ColumnWire.metadataOfType(TTime 0) with Flags = BinaryFlag ||| NotNullFlag }
     | Lit(VZeroDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VZeroDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | Lit(VJson _) -> simple TypeVarString |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VJson _) -> Some { ColumnWire.metadataOfType TJson with Flags = BinaryFlag ||| NotNullFlag }
     | UserVariable variable when variable.Sql = "@" -> simple TypeVarString
     | UserVariable variable ->
         currentVariableContext ()
@@ -7927,8 +7926,12 @@ and private runGroupedWindowSelect
 
     match grouped with
     | Err(code, message), _, _ -> Err(code, message), [], []
-    | _, _, groupedRows ->
-        let groupedColumns = leafNames |> List.map (fun name -> syntheticColumn name (TBigInt false) true)
+    | _, groupedMetadata, groupedRows ->
+        let groupedColumns =
+            deriveColumns
+                leafNames
+                (List.replicate leafNames.Length store.ConnectionCollation)
+                groupedMetadata
 
         // Each projection keeps the column name it would have had before the
         // rewrite — the substitution below turns its expression into
@@ -7947,7 +7950,15 @@ and private runGroupedWindowSelect
                 Having = None
                 OrderBy = select.OrderBy |> List.map (fun (e, d) -> substituteExprs replacements e, d) }
 
-        runWindowedSelect store registry dbName groupedColumns Map.empty groupedRows outerSelect outer
+        runWindowedSelect
+            store
+            registry
+            dbName
+            groupedColumns
+            (singleQualifier "__fsdb_grouped__" groupedColumns)
+            groupedRows
+            outerSelect
+            outer
 
 and private runWindowedSelect
     (store: Store)
@@ -8603,7 +8614,11 @@ and private runWindowedSelect
                         | WindowOver((WinRowNumber | WinRank _ | WinPercentRank | WinCumeDist | WinNTile _), _) -> false
                         | _ -> true
 
-                    syntheticColumn name (TBigInt false) nullable)
+                    metadataOfExpr (ctxFor [||]) wf
+                    |> Option.map (fun metadata ->
+                        let column = deriveColumns [ name ] [ store.ConnectionCollation ] [ metadata ] |> List.head
+                        { column with Nullable = nullable })
+                    |> Option.defaultValue (syntheticColumn name (TBigInt false) nullable))
 
             let extendedColumns = columns @ syntheticColumns
 
@@ -8640,7 +8655,11 @@ and private runWindowedSelect
                     Projections = select.Projections |> List.collect rewriteProjection
                     OrderBy = select.OrderBy |> List.map (fun (e, dir) -> substituteWindowFuncs synthetic e, dir) }
 
-            runSelect store registry dbName extendedColumns qualifiers extendedRows select' outer
+            let extendedQualifiers =
+                qualifiers
+                |> Map.add "__fsdb_window__" (syntheticColumns, columns.Length)
+
+            runSelect store registry dbName extendedColumns extendedQualifiers extendedRows select' outer
 
 and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
     let indexColumns =
