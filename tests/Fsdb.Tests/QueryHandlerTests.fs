@@ -589,6 +589,19 @@ let tests =
               | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES, got %A" other
 
+          testCase "SET default_storage_engine accepts InnoDB"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "SET default_storage_engine=InnoDB"
+
+              match result with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected SET to succeed, got %A" other
+
+              match handle session "SELECT @@default_storage_engine" |> snd with
+              | ResultSet(_, [ [ Some "InnoDB" ] ]) -> ()
+              | other -> failtestf "expected InnoDB, got %A" other
+
           testCase "SET NAMES 'x' COLLATE 'y', SESSION sql_mode='...' applies both assignments"
           <| fun _ ->
               // Laravel's MySqlConnector::configureConnection sends exactly

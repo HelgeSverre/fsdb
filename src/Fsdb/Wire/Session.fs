@@ -44,7 +44,8 @@ let defaultVariables: Map<string, string option> =
           "performance_schema", "0"
           "query_cache_size", "0"
           "query_cache_type", "OFF"
-          "block_encryption_mode", "aes-128-ecb" ]
+          "block_encryption_mode", "aes-128-ecb"
+          "default_storage_engine", "InnoDB" ]
         |> Map.map (fun _ v -> Some v)
 
 /// Recomputes defaults so configured limits and reported values cannot drift.
