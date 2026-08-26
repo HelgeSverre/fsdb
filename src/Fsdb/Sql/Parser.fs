@@ -3631,7 +3631,7 @@ let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
         Result.Error ex.Message
 
 /// Splits a COM_QUERY batch at statement delimiters outside literals,
-/// comments, and compound trigger bodies. The parser still validates each
+/// comments, and supported compound object bodies. The parser still validates each
 /// returned statement separately.
 let splitStatements (sql: string) : Result<string list, string> =
     let sql = stripVersionComments sql
@@ -3641,18 +3641,25 @@ let splitStatements (sql: string) : Result<string list, string> =
     let mutable quote: char option = None
     let mutable blockComment = false
     let mutable lineComment = false
-    let mutable triggerCompoundDepth = 0
+    let mutable compoundDepth = 0
 
     let isWordStart c = Char.IsLetter c || c = '_'
     let isWordPart c = Char.IsLetterOrDigit c || c = '_'
 
-    let startsTriggerCompound at =
+    let startsCompound at =
         let prefix = sql.[start .. at - 1]
+
+        let options = System.Text.RegularExpressions.RegexOptions.IgnoreCase
 
         System.Text.RegularExpressions.Regex.IsMatch(
             prefix,
             @"^\s*CREATE\s+TRIGGER\b[\s\S]*\bFOR\s+EACH\s+ROW(?:\s+(?:FOLLOWS|PRECEDES)\s+(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*))?\s*$",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            options
+        )
+        || System.Text.RegularExpressions.Regex.IsMatch(
+            prefix,
+            @"^\s*CREATE\s+PROCEDURE\s+\S+\s*\(\s*\)\s*$",
+            options
         )
 
     let addStatement stop =
@@ -3707,15 +3714,15 @@ let splitStatements (sql: string) : Result<string list, string> =
             let word = sql.[i .. stop - 1]
 
             if word.Equals("BEGIN", StringComparison.OrdinalIgnoreCase) then
-                if triggerCompoundDepth > 0 || startsTriggerCompound i then
-                    triggerCompoundDepth <- triggerCompoundDepth + 1
-            elif triggerCompoundDepth > 0 && word.Equals("CASE", StringComparison.OrdinalIgnoreCase) then
-                triggerCompoundDepth <- triggerCompoundDepth + 1
-            elif triggerCompoundDepth > 0 && word.Equals("END", StringComparison.OrdinalIgnoreCase) then
-                triggerCompoundDepth <- triggerCompoundDepth - 1
+                if compoundDepth > 0 || startsCompound i then
+                    compoundDepth <- compoundDepth + 1
+            elif compoundDepth > 0 && word.Equals("CASE", StringComparison.OrdinalIgnoreCase) then
+                compoundDepth <- compoundDepth + 1
+            elif compoundDepth > 0 && word.Equals("END", StringComparison.OrdinalIgnoreCase) then
+                compoundDepth <- compoundDepth - 1
 
             i <- stop
-        | None when sql.[i] = ';' && triggerCompoundDepth = 0 ->
+        | None when sql.[i] = ';' && compoundDepth = 0 ->
             addStatement i
             start <- i + 1
             i <- i + 1

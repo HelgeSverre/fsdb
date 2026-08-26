@@ -2656,6 +2656,18 @@ let tests =
                       "trigger order does not expose body delimiters"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "statement batches preserve compound procedure bodies"
+          <| fun _ ->
+              let sql = "CREATE PROCEDURE first_post() BEGIN SELECT id FROM posts LIMIT 1; END; SELECT 1"
+
+              match splitStatements sql with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ "CREATE PROCEDURE first_post() BEGIN SELECT id FROM posts LIMIT 1; END"; "SELECT 1" ]
+                      "the procedure body remains one statement"
+              | Error error -> failtestf "unexpected split error: %s" error
+
           testCase "statement batches reject unterminated literals"
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with
