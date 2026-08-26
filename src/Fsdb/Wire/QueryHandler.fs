@@ -725,9 +725,20 @@ let private showCreateViewRe = Regex(@"^SHOW\s+CREATE\s+VIEW\s+(\S+)\s*$", Regex
 let private showIndexRe =
     Regex(@"^SHOW\s+(?:INDEX|INDEXES|KEYS)\s+(?:FROM|IN)\s+(\S+)(\s+(?:FROM|IN)\s+(\S+))?", RegexOptions.IgnoreCase)
 
-let private showIndexNameFilter (sql: string) =
-    let matched = Regex.Match(sql, @"\s+WHERE\s+`?Key_name`?\s*=\s*'([^']*)'\s*$", RegexOptions.IgnoreCase)
-    if matched.Success then Some matched.Groups.[1].Value else None
+let private showIndexTextFilter (column: string) (sql: string) =
+    let matched =
+        Regex.Match(
+            sql,
+            sprintf @"(?:\s+WHERE|\s+AND)\s+`?%s`?\s*=\s*(?<value>'(?:\\.|''|[^'])*')" (Regex.Escape column),
+            RegexOptions.IgnoreCase
+        )
+
+    if not matched.Success then
+        None
+    else
+        match Parser.parseExpression matched.Groups.["value"].Value with
+        | Ok(Lit(VString value)) -> Some value
+        | _ -> None
 
 let private showTableStatusRe = Regex(@"^SHOW\s+TABLE\s+STATUS(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
@@ -2460,8 +2471,14 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowCreate name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
+        let showCreate =
+            if hasTemporaryTable session.TemporaryCatalog dbName table then
+                InformationSchema.showCreateTemporaryTable
+            else
+                InformationSchema.showCreateTable
+
         session,
-        InformationSchema.showCreateTable (catalogWithOverlay session dbName table) dbName table
+        showCreate (catalogWithOverlay session dbName table) dbName table
         |> showTableResult session dbName table
     | ShowCreateView name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
@@ -2506,9 +2523,17 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         session,
         InformationSchema.showIndex (catalogWithOverlay session dbName table) dbName table
         |> Result.map (fun (columns, rows) ->
-            match showIndexNameFilter sql with
-            | None -> columns, rows
-            | Some keyName -> columns, rows |> List.filter (fun row -> List.item 2 row = Some keyName))
+            let matches index wanted row =
+                wanted
+                |> Option.forall (fun value ->
+                    row
+                    |> List.tryItem index
+                    |> Option.flatten
+                    |> Option.exists (fun actual -> String.Equals(actual, value, StringComparison.OrdinalIgnoreCase)))
+
+            let keyName = showIndexTextFilter "Key_name" sql
+            let columnName = showIndexTextFilter "Column_name" sql
+            columns, rows |> List.filter (fun row -> matches 2 keyName row && matches 4 columnName row))
         |> showTableResult session dbName table
     | ShowGrants userOpt ->
         // No FOR clause or CURRENT_USER selects the authenticated account.

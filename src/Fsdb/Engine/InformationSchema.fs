@@ -1796,7 +1796,7 @@ let private backtickCols = List.map backtick >> String.concat ","
 /// around), a fresh rendering of the same columns/indexes/foreign keys, the
 /// same way real MySQL's `SHOW CREATE TABLE` itself re-derives its output
 /// from the catalog rather than echoing verbatim source.
-let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : string =
+let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: string) (t: Table) : string =
     let columnLine (c: ColumnDef) =
         let notNull = if c.PrimaryKey || not c.Nullable then "NOT NULL" else ""
 
@@ -1929,7 +1929,8 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
         if t.TableComment = "" then "" else sprintf " COMMENT='%s'" (showCreateString t.TableComment)
 
     sprintf
-        "CREATE TABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s%s"
+        "CREATE %sTABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s%s"
+        (if temporary then "TEMPORARY " else "")
         (backtick t.OriginalName)
         (String.concat ",\n  " lines)
         tableCharset
@@ -1939,7 +1940,11 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
 /// `SHOW CREATE TABLE t`.
 let showCreateTable (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =
     findTable catalog dbName tableName
-    |> Result.map (fun t -> [ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL catalog dbName t) ] ])
+    |> Result.map (fun t -> [ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL false catalog dbName t) ] ])
+
+let showCreateTemporaryTable (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =
+    findTable catalog dbName tableName
+    |> Result.map (fun t -> [ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL true catalog dbName t) ] ])
 
 /// `SHOW CREATE VIEW v` for the read-only stored-query subset.
 let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : ShowResult =

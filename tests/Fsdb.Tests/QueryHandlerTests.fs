@@ -1904,6 +1904,13 @@ let tests =
                   Expect.stringContains ddl "KEY `ix_label` (`label`(20))" "varchar prefix"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
+              let session, altered = handle session "ALTER TABLE prefixed ADD INDEX ix_altered (label (191))"
+              Expect.equal altered (Affected 0UL) "prefix index added"
+
+              match handle session "SHOW INDEX FROM prefixed WHERE key_name = 'ix_altered' and column_name = 'label'" |> snd with
+              | ResultSet(_, [ row ]) -> Expect.equal row.[7] (Some "191") "ALTER prefix metadata"
+              | other -> failtestf "expected the altered prefix index, got %A" other
+
           testCase "composite primary metadata follows key declaration order"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -2660,6 +2667,10 @@ let tests =
               match handle session "SELECT GROUP_CONCAT(name ORDER BY name) FROM staging" |> snd with
               | ResultSet(_, [ [ Some "first,second" ] ]) -> ()
               | other -> failtestf "expected rows copied into temporary table, got %A" other
+
+              match handle session "SHOW CREATE TABLE staging" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) -> Expect.stringStarts ddl "CREATE TEMPORARY TABLE" "temporary DDL"
+              | other -> failtestf "expected temporary SHOW CREATE output, got %A" other
 
               Expect.isFalse (Map.containsKey "staging" store.Catalog.[Fsdb.Storage.defaultDatabase]) "temporary table was not published"
 
