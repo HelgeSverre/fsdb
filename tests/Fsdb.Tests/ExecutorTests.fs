@@ -5637,23 +5637,31 @@ let tests =
                 testCase "numeric strings retain BIGINT precision"
                 <| fun _ ->
                     let store = newStore ()
-                    runDefault store "CREATE TABLE ids (id BIGINT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE ids (id BIGINT UNSIGNED PRIMARY KEY, reserved_at INT NOT NULL DEFAULT 0)" |> ignore
 
                     match
                         runDefault
                             store
-                            "INSERT INTO ids VALUES ('122092114329652993'), ('122092114329653001')"
+                            "INSERT INTO ids (id) VALUES ('122092114329652993'), ('122092114329653001')"
                     with
                     | Affected 2UL -> ()
                     | other -> failtestf "expected distinct string-bound ids, got %A" other
 
-                    match runDefault store "SELECT id FROM ids ORDER BY id" with
+                    match runDefault store "UPDATE ids SET reserved_at = 1 WHERE id = '122092114329652993'" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one adjacent id update, got %A" other
+
+                    match runDefault store "DELETE FROM ids WHERE id = '122092114329653001'" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one adjacent id delete, got %A" other
+
+                    match runDefault store "SELECT id, reserved_at FROM ids" with
                     | ResultSet(_, rows) ->
                         Expect.equal
                             rows
-                            [ [ Some "122092114329652993" ]; [ Some "122092114329653001" ] ]
-                            "BIGINT strings remain exact beyond double precision"
-                    | other -> failtestf "expected exact ids, got %A" other
+                            [ [ Some "122092114329652993"; Some "1" ] ]
+                            "quoted predicates distinguish adjacent BIGINT values"
+                    | other -> failtestf "expected the updated first id, got %A" other
 
                 testCase "the scalar-function family answers in the unsigned domain instead of saturating"
                 <| fun _ ->

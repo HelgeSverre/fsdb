@@ -490,8 +490,15 @@ let tests =
                 testCase "two ints compare numerically"
                 <| fun _ -> Expect.isLessThan (compare (VInt 2L) (VInt 10L)) 0 "2 < 10"
 
-                testCase "a number vs. a numeric string coerces the string to a double"
+                testCase "a number vs. a numeric string compares in the numeric domain"
                 <| fun _ -> Expect.equal (compare (VInt 1L) (VString "1")) 0 "1 = '1'"
+
+                testCase "integer comparisons with numeric strings remain exact above double precision"
+                <| fun _ ->
+                    let first = 122284105097302016UL
+                    let second = 122284105097302017UL
+                    Expect.isLessThan (compare (VUInt first) (VString(string second))) 0 "adjacent unsigned ids remain distinct"
+                    Expect.isGreaterThan (compare (VString(string second)) (VInt(int64 first))) 0 "comparison is symmetric"
 
                 testCase "numeric-string coercion beats lexical string ordering"
                 <| fun _ ->

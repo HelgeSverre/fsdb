@@ -1426,15 +1426,18 @@ let private parseLeadingNumeric (s: string) : float =
     else
         0.0
 
-let private compareBitString (value: uint64) (text: string) =
+let private compareDecimalString (value: decimal) (text: string) =
     let matched = leadingNumeric.Match text
 
     if not matched.Success then
-        Decimal.Compare(decimal value, 0m)
+        Decimal.Compare(value, 0m)
     else
         match Decimal.TryParse(matched.Value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
-        | true, number -> Decimal.Compare(decimal value, number)
+        | true, number -> Decimal.Compare(value, number)
         | false, _ -> Operators.compare (float value) (parseLeadingNumeric text)
+
+let private compareBitString (value: uint64) (text: string) =
+    compareDecimalString (decimal value) text
 
 /// MySQL's implicit numeric coercion, used by both comparison and
 /// arithmetic: numeric types convert directly, strings parse their leading
@@ -1619,7 +1622,7 @@ let rec private compareJsonNodes (x: JsonNode) (y: JsonNode) : int =
     | _ -> 0
 
 /// Total order over values for ORDER BY: NULL sorts first, numbers compare
-/// numerically (a number vs. a string coerces the string to a double, so
+/// numerically (a number vs. a string coerces the string to a number, so
 /// `'10' < '9'` numerically even though it's false as a string compare),
 /// same-typed values compare natively (strings per `compareStrings`'s
 /// collation), and anything else falls back to a text compare.
@@ -1660,6 +1663,12 @@ let rec compare (a: Value) (b: Value) : int =
     | VUInt x, VBit(_, y) -> Operators.compare x y
     | VBit(_, x), VDecimal y -> Decimal.Compare(decimal x, y)
     | VDecimal x, VBit(_, y) -> Decimal.Compare(x, decimal y)
+    | VInt value, VString text -> compareDecimalString (decimal value) text
+    | VString text, VInt value -> -(compareDecimalString (decimal value) text)
+    | VUInt value, VString text -> compareDecimalString (decimal value) text
+    | VString text, VUInt value -> -(compareDecimalString (decimal value) text)
+    | VDecimal value, VString text -> compareDecimalString value text
+    | VString text, VDecimal value -> -(compareDecimalString value text)
     | VBit(_, value), VString text -> compareBitString value text
     | VString text, VBit(_, value) -> -(compareBitString value text)
     | VBit(_, value), VBytes bytes -> compareBitBytes value bytes
