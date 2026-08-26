@@ -395,6 +395,26 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected the transaction's own write to also be there, got %A" result
 
+          testCase "concurrent transactions preserve tables created by other transactions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first, _ = handle (create 1 store) "BEGIN"
+              let second, _ = handle (create 2 store) "BEGIN"
+              let first, firstCreate = handle first "CREATE TABLE tx_created_first (id INT PRIMARY KEY)"
+              let second, secondCreate = handle second "CREATE TABLE tx_created_second (id INT PRIMARY KEY)"
+
+              Expect.equal firstCreate (Affected 0UL) "the first private catalog accepts its table"
+              Expect.equal secondCreate (Affected 0UL) "the second private catalog accepts its table"
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first catalog commits"
+              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the disjoint second catalog also commits"
+
+              match handle (create 3 store) "SHOW TABLES" |> snd with
+              | ResultSet(_, rows) ->
+                  let names = rows |> List.choose List.tryHead |> List.choose id |> Set.ofList
+                  Expect.isTrue (Set.contains "tx_created_first" names) "the first table remains visible"
+                  Expect.isTrue (Set.contains "tx_created_second" names) "the second table is published"
+              | result -> failtestf "expected both committed tables, got %A" result
+
           testCase "a qualified cross-database transaction merges a disjoint concurrent row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

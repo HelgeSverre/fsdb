@@ -5410,6 +5410,7 @@ let private mergeDatabaseSlotPublishing
                     |> Set.fold
                         (fun acc tableName ->
                             match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
+                            | None, None, Some _ -> acc
                             | Some baseTable, Some batchTable, _ when obj.ReferenceEquals(baseTable, batchTable) -> acc
                             | Some baseTable, None, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.remove tableName acc
                             | None, Some batchTable, None -> Map.add tableName batchTable acc
