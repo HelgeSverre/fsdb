@@ -11234,9 +11234,20 @@ let private afterInsertTriggers (store: Store) (db: string) (table: string) =
 let private beforeInsertTriggers (store: Store) (db: string) (table: string) =
     triggersFor store db table "BEFORE" "INSERT"
 
+type private TriggerStatement =
+    | TriggerDml of Statement
+    | TriggerIf of condition: Expr * body: Statement
+
+let private triggerDml =
+    function
+    | TriggerDml statement
+    | TriggerIf(_, statement) -> statement
+
 /// The one table a trigger body statement writes — what 1442's "already
 /// used by the statement which invoked this trigger" check points at.
-let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string) option =
+let private writtenTableOf (dbName: string) (triggerStatement: TriggerStatement) : (string * string) option =
+    let stmt = triggerDml triggerStatement
+
     match stmt with
     | Insert(t, _, _, _, _)
     | InsertSelect(t, _, _, _, _)
@@ -11249,17 +11260,26 @@ let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string
     | Delete d -> Some(d.From.Database |> Option.defaultValue dbName, normalizeTableName d.From.Table)
     | _ -> None
 
-let private parseTriggerBody (body: string) : Result<Statement list, string> =
+let private parseTriggerBody (body: string) : Result<TriggerStatement list, string> =
     let compound = Regex.Match(body, @"^\s*BEGIN\b(?<body>[\s\S]*)\bEND\s*$", RegexOptions.IgnoreCase)
 
     if compound.Success then
-        Parser.splitStatements compound.Groups.["body"].Value
-        |> Result.bind (fun statements ->
-            match statements with
-            | [] -> Error "Trigger body cannot be empty"
-            | statements -> statements |> traverse Parser.parse)
+        let inner = compound.Groups.["body"].Value
+        let conditional = Regex.Match(inner, @"^\s*IF\s+(?<condition>[\s\S]+?)\s+THEN\s+(?<body>[\s\S]+?)\s*;\s*END\s+IF\s*;?\s*$", RegexOptions.IgnoreCase)
+
+        if conditional.Success then
+            Parser.parseExpression conditional.Groups.["condition"].Value
+            |> Result.bind (fun condition ->
+                Parser.parse (conditional.Groups.["body"].Value.Trim().TrimEnd(';'))
+                |> Result.map (fun statement -> [ TriggerIf(condition, statement) ]))
+        else
+            Parser.splitStatements inner
+            |> Result.bind (fun statements ->
+                match statements with
+                | [] -> Error "Trigger body cannot be empty"
+                | statements -> statements |> traverse (Parser.parse >> Result.map TriggerDml))
     else
-        Parser.parse body |> Result.map List.singleton
+        Parser.parse body |> Result.map (TriggerDml >> List.singleton)
 
 /// Every database an INSERT into `dbName.tableName` can reach through its
 /// AFTER INSERT triggers, following the chain transitively.
@@ -11270,7 +11290,8 @@ let private parseTriggerBody (body: string) : Result<Statement list, string> =
 /// one of the two rows is lost when the transaction merges
 /// (`Storage.mergeDatabaseSlot`).
 let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : string list =
-    let bodyTargets (defaultDb: string) (statement: Statement) =
+    let bodyTargets (defaultDb: string) (triggerStatement: TriggerStatement) =
+        let statement = triggerDml triggerStatement
         let tableRefTarget (table: TableRef) =
             table.Database |> Option.defaultValue defaultDb, normalizeTableName table.Table
 
@@ -11321,19 +11342,26 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
 /// INSERT...SELECT body's SELECT isn't traversed — the fire-time
 /// `shadowDirectOnly` backstop still catches those, the same backstop that
 /// covers functions registered only after the trigger was created.
-let private triggerBodyExprs (stmt: Statement) : Expr list =
-    match stmt with
-    | SetTriggerNew(_, expression) -> [ expression ]
-    | Insert(_, _, rows, onDup, _) -> List.concat rows @ (onDup |> List.map snd)
-    | InsertSelect(_, _, _, onDup, _) -> onDup |> List.map snd
-    | Replace(_, _, rows) -> List.concat rows
-    | ReplaceSelect _ -> []
-    | ReplaceSet(_, assignments) -> assignments |> List.map snd
-    | Update u -> (u.Assignments |> List.map (fun a -> a.Value)) @ Option.toList u.Where
-    | Delete d -> Option.toList d.Where
-    | _ -> []
+let private triggerBodyExprs (triggerStatement: TriggerStatement) : Expr list =
+    let condition =
+        match triggerStatement with
+        | TriggerIf(condition, _) -> [ condition ]
+        | TriggerDml _ -> []
 
-let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list) (statement: Statement) =
+    let stmt = triggerDml triggerStatement
+
+    match stmt with
+    | SetTriggerNew(_, expression) -> condition @ [ expression ]
+    | Insert(_, _, rows, onDup, _) -> condition @ List.concat rows @ (onDup |> List.map snd)
+    | InsertSelect(_, _, _, onDup, _) -> condition @ (onDup |> List.map snd)
+    | Replace(_, _, rows) -> condition @ List.concat rows
+    | ReplaceSelect _ -> condition
+    | ReplaceSet(_, assignments) -> condition @ (assignments |> List.map snd)
+    | Update u -> condition @ (u.Assignments |> List.map (fun a -> a.Value)) @ Option.toList u.Where
+    | Delete d -> condition @ Option.toList d.Where
+    | _ -> condition
+
+let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list) (triggerStatement: TriggerStatement) =
     let rec references =
         function
         | QualifiedCol(qualifier, column) when qualifier.Equals("OLD", System.StringComparison.OrdinalIgnoreCase) || qualifier.Equals("NEW", System.StringComparison.OrdinalIgnoreCase) ->
@@ -11396,6 +11424,13 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
             @ (limit |> Option.map references |> Option.defaultValue [])
             @ (offset |> Option.map references |> Option.defaultValue [])
 
+    let statement = triggerDml triggerStatement
+
+    let conditionReferences =
+        match triggerStatement with
+        | TriggerIf(condition, _) -> references condition
+        | TriggerDml _ -> []
+
     let statementReferences =
         match statement with
         | SetTriggerNew(_, expression) -> references expression
@@ -11413,6 +11448,8 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
             @ (delete.Where |> Option.map references |> Option.defaultValue [])
         | _ -> []
 
+    let statementReferences = conditionReferences @ statementReferences
+
     statementReferences
     |> List.tryPick (fun (image, column) ->
         match image, event with
@@ -11429,8 +11466,10 @@ let private validateTriggerStatement
     (timing: TriggerTiming)
     (event: TriggerEvent)
     (columns: ColumnDef list)
-    (statement: Statement)
+    (triggerStatement: TriggerStatement)
     : Result<unit, QueryResult> =
+    let statement = triggerDml triggerStatement
+
     match statement with
     | Insert _
     | InsertSelect _
@@ -11440,10 +11479,10 @@ let private validateTriggerStatement
     | Update _
     | Delete _
     | SetTriggerNew _ ->
-        match triggerRowImageError event columns statement with
+        match triggerRowImageError event columns triggerStatement with
         | Some error -> Error error
         | None ->
-            match triggerBodyExprs statement |> List.tryPick (firstDirectOnlyCall registry) with
+            match triggerBodyExprs triggerStatement |> List.tryPick (firstDirectOnlyCall registry) with
             | Some fn -> Error(Err(3102, sprintf "Expression of trigger contains a disallowed function: %s" fn))
             | None ->
                 match statement with
@@ -11616,7 +11655,9 @@ let rec executeAs
                                 Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name)
                             )
                         else
-                            let privileges = bodyStatements |> traverse (checkStoredDefiner runStore trigger.Definer db)
+                            let privileges =
+                                bodyStatements
+                                |> traverse (triggerDml >> checkStoredDefiner runStore trigger.Definer db)
 
                             match storedObjectAccount trigger.Definer, privileges with
                             | Some account, Result.Ok _ -> Result.Ok(bodyStatements, account)
@@ -11637,7 +11678,7 @@ let rec executeAs
                 // error result here rather than an exception, so a
                 // failing body doesn't abort a surrounding
                 // transaction the way an escaped exception would.
-                let runBody (oldRow: Value[] option) (newRow: Value[] option) (statements: Statement list, account: Auth.Account) : QueryResult =
+                let runBody (oldRow: Value[] option) (newRow: Value[] option) (statements: TriggerStatement list, account: Auth.Account) : QueryResult =
                     let definerRegistry = registryForDefiner account shadowed
 
                     withTriggerRowScope
@@ -11645,7 +11686,7 @@ let rec executeAs
                           Old = oldRow
                           New = newRow }
                         (fun () ->
-                            let runStatement statement =
+                            let runDml statement =
                                 match statement with
                                 | SetTriggerNew(column, expression) ->
                                     match timing, event, newRow, resolveColumn columns column with
@@ -11666,6 +11707,17 @@ let rec executeAs
                                         executeAs runStore definerRegistry db (0L, 0L) foundRows account statement |> snd
                                     with SqlError(code, msg) ->
                                         Err(code, msg)
+
+                            let runStatement =
+                                function
+                                | TriggerDml statement -> runDml statement
+                                | TriggerIf(condition, statement) ->
+                                    let context = contextFactory runStore definerRegistry db Map.empty Map.empty None [||]
+
+                                    match evalExpr context condition with
+                                    | Error(code, message) -> Err(code, message)
+                                    | Ok value when truthy value = Some true -> runDml statement
+                                    | Ok _ -> Affected 0UL
 
                             statements
                             |> List.fold

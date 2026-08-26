@@ -64,6 +64,21 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "fire compound trigger"
               Expect.equal (rows store "SELECT n FROM t") [ [ Some "22" ] ] "later assignments observe the updated NEW row"
 
+          testCase "conditional trigger bodies execute only when their predicate is true"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (10), (20)") "seed rows"
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TRIGGER changed AFTER UPDATE ON t FOR EACH ROW BEGIN IF (NOT(NEW.n <=> OLD.n)) THEN INSERT INTO log(n) VALUES (NEW.n); END IF; END")
+                  "create conditional trigger"
+
+              expectOk (runDefault store "UPDATE t SET n = IF(n = 10, 11, n)") "update rows"
+              Expect.equal (rows store "SELECT n FROM log") [ [ Some "11" ] ] "only the changed row is logged"
+
           testCase "BEFORE INSERT preserves body writes in the subject database"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
