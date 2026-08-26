@@ -241,6 +241,7 @@ let private numericSystemVariables =
           "performance_schema"
           "query_cache_size"
           "sql_notes"
+          "tmp_table_size"
           "transaction_read_only"
           "tx_read_only"
           "unique_checks"

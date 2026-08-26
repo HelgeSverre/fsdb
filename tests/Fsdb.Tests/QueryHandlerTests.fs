@@ -645,6 +645,10 @@ let tests =
               | ResultSet(_, [ [ Some "OFF" ] ]) -> ()
               | other -> failtestf "expected read_only OFF, got %A" other
 
+              match handle session "SELECT @@tmp_table_size, @@max_heap_table_size" |> snd with
+              | ResultSet(_, [ [ Some "16777216"; Some "16777216" ] ]) -> ()
+              | other -> failtestf "expected temporary-table limits, got %A" other
+
               let session, result = handle session "SET sql_generate_invisible_primary_key = OFF"
 
               match result with
