@@ -1043,6 +1043,10 @@ let tests =
                             |> Option.iter (fun column -> Expect.equal column.Default (Some(DConst(VInt -1L))) "negative default")
                         | other -> failtestf "expected generated CREATE TABLE to parse, got %A" other
 
+                    match parseOk "CREATE TABLE task (progress DOUBLE PRECISION DEFAULT 0)" with
+                    | CreateTable { Columns = [ { Type = TDouble } ] } -> ()
+                    | other -> failtestf "expected DOUBLE PRECISION to parse, got %A" other
+
                 testCase "ANSI_QUOTES treats double-quoted table names as identifiers"
                 <| fun _ ->
                     match parseWithAnsiQuotes true "CREATE TABLE \"quoted table\" (\"id\" INT PRIMARY KEY)" with

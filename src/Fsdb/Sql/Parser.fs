@@ -600,7 +600,7 @@ let private columnType: Parser<ColumnType, unit> =
           |>> function
               | Some(p, s) -> TDecimal(p, s)
               | None -> TDecimal(10, 0)
-          keyword "DOUBLE" >>. ignoredWidth >>. unsignedFlag >>% TDouble
+          keyword "DOUBLE" >>. optional (keyword "PRECISION") >>. ignoredWidth >>. unsignedFlag >>% TDouble
           keyword "FLOAT" >>. ignoredWidth >>. unsignedFlag >>% TFloat
           keyword "DATETIME" >>. optFsp |>> TDateTime
           keyword "TIMESTAMP" >>. optFsp |>> TTimestamp
