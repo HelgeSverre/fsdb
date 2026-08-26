@@ -3851,6 +3851,9 @@ let private processRow
     (rawRow: Value option list)
     (columns: ColumnDef list)
     : Result<Value list * int64 * (bool * int64) option * Set<int>, StorageError> =
+    let nextAfterExplicit current value =
+        if value = Int64.MaxValue then Int64.MaxValue else max current (value + 1L)
+
     let step acc (col: ColumnDef, provided: Value option) =
         match acc with
         | Error e -> Error e
@@ -3863,7 +3866,10 @@ let private processRow
                 | _ ->
                     match coerceStoredValueWithMode mode col pending with
                     | Error e -> Error e
-                    | Ok(VInt i) -> Ok(VInt i :: valuesRev, max nextAutoId (i + 1L), Some(false, i))
+                    | Ok(VInt i) -> Ok(VInt i :: valuesRev, nextAfterExplicit nextAutoId i, Some(false, i))
+                    | Ok(VUInt value) when value <= uint64 Int64.MaxValue ->
+                        let id = int64 value
+                        Ok(VUInt value :: valuesRev, nextAfterExplicit nextAutoId id, Some(false, id))
                     | Ok _ -> Error(InvalidValueForColumn(col.Name, "auto_increment"))
             elif provided.IsNone && (match col.Default with Some(DExpression _) -> true | _ -> false) then
                 Ok(pending :: valuesRev, nextAutoId, assignedId)

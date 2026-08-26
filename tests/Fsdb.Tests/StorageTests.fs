@@ -288,6 +288,24 @@ let tests =
                     | Ok { LastInsertId = lastId } -> Expect.equal lastId 101L "counter continues past the explicit id"
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "an explicit unsigned AUTO_INCREMENT value is preserved"
+                <| fun _ ->
+                    let store = create ()
+
+                    let id =
+                        { (col "id" (TBigInt true) false) with
+                            AutoIncrement = true
+                            PrimaryKey = true }
+
+                    createTable store defaultDatabase "unsigned_ids" [ id ] [] [] None None |> ignore
+
+                    match insertRows store defaultDatabase "unsigned_ids" None [ [ VUInt 4UL ] ] with
+                    | Ok { LastInsertId = 4L; Affected = 1 } ->
+                        match scan store defaultDatabase "unsigned_ids" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows) [ [| VUInt 4UL |] ] "stored value"
+                        | Error e -> failtestf "expected Ok scan, got %A" e
+                    | other -> failtestf "expected explicit unsigned id 4, got %A" other
+
                 testCase "a single explicit-id insert reports that id as lastInsertId, matching real MySQL's OK packet (not the SQL LAST_INSERT_ID() function's 0)"
                 <| fun _ ->
                     let store = withUsersTable ()
