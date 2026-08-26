@@ -1706,6 +1706,7 @@ type private ColMod =
     | MCollate of string
     /// A validated `CHARACTER SET name` (utf8mb4/latin1/ascii).
     | MCharset of string
+    | MBinary
     | MOnUpdateCurrentTimestamp
     | MCheck of name: string option * expression: Expr * enforced: bool
     | MComment of string
@@ -1797,6 +1798,7 @@ let private colMod: Parser<ColMod, unit> =
           >>% MOnUpdateCurrentTimestamp
           keyword "COMMENT" >>. stringLit |>> (function VString text -> MComment text | _ -> MComment "")
           attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET") >>. knownCharset |>> MCharset
+          keyword "BINARY" >>% MBinary
           keyword "COLLATE"
           >>. identOrString
           >>= fun name ->
@@ -1819,7 +1821,22 @@ let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
               OnUpdateCurrentTimestamp = List.contains MOnUpdateCurrentTimestamp mods
               Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
               Comment = mods |> List.rev |> List.tryPick (function MComment text -> Some text | _ -> None) |> Option.defaultValue ""
-              Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
+              Collation =
+                  mods
+                  |> List.tryPick (function MCollate c -> Some c | _ -> None)
+                  |> Option.orElseWith (fun () ->
+                      if List.contains MBinary mods then
+                          let charset = mods |> List.tryPick (function MCharset value -> Some value | _ -> None)
+
+                          match charset |> Option.map _.ToLowerInvariant() with
+                          | Some "ascii" -> Some "ascii_bin"
+                          | Some "latin1" -> Some "latin1_bin"
+                          | Some "utf8"
+                          | Some "utf8mb3" -> Some "utf8mb3_bin"
+                          | Some "binary" -> Some "binary"
+                          | _ -> Some "utf8mb4_bin"
+                      else
+                          None)
               Charset =
                   mods
                   |> List.tryPick (function
@@ -1891,6 +1908,18 @@ let private indexItem: Parser<IndexDef, unit> =
           Unique = unique
           Kind = kind }
 
+let private namedUniqueConstraint: Parser<IndexDef, unit> =
+    (keyword "CONSTRAINT"
+     >>. identifier
+     .>> keyword "UNIQUE"
+     .>> optional (keyword "KEY" <|> keyword "INDEX")
+     .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ",")))
+    |>> fun (name, columns) ->
+        { Name = name
+          Columns = columns
+          Unique = true
+          Kind = BTree }
+
 let private refAction: Parser<string, unit> =
     choice
         [ keyword "CASCADE" >>% "CASCADE"
@@ -1946,7 +1975,8 @@ type private CreateItem =
 
 let private createTableItem: Parser<CreateItem, unit> =
     choice
-        [ attempt (foreignKeyItem |>> CForeignKey)
+        [ attempt (namedUniqueConstraint |>> CIndex)
+          attempt (foreignKeyItem |>> CForeignKey)
           attempt (
               checkDefinition
               |>> fun (name, expression, enforced) ->
