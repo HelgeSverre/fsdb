@@ -916,6 +916,11 @@ let tests =
                         (CreateTableLike("archive", "app.source", true))
                         "create table like"
 
+                    Expect.equal
+                        (parseOk "CREATE TABLE archive (LIKE app.source)")
+                        (CreateTableLike("archive", "app.source", false))
+                        "parenthesized create table like"
+
                 testCase "CREATE TABLE AS SELECT"
                 <| fun _ ->
                     match parseOk "CREATE TABLE IF NOT EXISTS archive AS SELECT id, name FROM source" with

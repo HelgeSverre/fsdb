@@ -2765,7 +2765,7 @@ let tests =
                     runDefault store "INSERT INTO parent VALUES (7)" |> ignore
                     runDefault store "INSERT INTO source (u, n) VALUES (1, 7)" |> ignore
 
-                    Expect.equal (runDefault store "CREATE TABLE clone LIKE source") (Affected 0UL) "table created"
+                    Expect.equal (runDefault store "CREATE TABLE clone (LIKE source)") (Affected 0UL) "table created"
 
                     match scan store defaultDatabase "clone" with
                     | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "rows are not copied"

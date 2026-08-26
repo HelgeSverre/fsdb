@@ -2155,11 +2155,12 @@ let private createTable: Parser<Statement, unit> =
               Comment = tableComment }
 
 let private createTableLike: Parser<Statement, unit> =
+    let source = keyword "LIKE" >>. qualifiedTableName
+
     (keyword "CREATE" >>. keyword "TABLE"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. qualifiedTableName
-     .>> keyword "LIKE"
-     .>>. qualifiedTableName)
+     .>>. (source <|> between (sym "(") (sym ")") source))
     |>> fun ((ifNotExists, name), source) -> CreateTableLike(name, source, ifNotExists)
 
 let private createIndexStmt: Parser<Statement, unit> =
