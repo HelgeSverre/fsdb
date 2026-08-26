@@ -67,7 +67,7 @@ type ColumnType =
     /// against `values`, add it if a migration actually needs SET semantics
     /// enforced rather than just accepted.
     | TSet of values: string list
-    | TDecimal of precision: int * scale: int
+    | TDecimal of precision: int * scale: int * unsigned: bool
     | TDouble of unsigned: bool
     | TFloat of unsigned: bool
     | TDate
@@ -344,7 +344,8 @@ and ColumnDef =
 
 /// A named `[UNIQUE] KEY|INDEX (cols)` — from a `CREATE TABLE` trailing item,
 /// `ALTER TABLE ADD INDEX`, `CREATE INDEX`, or a column-level `UNIQUE`
-/// modifier (which synthesizes one of these named after the column).
+/// modifier (which synthesizes one of these named after the column). Key
+/// columns retain optional prefix lengths for enforcement and introspection.
 and IndexKind =
     | BTree
     | FullTextIndex
@@ -354,14 +355,20 @@ and MatchMode =
     | BooleanMode
     | QueryExpansion
 
+and IndexColumn =
+    { Name: string
+      PrefixLength: int option }
+
 and IndexDef =
     { Name: string
-      Columns: string list
+      KeyColumns: IndexColumn list
       Unique: bool
       /// `FULLTEXT KEY` vs an ordinary index — drives `MATCH ... AGAINST`
       /// eligibility and the `Index_type` introspection column. SPATIAL
       /// collapses to `BTree` until fsdb has a spatial-index implementation.
       Kind: IndexKind }
+
+    member this.Columns = this.KeyColumns |> List.map _.Name
 
 /// A `CONSTRAINT name FOREIGN KEY (cols) REFERENCES tbl (cols) [ON DELETE
 /// ...] [ON UPDATE ...]` — enforced (insert/update-time parent check,
@@ -575,6 +582,9 @@ and SelectStmt =
       /// clause only parses rather than changing snapshot visibility.
       Locking: bool }
 
+let indexColumns names =
+    names |> List.map (fun name -> { Name = name; PrefixLength = None })
+
 /// Where `ADD`/`MODIFY`/`CHANGE COLUMN` places a column: `PositionDefault`
 /// means no `AFTER`/`FIRST` was written (a plain `ADD` appends at the end;
 /// a plain `MODIFY`/`CHANGE` leaves the column where it already was —
@@ -664,7 +674,7 @@ type Statement =
     | DropTable of names: string list * ifExists: bool
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list
-    | CreateIndex of name: string * table: string * columns: string list * unique: bool * kind: IndexKind
+    | CreateIndex of name: string * table: string * columns: IndexColumn list * unique: bool * kind: IndexKind
     /// `DROP INDEX [IF EXISTS] name ON table` — `IF EXISTS` is accepted for
     /// MySQL parity. The executor doesn't need the flag: a missing *index*
     /// already drops to a silent no-op (the one thing `IF EXISTS` suppresses

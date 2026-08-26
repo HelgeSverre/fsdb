@@ -170,6 +170,19 @@ let tests =
                     let latin1 = { col "value" (TVarchar 65535) true with Charset = Some "latin1" }
                     Expect.equal (createTable store defaultDatabase "wide_latin1" [ latin1 ] [] [] None None) (Ok()) "latin1 uses one byte per character"
 
+                    let keyColumns = [ 1..5 ] |> List.map (fun index -> col (sprintf "value%d" index) (TVarchar 255) false)
+                    let wideKey = { Name = "ix_wide"; KeyColumns = indexColumns (keyColumns |> List.map _.Name); Unique = false; Kind = BTree }
+
+                    match createTable store defaultDatabase "wide_key" keyColumns [ wideKey ] [] None None with
+                    | Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes")) -> ()
+                    | other -> failtestf "expected an oversized key error, got %A" other
+
+                    let boundedKey =
+                        { wideKey with
+                            KeyColumns = keyColumns |> List.map (fun column -> { Name = column.Name; PrefixLength = Some 100 }) }
+
+                    Expect.equal (createTable store defaultDatabase "bounded_key" keyColumns [ boundedKey ] [] None None) (Ok()) "prefixes bound the key size"
+
                 testCase "column comments allow 1024 Unicode scalars and reject longer text"
                 <| fun _ ->
                     let store = create ()
@@ -708,11 +721,19 @@ let tests =
                     let value = VBit(3, 5UL)
                     Expect.equal (coerceValue true (col "integer" (TInt false) true) value) (Ok(VInt 5L)) "integer"
                     Expect.equal (coerceValue true (col "unsigned" (TBigInt true) true) value) (Ok(VUInt 5UL)) "unsigned"
-                    Expect.equal (coerceValue true (col "decimal" (TDecimal(10, 0)) true) value) (Ok(VDecimal 5m)) "decimal"
+                    Expect.equal (coerceValue true (col "decimal" (TDecimal(10, 0, false)) true) value) (Ok(VDecimal 5m)) "decimal"
                     Expect.equal (coerceValue true (col "double" (TDouble false) true) value) (Ok(VDouble 5.0)) "double"
                     Expect.equal (coerceValue true (col "year" TYear true) value) (Ok(VInt 5L)) "year"
                     Expect.equal (coerceValue true (col "set" (TSet [ "a"; "b"; "c" ]) true) value) (Ok(VString "a,c")) "set bitmask"
                     Expect.equal (coerceValue true (col "enum" (TEnum [ "a"; "b"; "c" ]) true) (VBit(3, 2UL))) (Ok(VString "b")) "enum index" ]
+
+          testCase "unsigned decimal columns reject negative values"
+          <| fun _ ->
+              let unsigned = col "amount" (TDecimal(10, 2, true)) true
+
+              match coerceValue true unsigned (VDecimal -1m) with
+              | Error(OutOfRangeForColumn "amount") -> ()
+              | other -> failtestf "expected unsigned range rejection, got %A" other
 
           testList
               "coerceValue spatial columns"
@@ -736,7 +757,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -924,7 +945,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -1126,7 +1147,7 @@ let tests =
                 testCase "a candidate delete evaluates the current row after the row changes"
                 <| fun _ ->
                     let store = create ()
-                    let index = { Name = "ix_category"; Columns = [ "category" ]; Unique = false; Kind = BTree }
+                    let index = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Kind = BTree }
 
                     createTable
                         store
@@ -1590,7 +1611,7 @@ let tests =
                 testCase "AddIndex / DropIndexAction manage the table's index metadata"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let ix = { Name = "idx_name"; Columns = [ "name" ]; Unique = false; Kind = BTree }
+                    let ix = { Name = "idx_name"; KeyColumns = indexColumns [ "name" ]; Unique = false; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
                     | Ok() ->
@@ -1606,7 +1627,7 @@ let tests =
                 testCase "a secondary ordered index follows inserted, updated, deleted, and replaced row identities"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let index = { Name = "idx_age"; Columns = [ "age" ]; Unique = false; Kind = BTree }
+                    let index = { Name = "idx_age"; KeyColumns = indexColumns [ "age" ]; Unique = false; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex index ] with
                     | Ok() -> ()
@@ -1678,7 +1699,7 @@ let tests =
                 testCase "a composite secondary index follows row mutations incrementally"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let index = { Name = "idx_name_age"; Columns = [ "name"; "age" ]; Unique = false; Kind = BTree }
+                    let index = { Name = "idx_name_age"; KeyColumns = indexColumns [ "name"; "age" ]; Unique = false; Kind = BTree }
                     alterTable store defaultDatabase "users" [ AddIndex index ] |> Result.defaultWith (failtestf "add index failed: %A")
                     let reindexesBefore = reindexCallCount ()
 
@@ -1738,7 +1759,7 @@ let tests =
                         [ [ VNull; VString "dup"; VInt 1L ]; [ VNull; VString "dup"; VInt 2L ]; [ VNull; VString "unique"; VInt 3L ] ]
                     |> ignore
 
-                    let ix = { Name = "uq_name"; Columns = [ "name" ]; Unique = true; Kind = BTree }
+                    let ix = { Name = "uq_name"; KeyColumns = indexColumns [ "name" ]; Unique = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
                     | Error(DuplicateKey("uq_name", _)) -> ()
@@ -1870,7 +1891,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -2010,7 +2031,7 @@ let tests =
                         "parents"
                         [ idCol; col "other" (TInt false) false ]
                         [ { Name = "uq_pair"
-                            Columns = [ "id"; "other" ]
+                            KeyColumns = indexColumns [ "id"; "other" ]
                             Unique = true
                             Kind = BTree } ]
                         []

@@ -967,11 +967,11 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | _ -> numericFallback (Some "integer") (fun () -> VInt 0L)
 
     match col.Type, v with
-    | TDecimal(precision, _), _ when precision < 1 || precision > 65 ->
+    | TDecimal(precision, _, _), _ when precision < 1 || precision > 65 ->
         Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision col.Name))
-    | TDecimal(_, scale), _ when scale < 0 || scale > 30 ->
+    | TDecimal(_, scale, _), _ when scale < 0 || scale > 30 ->
         Error(ExpressionError(1425, sprintf "Too big scale %d specified for column '%s'. Maximum is 30." scale col.Name))
-    | TDecimal(precision, scale), _ when scale > precision ->
+    | TDecimal(precision, scale, _), _ when scale > precision ->
         Error(ExpressionError(1427, sprintf "For decimal(M,D), M must be >= D (column '%s')." col.Name))
     | _, VNull -> Ok VNull
     | _ ->
@@ -1112,7 +1112,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 | Some d -> Ok(VDouble d)
                 | None -> numericFallback None (fun () -> VDouble 0.0)
             | _ -> numericFallback None (fun () -> VDouble 0.0)
-        | TDecimal(_, scale) ->
+        | TDecimal(_, scale, unsigned) ->
             // MySQL pads/rounds every stored value to the column's declared
             // scale (`DECIMAL(10,2)` stores `100` as `100.00`), and later
             // reads it back at that same scale — `.NET`'s `decimal` carries
@@ -1128,15 +1128,24 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
 
                 scaled
 
+            let finish value =
+                if not unsigned || value >= 0m then
+                    Ok(VDecimal(rescale value))
+                elif strict then
+                    outOfRange ()
+                else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
+                    Ok(VDecimal(rescale 0m))
+
             match v with
-            | VDecimal d -> Ok(VDecimal(rescale d))
-            | VInt i -> Ok(VDecimal(rescale (decimal i)))
-            | VUInt u -> Ok(VDecimal(rescale (decimal u)))
-            | VBit(_, value) -> Ok(VDecimal(rescale (decimal value)))
-            | VDouble d -> Ok(VDecimal(rescale (decimal d)))
+            | VDecimal d -> finish d
+            | VInt i -> finish (decimal i)
+            | VUInt u -> finish (decimal u)
+            | VBit(_, value) -> finish (decimal value)
+            | VDouble d -> finish (decimal d)
             | VString s ->
                 match parseDecimal s with
-                | Some d -> Ok(VDecimal(rescale d))
+                | Some d -> finish d
                 | None -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
             | _ -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
         | TChar length
@@ -1569,8 +1578,8 @@ type private SecondaryKeyGroup =
 let private secondaryKeyGroups (table: Table) : SecondaryKeyGroup list =
     table.Indexes
     |> List.choose (fun index ->
-        match index.Kind, index.Unique with
-        | BTree, false ->
+        match index.Kind, index.Unique, index.KeyColumns |> List.forall (fun column -> column.PrefixLength.IsNone) with
+        | BTree, false, true ->
             index.Columns
             |> traverse (resolveColumn table.Columns)
             |> Result.toOption
@@ -2988,11 +2997,11 @@ let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
         | TDateTime fsp
         | TTimestamp fsp
         | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))
-        | TDecimal(precision, _) when precision < 1 || precision > 65 ->
+        | TDecimal(precision, _, _) when precision < 1 || precision > 65 ->
             Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision c.Name))
-        | TDecimal(_, scale) when scale < 0 || scale > 30 ->
+        | TDecimal(_, scale, _) when scale < 0 || scale > 30 ->
             Error(ExpressionError(1425, sprintf "Too big scale %d specified for column '%s'. Maximum is 30." scale c.Name))
-        | TDecimal(precision, scale) when scale > precision ->
+        | TDecimal(precision, scale, _) when scale > precision ->
             Error(ExpressionError(1427, sprintf "For decimal(M,D), M must be >= D (column '%s')." c.Name))
     // VECTOR shares the parse-anything-validate-at-DDL discipline: the
     // parser accepts any dimension, MySQL 9's 1..16383 range is enforced
@@ -3043,6 +3052,74 @@ let private checkGeometryKeyColumns (columns: ColumnDef list) (indexes: IndexDef
         |> function
             | Some _ -> Error(ExpressionError(1235, "This version of MySQL doesn't yet support 'SPATIAL indexes'"))
             | None -> Ok()
+
+let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
+    let bytesPerCharacter (column: ColumnDef) =
+        match column.Charset |> Option.map _.ToLowerInvariant() with
+        | Some "ascii"
+        | Some "latin1" -> 1
+        | Some "utf8mb3"
+        | Some "utf8" -> 3
+        | _ -> 4
+
+    let fullLength column =
+        match column.Type with
+        | TChar length
+        | TVarchar length -> Some(length * bytesPerCharacter column)
+        | TBinary length
+        | TVarBinary length -> Some length
+        | TTinyInt _
+        | TBool -> Some 1
+        | TSmallInt _ -> Some 2
+        | TMediumInt _ -> Some 3
+        | TInt _
+        | TFloat _ -> Some 4
+        | TBigInt _
+        | TDouble _ -> Some 8
+        | TDecimal(precision, _, _) -> Some((precision + 2) / 2)
+        | TBit width -> Some((width + 7) / 8)
+        | TDate -> Some 3
+        | TDateTime _
+        | TTimestamp _ -> Some 8
+        | TTime _ -> Some 3
+        | TYear -> Some 1
+        | TEnum _ -> Some 2
+        | TSet values -> Some((values.Length + 7) / 8)
+        | _ -> None
+
+    let partLength (index: IndexDef) (column: IndexColumn) =
+        match columns |> List.tryFind (fun definition -> String.Equals(definition.Name, column.Name, StringComparison.OrdinalIgnoreCase)) with
+        | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column.Name))
+        | Some definition ->
+            match column.PrefixLength, fullLength definition with
+            | Some prefix, _ when prefix < 1 -> Error(ExpressionError(1089, "Incorrect prefix key"))
+            | Some prefix, _ ->
+                let multiplier =
+                    match definition.Type with
+                    | TChar _
+                    | TVarchar _
+                    | TTinyText
+                    | TText
+                    | TMediumText
+                    | TLongText -> bytesPerCharacter definition
+                    | _ -> 1
+
+                Ok(prefix * multiplier)
+            | None, Some length -> Ok length
+            | None, None when index.Kind = FullTextIndex -> Ok 0
+            | None, None ->
+                Error(ExpressionError(1170, sprintf "BLOB/TEXT column '%s' used in key specification without a key length" definition.Name))
+
+    indexes
+    |> traverse (fun index ->
+        index.KeyColumns
+        |> traverse (partLength index)
+        |> Result.bind (fun lengths ->
+            if List.sum lengths > 3072 then
+                Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes"))
+            else
+                Ok()))
+    |> Result.map ignore
 
 /// FULLTEXT indexes only cover text columns — CHAR/VARCHAR and the TEXT
 /// family — matching MySQL's 1283 for anything else.
@@ -3247,10 +3324,11 @@ let createTableSeeded
                     match columns |> traverse validateColumnType with
                     | Error e -> Error e
                     | Ok _ ->
-                        match checkVectorKeyColumns columns indexes, checkGeometryKeyColumns columns indexes with
-                        | Error e, _
-                        | _, Error e -> Error e
-                        | Ok(), Ok() ->
+                        match checkVectorKeyColumns columns indexes, checkGeometryKeyColumns columns indexes, checkIndexLengths columns indexes with
+                        | Error e, _, _
+                        | _, Error e, _
+                        | _, _, Error e -> Error e
+                        | Ok(), Ok(), Ok() ->
                             if Map.containsKey key db then
                                 Error(TableExists tableName)
                             else
@@ -3409,22 +3487,25 @@ let private insertAt (idx: int) (x: 'a) (xs: 'a list) : 'a list =
     before @ [ x ] @ after
 
 let private renameIndexColumn oldName newName (indexes: IndexDef list) =
-    let rename name =
-        if String.Equals(name, oldName, StringComparison.OrdinalIgnoreCase) then newName else name
+    let rename (column: IndexColumn) =
+        if String.Equals(column.Name, oldName, StringComparison.OrdinalIgnoreCase) then
+            { column with Name = newName }
+        else
+            column
 
     indexes
     |> List.map (fun index ->
         { index with
-            Columns = index.Columns |> List.map rename })
+            KeyColumns = index.KeyColumns |> List.map rename })
 
 let private removeIndexColumn columnName (indexes: IndexDef list) =
     indexes
     |> List.choose (fun index ->
         let columns =
-            index.Columns
-            |> List.filter (fun name -> not (String.Equals(name, columnName, StringComparison.OrdinalIgnoreCase)))
+            index.KeyColumns
+            |> List.filter (fun (column: IndexColumn) -> not (String.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase)))
 
-        if columns.IsEmpty then None else Some { index with Columns = columns })
+        if columns.IsEmpty then None else Some { index with KeyColumns = columns })
 
 /// Resolves `FIRST`/`AFTER col`/no-clause-given to a concrete 0-based index
 /// into `columnsExcludingSelf` (the table's columns with the column being
@@ -3674,14 +3755,15 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         // give — otherwise `reindexTable` (Map.ofList, last-wins) silently
         // drops every row but one from the new UniqueIndex, and both the
         // fast path and the constraint itself go missing from then on.
-        ix.Columns
-        |> traverse (resolveColumn table.Columns)
+        checkIndexLengths table.Columns [ ix ]
+        |> Result.bind (fun () -> ix.Columns |> traverse (resolveColumn table.Columns))
         |> Result.bind (fun idxs ->
             match tryDuplicateConstraintValue table.Columns idxs table.RowsArray with
             | Some value -> Error(DuplicateKey(ix.Name, value))
             | None -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None))
     | AddIndex ix ->
-        checkFullTextColumns table.Columns ix
+        checkIndexLengths table.Columns [ ix ]
+        |> Result.bind (fun () -> checkFullTextColumns table.Columns ix)
         |> Result.map (fun () -> { table with Indexes = table.Indexes @ [ ix ] }, None)
     | DropIndexAction name ->
         Ok(
@@ -3740,7 +3822,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
 
                         let primary =
                             { Name = "PRIMARY"
-                              Columns = cols
+                              KeyColumns = cols |> List.map (fun name -> { Name = name; PrefixLength = None })
                               Unique = true
                               Kind = BTree }
 

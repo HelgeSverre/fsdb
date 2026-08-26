@@ -71,10 +71,11 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
         { columnMetadata TypeString with
             ColumnLength = values |> List.sumBy String.length |> fun n -> utf8Length (n + max 0 (values.Length - 1))
             Flags = SetFlag }
-    | TDecimal(precision, scale) ->
+    | TDecimal(precision, scale, unsigned) ->
         { columnMetadata TypeNewDecimal with
             ColumnLength = uint32 (precision + 2)
-            Decimals = byte scale }
+            Decimals = byte scale
+            Flags = if unsigned then UnsignedFlag else 0us }
         |> numeric
     | TDouble unsigned -> { columnMetadata TypeDouble with ColumnLength = 22u; Decimals = 31uy } |> withUnsigned unsigned |> numeric
     | TFloat unsigned -> { columnMetadata TypeFloat with ColumnLength = 12u; Decimals = 31uy } |> withUnsigned unsigned |> numeric

@@ -16,7 +16,7 @@ let private sameName (left: string) (right: string) =
 
 let private generic = ColumnWire.parameterMetadataOfType(TVarchar 16383)
 let private signedInteger = ColumnWire.parameterMetadataOfType(TBigInt false)
-let private decimalNumber = ColumnWire.parameterMetadataOfType(TDecimal(65, 30))
+let private decimalNumber = ColumnWire.parameterMetadataOfType(TDecimal(65, 30, false))
 let private floatingPoint = ColumnWire.parameterMetadataOfType (TDouble false)
 let private date = ColumnWire.parameterMetadataOfType TDate
 let private dateTime = ColumnWire.parameterMetadataOfType(TDateTime 6)
@@ -114,7 +114,7 @@ let private metadataOfValue =
     | VInt _ -> ColumnWire.parameterMetadataOfType(TBigInt false)
     | VUInt _ -> ColumnWire.parameterMetadataOfType(TBigInt true)
     | VDouble _ -> ColumnWire.parameterMetadataOfType (TDouble false)
-    | VDecimal _ -> ColumnWire.parameterMetadataOfType(TDecimal(65, 30))
+    | VDecimal _ -> ColumnWire.parameterMetadataOfType(TDecimal(65, 30, false))
     | VString _ -> generic
     | VBytes _ -> ColumnWire.parameterMetadataOfType TLongBlob
     | VDate _

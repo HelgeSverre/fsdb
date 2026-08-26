@@ -484,7 +484,7 @@ let tests =
                       "primary key and the column-level unique index both show up"
               | other -> failtestf "expected a resultset, got %A" other
 
-          testCase "STATISTICS.sub_part is always NULL — no prefix-length indexes to report"
+          testCase "STATISTICS.sub_part is NULL for a full-column index"
           <| fun _ ->
               // Doctrine DBAL's `selectIndexColumns` (behind Laravel's
               // `Blueprint::change()`) projects `SUB_PART`.

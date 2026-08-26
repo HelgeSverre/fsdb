@@ -573,7 +573,7 @@ let tests =
                   store
                   defaultDatabase
                   "widgets"
-                  [ AddColumn(extraCol, PositionDefault); AddIndex { Name = "ix_sku"; Columns = [ "sku" ]; Unique = false; Kind = BTree } ]
+                  [ AddColumn(extraCol, PositionDefault); AddIndex { Name = "ix_sku"; KeyColumns = indexColumns [ "sku" ]; Unique = false; Kind = BTree } ]
               |> ignore
 
               renameTable store defaultDatabase "widgets" "gadgets" |> ignore
@@ -751,14 +751,13 @@ let tests =
               let store = load dir
               attach dir store
               let category = { mkCol "category" (TVarchar 20) with Nullable = false }
-              let index = { Name = "ix_category"; Columns = [ "category" ]; Unique = false; Kind = BTree }
+              let index = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Kind = BTree }
               createTable store defaultDatabase "items" [ mkCol "id" (TInt false); category ] [ index ] [] None None |> ignore
               insertRows store defaultDatabase "items" None [ [ VInt 1L; VString "books" ]; [ VInt 2L; VString "books" ]; [ VInt 3L; VString "music" ] ] |> ignore
               snapshotNow dir store
               insertRows store defaultDatabase "items" None [ [ VInt 4L; VString "books" ] ] |> ignore
 
               let reloaded = load dir
-
               match trySecondaryLookup reloaded defaultDatabase "items" "category" (VString "books") with
               | Some(_, rows) -> Expect.equal (rows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered buckets preserve row order"
               | None -> failtest "expected a recovered secondary-index probe"
@@ -1193,7 +1192,8 @@ let tests =
               let store = load dir
               attach dir store
               let session = Fsdb.Session.create 1 store
-              let session, result = handle session "CREATE TABLE ordered_primary (first INT, second INT, PRIMARY KEY (second, first))"
+              let session, result =
+                  handle session "CREATE TABLE ordered_primary (first INT, second INT, body TEXT, PRIMARY KEY (second, first), KEY ix_body (body(12)))"
 
               match result with
               | Affected 0UL -> ()
@@ -1201,7 +1201,11 @@ let tests =
 
               let assertOrder (sourceStore: Store) message =
                   match Fsdb.InformationSchema.findTable sourceStore.Catalog defaultDatabase "ordered_primary" with
-                  | Ok table -> Expect.equal (primaryKeyColumns table) [ "second"; "first" ] message
+                  | Ok table ->
+                      Expect.equal (primaryKeyColumns table) [ "second"; "first" ] message
+
+                      let bodyIndex = table.Indexes |> List.find (fun index -> index.Name = "ix_body")
+                      Expect.equal bodyIndex.KeyColumns [ { Name = "body"; PrefixLength = Some 12 } ] "prefix survives recovery"
                   | Error error -> failtestf "expected ordered_primary after recovery, got %A" error
 
               assertOrder (load dir) "WAL retains the key order"
@@ -1491,7 +1495,7 @@ let tests =
               let columns =
                   [ { (mkCol "id" (TInt false)) with Nullable = false; AutoIncrement = true; PrimaryKey = true }
                     mkCol "d" (TDouble false)
-                    mkCol "dec" (TDecimal(20, 4))
+                    mkCol "dec" (TDecimal(20, 4, false))
                     mkCol "blb" TBlob
                     mkCol "dt" TDate ]
 
@@ -1573,7 +1577,7 @@ let tests =
                     mkCol "c_longblob" TLongBlob
                     mkCol "c_enum" (TEnum [ "a"; "b" ])
                     mkCol "c_set" (TSet [ "x"; "y" ])
-                    mkCol "c_decimal" (TDecimal(10, 2))
+                    mkCol "c_decimal" (TDecimal(10, 2, false))
                     mkCol "c_double" (TDouble false)
                     mkCol "c_float" (TFloat false)
                     mkCol "c_double_unsigned" (TDouble true)

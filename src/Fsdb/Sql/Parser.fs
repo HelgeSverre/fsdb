@@ -615,10 +615,11 @@ let private columnType: Parser<ColumnType, unit> =
           keyword "SET" >>. stringListParen |>> TSet
           (keyword "DECIMAL" <|> keyword "NUMERIC")
           >>. opt (between (sym "(") (sym ")") (intTok .>>. opt (sym "," >>. intTok)))
-          .>> unsignedFlag
-          |>> function
-              | Some(p, scale) -> TDecimal(p, Option.defaultValue 0 scale)
-              | None -> TDecimal(10, 0)
+          .>>. unsignedFlag
+          |>> fun (size, unsigned) ->
+              match size with
+              | Some(p, scale) -> TDecimal(p, Option.defaultValue 0 scale, unsigned)
+              | None -> TDecimal(10, 0, unsigned)
           keyword "DOUBLE" >>. optional (keyword "PRECISION") >>. ignoredWidth >>. unsignedFlag |>> TDouble
           keyword "FLOAT" >>. ignoredWidth >>. unsignedFlag |>> TFloat
           keyword "DATETIME" >>. optFsp |>> TDateTime
@@ -1915,13 +1916,13 @@ let private constrainedPrimaryKey: Parser<string list, unit> =
     >>. opt (notFollowedBy (keyword "PRIMARY") >>. identifier)
     >>. trailingPrimaryKey
 
-/// One column inside an index's column list, with its optional MySQL
-/// "key length" (`col(191)`) parsed and discarded — `Ast.IndexDef` doesn't
-/// track prefix lengths.
-let private indexColumn: Parser<string, unit> =
+let private indexedColumn: Parser<IndexColumn, unit> =
     identifier
-    .>> optional (between (sym "(") (sym ")") intTok)
+    .>>. opt (between (sym "(") (sym ")") intTok)
     .>> optional (keyword "ASC" <|> keyword "DESC")
+    |>> fun (name, prefixLength) ->
+        { Name = name
+          PrefixLength = prefixLength }
 
 /// `[UNIQUE] KEY|INDEX name (cols)` — `UNIQUE` alone (no `KEY`/`INDEX`) is
 /// also legal MySQL, so the `KEY`/`INDEX` keyword itself is optional once
@@ -1937,13 +1938,13 @@ let private indexPrefix: Parser<bool * IndexKind, unit> =
 
 let private indexItem: Parser<IndexDef, unit> =
     (indexPrefix .>>. opt identifier
-     .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ","))
+     .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ","))
      // `USING BTREE|HASH` — parsed and discarded, every index here is the
      // same structure either way.
      .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH")))
     |>> fun (((unique, kind), name), cols) ->
-        { Name = name |> Option.defaultValue (List.head cols)
-          Columns = cols
+        { Name = name |> Option.defaultValue (List.head cols).Name
+          KeyColumns = cols
           Unique = unique
           Kind = kind }
 
@@ -1952,10 +1953,10 @@ let private namedUniqueConstraint: Parser<IndexDef, unit> =
      >>. identifier
      .>> keyword "UNIQUE"
      .>> optional (keyword "KEY" <|> keyword "INDEX")
-     .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ",")))
+     .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ",")))
     |>> fun (name, columns) ->
         { Name = name
-          Columns = columns
+          KeyColumns = columns
           Unique = true
           Kind = BTree }
 
@@ -2178,7 +2179,11 @@ let private createTable: Parser<Statement, unit> =
         let uniqueColumnIndexes =
             columns
             |> List.filter (fun c -> c.Unique)
-            |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true; Kind = BTree })
+            |> List.map (fun c ->
+                { Name = c.Name
+                  KeyColumns = [ { Name = c.Name; PrefixLength = None } ]
+                  Unique = true
+                  Kind = BTree })
 
         let primaryColumns =
             if pkNames.IsEmpty then
@@ -2192,7 +2197,7 @@ let private createTable: Parser<Statement, unit> =
                 []
             else
                 [ { Name = "PRIMARY"
-                    Columns = primaryColumns
+                    KeyColumns = primaryColumns |> List.map (fun name -> { Name = name; PrefixLength = None })
                     Unique = true
                     Kind = BTree } ]
 
@@ -2227,7 +2232,7 @@ let private createIndexStmt: Parser<Statement, unit> =
      .>>. identifier
      .>> keyword "ON"
      .>>. qualifiedTableName
-     .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ",")))
+     .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ",")))
     |>> fun ((((unique, kind), name), table), cols) -> CreateIndex(name, table, cols, unique, kind)
 
 let private dropIndexStmt: Parser<Statement, unit> =

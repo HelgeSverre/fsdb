@@ -101,6 +101,11 @@ let tests =
               let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
               Expect.equal sqlState "42000" "sqlstate for 1064"
 
+          testCase "schema limit errors carry SQLSTATE 42000"
+          <| fun _ ->
+              Expect.equal (sqlStateForCode 1071) "42000" "key length"
+              Expect.equal (sqlStateForCode 1074) "42000" "column length"
+
           testCase "ERR payload for an unmapped code falls back to HY000"
           <| fun _ ->
               let payload = errPayload ClientProtocol41 9999 "whatever"
@@ -369,7 +374,7 @@ let tests =
               Expect.equal (wireTypeOfColumnType (TInt false)) TypeLong "int"
               Expect.equal (wireTypeOfColumnType (TBigInt false)) TypeLongLong "bigint"
               Expect.equal (wireTypeOfColumnType (TBit 9)) TypeBit "bit"
-              Expect.equal (wireTypeOfColumnType (TDecimal(10, 2))) TypeNewDecimal "decimal"
+              Expect.equal (wireTypeOfColumnType (TDecimal(10, 2, false))) TypeNewDecimal "decimal"
               Expect.equal (wireTypeOfColumnType (TDouble false)) TypeDouble "double"
               Expect.equal (wireTypeOfColumnType (TFloat false)) TypeFloat "float"
               Expect.equal (wireTypeOfColumnType TDate) TypeDate "date"

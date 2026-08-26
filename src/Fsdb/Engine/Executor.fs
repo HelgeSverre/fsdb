@@ -1098,7 +1098,7 @@ let private fspOfType (ty: ColumnType) : int option =
     | TDateTime fsp
     | TTimestamp fsp
     | TTime fsp -> Some fsp
-    | TDecimal(_, scale) -> Some scale
+    | TDecimal(_, scale, _) -> Some scale
     | _ -> None
 
 /// The fsp an output *expression* renders at, so an explicit precision request
@@ -1127,7 +1127,7 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         |> Some
 
     match expr with
-    | Cast(_, TDecimal(_, scale)) -> Some scale
+    | Cast(_, TDecimal(_, scale, _)) -> Some scale
     | Cast(_, TDouble _)
     | Cast(_, TFloat _) -> Some 6
     | Cast(source, TChar _)
@@ -3626,7 +3626,7 @@ and private describeQueryColumns
     : ColumnDef list option =
     let decimalParts =
         function
-        | TDecimal(precision, scale) -> Some(precision, scale)
+        | TDecimal(precision, scale, _) -> Some(precision, scale)
         | TTinyInt _
         | TBool -> Some(3, 0)
         | TSmallInt _ -> Some(5, 0)
@@ -3725,7 +3725,7 @@ and private describeQueryColumns
             |> fun parts ->
                 let scale = parts |> List.map snd |> List.max
                 let integralDigits = parts |> List.map (fun (precision, partScale) -> precision - partScale) |> List.max
-                TDecimal(min 65 (integralDigits + scale), scale)
+                TDecimal(min 65 (integralDigits + scale), scale, false)
 
         let displayLength =
             function
@@ -3762,7 +3762,7 @@ and private describeQueryColumns
                 | TMediumInt _
                 | TInt _
                 | TBigInt _ -> Some(DConst(VInt 0L))
-                | TDecimal(_, scale) ->
+                | TDecimal(_, scale, _) ->
                     let text = if scale = 0 then "0" else "0." + String.replicate scale "0"
                     Some(DConst(VString text))
                 | TChar _
@@ -3943,7 +3943,7 @@ and private describeQueryColumns
                         | Lit(VDecimal value) ->
                             literalDecimalParts (VDecimal value)
                             |> Option.map (fun (precision, scale) ->
-                                computedColumn name (TDecimal(precision, scale)) false (Some(decimalDefault scale)) None
+                                computedColumn name (TDecimal(precision, scale, false)) false (Some(decimalDefault scale)) None
                                 |> fun column -> describeLiteral column (VDecimal value))
                         | Lit(VDouble _) -> Some(computedColumn name (TDouble false) false (Some(DConst(VInt 0L))) None |> describeColumn)
                         | Lit(VString text) ->
@@ -3976,7 +3976,7 @@ and private describeQueryColumns
                                     | _ -> 65, 30
 
                                 let nullable expression = tryColumnDefForExpr context expression |> Option.map isNullable |> Option.defaultValue false
-                                Some(computedColumn name (TDecimal(precision, scale)) (nullable left || nullable right) None None)
+                                Some(computedColumn name (TDecimal(precision, scale, false)) (nullable left || nullable right) None None)
                             | _ -> None
                         | _ -> None
 
@@ -3990,14 +3990,14 @@ and private describeQueryColumns
                             |> Option.bind (fun column ->
                                 decimalParts column.Type
                                 |> Option.map (fun (precision, scale) ->
-                                    computedColumn name (TDecimal(min 65 (precision + 22), scale)) true None None))
+                                    computedColumn name (TDecimal(min 65 (precision + 22), scale, false)) true None None))
                         | FuncCall(functionName, [ argument ])
                             when functionName.Equals("AVG", System.StringComparison.OrdinalIgnoreCase) ->
                             tryColumnDefForExpr context argument
                             |> Option.bind (fun column ->
                                 decimalParts column.Type
                                 |> Option.map (fun (precision, scale) ->
-                                    computedColumn name (TDecimal(min 65 (precision + 4), min 30 (scale + 4))) true None None))
+                                    computedColumn name (TDecimal(min 65 (precision + 4), min 30 (scale + 4), false)) true None None))
                         | FuncCall(functionName, [ argument ])
                             when functionName.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
                                  || functionName.Equals("MAX", System.StringComparison.OrdinalIgnoreCase) ->
@@ -4147,7 +4147,7 @@ and private deriveColumns
         elif column.TypeId = TypeLongLong then TBigInt unsigned
         elif column.TypeId = TypeFloat then TFloat false
         elif column.TypeId = TypeDouble then TDouble false
-        elif column.TypeId = TypeNewDecimal then TDecimal(65, int column.Decimals)
+        elif column.TypeId = TypeNewDecimal then TDecimal(65, int column.Decimals, column.Flags &&& UnsignedFlag <> 0us)
         elif column.TypeId = TypeDate then TDate
         elif column.TypeId = TypeDateTime then TDateTime(int column.Decimals)
         elif column.TypeId = TypeTime then TTime(int column.Decimals)
@@ -12833,7 +12833,7 @@ let rec executeAs
     | CreateIndex(name, table, columns, unique, kind) ->
         let db, table = splitQualified dbName table
 
-        match alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique; Kind = kind } ] with
+        match alterTable store db table [ AddIndex { Name = name; KeyColumns = columns; Unique = unique; Kind = kind } ] with
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 

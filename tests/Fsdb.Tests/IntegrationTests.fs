@@ -2108,7 +2108,7 @@ let tests =
                   let expected =
                       [ 63, parameterMetadataOfType(TBigInt false)
                         63, parameterMetadataOfType(TBigInt true)
-                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        63, parameterMetadataOfType(TDecimal(65, 30, false))
                         45, parameterMetadataOfType(TVarchar 16383)
                         45, parameterMetadataOfType(TDateTime 6)
                         63, parameterMetadataOfType TLongBlob
@@ -2132,7 +2132,7 @@ let tests =
 
                   Expect.sequenceEqual
                       (expressions |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
-                      [ 63, parameterMetadataOfType(TDecimal(65, 30))
+                      [ 63, parameterMetadataOfType(TDecimal(65, 30, false))
                         45, parameterMetadataOfType(TVarchar 16383) ]
                       "casts infer a type while context-free parameters remain generic"
 
@@ -2143,13 +2143,13 @@ let tests =
                   Expect.sequenceEqual
                       (functions |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
                       [ 63, parameterMetadataOfType(TDouble false)
-                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        63, parameterMetadataOfType(TDecimal(65, 30, false))
                         45, parameterMetadataOfType TDate
                         45, parameterMetadataOfType(TDateTime 6)
                         45, parameterMetadataOfType TJson
                         63, parameterMetadataOfType(TGeometry Geometry)
                         63, parameterMetadataOfType(TBigInt false)
-                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        63, parameterMetadataOfType(TDecimal(65, 30, false))
                         45, parameterMetadataOfType(TTime 6)
                         45, parameterMetadataOfType(TTime 6) ]
                       "function signatures determine numeric, temporal, JSON, and geometry parameters"
@@ -2170,7 +2170,7 @@ let tests =
                         63, parameterMetadataOfType(TBigInt false)
                         45, parameterMetadataOfType(TDateTime 6)
                         63, parameterMetadataOfType(TBigInt false)
-                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        63, parameterMetadataOfType(TDecimal(65, 30, false))
                         63, parameterMetadataOfType(TBigInt false)
                         45, parameterMetadataOfType(TVarchar 16383)
                         63, parameterMetadataOfType(TBigInt false)
@@ -2189,8 +2189,8 @@ let tests =
                       (specialized |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
                       [ 63, parameterMetadataOfType(TBigInt false)
                         63, parameterMetadataOfType(TBigInt false)
-                        63, parameterMetadataOfType(TDecimal(65, 30))
-                        63, parameterMetadataOfType(TDecimal(65, 30))
+                        63, parameterMetadataOfType(TDecimal(65, 30, false))
+                        63, parameterMetadataOfType(TDecimal(65, 30, false))
                         45, parameterMetadataOfType(TVarchar 16383)
                         63, parameterMetadataOfType(TBigInt false)
                         45, parameterMetadataOfType TJson

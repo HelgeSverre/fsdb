@@ -141,7 +141,8 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TLongBlob -> w.WriteByte 0x11uy
     | TEnum values -> w.WriteByte 0x12uy; writeStrList w values
     | TSet values -> w.WriteByte 0x13uy; writeStrList w values
-    | TDecimal(p, s) -> w.WriteByte 0x14uy; w.WriteInt32LE p; w.WriteInt32LE s
+    | TDecimal(p, s, false) -> w.WriteByte 0x14uy; w.WriteInt32LE p; w.WriteInt32LE s
+    | TDecimal(p, s, true) -> w.WriteByte 0x23uy; w.WriteInt32LE p; w.WriteInt32LE s
     | TDouble false -> w.WriteByte 0x15uy
     | TFloat false -> w.WriteByte 0x16uy
     | TDouble true -> w.WriteByte 0x21uy
@@ -190,7 +191,8 @@ let private decodeColumnType (r: #IReader) : ColumnType =
     | 0x11uy -> TLongBlob
     | 0x12uy -> TEnum(readStrList r)
     | 0x13uy -> TSet(readStrList r)
-    | 0x14uy -> TDecimal(r.ReadInt32LE(), r.ReadInt32LE())
+    | 0x14uy -> TDecimal(r.ReadInt32LE(), r.ReadInt32LE(), false)
+    | 0x23uy -> TDecimal(r.ReadInt32LE(), r.ReadInt32LE(), true)
     | 0x15uy -> TDouble false
     | 0x16uy -> TFloat false
     | 0x21uy -> TDouble true
@@ -453,14 +455,35 @@ let private decodeColumnDef (includeComment: bool) (r: #IReader) : ColumnDef =
       Comment = if includeComment then readStr r else "" }
 
 let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
+    // The marker extends the legacy string-list field without shifting the
+    // unversioned index payload; NUL cannot occur in a MySQL identifier.
+    let encodeColumn column =
+        match column.PrefixLength with
+        | None -> column.Name
+        | Some length -> sprintf "\u0001%d:%s" length column.Name
+
     writeStr w ix.Name
-    writeStrList w ix.Columns
+    ix.KeyColumns |> List.map encodeColumn |> writeStrList w
     writeBool w ix.Unique
     writeBool w (ix.Kind = FullTextIndex)
 
 let private decodeIndexDef (r: #IReader) : IndexDef =
+    let decodeColumn (encoded: string) =
+        if encoded.StartsWith("\u0001", StringComparison.Ordinal) then
+            match encoded.IndexOf(':', 1) with
+            | separator when separator > 1 ->
+                match Int32.TryParse(encoded.Substring(1, separator - 1)) with
+                | true, length ->
+                    { Name = encoded.Substring(separator + 1)
+                      PrefixLength = Some length }
+                | _ -> { Name = encoded; PrefixLength = None }
+            | _ -> { Name = encoded; PrefixLength = None }
+        else
+            { Name = encoded
+              PrefixLength = None }
+
     { Name = readStr r
-      Columns = readStrList r
+      KeyColumns = readStrList r |> List.map decodeColumn
       Unique = readBool r
       Kind = (if readBool r then FullTextIndex else BTree) }
 

@@ -896,7 +896,7 @@ let tests =
                                 Charset = None
                                 OnUpdateCurrentTimestamp = false };
                               { Name = "score"
-                                Type = TDecimal(5, 2)
+                                Type = TDecimal(5, 2, false)
                                 Nullable = true
                                 Default = Some(DConst(VInt 0L))
                                 AutoIncrement = false
@@ -909,7 +909,7 @@ let tests =
                                 OnUpdateCurrentTimestamp = false } ] with
                                 Indexes =
                                     [ { Name = "PRIMARY"
-                                        Columns = [ "id" ]
+                                        KeyColumns = indexColumns [ "id" ]
                                         Unique = true
                                         Kind = BTree } ] }
                         ))
@@ -998,7 +998,7 @@ let tests =
                                     OnUpdateCurrentTimestamp = false } ] with
                                 Indexes =
                                     [ { Name = "PRIMARY"
-                                        Columns = [ "id" ]
+                                        KeyColumns = indexColumns [ "id" ]
                                         Unique = true
                                         Kind = BTree } ] }
                         ))
@@ -1025,7 +1025,7 @@ let tests =
                 testCase "composite primary keys retain declaration order"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (first INT, second INT, PRIMARY KEY (second, first))" with
-                    | CreateTable { Indexes = [ { Name = "PRIMARY"; Columns = [ "second"; "first" ] } ] } -> ()
+                    | CreateTable { Indexes = [ { Name = "PRIMARY"; KeyColumns = [ { Name = "second" }; { Name = "first" } ] } ] } -> ()
                     | other -> failtestf "expected an ordered primary index, got %A" other
 
                 testCase "BIGINT UNSIGNED"
@@ -1036,8 +1036,12 @@ let tests =
 
                 testCase "NUMERIC precision defaults to scale zero"
                 <| fun _ ->
-                    match parseOk "CREATE TABLE t (grade NUMERIC(20), percent NUMERIC(5,2)) DEFAULT COLLATE utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC" with
-                    | CreateTable { Columns = [ { Type = TDecimal(20, 0) }; { Type = TDecimal(5, 2) } ] } -> ()
+                    match parseOk "CREATE TABLE t (grade NUMERIC(20), percent NUMERIC(5,2), ratio DECIMAL(8,3) UNSIGNED) DEFAULT COLLATE utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC" with
+                    | CreateTable { Columns = columns } ->
+                        Expect.equal
+                            (columns |> List.map _.Type)
+                            [ TDecimal(20, 0, false); TDecimal(5, 2, false); TDecimal(8, 3, true) ]
+                            "numeric column types"
                     | other -> failtestf "expected numeric precision and scale, got %A" other
 
                 testCase "BIT keeps its declared width and defaults to one bit"
@@ -1174,7 +1178,7 @@ let tests =
                     match parseOk "CREATE TABLE t (email VARCHAR(255) UNIQUE)" with
                     | CreateTable
                         { Columns = [ { Unique = true } ]
-                          Indexes = [ { Name = "email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ]
+                          Indexes = [ { Name = "email"; KeyColumns = [ { Name = "email" } ]; Unique = true; Kind = BTree } ]
                           ForeignKeys = []
                           Checks = []
                           IfNotExists = false } -> ()
@@ -1184,12 +1188,18 @@ let tests =
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (a INT, b INT, UNIQUE KEY uq_a (a), KEY idx_b (b))" with
                     | CreateTable
-                        { Indexes = [ { Name = "uq_a"; Columns = [ "a" ]; Unique = true; Kind = BTree };
-                              { Name = "idx_b"; Columns = [ "b" ]; Unique = false; Kind = BTree } ]
+                        { Indexes = [ { Name = "uq_a"; KeyColumns = [ { Name = "a" } ]; Unique = true; Kind = BTree };
+                              { Name = "idx_b"; KeyColumns = [ { Name = "b" } ]; Unique = false; Kind = BTree } ]
                           ForeignKeys = []
                           Checks = []
                           IfNotExists = false } -> ()
                     | other -> failtestf "expected two indexes, got %A" other
+
+                testCase "index columns retain prefix lengths"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (body TEXT, KEY ix_body (body(191)))" with
+                    | CreateTable { Indexes = [ { KeyColumns = [ { Name = "body"; PrefixLength = Some 191 } ] } ] } -> ()
+                    | other -> failtestf "expected an indexed prefix, got %A" other
 
                 testCase "trailing CONSTRAINT ... FOREIGN KEY with ON DELETE/ON UPDATE"
                 <| fun _ ->
@@ -1891,8 +1901,8 @@ let tests =
                         (parseOk "ALTER TABLE t ADD UNIQUE INDEX uq (a), ADD KEY idx (b), DROP INDEX uq, DROP KEY idx")
                         (AlterTable(
                             "t",
-                            [ AddIndex { Name = "uq"; Columns = [ "a" ]; Unique = true; Kind = BTree }
-                              AddIndex { Name = "idx"; Columns = [ "b" ]; Unique = false; Kind = BTree }
+                            [ AddIndex { Name = "uq"; KeyColumns = indexColumns [ "a" ]; Unique = true; Kind = BTree }
+                              AddIndex { Name = "idx"; KeyColumns = indexColumns [ "b" ]; Unique = false; Kind = BTree }
                               DropIndexAction "uq"
                               DropIndexAction "idx" ]
                         ))
@@ -1948,7 +1958,7 @@ let tests =
                             "document_type",
                             [ AddIndex
                                   { Name = "uniq.document_type.name"
-                                    Columns = [ "technical_name" ]
+                                    KeyColumns = indexColumns [ "technical_name" ]
                                     Unique = true
                                     Kind = BTree } ]
                         ))
@@ -2014,13 +2024,17 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE INDEX idx_a ON t (a)")
-                        (CreateIndex("idx_a", "t", [ "a" ], false, BTree))
+                        (CreateIndex("idx_a", "t", indexColumns [ "a" ], false, BTree))
                         "create index"
 
                     Expect.equal
                         (parseOk "CREATE UNIQUE INDEX uq_a ON t (a)")
-                        (CreateIndex("uq_a", "t", [ "a" ], true, BTree))
+                        (CreateIndex("uq_a", "t", indexColumns [ "a" ], true, BTree))
                         "create unique index"
+
+                    match parseOk "CREATE INDEX ix_prefix ON t (a(12))" with
+                    | CreateIndex("ix_prefix", "t", [ { Name = "a"; PrefixLength = Some 12 } ], false, BTree) -> ()
+                    | other -> failtestf "expected CREATE INDEX prefix metadata, got %A" other
 
                 testCase "DROP INDEX [IF EXISTS] name ON table"
                 <| fun _ ->
@@ -2699,7 +2713,7 @@ let tests =
               | other -> failtestf "unexpected parse: %A" other
 
               match Fsdb.Parser.parse "CREATE FULLTEXT INDEX ft ON t (a)" with
-              | Ok(CreateIndex("ft", "t", [ "a" ], false, FullTextIndex)) -> ()
+              | Ok(CreateIndex("ft", "t", [ { Name = "a" } ], false, FullTextIndex)) -> ()
               | other -> failtestf "unexpected parse: %A" other
 
               Expect.isError (Fsdb.Parser.parse "SELECT MATCH(body) partial") "MATCH requires AGAINST"

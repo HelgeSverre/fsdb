@@ -311,6 +311,8 @@ let sqlStateForCode (code: int) : string =
     match code with
     | 1040 -> "08004" // ER_CON_COUNT_ERROR
     | 1064 -> "42000" // ER_PARSE_ERROR
+    | 1071 -> "42000" // ER_TOO_LONG_KEY
+    | 1074 -> "42000" // ER_TOO_BIG_FIELDLENGTH
     | 1146 -> "42S02" // ER_NO_SUCH_TABLE
     | 1054 -> "42S22" // ER_BAD_FIELD_ERROR
     | 1047 -> "08S01" // ER_UNKNOWN_COM_ERROR

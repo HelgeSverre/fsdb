@@ -120,7 +120,8 @@ let columnTypeText (ty: ColumnType) : string =
     | TLongBlob -> "longblob"
     | TEnum vs -> sprintf "enum(%s)" (quotedList vs)
     | TSet vs -> sprintf "set(%s)" (quotedList vs)
-    | TDecimal(p, s) -> sprintf "decimal(%d,%d)" p s
+    | TDecimal(p, s, unsigned) ->
+        sprintf "decimal(%d,%d)%s" p s (if unsigned then " unsigned" else "")
     | TDouble unsigned -> if unsigned then "double unsigned" else "double"
     | TFloat unsigned -> if unsigned then "float unsigned" else "float"
     | TDate -> "date"
@@ -166,7 +167,7 @@ let private numericPrecisionScale (ty: ColumnType) : (int64 * int64) option =
     | TInt _ -> Some(10L, 0L)
     | TBigInt _ -> Some(19L, 0L)
     | TBit width -> Some(int64 width, 0L)
-    | TDecimal(p, s) -> Some(int64 p, int64 s)
+    | TDecimal(p, s, _) -> Some(int64 p, int64 s)
     | TFloat _ -> Some(10L, 0L)
     | TDouble _ -> Some(22L, 0L)
     | _ -> None
@@ -554,10 +555,24 @@ let private indexesIncludingPrimary (table: Table) =
         | [] -> table.Indexes
         | columns ->
             { Name = "PRIMARY"
-              Columns = columns
+              KeyColumns = columns |> List.map (fun name -> { Name = name; PrefixLength = None })
               Unique = true
               Kind = BTree }
             :: table.Indexes
+
+let private effectivePrefixLength (table: Table) (keyColumn: IndexColumn) =
+    match keyColumn.PrefixLength with
+    | None -> None
+    | Some prefix ->
+        table.Columns
+        |> List.tryFind (fun column -> column.Name.Equals(keyColumn.Name, StringComparison.OrdinalIgnoreCase))
+        |> Option.bind (fun column ->
+            match column.Type with
+            | TChar length
+            | TVarchar length
+            | TBinary length
+            | TVarBinary length when prefix >= length -> None
+            | _ -> Some prefix)
 
 /// One row per `(index, column)` pair.
 let private statisticsRows (catalog: Catalog) : Value[] list =
@@ -565,8 +580,9 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
     |> List.collect (fun (dbName, t) ->
         indexesIncludingPrimary t
         |> List.collect (fun ix ->
-            ix.Columns
-            |> List.mapi (fun i colName ->
+            ix.KeyColumns
+            |> List.mapi (fun i keyColumn ->
+                let colName = keyColumn.Name
                 let nullable =
                     t.Columns
                     |> List.tryFind (fun c -> c.Name = colName)
@@ -585,7 +601,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vs colName
                    (if ix.Kind = FullTextIndex then VNull else vs "A")
                    vi 0
-                   VNull
+                   (effectivePrefixLength t keyColumn |> Option.map vi |> Option.defaultValue VNull)
                    VNull
                    vs nullable
                    vs (if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")
@@ -1869,7 +1885,14 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
                 elif ix.Kind = FullTextIndex then "FULLTEXT "
                 else ""
 
-            sprintf "%sKEY %s (%s)" prefix (backtick ix.Name) (backtickCols ix.Columns))
+            let columns =
+                ix.KeyColumns
+                |> List.map (fun column ->
+                    let length = column.PrefixLength |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
+                    backtick column.Name + length)
+                |> String.concat ","
+
+            sprintf "%sKEY %s (%s)" prefix (backtick ix.Name) columns)
 
     // The table's own declared defaults (server defaults when unset) —
     // MySQL renders these in the table options even when a column carries
@@ -1993,8 +2016,9 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
         let rows =
             indexesIncludingPrimary t
             |> List.collect (fun ix ->
-                ix.Columns
-                |> List.mapi (fun i colName ->
+                ix.KeyColumns
+                |> List.mapi (fun i keyColumn ->
+                    let colName = keyColumn.Name
                     [ Some t.OriginalName
                       Some(if ix.Unique then "0" else "1")
                       Some ix.Name
@@ -2002,7 +2026,7 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       Some colName
                       (if ix.Kind = FullTextIndex then None else Some "A")
                       Some "0"
-                      None
+                      (effectivePrefixLength t keyColumn |> Option.map string)
                       None
                       Some "YES"
                       Some(if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")

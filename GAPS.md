@@ -191,7 +191,7 @@ ADD UNIQUE over colliding data fails 1062 rather than corrupting.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, matching physical inner-join keys, direct literal SELECT/UPDATE/DELETE ranges, compatible grouping, and bounded composite index ordering; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; outer joins and unconstrained ordering remain scans | high (scale) | divergence |
-| Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | `Parser.indexColumn` discards the prefix length; INFORMATION_SCHEMA.STATISTICS reports SUB_PART as NULL | low | divergence |
+| Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | DDL, persistence, size validation, SHOW, and INFORMATION_SCHEMA retain prefixes; non-unique queries remain correct through scan fallback, while physical prefix probes and prefix-based UNIQUE enforcement are absent | low | divergence |
 | Expression indexes | `INDEX ((expr))` | absent | low | refusal |
 | Descending/invisible indexes | `DESC`, `INVISIBLE` | absent | low | refusal |
 | Cross-database FKs | supported | `Ast.ForeignKeyDef.RefTable` carries no database qualifier; cross-database references are invisible/unenforceable | low | divergence |

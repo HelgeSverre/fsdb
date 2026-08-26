@@ -1882,6 +1882,28 @@ let tests =
                   Expect.equal (List.length rows) 2 "primary key + the unique index"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "SHOW INDEX and SHOW CREATE retain index prefix lengths"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created = handle session "CREATE TABLE prefixed (body TEXT, label VARCHAR(255), exact VARCHAR(128), KEY ix_body (body(191)), KEY ix_label (label(20)), KEY ix_exact (exact(128)))"
+              Expect.equal created (Affected 0UL) "table created"
+
+              match handle session "SHOW INDEX FROM prefixed" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (fun row -> row.[2], row.[4], row.[7]))
+                      [ Some "ix_body", Some "body", Some "191"
+                        Some "ix_label", Some "label", Some "20"
+                        Some "ix_exact", Some "exact", None ]
+                      "prefix metadata"
+              | other -> failtestf "expected SHOW INDEX rows, got %A" other
+
+              match handle session "SHOW CREATE TABLE prefixed" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "KEY `ix_body` (`body`(191))" "text prefix"
+                  Expect.stringContains ddl "KEY `ix_label` (`label`(20))" "varchar prefix"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
           testCase "composite primary metadata follows key declaration order"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
