@@ -2121,7 +2121,16 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             let code, msg = Storage.toMySqlError (Storage.NoSuchDatabase dbName)
             session, Err(code, msg)
     | ShowVariables isGlobal -> session, handleShowVariables session isGlobal sql
-    | ShowStatus -> session, InformationSchema.showStatus session.TlsCipher session.TlsVersion (statusFilter sql) |> showResult
+    | ShowStatus ->
+        session,
+        InformationSchema.showStatus
+            (session.Capabilities &&& Protocol.ClientCompress <> 0u)
+            session.TransportMetrics.BytesReceived
+            session.TransportMetrics.BytesSent
+            session.TlsCipher
+            session.TlsVersion
+            (statusFilter sql)
+        |> showResult
     | ShowEngines -> session, InformationSchema.showEngines () |> showResult
     | ShowEngineInnodbStatus ->
         session,

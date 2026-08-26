@@ -21,6 +21,60 @@ open Fsdb.Storage
 open Fsdb.Value
 open Fsdb.Executor
 
+type private CountingStream(inner: IO.Stream, metrics: TransportMetrics) =
+    inherit IO.Stream()
+
+    override _.CanRead = inner.CanRead
+    override _.CanSeek = inner.CanSeek
+    override _.CanWrite = inner.CanWrite
+    override _.Length = inner.Length
+
+    override _.Position
+        with get () = inner.Position
+        and set value = inner.Position <- value
+
+    override _.Flush() = inner.Flush()
+    override _.FlushAsync cancellationToken = inner.FlushAsync cancellationToken
+
+    override _.Read(buffer, offset, count) =
+        let read = inner.Read(buffer, offset, count)
+        metrics.BytesReceived <- metrics.BytesReceived + int64 read
+        read
+
+    override _.ReadAsync(buffer, offset, count, cancellationToken) =
+        task {
+            let! read = inner.ReadAsync(buffer, offset, count, cancellationToken)
+            metrics.BytesReceived <- metrics.BytesReceived + int64 read
+            return read
+        }
+
+    override _.ReadAsync(buffer: Memory<byte>, cancellationToken) =
+        Threading.Tasks.ValueTask<int>(task {
+            let! read = inner.ReadAsync(buffer, cancellationToken)
+            metrics.BytesReceived <- metrics.BytesReceived + int64 read
+            return read
+        })
+
+    override _.Write(buffer, offset, count) =
+        inner.Write(buffer, offset, count)
+        metrics.BytesSent <- metrics.BytesSent + int64 count
+
+    override _.WriteAsync(buffer, offset, count, cancellationToken) =
+        task {
+            do! inner.WriteAsync(buffer, offset, count, cancellationToken)
+            metrics.BytesSent <- metrics.BytesSent + int64 count
+        }
+        :> Threading.Tasks.Task
+
+    override _.WriteAsync(buffer: ReadOnlyMemory<byte>, cancellationToken) =
+        Threading.Tasks.ValueTask(task {
+            do! inner.WriteAsync(buffer, cancellationToken)
+            metrics.BytesSent <- metrics.BytesSent + int64 buffer.Length
+        })
+
+    override _.Seek(offset, origin) = inner.Seek(offset, origin)
+    override _.SetLength value = inner.SetLength value
+
 // COM_* command byte values handled here.
 // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_command_phase.html
 type private Command =
@@ -739,7 +793,12 @@ let private handleConnection
         // server does for the same reason.
         client.NoDelay <- true
         use networkStream = client.GetStream()
-        let mutable stream: IO.Stream = networkStream
+        let metrics =
+            { BytesReceived = 0L
+              BytesSent = 0L }
+
+        let countedStream = new CountingStream(networkStream, metrics)
+        let mutable stream: IO.Stream = countedStream
         let mutable tlsStream: SslStream option = None
         let mutable compressedStream: CompressedStream option = None
         let mutable tlsVersion: string option = None
@@ -756,7 +815,7 @@ let private handleConnection
 
         let upgradeToTls (certificate: Security.Cryptography.X509Certificates.X509Certificate2) =
             async {
-                let secured = new SslStream(networkStream, false)
+                let secured = new SslStream(countedStream, true)
                 let authentication = SslServerAuthenticationOptions()
                 authentication.ServerCertificate <- certificate
                 authentication.EnabledSslProtocols <- SslProtocols.Tls12 ||| SslProtocols.Tls13
@@ -881,7 +940,8 @@ let private handleConnection
                         Capabilities = capabilities
                         MultiStatementsEnabled = capabilities &&& ClientMultiStatements <> 0u
                         TlsVersion = tlsVersion
-                        TlsCipher = tlsCipher }
+                        TlsCipher = tlsCipher
+                        TransportMetrics = metrics }
 
                 activeSession <- Some session
 
@@ -1630,7 +1690,8 @@ let private handleConnection
                                         Capabilities = session.Capabilities
                                         MultiStatementsEnabled = capabilities &&& ClientMultiStatements <> 0u
                                         TlsVersion = session.TlsVersion
-                                        TlsCipher = session.TlsCipher }
+                                        TlsCipher = session.TlsCipher
+                                        TransportMetrics = session.TransportMetrics }
 
                                 activeSession <- Some session
 

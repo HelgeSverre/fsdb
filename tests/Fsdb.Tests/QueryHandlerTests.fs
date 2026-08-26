@@ -1358,6 +1358,24 @@ let tests =
                   | ResultSet(_, [ [ Some actual; Some value ] ]) when actual = name && int64 value > 0L -> ()
                   | other -> failtestf "expected a positive %s counter, got %A" name other
 
+          testCase "SHOW STATUS reports connection compression and wire bytes"
+          <| fun _ ->
+              let metrics: Fsdb.Session.TransportMetrics =
+                  { BytesReceived = 123L
+                    BytesSent = 456L }
+
+              let session =
+                  { create 1 (Fsdb.Storage.create ()) with
+                      Capabilities = Fsdb.Protocol.ClientCompress
+                      TransportMetrics = metrics }
+
+              for name, expected in [ "Compression", "ON"; "Bytes_received", "123"; "Bytes_sent", "456" ] do
+                  match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
+                  | ResultSet(_, [ [ Some actual; Some value ] ]) ->
+                      Expect.equal actual name "the status name"
+                      Expect.equal value expected (name + " value")
+                  | other -> failtestf "expected %s status, got %A" name other
+
           testCase "SHOW SESSION/GLOBAL VARIABLES match like the bare form; GLOBAL reads the store scope"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

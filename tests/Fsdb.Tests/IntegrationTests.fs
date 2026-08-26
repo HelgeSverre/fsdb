@@ -154,6 +154,12 @@ let tests =
                   command.CommandText <- "SELECT REPEAT('compressible-', 512)"
                   let! value = command.ExecuteScalarAsync() |> Async.AwaitTask
                   Expect.equal (string value).Length (13 * 512) "a compressed result round-trips"
+
+                  command.CommandText <- "SHOW STATUS LIKE 'Compression'"
+                  use! reader = command.ExecuteReaderAsync() |> Async.AwaitTask
+                  let! hasRow = reader.ReadAsync() |> Async.AwaitTask
+                  Expect.isTrue hasRow "compression status has one row"
+                  Expect.equal (reader.GetString 1) "ON" "the negotiated compressed connection is reported"
               }
               |> Async.RunSynchronously
 

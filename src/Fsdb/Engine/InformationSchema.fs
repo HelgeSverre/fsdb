@@ -2161,9 +2161,19 @@ let showProcesslist (full: bool) : ShowResult =
 
     Ok([ "Id"; "User"; "Host"; "db"; "Command"; "Time"; "State"; "Info" ], rows)
 
-let showStatus (sslCipher: string option) (sslVersion: string option) (likeOpt: string option) : ShowResult =
+let showStatus
+    (compression: bool)
+    (bytesReceived: int64)
+    (bytesSent: int64)
+    (sslCipher: string option)
+    (sslVersion: string option)
+    (likeOpt: string option)
+    : ShowResult =
     let rows =
-        [ "Ssl_cipher", sslCipher |> Option.defaultValue ""
+        [ "Bytes_received", string bytesReceived
+          "Bytes_sent", string bytesSent
+          "Compression", if compression then "ON" else "OFF"
+          "Ssl_cipher", sslCipher |> Option.defaultValue ""
           "Ssl_version", sslVersion |> Option.defaultValue ""
           "Questions", string (questions ())
           "Threads_connected", string (connectedThreads ())

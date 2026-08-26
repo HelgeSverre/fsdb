@@ -108,6 +108,10 @@ type Savepoint =
       Catalog: Catalog
       PendingEventCount: int }
 
+type TransportMetrics =
+    { mutable BytesReceived: int64
+      mutable BytesSent: int64 }
+
 /// One open transaction. `Snapshot` is private until COMMIT. `BaseCatalog`
 /// distinguishes its concrete changes from committed rows: repeatable read
 /// retains one base, while read committed replaces both at each statement.
@@ -184,7 +188,8 @@ type Session =
       Capabilities: uint32
       MultiStatementsEnabled: bool
       TlsVersion: string option
-      TlsCipher: string option }
+      TlsCipher: string option
+      TransportMetrics: TransportMetrics }
 
 let create (connectionId: int) (store: Store) : Session =
     // New sessions inherit the current GLOBAL values.
@@ -223,7 +228,10 @@ let create (connectionId: int) (store: Store) : Session =
       Capabilities = 0u
       MultiStatementsEnabled = false
       TlsVersion = None
-      TlsCipher = None }
+      TlsCipher = None
+      TransportMetrics =
+        { BytesReceived = 0L
+          BytesSent = 0L } }
 
 /// The catalog store all statements on this session currently execute
 /// against: the shared store outside a transaction, or the transaction's
