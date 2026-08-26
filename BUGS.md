@@ -33,23 +33,12 @@ before the mysql2 adapter suite starts.
 
 Reproduce with `just smoke-apps rails`.
 
-## Temporary tables are unavailable
-
-WordPress' database suite now passes its stored-procedure, explicit
-auto-increment, REPLACE, and LIKE coverage. Its remaining failure creates a
-temporary table, inserts a placeholder-shaped value, and reads it back. A
-correct implementation needs a session-local catalog that shadows permanent
-tables.
-
-Reproduce with `just smoke-apps wordpress`. The current result is 508 tests,
-724 assertions, one failure, and one skipped test.
-
 ## Background-job reservation and completion lose the selected row
 
-Nextcloud can insert and enumerate two background jobs, but the second
-`getNext()` returns null after reserving the first. Updating a newly started job
-to a completed state can also report that no row changed. The DB suite exposes
-both paths through `JobListTest::testHasReservedJobs` and `JobRunsTest`.
+Nextcloud can insert and enumerate background jobs, but selecting past a
+nonexistent class and reserving two consecutive jobs can return null. Updating
+a newly started job to a failed state can also report that no row changed. The
+DB suite exposes these paths through `JobListTest` and `JobRunsTest`.
 
 Reproduce with `just smoke-apps nextcloud`.
 
@@ -60,14 +49,6 @@ case. Creating a user external share raises a duplicate-key error on
 `sh_external_mp` where MySQL completes the operation.
 
 Reproduce with `just smoke-apps nextcloud`. The current run reaches 5,704 tests
-and 30,540 assertions with 2 errors and 3 failures; the other remaining cases
-are the background-job failures above.
-
-## Trigger bodies do not support conditional control flow
-
-Compound trigger bodies support ordered DML and `SET NEW` statements, but not
-`IF`, `ELSEIF`, or `ELSE`. Shopware reaches migration 205 before a `BEFORE
-UPDATE` trigger containing nested conditional branches is rejected.
-
-Reproduce with `just smoke-apps shopware`. This is the trigger-language gap
-tracked in `GAPS.md`, not a failure of the preceding schema or wire protocol.
+and 30,621 assertions with one error and four failures; three are the
+background-job cases above, with recipient search and external sharing making
+up the other two failures.

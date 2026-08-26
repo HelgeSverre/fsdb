@@ -67,7 +67,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Statement family | Impact | Class |
 |---|---|---|
 | Zero-parameter procedures accept a direct statement or a single statement wrapped in `BEGIN…END`; parameters, functions, definer-context execution, multi-statement bodies, `DECLARE`, cursors, handlers, `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
-| Session-scoped `CREATE/DROP TEMPORARY TABLE` and temporary-table shadowing | medium | refusal |
+| Temporary tables are session-scoped and shadow permanent tables; temporary-table DDL is deliberately absent from the WAL | low | divergence |
 | One-time and recurring `CREATE/DROP EVENT` declarations and metadata are supported; ALTER, status changes, definer execution, and the scheduler thread remain absent | low | divergence/refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
@@ -276,7 +276,8 @@ other view shapes materialize once per statement.
 
 Triggers working: ordered multiple BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH
 ROW triggers with OLD/NEW row images, BEFORE SET NEW assignments,
-FOLLOWS/PRECEDES, and `BEGIN ... END` sequences of DML and SET NEW statements;
+FOLLOWS/PRECEDES, and `BEGIN ... END` sequences of DML, local declarations and
+assignments, nested IF/ELSEIF/ELSE branches, and SET NEW statements;
 statement atomicity, 1442 cycle/self-write detection, a depth cap,
 definer-based privilege checks per fire, lifecycle maintenance, and SHOW
 TRIGGERS/I_S.TRIGGERS metadata. Generated row-image columns and illegal
@@ -288,7 +289,7 @@ OLD/NEW images are rejected when the trigger is created.
 | ALGORITHM / explicit DEFINER / ALTER VIEW | supported | SQL SECURITY DEFINER and INVOKER execute with their respective identities; algorithm selection, explicit definers, and alteration remain absent | low | refusal |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | `InformationSchema.showCreateView` returns raw user text without the wrapper | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
-| Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML and SET NEW statement sequences; DECLARE, handlers, IF/CASE/loops, SIGNAL, and dynamic SQL remain absent | medium | refusal |
+| Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML, local DECLARE/SET, scalar-subquery assignment, nested IF/ELSEIF/ELSE, and SET NEW are covered; CASE, loops, handlers, SIGNAL, and dynamic SQL remain absent | medium | refusal |
 | Trigger recursion cap | cycle detection at runtime | `Executor.fireTriggers` uses a hardcoded depth of 8 | low | divergence |
 | Per-trigger sql_mode/charset capture | stored and applied | `InformationSchema.triggerSqlMode` and the charset fields are server constants | low | divergence |
 
@@ -483,9 +484,9 @@ implementation effort:
 2. Transaction scheduling and READ UNCOMMITTED. Indexed point/range UPDATE and
    DELETE statements wait and rebase, but deadlock victim selection, dirty
    reads, and the remaining transaction write shapes are not implemented.
-3. Complex/nested updatable views and the stored-program control language
-   inside trigger bodies. Ordered multi-trigger slots and sequential compound
-   DML bodies are covered.
+3. Complex/nested updatable views and the remaining stored-program control
+   language inside trigger bodies. Ordered multi-trigger slots, local values,
+   nested conditional branches, and sequential compound DML bodies are covered.
 4. Spatial indexes, overlay/buffer operations, and geographic SRS behavior.
    The common planar topology family includes equality and convex hull.
 5. Replication, logging, broad engine counters, and the remaining metadata

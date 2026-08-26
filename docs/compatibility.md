@@ -165,7 +165,9 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
   `UPDATE`, and `DELETE`. `FOLLOWS` and `PRECEDES` determine order within a
   timing/event slot.
 - Bodies accept one statement or a `BEGIN ... END` sequence of `INSERT`,
-  `REPLACE`, `UPDATE`, `DELETE`, and `SET NEW` statements.
+  `REPLACE`, `UPDATE`, `DELETE`, local `DECLARE`/`SET`, nested
+  `IF`/`ELSEIF`/`ELSE`, and `SET NEW` statements. Local assignments may read a
+  scalar subquery.
 - `OLD.column` and `NEW.column` bind the applicable row images. A `BEFORE`
   trigger may assign `NEW.column`; generated columns cannot be referenced.
 - Multi-row statements fire once per affected row. Ignored candidates do not
@@ -182,8 +184,8 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
 - A trigger follows its subject through `RENAME TABLE`; dropping the subject
   table or its database removes the stored trigger definition.
 
-Remaining trigger gaps are local variables, conditions, handlers, control
-flow, multi-table DML firing, and complete `REPLACE` delete-event behavior.
+Remaining trigger gaps are CASE/loop control flow, handlers, SIGNAL, dynamic
+SQL, multi-table DML firing, and complete `REPLACE` delete-event behavior.
 `REPLACE` refuses when DELETE triggers exist instead of silently skipping
 them. The full MySQL surface is documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
