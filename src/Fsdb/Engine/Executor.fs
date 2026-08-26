@@ -11265,38 +11265,166 @@ let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string
     | Delete d -> Some(d.From.Database |> Option.defaultValue dbName, normalizeTableName d.From.Table)
     | _ -> None
 
+type private TriggerBoundary =
+    | ThenBoundary
+    | ElseIfBoundary
+    | ElseBoundary
+    | EndIfBoundary
+    | SemicolonBoundary
+
+let private triggerWordAt (text: string) index (word: string) =
+    let finish = index + word.Length
+    let isWordCharacter c = System.Char.IsLetterOrDigit c || c = '_' || c = '$'
+    index >= 0
+    && finish <= text.Length
+    && System.String.Compare(text, index, word, 0, word.Length, System.StringComparison.OrdinalIgnoreCase) = 0
+    && (index = 0 || not (isWordCharacter text.[index - 1]))
+    && (finish = text.Length || not (isWordCharacter text.[finish]))
+
+let private triggerEndIfAt (text: string) index =
+    if triggerWordAt text index "END" then
+        let mutable next = index + 3
+        while next < text.Length && System.Char.IsWhiteSpace text.[next] do
+            next <- next + 1
+        if triggerWordAt text next "IF" then Some(next + 2) else None
+    else
+        None
+
+let private triggerBoundaryAt (boundaries: Set<TriggerBoundary>) (text: string) index =
+    if boundaries.Contains SemicolonBoundary && text.[index] = ';' then
+        Some(SemicolonBoundary, index + 1)
+    elif boundaries.Contains EndIfBoundary then
+        match triggerEndIfAt text index with
+        | Some finish -> Some(EndIfBoundary, finish)
+        | None ->
+            if boundaries.Contains ElseIfBoundary && triggerWordAt text index "ELSEIF" then
+                Some(ElseIfBoundary, index + 6)
+            elif boundaries.Contains ElseBoundary && triggerWordAt text index "ELSE" then
+                Some(ElseBoundary, index + 4)
+            elif boundaries.Contains ThenBoundary && triggerWordAt text index "THEN" then
+                Some(ThenBoundary, index + 4)
+            else
+                None
+    elif boundaries.Contains ElseIfBoundary && triggerWordAt text index "ELSEIF" then
+        Some(ElseIfBoundary, index + 6)
+    elif boundaries.Contains ElseBoundary && triggerWordAt text index "ELSE" then
+        Some(ElseBoundary, index + 4)
+    elif boundaries.Contains ThenBoundary && triggerWordAt text index "THEN" then
+        Some(ThenBoundary, index + 4)
+    else
+        None
+
+let private findTriggerBoundary boundaries (text: string) start =
+    let mutable index = start
+    let mutable depth = 0
+    let mutable quote = None
+    let mutable lineComment = false
+    let mutable blockComment = false
+    let mutable found = None
+
+    while index < text.Length && found.IsNone do
+        if lineComment then
+            if text.[index] = '\n' || text.[index] = '\r' then lineComment <- false
+            index <- index + 1
+        elif blockComment then
+            if text.[index] = '*' && index + 1 < text.Length && text.[index + 1] = '/' then
+                blockComment <- false
+                index <- index + 2
+            else
+                index <- index + 1
+        else
+            match quote with
+            | Some delimiter when text.[index] = '\\' && index + 1 < text.Length -> index <- index + 2
+            | Some delimiter when text.[index] = delimiter ->
+                if index + 1 < text.Length && text.[index + 1] = delimiter then
+                    index <- index + 2
+                else
+                    quote <- None
+                    index <- index + 1
+            | Some _ -> index <- index + 1
+            | None when text.[index] = '\'' || text.[index] = '"' || text.[index] = '`' ->
+                quote <- Some text.[index]
+                index <- index + 1
+            | None when text.[index] = '#' ->
+                lineComment <- true
+                index <- index + 1
+            | None when text.[index] = '-' && index + 2 < text.Length && text.[index + 1] = '-' && System.Char.IsWhiteSpace text.[index + 2] ->
+                lineComment <- true
+                index <- index + 2
+            | None when text.[index] = '/' && index + 1 < text.Length && text.[index + 1] = '*' ->
+                blockComment <- true
+                index <- index + 2
+            | None when text.[index] = '(' ->
+                depth <- depth + 1
+                index <- index + 1
+            | None when text.[index] = ')' ->
+                depth <- max 0 (depth - 1)
+                index <- index + 1
+            | None when depth = 0 ->
+                match triggerBoundaryAt boundaries text index with
+                | Some(boundary, finish) -> found <- Some(index, finish, boundary)
+                | None -> index <- index + 1
+            | None -> index <- index + 1
+
+    found
+
 let private parseTriggerBody (body: string) : Result<TriggerStatement list, string> =
     let compound = Regex.Match(body, @"^\s*BEGIN\b(?<body>[\s\S]*)\bEND\s*$", RegexOptions.IgnoreCase)
 
     if compound.Success then
         let inner = compound.Groups.["body"].Value
-        let conditional = Regex(@"\G\s*IF\s+(?<condition>[\s\S]+?)\s+THEN\s+(?<body>[\s\S]+?)\s*;\s*END\s+IF\s*;?", RegexOptions.IgnoreCase)
+        let skipSeparators offset =
+            let mutable next = offset
+            while next < inner.Length && (System.Char.IsWhiteSpace inner.[next] || inner.[next] = ';') do
+                next <- next + 1
+            next
 
-        let rec parseConditionals offset statements =
-            let matched = conditional.Match(inner, offset)
+        let rec parseStatements offset (stops: Set<TriggerBoundary>) statements =
+            let offset = skipSeparators offset
 
-            if matched.Success then
-                Parser.parseExpression matched.Groups.["condition"].Value
-                |> Result.bind (fun condition ->
-                    Parser.parse (matched.Groups.["body"].Value.Trim().TrimEnd(';'))
-                    |> Result.bind (fun statement ->
-                        let next = matched.Index + matched.Length
-
-                        if System.String.IsNullOrWhiteSpace(inner.[next..]) then
-                            Ok(List.rev (TriggerIf(condition, [ TriggerDml statement ], []) :: statements))
-                        else
-                            parseConditionals next (TriggerIf(condition, [ TriggerDml statement ], []) :: statements)))
+            if offset >= inner.Length then
+                if stops.IsEmpty then Ok(List.rev statements, offset, None)
+                else Error "Unterminated IF in trigger body"
             else
-                Error "Invalid conditional trigger body"
+                match triggerBoundaryAt stops inner offset with
+                | Some(boundary, finish) -> Ok(List.rev statements, finish, Some boundary)
+                | None when triggerWordAt inner offset "IF" ->
+                    parseIf (offset + 2)
+                    |> Result.bind (fun (statement, next) -> parseStatements next stops (statement :: statements))
+                | None ->
+                    match findTriggerBoundary (Set.singleton SemicolonBoundary) inner offset with
+                    | Some(finishStart, finish, _) ->
+                        Parser.parse (inner.Substring(offset, finishStart - offset).Trim())
+                        |> Result.bind (fun statement -> parseStatements finish stops (TriggerDml statement :: statements))
+                    | None ->
+                        Parser.parse (inner.Substring(offset).Trim())
+                        |> Result.map (fun statement -> List.rev (TriggerDml statement :: statements), inner.Length, None)
 
-        if conditional.IsMatch(inner) then
-            parseConditionals 0 []
-        else
-            Parser.splitStatements inner
-            |> Result.bind (fun statements ->
-                match statements with
-                | [] -> Error "Trigger body cannot be empty"
-                | statements -> statements |> traverse (Parser.parse >> Result.map TriggerDml))
+        and parseIf conditionStart =
+            match findTriggerBoundary (Set.singleton ThenBoundary) inner conditionStart with
+            | None -> Error "IF is missing THEN"
+            | Some(conditionEnd, bodyStart, _) ->
+                Parser.parseExpression (inner.Substring(conditionStart, conditionEnd - conditionStart).Trim())
+                |> Result.bind (fun condition ->
+                    let stops = Set.ofList [ ElseIfBoundary; ElseBoundary; EndIfBoundary ]
+
+                    parseStatements bodyStart stops []
+                    |> Result.bind (fun (whenTrue, next, boundary) ->
+                        match boundary with
+                        | Some EndIfBoundary -> Ok(TriggerIf(condition, whenTrue, []), next)
+                        | Some ElseBoundary ->
+                            parseStatements next (Set.singleton EndIfBoundary) []
+                            |> Result.bind (fun (whenFalse, finish, ended) ->
+                                match ended with
+                                | Some EndIfBoundary -> Ok(TriggerIf(condition, whenTrue, whenFalse), finish)
+                                | _ -> Error "ELSE is missing END IF")
+                        | Some ElseIfBoundary ->
+                            parseIf next
+                            |> Result.map (fun (alternative, finish) -> TriggerIf(condition, whenTrue, [ alternative ]), finish)
+                        | _ -> Error "IF is missing END IF"))
+
+        parseStatements 0 Set.empty []
+        |> Result.bind (fun (statements, _, _) -> if statements.IsEmpty then Error "Trigger body cannot be empty" else Ok statements)
     else
         Parser.parse body |> Result.map (TriggerDml >> List.singleton)
 

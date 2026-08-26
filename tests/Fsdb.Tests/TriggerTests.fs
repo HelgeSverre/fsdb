@@ -81,6 +81,20 @@ let tests =
               Expect.equal (rows store "SELECT n FROM log") [ [ Some "11" ] ] "only the changed row is logged"
               Expect.equal (rows store "SELECT n FROM second_log") [ [ Some "11" ] ] "later conditions also execute"
 
+          testCase "nested trigger conditions select ELSEIF and ELSE statement blocks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TRIGGER branch BEFORE INSERT ON t FOR EACH ROW BEGIN IF NEW.n > 0 THEN IF NEW.n = 1 THEN SET NEW.n = 10; ELSEIF NEW.n = 2 THEN SET NEW.n = 20; SET NEW.n = NEW.n + 1; ELSE SET NEW.n = 30; END IF; END IF; END")
+                  "create nested conditional trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (1), (2), (3), (-1)") "fire each branch"
+              Expect.equal (rows store "SELECT n FROM t ORDER BY id") [ [ Some "10" ]; [ Some "21" ]; [ Some "30" ]; [ Some "-1" ] ] "each row follows one branch"
+
           testCase "BEFORE INSERT preserves body writes in the subject database"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
