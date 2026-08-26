@@ -14,9 +14,8 @@ $CFG->dboptions = [
     'dbpersist' => false,
     'dbsocket' => false,
     'dbport' => 3306,
-    'dbcollation' => 'utf8mb4_unicode_ci',
+    'dbcollation' => 'utf8mb4_bin',
     'dbtransactions' => true,
-    'versionfromdb' => true,
 ];
 $CFG->wwwroot = 'http://moodle.invalid';
 $CFG->dataroot = '/opt/moodledata';
