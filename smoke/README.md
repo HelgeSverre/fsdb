@@ -67,6 +67,8 @@ Reproducible fsdb failures found by these probes are tracked in `BUGS.md`.
 
 Most targets remain focused compatibility gates. Drupal is the exception: its
 target runs every upstream PHPUnit suite (28,475 tests at the current pin),
-including tests that do not access a database. A failure is a candidate fsdb
-incompatibility only when the same pinned test succeeds against MySQL 8.4;
-environment and upstream failures remain separate classifications.
+including tests that do not access a database. Drupal's own test runner uses
+eight workers by default; set `DRUPAL_CONCURRENCY` to tune that locally. A
+failure is a candidate fsdb compatibility only when the same pinned test
+succeeds against MySQL 8.4; environment and upstream failures remain separate
+classifications.

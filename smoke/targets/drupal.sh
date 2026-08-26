@@ -18,5 +18,10 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-vendor/bin/phpunit --configuration core/phpunit.xml.dist \
-    --testsuite unit-component,unit,kernel,functional,functional-javascript,build
+php core/scripts/run-tests.sh \
+    --all \
+    --concurrency="${DRUPAL_CONCURRENCY:-8}" \
+    --sqlite=/tmp/drupal-results.sqlite \
+    --dburl="$SIMPLETEST_DB" \
+    --url="$SIMPLETEST_BASE_URL" \
+    --non-html

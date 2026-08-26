@@ -92,7 +92,8 @@ RUN composer install --no-interaction --prefer-dist --no-progress
 
 FROM php-build AS drupal
 WORKDIR /opt/drupal
-RUN apt-get update \
+RUN install-php-extensions pdo_sqlite \
+    && apt-get update \
     && apt-get install --yes --no-install-recommends chromium chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=drupal-build /opt/drupal/ ./
