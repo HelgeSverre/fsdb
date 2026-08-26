@@ -1506,6 +1506,12 @@ let tests =
                     | InsertSelect("t", [], _, [], true) -> ()
                     | other -> failtestf "expected an ignore-flagged InsertSelect, got %A" other
 
+                testCase "INSERT accepts a parenthesized SELECT source"
+                <| fun _ ->
+                    match parseOk "INSERT INTO t (SELECT x, y FROM u WHERE x > 1)" with
+                    | InsertSelect("t", [], { Projections = [ Col "x", None; Col "y", None ] }, [], false) -> ()
+                    | other -> failtestf "expected a parenthesized InsertSelect, got %A" other
+
                 testCase "INSERT ... SELECT carries a trailing ON DUPLICATE KEY UPDATE"
                 <| fun _ ->
                     match parseOk "INSERT INTO t (a, b) SELECT x, y FROM u AS s ON DUPLICATE KEY UPDATE b = s.y, a = a + 1" with

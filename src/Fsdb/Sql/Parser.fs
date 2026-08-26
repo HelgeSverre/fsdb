@@ -2485,17 +2485,25 @@ let private insertStmt: Parser<Statement, unit> =
     let assignments = sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
     let row = optional (keyword "ROW") >>. between (sym "(") (sym ")") (sepBy1 insertValue (sym ","))
 
+    let parenthesizedSelect =
+        attempt (between (sym "(") (sym ")") selectWithCtes)
+        .>>. opt onDuplicateKeyUpdate
+        |>> fun source -> None, Choice2Of3 source
+
+    let ordinarySource =
+        opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
+        .>>. choice
+                 [ ((keyword "VALUES" <|> keyword "VALUE") >>. sepBy1 row (sym ",")
+                    .>>. opt onDuplicateKeyUpdate)
+                   |>> Choice1Of3
+                   (selectWithCtes .>>. opt onDuplicateKeyUpdate) |>> Choice2Of3
+                   (keyword "SET" >>. assignments .>>. opt onDuplicateKeyUpdate) |>> Choice3Of3 ]
+
     (keyword "INSERT" >>. (opt (keyword "IGNORE") |>> Option.isSome)
      .>> keyword "INTO"
      .>>. qualifiedTableName
-     .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
-     .>>. choice
-              [ ((keyword "VALUES" <|> keyword "VALUE") >>. sepBy1 row (sym ",")
-                 .>>. opt onDuplicateKeyUpdate)
-                |>> Choice1Of3
-                (selectWithCtes .>>. opt onDuplicateKeyUpdate) |>> Choice2Of3
-                (keyword "SET" >>. assignments .>>. opt onDuplicateKeyUpdate) |>> Choice3Of3 ])
-    |>> fun (((ignoreDuplicates, table), cols), branch) ->
+     .>>. (parenthesizedSelect <|> ordinarySource))
+    |>> fun ((ignoreDuplicates, table), (cols, branch)) ->
         let cols = cols |> Option.defaultValue []
 
         match branch with

@@ -2284,6 +2284,21 @@ let tests =
                         Expect.equal rows [ [ Some "east"; Some "30" ]; [ Some "west"; Some "5" ] ] "one summary row per region"
                     | other -> failtestf "expected the grouped totals, got %A" other
 
+                testCase "accepts a parenthesized SELECT source"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (id INT, value INT)" |> ignore
+                    runDefault store "CREATE TABLE dst (id INT, value INT)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1, 10), (2, NULL)" |> ignore
+
+                    match runDefault store "INSERT INTO dst (SELECT id, value FROM src WHERE value IS NOT NULL)" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one inserted row, got %A" other
+
+                    match runDefault store "SELECT id, value FROM dst" with
+                    | ResultSet(_, [ [ Some "1"; Some "10" ] ]) -> ()
+                    | other -> failtestf "expected the selected row, got %A" other
+
                 testCase "INSERT IGNORE ... SELECT skips rows that violate a unique constraint instead of failing"
                 <| fun _ ->
                     let store = newStore ()
