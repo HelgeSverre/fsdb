@@ -1836,6 +1836,11 @@ let tests =
                         (AlterTable("t", [ DropPrimaryKey; AddPrimaryKey [ "id"; "tenant_id" ] ]))
                         "replace primary key"
 
+                    Expect.equal
+                        (parseOk "ALTER TABLE migrations_lock ADD PRIMARY KEY migrations_lock_pkey(lock_key)")
+                        (AlterTable("migrations_lock", [ AddPrimaryKey [ "lock_key" ] ]))
+                        "optional primary-key name"
+
                 testCase "ALTER TABLE named unique constraints and execution options"
                 <| fun _ ->
                     Expect.equal

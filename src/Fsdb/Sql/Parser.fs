@@ -1877,7 +1877,9 @@ let private colPosition: Parser<ColumnPosition, unit> =
 /// has no separate slot for it, so it's applied as a post-pass that flags
 /// the matching columns' `PrimaryKey` field instead.
 let private trailingPrimaryKey: Parser<string list, unit> =
-    attempt (keyword "PRIMARY" >>. keyword "KEY") >>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
+    attempt (keyword "PRIMARY" >>. keyword "KEY")
+    >>. opt (notFollowedBy (sym "(") >>. identifier)
+    >>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
 
 /// One column inside an index's column list, with its optional MySQL
 /// "key length" (`col(191)`) parsed and discarded — `Ast.IndexDef` doesn't
