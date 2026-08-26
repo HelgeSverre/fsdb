@@ -1575,6 +1575,27 @@ let tests =
                               (VInt 1L)
                               "exactly 3 whole months is a whole quarter"
 
+                      testCase "TIMESTAMPDIFF calendar units include time of day in whole-unit boundaries"
+                      <| fun _ ->
+                          let start = VDateTime(DateTime(1975, 11, 1, 16, 11, 57))
+                          let beforeBoundary = VDateTime(DateTime(2030, 1, 1, 0, 0, 0))
+                          let atBoundary = VDateTime(DateTime(2030, 1, 1, 16, 11, 57))
+
+                          Expect.equal
+                              (call "TIMESTAMPDIFF" [ VString "MONTH"; start; beforeBoundary ])
+                              (VInt 649L)
+                              "same day before the source time is not a whole month"
+
+                          Expect.equal
+                              (call "TIMESTAMPDIFF" [ VString "MONTH"; start; atBoundary ])
+                              (VInt 650L)
+                              "the source time reaches the next whole month"
+
+                          Expect.equal
+                              (call "TIMESTAMPDIFF" [ VString "YEAR"; start; VDateTime(DateTime(2030, 11, 1, 0, 0, 0)) ])
+                              (VInt 54L)
+                              "year boundaries include time of day"
+
                       testCase "LAST_DAY finds the month's final day"
                       <| fun _ -> Expect.equal (call "LAST_DAY" [ VDate(DateOnly(2024, 2, 15)) ]) (VDate(DateOnly(2024, 2, 29))) "leap february"
 

@@ -2771,6 +2771,16 @@ let private timestampDiffFn: Scalar =
         | Some unit, Some da, Some db ->
             let span = db - da
 
+            let ordered () = if db < da then db, da, -1.0 else da, db, 1.0
+
+            let wholeMonths (earlier: DateTime) (later: DateTime) =
+                let months = (later.Year - earlier.Year) * 12 + later.Month - earlier.Month
+                months - if (later.Day, later.TimeOfDay) < (earlier.Day, earlier.TimeOfDay) then 1 else 0
+
+            let wholeYears (earlier: DateTime) (later: DateTime) =
+                let years = later.Year - earlier.Year
+                years - if (later.Month, later.Day, later.TimeOfDay) < (earlier.Month, earlier.Day, earlier.TimeOfDay) then 1 else 0
+
             let result =
                 match unit.ToUpperInvariant() with
                 | "SECOND" -> span.TotalSeconds
@@ -2786,15 +2796,14 @@ let private timestampDiffFn: Scalar =
                 // (a negative diff). Order the pair first, then reapply the
                 // sign to the magnitude.
                 | "MONTH" ->
-                    let earlier, later, sign = if db < da then db, da, -1.0 else da, db, 1.0
-                    sign * (float ((later.Year - earlier.Year) * 12 + later.Month - earlier.Month) - (if later.Day < earlier.Day then 1.0 else 0.0))
+                    let earlier, later, sign = ordered ()
+                    sign * float (wholeMonths earlier later)
                 | "QUARTER" ->
-                    let earlier, later, sign = if db < da then db, da, -1.0 else da, db, 1.0
-                    let months = float ((later.Year - earlier.Year) * 12 + later.Month - earlier.Month) - (if later.Day < earlier.Day then 1.0 else 0.0)
-                    sign * Math.Truncate(months / 3.0)
+                    let earlier, later, sign = ordered ()
+                    sign * Math.Truncate(float (wholeMonths earlier later) / 3.0)
                 | "YEAR" ->
-                    let earlier, later, sign = if db < da then db, da, -1.0 else da, db, 1.0
-                    sign * (float (later.Year - earlier.Year) - (if (later.Month, later.Day) < (earlier.Month, earlier.Day) then 1.0 else 0.0))
+                    let earlier, later, sign = ordered ()
+                    sign * float (wholeYears earlier later)
                 | _ -> span.TotalSeconds
 
             VInt(int64 (Math.Truncate result))
