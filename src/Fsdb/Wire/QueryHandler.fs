@@ -330,7 +330,17 @@ let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string
 // `showResult` below.
 // ---------------------------------------------------------------------------
 
-let private stripBackticks (s: string) = s.Trim().Trim('`')
+let private stripIdentifierQuotes (s: string) =
+    let text = s.Trim()
+
+    if
+        text.Length >= 2
+        && ((text.[0] = '`' && text.[text.Length - 1] = '`')
+            || (text.[0] = '"' && text.[text.Length - 1] = '"'))
+    then
+        text.Substring(1, text.Length - 2)
+    else
+        text
 
 let private showStatusRe =
     Regex(@"^SHOW\s+(?:SESSION\s+|GLOBAL\s+)?STATUS(\s|$)", RegexOptions.IgnoreCase)
@@ -436,7 +446,7 @@ let private showTablesRe =
 let private handleShowTables (session: Session) (sql: string) : QueryResult =
     let m = showTablesRe.Match sql
     let full = m.Groups.[1].Success
-    let dbName = if m.Groups.[3].Success then stripBackticks m.Groups.[3].Value else session.Database |> Option.defaultValue defaultDatabase
+    let dbName = if m.Groups.[3].Success then stripIdentifierQuotes m.Groups.[3].Value else session.Database |> Option.defaultValue defaultDatabase
 
     let store = Session.currentStore session
 
@@ -530,7 +540,7 @@ let private showTableStatusRe = Regex(@"^SHOW\s+TABLE\s+STATUS(\s+FROM\s+(\S+))?
 
 let private handleShowTableStatus (session: Session) (sql: string) : QueryResult =
     let m = showTableStatusRe.Match sql
-    let dbName = if m.Groups.[2].Success then stripBackticks m.Groups.[2].Value else session.Database |> Option.defaultValue defaultDatabase
+    let dbName = if m.Groups.[2].Success then stripIdentifierQuotes m.Groups.[2].Value else session.Database |> Option.defaultValue defaultDatabase
 
     InformationSchema.showTableStatus (Session.currentStore session).Catalog dbName (likeSuffix sql)
     |> Result.map (fun (columns, rows) -> columns, visibleTableRows session dbName rows)
@@ -803,7 +813,7 @@ let private parseSetFragment
 
             if varMatch.Success then
                 let isGlobal = isGlobalScope varMatch.Groups.[1].Value
-                let name = stripBackticks varMatch.Groups.[2].Value |> _.ToLowerInvariant()
+                let name = stripIdentifierQuotes varMatch.Groups.[2].Value |> _.ToLowerInvariant()
 
                 if Session.tryGlobalVariable session.Store name |> Option.isNone then
                     Error(Err(1193, sprintf "Unknown system variable '%s'" name))
@@ -1587,12 +1597,12 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         let m = showOpenTablesRe.Match sql
         Some(
             ShowOpenTables(
-                (if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None),
+                (if m.Groups.[1].Success then Some(stripIdentifierQuotes m.Groups.[1].Value) else None),
                 (if m.Groups.[2].Success then Some m.Groups.[2].Value else None)
             )
         )
     elif showCreateDatabaseRe.IsMatch sql then
-        Some(ShowCreateDatabase(stripBackticks (showCreateDatabaseRe.Match sql).Groups.[1].Value))
+        Some(ShowCreateDatabase(stripIdentifierQuotes (showCreateDatabaseRe.Match sql).Groups.[1].Value))
     elif showCharsetRe.IsMatch sql then
         Some ShowCharset
     elif showPrivilegesRe.IsMatch sql then
@@ -1621,17 +1631,17 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(ShowProcesslist((showProcesslistRe.Match sql).Groups.[1].Success))
     elif showTriggersRe.IsMatch sql then
         let m = showTriggersRe.Match sql
-        Some(ShowTriggers(if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None))
+        Some(ShowTriggers(if m.Groups.[1].Success then Some(stripIdentifierQuotes m.Groups.[1].Value) else None))
     elif showEventsRe.IsMatch sql then
         let m = showEventsRe.Match sql
-        Some(ShowEvents(if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None))
+        Some(ShowEvents(if m.Groups.[1].Success then Some(stripIdentifierQuotes m.Groups.[1].Value) else None))
     elif showRoutineStatusRe.IsMatch sql then
         Some ShowRoutineStatus
     elif killRe.IsMatch sql then
         let m = killRe.Match sql
         Some(Kill(m.Groups.[1].Value.ToUpperInvariant() = "QUERY", int64 m.Groups.[2].Value))
     elif alterKeysRe.IsMatch sql then
-        Some(AlterKeysNoop(stripBackticks (alterKeysRe.Match sql).Groups.[1].Value))
+        Some(AlterKeysNoop(stripIdentifierQuotes (alterKeysRe.Match sql).Groups.[1].Value))
     elif showCountWarningsRe.IsMatch sql then
         Some(ShowMessageCount false)
     elif showCountErrorsRe.IsMatch sql then
@@ -2005,7 +2015,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowColumns(full, name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
-        let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
+        let dbName = dbOverride |> Option.map stripIdentifierQuotes |> Option.defaultValue dbName
         let store = Session.currentStore session
         let viewColumns = Executor.viewColumns store (registryFor session)
         session,
@@ -2022,7 +2032,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowIndex(name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
-        let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
+        let dbName = dbOverride |> Option.map stripIdentifierQuotes |> Option.defaultValue dbName
         session,
         InformationSchema.showIndex (catalogWithOverlay session dbName table) dbName table
         |> showTableResult session dbName table

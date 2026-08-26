@@ -243,7 +243,17 @@ type DurableCommitSlot = { mutable Sink: DurableCommitSink option }
 
 let defaultDatabase = "fsdb"
 
-let private stripBackticks (s: string) = s.Trim().Trim('`')
+let private stripIdentifierQuotes (s: string) =
+    let text = s.Trim()
+
+    if
+        text.Length >= 2
+        && ((text.[0] = '`' && text.[text.Length - 1] = '`')
+            || (text.[0] = '"' && text.[text.Length - 1] = '"'))
+    then
+        text.Substring(1, text.Length - 2)
+    else
+        text
 
 /// Splits a `` `db`.`table` `` (or bare `table`) name into its two parts,
 /// defaulting the database to `defaultDb` — the one place every qualified
@@ -255,8 +265,8 @@ let private stripBackticks (s: string) = s.Trim().Trim('`')
 /// backticks straddling the dot survive), which then splits wrong.
 let splitQualified (defaultDb: string) (name: string) : string * string =
     match name.Trim().Split('.') with
-    | [| db; tbl |] -> stripBackticks db, stripBackticks tbl
-    | _ -> defaultDb, stripBackticks name
+    | [| db; tbl |] -> stripIdentifierQuotes db, stripIdentifierQuotes tbl
+    | _ -> defaultDb, stripIdentifierQuotes name
 
 type RowLockStripe =
     { SyncRoot: obj

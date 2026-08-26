@@ -603,6 +603,10 @@ let tests =
               | ResultSet([ "id" ], []) -> ()
               | other -> failtestf "expected ANSI-quoted SELECT to succeed, got %A" other
 
+              match handle session "SHOW INDEX FROM \"drupal_install_test\"" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected ANSI-quoted SHOW INDEX to succeed, got %A" other
+
               match prepareStatementForSession session "SELECT \"id\" FROM \"drupal_install_test\" WHERE \"id\" = ?" with
               | Ok(Some _, 1) -> ()
               | other -> failtestf "expected ANSI-quoted prepared statement to parse, got %A" other
