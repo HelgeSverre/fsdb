@@ -11236,18 +11236,23 @@ let private beforeInsertTriggers (store: Store) (db: string) (table: string) =
 
 type private TriggerStatement =
     | TriggerDml of Statement
-    | TriggerIf of condition: Expr * body: Statement
+    | TriggerIf of condition: Expr * whenTrue: TriggerStatement list * whenFalse: TriggerStatement list
 
-let private triggerDml =
+let rec private triggerDmlStatements =
     function
-    | TriggerDml statement
-    | TriggerIf(_, statement) -> statement
+    | TriggerDml statement -> [ statement ]
+    | TriggerIf(_, whenTrue, whenFalse) ->
+        (whenTrue @ whenFalse) |> List.collect triggerDmlStatements
+
+let rec private triggerConditions =
+    function
+    | TriggerDml _ -> []
+    | TriggerIf(condition, whenTrue, whenFalse) ->
+        condition :: ((whenTrue @ whenFalse) |> List.collect triggerConditions)
 
 /// The one table a trigger body statement writes — what 1442's "already
 /// used by the statement which invoked this trigger" check points at.
-let private writtenTableOf (dbName: string) (triggerStatement: TriggerStatement) : (string * string) option =
-    let stmt = triggerDml triggerStatement
-
+let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string) option =
     match stmt with
     | Insert(t, _, _, _, _)
     | InsertSelect(t, _, _, _, _)
@@ -11278,9 +11283,9 @@ let private parseTriggerBody (body: string) : Result<TriggerStatement list, stri
                         let next = matched.Index + matched.Length
 
                         if System.String.IsNullOrWhiteSpace(inner.[next..]) then
-                            Ok(List.rev (TriggerIf(condition, statement) :: statements))
+                            Ok(List.rev (TriggerIf(condition, [ TriggerDml statement ], []) :: statements))
                         else
-                            parseConditionals next (TriggerIf(condition, statement) :: statements)))
+                            parseConditionals next (TriggerIf(condition, [ TriggerDml statement ], []) :: statements)))
             else
                 Error "Invalid conditional trigger body"
 
@@ -11305,7 +11310,6 @@ let private parseTriggerBody (body: string) : Result<TriggerStatement list, stri
 /// (`Storage.mergeDatabaseSlot`).
 let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : string list =
     let bodyTargets (defaultDb: string) (triggerStatement: TriggerStatement) =
-        let statement = triggerDml triggerStatement
         let tableRefTarget (table: TableRef) =
             table.Database |> Option.defaultValue defaultDb, normalizeTableName table.Table
 
@@ -11316,15 +11320,16 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
                 | FromTable table -> Some(tableRefTarget table)
                 | _ -> None)
 
-        match statement with
-        | Insert(table, _, _, _, _)
-        | InsertSelect(table, _, _, _, _)
-        | Replace(table, _, _)
-        | ReplaceSelect(table, _, _)
-        | ReplaceSet(table, _) -> [ splitQualified defaultDb table |> fun (db, name) -> db, normalizeTableName name ]
-        | Update update -> tableRefTarget update.From :: joinTargets update.Joins
-        | Delete delete -> tableRefTarget delete.From :: joinTargets delete.Joins
-        | _ -> []
+        triggerDmlStatements triggerStatement
+        |> List.collect (function
+            | Insert(table, _, _, _, _)
+            | InsertSelect(table, _, _, _, _)
+            | Replace(table, _, _)
+            | ReplaceSelect(table, _, _)
+            | ReplaceSet(table, _) -> [ splitQualified defaultDb table |> fun (db, name) -> db, normalizeTableName name ]
+            | Update update -> tableRefTarget update.From :: joinTargets update.Joins
+            | Delete delete -> tableRefTarget delete.From :: joinTargets delete.Joins
+            | _ -> [])
 
     let rec visit (visited: Set<string * string>) (db: string) (table: string) =
         let key = db.ToLowerInvariant(), normalizeTableName table
@@ -11357,23 +11362,20 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
 /// `shadowDirectOnly` backstop still catches those, the same backstop that
 /// covers functions registered only after the trigger was created.
 let private triggerBodyExprs (triggerStatement: TriggerStatement) : Expr list =
-    let condition =
-        match triggerStatement with
-        | TriggerIf(condition, _) -> [ condition ]
-        | TriggerDml _ -> []
+    let statementExprs =
+        function
+        | SetTriggerNew(_, expression) -> [ expression ]
+        | Insert(_, _, rows, onDup, _) -> List.concat rows @ (onDup |> List.map snd)
+        | InsertSelect(_, _, _, onDup, _) -> onDup |> List.map snd
+        | Replace(_, _, rows) -> List.concat rows
+        | ReplaceSelect _ -> []
+        | ReplaceSet(_, assignments) -> assignments |> List.map snd
+        | Update u -> (u.Assignments |> List.map (fun a -> a.Value)) @ Option.toList u.Where
+        | Delete d -> Option.toList d.Where
+        | _ -> []
 
-    let stmt = triggerDml triggerStatement
-
-    match stmt with
-    | SetTriggerNew(_, expression) -> condition @ [ expression ]
-    | Insert(_, _, rows, onDup, _) -> condition @ List.concat rows @ (onDup |> List.map snd)
-    | InsertSelect(_, _, _, onDup, _) -> condition @ (onDup |> List.map snd)
-    | Replace(_, _, rows) -> condition @ List.concat rows
-    | ReplaceSelect _ -> condition
-    | ReplaceSet(_, assignments) -> condition @ (assignments |> List.map snd)
-    | Update u -> condition @ (u.Assignments |> List.map (fun a -> a.Value)) @ Option.toList u.Where
-    | Delete d -> condition @ Option.toList d.Where
-    | _ -> condition
+    triggerConditions triggerStatement
+    @ (triggerDmlStatements triggerStatement |> List.collect statementExprs)
 
 let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list) (triggerStatement: TriggerStatement) =
     let rec references =
@@ -11438,29 +11440,26 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
             @ (limit |> Option.map references |> Option.defaultValue [])
             @ (offset |> Option.map references |> Option.defaultValue [])
 
-    let statement = triggerDml triggerStatement
-
     let conditionReferences =
-        match triggerStatement with
-        | TriggerIf(condition, _) -> references condition
-        | TriggerDml _ -> []
+        triggerConditions triggerStatement |> List.collect references
 
     let statementReferences =
-        match statement with
-        | SetTriggerNew(_, expression) -> references expression
-        | Insert(_, _, rows, assignments, _) -> (rows |> List.collect (List.collect references)) @ (assignments |> List.collect (snd >> references))
-        | InsertSelect(_, _, select, assignments, _) -> selectReferences select @ (assignments |> List.collect (snd >> references))
-        | Replace(_, _, rows) -> rows |> List.collect (List.collect references)
-        | ReplaceSelect(_, _, select) -> selectReferences select
-        | ReplaceSet(_, assignments) -> assignments |> List.collect (snd >> references)
-        | Update update ->
-            (update.Ctes |> List.collect (fun cte -> selectOrUnionReferences cte.Body))
-            @ (update.Assignments |> List.collect (fun assignment -> references assignment.Value))
-            @ (update.Where |> Option.map references |> Option.defaultValue [])
-        | Delete delete ->
-            (delete.Ctes |> List.collect (fun cte -> selectOrUnionReferences cte.Body))
-            @ (delete.Where |> Option.map references |> Option.defaultValue [])
-        | _ -> []
+        triggerDmlStatements triggerStatement
+        |> List.collect (function
+            | SetTriggerNew(_, expression) -> references expression
+            | Insert(_, _, rows, assignments, _) -> (rows |> List.collect (List.collect references)) @ (assignments |> List.collect (snd >> references))
+            | InsertSelect(_, _, select, assignments, _) -> selectReferences select @ (assignments |> List.collect (snd >> references))
+            | Replace(_, _, rows) -> rows |> List.collect (List.collect references)
+            | ReplaceSelect(_, _, select) -> selectReferences select
+            | ReplaceSet(_, assignments) -> assignments |> List.collect (snd >> references)
+            | Update update ->
+                (update.Ctes |> List.collect (fun cte -> selectOrUnionReferences cte.Body))
+                @ (update.Assignments |> List.collect (fun assignment -> references assignment.Value))
+                @ (update.Where |> Option.map references |> Option.defaultValue [])
+            | Delete delete ->
+                (delete.Ctes |> List.collect (fun cte -> selectOrUnionReferences cte.Body))
+                @ (delete.Where |> Option.map references |> Option.defaultValue [])
+            | _ -> [])
 
     let statementReferences = conditionReferences @ statementReferences
 
@@ -11482,34 +11481,34 @@ let private validateTriggerStatement
     (columns: ColumnDef list)
     (triggerStatement: TriggerStatement)
     : Result<unit, QueryResult> =
-    let statement = triggerDml triggerStatement
+    let validateStatement =
+        function
+        | Insert _
+        | InsertSelect _
+        | Replace _
+        | ReplaceSelect _
+        | ReplaceSet _
+        | Update _
+        | Delete _ -> Ok()
+        | SetTriggerNew(_, _) when timing <> Before || event = TriggerDelete ->
+            Error(Err(1362, "Updating of NEW row is not allowed in after trigger"))
+        | SetTriggerNew(column, _) ->
+            match resolveColumn columns column with
+            | Error error -> Error(storageErr error)
+            | Ok index when columns.[index].Generated.IsSome ->
+                Error(Err(1362, sprintf "Updating of NEW row is not allowed for generated column '%s'" column))
+            | Ok _ -> Ok()
+        | _ -> Error(Err(1064, "Trigger body accepts INSERT, UPDATE, DELETE, REPLACE, or SET NEW statements"))
 
-    match statement with
-    | Insert _
-    | InsertSelect _
-    | Replace _
-    | ReplaceSelect _
-    | ReplaceSet _
-    | Update _
-    | Delete _
-    | SetTriggerNew _ ->
+    match triggerDmlStatements triggerStatement |> traverse validateStatement with
+    | Error error -> Error error
+    | Ok _ ->
         match triggerRowImageError event columns triggerStatement with
         | Some error -> Error error
         | None ->
             match triggerBodyExprs triggerStatement |> List.tryPick (firstDirectOnlyCall registry) with
             | Some fn -> Error(Err(3102, sprintf "Expression of trigger contains a disallowed function: %s" fn))
-            | None ->
-                match statement with
-                | SetTriggerNew(_, _) when timing <> Before || event = TriggerDelete ->
-                    Error(Err(1362, "Updating of NEW row is not allowed in after trigger"))
-                | SetTriggerNew(column, _) ->
-                    match resolveColumn columns column with
-                    | Error error -> Error(storageErr error)
-                    | Ok index when columns.[index].Generated.IsSome ->
-                        Error(Err(1362, sprintf "Updating of NEW row is not allowed for generated column '%s'" column))
-                    | Ok _ -> Ok()
-                | _ -> Ok()
-    | _ -> Error(Err(1064, "Trigger body accepts INSERT, UPDATE, DELETE, REPLACE, or SET NEW statements"))
+            | None -> Ok()
 
 let private storeTriggerDefinition
     (store: Store)
@@ -11652,7 +11651,8 @@ let rec executeAs
                 match parseTriggerBody trigger.Body with
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
                 | Result.Ok bodyStatements ->
-                    let targets = bodyStatements |> List.choose (writtenTableOf db)
+                    let dmlStatements = bodyStatements |> List.collect triggerDmlStatements
+                    let targets = dmlStatements |> List.choose (writtenTableOf db)
 
                     match targets |> List.tryFind (fun target -> List.contains target (self :: chain)) with
                     | Some target -> Result.Error(err1442 (snd target))
@@ -11670,8 +11670,7 @@ let rec executeAs
                             )
                         else
                             let privileges =
-                                bodyStatements
-                                |> traverse (triggerDml >> checkStoredDefiner runStore trigger.Definer db)
+                                dmlStatements |> traverse (checkStoredDefiner runStore trigger.Definer db)
 
                             match storedObjectAccount trigger.Definer, privileges with
                             | Some account, Result.Ok _ -> Result.Ok(bodyStatements, account)
@@ -11722,24 +11721,27 @@ let rec executeAs
                                     with SqlError(code, msg) ->
                                         Err(code, msg)
 
-                            let runStatement =
+                            let rec runStatements statements =
+                                statements
+                                |> List.fold
+                                    (fun result statement ->
+                                        match result with
+                                        | Err _ -> result
+                                        | _ -> runStatement statement)
+                                    (Affected 0UL)
+
+                            and runStatement =
                                 function
                                 | TriggerDml statement -> runDml statement
-                                | TriggerIf(condition, statement) ->
+                                | TriggerIf(condition, whenTrue, whenFalse) ->
                                     let context = contextFactory runStore definerRegistry db Map.empty Map.empty None [||]
 
                                     match evalExpr context condition with
                                     | Error(code, message) -> Err(code, message)
-                                    | Ok value when truthy value = Some true -> runDml statement
-                                    | Ok _ -> Affected 0UL
+                                    | Ok value when truthy value = Some true -> runStatements whenTrue
+                                    | Ok _ -> runStatements whenFalse
 
-                            statements
-                            |> List.fold
-                                (fun result statement ->
-                                    match result with
-                                    | Err _ -> result
-                                    | _ -> runStatement statement)
-                                (Affected 0UL))
+                            runStatements statements)
 
                 try
                     rows
