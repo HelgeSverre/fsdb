@@ -1120,6 +1120,10 @@ let tests =
               | ResultSet([ "id" ], [ [ Some "42" ] ]) -> ()
               | other -> failtestf "expected procedure result, got %A" other
 
+              match handle session "CALL `first_post`" |> snd with
+              | ResultSet([ "id" ], [ [ Some "42" ] ]) -> ()
+              | other -> failtestf "expected unparenthesized procedure result, got %A" other
+
           testCase "scheduled event declarations persist without executing"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

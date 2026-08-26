@@ -2592,7 +2592,8 @@ let private createProcedureRe =
         RegexOptions.IgnoreCase ||| RegexOptions.Singleline
     )
 
-let private callProcedureRe = Regex(@"^\s*CALL\s+(?<name>\S+)\s*\(\s*\)\s*$", RegexOptions.IgnoreCase)
+let private callProcedureRe =
+    Regex(@"^\s*CALL\s+(?<name>[^\s(]+)(?:\s*\(\s*\))?\s*$", RegexOptions.IgnoreCase)
 
 let private dropProcedureRe =
     Regex(@"^\s*DROP\s+PROCEDURE\s+(?<ifExists>IF\s+EXISTS\s+)?(?<name>\S+)\s*$", RegexOptions.IgnoreCase)
