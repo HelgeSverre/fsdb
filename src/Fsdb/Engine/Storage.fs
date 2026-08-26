@@ -2197,7 +2197,8 @@ let mysqlViewsColumns: ColumnDef list =
       sysCol "column_names" TText false (Some(VString ""))
       sysCol "created" (TDateTime 2) true None
       sysCol "definer" (TChar 93) false (Some(VString ""))
-      sysCol "check_option" (TChar 8) false (Some(VString "NONE")) ]
+      sysCol "check_option" (TChar 8) false (Some(VString "NONE"))
+      sysCol "security_type" (TChar 7) false (Some(VString "DEFINER")) ]
 
 let mysqlRoutinesColumns: ColumnDef list =
     [ keyCol "routine_schema" 64

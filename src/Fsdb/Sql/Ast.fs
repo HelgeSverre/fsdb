@@ -627,6 +627,10 @@ type TriggerOrder =
     | Follows of trigger: string
     | Precedes of trigger: string
 
+type ViewSecurity =
+    | ViewDefiner
+    | ViewInvoker
+
 type ExplainFormat =
     | ExplainTraditional
     | ExplainJson
@@ -748,8 +752,8 @@ type Statement =
     /// explicit view-column list, and `orReplace` selects CREATE OR REPLACE.
     /// ponytail: fsdb materializes the definition once per referencing
     /// statement; INSERT, UPDATE, and DELETE accept only direct projections
-    /// of one table. No MERGE, CHECK OPTION, or configurable SQL SECURITY.
-    | CreateView of name: string * columns: string list * definition: string * orReplace: bool
+    /// of one table. No MERGE.
+    | CreateView of name: string * columns: string list * definition: string * orReplace: bool * security: ViewSecurity
     /// `DROP VIEW [IF EXISTS] view [, ...]`.
     | DropView of names: string list * ifExists: bool
     | ChecksumTables of tables: string list * quick: bool

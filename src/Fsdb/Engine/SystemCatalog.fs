@@ -73,7 +73,8 @@ module View =
           ColumnNames: string
           Created: DateTime option
           Definer: string
-          CheckOption: string }
+          CheckOption: string
+          SecurityType: string }
 
     let tryRead (row: Value[]) : Entry option =
         if row.Length < 5 then
@@ -86,7 +87,8 @@ module View =
                   ColumnNames = textAt 3 row
                   Created = dateTimeAt 4 row
                   Definer = textAt 5 row
-                  CheckOption = row |> Array.tryItem 6 |> Option.bind toText |> Option.defaultValue "NONE" }
+                  CheckOption = row |> Array.tryItem 6 |> Option.bind toText |> Option.defaultValue "NONE"
+                  SecurityType = row |> Array.tryItem 7 |> Option.bind toText |> Option.defaultValue "DEFINER" }
 
 module Routine =
     type Entry =

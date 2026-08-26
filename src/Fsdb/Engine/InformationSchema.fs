@@ -1021,7 +1021,7 @@ let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
         [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs view.CheckOption; vs (if isDirectUpdatableView view.Definition then "YES" else "NO"); vs view.Definer
-           vs "DEFINER"; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
+           vs view.SecurityType; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
 
 let private routinesColumns =
     [ strCol "SPECIFIC_NAME"
@@ -1929,10 +1929,16 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
                 else
                     sprintf " WITH %s CHECK OPTION" view.CheckOption
 
+            let security =
+                if view.SecurityType.Equals("INVOKER", System.StringComparison.OrdinalIgnoreCase) then
+                    " SQL SECURITY INVOKER"
+                else
+                    ""
+
             Ok(
                 [ "View"; "Create View"; "character_set_client"; "collation_connection" ],
                 [ [ Some view.Name
-                    Some(sprintf "CREATE VIEW `%s` AS %s%s" view.Name view.Definition checkOption)
+                    Some(sprintf "CREATE%s VIEW `%s` AS %s%s" security view.Name view.Definition checkOption)
                     Some "utf8mb4"
                     Some "utf8mb4_0900_ai_ci" ] ]
             )

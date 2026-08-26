@@ -936,7 +936,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | CreateTrigger(_, _, _, table, _, _) -> onTables "TRIGGER" [ split table ]
     | SetTriggerNew _ -> []
     | DropTrigger _ -> []
-    | CreateView(name, _, definition, orReplace) ->
+    | CreateView(name, _, definition, orReplace, _) ->
         let viewDb, _ = split name
         let own = onTables "CREATE VIEW" [ split name ] @ (if orReplace then onTables "DROP" [ split name ] else [])
 

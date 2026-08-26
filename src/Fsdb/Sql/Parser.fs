@@ -3383,16 +3383,28 @@ let private setTriggerNewStmt: Parser<Statement, unit> =
 // CREATE VIEW / DROP VIEW.
 // ---------------------------------------------------------------------------
 
+let private viewSecurity =
+    keyword "SQL"
+    >>. keyword "SECURITY"
+    >>. ((keyword "INVOKER" >>% ViewInvoker) <|> (keyword "DEFINER" >>% ViewDefiner))
+
 let private createViewStmt: Parser<Statement, unit> =
     (keyword "CREATE"
      >>. (opt (attempt (keyword "OR" >>. keyword "REPLACE")) |>> Option.isSome)
+     .>>. opt (attempt viewSecurity)
      .>> keyword "VIEW"
      .>>. qualifiedTableName
      .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
      .>> keyword "AS"
      .>>. manyChars anyChar)
-    |>> fun (((orReplace, name), columns), definition) ->
-        CreateView(name, columns |> Option.defaultValue [], definition.Trim().TrimEnd(';').Trim(), orReplace)
+    |>> fun ((((orReplace, security), name), columns), definition) ->
+        CreateView(
+            name,
+            columns |> Option.defaultValue [],
+            definition.Trim().TrimEnd(';').Trim(),
+            orReplace,
+            security |> Option.defaultValue ViewDefiner
+        )
 
 let private dropViewStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "VIEW"

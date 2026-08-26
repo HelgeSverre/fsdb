@@ -183,7 +183,8 @@ type private StoredView =
       Definition: string
       Columns: string list
       Definer: string
-      CheckOption: string }
+      CheckOption: string
+      SecurityType: string }
 
 type private UpdatableView =
     { ViewDatabase: string
@@ -194,7 +195,8 @@ type private UpdatableView =
       OrderedColumns: string list
       Predicate: Expr option
       Definer: string
-      CheckOption: bool }
+      CheckOption: bool
+      SecurityType: string }
 
 type private StoredTrigger =
     { Name: string
@@ -235,6 +237,34 @@ let private registryForDefiner (account: Auth.Account) (registry: Registry) =
     registry
     |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(account.Name + "@" + account.Host))
 
+let private registryAccount (registry: Registry) =
+    Functions.lookup "CURRENT_USER" registry
+    |> Option.bind (fun currentUser -> currentUser [] |> toText |> Option.bind storedObjectAccount)
+
+let private registryForViewSecurity
+    (store: Store)
+    (registry: Registry)
+    (securityType: string)
+    (definer: string)
+    (schema: string)
+    (statement: Statement)
+    =
+    if securityType.Equals("INVOKER", System.StringComparison.OrdinalIgnoreCase) then
+        match registryAccount registry with
+        | Some account ->
+            Auth.checkForAccount store account (Auth.requiredPrivileges schema statement)
+            |> Result.map (fun () -> registry)
+        | None -> Error(1449, "The current invoker account does not exist")
+    else
+        checkStoredDefiner store definer schema statement
+        |> Result.bind (fun () ->
+            match storedObjectAccount definer with
+            | Some account -> Ok(registryForDefiner account registry)
+            | None -> Error(1449, "The user specified as a definer ('') does not exist"))
+
+let private registryForView (store: Store) (registry: Registry) (view: StoredView) (statement: Statement) =
+    registryForViewSecurity store registry view.SecurityType view.Definer view.Schema statement
+
 /// Reads one view definition from the row-backed catalog. The explicit column
 /// list is JSON so every legal quoted identifier round-trips without inventing
 /// a second escaping convention. Invalid catalog text is treated as an absent
@@ -264,7 +294,8 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
               Definition = view.Definition
               Columns = view.ColumnNames |> columns
               Definer = view.Definer
-              CheckOption = view.CheckOption })
+              CheckOption = view.CheckOption
+              SecurityType = view.SecurityType })
 
 let private updatableViewOfSelect (view: StoredView) (select: SelectStmt) : UpdatableView option =
     match select.From with
@@ -360,7 +391,8 @@ let private updatableViewOfSelect (view: StoredView) (select: SelectStmt) : Upda
                                     | _ -> None)
                             )
                           Definer = view.Definer
-                          CheckOption = not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)) }
+                          CheckOption = not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase))
+                          SecurityType = view.SecurityType }
     | _ -> None
 
 let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
@@ -3531,31 +3563,25 @@ and private resolveTableRef
                     let resolved =
                         match Parser.parse view.Definition with
                         | Result.Ok((Select select) as statement) ->
-                            match checkStoredDefiner store view.Definer view.Schema statement with
+                            match registryForView store registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
-                            | Result.Ok() ->
-                                match storedObjectAccount view.Definer with
-                                | Some account ->
-                                    resolveFromSubquery
-                                        store
-                                        (registryForDefiner account registry)
-                                        view.Schema
-                                        (FromSubquery(PlainSelect select, view.Name))
-                                        None
-                                | None -> Error(Err(1449, "The user specified as a definer ('') does not exist"))
+                            | Result.Ok viewRegistry ->
+                                resolveFromSubquery
+                                    store
+                                    viewRegistry
+                                    view.Schema
+                                    (FromSubquery(PlainSelect select, view.Name))
+                                    None
                         | Result.Ok((Union(first, rest, orderBy, limit, offset)) as statement) ->
-                            match checkStoredDefiner store view.Definer view.Schema statement with
+                            match registryForView store registry view statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
-                            | Result.Ok() ->
-                                match storedObjectAccount view.Definer with
-                                | Some account ->
-                                    resolveFromSubquery
-                                        store
-                                        (registryForDefiner account registry)
-                                        view.Schema
-                                        (FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), view.Name))
-                                        None
-                                | None -> Error(Err(1449, "The user specified as a definer ('') does not exist"))
+                            | Result.Ok viewRegistry ->
+                                resolveFromSubquery
+                                    store
+                                    viewRegistry
+                                    view.Schema
+                                    (FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), view.Name))
+                                    None
                         | _ -> Error(Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s)" view.Schema view.Name))
 
                     let resolved =
@@ -5738,6 +5764,7 @@ and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join lis
 
 and private tryMergeDirectView
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (select: SelectStmt)
     : Result<SelectStmt option, QueryResult> =
@@ -5786,9 +5813,17 @@ and private tryMergeDirectView
                     | Error _
                     | Ok None -> Ok None
                     | Ok(Some _) ->
-                        match checkStoredDefiner store direct.Definer direct.ViewDatabase statement with
+                        match
+                            registryForViewSecurity
+                                store
+                                registry
+                                direct.SecurityType
+                                direct.Definer
+                                direct.ViewDatabase
+                                statement
+                        with
                         | Error(code, message) -> Error(Err(code, message))
-                        | Ok() ->
+                        | Ok _ ->
                             let viewQualifier = viewRef.Alias |> Option.defaultValue viewRef.Table
                             let mergedSource = { source with Alias = Some viewQualifier }
                             let outputColumns =
@@ -6119,7 +6154,7 @@ and private runSelectStmt
     elif outer.IsSome then
         runUnmergedSelectStmt store registry dbName select outer
     else
-    match tryMergeDirectView store dbName select with
+    match tryMergeDirectView store registry dbName select with
     | Error error -> error, [], []
     | Ok(Some merged) -> runSelectStmt store registry dbName merged outer
     | Ok None -> runUnmergedSelectStmt store registry dbName select outer
@@ -11899,9 +11934,9 @@ let rec executeAs
                     (prepareInsertRow targetStore db table tableColumns))
 
     let executeViewWrite (view: UpdatableView) statement =
-        match checkStoredDefiner store view.Definer view.Database statement with
+        match registryForViewSecurity store registry view.SecurityType view.Definer view.Database statement with
         | Error(code, message) -> ids, Err(code, message)
-        | Ok() ->
+        | Ok _ ->
             let execute () = executeAs store registry dbName ids foundRows currentAccount statement
 
             if view.CheckOption then
@@ -12563,7 +12598,7 @@ let rec executeAs
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
-    | CreateView(name, columns, definition, orReplace) ->
+    | CreateView(name, columns, definition, orReplace, security) ->
         let db, viewName = splitQualified dbName name
         let parsedDefinition = Parser.parse definition
         let trailingCheckOption =
@@ -12613,7 +12648,8 @@ let rec executeAs
                       Definition = viewDefinition
                       Columns = columns
                       Definer = currentAccount.Name + "@" + currentAccount.Host
-                      CheckOption = checkOption }
+                      CheckOption = checkOption
+                      SecurityType = if security = ViewInvoker then "INVOKER" else "DEFINER" }
                     select
                 |> Option.isSome
             | _ -> false
@@ -12657,14 +12693,23 @@ let rec executeAs
                                 store
                                 "mysql"
                                 "views"
-                                (Some [ "view_name"; "view_schema"; "view_definition"; "column_names"; "created"; "definer"; "check_option" ])
+                                (Some
+                                    [ "view_name"
+                                      "view_schema"
+                                      "view_definition"
+                                      "column_names"
+                                      "created"
+                                      "definer"
+                                      "check_option"
+                                      "security_type" ])
                                 [ [ VString viewName
                                     VString db
                                     VString viewDefinition
                                     VString(JsonSerializer.Serialize(columns |> List.toArray))
                                     VDateTime System.DateTime.Now
                                     VString(currentAccount.Name + "@" + currentAccount.Host)
-                                    VString checkOption ] ]
+                                    VString checkOption
+                                    VString(if security = ViewInvoker then "INVOKER" else "DEFINER") ] ]
                         with
                         | Ok _ -> ids, Affected 0UL
                         | Error error -> ids, storageErr error
@@ -13447,9 +13492,9 @@ let rec executeAs
                     OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
-            match checkStoredDefiner store view.Definer view.Database (Delete rewritten) with
+            match registryForViewSecurity store registry view.SecurityType view.Definer view.Database (Delete rewritten) with
             | Error(code, message) -> ids, Err(code, message)
-            | Ok() -> executeAs store registry dbName ids foundRows currentAccount (Delete rewritten)
+            | Ok _ -> executeAs store registry dbName ids foundRows currentAccount (Delete rewritten)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
@@ -13619,4 +13664,5 @@ let transactionRowTargets (store: Store) (dbName: string) (statement: Statement)
     | _ -> None
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =
-    executeAs store registry dbName ids foundRows (Auth.account "root" "%") stmt
+    let root = Auth.account "root" "%"
+    executeAs store (registryForDefiner root registry) dbName ids foundRows root stmt

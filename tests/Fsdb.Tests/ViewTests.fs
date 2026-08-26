@@ -278,6 +278,7 @@ let tests =
                   expectOk (run store "INSERT INTO t VALUES (1), (2)") "seed"
                   expectOk (run store "CREATE VIEW doubled AS SELECT id, id * 2 AS n FROM t") "create view"
                   expectOk (run store "CREATE VIEW positive AS SELECT id FROM t WHERE id > 0 WITH LOCAL CHECK OPTION") "create guarded view"
+                  expectOk (run store "CREATE SQL SECURITY INVOKER VIEW invoked AS SELECT id FROM t") "create invoker view"
 
                   let reloaded = Fsdb.Persistence.load dir
                   Expect.equal
@@ -287,7 +288,12 @@ let tests =
 
                   match run reloaded "INSERT INTO positive VALUES (0)" with
                   | Err(1369, "CHECK OPTION failed 'fsdb.positive'") -> ()
-                  | other -> failtestf "expected persisted CHECK OPTION, got %A" other)
+                  | other -> failtestf "expected persisted CHECK OPTION, got %A" other
+
+                  Expect.equal
+                      (rows reloaded "SELECT security_type FROM mysql.views WHERE view_name = 'invoked'")
+                      [ [ Some "INVOKER" ] ]
+                      "reloaded security type")
 
           testCase "SHOW and information_schema expose stored views"
           <| fun _ ->
@@ -613,6 +619,65 @@ let tests =
                   Expect.equal currentUser "owner@%" "definer identity"
                   Expect.equal invokingUser "writer@localhost" "invoker identity"
               | other -> failtestf "expected view identity row, got %A" other
+
+          testCase "invoker views use the caller's privileges and identity"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = apply root "CREATE TABLE source (id INT PRIMARY KEY)"
+              let root = apply root "INSERT INTO source VALUES (1)"
+              let root = apply root "CREATE USER owner"
+              let root = apply root "CREATE USER reader"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO owner"
+              let root = apply root "GRANT SELECT, UPDATE ON fsdb.source TO owner"
+              let root = apply root "GRANT SELECT, SHOW VIEW ON fsdb.invoker_view TO reader"
+              let root = apply root "GRANT UPDATE ON fsdb.invoker_writable TO reader"
+              let owner = { Fsdb.Session.create 2 store with User = "owner" }
+              let reader = { Fsdb.Session.create 3 store with User = "reader" }
+
+              let _owner =
+                  apply
+                      owner
+                      "CREATE SQL SECURITY INVOKER VIEW invoker_view AS SELECT id, CURRENT_USER() AS execution_identity FROM source"
+
+              let _owner = apply owner "CREATE SQL SECURITY INVOKER VIEW invoker_writable AS SELECT id FROM source"
+
+              match Fsdb.QueryHandler.handle reader "SELECT id, execution_identity FROM invoker_view" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "source" "invoker needs base-table access"
+              | other -> failtestf "expected invoker privilege failure, got %A" other
+
+              match Fsdb.QueryHandler.handle reader "UPDATE invoker_writable SET id = 2 WHERE id = 1" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "source" "invoker write needs base-table access"
+              | other -> failtestf "expected invoker write privilege failure, got %A" other
+
+              let _root = apply root "GRANT SELECT, UPDATE ON fsdb.source TO reader"
+
+              match Fsdb.QueryHandler.handle reader "SELECT id, execution_identity FROM invoker_view" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some identity ] ]) -> Expect.equal identity "reader@%" "invoker identity"
+              | other -> failtestf "expected invoker-backed row, got %A" other
+
+              expectOk
+                  (Fsdb.QueryHandler.handle reader "UPDATE invoker_writable SET id = 2 WHERE id = 1" |> snd)
+                  "invoker update"
+
+              Expect.equal
+                  (rows store "SELECT view_name, security_type FROM mysql.views WHERE view_name = 'invoker_view'")
+                  [ [ Some "invoker_view"; Some "INVOKER" ] ]
+                  "stored security type"
+
+              match Fsdb.QueryHandler.handle reader "SELECT security_type FROM information_schema.views WHERE table_name = 'invoker_view'" |> snd with
+              | ResultSet(_, [ [ Some "INVOKER" ] ]) -> ()
+              | other -> failtestf "expected invoker metadata, got %A" other
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "invoker_view" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) -> Expect.stringContains ddl "SQL SECURITY INVOKER" "SHOW statement"
+              | other -> failtestf "expected SHOW CREATE VIEW, got %A" other
 
           testCase "concurrent view creation stamps each account's definer"
           <| fun _ ->
