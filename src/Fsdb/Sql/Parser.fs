@@ -3449,9 +3449,78 @@ statementRef.Value <-
 /// Parses one SQL statement, with an optional trailing `;`. Session-variable
 /// forms like `SELECT @@version` are deliberately out of scope — those are
 /// handled by `QueryHandler` before reaching this parser.
-let parse (sql: string) : Result<Statement, string> =
+let private ansiQuotedIdentifiers (sql: string) : string =
+    let output = Text.StringBuilder(sql.Length)
+    let mutable index = 0
+
+    let copyQuoted (quote: char) =
+        output.Append quote |> ignore
+        index <- index + 1
+        let mutable closed = false
+
+        while index < sql.Length && not closed do
+            let current = sql.[index]
+
+            if quote <> '`' && current = '\\' && index + 1 < sql.Length then
+                output.Append(current).Append(sql.[index + 1]) |> ignore
+                index <- index + 2
+            elif current = quote && index + 1 < sql.Length && sql.[index + 1] = quote then
+                output.Append(current).Append(current) |> ignore
+                index <- index + 2
+            else
+                output.Append current |> ignore
+                index <- index + 1
+                closed <- current = quote
+
+    while index < sql.Length do
+        match sql.[index] with
+        | '\''
+        | '`' as quote -> copyQuoted quote
+        | '"' ->
+            output.Append '`' |> ignore
+            index <- index + 1
+            let mutable closed = false
+
+            while index < sql.Length && not closed do
+                match sql.[index] with
+                | '"' when index + 1 < sql.Length && sql.[index + 1] = '"' ->
+                    output.Append '"' |> ignore
+                    index <- index + 2
+                | '"' ->
+                    output.Append '`' |> ignore
+                    index <- index + 1
+                    closed <- true
+                | '`' ->
+                    output.Append("``") |> ignore
+                    index <- index + 1
+                | current ->
+                    output.Append current |> ignore
+                    index <- index + 1
+        | '#' ->
+            let endOfLine = sql.IndexOf('\n', index)
+            let length = if endOfLine < 0 then sql.Length - index else endOfLine - index
+            output.Append(sql, index, length) |> ignore
+            index <- index + length
+        | '-' when index + 1 < sql.Length && sql.[index + 1] = '-' && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2]) ->
+            let endOfLine = sql.IndexOf('\n', index)
+            let length = if endOfLine < 0 then sql.Length - index else endOfLine - index
+            output.Append(sql, index, length) |> ignore
+            index <- index + length
+        | '/' when index + 1 < sql.Length && sql.[index + 1] = '*' ->
+            let closeAt = sql.IndexOf("*/", index + 2, StringComparison.Ordinal)
+            let length = if closeAt < 0 then sql.Length - index else closeAt + 2 - index
+            output.Append(sql, index, length) |> ignore
+            index <- index + length
+        | current ->
+            output.Append current |> ignore
+            index <- index + 1
+
+    output.ToString()
+
+let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0
     exprDepth.Value <- 0
+    let sql = if enabled then ansiQuotedIdentifiers sql else sql
     let sql = stripVersionComments sql
     let full = ws >>. statement .>> opt (sym ";") .>> eof
 
@@ -3471,6 +3540,8 @@ let parse (sql: string) : Result<Statement, string> =
             | Failure(msg, _, _) -> Result.Error msg
     with ex ->
         Result.Error ex.Message
+
+let parse (sql: string) : Result<Statement, string> = parseWithAnsiQuotes false sql
 
 /// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
 /// client-to-server data stream.

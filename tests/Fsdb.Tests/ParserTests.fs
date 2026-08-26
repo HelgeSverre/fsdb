@@ -1043,6 +1043,16 @@ let tests =
                             |> Option.iter (fun column -> Expect.equal column.Default (Some(DConst(VInt -1L))) "negative default")
                         | other -> failtestf "expected generated CREATE TABLE to parse, got %A" other
 
+                testCase "ANSI_QUOTES treats double-quoted table names as identifiers"
+                <| fun _ ->
+                    match parseWithAnsiQuotes true "CREATE TABLE \"quoted table\" (\"id\" INT PRIMARY KEY)" with
+                    | Ok(CreateTable { Name = "quoted table"; Columns = [ { Name = "id" } ] }) -> ()
+                    | other -> failtestf "expected ANSI-quoted identifiers, got %A" other
+
+                    match parse "SELECT \"still a string\"" with
+                    | Ok(Select { Projections = [ Lit(VString "still a string"), None ] }) -> ()
+                    | other -> failtestf "expected default double-quoted string semantics, got %A" other
+
                 testCase "HASH partition declarations are accepted"
                 <| fun _ ->
                     [ "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 4"

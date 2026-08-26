@@ -626,6 +626,9 @@ let private hasSqlMode (name: string) (value: string) =
     value.Split(',')
     |> Array.exists (fun mode -> String.Equals(mode.Trim(), name, StringComparison.OrdinalIgnoreCase))
 
+let private usesAnsiQuotes (value: string) =
+    hasSqlMode "ANSI_QUOTES" value || hasSqlMode "ANSI" value
+
 let private applySqlMode (store: Store) (value: string) =
     setStrictMode store (isStrictSqlMode value)
     setZeroDateModes store (hasSqlMode "NO_ZERO_DATE" value) (hasSqlMode "NO_ZERO_IN_DATE" value)
@@ -1443,7 +1446,9 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
     | None -> execute session
 
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
-    match Parser.parse sql with
+    let ansiQuotes = lookupVar session "sql_mode" |> Option.flatten |> Option.exists usesAnsiQuotes
+
+    match Parser.parseWithAnsiQuotes ansiQuotes sql with
     | Result.Ok stmt -> executeParsed session stmt
     | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError sql detail
 
@@ -2279,7 +2284,7 @@ let renumberPlaceholders (stmt: Statement) : Statement * int =
 /// (SET/SHOW/transaction control) — those still execute textually through
 /// `Sql`, so their placeholder count is the plain `placeholderPositions`
 /// count rather than a parser one.
-let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
+let private prepareStatementWithAnsiQuotes (ansiQuotes: bool) (sql: string) : Result<Statement option * int, int * string> =
     let trimmed = sql.Trim().TrimEnd(';').Trim()
     let upper = trimmed.ToUpperInvariant()
 
@@ -2288,7 +2293,7 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
     elif (tryProbe trimmed upper).IsSome then
         Result.Ok(None, placeholderPositions sql |> List.length)
     else
-        match Parser.parse sql with
+        match Parser.parseWithAnsiQuotes ansiQuotes sql with
         | Result.Ok stmt ->
             let renumbered, count = renumberPlaceholders stmt
 
@@ -2308,6 +2313,13 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
             match parserError sql detail with
             | Err(code, msg) -> Result.Error(code, msg)
             | _ -> Result.Error(1064, "syntax error")
+
+let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
+    prepareStatementWithAnsiQuotes false sql
+
+let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
+    let ansiQuotes = lookupVar session "sql_mode" |> Option.flatten |> Option.exists usesAnsiQuotes
+    prepareStatementWithAnsiQuotes ansiQuotes sql
 
 let preparedMetadata
     (session: Session)
@@ -2480,7 +2492,7 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             match sql with
             | None -> session, syntaxError source
             | Some sql ->
-                match prepareStatement sql with
+                match prepareStatementForSession session sql with
                 | Error(code, message) -> session, Err(code, message)
                 | Ok(ast, count) when session.TextStatements.Count + session.Statements.Count < Limits.maxPreparedStmtCount ->
                     let statement =

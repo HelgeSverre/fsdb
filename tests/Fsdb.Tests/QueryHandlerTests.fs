@@ -589,6 +589,24 @@ let tests =
               | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES, got %A" other
 
+          testCase "ANSI_QUOTES applies to later statements in the same session"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET sql_mode = 'ANSI,TRADITIONAL'"
+              let session, created = handle session "CREATE TABLE \"drupal_install_test\" (\"id\" INT NOT NULL PRIMARY KEY)"
+
+              match created with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected ANSI-quoted DDL to succeed, got %A" other
+
+              match handle session "SELECT \"id\" FROM \"drupal_install_test\"" |> snd with
+              | ResultSet([ "id" ], []) -> ()
+              | other -> failtestf "expected ANSI-quoted SELECT to succeed, got %A" other
+
+              match prepareStatementForSession session "SELECT \"id\" FROM \"drupal_install_test\" WHERE \"id\" = ?" with
+              | Ok(Some _, 1) -> ()
+              | other -> failtestf "expected ANSI-quoted prepared statement to parse, got %A" other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

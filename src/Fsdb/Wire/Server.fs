@@ -1252,7 +1252,7 @@ let private handleConnection
 
                                 return! loop session
                             | Some(StmtPrepare sql) ->
-                                match QueryHandler.prepareStatement sql with
+                                match QueryHandler.prepareStatementForSession session sql with
                                 | Result.Error(code, message) ->
                                     do!
                                         writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities code message }
