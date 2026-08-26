@@ -3541,6 +3541,13 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
 
         resolveColumn table.Columns oldName
         |> Result.bind (fun oldIdx ->
+            let oldDef = table.Columns.[oldIdx]
+
+            let newDef =
+                { newDef with
+                    PrimaryKey = oldDef.PrimaryKey || newDef.PrimaryKey
+                    Unique = oldDef.Unique || newDef.Unique }
+
             let columnsExcludingSelf = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> oldIdx) |> List.map snd
 
             resolvePosition columnsExcludingSelf oldIdx position

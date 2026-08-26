@@ -1431,6 +1431,24 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "ChangeColumn preserves an auto-increment primary key"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    let changed =
+                        { (col "id" (TBigInt false) false) with
+                            AutoIncrement = true }
+
+                    match alterTable store defaultDatabase "users" [ ChangeColumn("id", changed, PositionDefault) ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, _) ->
+                            let id = columns |> List.find (fun column -> column.Name = "id")
+                            Expect.isTrue id.PrimaryKey "primary-key membership"
+                            Expect.isTrue id.AutoIncrement "auto increment"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
                 testCase "AddColumn ... FIRST inserts at the front, in schema and every row"
                 <| fun _ ->
                     let store = withUsersTable ()
