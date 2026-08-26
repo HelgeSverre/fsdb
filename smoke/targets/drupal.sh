@@ -14,6 +14,18 @@ webdriver_pid=$!
 
 cleanup() {
     kill "$http_pid" "$webdriver_pid" 2>/dev/null || true
+
+    if [[ -n "${SMOKE_RUN_ID:-}" ]]; then
+        artifact_dir="/smoke-results/$SMOKE_RUN_ID"
+        mkdir -p "$artifact_dir"
+        tar -czf "$artifact_dir/drupal-junit.tar.gz" -C /opt/drupal sites/default/files/simpletest || true
+
+        for artifact in /tmp/drupal-results.sqlite /tmp/drupal-http.log /tmp/drupal-webdriver.log; do
+            [[ ! -f "$artifact" ]] || cp "$artifact" "$artifact_dir/"
+        done
+
+        find "$artifact_dir" -maxdepth 1 -type f -exec chmod 0666 {} +
+    fi
 }
 
 trap cleanup EXIT INT TERM

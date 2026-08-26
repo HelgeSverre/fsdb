@@ -57,6 +57,8 @@ services:
       args:
         DRUPAL_REF: ${DRUPAL_REF}
     init: true
+    volumes:
+      - ./results:/smoke-results
 
   nextcloud:
     image: fsdb-smoke-nextcloud:${NEXTCLOUD_REF}

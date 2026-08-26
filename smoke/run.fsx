@@ -217,7 +217,21 @@ try
                     :: outcomes
             else
                 let runStatus =
-                    runLogged runLog "docker" (composeArguments @ [ "run"; "--rm"; "--no-deps"; target ])
+                    let targetEnvironment =
+                        if target = "drupal" then
+                            [ yield "--env"
+                              yield "SMOKE_RUN_ID=" + runIdentifier
+
+                              match Environment.GetEnvironmentVariable("DRUPAL_CONCURRENCY") with
+                              | null
+                              | "" -> ()
+                              | concurrency ->
+                                  yield "--env"
+                                  yield "DRUPAL_CONCURRENCY=" + concurrency ]
+                        else
+                            []
+
+                    runLogged runLog "docker" (composeArguments @ [ "run"; "--rm"; "--no-deps" ] @ targetEnvironment @ [ target ])
 
                 runLogged serverLog "docker" (composeArguments @ [ "logs"; "--no-color"; "fsdb" ])
                 |> ignore
