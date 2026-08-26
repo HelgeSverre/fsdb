@@ -2364,6 +2364,9 @@ let private alterExecutionOption: Parser<AlterAction list, unit> =
     let lock = keyword "LOCK" >>. opt (sym "=") >>. choice [ keyword "DEFAULT"; keyword "NONE"; keyword "SHARED"; keyword "EXCLUSIVE" ]
     attempt (algorithm <|> lock) >>% []
 
+let private alterTableOption: Parser<AlterAction list, unit> =
+    attempt (keyword "ROW_FORMAT" >>. opt (sym "=") >>. identifier) >>% []
+
 let private alterAction: Parser<AlterAction list, unit> =
     choice
         [ addForeignKeyAction |>> List.singleton
@@ -2388,6 +2391,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           setTableCommentAction |>> List.singleton
           convertCharsetAction |>> List.singleton
           alterExecutionOption
+          alterTableOption
           renameToAction |>> List.singleton ]
     <?> "ALTER TABLE action"
 

@@ -1855,6 +1855,11 @@ let tests =
                         ))
                         "alter options"
 
+                    Expect.equal
+                        (parseOk "ALTER TABLE files ROW_FORMAT = DYNAMIC")
+                        (AlterTable("files", []))
+                        "row format is a storage hint"
+
                 testCase "DROP TABLE accepts referential action suffixes"
                 <| fun _ ->
                     Expect.equal (parseOk "DROP TABLE unittest_actor CASCADE") (DropTable([ "unittest_actor" ], false)) "drop cascade"
