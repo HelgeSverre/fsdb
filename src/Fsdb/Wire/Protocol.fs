@@ -23,12 +23,17 @@ let decodeSqlBytes (bytes: byte[]) : string =
     with :? DecoderFallbackException ->
         let sql = StringBuilder(bytes.Length * 2)
         let mutable index = 0
+        let mutable segmentStart = 0
+
+        let appendUtf8 start count =
+            if count > 0 then
+                sql.Append(strictUtf8.GetString(bytes, start, count)) |> ignore
 
         while index < bytes.Length do
             if bytes.[index] <> byte '\'' then
-                sql.Append(char bytes.[index]) |> ignore
                 index <- index + 1
             else
+                appendUtf8 segmentStart (index - segmentStart)
                 let literal = ResizeArray<byte>()
                 let start = index
                 let mutable closed = false
@@ -66,9 +71,13 @@ let decodeSqlBytes (bytes: byte[]) : string =
                         sql.Append(strictUtf8.GetString source) |> ignore
                     with :? DecoderFallbackException ->
                         sql.Append("X'").Append(Convert.ToHexString(literal.ToArray())).Append('\'') |> ignore
+
+                    segmentStart <- index
                 else
-                    sql.Append(char bytes.[start]) |> ignore
-                    literal |> Seq.iter (char >> sql.Append >> ignore)
+                    appendUtf8 start (bytes.Length - start)
+                    segmentStart <- bytes.Length
+
+        appendUtf8 segmentStart (bytes.Length - segmentStart)
 
         sql.ToString()
 
