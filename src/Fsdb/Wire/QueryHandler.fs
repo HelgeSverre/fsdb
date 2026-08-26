@@ -818,16 +818,26 @@ let private resolveSystemSetRhs
 /// `executeStatement` (which re-derives it from the *current* session before
 /// every statement, since `Storage.Store.StrictMode` is store-wide state
 /// shared by every connection; see the note on `Storage.Store.StrictMode`).
-let private isStrictSqlMode (value: string) : bool =
-    value.Split(',')
-    |> Array.exists (fun m ->
-        let m = m.Trim()
-        String.Equals(m, "STRICT_TRANS_TABLES", StringComparison.OrdinalIgnoreCase)
-        || String.Equals(m, "STRICT_ALL_TABLES", StringComparison.OrdinalIgnoreCase))
-
 let private hasSqlMode (name: string) (value: string) =
-    value.Split(',')
-    |> Array.exists (fun mode -> String.Equals(mode.Trim(), name, StringComparison.OrdinalIgnoreCase))
+    let modes =
+        value.Split(',')
+        |> Array.map (fun mode -> mode.Trim().ToUpperInvariant())
+        |> Set.ofArray
+
+    let traditionalModes =
+        Set.ofList
+            [ "STRICT_TRANS_TABLES"
+              "STRICT_ALL_TABLES"
+              "NO_ZERO_IN_DATE"
+              "NO_ZERO_DATE"
+              "ERROR_FOR_DIVISION_BY_ZERO"
+              "NO_ENGINE_SUBSTITUTION" ]
+
+    let requested = name.ToUpperInvariant()
+    Set.contains requested modes || Set.contains "TRADITIONAL" modes && Set.contains requested traditionalModes
+
+let private isStrictSqlMode value =
+    hasSqlMode "STRICT_TRANS_TABLES" value || hasSqlMode "STRICT_ALL_TABLES" value
 
 let private usesAnsiQuotes (value: string) =
     hasSqlMode "ANSI_QUOTES" value || hasSqlMode "ANSI" value

@@ -620,6 +620,16 @@ let tests =
               | ResultSet(_, [ _ ]) -> ()
               | other -> failtestf "expected ANSI-quoted SHOW INDEX to succeed, got %A" other
 
+              let session, _ = handle session "CREATE TABLE strict_values (id INT, unsigned_value INT UNSIGNED NOT NULL)"
+
+              match handle session "INSERT INTO strict_values (id) VALUES (1)" |> snd with
+              | Err(1364, _) -> ()
+              | other -> failtestf "expected TRADITIONAL to reject a missing required value, got %A" other
+
+              match handle session "INSERT INTO strict_values VALUES (1, -1)" |> snd with
+              | Err(1264, _) -> ()
+              | other -> failtestf "expected TRADITIONAL to reject a negative unsigned value, got %A" other
+
               match prepareStatementForSession session "SELECT \"id\" FROM \"drupal_install_test\" WHERE \"id\" = ?" with
               | Ok(Some _, 1) -> ()
               | other -> failtestf "expected ANSI-quoted prepared statement to parse, got %A" other
