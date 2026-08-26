@@ -904,13 +904,14 @@ let private handleConnection
                         match resp.Database with
                         | None -> Ok()
                         | Some db when Storage.databaseExists store db -> Ok()
-                        | Some db -> Auth.checkForAccount store selectedAccount [ "CREATE", Auth.OnDb db ]
+                        | Some db ->
+                            let code, message = Storage.toMySqlError (Storage.NoSuchDatabase db)
+                            Error(code, message)
 
                     match databaseAllowed with
                     | Error(code, message) ->
                         do! writePacketAsync stream { SeqId = okSeq; Payload = errPayload capabilities code message } |> Async.Ignore
                     | Ok() ->
-                        resp.Database |> Option.iter (Storage.ensureDatabase store)
                         databaseAccepted <- true
 
                         do!

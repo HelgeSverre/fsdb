@@ -2767,6 +2767,12 @@ let tests =
                   | Ok(Select { Projections = [ Lit(VInt 1L), Some "one" ] }) -> ()
                   | other -> failtestf "unexpected parse for %s: %A" sql other
 
+          testCase "POSITION accepts the standard IN argument separator"
+          <| fun _ ->
+              match Fsdb.Parser.parse "SELECT POSITION(('ood') IN ('Moodle'))" with
+              | Ok(Select { Projections = [ FuncCall("POSITION", [ Lit(VString "ood"); Lit(VString "Moodle") ]), None ] }) -> ()
+              | other -> failtestf "unexpected POSITION parse: %A" other
+
           testCase "REGEXP, ANY, and SOME are reserved in expression position"
           <| fun _ ->
               for sql in [ "SELECT REGEXP"; "SELECT 1 = ANY (SELE)"; "SELECT SOME(1)" ] do

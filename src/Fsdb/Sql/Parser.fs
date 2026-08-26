@@ -835,7 +835,10 @@ let private genericFuncCall: Parser<Expr, unit> =
                 openParen
                 >>. sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
                 .>> sym ")"
-                |>> fun args -> FuncCall(name, args)
+                |>> fun args ->
+                    match normalizedName, args with
+                    | "position", [ In(needle, [ haystack ]) ] -> FuncCall(name, [ needle; haystack ])
+                    | _ -> FuncCall(name, args)
     )
 
 let private trimAtom: Parser<Expr, unit> =
@@ -859,7 +862,8 @@ let private trimAtom: Parser<Expr, unit> =
         |>> fun ((mode, removed), source) -> FuncCall(mode, [ removed; source ])
     )
 
-let private funcCallAtom: Parser<Expr, unit> = choice [ attempt convertUsingAtom; attempt weightStringAtom; trimAtom; rowConstructorAtom; genericFuncCall ]
+let private funcCallAtom: Parser<Expr, unit> =
+    choice [ attempt convertUsingAtom; attempt weightStringAtom; trimAtom; rowConstructorAtom; genericFuncCall ]
 
 /// `GROUP_CONCAT([DISTINCT] expr [ORDER BY key [ASC|DESC], ...] [SEPARATOR
 /// 'str'])` — parsed separately from `funcCallAtom` rather than folding

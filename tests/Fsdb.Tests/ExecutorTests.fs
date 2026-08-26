@@ -52,6 +52,12 @@ let tests =
                     | ResultSet([ "two" ], [ [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected a single computed row, got %A" other
 
+                testCase "POSITION uses its standard SQL syntax"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT POSITION(('ood') IN ('Moodle')), POSITION(('Oracle') IN ('Moodle'))" with
+                    | ResultSet(_, [ [ Some "2"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected POSITION offsets 2 and 0, got %A" other
+
                 testCase "FROM DUAL provides MySQL's single-row source"
                 <| fun _ ->
                     match runDefault (newStore ()) "SELECT 1 + 1 AS two FROM DUAL" with

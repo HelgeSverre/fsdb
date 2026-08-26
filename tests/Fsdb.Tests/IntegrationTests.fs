@@ -706,10 +706,10 @@ let tests =
                   let! unprivilegedResult = unprivileged.OpenAsync() |> Async.AwaitTask |> Async.Catch
 
                   match unprivilegedResult with
-                  | Choice1Of2() -> failtest "expected an authenticated account without CREATE to be denied"
+                  | Choice1Of2() -> failtest "expected a missing handshake database to be refused"
                   | Choice2Of2 e ->
                       match mysqlError e with
-                      | Some m -> Expect.equal m.Number 1044 "database creation at handshake requires CREATE"
+                      | Some m -> Expect.equal m.Number 1049 "the handshake reports an unknown database"
                       | None -> raise e
 
                   Expect.isFalse (Fsdb.Storage.databaseExists store unprivilegedDatabase) "denied handshake did not grow the catalog"
@@ -1167,13 +1167,16 @@ let tests =
           testCase "a table with an index and a foreign key is visible through information_schema and SHOW CREATE TABLE"
           <| fun _ ->
               async {
-                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let store = Fsdb.Storage.create ()
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
                   let port = server.Port
 
                   let connStr =
                       sprintf
                           "Server=127.0.0.1;Port=%d;User ID=root;Password=;Database=shop;AllowPublicKeyRetrieval=True;SslMode=None"
                           port
+
+                  Fsdb.Storage.ensureDatabase store "shop"
 
                   use conn = new MySqlConnector.MySqlConnection(connStr)
                   do! conn.OpenAsync() |> Async.AwaitTask
@@ -1192,10 +1195,8 @@ let tests =
                           return! cmd.ExecuteScalarAsync() |> Async.AwaitTask
                       }
 
-                  // `Database=shop` on the connection string exercises the
-                  // handshake's auto-create path (`shop` doesn't exist yet).
                   let! dbName = scalar "SELECT DATABASE()"
-                  Expect.equal (string dbName) "shop" "connecting with Database=shop auto-created it"
+                  Expect.equal (string dbName) "shop" "the handshake selected the existing database"
 
                   do!
                       exec "CREATE TABLE users (id INT AUTO_INCREMENT PRIMARY KEY, email VARCHAR(255) NOT NULL UNIQUE)"
