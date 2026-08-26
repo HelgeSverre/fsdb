@@ -543,19 +543,27 @@ let private statisticsColumns =
       strCol "IS_VISIBLE"
       strCol "EXPRESSION" ]
 
-/// One row per `(index, column)` pair — the primary key surfaces as a
-/// synthesized index literally named `PRIMARY`, same as real MySQL, since
-/// `Ast.ColumnDef.PrimaryKey` doesn't otherwise have an `IndexDef` of its
-/// own.
+let private isPrimaryIndex (index: IndexDef) =
+    String.Equals(index.Name, "PRIMARY", StringComparison.OrdinalIgnoreCase)
+
+let private indexesIncludingPrimary (table: Table) =
+    if table.Indexes |> List.exists isPrimaryIndex then
+        table.Indexes
+    else
+        match Storage.primaryKeyColumns table with
+        | [] -> table.Indexes
+        | columns ->
+            { Name = "PRIMARY"
+              Columns = columns
+              Unique = true
+              Kind = BTree }
+            :: table.Indexes
+
+/// One row per `(index, column)` pair.
 let private statisticsRows (catalog: Catalog) : Value[] list =
     allTables catalog
     |> List.collect (fun (dbName, t) ->
-        let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
-
-        let primaryIndex =
-            if pkCols.IsEmpty then [] else [ { Name = "PRIMARY"; Columns = pkCols; Unique = true; Kind = BTree } ]
-
-        primaryIndex @ t.Indexes
+        indexesIncludingPrimary t
         |> List.collect (fun ix ->
             ix.Columns
             |> List.mapi (fun i colName ->
@@ -604,16 +612,15 @@ let private keyColumnUsageRows (catalog: Catalog) : Value[] list =
     allTables catalog
     |> List.collect (fun (dbName, t) ->
         let pkRows =
-            t.Columns
-            |> List.filter (fun c -> c.PrimaryKey)
-            |> List.mapi (fun i c ->
+            Storage.primaryKeyColumns t
+            |> List.mapi (fun i columnName ->
                 [| vs "def"
                    vs dbName
                    vs "PRIMARY"
                    vs "def"
                    vs dbName
                    vs t.OriginalName
-                   vs c.Name
+                   vs columnName
                    vi (i + 1)
                    VNull
                    VNull
@@ -712,14 +719,14 @@ let private tableConstraintsRows (catalog: Catalog) : Value[] list =
         allTables catalog
         |> List.collect (fun (dbName, t) ->
         let pkRows =
-            if t.Columns |> List.exists (fun c -> c.PrimaryKey) then
+            if Storage.primaryKeyColumns t |> List.isEmpty |> not then
                 [ [| vs "def"; vs dbName; vs "PRIMARY"; vs dbName; vs t.OriginalName; vs "PRIMARY KEY"; vs "YES" |] ]
             else
                 []
 
         let uniqueRows =
             t.Indexes
-            |> List.filter (fun ix -> ix.Unique)
+            |> List.filter (fun index -> index.Unique && not (isPrimaryIndex index))
             |> List.map (fun ix ->
                 [| vs "def"; vs dbName; vs ix.Name; vs dbName; vs t.OriginalName; vs "UNIQUE"; vs "YES" |])
 
@@ -1850,11 +1857,12 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
         |> List.filter ((<>) "")
         |> String.concat " "
 
-    let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
+    let pkCols = Storage.primaryKeyColumns t
     let pkLine = if pkCols.IsEmpty then [] else [ sprintf "PRIMARY KEY (%s)" (backtickCols pkCols) ]
 
     let indexLines =
         t.Indexes
+        |> List.filter (not << isPrimaryIndex)
         |> List.map (fun ix ->
             let prefix =
                 if ix.Unique then "UNIQUE "
@@ -1982,11 +1990,8 @@ let showCreateTrigger (catalog: Catalog) (dbName: string) (triggerName: string) 
 let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =
     findTable catalog dbName tableName
     |> Result.map (fun t ->
-        let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
-        let primaryIndex = if pkCols.IsEmpty then [] else [ { Name = "PRIMARY"; Columns = pkCols; Unique = true; Kind = BTree } ]
-
         let rows =
-            primaryIndex @ t.Indexes
+            indexesIncludingPrimary t
             |> List.collect (fun ix ->
                 ix.Columns
                 |> List.mapi (fun i colName ->

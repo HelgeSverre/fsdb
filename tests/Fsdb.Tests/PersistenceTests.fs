@@ -1187,6 +1187,28 @@ let tests =
                   Expect.equal table.TableCollation (Some "utf8mb4_unicode_ci") "the declared collation survives the restart"
               | Error e -> failtestf "expected table 'decl' to reload, got %A" e
 
+          testCase "composite primary declaration order survives WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              let session, result = handle session "CREATE TABLE ordered_primary (first INT, second INT, PRIMARY KEY (second, first))"
+
+              match result with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected CREATE TABLE to succeed, got %A" other
+
+              let assertOrder (sourceStore: Store) message =
+                  match Fsdb.InformationSchema.findTable sourceStore.Catalog defaultDatabase "ordered_primary" with
+                  | Ok table -> Expect.equal (primaryKeyColumns table) [ "second"; "first" ] message
+                  | Error error -> failtestf "expected ordered_primary after recovery, got %A" error
+
+              assertOrder (load dir) "WAL retains the key order"
+              snapshotNow dir store
+              assertOrder (load dir) "snapshot retains the key order"
+              ignore session
+
           testCase "a column comment survives a restart"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -1619,7 +1641,7 @@ let tests =
                   | Some t -> t.Indexes |> List.map (fun ix -> ix.Name) |> List.sort
                   | None -> failtest "new_name missing after reload"
 
-              Expect.equal indexes [ "ix_c" ] "the created index replayed and the dropped one stayed dropped"
+              Expect.equal indexes [ "PRIMARY"; "ix_c" ] "the primary and created index replayed while the dropped index stayed dropped"
 
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->

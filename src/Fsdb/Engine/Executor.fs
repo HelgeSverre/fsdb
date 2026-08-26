@@ -7526,9 +7526,12 @@ and private groupByIsIndexOrdered (store: Store) (dbName: string) (select: Selec
         | Error _ -> false
         | Ok table ->
             let pinned = whereEqualityPinnedColumns select.Where
-            let pkColumns = table.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
+            let pkColumns = Storage.primaryKeyColumns table
+            let secondaryIndexes =
+                table.Indexes
+                |> List.filter (fun index -> not (System.String.Equals(index.Name, "PRIMARY", System.StringComparison.OrdinalIgnoreCase)))
 
-            (if pkColumns.IsEmpty then [] else [ pkColumns ]) @ (table.Indexes |> List.map (fun ix -> ix.Columns))
+            (if pkColumns.IsEmpty then [] else [ pkColumns ]) @ (secondaryIndexes |> List.map _.Columns)
             |> List.exists (indexSortsGroupBy pinned groupColsLower)
     | _ -> false
 

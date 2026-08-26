@@ -2180,10 +2180,26 @@ let private createTable: Parser<Statement, unit> =
             |> List.filter (fun c -> c.Unique)
             |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true; Kind = BTree })
 
+        let primaryColumns =
+            if pkNames.IsEmpty then
+                columns
+                |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
+            else
+                pkNames
+
+        let primaryIndex =
+            if primaryColumns.IsEmpty then
+                []
+            else
+                [ { Name = "PRIMARY"
+                    Columns = primaryColumns
+                    Unique = true
+                    Kind = BTree } ]
+
         CreateTable
             { Name = name
               Columns = columns
-              Indexes = explicitIndexes @ uniqueColumnIndexes
+              Indexes = primaryIndex @ explicitIndexes @ uniqueColumnIndexes
               ForeignKeys = foreignKeys
               Checks = checks
               IfNotExists = ifNotExists

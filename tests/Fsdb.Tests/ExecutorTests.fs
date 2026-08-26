@@ -1777,15 +1777,18 @@ let tests =
                     runDefault store "INSERT INTO t (tenant_id) VALUES (1), (2)" |> ignore
 
                     Expect.equal
-                        (runDefault store "ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (id, tenant_id)")
+                        (runDefault store "ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (tenant_id, id)")
                         (Affected 0UL)
                         "primary key replaced"
 
-                    let primary =
-                        store.Catalog.[defaultDatabase].[normalizeTableName "t"].Columns
-                        |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
+                    let table = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
 
-                    Expect.equal primary [ "id"; "tenant_id" ] "composite primary key"
+                    Expect.equal (primaryKeyColumns table) [ "tenant_id"; "id" ] "composite primary key"
+
+                    runDefault store "ALTER TABLE t RENAME COLUMN tenant_id TO account_id" |> ignore
+
+                    let renamed = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
+                    Expect.equal (primaryKeyColumns renamed) [ "account_id"; "id" ] "renamed key column"
 
                     runDefault store "CREATE TABLE lone_auto (id INT AUTO_INCREMENT PRIMARY KEY)" |> ignore
 
@@ -2855,7 +2858,7 @@ let tests =
 
                     let clone = store.Catalog.[defaultDatabase].[normalizeTableName "clone"]
                     Expect.isEmpty clone.ForeignKeys "foreign keys are not copied"
-                    Expect.equal (clone.Indexes |> List.map _.Name |> Set.ofList) (Set.ofList [ "u"; "ix_n" ]) "indexes copied"
+                    Expect.equal (clone.Indexes |> List.map _.Name |> Set.ofList) (Set.ofList [ "PRIMARY"; "u"; "ix_n" ]) "indexes copied"
 
                     match runDefault store "INSERT INTO clone (u, n) VALUES (2, 5)" with
                     | Affected 1UL -> ()

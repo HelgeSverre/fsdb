@@ -1868,6 +1868,24 @@ let tests =
                   Expect.equal (List.length rows) 2 "primary key + the unique index"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "composite primary metadata follows key declaration order"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE composite_order (first INT, second INT, PRIMARY KEY (second, first))"
+
+              match handle session "SHOW INDEX FROM composite_order" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (fun row -> row.[2], row.[3], row.[4]))
+                      [ Some "PRIMARY", Some "1", Some "second"; Some "PRIMARY", Some "2", Some "first" ]
+                      "SHOW INDEX preserves the declared sequence"
+              | other -> failtestf "expected SHOW INDEX rows, got %A" other
+
+              match handle session "SHOW CREATE TABLE composite_order" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "PRIMARY KEY (`second`,`first`)" "SHOW CREATE uses the declared sequence"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
           testCase "SHOW INDEXES IN filters by Key_name"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

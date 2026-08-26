@@ -205,6 +205,17 @@ type Table =
     /// snapshot with `List.*`; every hot path reads `RowsArray` directly.
     member this.Rows: Value[] list = List.ofSeq this.RowsArray
 
+let private isPrimaryIndex (index: IndexDef) =
+    String.Equals(index.Name, "PRIMARY", StringComparison.OrdinalIgnoreCase)
+
+let primaryKeyColumns (table: Table) =
+    table.Indexes
+    |> List.tryFind isPrimaryIndex
+    |> Option.map _.Columns
+    |> Option.defaultWith (fun () ->
+        table.Columns
+        |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None))
+
 /// Table names are case-insensitive, keyed by their lowercased form.
 type Database = Map<string, Table>
 
@@ -1526,15 +1537,19 @@ let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (ro
 /// and treated as one group across however many columns it spans) plus
 /// every `UNIQUE` index, named after itself.
 let private uniqueKeyGroups (table: Table) : (string * int list) list =
-    let pk =
-        table.Columns |> List.indexed |> List.choose (fun (i, c) -> if c.PrimaryKey then Some i else None)
+    let primary =
+        primaryKeyColumns table
+        |> traverse (resolveColumn table.Columns)
+        |> Result.toOption
+        |> Option.filter (not << List.isEmpty)
+        |> Option.map (fun indices -> "PRIMARY", indices)
 
     let fromIndexes =
         table.Indexes
-        |> List.filter (fun ix -> ix.Unique)
+        |> List.filter (fun index -> index.Unique && not (isPrimaryIndex index))
         |> List.choose (fun ix -> ix.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption |> Option.map (fun idxs -> ix.Name, idxs))
 
-    (if pk.IsEmpty then [] else [ "PRIMARY", pk ]) @ fromIndexes
+    Option.toList primary @ fromIndexes
 
 type private SecondaryKeyGroup =
     { Name: string
@@ -3114,11 +3129,19 @@ let private validateForeignKeyDefinition
                 let sameColumns left right = List.forall2 equal left right
 
                 let primary =
-                    parentColumns |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
+                    parentIndexes
+                    |> List.tryFind isPrimaryIndex
+                    |> Option.map _.Columns
+                    |> Option.defaultWith (fun () ->
+                        parentColumns
+                        |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None))
 
                 let uniqueKeys =
                     [ if not primary.IsEmpty then primary
-                      yield! parentIndexes |> List.filter _.Unique |> List.map _.Columns
+                      yield!
+                          parentIndexes
+                          |> List.filter (fun index -> index.Unique && not (isPrimaryIndex index))
+                          |> List.map _.Columns
                       yield! parentColumns |> List.filter _.Unique |> List.map (fun column -> [ column.Name ]) ]
 
                 if uniqueKeys
@@ -3355,6 +3378,15 @@ let private insertAt (idx: int) (x: 'a) (xs: 'a list) : 'a list =
     let before, after = xs |> List.splitAt (min idx (List.length xs))
     before @ [ x ] @ after
 
+let private renameIndexColumn oldName newName (indexes: IndexDef list) =
+    let rename name =
+        if String.Equals(name, oldName, StringComparison.OrdinalIgnoreCase) then newName else name
+
+    indexes
+    |> List.map (fun index ->
+        { index with
+            Columns = index.Columns |> List.map rename })
+
 /// Resolves `FIRST`/`AFTER col`/no-clause-given to a concrete 0-based index
 /// into `columnsExcludingSelf` (the table's columns with the column being
 /// added/moved already removed, so an `AFTER`/`FIRST` offset means the same
@@ -3570,7 +3602,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     let candidate =
                         { table with
                             Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                            RowsArray = rowStore.DrainToImmutable() }
+                            RowsArray = rowStore.DrainToImmutable()
+                            Indexes = renameIndexColumn oldName newDef.Name table.Indexes }
 
                     // A narrowing re-coercion that folds two unique-key
                     // values together must fail with 1062 (MySQL errors even
@@ -3592,7 +3625,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         resolveColumn table.Columns oldName
         |> Result.map (fun idx ->
             { table with
-                Columns = table.Columns |> List.mapi (fun i c -> if i = idx then { c with Name = newName } else c) },
+                Columns = table.Columns |> List.mapi (fun i c -> if i = idx then { c with Name = newName } else c)
+                Indexes = renameIndexColumn oldName newName table.Indexes },
             None)
     | AddIndex ix when ix.Unique ->
         // `CREATE UNIQUE INDEX`/`ALTER TABLE ... ADD UNIQUE` over rows that
@@ -3664,11 +3698,29 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                                 else
                                     column)
 
-                        Ok({ table with Columns = columns }, None))
+                        let primary =
+                            { Name = "PRIMARY"
+                              Columns = cols
+                              Unique = true
+                              Kind = BTree }
+
+                        Ok(
+                            { table with
+                                Columns = columns
+                                Indexes = primary :: table.Indexes },
+                            None
+                        ))
     | DropPrimaryKey ->
         if table.Columns |> List.exists _.PrimaryKey then
             let columns = table.Columns |> List.map (fun column -> { column with PrimaryKey = false })
-            Ok({ table with Columns = columns }, None)
+            let indexes = table.Indexes |> List.filter (not << isPrimaryIndex)
+
+            Ok(
+                { table with
+                    Columns = columns
+                    Indexes = indexes },
+                None
+            )
         else
             Error(ExpressionError(1091, "Can't DROP 'PRIMARY'; check that column/key exists"))
     | SetDefault(column, value) ->
