@@ -1294,7 +1294,26 @@ let tests =
 
           testList
               "alterTable"
-              [ testCase "AddColumn appends the column and fills existing rows with its default"
+              [ testCase "SetAutoIncrement can lower the next value after rows are deleted"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 666L; VString "alice"; VInt 30L ] ] |> ignore
+                    deleteRows store defaultDatabase "users" (fun _ -> Ok true) |> ignore
+
+                    alterTable store defaultDatabase "users" [ SetAutoIncrement 1L ] |> ignore
+
+                    match insertRows store defaultDatabase "users" None [ [ VNull; VString "bob"; VInt 40L ] ] with
+                    | Ok { LastInsertId = 1L } -> ()
+                    | other -> failtestf "expected reset id 1, got %A" other
+
+                    insertRows store defaultDatabase "users" None [ [ VInt 666L; VString "carol"; VInt 50L ] ] |> ignore
+                    alterTable store defaultDatabase "users" [ SetAutoIncrement 1L ] |> ignore
+
+                    match insertRows store defaultDatabase "users" None [ [ VNull; VString "dave"; VInt 60L ] ] with
+                    | Ok { LastInsertId = 667L } -> ()
+                    | other -> failtestf "expected existing id floor 667, got %A" other
+
+                testCase "AddColumn appends the column and fills existing rows with its default"
                 <| fun _ ->
                     let store = withUsersTable ()
                     insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore

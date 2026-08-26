@@ -3761,9 +3761,21 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     TableCollation = Some collation },
                 None)
     | SetAutoIncrement value ->
-        // Forward only, like InnoDB: a value below what existing rows
-        // already claimed leaves the counter where it is.
-        Ok({ table with NextAutoId = max value table.NextAutoId }, None)
+        let nextAfterExisting =
+            table.Columns
+            |> List.tryFindIndex _.AutoIncrement
+            |> Option.map (fun index ->
+                table.RowsArray
+                |> Seq.choose (fun row ->
+                    match row.[index] with
+                    | VInt stored when stored >= 0L -> Some stored
+                    | VUInt stored when stored <= uint64 Int64.MaxValue -> Some(int64 stored)
+                    | _ -> None)
+                |> Seq.fold max 0L
+                |> fun highest -> if highest = Int64.MaxValue then highest else highest + 1L)
+            |> Option.defaultValue 1L
+
+        Ok({ table with NextAutoId = max 1L (max value nextAfterExisting) }, None)
     | SetTableComment comment ->
         validateTableComment table.OriginalName comment
         |> Result.map (fun valid -> { table with TableComment = valid }, None)
