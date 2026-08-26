@@ -2948,10 +2948,29 @@ let private withTable
 /// scope for MySQL-compatible errors. Runtime coercion repeats DECIMAL's
 /// bounds because CAST and JSON_TABLE create synthetic column definitions.
 let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
+    let bytesPerCharacter =
+        match c.Charset |> Option.map _.ToLowerInvariant() with
+        | Some "ascii"
+        | Some "latin1" -> 1
+        | Some "utf8mb3"
+        | Some "utf8" -> 3
+        | _ -> 4
+
+    let maxVarcharLength = 65535 / bytesPerCharacter
+
     if c.OnUpdateCurrentTimestamp && not (supportsCurrentTimestamp c) then
         Error(ExpressionError(1294, sprintf "Invalid ON UPDATE clause for '%s' column" c.Name))
     else
         match c.Type with
+        | TChar length when length < 1 || length > 255 ->
+            Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 255); use BLOB or TEXT instead" c.Name))
+        | TVarchar length when length < 1 || length > maxVarcharLength ->
+            Error(
+                ExpressionError(
+                    1074,
+                    sprintf "Column length too big for column '%s' (max = %d); use BLOB or TEXT instead" c.Name maxVarcharLength
+                )
+            )
         | TBit width when width < 1 -> Error(ExpressionError(3013, sprintf "Invalid size for column '%s'." c.Name))
         | TBit width when width > 64 ->
             Error(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 64)" c.Name))

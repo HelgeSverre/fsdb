@@ -155,6 +155,21 @@ let tests =
                     | Error(ExpressionError(1439, _)) -> ()
                     | other -> failtestf "expected oversized BIT width, got %A" other
 
+                testCase "character column lengths respect their charset limits"
+                <| fun _ ->
+                    let store = create ()
+
+                    match createTable store defaultDatabase "wide_char" [ col "value" (TChar 256) true ] [] [] None None with
+                    | Error(ExpressionError(1074, _)) -> ()
+                    | other -> failtestf "expected oversized CHAR to fail, got %A" other
+
+                    match createTable store defaultDatabase "wide_utf8" [ col "value" (TVarchar 16384) true ] [] [] None None with
+                    | Error(ExpressionError(1074, "Column length too big for column 'value' (max = 16383); use BLOB or TEXT instead")) -> ()
+                    | other -> failtestf "expected oversized utf8mb4 VARCHAR to fail, got %A" other
+
+                    let latin1 = { col "value" (TVarchar 65535) true with Charset = Some "latin1" }
+                    Expect.equal (createTable store defaultDatabase "wide_latin1" [ latin1 ] [] [] None None) (Ok()) "latin1 uses one byte per character"
+
                 testCase "column comments allow 1024 Unicode scalars and reject longer text"
                 <| fun _ ->
                     let store = create ()
