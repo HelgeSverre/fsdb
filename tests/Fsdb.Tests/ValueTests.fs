@@ -1620,8 +1620,13 @@ let tests =
 
                           Expect.equal
                               (call "DATE_FORMAT" [ dt; VString "%Y-%y-%m-%c-%d-%e|%H-%h-%I-%i-%s-%S-%p|%W-%a-%M-%b|%j-%D-%w|%%|%x" ])
-                              (VString "2024-24-03-3-05-5|13-01-01-45-09-09-PM|Tuesday-Tue-March-Mar|065-5th-2|%|%x")
+                              (VString "2024-24-03-3-05-5|13-01-01-45-09-09-PM|Tuesday-Tue-March-Mar|065-5th-2|%|2024")
                               "every specifier"
+
+                          Expect.equal
+                              (call "DATE_FORMAT" [ VDate(DateOnly(2000, 1, 1)); VString "%x-%v" ])
+                              (VString "1999-52")
+                              "ISO week year crosses calendar boundaries"
 
                           // each ordinal suffix shape: st/nd/rd/th
                           Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 1)); VString "%D" ]) (VString "1st") "1st"

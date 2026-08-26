@@ -2240,9 +2240,7 @@ let private dateDiffFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
-/// The common `DATE_FORMAT`/`FROM_UNIXTIME` specifiers — MySQL's `%x` table
-/// has far more (week-numbering variants, locale names, ...); this is the
-/// subset a Laravel app's `Carbon::format`-equivalent queries actually hit.
+/// Shared `DATE_FORMAT` and `FROM_UNIXTIME` rendering.
 let private formatDate (dt: DateTime) (fmt: string) : string =
     let sb = StringBuilder()
     let mutable i = 0
@@ -2269,6 +2267,8 @@ let private formatDate (dt: DateTime) (fmt: string) : string =
                 | 'M' -> CultureInfo.InvariantCulture.DateTimeFormat.GetMonthName dt.Month
                 | 'b' -> CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName dt.Month
                 | 'j' -> dt.DayOfYear.ToString("D3")
+                | 'v' -> ISOWeek.GetWeekOfYear(dt).ToString("D2")
+                | 'x' -> ISOWeek.GetYear(dt).ToString("D4")
                 | 'D' ->
                     let suffix =
                         match dt.Day with
