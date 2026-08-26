@@ -523,6 +523,9 @@ let private showCreateUserRe = Regex(@"^SHOW\s+CREATE\s+USER\s+(.+?)\s*;?$", Reg
 let private showCreateProgramRe =
     Regex(@"^SHOW\s+CREATE\s+(PROCEDURE|FUNCTION|EVENT)\s+(\S+)\s*;?$", RegexOptions.IgnoreCase)
 
+let private showCreateTriggerRe =
+    Regex(@"^SHOW\s+CREATE\s+TRIGGER\s+(\S+)\s*;?$", RegexOptions.IgnoreCase)
+
 let private showTriggersRe =
     Regex(@"^SHOW\s+TRIGGERS(?:\s+(?:FROM|IN)\s+(\S+))?", RegexOptions.IgnoreCase)
 
@@ -1828,6 +1831,7 @@ type private Probe =
     | ShowTables
     | ShowCreate of name: string
     | ShowCreateView of name: string
+    | ShowCreateTrigger of name: string
     | ShowColumns of full: bool * name: string * dbOverride: string option
     | Describe of name: string
     | ShowIndex of name: string * dbOverride: string option
@@ -1928,6 +1932,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
     elif showCreateProgramRe.IsMatch sql then
         let matched = showCreateProgramRe.Match sql
         Some(ShowCreateProgram(matched.Groups.[1].Value.ToUpperInvariant(), matched.Groups.[2].Value))
+    elif showCreateTriggerRe.IsMatch sql then
+        Some(ShowCreateTrigger((showCreateTriggerRe.Match sql).Groups.[1].Value))
     elif showGrantsRe.IsMatch sql then
         let m = showGrantsRe.Match sql
         Some(ShowGrants(if m.Groups.[1].Success then Some m.Groups.[1].Value else None))
@@ -2328,6 +2334,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         session,
         InformationSchema.showCreateView (Session.currentStore session).Catalog dbName view
         |> showTableResult session dbName view
+    | ShowCreateTrigger name ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let dbName, trigger = splitQualified sessionDb name
+        session, InformationSchema.showCreateTrigger (Session.currentStore session).Catalog dbName trigger |> showResult
     | ShowColumns(full, name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name

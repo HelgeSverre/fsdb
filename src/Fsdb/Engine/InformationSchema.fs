@@ -1943,6 +1943,39 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
                     Some "utf8mb4_0900_ai_ci" ] ]
             )
 
+let private quotedDefiner (definer: string) =
+    let separator = definer.LastIndexOf '@'
+    let user, host =
+        if separator < 0 then definer, "%" else definer[.. separator - 1], definer[(separator + 1) ..]
+
+    sprintf "`%s`@`%s`" (user.Replace("`", "``")) (host.Replace("`", "``"))
+
+/// `SHOW CREATE TRIGGER trigger_name`.
+let showCreateTrigger (catalog: Catalog) (dbName: string) (triggerName: string) : ShowResult =
+    triggerCatalogRows catalog
+    |> List.tryFind (fun trigger ->
+        String.Equals(trigger.Schema, dbName, StringComparison.OrdinalIgnoreCase)
+        && String.Equals(trigger.Name, triggerName, StringComparison.OrdinalIgnoreCase))
+    |> function
+        | None -> Error(1360, sprintf "Trigger does not exist")
+        | Some trigger ->
+            let ddl =
+                sprintf
+                    "CREATE DEFINER=%s TRIGGER `%s` %s %s ON `%s` FOR EACH ROW %s"
+                    (quotedDefiner trigger.Definer)
+                    (trigger.Name.Replace("`", "``"))
+                    trigger.Timing
+                    trigger.Event
+                    (trigger.Table.Replace("`", "``"))
+                    trigger.Body
+
+            Ok(
+                [ "Trigger"; "sql_mode"; "SQL Original Statement"; "character_set_client"; "collation_connection"
+                  "Database Collation"; "Created" ],
+                [ [ Some trigger.Name; Some triggerSqlMode; Some ddl; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
+                    Some "utf8mb4_0900_ai_ci"; Some(triggerCreatedText trigger) ] ]
+            )
+
 /// `SHOW INDEX|INDEXES|KEYS FROM t [FROM db]` — one row per index column,
 /// same shape `STATISTICS` (above) projects, just scoped to one table and
 /// under `SHOW`'s own (differently-cased) column names.

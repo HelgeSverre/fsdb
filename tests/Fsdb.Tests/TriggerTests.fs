@@ -678,6 +678,40 @@ let tests =
                   Expect.isSome (List.item 5 row) "Created present"
               | other -> failtestf "expected one SHOW TRIGGERS row, got %A" other
 
+          testCase "SHOW CREATE TRIGGER renders a reusable definition"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+
+              let step session sql =
+                  let next, result = handle session sql
+                  expectOk result sql
+                  next
+
+              let session = step session "CREATE TABLE t (id INT, n INT)"
+              let session = step session "CREATE TABLE log (n INT)"
+              let session = step session "CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)"
+
+              match handle session "SHOW CREATE TRIGGER fsdb.trg" |> snd with
+              | ResultSet(columns, [ row ]) ->
+                  Expect.equal
+                      columns
+                      [ "Trigger"; "sql_mode"; "SQL Original Statement"; "character_set_client"; "collation_connection"
+                        "Database Collation"; "Created" ]
+                      "MySQL headers"
+
+                  Expect.equal (List.item 0 row) (Some "trg") "trigger name"
+                  Expect.equal
+                      (List.item 2 row)
+                      (Some "CREATE DEFINER=`root`@`%` TRIGGER `trg` AFTER INSERT ON `t` FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)")
+                      "trigger definition"
+                  Expect.isSome (List.item 6 row) "creation time"
+              | other -> failtestf "expected one SHOW CREATE TRIGGER row, got %A" other
+
+              match handle session "SHOW CREATE TRIGGER missing" |> snd with
+              | Err(1360, _) -> ()
+              | other -> failtestf "expected missing-trigger 1360, got %A" other
+
           testCase "information_schema.TRIGGERS renders the row with MySQL's probed constants"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
