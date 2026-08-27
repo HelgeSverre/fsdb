@@ -1919,12 +1919,23 @@ let private constrainedPrimaryKey: Parser<string list, unit> =
     >>. trailingPrimaryKey
 
 let private indexedColumn: Parser<IndexColumn, unit> =
-    identifier
-    .>>. opt (between (sym "(") (sym ")") intTok)
-    .>> optional (keyword "ASC" <|> keyword "DESC")
-    |>> fun (name, prefixLength) ->
-        { Name = name
-          PrefixLength = prefixLength }
+    let storedColumn =
+        identifier
+        .>>. opt (between (sym "(") (sym ")") intTok)
+        .>> optional (keyword "ASC" <|> keyword "DESC")
+        |>> fun (name, prefixLength) ->
+            { Name = name
+              PrefixLength = prefixLength
+              Transform = None }
+
+    let lowerColumn =
+        between (sym "(") (sym ")") (keyword "LOWER" >>. between (sym "(") (sym ")") identifier)
+        |>> fun name ->
+            { Name = name
+              PrefixLength = None
+              Transform = Some Lowercase }
+
+    attempt lowerColumn <|> storedColumn
 
 /// `[UNIQUE] KEY|INDEX name (cols)` — `UNIQUE` alone (no `KEY`/`INDEX`) is
 /// also legal MySQL, so the `KEY`/`INDEX` keyword itself is optional once
@@ -2183,7 +2194,7 @@ let private createTable: Parser<Statement, unit> =
             |> List.filter (fun c -> c.Unique)
             |> List.map (fun c ->
                 { Name = c.Name
-                  KeyColumns = [ { Name = c.Name; PrefixLength = None } ]
+                  KeyColumns = [ { Name = c.Name; PrefixLength = None; Transform = None } ]
                   Unique = true
                   Kind = BTree })
 
@@ -2199,7 +2210,7 @@ let private createTable: Parser<Statement, unit> =
                 []
             else
                 [ { Name = "PRIMARY"
-                    KeyColumns = primaryColumns |> List.map (fun name -> { Name = name; PrefixLength = None })
+                    KeyColumns = primaryColumns |> List.map (fun name -> { Name = name; PrefixLength = None; Transform = None })
                     Unique = true
                     Kind = BTree } ]
 

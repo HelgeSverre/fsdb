@@ -2042,8 +2042,12 @@ let tests =
                         "create unique index"
 
                     match parseOk "CREATE INDEX ix_prefix ON t (a(12))" with
-                    | CreateIndex("ix_prefix", "t", [ { Name = "a"; PrefixLength = Some 12 } ], false, BTree) -> ()
+                    | CreateIndex("ix_prefix", "t", [ { Name = "a"; PrefixLength = Some 12; Transform = None } ], false, BTree) -> ()
                     | other -> failtestf "expected CREATE INDEX prefix metadata, got %A" other
+
+                    match parseOk "CREATE UNIQUE INDEX ix_lower ON t ((LOWER(external_id)))" with
+                    | CreateIndex("ix_lower", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Lowercase } ], true, BTree) -> ()
+                    | other -> failtestf "expected a lowercase functional key part, got %A" other
 
                 testCase "DROP INDEX [IF EXISTS] name ON table"
                 <| fun _ ->

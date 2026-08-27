@@ -1594,9 +1594,12 @@ let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (ro
 type private UniqueKeyGroup =
     { Name: string
       Indices: int list
-      PrefixLengths: int option list }
+      PrefixLengths: int option list
+      Transforms: IndexTransform option list }
 
-let private indexesWholeColumns group = group.PrefixLengths |> List.forall Option.isNone
+let private indexesWholeColumns group =
+    group.PrefixLengths |> List.forall Option.isNone
+    && group.Transforms |> List.forall Option.isNone
 
 let private uniqueKeyGroups (table: Table) : UniqueKeyGroup list =
     let primary =
@@ -1607,19 +1610,21 @@ let private uniqueKeyGroups (table: Table) : UniqueKeyGroup list =
         |> Option.map (fun indices ->
             { Name = "PRIMARY"
               Indices = indices
-              PrefixLengths = List.replicate indices.Length None })
+              PrefixLengths = List.replicate indices.Length None
+              Transforms = List.replicate indices.Length None })
 
     let fromIndexes =
         table.Indexes
         |> List.filter (fun index -> index.Unique && not (isPrimaryIndex index))
         |> List.choose (fun index ->
             index.KeyColumns
-            |> traverse (fun column -> resolveColumn table.Columns column.Name |> Result.map (fun resolved -> resolved, column.PrefixLength))
+            |> traverse (fun column -> resolveColumn table.Columns column.Name |> Result.map (fun resolved -> resolved, column.PrefixLength, column.Transform))
             |> Result.toOption
             |> Option.map (fun columns ->
                 { Name = index.Name
-                  Indices = columns |> List.map fst
-                  PrefixLengths = columns |> List.map snd }))
+                  Indices = columns |> List.map (fun (index, _, _) -> index)
+                  PrefixLengths = columns |> List.map (fun (_, prefix, _) -> prefix)
+                  Transforms = columns |> List.map (fun (_, _, transform) -> transform) }))
 
     Option.toList primary @ fromIndexes
 
@@ -1630,7 +1635,7 @@ type private SecondaryKeyGroup =
 let private secondaryKeyGroups (table: Table) : SecondaryKeyGroup list =
     table.Indexes
     |> List.choose (fun index ->
-        match index.Kind, index.Unique, index.KeyColumns |> List.forall (fun column -> column.PrefixLength.IsNone) with
+        match index.Kind, index.Unique, index.KeyColumns |> List.forall (fun column -> column.PrefixLength.IsNone && column.Transform.IsNone) with
         | BTree, false, true ->
             index.Columns
             |> traverse (resolveColumn table.Columns)
@@ -1744,8 +1749,12 @@ let private encodeUniqueKey (columns: ColumnDef list) (group: UniqueKeyGroup) (r
     else
         let keyRow = Array.copy row
 
-        List.zip group.Indices group.PrefixLengths
-        |> List.iter (fun (index, prefixLength) ->
+        List.zip3 group.Indices group.PrefixLengths group.Transforms
+        |> List.iter (fun (index, prefixLength, transform) ->
+            match transform, keyRow.[index] with
+            | Some Lowercase, VString text -> keyRow.[index] <- VString(text.ToLowerInvariant())
+            | _ -> ()
+
             match prefixLength, keyRow.[index] with
             | Some length, VString text ->
                 keyRow.[index] <- VString(truncateRunes length text |> Option.defaultValue text)
@@ -3266,6 +3275,11 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
     let partLength (index: IndexDef) (column: IndexColumn) =
         match columns |> List.tryFind (fun definition -> String.Equals(definition.Name, column.Name, StringComparison.OrdinalIgnoreCase)) with
         | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column.Name))
+        | Some definition when column.Transform = Some Lowercase ->
+            match definition.Type with
+            | TChar _
+            | TVarchar _ -> fullLength definition |> Option.defaultValue 0 |> Ok
+            | _ -> Error(ExpressionError(3757, "Cannot create a functional index on this expression."))
         | Some definition ->
             match column.PrefixLength, fullLength definition with
             | Some prefix, _ when prefix < 1 -> Error(ExpressionError(1089, "Incorrect prefix key"))
@@ -3953,7 +3967,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
             let group =
                 { Name = ix.Name
                   Indices = idxs
-                  PrefixLengths = ix.KeyColumns |> List.map _.PrefixLength }
+                  PrefixLengths = ix.KeyColumns |> List.map _.PrefixLength
+                  Transforms = ix.KeyColumns |> List.map _.Transform }
 
             match tryDuplicateUniqueValue table.Columns group table.RowsArray with
             | Some value -> Error(DuplicateKey(ix.Name, value))
@@ -4019,7 +4034,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
 
                         let primary =
                             { Name = "PRIMARY"
-                              KeyColumns = cols |> List.map (fun name -> { Name = name; PrefixLength = None })
+                              KeyColumns = cols |> List.map (fun name -> { Name = name; PrefixLength = None; Transform = None })
                               Unique = true
                               Kind = BTree }
 

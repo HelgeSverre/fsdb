@@ -1660,6 +1660,22 @@ let tests =
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected the shared prefix to collide, got %A" other
 
+                testCase "LOWER functional indexes enforce transformed uniqueness"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE books (id INT PRIMARY KEY, external_id VARCHAR(255), UNIQUE INDEX ix_lower_external_id ((LOWER(external_id))))" |> ignore
+                    Expect.equal (runDefault store "INSERT INTO books VALUES (1, 'Reference')") (Affected 1UL) "first spelling accepted"
+
+                    match runDefault store "INSERT INTO books VALUES (2, 'reference')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected lowercase-equivalent values to collide, got %A" other
+
+                    Expect.equal (runDefault store "INSERT INTO books VALUES (2, 'different')") (Affected 1UL) "different value accepted"
+
+                    match runDefault store "UPDATE books SET external_id = 'REFERENCE' WHERE id = 2" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected updates to maintain the functional key, got %A" other
+
                 testCase "ALTER TABLE ENGINE accepts InnoDB and rejects unsupported engines"
                 <| fun _ ->
                     let store = newStore ()

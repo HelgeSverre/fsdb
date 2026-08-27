@@ -551,7 +551,7 @@ let private indexesIncludingPrimary (table: Table) =
         | [] -> table.Indexes
         | columns ->
             { Name = "PRIMARY"
-              KeyColumns = columns |> List.map (fun name -> { Name = name; PrefixLength = None })
+              KeyColumns = columns |> List.map (fun name -> { Name = name; PrefixLength = None; Transform = None })
               Unique = true
               Kind = BTree }
             :: table.Indexes
@@ -570,6 +570,11 @@ let private effectivePrefixLength (table: Table) (keyColumn: IndexColumn) =
             | TVarBinary length when prefix >= length -> None
             | _ -> Some prefix)
 
+let private indexExpression (keyColumn: IndexColumn) =
+    match keyColumn.Transform with
+    | Some Lowercase -> Some(sprintf "lower(`%s`)" (keyColumn.Name.Replace("`", "``")))
+    | None -> None
+
 /// One row per `(index, column)` pair.
 let private statisticsRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -578,10 +583,11 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
         |> List.collect (fun ix ->
             ix.KeyColumns
             |> List.mapi (fun i keyColumn ->
-                let colName = keyColumn.Name
+                let expression = indexExpression keyColumn
+                let colName = if expression.IsSome then VNull else vs keyColumn.Name
                 let nullable =
                     t.Columns
-                    |> List.tryFind (fun c -> c.Name = colName)
+                    |> List.tryFind (fun c -> c.Name = keyColumn.Name)
                     |> Option.map (fun c -> if c.PrimaryKey || not c.Nullable then "" else "YES")
                     |> Option.defaultValue ""
 
@@ -594,7 +600,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vs dbName
                    vs ix.Name
                    vi (i + 1)
-                   vs colName
+                   colName
                    (if ix.Kind = FullTextIndex then VNull else vs "A")
                    vi 0
                    (effectivePrefixLength t keyColumn |> Option.map vi |> Option.defaultValue VNull)
@@ -604,7 +610,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vs ""
                    vs ""
                    vs "YES"
-                   VNull |])))
+                   (expression |> Option.map vs |> Option.defaultValue VNull) |])))
 
 let private keyColumnUsageColumns =
     [ strCol "CONSTRAINT_CATALOG"
@@ -1884,8 +1890,11 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
             let columns =
                 ix.KeyColumns
                 |> List.map (fun column ->
-                    let length = column.PrefixLength |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
-                    backtick column.Name + length)
+                    match indexExpression column with
+                    | Some expression -> "(" + expression + ")"
+                    | None ->
+                        let length = column.PrefixLength |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
+                        backtick column.Name + length)
                 |> String.concat ","
 
             sprintf "%sKEY %s (%s)" prefix (backtick ix.Name) columns)
@@ -2019,12 +2028,12 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
             |> List.collect (fun ix ->
                 ix.KeyColumns
                 |> List.mapi (fun i keyColumn ->
-                    let colName = keyColumn.Name
+                    let expression = indexExpression keyColumn
                     [ Some t.OriginalName
                       Some(if ix.Unique then "0" else "1")
                       Some ix.Name
                       Some(string (i + 1))
-                      Some colName
+                      (if expression.IsSome then None else Some keyColumn.Name)
                       (if ix.Kind = FullTextIndex then None else Some "A")
                       Some "0"
                       (effectivePrefixLength t keyColumn |> Option.map string)
@@ -2032,7 +2041,9 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       Some "YES"
                       Some(if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")
                       Some ""
-                      Some "" ]))
+                      Some ""
+                      Some "YES"
+                      expression ]))
 
         [ "Table"
           "Non_unique"
@@ -2046,7 +2057,9 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
           "Null"
           "Index_type"
           "Comment"
-          "Index_comment" ],
+          "Index_comment"
+          "Visible"
+          "Expression" ],
         rows)
 
 /// `SHOW TABLE STATUS [FROM db] [LIKE 'pattern']`.

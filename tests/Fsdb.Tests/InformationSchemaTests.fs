@@ -494,6 +494,32 @@ let tests =
               | ResultSet(_, [ [ None ] ]) -> ()
               | other -> failtestf "expected a single NULL row, got %A" other
 
+          testCase "functional indexes expose their expression instead of a column name"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE UNIQUE INDEX ix_lower_name ON users ((LOWER(name)))" |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT column_name, expression FROM information_schema.statistics WHERE table_schema = 'fsdb' AND table_name = 'users' AND index_name = 'ix_lower_name'"
+              with
+              | ResultSet(_, [ [ None; Some "lower(`name`)" ] ]) -> ()
+              | other -> failtestf "expected functional index expression metadata, got %A" other
+
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE users" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) -> Expect.stringContains ddl "UNIQUE KEY `ix_lower_name` ((lower(`name`)))" "functional key DDL"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+              match Fsdb.QueryHandler.handle session "SHOW INDEX FROM users WHERE key_name = 'ix_lower_name'" |> snd with
+              | ResultSet(columns, [ row ]) ->
+                  Expect.equal (List.last columns) "Expression" "expression column"
+                  Expect.equal row.[4] None "functional key has no column name"
+                  Expect.equal (List.last row) (Some "lower(`name`)") "functional expression"
+              | other -> failtestf "expected functional SHOW INDEX metadata, got %A" other
+
           testCase "KEY_COLUMN_USAGE and REFERENTIAL_CONSTRAINTS surface the foreign key"
           <| fun _ ->
               let store = setup ()

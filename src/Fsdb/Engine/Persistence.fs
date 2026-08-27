@@ -455,12 +455,13 @@ let private decodeColumnDef (includeComment: bool) (r: #IReader) : ColumnDef =
       Comment = if includeComment then readStr r else "" }
 
 let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
-    // The marker extends the legacy string-list field without shifting the
-    // unversioned index payload; NUL cannot occur in a MySQL identifier.
+    // Key-part attributes stay inside the existing string-list field so the
+    // following payload remains aligned. NUL cannot occur in an identifier.
     let encodeColumn column =
-        match column.PrefixLength with
-        | None -> column.Name
-        | Some length -> sprintf "\u0001%d:%s" length column.Name
+        match column.Transform, column.PrefixLength with
+        | Some Lowercase, _ -> "\u0000L:" + column.Name
+        | None, None -> column.Name
+        | None, Some length -> sprintf "\u0001%d:%s" length column.Name
 
     writeStr w ix.Name
     ix.KeyColumns |> List.map encodeColumn |> writeStrList w
@@ -469,18 +470,30 @@ let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
 
 let private decodeIndexDef (r: #IReader) : IndexDef =
     let decodeColumn (encoded: string) =
-        if encoded.StartsWith("\u0001", StringComparison.Ordinal) then
+        if encoded.StartsWith("\u0000L:", StringComparison.Ordinal) then
+            { Name = encoded.Substring 3
+              PrefixLength = None
+              Transform = Some Lowercase }
+        elif encoded.StartsWith("\u0001", StringComparison.Ordinal) then
             match encoded.IndexOf(':', 1) with
             | separator when separator > 1 ->
                 match Int32.TryParse(encoded.Substring(1, separator - 1)) with
                 | true, length ->
                     { Name = encoded.Substring(separator + 1)
-                      PrefixLength = Some length }
-                | _ -> { Name = encoded; PrefixLength = None }
-            | _ -> { Name = encoded; PrefixLength = None }
+                      PrefixLength = Some length
+                      Transform = None }
+                | _ ->
+                    { Name = encoded
+                      PrefixLength = None
+                      Transform = None }
+            | _ ->
+                { Name = encoded
+                  PrefixLength = None
+                  Transform = None }
         else
             { Name = encoded
-              PrefixLength = None }
+              PrefixLength = None
+              Transform = None }
 
     { Name = readStr r
       KeyColumns = readStrList r |> List.map decodeColumn

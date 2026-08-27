@@ -355,9 +355,13 @@ and MatchMode =
     | BooleanMode
     | QueryExpansion
 
+and IndexTransform =
+    | Lowercase
+
 and IndexColumn =
     { Name: string
-      PrefixLength: int option }
+      PrefixLength: int option
+      Transform: IndexTransform option }
 
 and IndexDef =
     { Name: string
@@ -583,7 +587,11 @@ and SelectStmt =
       Locking: bool }
 
 let indexColumns names =
-    names |> List.map (fun name -> { Name = name; PrefixLength = None })
+    names
+    |> List.map (fun name ->
+        { Name = name
+          PrefixLength = None
+          Transform = None })
 
 /// Where `ADD`/`MODIFY`/`CHANGE COLUMN` places a column: `PositionDefault`
 /// means no `AFTER`/`FIRST` was written (a plain `ADD` appends at the end;

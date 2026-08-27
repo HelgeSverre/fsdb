@@ -179,7 +179,12 @@ let tests =
 
                     let boundedKey =
                         { wideKey with
-                            KeyColumns = keyColumns |> List.map (fun column -> { Name = column.Name; PrefixLength = Some 100 }) }
+                            KeyColumns =
+                                keyColumns
+                                |> List.map (fun column ->
+                                    { Name = column.Name
+                                      PrefixLength = Some 100
+                                      Transform = None }) }
 
                     Expect.equal (createTable store defaultDatabase "bounded_key" keyColumns [ boundedKey ] [] None None) (Ok()) "prefixes bound the key size"
 
@@ -792,7 +797,7 @@ let tests =
                         "prefixed"
                         [ col "value" (TVarchar 50) false ]
                         [ { Name = "uq_value"
-                            KeyColumns = [ { Name = "value"; PrefixLength = Some 10 } ]
+                            KeyColumns = [ { Name = "value"; PrefixLength = Some 10; Transform = None } ]
                             Unique = true
                             Kind = BTree } ]
                         []

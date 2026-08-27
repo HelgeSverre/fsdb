@@ -1205,7 +1205,7 @@ let tests =
                       Expect.equal (primaryKeyColumns table) [ "second"; "first" ] message
 
                       let bodyIndex = table.Indexes |> List.find (fun index -> index.Name = "ix_body")
-                      Expect.equal bodyIndex.KeyColumns [ { Name = "body"; PrefixLength = Some 12 } ] "prefix survives recovery"
+                      Expect.equal bodyIndex.KeyColumns [ { Name = "body"; PrefixLength = Some 12; Transform = None } ] "prefix survives recovery"
                   | Error error -> failtestf "expected ordered_primary after recovery, got %A" error
 
               assertOrder (load dir) "WAL retains the key order"
@@ -1625,6 +1625,7 @@ let tests =
                     "INSERT INTO old_name VALUES (1, 'x')"
                     "RENAME TABLE old_name TO new_name" // 0x06
                     "CREATE INDEX ix_c ON new_name (c)" // 0x07
+                    "CREATE UNIQUE INDEX ix_lower_c ON new_name ((LOWER(c)))"
                     "CREATE INDEX ix_gone ON new_name (id)"
                     "DROP INDEX ix_gone ON new_name" ] // 0x08
                   |> List.fold run session
@@ -1647,7 +1648,11 @@ let tests =
                   | Some t -> t.Indexes |> List.map (fun ix -> ix.Name) |> List.sort
                   | None -> failtest "new_name missing after reload"
 
-              Expect.equal indexes [ "PRIMARY"; "ix_c" ] "the primary and created index replayed while the dropped index stayed dropped"
+              Expect.equal indexes [ "PRIMARY"; "ix_c"; "ix_lower_c" ] "created indexes replayed while the dropped index stayed dropped"
+
+              match handle (Fsdb.Session.create 2 reloaded) "INSERT INTO new_name VALUES (2, 'X')" |> snd with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected the recovered functional index to reject a duplicate, got %A" other
 
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->
