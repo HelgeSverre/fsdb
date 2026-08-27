@@ -904,8 +904,11 @@ let private restrictedTo (priv: string) : Fsdb.Auth.Account option =
 /// Stamped by `Server.listen` — `SHOW STATUS`'s `Uptime` baseline.
 let mutable serverStartedAt = DateTime.Now
 let mutable private questionCount = 0L
-let private commandCounts =
-    Collections.Concurrent.ConcurrentDictionary<string, int64>(StringComparer.OrdinalIgnoreCase)
+let mutable private deleteCommandCount = 0L
+let mutable private insertCommandCount = 0L
+let mutable private replaceCommandCount = 0L
+let mutable private selectCommandCount = 0L
+let mutable private updateCommandCount = 0L
 
 type StatusCommand =
     | DeleteCommand
@@ -929,15 +932,26 @@ let questions () = Threading.Interlocked.Read(&questionCount)
 let resetQuestions () = Threading.Interlocked.Exchange(&questionCount, 0L) |> ignore
 
 let recordCommand command =
-    let name = commandName command
-    commandCounts.AddOrUpdate(name, 1L, fun _ count -> count + 1L) |> ignore
+    match command with
+    | DeleteCommand -> Threading.Interlocked.Increment(&deleteCommandCount) |> ignore
+    | InsertCommand -> Threading.Interlocked.Increment(&insertCommandCount) |> ignore
+    | ReplaceCommand -> Threading.Interlocked.Increment(&replaceCommandCount) |> ignore
+    | SelectCommand -> Threading.Interlocked.Increment(&selectCommandCount) |> ignore
+    | UpdateCommand -> Threading.Interlocked.Increment(&updateCommandCount) |> ignore
 
-let resetCommandCounts () = commandCounts.Clear()
+let resetCommandCounts () =
+    Threading.Interlocked.Exchange(&deleteCommandCount, 0L) |> ignore
+    Threading.Interlocked.Exchange(&insertCommandCount, 0L) |> ignore
+    Threading.Interlocked.Exchange(&replaceCommandCount, 0L) |> ignore
+    Threading.Interlocked.Exchange(&selectCommandCount, 0L) |> ignore
+    Threading.Interlocked.Exchange(&updateCommandCount, 0L) |> ignore
 
-let private commandCount name =
-    match commandCounts.TryGetValue name with
-    | true, count -> count
-    | false, _ -> 0L
+let private commandCount = function
+    | DeleteCommand -> Threading.Interlocked.Read(&deleteCommandCount)
+    | InsertCommand -> Threading.Interlocked.Read(&insertCommandCount)
+    | ReplaceCommand -> Threading.Interlocked.Read(&replaceCommandCount)
+    | SelectCommand -> Threading.Interlocked.Read(&selectCommandCount)
+    | UpdateCommand -> Threading.Interlocked.Read(&updateCommandCount)
 
 let registerProcessAs (id: int64) (account: Fsdb.Auth.Account) (user: string) (host: string) : ProcessEntry =
     let entry =
@@ -2272,7 +2286,7 @@ let showStatus
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds)
           for command in reportedCommands do
               let name = commandName command
-              name, string (commandCount name) ]
+              name, string (commandCount command) ]
         |> List.filter (fun (name, _) -> likeFilter likeOpt name)
         |> List.map (fun (name, value) -> [ Some name; Some value ])
 
