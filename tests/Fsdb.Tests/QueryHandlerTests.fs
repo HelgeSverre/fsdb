@@ -753,6 +753,19 @@ let tests =
               | Ok(Some _, 1) -> ()
               | other -> failtestf "expected ANSI-quoted prepared statement to parse, got %A" other
 
+          testCase "parsed statements remain isolated by ANSI_QUOTES mode"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let ansiSession, _ = handle (create 1 store) "SET sql_mode = 'ANSI_QUOTES'"
+
+              match handle ansiSession "SELECT \"missing_column\"" |> snd with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected an ANSI identifier lookup, got %A" other
+
+              match handle (create 2 store) "SELECT \"missing_column\"" |> snd with
+              | ResultSet([ "missing_column" ], [ [ Some "missing_column" ] ]) -> ()
+              | other -> failtestf "expected a non-ANSI string literal, got %A" other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

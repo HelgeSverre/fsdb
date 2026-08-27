@@ -8,6 +8,7 @@
 module Fsdb.QueryHandler
 
 open System
+open System.Collections.Concurrent
 open System.Diagnostics
 open System.Runtime.CompilerServices
 open System.Text
@@ -1924,6 +1925,30 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
 
 let private executeParsed session stmt = executeParsedWithTemporaryAction None session stmt
 
+let private parsedStatementCapacity = 16384
+let private cacheableSqlLength = 512
+let private parsedStatements = ConcurrentDictionary<struct (bool * string), Statement>()
+let private parsedStatementOrder = ConcurrentQueue<struct (bool * string)>()
+
+let private parseStatement (ansiQuotes: bool) (sql: string) =
+    let key = struct (ansiQuotes, sql)
+
+    match parsedStatements.TryGetValue key with
+    | true, statement -> Result.Ok statement
+    | false, _ ->
+        match Parser.parseWithAnsiQuotes ansiQuotes sql with
+        | Result.Ok statement as parsed ->
+            if sql.Length <= cacheableSqlLength && parsedStatements.TryAdd(key, statement) then
+                parsedStatementOrder.Enqueue key
+
+                while parsedStatements.Count > parsedStatementCapacity do
+                    match parsedStatementOrder.TryDequeue() with
+                    | true, oldest -> parsedStatements.TryRemove oldest |> ignore
+                    | false, _ -> ()
+
+            parsed
+        | Result.Error _ as error -> error
+
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     let ansiQuotes = lookupVar session "sql_mode" |> Option.flatten |> Option.exists usesAnsiQuotes
 
@@ -1935,7 +1960,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
         else
             None, sql
 
-    match Parser.parseWithAnsiQuotes ansiQuotes parsedSql with
+    match parseStatement ansiQuotes parsedSql with
     | Result.Ok stmt -> executeParsedWithTemporaryAction action session stmt
     | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError sql detail
 
