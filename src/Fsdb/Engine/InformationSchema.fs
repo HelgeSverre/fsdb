@@ -573,6 +573,7 @@ let private effectivePrefixLength (table: Table) (keyColumn: IndexColumn) =
 let private indexExpression (keyColumn: IndexColumn) =
     match keyColumn.Transform with
     | Some Lowercase -> Some(sprintf "lower(`%s`)" (keyColumn.Name.Replace("`", "``")))
+    | Some(Expression expression) -> Some(exprToSql expression)
     | None -> None
 
 /// One row per `(index, column)` pair.

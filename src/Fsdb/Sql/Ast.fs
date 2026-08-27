@@ -357,6 +357,7 @@ and MatchMode =
 
 and IndexTransform =
     | Lowercase
+    | Expression of Expr
 
 and IndexColumn =
     { Name: string
@@ -372,7 +373,9 @@ and IndexDef =
       /// collapses to `BTree` until fsdb has a spatial-index implementation.
       Kind: IndexKind }
 
-    member this.Columns = this.KeyColumns |> List.map _.Name
+    member this.Columns =
+        this.KeyColumns
+        |> List.choose (fun column -> if column.Name = "" then None else Some column.Name)
 
 /// A `CONSTRAINT name FOREIGN KEY (cols) REFERENCES tbl (cols) [ON DELETE
 /// ...] [ON UPDATE ...]` — enforced (insert/update-time parent check,

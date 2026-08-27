@@ -1930,12 +1930,21 @@ let private indexedColumn: Parser<IndexColumn, unit> =
 
     let lowerColumn =
         between (sym "(") (sym ")") (keyword "LOWER" >>. between (sym "(") (sym ")") identifier)
+        .>> optional (keyword "ASC" <|> keyword "DESC")
         |>> fun name ->
             { Name = name
               PrefixLength = None
               Transform = Some Lowercase }
 
-    attempt lowerColumn <|> storedColumn
+    let expressionColumn =
+        between (sym "(") (sym ")") expr
+        .>> optional (keyword "ASC" <|> keyword "DESC")
+        |>> fun expression ->
+            { Name = ""
+              PrefixLength = None
+              Transform = Some(Expression expression) }
+
+    attempt lowerColumn <|> attempt expressionColumn <|> storedColumn
 
 /// `[UNIQUE] KEY|INDEX name (cols)` — `UNIQUE` alone (no `KEY`/`INDEX`) is
 /// also legal MySQL, so the `KEY`/`INDEX` keyword itself is optional once
@@ -1951,10 +1960,12 @@ let private indexPrefix: Parser<bool * IndexKind, unit> =
 
 let private indexItem: Parser<IndexDef, unit> =
     (indexPrefix .>>. opt identifier
+     .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH"))
      .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ","))
      // `USING BTREE|HASH` — parsed and discarded, every index here is the
      // same structure either way.
-     .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH")))
+     .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH"))
+     .>> optional (keyword "VISIBLE" <|> keyword "INVISIBLE"))
     |>> fun (((unique, kind), name), cols) ->
         { Name = name |> Option.defaultValue (List.head cols).Name
           KeyColumns = cols

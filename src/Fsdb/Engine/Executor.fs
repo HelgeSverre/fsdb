@@ -11020,6 +11020,47 @@ let private validateFunctionalDefaultsForStorage (registry: Registry) (columns: 
     | Error(Err(code, message)) -> Error(ExpressionError(code, message))
     | Error _ -> Error(ExpressionError(1105, "Invalid functional default"))
 
+let private validateIndexExpressions
+    (registry: Registry)
+    (columns: ColumnDef list)
+    (indexes: IndexDef list)
+    : Result<unit, StorageError> =
+    let invalid (index: IndexDef) detail =
+        Error(
+            ExpressionError(
+                3758,
+                sprintf "Expression of functional index '%s' contains a disallowed %s." index.Name detail
+            )
+        )
+
+    let validateExpression (index: IndexDef) expression =
+        match firstDisallowedCheckShape expression with
+        | Some shape -> invalid index shape
+        | None when Expression.exists (function Row _ -> true | _ -> false) expression -> invalid index "row expression"
+        | None ->
+            match firstDisallowedCheckFunction registry expression with
+            | Some functionName -> invalid index (sprintf "function: %s" functionName)
+            | None ->
+                checkColumnReferences expression
+                |> List.tryPick (fun (qualifier, name) ->
+                    match qualifier, resolveColumn columns name with
+                    | Some _, _ -> Some(ExpressionError(3757, "Cannot create a functional index on an expression that refers to another table."))
+                    | None, Error _ -> Some(UnknownColumn name)
+                    | None, Ok _ -> None)
+                |> function
+                    | Some error -> Error error
+                    | None -> Ok()
+
+    indexes
+    |> traverse (fun index ->
+        index.KeyColumns
+        |> traverse (fun column ->
+            match column.Transform with
+            | Some(Expression expression) -> validateExpression index expression
+            | _ -> Ok())
+        |> Result.map ignore)
+    |> Result.map ignore
+
 let private validateCheckDefinition
     (registry: Registry)
     (columns: ColumnDef list)
@@ -12408,13 +12449,15 @@ let rec executeAs
                 rejectDirectOnlyGenerated registry table.Columns,
                 rejectQuantifiedComparisonsInGenerated table.Columns,
                 rejectSessionVariablesInGenerated table.Columns,
-                validateFunctionalDefaults registry table.Columns
+                validateFunctionalDefaults registry table.Columns,
+                validateIndexExpressions registry table.Columns table.Indexes
             with
-            | Some err, _, _, _
-            | _, Some err, _, _
-            | _, _, Some err, _
-            | _, _, _, Error err -> ids, err
-            | None, None, None, Ok() ->
+            | Some err, _, _, _, _
+            | _, Some err, _, _, _
+            | _, _, Some err, _, _
+            | _, _, _, Error err, _ -> ids, err
+            | _, _, _, _, Error error -> ids, storageErr error
+            | None, None, None, Ok(), Ok() ->
                 let alreadyExists = scan store db name |> Result.isOk
 
                 if alreadyExists && table.IfNotExists then
@@ -12742,6 +12785,12 @@ let rec executeAs
                 |> Result.bind (fun () -> scan snapshot db finalTable |> Result.map fst)
                 |> Result.bind (fun columns ->
                     validateFunctionalDefaultsForStorage registry columns
+                    |> Result.bind (fun () ->
+                        snapshot.Catalog
+                        |> Map.tryFind db
+                        |> Option.bind (Map.tryFind (normalizeTableName finalTable))
+                        |> Option.map (fun storedTable -> validateIndexExpressions registry columns storedTable.Indexes)
+                        |> Option.defaultValue (Error(NoSuchTable finalTable)))
                     |> Result.bind (fun () -> validateExistingDefinitions columns)
                     |> Result.bind (fun () -> actions |> List.fold (fun state action -> state |> Result.bind (fun () -> applyCheckAction columns action)) (Ok()))
                     |> Result.bind (fun () ->
@@ -12855,10 +12904,21 @@ let rec executeAs
 
     | CreateIndex(name, table, columns, unique, kind) ->
         let db, table = splitQualified dbName table
+        let index =
+            { Name = name
+              KeyColumns = columns
+              Unique = unique
+              Kind = kind }
 
-        match alterTable store db table [ AddIndex { Name = name; KeyColumns = columns; Unique = unique; Kind = kind } ] with
-        | Ok() -> ids, Affected 0UL
-        | Error e -> ids, storageErr e
+        match scan store db table with
+        | Error error -> ids, storageErr error
+        | Ok(columnDefinitions, _) ->
+            match validateIndexExpressions registry columnDefinitions [ index ] with
+            | Error error -> ids, storageErr error
+            | Ok() ->
+                match alterTable store db table [ AddIndex index ] with
+                | Ok() -> ids, Affected 0UL
+                | Error e -> ids, storageErr e
 
     | DropIndexStmt(name, table, _) ->
         // `ifExists` needs no executor logic (see the AST case's doc):

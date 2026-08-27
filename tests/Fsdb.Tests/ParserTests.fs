@@ -2049,6 +2049,13 @@ let tests =
                     | CreateIndex("ix_lower", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Lowercase } ], true, BTree) -> ()
                     | other -> failtestf "expected a lowercase functional key part, got %A" other
 
+                    match
+                        parseOk
+                            "CREATE TABLE companies (name VARCHAR(255), rating BIGINT, firm_name VARCHAR(255), firm_id BIGINT, client_of BIGINT, INDEX company_name_index USING btree (name), INDEX company_expression_index ((CASE WHEN rating > 0 THEN lower(name) END) DESC), INDEX full_name_index ((CONCAT_WS(firm_name, name, _utf8mb4' '))), INDEX company_disabled_index (firm_id, client_of) INVISIBLE)"
+                    with
+                    | CreateTable { Indexes = [ _; { KeyColumns = [ { Transform = Some(Expression(Case _)) } ] }; { KeyColumns = [ { Transform = Some(Expression(FuncCall("CONCAT_WS", _))) } ] }; _ ] } -> ()
+                    | other -> failtestf "expected Rails expression/index-option metadata, got %A" other
+
                 testCase "DROP INDEX [IF EXISTS] name ON table"
                 <| fun _ ->
                     Expect.equal (parseOk "DROP INDEX idx_a ON t") (DropIndexStmt("idx_a", "t", false)) "drop index"

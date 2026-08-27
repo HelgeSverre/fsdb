@@ -1626,6 +1626,7 @@ let tests =
                     "RENAME TABLE old_name TO new_name" // 0x06
                     "CREATE INDEX ix_c ON new_name (c)" // 0x07
                     "CREATE UNIQUE INDEX ix_lower_c ON new_name ((LOWER(c)))"
+                    "CREATE INDEX ix_expression ON new_name ((CASE WHEN c = 'x' THEN lower(c) END))"
                     "CREATE INDEX ix_gone ON new_name (id)"
                     "DROP INDEX ix_gone ON new_name" ] // 0x08
                   |> List.fold run session
@@ -1648,7 +1649,11 @@ let tests =
                   | Some t -> t.Indexes |> List.map (fun ix -> ix.Name) |> List.sort
                   | None -> failtest "new_name missing after reload"
 
-              Expect.equal indexes [ "PRIMARY"; "ix_c"; "ix_lower_c" ] "created indexes replayed while the dropped index stayed dropped"
+              Expect.equal indexes [ "PRIMARY"; "ix_c"; "ix_expression"; "ix_lower_c" ] "created indexes replayed while the dropped index stayed dropped"
+
+              match Fsdb.InformationSchema.showCreateTable reloaded.Catalog defaultDatabase "new_name" with
+              | Ok(_, [ [ _; Some ddl ] ]) -> Expect.stringContains ddl "KEY `ix_expression` (((case" "expression index survives recovery"
+              | other -> failtestf "expected recovered expression DDL, got %A" other
 
               match handle (Fsdb.Session.create 2 reloaded) "INSERT INTO new_name VALUES (2, 'X')" |> snd with
               | Err(1062, _) -> ()

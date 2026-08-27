@@ -1676,6 +1676,25 @@ let tests =
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected updates to maintain the functional key, got %A" other
 
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE companies (name VARCHAR(255), rating BIGINT, firm_name VARCHAR(255), firm_id BIGINT, client_of BIGINT, INDEX company_name_index USING btree (name), INDEX company_expression_index ((CASE WHEN rating > 0 THEN lower(name) END) DESC), INDEX full_name_index ((CONCAT_WS(firm_name, name, _utf8mb4' '))), INDEX company_disabled_index (firm_id, client_of) INVISIBLE)")
+                        (Affected 0UL)
+                        "non-unique expression and visibility metadata is accepted"
+
+                    match runDefault store "CREATE INDEX invalid_expression ON companies ((UUID()))" with
+                    | Err(3758, _) -> ()
+                    | other -> failtestf "expected nondeterministic expression rejection, got %A" other
+
+                    match runDefault store "ALTER TABLE companies ADD INDEX invalid_alter ((RAND()))" with
+                    | Err(3758, _) -> ()
+                    | other -> failtestf "expected subquery expression rejection, got %A" other
+
+                    let companies = store.Catalog.[defaultDatabase].[normalizeTableName "companies"]
+                    Expect.isFalse (companies.Indexes |> List.exists (fun index -> index.Name = "invalid_expression")) "rejected index is not published"
+                    Expect.isFalse (companies.Indexes |> List.exists (fun index -> index.Name = "invalid_alter")) "rejected ALTER index is not published"
+
                 testCase "ALTER TABLE ENGINE accepts InnoDB and rejects unsupported engines"
                 <| fun _ ->
                     let store = newStore ()

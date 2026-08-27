@@ -3273,32 +3273,36 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
         | _ -> None
 
     let partLength (index: IndexDef) (column: IndexColumn) =
-        match columns |> List.tryFind (fun definition -> String.Equals(definition.Name, column.Name, StringComparison.OrdinalIgnoreCase)) with
-        | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column.Name))
-        | Some definition when column.Transform = Some Lowercase ->
-            match definition.Type with
-            | TChar _
-            | TVarchar _ -> fullLength definition |> Option.defaultValue 0 |> Ok
-            | _ -> Error(ExpressionError(3757, "Cannot create a functional index on this expression."))
-        | Some definition ->
-            match column.PrefixLength, fullLength definition with
-            | Some prefix, _ when prefix < 1 -> Error(ExpressionError(1089, "Incorrect prefix key"))
-            | Some prefix, _ ->
-                let multiplier =
-                    match definition.Type with
-                    | TChar _
-                    | TVarchar _
-                    | TTinyText
-                    | TText
-                    | TMediumText
-                    | TLongText -> bytesPerCharacter definition
-                    | _ -> 1
+        match column.Transform with
+        | Some(Expression _) when index.Unique -> Error(ExpressionError(1235, "This version of fsdb doesn't yet support unique expression indexes other than LOWER(column)"))
+        | Some(Expression _) -> Ok 0
+        | _ ->
+            match columns |> List.tryFind (fun definition -> String.Equals(definition.Name, column.Name, StringComparison.OrdinalIgnoreCase)) with
+            | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column.Name))
+            | Some definition when column.Transform = Some Lowercase ->
+                match definition.Type with
+                | TChar _
+                | TVarchar _ -> fullLength definition |> Option.defaultValue 0 |> Ok
+                | _ -> Error(ExpressionError(3757, "Cannot create a functional index on this expression."))
+            | Some definition ->
+                match column.PrefixLength, fullLength definition with
+                | Some prefix, _ when prefix < 1 -> Error(ExpressionError(1089, "Incorrect prefix key"))
+                | Some prefix, _ ->
+                    let multiplier =
+                        match definition.Type with
+                        | TChar _
+                        | TVarchar _
+                        | TTinyText
+                        | TText
+                        | TMediumText
+                        | TLongText -> bytesPerCharacter definition
+                        | _ -> 1
 
-                Ok(prefix * multiplier)
-            | None, Some length -> Ok length
-            | None, None when index.Kind = FullTextIndex -> Ok 0
-            | None, None ->
-                Error(ExpressionError(1170, sprintf "BLOB/TEXT column '%s' used in key specification without a key length" definition.Name))
+                    Ok(prefix * multiplier)
+                | None, Some length -> Ok length
+                | None, None when index.Kind = FullTextIndex -> Ok 0
+                | None, None ->
+                    Error(ExpressionError(1170, sprintf "BLOB/TEXT column '%s' used in key specification without a key length" definition.Name))
 
     indexes
     |> traverse (fun index ->

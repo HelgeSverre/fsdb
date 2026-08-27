@@ -460,6 +460,10 @@ let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
     let encodeColumn column =
         match column.Transform, column.PrefixLength with
         | Some Lowercase, _ -> "\u0000L:" + column.Name
+        | Some(Expression expression), _ ->
+            let expressionBytes = Writer()
+            encodeExpr expressionBytes expression
+            "\u0000E:" + Convert.ToBase64String(expressionBytes.ToArray())
         | None, None -> column.Name
         | None, Some length -> sprintf "\u0001%d:%s" length column.Name
 
@@ -474,6 +478,12 @@ let private decodeIndexDef (r: #IReader) : IndexDef =
             { Name = encoded.Substring 3
               PrefixLength = None
               Transform = Some Lowercase }
+        elif encoded.StartsWith("\u0000E:", StringComparison.Ordinal) then
+            let expression = encoded.Substring 3 |> Convert.FromBase64String |> Reader |> decodeExpr
+
+            { Name = ""
+              PrefixLength = None
+              Transform = Some(Expression expression) }
         elif encoded.StartsWith("\u0001", StringComparison.Ordinal) then
             match encoded.IndexOf(':', 1) with
             | separator when separator > 1 ->
