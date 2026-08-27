@@ -24,6 +24,7 @@ let defaultVariables: Map<string, string option> =
           "collation_connection", "utf8mb4_general_ci"
           "collation_server", "utf8mb4_general_ci"
           "collation_database", "utf8mb4_general_ci"
+          "lc_time_names", "en_US"
           "autocommit", "1"
           "system_time_zone", "UTC"
           "time_zone", "SYSTEM"

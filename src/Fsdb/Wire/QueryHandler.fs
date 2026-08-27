@@ -409,11 +409,21 @@ let private registryFor (session: Session) : Functions.Registry =
 
     let database _ = session.Database |> Option.map VString |> Option.defaultValue VNull
     let blockEncryptionMode = lookupVar session "block_encryption_mode" |> Option.flatten |> Option.defaultValue "aes-128-ecb"
+    let timeLocale =
+        lookupVar session "lc_time_names"
+        |> Option.flatten
+        |> Option.bind Functions.tryTimeLocale
+        |> Option.defaultValue Functions.defaultTimeLocale
+
     let loginUser = if session.LoginUser = "" then session.User else session.LoginUser
 
     registry
     |> Functions.registerScalar "AES_ENCRYPT" (Functions.aesEncrypt blockEncryptionMode)
     |> Functions.registerScalar "AES_DECRYPT" (Functions.aesDecrypt blockEncryptionMode)
+    |> Functions.registerScalar "DATE_FORMAT" (Functions.dateFormatFn timeLocale)
+    |> Functions.registerScalar "DAYNAME" (Functions.dayNameFn timeLocale)
+    |> Functions.registerScalar "MONTHNAME" (Functions.monthNameFn timeLocale)
+    |> Functions.registerScalar "FROM_UNIXTIME" (Functions.fromUnixTimeFn timeLocale)
     |> Functions.registerScalar "DATABASE" database
     |> Functions.registerScalar "SCHEMA" database
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
@@ -1048,6 +1058,10 @@ let private parseSetFragment
                         match Collation.tryFind value with
                         | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
                         | None -> Error(Err(1273, sprintf "Unknown collation: '%s'" value))
+                    | Ok(VString value, sideEffects) when name = "lc_time_names" ->
+                        match Functions.tryTimeLocale value with
+                        | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
+                        | None -> Error(Err(1649, sprintf "Unknown locale: '%s'" value))
                     | Ok(VNull, sideEffects) when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None, isGlobal), sideEffects)
                     | Ok(VNull, _) -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
                     | Ok(value, sideEffects) -> Ok(SetVarAction(name, toText value, isGlobal), sideEffects)

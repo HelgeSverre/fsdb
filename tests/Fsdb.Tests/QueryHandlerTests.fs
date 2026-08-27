@@ -757,6 +757,33 @@ let tests =
               | Err(1273, _) -> ()
               | other -> failtestf "expected 1273 for an unknown COLLATE in SET NAMES, got %A" other
 
+          testCase "lc_time_names localizes temporal names per session"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let second = create 2 store
+              let first, result = handle first "SET lc_time_names = 'es_MX'"
+
+              match result with
+              | Affected _ -> ()
+              | other -> failtestf "expected locale assignment to succeed, got %A" other
+
+              match handle first "SELECT DATE_FORMAT('2020-01-01','%W %a %M %b'), DAYNAME('2020-01-01'), MONTHNAME('2020-01-01'), FROM_UNIXTIME(0,'%M'), @@lc_time_names" |> snd with
+              | ResultSet(_, [ [ Some "miércoles mié enero ene"; Some "miércoles"; Some "enero"; Some "enero"; Some "es_MX" ] ]) -> ()
+              | other -> failtestf "expected Spanish temporal names, got %A" other
+
+              match handle second "SELECT DATE_FORMAT('2020-01-01','%W %a %M %b')" |> snd with
+              | ResultSet(_, [ [ Some "Wednesday Wed January Jan" ] ]) -> ()
+              | other -> failtestf "expected the other session to retain en_US, got %A" other
+
+              match handle first "SET lc_time_names = 'xx_YY'" |> snd with
+              | Err(1649, "Unknown locale: 'xx_YY'") -> ()
+              | other -> failtestf "expected 1649 for an unknown locale, got %A" other
+
+              match handle first "SELECT DATE_FORMAT('2020-01-01')" |> snd with
+              | Err(1582, "Incorrect parameter count in the call to native function 'DATE_FORMAT'") -> ()
+              | other -> failtestf "expected DATE_FORMAT to validate its arity, got %A" other
+
           testCase "collation_connection drives LIKE, DISTINCT, and GROUP BY over literals"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

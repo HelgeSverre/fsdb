@@ -2240,51 +2240,213 @@ let private dateDiffFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
+let private calcDaysInYear (year: uint32) =
+    if year &&& 3u = 0u && (year % 100u <> 0u || (year % 400u = 0u && year <> 0u)) then 366u else 365u
+
+let private calcDayNumber (year: uint32) (month: uint32) (day: uint32) : int64 =
+    if year = 0u && month = 0u then
+        0L
+    else
+        let mutable y = int64 year
+        let mutable days = 365L * y + 31L * (int64 month - 1L) + int64 day
+
+        if month <= 2u then
+            y <- y - 1L
+        else
+            days <- days - (int64 month * 4L + 23L) / 10L
+
+        let centuryCorrection = ((y / 100L + 1L) * 3L) / 4L
+        days + y / 4L - centuryCorrection
+
+let private calcWeekday dayNumber sundayFirst =
+    int ((dayNumber + 5L + if sundayFirst then 1L else 0L) % 7L)
+
+let private wrapUInt32 (value: int64) = uint32 (value &&& 0xffffffffL)
+
+let private calcWeek (behaviour: int) (yearValue: int) (month: int) (day: int) : uint32 * uint32 =
+    let mondayFirst = behaviour &&& 1 <> 0
+    let mutable weekYear = behaviour &&& 2 <> 0
+    let firstWeekday = behaviour &&& 4 <> 0
+    let dayNumber = calcDayNumber (uint32 yearValue) (uint32 month) (uint32 day)
+    let mutable firstDayNumber = calcDayNumber (uint32 yearValue) 1u 1u
+    let mutable weekday = calcWeekday firstDayNumber (not mondayFirst)
+    let mutable year = uint32 yearValue
+
+    let earlyJanuary = month = 1 && day <= 7 - weekday
+
+    if earlyJanuary && not weekYear && ((firstWeekday && weekday <> 0) || (not firstWeekday && weekday >= 4)) then
+        0u, year
+    else
+        if earlyJanuary then
+            weekYear <- true
+            year <- year - 1u
+            let daysInYear = calcDaysInYear year
+            firstDayNumber <- firstDayNumber - int64 daysInYear
+            weekday <- (weekday + 53 * 7 - int daysInYear) % 7
+
+        let start =
+            if (firstWeekday && weekday <> 0) || (not firstWeekday && weekday >= 4) then
+                firstDayNumber + int64 (7 - weekday)
+            else
+                firstDayNumber - int64 weekday
+
+        let days = wrapUInt32 (dayNumber - start)
+
+        if weekYear && days >= 52u * 7u then
+            weekday <- (weekday + int (calcDaysInYear year)) % 7
+
+            if (not firstWeekday && weekday < 4) || (firstWeekday && weekday = 0) then
+                1u, year + 1u
+            else
+                days / 7u + 1u, year
+        else
+            days / 7u + 1u, year
+
+let private weekBehaviour mode =
+    let value = mode &&& 7
+    if value &&& 1 = 0 then value ^^^ 4 else value
+
+let private weekOf (mode: int) (date: DateOnly) : int * int =
+    let week, year = calcWeek (weekBehaviour mode) date.Year date.Month date.Day
+    int week, int year
+
+let private yearWeekOf (mode: int) (date: DateOnly) : int =
+    let week, year = calcWeek (weekBehaviour mode ||| 2) date.Year date.Month date.Day
+    int year * 100 + int week
+
+type private DateFormatParts =
+    { Year: int
+      Month: int
+      Day: int
+      Hour: int
+      Minute: int
+      Second: int
+      Microsecond: int }
+
+let private partsOfDateTime (value: DateTime) =
+    { Year = value.Year
+      Month = value.Month
+      Day = value.Day
+      Hour = value.Hour
+      Minute = value.Minute
+      Second = value.Second
+      Microsecond = int (value.Ticks % TimeSpan.TicksPerSecond / 10L) }
+
+let private dateFormatParts =
+    function
+    | VZeroDate date ->
+        let year, month, day = zeroDateParts date
+
+        Some
+            { Year = year
+              Month = month
+              Day = day
+              Hour = 0
+              Minute = 0
+              Second = 0
+              Microsecond = 0 }
+    | VZeroDateTime dateTime ->
+        let date, hour, minute, second, microsecond = zeroDateTimeParts dateTime
+        let year, month, day = zeroDateParts date
+
+        Some
+            { Year = year
+              Month = month
+              Day = day
+              Hour = hour
+              Minute = minute
+              Second = second
+              Microsecond = microsecond }
+    | VTime value ->
+        try
+            Some(partsOfDateTime (DateTime.Today.AddTicks(timeTicks value)))
+        with :? ArgumentOutOfRangeException ->
+            None
+    | value -> asDateTime value |> Option.map partsOfDateTime
+
+let private zeroPadded width (value: int64) =
+    if value < 0L then
+        "-" + (-value).ToString().PadLeft(max 0 (width - 1), '0')
+    else
+        value.ToString().PadLeft(width, '0')
+
+let private ordinal day =
+    let suffix =
+        if day >= 10 && day <= 19 then
+            "th"
+        else
+            match day % 10 with
+            | 1 -> "st"
+            | 2 -> "nd"
+            | 3 -> "rd"
+            | _ -> "th"
+
+    string day + suffix
+
 /// Shared `DATE_FORMAT` and `FROM_UNIXTIME` rendering.
-let private formatDate (dt: DateTime) (fmt: string) : string =
+let private formatDate (locale: TemporalLocale.Names) (parts: DateFormatParts) (fmt: string) : string option =
     let sb = StringBuilder()
     let mutable i = 0
+    let mutable valid = true
+    let hour12 = (parts.Hour % 24 + 11) % 12 + 1
+    let week behaviour = calcWeek behaviour parts.Year parts.Month parts.Day
+    let dayNumber = calcDayNumber (uint32 parts.Year) (uint32 parts.Month) (uint32 parts.Day)
+    let weekday = calcWeekday dayNumber true
+
+    let monthName abbreviated =
+        if parts.Month = 0 then
+            valid <- false
+            ""
+        elif abbreviated then
+            locale.AbbreviatedMonths.[parts.Month - 1]
+        else
+            locale.Months.[parts.Month - 1]
+
+    let weekdayName abbreviated =
+        if parts.Year = 0 && parts.Month = 0 then
+            valid <- false
+            ""
+        else
+            let index = (weekday + 6) % 7
+            if abbreviated then locale.AbbreviatedDays.[index] else locale.Days.[index]
 
     while i < fmt.Length do
         if fmt.[i] = '%' && i + 1 < fmt.Length then
             let piece =
                 match fmt.[i + 1] with
-                | 'Y' -> dt.Year.ToString("D4")
-                | 'y' -> (dt.Year % 100).ToString("D2")
-                | 'm' -> dt.Month.ToString("D2")
-                | 'c' -> string dt.Month
-                | 'd' -> dt.Day.ToString("D2")
-                | 'e' -> string dt.Day
-                | 'H' -> dt.Hour.ToString("D2")
+                | 'Y' -> zeroPadded 4 parts.Year
+                | 'y' -> zeroPadded 2 (int64 (parts.Year % 100))
+                | 'm' -> zeroPadded 2 parts.Month
+                | 'c' -> string parts.Month
+                | 'd' -> zeroPadded 2 parts.Day
+                | 'e' -> string parts.Day
+                | 'f' -> zeroPadded 6 parts.Microsecond
+                | 'H' -> zeroPadded 2 parts.Hour
                 | 'h'
-                | 'I' -> (let h = dt.Hour % 12 in (if h = 0 then 12 else h)).ToString("D2")
-                | 'i' -> dt.Minute.ToString("D2")
+                | 'I' -> zeroPadded 2 hour12
+                | 'i' -> zeroPadded 2 parts.Minute
+                | 'j' -> zeroPadded 3 (dayNumber - calcDayNumber (uint32 parts.Year) 1u 1u + 1L)
+                | 'k' -> string parts.Hour
+                | 'l' -> string hour12
+                | 'M' -> monthName false
+                | 'b' -> monthName true
+                | 'p' -> if parts.Hour % 24 < 12 then "AM" else "PM"
+                | 'r' -> sprintf "%02d:%02d:%02d %s" hour12 parts.Minute parts.Second (if parts.Hour % 24 < 12 then "AM" else "PM")
                 | 's'
-                | 'S' -> dt.Second.ToString("D2")
-                | 'p' -> if dt.Hour < 12 then "AM" else "PM"
-                | 'W' -> dt.DayOfWeek.ToString()
-                | 'a' -> (dt.DayOfWeek.ToString()).Substring(0, 3)
-                | 'M' -> CultureInfo.InvariantCulture.DateTimeFormat.GetMonthName dt.Month
-                | 'b' -> CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName dt.Month
-                | 'j' -> dt.DayOfYear.ToString("D3")
-                | 'v' -> ISOWeek.GetWeekOfYear(dt).ToString("D2")
-                | 'x' -> ISOWeek.GetYear(dt).ToString("D4")
-                | 'D' ->
-                    let suffix =
-                        match dt.Day with
-                        | 1
-                        | 21
-                        | 31 -> "st"
-                        | 2
-                        | 22 -> "nd"
-                        | 3
-                        | 23 -> "rd"
-                        | _ -> "th"
-
-                    string dt.Day + suffix
-                | 'w' -> string (int dt.DayOfWeek)
+                | 'S' -> zeroPadded 2 parts.Second
+                | 'T' -> sprintf "%02d:%02d:%02d" parts.Hour parts.Minute parts.Second
+                | 'U' -> week 4 |> fst |> int64 |> zeroPadded 2
+                | 'u' -> week 1 |> fst |> int64 |> zeroPadded 2
+                | 'V' -> week 6 |> fst |> int64 |> zeroPadded 2
+                | 'v' -> week 3 |> fst |> int64 |> zeroPadded 2
+                | 'W' -> weekdayName false
+                | 'a' -> weekdayName true
+                | 'w' -> string weekday
+                | 'X' -> week 6 |> snd |> int64 |> zeroPadded 4
+                | 'x' -> week 3 |> snd |> int64 |> zeroPadded 4
+                | 'D' -> ordinal parts.Day
                 | '%' -> "%"
-                | other -> "%" + string other
+                | other -> string other
 
             sb.Append(piece: string) |> ignore
             i <- i + 2
@@ -2292,42 +2454,24 @@ let private formatDate (dt: DateTime) (fmt: string) : string =
             sb.Append fmt.[i] |> ignore
             i <- i + 1
 
-    sb.ToString()
+    if fmt <> "" && valid then Some(sb.ToString()) else None
 
-let private formatZeroDate (date: ZeroDate) (fmt: string) =
-    let year, month, day = zeroDateParts date
-    fmt.Replace("%Y", sprintf "%04d" year)
-        .Replace("%y", sprintf "%02d" (year % 100))
-        .Replace("%m", sprintf "%02d" month)
-        .Replace("%c", string month)
-        .Replace("%d", sprintf "%02d" day)
-        .Replace("%e", string day)
+let internal tryTimeLocale (locale: string) =
+    TemporalLocale.tryFind locale
 
-let private formatZeroDateTime (dateTime: ZeroDateTime) (fmt: string) =
-    let date, hour, minute, second, _ = zeroDateTimeParts dateTime
-    let hour12 = if hour % 12 = 0 then 12 else hour % 12
+let internal defaultTimeLocale = TemporalLocale.tryFind "en_US" |> Option.get
 
-    (formatZeroDate date fmt)
-        .Replace("%H", sprintf "%02d" hour)
-        .Replace("%h", sprintf "%02d" hour12)
-        .Replace("%I", sprintf "%02d" hour12)
-        .Replace("%i", sprintf "%02d" minute)
-        .Replace("%s", sprintf "%02d" second)
-        .Replace("%S", sprintf "%02d" second)
-        .Replace("%p", (if hour < 12 then "AM" else "PM"))
-
-let private dateFormatFn: Scalar =
+let internal dateFormatFn (locale: TemporalLocale.Names) : Scalar =
     function
     | [ d; f ] when not (anyNull [ d; f ]) ->
-        match d, toText f with
-        | VZeroDate date, Some fmt when not (isAllZeroDate date) ->
-            VString(formatZeroDate date fmt)
-        | VZeroDateTime dateTime, Some fmt ->
-            let date, _, _, _, _ = zeroDateTimeParts dateTime
-            if isAllZeroDate date then VNull else VString(formatZeroDateTime dateTime fmt)
-        | _, Some fmt -> asDateTime d |> Option.map (fun dt -> VString(formatDate dt fmt)) |> Option.defaultValue VNull
+        match dateFormatParts d, toText f with
+        | Some parts, Some fmt ->
+            formatDate locale parts fmt
+            |> Option.map VString
+            |> Option.defaultValue VNull
         | _ -> VNull
-    | _ -> VNull
+    | [ _; _ ] -> VNull
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'DATE_FORMAT'"))
 
 let private dateFn: Scalar =
     function
@@ -2393,77 +2537,21 @@ let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromTime: TimeVal
     | [ value ] when not (anyNull [ value ]) -> asDateTime value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
-let private dayNameFn: Scalar =
-    function
-    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun d -> VString(d.DayOfWeek.ToString())) |> Option.defaultValue VNull
-    | _ -> VNull
-
-let private monthNameFn: Scalar =
+let internal dayNameFn (locale: TemporalLocale.Names) : Scalar =
     function
     | [ v ] when not (anyNull [ v ]) ->
         asDateTime v
-        |> Option.map (fun d -> VString(CultureInfo.InvariantCulture.DateTimeFormat.GetMonthName d.Month))
+        |> Option.map (fun date -> VString(locale.Days.[(int date.DayOfWeek + 6) % 7]))
         |> Option.defaultValue VNull
     | _ -> VNull
 
-/// MySQL's 8 `WEEK(date, mode)` modes are 3 independent choices packed into
-/// 3 bits: bit 0 picks Monday- (set) vs Sunday-first (unset) weeks; bit 1
-/// picks a 1-53 range where the days before week 1 borrow the previous
-/// year's last week (set) vs a 0-53 range where they're week 0 (unset);
-/// bit 2 picks whether week 1 is the first week *containing* the year's
-/// first Monday/Sunday (unset) or the ISO-style first week with 4+ days in
-/// this year (set). MySQL's `week_mode()` XORs bit 2 when bit 0 is unset —
-/// without that flip, Sunday-first and Monday-first modes wouldn't line up
-/// with the docs' mode table (e.g. mode 0 uses the "contains" rule, mode 1
-/// uses the "4+ days" rule, even though both have bit 2 unset in the raw
-/// mode number).
-let private weekModeBits (mode: int) : bool * bool * bool =
-    let monday = mode &&& 1 <> 0
-    let rangeFrom1 = mode &&& 2 <> 0
-    let rawFirstWeekday = mode &&& 4 <> 0
-    let firstWeekday = if monday then rawFirstWeekday else not rawFirstWeekday
-    (monday, rangeFrom1, not firstWeekday)
-
-/// The first day of week 1 of `year`, under the "contains the first
-/// Mon/Sun" rule (`not rule4day`: the on-or-after occurrence of the week's
-/// start weekday from Jan 1) or the ISO-style "4+ days in this year" rule
-/// (`rule4day`: Jan 1's week counts as week 1 only if it has at least 4
-/// days in `year`, i.e. its start weekday is within 3 days of Jan 1).
-let private weekStart (year: int) (monday: bool) (rule4day: bool) : DateOnly =
-    let jan1 = DateOnly(year, 1, 1)
-    let raw = int jan1.DayOfWeek
-    let wd = if monday then (raw + 6) % 7 else raw
-    if rule4day then
-        (if wd <= 3 then jan1.AddDays(-wd) else jan1.AddDays(7 - wd))
-    else
-        jan1.AddDays((7 - wd) % 7)
-
-/// Days before `date`'s own-year week 1 belong either to week 0
-/// (`not rangeFrom1`) or to the previous year's real last week
-/// (`rangeFrom1`); a date on/after next year's week 1 start similarly
-/// rolls forward to week 1 of next year, but only under `rangeFrom1` —
-/// MySQL's 0-53 modes let a trailing week run all the way to 53 instead.
-let private calcWeek (date: DateOnly) (monday: bool) (rule4day: bool) (rangeFrom1: bool) : int * int =
-    let year = date.Year
-    let w1 = weekStart year monday rule4day
-
-    if date < w1 then
-        if rangeFrom1 then
-            let py = year - 1
-            ((date.DayNumber - (weekStart py monday rule4day).DayNumber) / 7 + 1, py)
-        else
-            (0, year)
-    else
-        let weeknr = (date.DayNumber - w1.DayNumber) / 7 + 1
-
-        if rangeFrom1 && date >= weekStart (year + 1) monday rule4day then
-            (1, year + 1)
-        else
-            (weeknr, year)
-
-let private weekOf (mode: int) (date: DateOnly) : int * int =
-    let monday, rangeFrom1, rule4day = weekModeBits mode
-    calcWeek date monday rule4day rangeFrom1
+let internal monthNameFn (locale: TemporalLocale.Names) : Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) ->
+        asDateTime v
+        |> Option.map (fun date -> VString(locale.Months.[date.Month - 1]))
+        |> Option.defaultValue VNull
+    | _ -> VNull
 
 let private weekFn: Scalar =
     function
@@ -2481,15 +2569,6 @@ let private weekOfYearFn: Scalar =
     function
     | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map (weekOf 3 >> fst >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
-
-/// `YEARWEEK` always uses the mode's day-of-week and week-1 rule but forces
-/// the 1-53/rollover range (`rangeFrom1 = true`) regardless of the mode's
-/// own range bit — a `(year, week)` pair has to be unambiguous, which a
-/// week-0 or a trailing week-53-that's-really-next-year's-week-1 isn't.
-let private yearWeekOf (mode: int) (date: DateOnly) : int =
-    let monday, _, rule4day = weekModeBits mode
-    let w, y = calcWeek date monday rule4day true
-    y * 100 + w
 
 let private yearWeekFn: Scalar =
     function
@@ -2755,12 +2834,15 @@ let private fromUnixSeconds (ts: Value) : DateTime option =
     else
         try Some(unixEpoch.AddSeconds secs) with :? ArgumentOutOfRangeException -> None
 
-let private fromUnixTimeFn: Scalar =
+let internal fromUnixTimeFn (locale: TemporalLocale.Names) : Scalar =
     function
     | [ ts ] when not (anyNull [ ts ]) -> fromUnixSeconds ts |> Option.map VDateTime |> Option.defaultValue VNull
     | [ ts; f ] when not (anyNull [ ts; f ]) ->
         match toText f, fromUnixSeconds ts with
-        | Some fmt, Some dt -> VString(formatDate dt fmt)
+        | Some fmt, Some dt ->
+            formatDate locale (partsOfDateTime dt) fmt
+            |> Option.map VString
+            |> Option.defaultValue VNull
         | _ -> VNull
     | _ -> VNull
 
@@ -5446,7 +5528,7 @@ let builtins: Registry =
     |> registerScalar "SUBDATE" (addSubDateCore -1.0)
     |> registerScalar "INTERVAL" intervalFn
     |> registerScalar "DATEDIFF" dateDiffFn
-    |> registerScalar "DATE_FORMAT" dateFormatFn
+    |> registerScalar "DATE_FORMAT" (dateFormatFn defaultTimeLocale)
     |> registerScalar "CONVERT" convertFn
     |> registerScalar "DATE" dateFn
     |> registerScalar "TIME" timeFn
@@ -5461,8 +5543,8 @@ let builtins: Registry =
     |> registerScalar "MICROSECOND" (zeroAwareTimePart (fun dateTime -> let _, _, _, _, microseconds = zeroDateTimeParts dateTime in microseconds) timeMicroseconds (fun d -> int (d.Ticks % TimeSpan.TicksPerSecond / 10L)))
     |> registerScalar "DAYOFWEEK" (datePartFn (fun d -> int d.DayOfWeek + 1))
     |> registerScalar "DAYOFYEAR" (datePartFn (fun d -> d.DayOfYear))
-    |> registerScalar "DAYNAME" dayNameFn
-    |> registerScalar "MONTHNAME" monthNameFn
+    |> registerScalar "DAYNAME" (dayNameFn defaultTimeLocale)
+    |> registerScalar "MONTHNAME" (monthNameFn defaultTimeLocale)
     |> registerScalar "WEEK" weekFn
     |> registerScalar "WEEKDAY" weekdayFn
     |> registerScalar "WEEKOFYEAR" weekOfYearFn
@@ -5490,7 +5572,7 @@ let builtins: Registry =
     |> registerScalar "FROM_DAYS" fromDaysFn
     |> registerScalar "TO_DAYS" toDaysFn
     |> registerScalar "UNIX_TIMESTAMP" unixTimestampFn
-    |> registerScalar "FROM_UNIXTIME" fromUnixTimeFn
+    |> registerScalar "FROM_UNIXTIME" (fromUnixTimeFn defaultTimeLocale)
     |> registerScalar "TIMESTAMPDIFF" timestampDiffFn
     |> registerScalar "EXTRACT" extractFn
     |> registerScalar "LAST_DAY" lastDayFn

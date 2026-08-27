@@ -1388,7 +1388,7 @@ let tests =
                           Expect.equal (call "EXTRACT" [ VString "YEAR_MONTH"; partial ]) (VInt 202001L) "year and month survive extraction"
                           Expect.equal (call "EXTRACT" [ VString "DAY"; partial ]) (VInt 0L) "zero day survives extraction"
                           Expect.equal (call "EXTRACT" [ VString "HOUR"; zeroDateTime ]) (VInt 12L) "hour survives extraction"
-                          Expect.equal (call "DATE_FORMAT" [ allZero; VString "%Y-%m-%d" ]) VNull "all-zero format is null"
+                          Expect.equal (call "DATE_FORMAT" [ allZero; VString "%Y-%m-%d" ]) (VString "0000-00-00") "all-zero numeric fields survive"
 
                       testCase "NOW truncates to whole seconds (MySQL NOW() has precision 0)"
                       <| fun _ ->
@@ -1635,14 +1635,97 @@ let tests =
                               (VDateTime(DateTime(2024, 1, 1, 0, 0, 30)))
                               "second promotes to datetime"
 
-                      testCase "DATE_FORMAT renders every supported specifier, ordinal suffixes, and 12-hour wrap"
+                      testCase "DATE_FORMAT renders every MySQL format specifier"
                       <| fun _ ->
-                          let dt = VDateTime(DateTime(2024, 3, 5, 13, 45, 9))
+                          let dt = VDateTime(DateTime(2024, 3, 5, 13, 45, 9).AddTicks(1_234_560L))
 
                           Expect.equal
-                              (call "DATE_FORMAT" [ dt; VString "%Y-%y-%m-%c-%d-%e|%H-%h-%I-%i-%s-%S-%p|%W-%a-%M-%b|%j-%D-%w|%%|%x" ])
-                              (VString "2024-24-03-3-05-5|13-01-01-45-09-09-PM|Tuesday-Tue-March-Mar|065-5th-2|%|2024")
-                              "every specifier"
+                              (call
+                                  "DATE_FORMAT"
+                                  [ dt
+                                    VString "%a|%b|%c|%D|%d|%e|%f|%H|%h|%I|%i|%j|%k|%l|%M|%m|%p|%r|%S|%s|%T|%U|%u|%V|%v|%W|%w|%X|%x|%Y|%y|%%" ])
+                              (VString "Tue|Mar|3|5th|05|5|123456|13|01|01|45|065|13|1|March|03|PM|01:45:09 PM|09|09|13:45:09|09|10|09|10|Tuesday|2|2024|2024|2024|24|%")
+                              "specifier table"
+
+                      testCase "DATE_FORMAT applies MySQL week modes at year boundaries"
+                      <| fun _ ->
+                          let format date = call "DATE_FORMAT" [ VDate(DateOnly.Parse date); VString "%U|%u|%V|%v|%X|%x" ]
+
+                          Expect.equal (format "1999-01-01") (VString "00|00|52|53|1998|1998") "first day of 1999"
+                          Expect.equal (format "2000-01-01") (VString "00|00|52|52|1999|1999") "first day of 2000"
+                          Expect.equal (format "2000-01-02") (VString "01|00|01|52|2000|1999") "first Sunday of 2000"
+                          Expect.equal (format "2000-01-03") (VString "01|01|01|01|2000|2000") "first Monday of 2000"
+
+                      testCase "DATE_FORMAT handles literal percent forms and empty formats"
+                      <| fun _ ->
+                          let date = VDate(DateOnly(2024, 1, 1))
+                          Expect.equal (call "DATE_FORMAT" [ VNull; VString "%Y" ]) VNull "NULL date"
+                          Expect.equal (call "DATE_FORMAT" [ date; VNull ]) VNull "NULL format"
+                          Expect.equal (call "DATE_FORMAT" [ date; VString "" ]) VNull "empty format"
+                          Expect.equal (call "DATE_FORMAT" [ date; VString "abc%" ]) (VString "abc%") "trailing percent"
+                          Expect.equal (call "DATE_FORMAT" [ date; VString "%q" ]) (VString "q") "unknown specifier"
+                          Expect.equal (call "DATE_FORMAT" [ date; VString "%%%Y" ]) (VString "%2024") "escaped percent"
+
+                      testCase "DATE_FORMAT preserves incomplete date components"
+                      <| fun _ ->
+                          let partial = tryZeroDate 2006 6 0 |> Option.get |> VZeroDate
+                          let zeroMonth = tryZeroDate 2006 0 1 |> Option.get |> VZeroDate
+                          let allZero = tryZeroDate 0 0 0 |> Option.get |> VZeroDate
+
+                          Expect.equal
+                              (call "DATE_FORMAT" [ partial; VString "%Y|%M|%b|%m|%c|%D|%d|%e|%j|%W|%a|%w|%U|%u|%V|%v|%X|%x" ])
+                              (VString "2006|June|Jun|06|6|0th|00|0|151|Wednesday|Wed|3|22|22|22|22|2006|2006")
+                              "zero day"
+
+                          Expect.equal (call "DATE_FORMAT" [ allZero; VString "%Y-%m-%d %T.%f" ]) (VString "0000-00-00 00:00:00.000000") "all-zero numeric fields"
+                          Expect.equal (call "DATE_FORMAT" [ allZero; VString "%W" ]) VNull "all-zero weekday name"
+
+                          Expect.equal
+                              (call "DATE_FORMAT" [ zeroMonth; VString "%j|%W|%a|%w|%U|%u|%V|%v|%X|%x" ])
+                              (VString "-30|Thursday|Thu|4|613566753|613566753|613566753|01|2006|2007")
+                              "zero month calendar fields"
+
+                          Expect.equal (call "DATE_FORMAT" [ zeroMonth; VString "%M" ]) VNull "zero month name"
+
+                          Expect.equal
+                              (call "DATE_FORMAT" [ allZero; VString "%c|%D|%d|%e|%j|%U|%u|%V|%v|%X|%x|%Y|%y" ])
+                              (VString "0|0th|00|0|000|613566757|613566757|613566757|01|0000|0001|0000|00")
+                              "all-zero calendar fields"
+
+                      testCase "DATE_FORMAT accepts TIME values and preserves microseconds"
+                      <| fun _ ->
+                          let time = tryParseTimeValue "12:34:56.123456" |> Option.get |> VTime
+                          let longTime = tryParseTimeValue "100:02:03.123456" |> Option.get |> VTime
+                          let negativeTime = tryParseTimeValue "-12:34:56.123456" |> Option.get |> VTime
+
+                          Expect.equal
+                              (call "DATE_FORMAT" [ time; VString "%H|%h|%I|%i|%s|%S|%f|%k|%l|%p|%r|%T" ])
+                              (VString "12|12|12|34|56|56|123456|12|12|PM|12:34:56 PM|12:34:56")
+                              "time fields"
+
+                          Expect.equal
+                              (call "DATE_FORMAT" [ longTime; VString "%H|%k|%T|%f" ])
+                              (VString "04|4|04:02:03|123456")
+                              "times above 24 hours advance the implicit current date"
+
+                          Expect.equal
+                              (call "DATE_FORMAT" [ negativeTime; VString "%H|%k|%T|%f" ])
+                              (VString "11|11|11:25:03|876544")
+                              "negative times move back from the implicit current date"
+
+                      testCase "DATE_FORMAT carries every MySQL 8.4 time locale"
+                      <| fun _ ->
+                          let locales = Fsdb.TemporalLocale.names |> List.ofSeq
+                          Expect.equal locales.Length 111 "locale count"
+
+                          for locale in locales do
+                              match Fsdb.TemporalLocale.tryFind locale with
+                              | Some names ->
+                                  Expect.equal names.Months.Length 12 (locale + " months")
+                                  Expect.equal names.AbbreviatedMonths.Length 12 (locale + " abbreviated months")
+                                  Expect.equal names.Days.Length 7 (locale + " days")
+                                  Expect.equal names.AbbreviatedDays.Length 7 (locale + " abbreviated days")
+                              | None -> failtestf "missing locale %s" locale
 
                           Expect.equal
                               (call "DATE_FORMAT" [ VDate(DateOnly(2000, 1, 1)); VString "%x-%v" ])
@@ -1671,7 +1754,8 @@ let tests =
 
                       testCase "FROM_UNIXTIME formats with a specifier"
                       <| fun _ ->
-                          Expect.equal (call "FROM_UNIXTIME" [ VInt 0L; VString "%Y-%m-%d" ]) (VString "1970-01-01") "epoch formatted" ]
+                          Expect.equal (call "FROM_UNIXTIME" [ VInt 0L; VString "%Y-%m-%d" ]) (VString "1970-01-01") "epoch formatted"
+                          Expect.equal (call "FROM_UNIXTIME" [ VInt 0L; VString "%f|%q|%%" ]) (VString "000000|q|%") "shared format rules" ]
 
                 testList
                     "Strings"

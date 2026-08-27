@@ -18,6 +18,7 @@
     <Compile Include="Sql/Collation.fs" />
     <Compile Include="Sql/Regexp.fs" />
     <Compile Include="Sql/Temporal.fs" />
+    <Compile Include="Sql/TemporalLocale.fs" />
     <Compile Include="Sql/Value.fs" />
     <Compile Include="Sql/FullText.fs" />
     <Compile Include="Sql/Ast.fs" />
