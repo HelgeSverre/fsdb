@@ -382,6 +382,12 @@ let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> un
             observerError |> Option.iter raise
     | _ -> ignore
 
+let private prepareResultEvents (store: Store) (eventsOf: 'a -> CommitEvent list) (result: 'a) : unit -> unit =
+    if store.PendingEvents.IsSome || hasCommitConsumer store then
+        prepareEvents store (eventsOf result)
+    else
+        ignore
+
 /// Buffers private transaction events or publishes live ones in durable order.
 let private emit (store: Store) (event: CommitEvent option) : unit =
     event |> Option.toList |> prepareEvents store |> fun acknowledge -> acknowledge ()
@@ -589,7 +595,7 @@ let private withDatabasePublishing
                                         | None, None -> published)
                                     current
 
-                        Ok(result, prepareEvents store (eventsOf result)))
+                        Ok(result, prepareResultEvents store eventsOf result))
 
         match published with
         | Error error -> Error error
@@ -5803,7 +5809,7 @@ let private withPointUpdateDatabase
                         Error(NoSuchDatabase dbName)
                     elif obj.ReferenceEquals(slot.Value, baseDb) then
                         slot.Value <- batchDb
-                        Ok(prepareEvents store (eventsOf result))
+                        Ok(prepareResultEvents store eventsOf result)
                     else
                         Ok(
                             mergeDatabaseSlotPublishing
@@ -5812,7 +5818,7 @@ let private withPointUpdateDatabase
                                 slot
                                 baseDb
                                 batchDb
-                                (fun () -> prepareEvents store (eventsOf result))
+                                (fun () -> prepareResultEvents store eventsOf result)
                         ))
 
             published
