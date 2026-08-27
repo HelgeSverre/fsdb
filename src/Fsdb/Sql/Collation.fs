@@ -3,17 +3,9 @@
 /// nothing re-derives its own rules per call site.
 ///
 /// The full utf8mb4 collation set MySQL 8.4 ships is registered below
-/// (all 89), driven by ICU collation — the same weight family UCA defines,
-/// so *equality* (what indexes, unique keys, and joins depend on) matches
-/// MySQL exactly. Each collation is data: an ICU locale (or byte order for
-/// the `_bin` pair), the sensitivity folding (ai/ci combos), and the pad
-/// attribute (PAD SPACE vs NO PAD — MySQL-verified: PAD SPACE collations
-/// ignore trailing spaces in equality but sort `'a '` *before* `'a'`).
-///
-/// ponytails:
-///  - the exact tie-break *order* among accent variants under ORDER BY may
-///    differ from MySQL's own weight table, because the host ICU's CLDR
-///    version differs (Apple ICU vs UCA 9.0/CLDR 30); equality never does.
+/// (all 89), using ICU collation with explicit sensitivity and padding
+/// policies. Host ICU and MySQL use different UCA/CLDR versions, so exact
+/// weight strings and accent tie-break ordering may differ.
 ///  - `utf8mb4_unicode_520_ci`/legacy language collations use ICU's CLDR
 ///    tailoring rather than MySQL's UCA 5.2/4.0 weight tables.
 ///  - LIKE folds per character and never expands ('æ' LIKE 'ae' is false

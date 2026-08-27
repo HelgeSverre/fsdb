@@ -1425,10 +1425,8 @@ let private handleConnection
                                     // matching what's actually on the wire, a truncated param,
                                     // ...) makes `Reader`'s reads throw straight out of this
                                     // decode step — caught here rather than escaping the
-                                    // connection loop (see the ponytail note on `readBinaryValue`
-                                    // in Protocol.fs for the other half of this: a well-formed but
-                                    // un-representable value like a zero DATETIME, clamped instead
-                                    // of thrown).
+                                    // connection loop. Well-formed values that fsdb cannot
+                                    // represent are normalized by `readBinaryValue`.
                                     let decoded =
                                         try
                                             let nullBitmap =

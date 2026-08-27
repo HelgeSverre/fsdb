@@ -1,6 +1,5 @@
 /// Turns an `Ast.Statement` into effects against `Storage` and rows out.
-/// The SELECT pipeline is volcano-style over plain `list`s (see the
-/// `ponytail` note on `materialize` below for why not a lazier `seq`):
+/// The SELECT pipeline is volcano-style over plain `list`s:
 /// scan -> filter -> order -> limit/offset -> project.
 module Fsdb.Executor
 

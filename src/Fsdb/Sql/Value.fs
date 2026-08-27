@@ -1378,7 +1378,7 @@ let decodeValue (r: #IReader) : Value =
 
 /// The MySQL wire type this value's runtime shape reports as, so a
 /// resultset's column definition can match the value instead of a blanket
-/// VAR_STRING (see the `ponytail` history on `Protocol.columnDefPayload`).
+/// VAR_STRING.
 /// This matters for real client drivers: PHP's mysqlnd, in particular,
 /// auto-converts a LONGLONG/DOUBLE/DATE/DATETIME-typed column to a native
 /// int/float/string even over the text protocol, based on this byte —
