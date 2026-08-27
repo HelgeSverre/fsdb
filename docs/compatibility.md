@@ -146,12 +146,15 @@ fsdb supports stored queries broadly and a narrow writable subset:
   without running it, so empty and nondeterministic views have the same
   metadata shape as populated views.
 
-Direct projections over one base table, with an optional simple predicate but
-without grouping, joins, or computed columns, accept `INSERT`, `INSERT ...
-SELECT`, `REPLACE` in each supported source form, `ON DUPLICATE KEY UPDATE`,
-`UPDATE`, and `DELETE`. Every written or referenced column must be exposed by
-the view, and base-table writes run under the view definer's privileges. `WITH
-CHECK OPTION` is enforced on this direct subset and reported by `SHOW CREATE
+Single-table views and nested views over that shape accept `UPDATE` and
+`DELETE`, including predicates over computed projections. Only direct column
+projections are assignable; computed columns return 1348. A view is insertable
+only when every projection is direct, no base column is repeated, and every
+required base column is exposed. Insertable views accept `INSERT`, `INSERT ...
+SELECT`, `REPLACE` in each supported source form, and `ON DUPLICATE KEY
+UPDATE`. Every written or referenced column must be exposed, and the privilege
+identity is checked at every nested view boundary. `LOCAL` and `CASCADED`
+check predicates compose through nested views and are reported by `SHOW CREATE
 VIEW` and `information_schema.VIEWS`. `SQL SECURITY DEFINER` and `SQL SECURITY
 INVOKER` use their respective privilege identities. `ALTER VIEW`, `ALGORITHM`,
 and explicit `DEFINER` remain unsupported. Creation validates

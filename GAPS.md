@@ -263,12 +263,13 @@ expressions.
 Views working: CREATE [OR REPLACE] VIEW with explicit column lists, views
 over views, recursive-reference detection (1462), definer-privilege checking
 at read time so revokes take effect, persistence through WAL restarts,
-SHOW CREATE VIEW and I_S.VIEWS with correct shapes. Direct projections over
-one filtered or unfiltered base table accept INSERT, INSERT ... SELECT,
-REPLACE VALUES/SET/SELECT, ODKU, UPDATE, and DELETE
-with exposed-column enforcement and definer privilege checks.
-`LOCAL` and `CASCADED` CHECK OPTION values are persisted, exposed through
-metadata, and enforced on the direct writable subset.
+SHOW CREATE VIEW and I_S.VIEWS with correct shapes. Single-table and nested
+views accept UPDATE and DELETE through direct columns, including predicates
+over computed projections. Insertable views additionally accept INSERT,
+INSERT ... SELECT, REPLACE VALUES/SET/SELECT, and ODKU, with required-column,
+repeated-column, exposed-column, and definer privilege checks. `LOCAL` and
+`CASCADED` CHECK OPTION values are persisted, exposed through metadata, and
+composed through nested views.
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
 STATUS. Their metadata is derived from the saved query without evaluating it.
 Direct single-table projections with a static predicate merge into the outer
@@ -286,7 +287,7 @@ OLD/NEW images are rejected when the trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | joins, expressions, and nested views where MySQL deems the view writable | direct single-table projections with a simple base-table WHERE predicate; insert, ODKU, replace, update, and delete forms map through it | medium | refusal |
+| Updatable-view breadth | inner joins and single-table/nested expressions where MySQL deems individual columns writable | single-table and nested views compose predicates and check options; direct columns update/delete, computed columns remain readable, and insertability is tracked separately | medium | refusal |
 | ALGORITHM / explicit DEFINER / ALTER VIEW | supported | SQL SECURITY DEFINER and INVOKER execute with their respective identities; algorithm selection, explicit definers, and alteration remain absent | low | refusal |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | `InformationSchema.showCreateView` returns raw user text without the wrapper | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |

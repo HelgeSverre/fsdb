@@ -1022,31 +1022,54 @@ let private viewsColumns =
       strCol "CHARACTER_SET_CLIENT"
       strCol "COLLATION_CONNECTION" ]
 
-let private isDirectUpdatableView (definition: string) =
-    match Fsdb.Parser.parse definition with
-    | Ok(Select select) ->
-        match select.From with
-        | Some(FromTable _) ->
-            select.Joins.IsEmpty
-            && not select.Distinct
-            && not select.CalculateFoundRows
-            && select.GroupBy.IsEmpty
-            && not select.Rollup
-            && select.Windows.IsEmpty
-            && select.Ctes.IsEmpty
-            && select.Having.IsNone
-            && select.OrderBy.IsEmpty
-            && select.Limit.IsNone
-            && select.Offset.IsNone
-            && not select.Locking
-            && (select.Projections |> List.forall (fun (expression, _) -> match expression with Col _ | QualifiedCol _ -> true | _ -> false))
+let private isUpdatableView (catalog: Catalog) (schema: string) (definition: string) =
+    let views = viewCatalogEntries catalog
+
+    let rec check seen schema definition =
+        match Fsdb.Parser.parse definition with
+        | Ok(Select select) ->
+            match select.From with
+            | Some(FromTable source) ->
+                let shapeAllowsUpdates =
+                    select.Joins.IsEmpty
+                    && not select.Distinct
+                    && not select.CalculateFoundRows
+                    && select.GroupBy.IsEmpty
+                    && not select.Rollup
+                    && select.Windows.IsEmpty
+                    && select.Ctes.IsEmpty
+                    && select.Having.IsNone
+                    && select.OrderBy.IsEmpty
+                    && select.Limit.IsNone
+                    && select.Offset.IsNone
+                    && not select.Locking
+                    && (select.Projections
+                        |> List.exists (fun (expression, _) ->
+                            match expression with
+                            | Col _
+                            | QualifiedCol _ -> true
+                            | _ -> false))
+
+                if not shapeAllowsUpdates then
+                    false
+                else
+                    let sourceSchema = source.Database |> Option.defaultValue schema
+                    let key = sourceSchema.ToLowerInvariant(), source.Table.ToLowerInvariant()
+
+                    views
+                    |> List.tryFind (fun view ->
+                        view.Schema.Equals(sourceSchema, StringComparison.OrdinalIgnoreCase)
+                        && view.Name.Equals(source.Table, StringComparison.OrdinalIgnoreCase))
+                    |> Option.forall (fun view -> not (Set.contains key seen) && check (Set.add key seen) sourceSchema view.Definition)
+            | _ -> false
         | _ -> false
-    | _ -> false
+
+    check Set.empty schema definition
 
 let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
-        [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs view.CheckOption; vs (if isDirectUpdatableView view.Definition then "YES" else "NO"); vs view.Definer
+        [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs view.CheckOption; vs (if isUpdatableView catalog view.Schema view.Definition then "YES" else "NO"); vs view.Definer
            vs view.SecurityType; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
 
 let private routinesColumns =

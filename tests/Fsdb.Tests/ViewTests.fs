@@ -60,6 +60,123 @@ let tests =
                   [ [ Some "YES" ] ]
                   "metadata reports the supported writable shape"
 
+          testCase "computed projections leave their base columns updatable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE measurements (id INT PRIMARY KEY, n INT NOT NULL, hidden INT DEFAULT 7)") "create table"
+              expectOk (run store "INSERT INTO measurements VALUES (1, 10, 7), (2, -10, 7)") "seed table"
+              expectOk (run store "CREATE VIEW measured AS SELECT id, n, n * 2 AS doubled FROM measurements") "create view"
+
+              Expect.equal
+                  (rows store "SELECT IS_UPDATABLE FROM information_schema.views WHERE table_schema = 'fsdb' AND table_name = 'measured'")
+                  [ [ Some "YES" ] ]
+                  "computed columns do not make the whole view read-only"
+
+              expectOk (run store "UPDATE measured SET n = 11 WHERE doubled = 20") "update a base column through a computed predicate"
+              expectOk (run store "DELETE FROM measured WHERE doubled = -20") "delete through a computed predicate"
+
+              match run store "UPDATE measured SET doubled = 22 WHERE id = 1" with
+              | Err(1348, "Column 'doubled' is not updatable") -> ()
+              | other -> failtestf "expected computed-column update rejection, got %A" other
+
+              match run store "INSERT INTO measured(id, n) VALUES (3, 30)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected the computed view not to be insertable, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id, n, hidden FROM measurements ORDER BY id")
+                  [ [ Some "1"; Some "11"; Some "7" ] ]
+                  "legal writes reach the base table"
+
+          testCase "nested updatable views compose predicates and check options"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE nested_rows (id INT PRIMARY KEY, n INT NOT NULL)") "create table"
+              expectOk (run store "INSERT INTO nested_rows VALUES (1, 10), (2, 30)") "seed table"
+              expectOk (run store "CREATE VIEW positive_rows AS SELECT id, n FROM nested_rows WHERE n > 0") "create base view"
+
+              expectOk
+                  (run store "CREATE VIEW local_rows AS SELECT id, n FROM positive_rows WHERE n < 20 WITH LOCAL CHECK OPTION")
+                  "create local view"
+
+              expectOk
+                  (run store "CREATE VIEW cascaded_rows AS SELECT id, n FROM positive_rows WHERE n < 20 WITH CASCADED CHECK OPTION")
+                  "create cascaded view"
+
+              expectOk (run store "UPDATE local_rows SET n = -1 WHERE id = 1") "LOCAL checks only its own predicate"
+              expectOk (run store "INSERT INTO local_rows VALUES (3, -1)") "LOCAL insert checks only its own predicate"
+
+              expectOk (run store "UPDATE nested_rows SET n = 10 WHERE id = 1") "restore row"
+
+              [ "UPDATE cascaded_rows SET n = -1 WHERE id = 1"
+                "INSERT INTO cascaded_rows VALUES (4, -1)" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1369, "CHECK OPTION failed 'fsdb.cascaded_rows'") -> ()
+                  | other -> failtestf "expected cascaded check failure for %s, got %A" sql other)
+
+              expectOk (run store "UPDATE local_rows SET n = 15 WHERE id = 1") "update nested view"
+              expectOk (run store "DELETE FROM local_rows WHERE id = 1") "delete nested view"
+
+              Expect.equal
+                  (rows store "SELECT id, n FROM nested_rows ORDER BY id")
+                  [ [ Some "2"; Some "30" ]; [ Some "3"; Some "-1" ] ]
+                  "nested writes preserve both visibility predicates"
+
+              Expect.equal
+                  (rows store "SELECT table_name, is_updatable FROM information_schema.views WHERE table_name IN ('positive_rows', 'local_rows', 'cascaded_rows') ORDER BY table_name")
+                  [ [ Some "cascaded_rows"; Some "YES" ]; [ Some "local_rows"; Some "YES" ]; [ Some "positive_rows"; Some "YES" ] ]
+                  "nested direct views remain updatable"
+
+          testCase "nested LOCAL checks retain an underlying view check"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE checked_rows (id INT PRIMARY KEY, n INT NOT NULL)") "create table"
+              expectOk (run store "INSERT INTO checked_rows VALUES (1, 10)") "seed table"
+
+              expectOk
+                  (run store "CREATE VIEW checked_positive AS SELECT id, n FROM checked_rows WHERE n > 0 WITH CASCADED CHECK OPTION")
+                  "create checked base view"
+
+              expectOk
+                  (run store "CREATE VIEW checked_local AS SELECT id, n FROM checked_positive WHERE n < 20 WITH LOCAL CHECK OPTION")
+                  "create local nested view"
+
+              match run store "UPDATE checked_local SET n = -1 WHERE id = 1" with
+              | Err(1369, "CHECK OPTION failed 'fsdb.checked_local'") -> ()
+              | other -> failtestf "expected the underlying check to remain active, got %A" other
+
+          testCase "view updateability and insertability are independent"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE required_rows (id INT PRIMARY KEY, required_value INT NOT NULL)") "create table"
+              expectOk (run store "INSERT INTO required_rows VALUES (1, 10)") "seed table"
+              expectOk (run store "CREATE VIEW partial_rows AS SELECT id FROM required_rows") "create partial view"
+              expectOk (run store "CREATE VIEW repeated_rows AS SELECT id, required_value AS first_copy, required_value AS second_copy FROM required_rows") "create repeated view"
+              expectOk (run store "CREATE VIEW all_required_rows AS SELECT * FROM required_rows") "create star view"
+
+              Expect.equal
+                  (rows store "SELECT table_name, is_updatable FROM information_schema.views WHERE table_name IN ('partial_rows', 'repeated_rows') ORDER BY table_name")
+                  [ [ Some "partial_rows"; Some "YES" ]; [ Some "repeated_rows"; Some "YES" ] ]
+                  "both views permit updates"
+
+              expectOk (run store "UPDATE partial_rows SET id = 2 WHERE id = 1") "update a partial view"
+              expectOk (run store "UPDATE repeated_rows SET first_copy = 11 WHERE id = 2") "update one repeated projection"
+              expectOk (run store "INSERT INTO all_required_rows VALUES (3, 30)") "insert through a star view"
+              expectOk (run store "UPDATE all_required_rows SET required_value = 31 WHERE id = 3") "update through a star view"
+
+              [ "INSERT INTO partial_rows VALUES (3)"
+                "INSERT INTO repeated_rows(id, first_copy) VALUES (3, 30)" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1471, _) -> ()
+                  | other -> failtestf "expected noninsertable view rejection for %s, got %A" sql other)
+
+              Expect.equal
+                  (rows store "SELECT * FROM required_rows ORDER BY id")
+                  [ [ Some "2"; Some "11" ]; [ Some "3"; Some "31" ] ]
+                  "legal writes persist"
+
           testCase "a direct view streams an ordered limit from its base table"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -232,6 +349,38 @@ let tests =
               match Fsdb.QueryHandler.handle writer "INSERT INTO writable_vendors VALUES (3, 'Blocked')" |> snd with
               | Err(1142, message) -> Expect.stringContains message "vendors" "revoked base table named"
               | other -> failtestf "expected definer privilege failure, got %A" other
+
+          testCase "nested view writes authorize every definer boundary"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = Fsdb.Session.create 1 store
+              let root = apply root "CREATE TABLE secured_rows (id INT PRIMARY KEY, n INT)"
+              let root = apply root "INSERT INTO secured_rows VALUES (1, 10)"
+              let root = apply root "CREATE USER inner_owner"
+              let root = apply root "CREATE USER outer_owner"
+              let root = apply root "CREATE USER nested_writer"
+              let root = apply root "GRANT SELECT, UPDATE ON fsdb.secured_rows TO inner_owner"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO inner_owner"
+              let innerOwner = { Fsdb.Session.create 2 store with User = "inner_owner" }
+              let _innerOwner = apply innerOwner "CREATE VIEW inner_secured AS SELECT id, n FROM secured_rows"
+              let root = apply root "GRANT SELECT, UPDATE ON fsdb.inner_secured TO outer_owner"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO outer_owner"
+              let outerOwner = { Fsdb.Session.create 3 store with User = "outer_owner" }
+              let _outerOwner = apply outerOwner "CREATE VIEW outer_secured AS SELECT id, n FROM inner_secured"
+              let root = apply root "GRANT UPDATE ON fsdb.outer_secured TO nested_writer"
+              let writer = { Fsdb.Session.create 4 store with User = "nested_writer" }
+              let writer = apply writer "UPDATE outer_secured SET n = 11 WHERE id = 1"
+              let _root = apply root "REVOKE UPDATE ON fsdb.secured_rows FROM inner_owner"
+
+              match Fsdb.QueryHandler.handle writer "UPDATE outer_secured SET n = 12 WHERE id = 1" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "secured_rows" "the failing inner boundary names its base table"
+              | other -> failtestf "expected the inner definer's revoked privilege to block the write, got %A" other
 
           testCase "view definitions reject user and system variables"
           <| fun _ ->
