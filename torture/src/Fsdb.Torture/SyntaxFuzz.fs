@@ -72,6 +72,7 @@ module SyntaxFuzz =
            "outer_join_view_update", "UPDATE syntax_outer_join SET note = note WHERE doubled = 20"
            "nested_join_view_insert", "INSERT INTO syntax_nested_join (id, n) VALUES (999999, 1) ON DUPLICATE KEY UPDATE n = VALUES(n)"
            "materialized_join_view_update", "UPDATE syntax_materialized_join SET n = n WHERE id = 1 AND total = 11"
+           "union_join_view_update", "UPDATE syntax_union_join SET n = n WHERE id = 1 AND marker = 11"
            "ordered_compound_trigger",
            sprintf
                "CREATE TRIGGER syntax_after_%s BEFORE INSERT ON syntax_trigger_target FOR EACH ROW FOLLOWS syntax_first BEGIN INSERT INTO syntax_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END"
@@ -143,6 +144,8 @@ module SyntaxFuzz =
            "CREATE VIEW syntax_outer_join AS SELECT id, n, note, n * 2 AS doubled FROM syntax_nested_join WHERE n < 50"
            "CREATE VIEW syntax_materialized_totals AS SELECT id, SUM(n) AS total FROM syntax_source GROUP BY id"
            "CREATE VIEW syntax_materialized_join AS SELECT t.id, t.n, x.total FROM syntax_target AS t JOIN syntax_materialized_totals AS x ON x.id = t.id"
+           "CREATE VIEW syntax_union_component AS SELECT id, n AS marker FROM syntax_source WHERE n > 0 UNION ALL SELECT id, n AS marker FROM syntax_source WHERE n < 0"
+           "CREATE VIEW syntax_union_join AS SELECT t.id, t.n, x.marker FROM syntax_target AS t JOIN syntax_union_component AS x ON x.id = t.id"
            "CREATE TABLE syntax_partitioned (id INT) PARTITION BY HASH(id) PARTITIONS 2"
            "INSERT INTO syntax_partitioned VALUES (1), (2), (3)"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]

@@ -1345,7 +1345,10 @@ module ScenarioProbes =
 [<RequireQualifiedAccess>]
 module DmlBattery =
     let private cleanup =
-        [| "DROP VIEW IF EXISTS fsdb_dml_materialized_reversed"
+        [| "DROP VIEW IF EXISTS fsdb_dml_union_reversed"
+           "DROP VIEW IF EXISTS fsdb_dml_union_join"
+           "DROP VIEW IF EXISTS fsdb_dml_union_component"
+           "DROP VIEW IF EXISTS fsdb_dml_materialized_reversed"
            "DROP VIEW IF EXISTS fsdb_dml_materialized_join"
            "DROP VIEW IF EXISTS fsdb_dml_materialized_totals"
            "DROP VIEW IF EXISTS fsdb_dml_outer_join"
@@ -1390,6 +1393,9 @@ module DmlBattery =
            "CREATE VIEW fsdb_dml_materialized_totals AS SELECT group_id, SUM(amount) AS total FROM fsdb_dml_materialized_amount GROUP BY group_id"
            "CREATE VIEW fsdb_dml_materialized_join AS SELECT t.id, t.n, x.total FROM fsdb_dml_materialized_target AS t JOIN fsdb_dml_materialized_totals AS x ON x.group_id = t.group_id"
            "CREATE VIEW fsdb_dml_materialized_reversed AS SELECT t.id, t.n, x.total FROM fsdb_dml_materialized_totals AS x JOIN fsdb_dml_materialized_target AS t ON x.group_id = t.group_id"
+           "CREATE VIEW fsdb_dml_union_component AS SELECT group_id, amount AS marker FROM fsdb_dml_materialized_amount WHERE amount = 6 UNION ALL SELECT group_id, amount AS marker FROM fsdb_dml_materialized_amount WHERE amount = 20"
+           "CREATE VIEW fsdb_dml_union_join AS SELECT t.id, t.n, x.marker FROM fsdb_dml_materialized_target AS t JOIN fsdb_dml_union_component AS x ON x.group_id = t.group_id"
+           "CREATE VIEW fsdb_dml_union_reversed AS SELECT t.id, t.n, x.marker FROM fsdb_dml_union_component AS x JOIN fsdb_dml_materialized_target AS t ON x.group_id = t.group_id"
            "CREATE TRIGGER fsdb_trigger_first BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW SET NEW.n = NEW.n + 1"
            "CREATE TRIGGER fsdb_trigger_second BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW FOLLOWS fsdb_trigger_first BEGIN INSERT INTO fsdb_trigger_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END" |]
 
@@ -1427,6 +1433,9 @@ module DmlBattery =
            "materialized_join_update", "UPDATE fsdb_dml_materialized_join SET n = 11 WHERE id = 1 AND total = 10"
            "materialized_reversed_update", "UPDATE fsdb_dml_materialized_reversed SET n = 21 WHERE id = 2 AND total = 20"
            "materialized_join_state", "UPDATE fsdb_dml_materialized_target SET n = n + 100 WHERE (id = 1 AND n = 11) OR (id = 2 AND n = 21)"
+           "union_join_update", "UPDATE fsdb_dml_union_join SET n = 112 WHERE id = 1 AND n = 111 AND marker = 6"
+           "union_reversed_update", "UPDATE fsdb_dml_union_reversed SET n = 122 WHERE id = 2 AND n = 121 AND marker = 20"
+           "union_join_state", "UPDATE fsdb_dml_materialized_target SET n = n + 1000 WHERE (id = 1 AND n = 112) OR (id = 2 AND n = 122)"
            "ordered_compound_trigger", "INSERT INTO fsdb_trigger_contract VALUES (1, 10)"
            "trigger_side_effect", "UPDATE fsdb_trigger_log SET n = n + 1 WHERE n = 11"
            "insert_ignore_duplicate", "INSERT IGNORE INTO fsdb_dml_contract VALUES (1, 99)"
