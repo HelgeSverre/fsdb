@@ -3014,55 +3014,42 @@ let tests =
 
           testList
               "concurrent writers"
-              [ testCase "N threads writing to N different databases finish in roughly one thread's time, not N times"
+              [ testCase "holding one database's writer lock does not block another database"
                 <| fun _ ->
-                    let threadCount = 4
-                    let opsPerThread = 4000
+                    let store = create ()
 
-                    // One counter row per database — cheap enough per-op
-                    // that any accidental store-wide serialization (the
-                    // blocker this guards against) shows up as a multiple
-                    // of wall time, not just noise.
-                    let asInt =
-                        function
-                        | VInt i -> i
-                        | v -> failwithf "expected VInt, got %A" v
-
-                    let workload (store: Store) (dbName: string) =
+                    for dbName in [ "held"; "free" ] do
                         createDatabase store dbName |> ignore
                         createTable store dbName "counters" [ col "n" (TInt false) false ] [] [] None None |> ignore
                         insertRows store dbName "counters" None [ [ VInt 0L ] ] |> ignore
 
-                        for _ in 1 .. opsPerThread do
-                            updateRows store dbName "counters" None (fun _ -> Ok true) (fun row -> Ok [| VInt(asInt row.[0] + 1L) |])
-                            |> ignore
+                    use held = new System.Threading.ManualResetEventSlim()
+                    use release = new System.Threading.ManualResetEventSlim()
+                    let heldSlot = store.Databases.["held"]
 
-                    let time f =
-                        let sw = System.Diagnostics.Stopwatch.StartNew()
-                        f ()
-                        sw.Elapsed
+                    let holder =
+                        System.Threading.Tasks.Task.Factory.StartNew(
+                            (fun () ->
+                                lock heldSlot (fun () ->
+                                    held.Set()
+                                    release.Wait())),
+                            System.Threading.CancellationToken.None,
+                            System.Threading.Tasks.TaskCreationOptions.LongRunning,
+                            System.Threading.Tasks.TaskScheduler.Default
+                        )
 
-                    let baselineStore = create ()
-                    let baseline = time (fun () -> workload baselineStore "solo")
+                    Expect.isTrue (held.Wait(System.TimeSpan.FromSeconds 5.)) "the held database lock is acquired"
 
-                    let store = create ()
+                    try
+                        let writer =
+                            System.Threading.Tasks.Task.Run(fun () ->
+                                updateRows store "free" "counters" None (fun _ -> Ok true) (fun _ -> Ok [| VInt 1L |]))
 
-                    let parallelElapsed =
-                        time (fun () ->
-                            [ 0 .. threadCount - 1 ]
-                            |> List.map (fun i -> System.Threading.Tasks.Task.Run(fun () -> workload store (sprintf "db%d" i)))
-                            |> System.Threading.Tasks.Task.WaitAll)
-
-                    // A generous bound — this only needs to catch the
-                    // pathological case (global serialization, where
-                    // `threadCount` databases' worth of writes takes
-                    // roughly `threadCount` times as long as one), not hold
-                    // parallel writers to near-perfect scaling.
-                    if not (TestSupport.skipTimingAssertions ()) then
-                        Expect.isLessThan
-                            parallelElapsed.TotalMilliseconds
-                            (baseline.TotalMilliseconds * 2.0 + 200.0)
-                            (sprintf "4 databases in parallel (%A) vs 1 database serially (%A) — writers to different databases shouldn't serialize" parallelElapsed baseline)
+                        Expect.isTrue (writer.Wait(System.TimeSpan.FromSeconds 5.)) "the disjoint writer completes"
+                        Expect.equal writer.Result (Ok 1) "the disjoint writer updates its row"
+                    finally
+                        release.Set()
+                        Expect.isTrue (holder.Wait(System.TimeSpan.FromSeconds 5.)) "the held database lock is released"
 
                 testCase "two threads incrementing the same row in the same database serialize correctly (no lost updates)"
                 <| fun _ ->

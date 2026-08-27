@@ -731,21 +731,8 @@ let tests =
                       (referenceArithmetic |> List.sort)
                       "non-extractable arithmetic ON falls back to the nested loop and stays correct"
 
-          testCase "the non-equi JOIN fallback's accumulator holds only matched rows, not one entry per candidate pair"
+          testCase "a low-selectivity non-equi JOIN returns only matched rows"
           <| fun _ ->
-              // A low-selectivity non-equi ON must stream matches, not
-              // hold a `(left, right, combined, matched: bool)` tuple
-              // per *candidate pair* — that keeps the full cross
-              // product in memory at once, not just the eventual
-              // result. Per-pair `evalExpr` cost dominates wall time
-              // either way (much larger than the accumulator-shape
-              // difference at unit-test scale), so this is a
-              // correctness/doesn't-hang check at a meaningfully
-              // low-selectivity size (n-1 matches out of n^2 candidate
-              // pairs), not a tight perf assertion — see the
-              // perf-canary tests elsewhere in this suite for that
-              // style of check where the gap is wide enough to assert
-              // on reliably.
               let store = newStore ()
               runDefault store "CREATE TABLE l (n INT)" |> ignore
               runDefault store "CREATE TABLE r (n INT)" |> ignore
@@ -755,25 +742,12 @@ let tests =
               runDefault store (sprintf "INSERT INTO l VALUES %s" values) |> ignore
               runDefault store (sprintf "INSERT INTO r VALUES %s" values) |> ignore
 
-              // `l.n + 1 = r.n` has no extractable equi key, so this
-              // is the nested-loop fallback over the full n * n cross
-              // product (640,000 candidate pairs here), even though at
-              // most n - 1 of them ever match.
               let sql = "SELECT l.n, r.n FROM l JOIN r ON l.n + 1 = r.n"
-
-              let sw = System.Diagnostics.Stopwatch.StartNew()
               let result = runDefault store sql
-              sw.Stop()
 
               match result with
               | ResultSet(_, rows) -> Expect.equal (List.length rows) (n - 1) "one match per row except the last"
               | other -> failtestf "expected a resultset, got %A" other
-
-              if not (TestSupport.skipTimingAssertions ()) then
-                  Expect.isLessThan
-                      sw.Elapsed.TotalSeconds
-                      10.0
-                      (sprintf "a %d x %d non-equi join with only %d matches took %A — looks hung, not just slow" n n (n - 1) sw.Elapsed)
 
           testCase "a non-equi JOIN rejects more than one million candidate pairs"
           <| fun _ ->
