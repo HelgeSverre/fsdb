@@ -1929,6 +1929,25 @@ let private parsedStatementCapacity = 16384
 let private cacheableSqlLength = 512
 let private parsedStatements = ConcurrentDictionary<struct (bool * string), Statement>()
 let private parsedStatementOrder = ConcurrentQueue<struct (bool * string)>()
+let private parsedStatementCandidates = ConcurrentDictionary<int, byte>()
+let private parsedStatementCandidateOrder = ConcurrentQueue<int>()
+
+let private isRepeatedStatement (ansiQuotes: bool) (sql: string) =
+    // The fingerprint only decides admission. Cache lookups still use the
+    // complete SQL and mode, so collisions cannot select the wrong AST.
+    let fingerprint = HashCode.Combine(ansiQuotes, StringComparer.Ordinal.GetHashCode sql)
+
+    if parsedStatementCandidates.TryAdd(fingerprint, 0uy) then
+        parsedStatementCandidateOrder.Enqueue fingerprint
+
+        while parsedStatementCandidates.Count > parsedStatementCapacity * 2 do
+            match parsedStatementCandidateOrder.TryDequeue() with
+            | true, oldest -> parsedStatementCandidates.TryRemove oldest |> ignore
+            | false, _ -> ()
+
+        false
+    else
+        true
 
 let private parseStatement (ansiQuotes: bool) (sql: string) =
     let key = struct (ansiQuotes, sql)
@@ -1938,7 +1957,7 @@ let private parseStatement (ansiQuotes: bool) (sql: string) =
     | false, _ ->
         match Parser.parseWithAnsiQuotes ansiQuotes sql with
         | Result.Ok statement as parsed ->
-            if sql.Length <= cacheableSqlLength && parsedStatements.TryAdd(key, statement) then
+            if sql.Length <= cacheableSqlLength && isRepeatedStatement ansiQuotes sql && parsedStatements.TryAdd(key, statement) then
                 parsedStatementOrder.Enqueue key
 
                 while parsedStatements.Count > parsedStatementCapacity do
