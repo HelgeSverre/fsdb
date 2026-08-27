@@ -6,6 +6,7 @@ open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Functions
 open Fsdb.Executor
+open TestSupport.SqlCommentMutation
 
 let private run = TestSupport.Sql.execute
 let private runDefault = TestSupport.Sql.executeDefault
@@ -470,6 +471,138 @@ let tests =
                   match runDefault store sql with
                   | ResultSet(_, rows) -> Expect.equal rows expected sql
                   | other -> failtestf "expected the composed resultset, got %A from %s" other sql
+
+          testCase "a branching CTE graph preserves every path through dense comments"
+          <| fun _ ->
+              let definitions =
+                  "c0 AS (SELECT 1 AS n)"
+                  :: [ for level in 1..12 ->
+                           sprintf
+                               "c%d/* name */AS (SELECT n/* left */+/* one */1 AS n FROM c%d UNION/* branch */ALL SELECT n + 2 FROM c%d)"
+                               level
+                               (level - 1)
+                               (level - 1) ]
+
+              let sql =
+                  "WITH/* graph */"
+                  + String.concat ",# next level\n" definitions
+                  + " SELECT COUNT(/* paths */*), MIN(n), MAX(n), SUM(n) FROM c12"
+
+              match runDefault (newStore ()) sql with
+              | ResultSet(_, [ [ Some "4096"; Some "13"; Some "25"; Some "77824" ] ]) -> ()
+              | other -> failtestf "expected all branching CTE paths, got %A" other
+
+          testCase "a long commented join chain preserves dependency order and outer padding"
+          <| fun _ ->
+              let joins =
+                  [ 1..23 ]
+                  |> List.map (fun level ->
+                      sprintf
+                          "JOIN/* edge %d */tagged AS t%d ON t%d.n = t%d.n + 1"
+                          level
+                          level
+                          level
+                          (level - 1))
+                  |> String.concat " "
+
+              let sql =
+                  "WITH/* seed */RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 32), "
+                  + "tagged AS (SELECT n, n MOD 3 AS bucket FROM nums) "
+                  + "SELECT COUNT(*), SUM(t0/* qualifier */.n), COUNT(t23.n), COUNT(missing.n) "
+                  + "FROM tagged AS t0 "
+                  + joins
+                  + " LEFT/* padded */JOIN tagged AS missing ON missing.n = t0.n + 100"
+
+              match runDefault (newStore ()) sql with
+              | ResultSet(_, [ [ Some "9"; Some "45"; Some "9"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected the long join chain aggregate, got %A" other
+
+          testCase "deep correlated and derived subqueries retain every enclosing scope"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE numbers (n INT PRIMARY KEY)" |> ignore
+              runDefault store "INSERT INTO numbers VALUES (1),(2),(3),(4)" |> ignore
+
+              let correlated =
+                  [ 12 .. -1 .. 1 ]
+                  |> List.fold
+                      (fun inner level ->
+                          sprintf
+                              "EXISTS/* level %d */(SELECT 1 FROM numbers AS e%d WHERE e%d/* qualifier */.n = root.n AND %s)"
+                              level
+                              level
+                              level
+                              inner)
+                      "TRUE"
+
+              let correlatedSql = sprintf "SELECT root.n FROM numbers AS root WHERE %s ORDER BY root.n" correlated
+
+              match runDefault store correlatedSql with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ] correlatedSql
+              | other -> failtestf "expected deeply correlated rows, got %A" other
+
+              let derived =
+                  [ 1..28 ]
+                  |> List.fold
+                      (fun inner level ->
+                          sprintf
+                              "SELECT d%d.n/* arithmetic */+1 AS n FROM (/* layer %d */%s) AS d%d"
+                              (level - 1)
+                              level
+                              inner
+                              (level - 1))
+                      "SELECT 1 AS n"
+
+              let derivedSql = sprintf "WITH seed AS (SELECT 1) SELECT final.n FROM (/* outer */%s) AS final" derived
+
+              match runDefault store derivedSql with
+              | ResultSet(_, [ [ Some "29" ] ]) -> ()
+              | other -> failtestf "expected the deeply derived value, got %A" other
+
+          testCase "recursive, lateral, JSON, values, window, and quantified sources compose"
+          <| fun _ ->
+              let sql =
+                  "WITH RECURSIVE nums(n) AS ("
+                  + "SELECT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 4), "
+                  + "windowed AS (SELECT n, SUM(n) OVER (ORDER BY n) AS running FROM nums) "
+                  + "SELECT labels.label, source.n, doubled.twice, jt.v, windowed.running, "
+                  + "(SELECT COUNT(*) FROM nums AS probe WHERE probe.n <= source.n) "
+                  + "FROM nums AS source "
+                  + "JOIN (VALUES ROW(1,'one'),ROW(2,'two'),ROW(3,'three'),ROW(4,'four')) AS labels(id,label) "
+                  + "ON labels.id = source.n "
+                  + "JOIN LATERAL (SELECT source.n * 2 AS twice WHERE source.n MOD 2 = 0) AS doubled ON TRUE "
+                  + "JOIN JSON_TABLE('[4,8]', '$[*]' COLUMNS(v INT PATH '$')) AS jt ON jt.v = doubled.twice "
+                  + "LEFT JOIN windowed ON windowed.n = source.n "
+                  + "WHERE source.n = ANY (SELECT n FROM nums WHERE n >= 2) ORDER BY source.n"
+
+              let expected =
+                  [ [ Some "two"; Some "2"; Some "4"; Some "4"; Some "3"; Some "2" ]
+                    [ Some "four"; Some "4"; Some "8"; Some "8"; Some "10"; Some "4" ] ]
+
+              let mutations =
+                  whitespaceRuns sql
+                  |> Array.indexed
+                  |> Array.collect (fun (index, run) ->
+                      let block = injectAt sql run "/* execution boundary */"
+
+                      if index % 4 = 0 then
+                          [| block
+                             injectAt sql run "# execution boundary\n"
+                             injectAt sql run "-- execution boundary\n"
+                             injectAt sql run " /*!99999 ignored_tokens */ " |]
+                      else
+                          [| block |])
+                  |> Array.toList
+
+              Expect.isGreaterThan mutations.Length 100 "many independent comment placements execute"
+
+              let store = newStore ()
+
+              for candidate in sql :: mutations do
+                  match runDefault store candidate with
+                  | ResultSet(_, rows) -> Expect.equal rows expected candidate
+                  | other -> failtestf "expected every composed source to agree, got %A from %s" other candidate
 
           // NATURAL/USING expectations below were verified against a
           // real MySQL 8.4 (same schema/data, differential probe) —

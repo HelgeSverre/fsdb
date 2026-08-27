@@ -51,6 +51,66 @@ module Sql =
         | ResultSet(_, result) -> result
         | other -> failtestf "expected rows from %s, got %A" sql other
 
+module SqlCommentMutation =
+    let whitespaceRuns (sql: string) =
+        let runs = ResizeArray<int * int>()
+        let mutable quote = None
+        let mutable blockComment = false
+        let mutable lineComment = false
+        let mutable index = 0
+
+        while index < sql.Length do
+            match quote with
+            | Some current when current <> '`' && sql.[index] = '\\' && index + 1 < sql.Length -> index <- index + 2
+            | Some current when sql.[index] = current && index + 1 < sql.Length && sql.[index + 1] = current -> index <- index + 2
+            | Some current when sql.[index] = current ->
+                quote <- None
+                index <- index + 1
+            | Some _ -> index <- index + 1
+            | None when blockComment && sql.[index] = '*' && index + 1 < sql.Length && sql.[index + 1] = '/' ->
+                blockComment <- false
+                index <- index + 2
+            | None when blockComment -> index <- index + 1
+            | None when lineComment && (sql.[index] = '\n' || sql.[index] = '\r') ->
+                lineComment <- false
+                index <- index + 1
+            | None when lineComment -> index <- index + 1
+            | None when sql.[index] = '\'' || sql.[index] = '"' || sql.[index] = '`' ->
+                quote <- Some sql.[index]
+                index <- index + 1
+            | None when sql.[index] = '#' ->
+                lineComment <- true
+                index <- index + 1
+            | None when
+                sql.[index] = '-'
+                && index + 1 < sql.Length
+                && sql.[index + 1] = '-'
+                && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2])
+                ->
+                lineComment <- true
+                index <- index + 2
+            | None when sql.[index] = '/' && index + 1 < sql.Length && sql.[index + 1] = '*' ->
+                blockComment <- true
+                index <- index + 2
+            | None when Char.IsWhiteSpace sql.[index] ->
+                let start = index
+
+                while index < sql.Length && Char.IsWhiteSpace sql.[index] do
+                    index <- index + 1
+
+                runs.Add(start, index - start)
+            | None -> index <- index + 1
+
+        runs.ToArray()
+
+    let injectAt (sql: string) (start, length) comment =
+        sql.Substring(0, start) + comment + sql.Substring(start + length)
+
+    let injectEverywhere (sql: string) comment =
+        whitespaceRuns sql
+        |> Array.rev
+        |> Array.fold (fun current run -> injectAt current run comment) sql
+
 type ServerFixture(listener: Net.Sockets.TcpListener, completion: Threading.Tasks.Task) =
     member _.Listener = listener
     member _.Port = Fsdb.Server.port listener

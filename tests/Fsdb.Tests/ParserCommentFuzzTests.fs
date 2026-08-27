@@ -1,7 +1,7 @@
 module Fsdb.Tests.ParserCommentFuzzTests
 
-open System
 open Expecto
+open TestSupport.SqlCommentMutation
 
 type private Sample = { Name: string; Sql: string }
 
@@ -39,7 +39,10 @@ let private samples =
            "SELECT d.id, jt.ord, jt.n FROM documents AS d INNER JOIN JSON_TABLE(d.payload, '$[*]' COLUMNS (ord FOR ORDINALITY, n INT PATH '$.n' NULL ON EMPTY)) AS jt ON jt.n > 0 WHERE d.payload IS NOT NULL ORDER BY d.id, jt.ord" }
        { Name = "case and aggregates"
          Sql =
-           "SELECT tenant_id, COUNT(*) AS total, SUM(CASE WHEN state = 'open' THEN amount ELSE 0 END) AS open_amount FROM invoices WHERE created_at >= TIMESTAMP '2026-01-01 00:00:00' GROUP BY tenant_id HAVING COUNT(*) > 1 ORDER BY open_amount DESC" } |]
+           "SELECT tenant_id, COUNT(*) AS total, SUM(CASE WHEN state = 'open' THEN amount ELSE 0 END) AS open_amount FROM invoices WHERE created_at >= TIMESTAMP '2026-01-01 00:00:00' GROUP BY tenant_id HAVING COUNT(*) > 1 ORDER BY open_amount DESC" }
+       { Name = "pre-commented CTE join"
+         Sql =
+           "WITH/* existing block */ c AS (SELECT 1 AS n UNION ALL SELECT 2) # existing line\nSELECT c.n FROM c -- join follows\nJOIN (SELECT 1 AS n) AS d ON d.n = c.n ORDER BY c.n" } |]
 
 let private commentForms =
     [| "block", "/* fuzz */"
@@ -51,41 +54,6 @@ let private commentForms =
        "six-digit version", "/*!080400 */"
        "future version", "/*!99999 ignored_tokens */"
        "optimizer hint", "/*+ NO_RANGE_OPTIMIZATION(t) */" |]
-
-let private whitespaceRuns (sql: string) =
-    let runs = ResizeArray<int * int>()
-    let mutable quote = None
-    let mutable index = 0
-
-    while index < sql.Length do
-        match quote with
-        | Some current when current <> '`' && sql.[index] = '\\' && index + 1 < sql.Length -> index <- index + 2
-        | Some current when sql.[index] = current && index + 1 < sql.Length && sql.[index + 1] = current -> index <- index + 2
-        | Some current when sql.[index] = current ->
-            quote <- None
-            index <- index + 1
-        | Some _ -> index <- index + 1
-        | None when sql.[index] = '\'' || sql.[index] = '"' || sql.[index] = '`' ->
-            quote <- Some sql.[index]
-            index <- index + 1
-        | None when Char.IsWhiteSpace sql.[index] ->
-            let start = index
-
-            while index < sql.Length && Char.IsWhiteSpace sql.[index] do
-                index <- index + 1
-
-            runs.Add(start, index - start)
-        | None -> index <- index + 1
-
-    runs.ToArray()
-
-let private injectAt (sql: string) (start, length) comment =
-    sql.Substring(0, start) + comment + sql.Substring(start + length)
-
-let private injectEverywhere (sql: string) comment =
-    whitespaceRuns sql
-    |> Array.rev
-    |> Array.fold (fun current run -> injectAt current run comment) sql
 
 let private punctuationTemplate =
     "WITH c AS (§SELECT 1 AS id UNION ALL SELECT 2) "
