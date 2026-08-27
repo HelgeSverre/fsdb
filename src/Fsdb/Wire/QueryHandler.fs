@@ -1926,6 +1926,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
 let private executeParsed session stmt = executeParsedWithTemporaryAction None session stmt
 
 let private parsedStatementCapacity = 16384
+let private parsedStatementCandidateCapacity = parsedStatementCapacity * 2
 let private cacheableSqlLength = 512
 let private parsedStatements = ConcurrentDictionary<struct (bool * string), Statement>()
 let private parsedStatementOrder = ConcurrentQueue<struct (bool * string)>()
@@ -1940,7 +1941,7 @@ let private isRepeatedStatement (ansiQuotes: bool) (sql: string) =
     if parsedStatementCandidates.TryAdd(fingerprint, 0uy) then
         parsedStatementCandidateOrder.Enqueue fingerprint
 
-        while parsedStatementCandidates.Count > parsedStatementCapacity * 2 do
+        while parsedStatementCandidates.Count > parsedStatementCandidateCapacity do
             match parsedStatementCandidateOrder.TryDequeue() with
             | true, oldest -> parsedStatementCandidates.TryRemove oldest |> ignore
             | false, _ -> ()
@@ -1957,7 +1958,11 @@ let private parseStatement (ansiQuotes: bool) (sql: string) =
     | false, _ ->
         match Parser.parseWithAnsiQuotes ansiQuotes sql with
         | Result.Ok statement as parsed ->
-            if sql.Length <= cacheableSqlLength && isRepeatedStatement ansiQuotes sql && parsedStatements.TryAdd(key, statement) then
+            let cacheable =
+                sql.Length <= cacheableSqlLength
+                && isRepeatedStatement ansiQuotes sql
+
+            if cacheable && parsedStatements.TryAdd(key, statement) then
                 parsedStatementOrder.Enqueue key
 
                 while parsedStatements.Count > parsedStatementCapacity do
