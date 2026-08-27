@@ -504,7 +504,8 @@ let tests =
                     for feature in
                         [ "nested_join_view_update"
                           "outer_join_view_update"
-                          "nested_join_view_insert" ] do
+                          "nested_join_view_insert"
+                          "materialized_join_view_update" ] do
                         Expect.contains features feature feature
 
                     let commentedReplace =
