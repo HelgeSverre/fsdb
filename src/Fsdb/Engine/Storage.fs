@@ -5811,7 +5811,7 @@ let private withPointUpdateDatabase
                     elif obj.ReferenceEquals(slot.Value, baseDb) then
                         slot.Value <- batchDb
                         Ok(prepareResultEvents store eventsOf result)
-                    elif canMergePointUpdate tableKey rowIds baseDb batchDb slot.Value then
+                    elif not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb slot.Value then
                         slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb slot.Value
                         Ok(prepareResultEvents store eventsOf result)
                     else
