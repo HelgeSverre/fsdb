@@ -4778,38 +4778,36 @@ let tests =
                         | Err(1452, _), Err(1452, _) -> ()
                         | _ -> failtestf "indexed and scanned lookups disagreed for %d: %A and %A" parentId indexed scanned
 
-                testCase "single-row INSERT into a child of a large PK-indexed parent stays flat, not linear in the parent's size"
+                testCase "FK parent probes allocate independently of the parent's size"
                 <| fun _ ->
-                    let timeInserts parentRows =
+                    let allocatedByInserts parentRows =
                         let store = newStore ()
                         runDefault store "CREATE TABLE parent (id INT PRIMARY KEY)" |> ignore
                         runDefault store "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent(id))" |> ignore
 
                         let batch = [ for i in 1 .. parentRows -> sprintf "(%d)" i ] |> String.concat ", "
                         runDefault store (sprintf "INSERT INTO parent VALUES %s" batch) |> ignore
-                        runDefault store "INSERT INTO child VALUES (1, 1)" |> ignore
+                        runDefault store (sprintf "INSERT INTO child VALUES (1, %d)" parentRows) |> ignore
 
-                        let sw = System.Diagnostics.Stopwatch.StartNew()
+                        let before = System.GC.GetAllocatedBytesForCurrentThread()
 
                         for i in 2 .. 200 do
-                            runDefault store (sprintf "INSERT INTO child VALUES (%d, %d)" i i) |> ignore
+                            runDefault store (sprintf "INSERT INTO child VALUES (%d, %d)" i (parentRows - i + 1)) |> ignore
 
-                        sw.Stop()
-                        sw.Elapsed.TotalMilliseconds
+                        System.GC.GetAllocatedBytesForCurrentThread() - before
 
-                    let at2k = timeInserts 2_000
-                    let at20k = timeInserts 20_000
-                    let ratio = at20k / max at2k 0.001
+                    let at2k = allocatedByInserts 2_000
+                    let at20k = allocatedByInserts 20_000
+                    let ratio = float at20k / max (float at2k) 1.0
 
-                    if not (TestSupport.skipTimingAssertions ()) then
-                        Expect.isLessThan
-                            ratio
-                            2.5
-                            (sprintf
-                                "FK inserts took %fms at 2k parent rows and %fms at 20k (ratio %f) — looks linear in parent size again"
-                                at2k
-                                at20k
-                                ratio)
+                    Expect.isLessThan
+                        ratio
+                        2.0
+                        (sprintf
+                            "FK inserts allocated %d bytes at 2k parent rows and %d bytes at 20k (ratio %f) — looks linear in parent size again"
+                            at2k
+                            at20k
+                            ratio)
 
                 testCase "point SELECT by PRIMARY KEY on a 50,000-row table stays flat, not linear in table size"
                 <| fun _ ->
