@@ -323,6 +323,8 @@ type Store =
       /// their current values. Logical ownership may span transaction
       /// statements without depending on managed thread affinity.
       RowLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
+      /// A separate namespace prevents key hashes from aliasing held rows.
+      KeyLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
       RowLockSequence: int64 array
       TransactionLocks: TransactionLockContext option }
 
@@ -405,6 +407,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       Lock = obj ()
       CommitLock = store.CommitLock
       RowLocks = store.RowLocks
+      KeyLocks = store.KeyLocks
       RowLockSequence = store.RowLockSequence
       TransactionLocks = store.TransactionLocks }
 
@@ -2112,7 +2115,9 @@ let private withWriteLocksFor
     (keys: string list)
     body
     =
-    let rowLocks = store.RowLocks.GetOrAdd(normalizeTableName dbName, (fun _ -> ConcurrentDictionary()))
+    let databaseKey = normalizeTableName dbName
+    let rowLocks = store.RowLocks.GetOrAdd(databaseKey, (fun _ -> ConcurrentDictionary()))
+    let keyLocks = store.KeyLocks.GetOrAdd(databaseKey, (fun _ -> ConcurrentDictionary()))
     let tableOffset =
         StringComparer.OrdinalIgnoreCase.GetHashCode(tableName) &&& Int32.MaxValue
 
@@ -2122,11 +2127,21 @@ let private withWriteLocksFor
     let keyStripeIndex key =
         int ((int64 tableOffset + int64 (StringComparer.Ordinal.GetHashCode key &&& Int32.MaxValue)) % int64 rowLockStripeCount)
 
-    let stripes =
-        (rowIds |> List.map stripeIndex) @ (keys |> List.map keyStripeIndex)
+    let rowStripes =
+        rowIds
+        |> List.map stripeIndex
         |> List.distinct
         |> List.sort
         |> List.map (fun index -> rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ())))
+
+    let keyStripes =
+        keys
+        |> List.map keyStripeIndex
+        |> List.distinct
+        |> List.sort
+        |> List.map (fun index -> keyLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ())))
+
+    let stripes = rowStripes @ keyStripes
     let context, releaseAfter =
         match store.TransactionLocks with
         | Some context -> context, false
@@ -2496,6 +2511,7 @@ let create () : Store =
       Lock = obj ()
       CommitLock = obj ()
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
+      KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       RowLockSequence = [| 0L |]
       TransactionLocks = None }
 
