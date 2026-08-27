@@ -5794,6 +5794,7 @@ let private withPointUpdateDatabase
     | false, _ -> Error(NoSuchDatabase dbName)
     | true, slot ->
         let rowIds = List.distinct rowIds
+        let tableKey = normalizeTableName tableName
         let baseDb = slot.Value
 
         operation baseDb
@@ -5809,6 +5810,9 @@ let private withPointUpdateDatabase
                         Error(NoSuchDatabase dbName)
                     elif obj.ReferenceEquals(slot.Value, baseDb) then
                         slot.Value <- batchDb
+                        Ok(prepareResultEvents store eventsOf result)
+                    elif canMergePointUpdate tableKey rowIds baseDb batchDb slot.Value then
+                        slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb slot.Value
                         Ok(prepareResultEvents store eventsOf result)
                     else
                         Ok(
