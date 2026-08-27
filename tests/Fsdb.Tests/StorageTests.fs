@@ -3309,25 +3309,41 @@ let tests =
               "performance canary"
               [ testCase "a single-row UPDATE against a 50,000-row table stays roughly linear, not quadratic"
                 <| fun _ ->
-                    // The generous bound distinguishes quadratic growth from
-                    // ordinary machine variance; it is not a latency target.
-                    let store = withUsersTable ()
+                    let timeUpdate rowCount =
+                        let store = withUsersTable ()
+                        let rows = [ for i in 1 .. rowCount -> [ VString(sprintf "name%d" i); VInt(int64 (i % 100)) ] ]
+                        insertRows store defaultDatabase "users" (Some [ "name"; "age" ]) rows |> ignore
+                        updateRows store defaultDatabase "users" None (fun row -> Ok(row.[0] = VInt 1L)) (fun row -> Ok [| row.[0]; row.[1]; VInt 999L |])
+                        |> ignore
 
-                    let rows = [ for i in 1 .. 50_000 -> [ VString(sprintf "name%d" i); VInt(int64 (i % 100)) ] ]
-                    insertRows store defaultDatabase "users" (Some [ "name"; "age" ]) rows |> ignore
+                        [ for age in 991L .. 999L do
+                              let sw = System.Diagnostics.Stopwatch.StartNew()
 
-                    let sw = System.Diagnostics.Stopwatch.StartNew()
+                              let result =
+                                  updateRows
+                                      store
+                                      defaultDatabase
+                                      "users"
+                                      None
+                                      (fun row -> Ok(row.[0] = VInt(int64 (rowCount / 2))))
+                                      (fun row -> Ok [| row.[0]; row.[1]; VInt age |])
 
-                    let result = updateRows store defaultDatabase "users" None (fun row -> Ok(row.[0] = VInt 25_000L)) (fun row -> Ok [| row.[0]; row.[1]; VInt 999L |])
+                              sw.Stop()
+                              Expect.equal result (Ok 1) "the point update changes one row"
+                              sw.Elapsed.TotalMilliseconds ]
+                        |> List.sort
+                        |> List.item 4
 
-                    sw.Stop()
-
-                    match result with
-                    | Ok 1 -> ()
-                    | other -> failtestf "expected Ok 1, got %A" other
+                    let at10k = timeUpdate 10_000
+                    let at50k = timeUpdate 50_000
+                    let ratio = at50k / max at10k 0.001
 
                     if not (TestSupport.skipTimingAssertions ()) then
                         Expect.isLessThan
-                            sw.Elapsed.TotalMilliseconds
-                            500.0
-                            (sprintf "single-row UPDATE against 50,000 rows took %A — looks quadratic again" sw.Elapsed) ] ]
+                            ratio
+                            12.5
+                            (sprintf
+                                "single-row UPDATE took %fms at 10k rows and %fms at 50k (ratio %f) — looks quadratic again"
+                                at10k
+                                at50k
+                                ratio) ] ]
