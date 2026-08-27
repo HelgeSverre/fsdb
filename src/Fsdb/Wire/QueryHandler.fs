@@ -877,6 +877,7 @@ let private applySqlMode (store: Store) (value: string) =
     setStrictMode store (isStrictSqlMode modes)
     setZeroDateModes store (hasSqlMode modes "NO_ZERO_DATE") (hasSqlMode modes "NO_ZERO_IN_DATE")
     setOnlyFullGroupBy store (hasSqlMode modes "ONLY_FULL_GROUP_BY")
+    setNoAutoValueOnZero store (hasSqlMode modes "NO_AUTO_VALUE_ON_ZERO")
 
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends

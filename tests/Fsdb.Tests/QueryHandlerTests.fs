@@ -876,6 +876,56 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]), ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected parse-cache isolation between NOT modes, got %A" other
 
+          testCase "NO_AUTO_VALUE_ON_ZERO preserves explicit zero auto-increment values"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let defaultSession = create 1 store
+              let zeroSession, _ = handle (create 2 store) "SET sql_mode = 'NO_AUTO_VALUE_ON_ZERO'"
+              let defaultSession, _ = handle defaultSession "CREATE TABLE default_ids (id BIGINT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(10))"
+              let zeroSession, _ = handle zeroSession "CREATE TABLE zero_ids (id BIGINT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(10))"
+
+              let defaultSession, _ = handle defaultSession "INSERT INTO default_ids VALUES (0, 'zero'), (NULL, 'null')"
+              let zeroSession, _ = handle zeroSession "INSERT INTO zero_ids VALUES (0, 'zero'), (NULL, 'null')"
+
+              match handle defaultSession "SELECT id, label FROM default_ids ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "zero" ]; [ Some "2"; Some "null" ] ]) -> ()
+              | other -> failtestf "expected zero to allocate an id in default mode, got %A" other
+
+              match handle zeroSession "SELECT id, label FROM zero_ids ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "0"; Some "zero" ]; [ Some "1"; Some "null" ] ]) -> ()
+              | other -> failtestf "expected zero to remain explicit in NO_AUTO_VALUE_ON_ZERO mode, got %A" other
+
+              let zeroSession, upsert = handle zeroSession "INSERT INTO zero_ids VALUES (0, 'again') ON DUPLICATE KEY UPDATE label = VALUES(label)"
+              Expect.equal upsert (Affected 2UL) "zero should address the existing primary key"
+
+              let _, replace = handle zeroSession "REPLACE INTO zero_ids VALUES (0, 'replace')"
+              Expect.equal replace (Affected 2UL) "REPLACE should replace the explicit zero key"
+
+              match handle defaultSession "INSERT INTO default_ids VALUES (0, 'next')" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the sibling session to retain default zero allocation, got %A" other
+
+              match handle defaultSession "SELECT MAX(id) FROM default_ids" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected the sibling session's zero to allocate id 3, got %A" other
+
+              let defaultSession, _ = handle defaultSession "CREATE TABLE default_ignore (id INT AUTO_INCREMENT PRIMARY KEY, marker INT UNIQUE)"
+              let defaultSession, _ = handle defaultSession "INSERT INTO default_ignore VALUES (0, 1)"
+              let defaultSession, _ = handle defaultSession "INSERT IGNORE INTO default_ignore VALUES (0, 1)"
+              let defaultSession, _ = handle defaultSession "INSERT INTO default_ignore VALUES (NULL, 2)"
+              let zeroSession, _ = handle zeroSession "CREATE TABLE zero_ignore (id INT AUTO_INCREMENT PRIMARY KEY, marker INT UNIQUE)"
+              let zeroSession, _ = handle zeroSession "INSERT INTO zero_ignore VALUES (0, 1)"
+              let zeroSession, _ = handle zeroSession "INSERT IGNORE INTO zero_ignore VALUES (0, 1)"
+              let zeroSession, _ = handle zeroSession "INSERT INTO zero_ignore VALUES (NULL, 2)"
+
+              match handle defaultSession "SELECT id FROM default_ignore ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected an ignored generated zero to reserve id 2, got %A" other
+
+              match handle zeroSession "SELECT id FROM zero_ignore ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "0" ]; [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected an ignored explicit zero not to consume an id, got %A" other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

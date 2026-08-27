@@ -305,6 +305,7 @@ type Store =
       mutable NoZeroDate: bool
       mutable NoZeroInDate: bool
       mutable OnlyFullGroupBy: bool
+      mutable NoAutoValueOnZero: bool
       /// Applies only when no column or explicit COLLATE supplies precedence.
       mutable ConnectionCollation: Collation.Collation
       /// Lowercase names overlay real tables in the reserved fsdb schema.
@@ -410,6 +411,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       NoZeroDate = store.NoZeroDate
       NoZeroInDate = store.NoZeroInDate
       OnlyFullGroupBy = store.OnlyFullGroupBy
+      NoAutoValueOnZero = store.NoAutoValueOnZero
       ConnectionCollation = store.ConnectionCollation
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
@@ -499,6 +501,9 @@ let setZeroDateModes (store: Store) (noZeroDate: bool) (noZeroInDate: bool) : un
 
 let setOnlyFullGroupBy (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.OnlyFullGroupBy <- enabled)
+
+let setNoAutoValueOnZero (store: Store) (enabled: bool) : unit =
+    lock store.Lock (fun () -> store.NoAutoValueOnZero <- enabled)
 
 /// Table names are keyed case-insensitively by their lowercased form —
 /// public because `Persistence`'s WAL replay looks tables up in `Catalog`
@@ -2506,6 +2511,7 @@ let create () : Store =
       NoZeroDate = true
       NoZeroInDate = true
       OnlyFullGroupBy = true
+      NoAutoValueOnZero = false
       ConnectionCollation = Collation.defaultCollation
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
@@ -4250,14 +4256,33 @@ let renameTables (store: Store) (dbName: string) (pairs: (string * string) list)
 /// column (if any) paired with whether `nextAutoId` generated it or it was
 /// supplied explicitly. The omitted-column set lets the executor distinguish
 /// a functional default from an explicitly supplied NULL before triggers run.
+let private generatesAutoValue
+    (mode: TemporalCoercionMode)
+    (generateAutoOnZero: bool)
+    (column: ColumnDef)
+    (value: Value)
+    =
+    match value with
+    | VNull -> true
+    | _ when not generateAutoOnZero -> false
+    | _ ->
+        match Diagnostics.suppress (fun () -> coerceStoredValueWithMode mode column value) with
+        | Ok(VInt 0L)
+        | Ok(VUInt 0UL) -> true
+        | _ -> false
+
 let private processRow
     (mode: TemporalCoercionMode)
+    (generateAutoOnZero: bool)
     (nextAutoId: int64)
     (rawRow: Value option list)
     (columns: ColumnDef list)
     : Result<Value list * int64 * (bool * int64) option * Set<int>, StorageError> =
     let nextAfterExplicit current value =
         if value = Int64.MaxValue then Int64.MaxValue else max current (value + 1L)
+
+    let generate valuesRev =
+        Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some(true, nextAutoId))
 
     let step acc (col: ColumnDef, provided: Value option) =
         match acc with
@@ -4282,10 +4307,10 @@ let private processRow
             match pending with
             | Error error -> Error error
             | Ok pending when col.AutoIncrement ->
-                match pending with
-                | VNull -> Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some(true, nextAutoId))
-                | value ->
-                    match coerceStoredValueWithMode mode col value with
+                if generatesAutoValue mode generateAutoOnZero col pending then
+                    generate valuesRev
+                else
+                    match coerceStoredValueWithMode mode col pending with
                     | Error e -> Error e
                     | Ok(VInt i) -> Ok(VInt i :: valuesRev, nextAfterExplicit nextAutoId i, Some(false, i))
                     | Ok(VUInt value) when value <= uint64 Int64.MaxValue ->
@@ -4356,6 +4381,7 @@ type InsertOutcome =
 let private insertCore
     (checkFks: bool)
     (mode: TemporalCoercionMode)
+    (generateAutoOnZero: bool)
     (ignoreErrors: bool)
     (db: Database)
     (tableKey: string)
@@ -4379,7 +4405,10 @@ let private insertCore
                     |> List.sumBy (fun values ->
                         match idxs |> List.tryFindIndex ((=) autoIndex) with
                         | None -> 1L
-                        | Some valueIndex when valueIndex < values.Length && values.[valueIndex] = VNull -> 1L
+                        | Some valueIndex when valueIndex < values.Length ->
+                            let value = values.[valueIndex]
+                            let column = table.Columns.[autoIndex]
+                            if generatesAutoValue mode generateAutoOnZero column value then 1L else 0L
                         | _ -> 0L)
 
                 table.NextAutoId + generatedAttempts
@@ -4442,7 +4471,7 @@ let private insertCore
                 let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                 let rowResult =
-                    processRow mode nextAutoId rawRow table.Columns
+                    processRow mode generateAutoOnZero nextAutoId rawRow table.Columns
                     |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
                         let candidate = Array.ofList finalValues
 
@@ -4574,7 +4603,16 @@ let private insertRowsPreparedCore
                 |> Result.bind (fun table ->
                     resolveInsertColumns table columns
                     |> Result.bind (fun indices ->
-                        insertCore store.ForeignKeyChecks (temporalCoercionMode store) ignoreErrors db key rowsIn indices prepare)))
+                        insertCore
+                            store.ForeignKeyChecks
+                            (temporalCoercionMode store)
+                            (not store.NoAutoValueOnZero)
+                            ignoreErrors
+                            db
+                            key
+                            rowsIn
+                            indices
+                            prepare)))
 
     let result =
         match tryInsertLockTargets store dbName tableName columns rowsIn with
@@ -4952,7 +4990,12 @@ and private upsertRowsInTable
                                     let provided = List.zip idxs rowValues |> Map.ofList
                                     let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
-                                    processRow (temporalCoercionMode store) nextAutoId rawRow table.Columns
+                                    processRow
+                                        (temporalCoercionMode store)
+                                        (not store.NoAutoValueOnZero)
+                                        nextAutoId
+                                        rawRow
+                                        table.Columns
                                     |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
                                         // A unique index over a *generated* column (e.g.
                                         // Laravel Pulse's `key_hash BINARY(16) AS
@@ -5293,7 +5336,12 @@ let replaceRows
                                 let provided = List.zip idxs rowValues |> Map.ofList
                                 let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
-                                processRow (temporalCoercionMode store) nextAutoId rawRow table.Columns
+                                processRow
+                                    (temporalCoercionMode store)
+                                    (not store.NoAutoValueOnZero)
+                                    nextAutoId
+                                    rawRow
+                                    table.Columns
                                 |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
                                     prepare omitted (Array.ofList finalValues)
                                     |> Result.bind (fun candidate ->
