@@ -208,7 +208,8 @@ type private WritableViewSource =
       Targets: Map<string, ViewColumnTarget>
       Predicate: Expr option
       CheckPredicates: Map<ViewTargetKey, Expr>
-      InsertableTargets: Set<ViewTargetKey> }
+      InsertableTargets: Set<ViewTargetKey>
+      Mergeable: bool }
 
 type private UpdatableView =
     { ViewDatabase: string
@@ -696,54 +697,96 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     let database = tableRef.Database |> Option.defaultValue view.Schema
                     let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
 
-                    match tryStoredView store database tableRef.Table with
-                    | Some stored ->
-                        if
-                            not (stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase))
-                            || not (stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase))
-                        then
+                    let readOnlySource (stored: StoredView) (definition: SelectStmt) =
+                        let projectedNames =
+                            definition.Projections
+                            |> List.map (fun (expression, alias) ->
+                                alias
+                                |> Option.orElseWith (fun () ->
+                                    match expression with
+                                    | Col column
+                                    | QualifiedCol(_, column) -> Some column
+                                    | Star _ -> None
+                                    | _ -> Some(InformationSchema.exprToSql expression)))
+
+                        if projectedNames |> List.exists Option.isNone then
                             None
                         else
-                            match Parser.parse stored.Definition with
-                            | Ok(Select definition) ->
-                                classify (Set.add key seen) stored definition
-                                |> Option.bind (fun nested ->
-                                    if not nested.UpdateJoins.IsEmpty then
-                                        None
-                                    else
-                                        let qualify =
-                                            Expression.rewrite (function
-                                                | Col column
-                                                | QualifiedCol(_, column) -> Some(QualifiedCol(qualifier, column))
-                                                | _ -> None)
+                            let inferred = projectedNames |> List.choose id
+                            let columns = if stored.Columns.IsEmpty then inferred else stored.Columns
 
-                                        let targets =
-                                            nested.Targets
-                                            |> Map.map (fun _ target -> { target with Qualifier = qualifier })
+                            if columns.Length <> inferred.Length then
+                                None
+                            else
+                                let expressions =
+                                    columns
+                                    |> List.map (fun column -> column.ToLowerInvariant(), QualifiedCol(qualifier, column))
+                                    |> Map.ofList
 
-                                        let checkPredicates =
-                                            nested.CheckPredicates
-                                            |> Map.toList
-                                            |> List.map (fun ((targetDatabase, targetTable, _), predicate) ->
-                                                (targetDatabase, targetTable, qualifier), predicate)
-                                            |> Map.ofList
+                                Some
+                                    { Reference = { tableRef with Database = Some database }
+                                      Qualifier = qualifier
+                                      Columns = columns
+                                      Expressions = expressions
+                                      Targets = Map.empty
+                                      Predicate = None
+                                      CheckPredicates = Map.empty
+                                      InsertableTargets = Set.empty
+                                      Mergeable = false }
 
-                                        let insertableTargets =
-                                            nested.InsertableTargets
-                                            |> Set.map (fun (targetDatabase, targetTable, _) -> targetDatabase, targetTable, qualifier)
+                    match tryStoredView store database tableRef.Table with
+                    | Some stored ->
+                        match Parser.parse stored.Definition with
+                        | Ok(Select definition) ->
+                            let nested =
+                                if
+                                    stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase)
+                                    && stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase)
+                                then
+                                    classify (Set.add key seen) stored definition
+                                else
+                                    None
 
-                                        Some
-                                            { Reference =
-                                                { nested.UpdateFrom with
-                                                    Alias = Some qualifier }
-                                              Qualifier = qualifier
-                                              Columns = nested.OrderedColumns
-                                              Expressions = nested.Expressions |> Map.map (fun _ expression -> qualify expression)
-                                              Targets = targets
-                                              Predicate = nested.Predicate |> Option.map qualify
-                                              CheckPredicates = checkPredicates
-                                              InsertableTargets = insertableTargets })
-                            | _ -> None
+                            nested
+                            |> Option.bind (fun nested ->
+                                if not nested.UpdateJoins.IsEmpty then
+                                    None
+                                else
+                                    let qualify =
+                                        Expression.rewrite (function
+                                            | Col column
+                                            | QualifiedCol(_, column) -> Some(QualifiedCol(qualifier, column))
+                                            | _ -> None)
+
+                                    let targets =
+                                        nested.Targets
+                                        |> Map.map (fun _ target -> { target with Qualifier = qualifier })
+
+                                    let checkPredicates =
+                                        nested.CheckPredicates
+                                        |> Map.toList
+                                        |> List.map (fun ((targetDatabase, targetTable, _), predicate) ->
+                                            (targetDatabase, targetTable, qualifier), predicate)
+                                        |> Map.ofList
+
+                                    let insertableTargets =
+                                        nested.InsertableTargets
+                                        |> Set.map (fun (targetDatabase, targetTable, _) -> targetDatabase, targetTable, qualifier)
+
+                                    Some
+                                        { Reference =
+                                            { nested.UpdateFrom with
+                                                Alias = Some qualifier }
+                                          Qualifier = qualifier
+                                          Columns = nested.OrderedColumns
+                                          Expressions = nested.Expressions |> Map.map (fun _ expression -> qualify expression)
+                                          Targets = targets
+                                          Predicate = nested.Predicate |> Option.map qualify
+                                          CheckPredicates = checkPredicates
+                                          InsertableTargets = insertableTargets
+                                          Mergeable = true })
+                            |> Option.orElseWith (fun () -> readOnlySource stored definition)
+                        | _ -> None
                     | None ->
                         InformationSchema.findTable store.Catalog database tableRef.Table
                         |> Result.toOption
@@ -770,7 +813,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Targets = targets
                               Predicate = None
                               CheckPredicates = Map.empty
-                              InsertableTargets = Set.singleton (database, tableRef.Table, qualifier) })
+                              InsertableTargets = Set.singleton (database, tableRef.Table, qualifier)
+                              Mergeable = true })
 
                 let sources =
                     tableRefs
@@ -855,7 +899,10 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         let directTargets = projected |> List.choose (fun (_, _, target) -> target)
 
                         let insertableTargets =
-                            if projected |> List.exists (fun (_, _, target) -> target.IsNone) then
+                            if
+                                (sources |> List.exists (fun source -> not source.Mergeable))
+                                || (projected |> List.exists (fun (_, _, target) -> target.IsNone))
+                            then
                                 Set.empty
                             else
                                 directTargets

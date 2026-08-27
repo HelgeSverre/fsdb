@@ -278,6 +278,9 @@ and insert through an explicit column list into one insertable component.
 Mergeable component views and simple outer layers preserve the same behavior,
 including inherited CHECK OPTION predicates, when the nested security identity
 is unchanged.
+An inner join may also use a nonmergeable aggregate view as a read-only row
+source while updating another mergeable component; INSERT still requires every
+component to be mergeable.
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
@@ -297,7 +300,7 @@ OLD/NEW images are rejected when the trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | join components with distinct definer/security contexts, materialized components usable by UPDATE, and additional expression shapes where MySQL deems individual columns writable | single-table, same-identity nested joins, and outer view layers compose writable targets and checks; one join component updates or inserts at a time | medium | refusal |
+| Updatable-view breadth | nested write targets with distinct definer/security contexts, UNION-shaped read-only join components, and additional expression shapes where MySQL deems individual columns writable | single-table, same-identity nested joins, outer view layers, and aggregate read-only join components compose writable targets; one mergeable component updates or inserts at a time | medium | refusal |
 | ALGORITHM / explicit DEFINER / ALTER VIEW | supported | SQL SECURITY DEFINER and INVOKER execute with their respective identities; algorithm selection, explicit definers, and alteration remain absent | low | refusal |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | `InformationSchema.showCreateView` returns raw user text without the wrapper | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |

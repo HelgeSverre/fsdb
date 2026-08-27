@@ -161,8 +161,11 @@ for writes. Scalar and correlated subqueries in a view predicate remain part
 of the lowered base-table write.
 Mergeable component views and a simple outer view layer retain the join's
 writable targets, predicates, and per-component checks when their stored
-security identity is unchanged. A join across view components with different
-definers or security modes remains read-only.
+security identity is unchanged. A nested component with a different definer
+or security mode remains a read-only source in the outer view.
+For UPDATE, an aggregate component may remain materialized and read-only while
+another component supplies the writable columns. INSERT through a join still
+requires every component to be mergeable.
 Single-table insertable views additionally accept `INSERT`, `INSERT ...
 SELECT`, `REPLACE` in each supported source form, and `ON DUPLICATE KEY
 UPDATE`. Every written or referenced column must be exposed, and the privilege

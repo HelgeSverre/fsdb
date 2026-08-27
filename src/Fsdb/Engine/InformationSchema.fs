@@ -1079,8 +1079,8 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                     false
                 elif not select.Joins.IsEmpty then
                     sourceAllowsUpdates source
-                    && (select.Joins
-                        |> List.forall (fun join ->
+                    || (select.Joins
+                        |> List.exists (fun join ->
                             match join.Table with
                             | FromTable table -> sourceAllowsUpdates table
                             | _ -> false))

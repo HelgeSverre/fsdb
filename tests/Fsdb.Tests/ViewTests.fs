@@ -387,6 +387,51 @@ let tests =
                   [ [ Some "1"; Some "14" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
                   "nested join writes persist"
 
+          testCase "join views update mergeable components beside materialized views"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE view_amounts (group_id INT, amount INT)") "create amounts"
+              expectOk (run store "INSERT INTO view_amounts VALUES (1, 4), (1, 6), (2, 20)") "seed amounts"
+
+              expectOk
+                  (run store "CREATE TABLE view_targets (id INT PRIMARY KEY, group_id INT NOT NULL DEFAULT 1, n INT NOT NULL)")
+                  "create targets"
+
+              expectOk (run store "INSERT INTO view_targets VALUES (1, 1, 10), (2, 2, 20)") "seed targets"
+
+              expectOk
+                  (run store "CREATE VIEW materialized_totals AS SELECT group_id, SUM(amount) AS total FROM view_amounts GROUP BY group_id")
+                  "create materialized component"
+
+              expectOk
+                  (run store "CREATE VIEW targets_with_totals AS SELECT t.id, t.n, x.total FROM view_targets t JOIN materialized_totals x ON x.group_id = t.group_id")
+                  "create joined view"
+
+              expectOk
+                  (run store "CREATE VIEW reversed_targets_with_totals AS SELECT t.id, t.n, x.total FROM materialized_totals x JOIN view_targets t ON x.group_id = t.group_id")
+                  "create reversed joined view"
+
+              Expect.equal
+                  (rows store "SELECT table_name, is_updatable FROM information_schema.views WHERE table_name IN ('targets_with_totals', 'reversed_targets_with_totals') ORDER BY table_name")
+                  [ [ Some "reversed_targets_with_totals"; Some "YES" ]; [ Some "targets_with_totals"; Some "YES" ] ]
+                  "one mergeable component makes the join view updatable"
+
+              expectOk (run store "UPDATE targets_with_totals SET n = 11 WHERE id = 1") "update physical leading component"
+              expectOk (run store "UPDATE reversed_targets_with_totals SET n = 21 WHERE id = 2") "update physical joined component"
+
+              match run store "UPDATE targets_with_totals SET total = 99 WHERE id = 1" with
+              | Err(1348, "Column 'total' is not updatable") -> ()
+              | other -> failtestf "expected materialized-column refusal, got %A" other
+
+              match run store "INSERT INTO targets_with_totals(id, n) VALUES (3, 30)" with
+              | Err(1471, "The target table targets_with_totals of the INSERT is not insertable-into") -> ()
+              | other -> failtestf "expected materialized join insert refusal, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id, n FROM view_targets ORDER BY id")
+                  [ [ Some "1"; Some "11" ]; [ Some "2"; Some "21" ] ]
+                  "only the mergeable component changes"
+
           testCase "a direct view streams an ordered limit from its base table"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
