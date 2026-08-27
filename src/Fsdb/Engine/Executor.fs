@@ -5113,18 +5113,6 @@ and private applyResolvedJoin
 
         let buildCombinedRows (rightIndexed: (int * Value[]) list) (matched: (int * int * Value[]) list) =
             let matchedCombined = matched |> List.map (fun (_, _, c) -> c)
-            let matchedLeft = matched |> List.map (fun (li, _, _) -> li) |> Set.ofList
-            let matchedRight = matched |> List.map (fun (_, ri, _) -> ri) |> Set.ofList
-
-            let leftOnly =
-                leftIndexed.Value
-                |> List.filter (fst >> matchedLeft.Contains >> not)
-                |> List.map (fun (_, l) -> Array.append l rightNullPadding)
-
-            let rightOnly =
-                rightIndexed
-                |> List.filter (fst >> matchedRight.Contains >> not)
-                |> List.map (fun (_, r) -> Array.append leftNullPadding r)
 
             let combinedRows =
                 match join.Kind with
@@ -5132,9 +5120,25 @@ and private applyResolvedJoin
                 | CrossJoin
                 | NaturalJoin -> matchedCombined
                 | LeftJoin
-                | NaturalLeftJoin -> matchedCombined @ leftOnly
+                | NaturalLeftJoin ->
+                    let matchesByLeft = matched |> List.groupBy (fun (li, _, _) -> li) |> Map.ofList
+
+                    leftIndexed.Value
+                    |> List.collect (fun (li, left) ->
+                        matchesByLeft
+                        |> Map.tryFind li
+                        |> Option.map (List.sortBy (fun (_, ri, _) -> ri) >> List.map (fun (_, _, combined) -> combined))
+                        |> Option.defaultValue [ Array.append left rightNullPadding ])
                 | RightJoin
-                | NaturalRightJoin -> matchedCombined @ rightOnly
+                | NaturalRightJoin ->
+                    let matchesByRight = matched |> List.groupBy (fun (_, ri, _) -> ri) |> Map.ofList
+
+                    rightIndexed
+                    |> List.collect (fun (ri, right) ->
+                        matchesByRight
+                        |> Map.tryFind ri
+                        |> Option.map (List.sortBy (fun (li, _, _) -> li) >> List.map (fun (_, _, combined) -> combined))
+                        |> Option.defaultValue [ Array.append leftNullPadding right ])
 
             newSources, combinedRows
 

@@ -2189,6 +2189,22 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected hash joins to resolve both key collations, got %A" other
 
+                testCase "outer hash joins preserve the retained side's scan order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (id INT PRIMARY KEY, ref_id INT)" |> ignore
+                    runDefault store "CREATE TABLE referenced (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO parent VALUES (1, NULL), (2, 10), (3, 20)" |> ignore
+                    runDefault store "INSERT INTO referenced VALUES (10), (20), (30)" |> ignore
+
+                    match runDefault store "SELECT p.id, r.id FROM parent p LEFT JOIN referenced r ON p.ref_id = r.id" with
+                    | ResultSet(_, [ [ Some "1"; None ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "20" ] ]) -> ()
+                    | other -> failtestf "expected left rows to retain scan order, got %A" other
+
+                    match runDefault store "SELECT p.id, r.id FROM parent p RIGHT JOIN referenced r ON p.ref_id = r.id" with
+                    | ResultSet(_, [ [ Some "2"; Some "10" ]; [ Some "3"; Some "20" ]; [ None; Some "30" ] ]) -> ()
+                    | other -> failtestf "expected right rows to retain scan order, got %A" other
+
                 testCase "incompatible equal-rank collations return 1267"
                 <| fun _ ->
                     let store = newStore ()
