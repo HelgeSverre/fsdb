@@ -237,7 +237,9 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
 
     let database =
         if capabilities &&& ClientConnectWithDb <> 0u && r.Remaining > 0 then
-            Some(r.ReadNullTerminatedString())
+            match r.ReadNullTerminatedString() with
+            | "" -> None
+            | name -> Some name
         else
             None
 

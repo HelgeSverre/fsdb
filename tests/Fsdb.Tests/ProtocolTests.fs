@@ -144,6 +144,19 @@ let tests =
               Expect.equal resp.Username "root" "username"
               Expect.equal resp.Database None "no database requested"
 
+          testCase "parseHandshakeResponse treats an empty requested database as absent"
+          <| fun _ ->
+              let w = Writer()
+              w.WriteInt32LE(int (ClientProtocol41 ||| ClientSecureConnection ||| ClientConnectWithDb))
+              w.WriteInt32LE 16777216
+              w.WriteByte 45uy
+              w.WriteBytes(Array.zeroCreate<byte> 23)
+              w.WriteNullTerminatedString "root"
+              w.WriteByte 0uy
+              w.WriteNullTerminatedString ""
+              let response = parseHandshakeResponse (w.ToArray())
+              Expect.equal response.Database None "empty database names do not request USE"
+
           testCase "parseHandshakeResponse rejects an auth length above Int32.MaxValue"
           <| fun _ ->
               let w = Writer()
