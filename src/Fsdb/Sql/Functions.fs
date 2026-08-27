@@ -4510,9 +4510,11 @@ let private regexpArity (name: string) =
     | _ -> None
 
 let validateRegexpArity (name: string) arguments =
+    let count = List.length arguments
+
     match regexpArity name with
-    | Some(minimum, maximum) when List.length arguments < minimum || List.length arguments > maximum ->
-            raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
+    | Some(minimum, maximum) when count < minimum || count > maximum ->
+        raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
     | _ -> ()
 
 let regexpFunction (name: string) (collation: Collation.Collation) : Scalar option =

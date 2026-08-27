@@ -2915,6 +2915,13 @@ let private lateralTable: Parser<FromItem, unit> =
         | FromSubquery(body, alias) -> FromLateral(body, alias)
         | other -> other
 
+let private uniformRowWidth (rows: Expr list list) =
+    match rows with
+    | [] -> None
+    | first :: rest ->
+        let width = first.Length
+        if rest |> List.forall (fun row -> row.Length = width) then Some width else None
+
 /// `(VALUES ROW(...), ROW(...)) [AS] alias [(c1, c2, ...)]` — MySQL 8's table
 /// value constructor. Desugared into the `UNION ALL` of one-row `SELECT`s it
 /// is exactly equivalent to, so it needs no `FromItem` case and no executor
@@ -2929,11 +2936,10 @@ let private valuesTable: Parser<FromItem, unit> =
     .>>. ((keyword "AS" >>. identifier) <|> identifier)
     .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
     >>= fun ((rows, alias), colNames) ->
-        let width = List.length (List.head rows)
-
-        if rows |> List.exists (fun r -> List.length r <> width) then
+        match uniformRowWidth rows with
+        | None ->
             fail "every ROW() of a VALUES table must have the same number of columns"
-        else
+        | Some width ->
             let names =
                 match colNames with
                 | Some ns when List.length ns <> width -> []
@@ -3316,11 +3322,10 @@ let private valuesQueryStmt: Parser<Statement, unit> =
 
     keyword "VALUES" >>. sepBy1 row (sym ",") .>>. queryTail
     >>= fun (rows, (orderBy, limit, offset)) ->
-        let width = rows.Head.Length
-
-        if rows |> List.exists (fun values -> values.Length <> width) then
+        match uniformRowWidth rows with
+        | None ->
             fail "all VALUES rows must have the same number of columns"
-        else
+        | Some _ ->
             let selectOf values =
                 values
                 |> List.mapi (fun index value -> value, Some(sprintf "column_%d" index))
