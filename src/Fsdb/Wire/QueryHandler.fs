@@ -799,47 +799,6 @@ let private literalSetRhs (rhs: string) : Value option =
     else
         None
 
-/// Evaluates a `SET` user-variable right-hand side through the ordinary
-/// expression grammar. A private variable map preserves SET's all-or-
-/// nothing application when a later fragment fails.
-let private resolveUserSetRhs
-    (session: Session)
-    (userVariables: Map<string, Value>)
-    (sql: string)
-    (rhs: string)
-    : Result<Value * Map<string, Value>, QueryResult> =
-    match literalSetRhs rhs with
-    | Some value -> Ok(value, userVariables)
-    | None ->
-        match Parser.parseExpression rhs with
-        | Error _ -> Error(syntaxError sql)
-        | Ok expression ->
-            let variables = expressionVariablesFor session userVariables
-            let store = Session.currentStore session
-            let dbName = session.Database |> Option.defaultValue defaultDatabase
-
-            Executor.withVariableContext variables (fun () ->
-                Executor.evaluateExpression store (registryFor session) dbName expression
-                |> Result.map (fun value -> value, variables.UserVariables.Value))
-
-let private resolveSystemSetRhs
-    (session: Session)
-    (userVariables: Map<string, Value>)
-    (sql: string)
-    (rhs: string)
-    : Result<Value * Map<string, Value>, QueryResult> =
-    match literalSetRhs rhs with
-    | Some value -> Ok(value, userVariables)
-    | None when bareSetIdentifier.IsMatch(rhs.Trim()) -> Ok(VString(rhs.Trim()), userVariables)
-    | None ->
-        resolveUserSetRhs session userVariables sql rhs
-
-/// Whether a `sql_mode` value (comma-separated, as stored in
-/// `Session.Variables`) still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES
-/// — shared by `handleSet` (which records a new `sql_mode`) and
-/// `executeStatement` (which re-derives it from the *current* session before
-/// every statement, since `Storage.Store.StrictMode` is store-wide state
-/// shared by every connection; see the note on `Storage.Store.StrictMode`).
 let private hasSqlMode (name: string) (value: string) =
     let modes =
         value.Split(',')
@@ -863,6 +822,53 @@ let private isStrictSqlMode value =
 
 let private usesAnsiQuotes (value: string) =
     hasSqlMode "ANSI_QUOTES" value || hasSqlMode "ANSI" value
+
+let private usesIgnoreSpace (value: string) =
+    hasSqlMode "IGNORE_SPACE" value || hasSqlMode "ANSI" value
+
+let private parserOptionsForSession (session: Session) =
+    let sqlMode = lookupVar session "sql_mode" |> Option.flatten |> Option.defaultValue ""
+
+    let options: Parser.ParserOptions =
+        { AnsiQuotes = usesAnsiQuotes sqlMode
+          IgnoreSpace = usesIgnoreSpace sqlMode }
+
+    options
+
+/// Evaluates a `SET` user-variable right-hand side through the ordinary
+/// expression grammar. A private variable map preserves SET's all-or-
+/// nothing application when a later fragment fails.
+let private resolveUserSetRhs
+    (session: Session)
+    (userVariables: Map<string, Value>)
+    (sql: string)
+    (rhs: string)
+    : Result<Value * Map<string, Value>, QueryResult> =
+    match literalSetRhs rhs with
+    | Some value -> Ok(value, userVariables)
+    | None ->
+        match Parser.parseExpressionWithOptions (parserOptionsForSession session) rhs with
+        | Error _ -> Error(syntaxError sql)
+        | Ok expression ->
+            let variables = expressionVariablesFor session userVariables
+            let store = Session.currentStore session
+            let dbName = session.Database |> Option.defaultValue defaultDatabase
+
+            Executor.withVariableContext variables (fun () ->
+                Executor.evaluateExpression store (registryFor session) dbName expression
+                |> Result.map (fun value -> value, variables.UserVariables.Value))
+
+let private resolveSystemSetRhs
+    (session: Session)
+    (userVariables: Map<string, Value>)
+    (sql: string)
+    (rhs: string)
+    : Result<Value * Map<string, Value>, QueryResult> =
+    match literalSetRhs rhs with
+    | Some value -> Ok(value, userVariables)
+    | None when bareSetIdentifier.IsMatch(rhs.Trim()) -> Ok(VString(rhs.Trim()), userVariables)
+    | None ->
+        resolveUserSetRhs session userVariables sql rhs
 
 let private applySqlMode (store: Store) (value: string) =
     setStrictMode store (isStrictSqlMode value)
@@ -1944,32 +1950,33 @@ type private BoundedConcurrentCache<'key, 'value when 'key: equality>(capacity: 
             false
 
 let private parsedStatements =
-    BoundedConcurrentCache<struct (bool * string), Statement>(parsedStatementCapacity)
+    BoundedConcurrentCache<struct (bool * bool * string), Statement>(parsedStatementCapacity)
 
 let private parsedStatementCandidates =
     BoundedConcurrentCache<int, byte>(parsedStatementCandidateCapacity)
 
-let private isRepeatedStatement (ansiQuotes: bool) (sql: string) =
+let private isRepeatedStatement (options: Parser.ParserOptions) (sql: string) =
     // The fingerprint only decides admission. Cache lookups still use the
     // complete SQL and mode, so collisions cannot select the wrong AST.
-    let fingerprint = HashCode.Combine(ansiQuotes, StringComparer.Ordinal.GetHashCode sql)
+    let fingerprint =
+        HashCode.Combine(options.AnsiQuotes, options.IgnoreSpace, StringComparer.Ordinal.GetHashCode sql)
 
     if parsedStatementCandidates.TryAdd(fingerprint, 0uy) then
         false
     else
         true
 
-let private parseStatement (ansiQuotes: bool) (sql: string) =
-    let key = struct (ansiQuotes, sql)
+let private parseStatement (options: Parser.ParserOptions) (sql: string) =
+    let key = struct (options.AnsiQuotes, options.IgnoreSpace, sql)
 
     match parsedStatements.TryGetValue key with
     | true, statement -> Result.Ok statement
     | false, _ ->
-        match Parser.parseWithAnsiQuotes ansiQuotes sql with
+        match Parser.parseWithOptions options sql with
         | Result.Ok statement as parsed ->
             let cacheable =
                 sql.Length <= cacheableSqlLength
-                && isRepeatedStatement ansiQuotes sql
+                && isRepeatedStatement options sql
 
             if cacheable then
                 parsedStatements.TryAdd(key, statement) |> ignore
@@ -1977,20 +1984,20 @@ let private parseStatement (ansiQuotes: bool) (sql: string) =
             parsed
         | Result.Error _ as error -> error
 
-let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
-    let ansiQuotes = lookupVar session "sql_mode" |> Option.flatten |> Option.exists usesAnsiQuotes
+let private executeStatement (session: Session) (normalizedSql: string) (parserSql: string) : Session * QueryResult =
+    let parserOptions = parserOptionsForSession session
 
     let action, parsedSql =
-        if Regex.IsMatch(sql, @"^\s*CREATE\s+TEMPORARY\s+TABLE\b", RegexOptions.IgnoreCase) then
-            Some CreateTemporary, Regex.Replace(sql, @"^(\s*CREATE\s+)TEMPORARY\s+", "$1", RegexOptions.IgnoreCase)
-        elif Regex.IsMatch(sql, @"^\s*DROP\s+TEMPORARY\s+TABLE\b", RegexOptions.IgnoreCase) then
-            Some DropTemporary, Regex.Replace(sql, @"^(\s*DROP\s+)TEMPORARY\s+", "$1", RegexOptions.IgnoreCase)
+        if Regex.IsMatch(normalizedSql, @"^\s*CREATE\s+TEMPORARY\s+TABLE\b", RegexOptions.IgnoreCase) then
+            Some CreateTemporary, Regex.Replace(normalizedSql, @"^(\s*CREATE\s+)TEMPORARY\s+", "$1", RegexOptions.IgnoreCase)
+        elif Regex.IsMatch(normalizedSql, @"^\s*DROP\s+TEMPORARY\s+TABLE\b", RegexOptions.IgnoreCase) then
+            Some DropTemporary, Regex.Replace(normalizedSql, @"^(\s*DROP\s+)TEMPORARY\s+", "$1", RegexOptions.IgnoreCase)
         else
-            None, sql
+            None, parserSql
 
-    match parseStatement ansiQuotes parsedSql with
+    match parseStatement parserOptions parsedSql with
     | Result.Ok stmt -> executeParsedWithTemporaryAction action session stmt
-    | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError sql detail
+    | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError parserSql detail
 
 /// Every statement form `dispatch` recognizes purely by text probe
 /// (SET/USE/SHOW/transaction control) rather than `Parser.parse` — one DU
@@ -2833,7 +2840,10 @@ let renumberPlaceholders (stmt: Statement) : Statement * int =
 /// (SET/SHOW/transaction control) — those still execute textually through
 /// `Sql`, so their placeholder count is the plain `placeholderPositions`
 /// count rather than a parser one.
-let private prepareStatementWithAnsiQuotes (ansiQuotes: bool) (sql: string) : Result<Statement option * int, int * string> =
+let private prepareStatementWithOptions
+    (options: Parser.ParserOptions)
+    (sql: string)
+    : Result<Statement option * int, int * string> =
     let trimmed = sql.Trim().TrimEnd(';').Trim()
     let upper = trimmed.ToUpperInvariant()
 
@@ -2842,7 +2852,7 @@ let private prepareStatementWithAnsiQuotes (ansiQuotes: bool) (sql: string) : Re
     elif (tryProbe trimmed upper).IsSome then
         Result.Ok(None, placeholderPositions sql |> List.length)
     else
-        match Parser.parseWithAnsiQuotes ansiQuotes sql with
+        match Parser.parseWithOptions options sql with
         | Result.Ok stmt ->
             let renumbered, count = renumberPlaceholders stmt
 
@@ -2864,11 +2874,10 @@ let private prepareStatementWithAnsiQuotes (ansiQuotes: bool) (sql: string) : Re
             | _ -> Result.Error(1064, "syntax error")
 
 let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
-    prepareStatementWithAnsiQuotes false sql
+    prepareStatementWithOptions { AnsiQuotes = false; IgnoreSpace = false } sql
 
 let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
-    let ansiQuotes = lookupVar session "sql_mode" |> Option.flatten |> Option.exists usesAnsiQuotes
-    prepareStatementWithAnsiQuotes ansiQuotes sql
+    prepareStatementWithOptions (parserOptionsForSession session) sql
 
 let preparedMetadata
     (session: Session)
@@ -3276,7 +3285,7 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
                         // values from which descriptors can be inferred.
                         let session, result = runProbe session sql probe
                         { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
-                    | None -> executeStatement session sql upper
+                    | None -> executeStatement session sql rawSql
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and

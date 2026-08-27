@@ -766,6 +766,58 @@ let tests =
               | ResultSet([ "missing_column" ], [ [ Some "missing_column" ] ]) -> ()
               | other -> failtestf "expected a non-ANSI string literal, got %A" other
 
+          testCase "IGNORE_SPACE controls built-in calls, reserved names, prepares, and parse caching"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let defaultSession = create 1 store
+              let ignoreSession, _ = handle (create 2 store) "SET sql_mode = 'IGNORE_SPACE'"
+
+              for _ in 1..2 do
+                  match handle ignoreSession "SELECT COUNT (*)" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected spaced COUNT under IGNORE_SPACE, got %A" other
+
+              match handle defaultSession "SELECT COUNT (*)" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected default mode to reject spaced COUNT, got %A" other
+
+              match handle ignoreSession "SELECT COUNT /**/ (*)" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected an intervening comment to remain invalid, got %A" other
+
+              match prepareStatementForSession ignoreSession "SELECT COUNT (?)" with
+              | Ok(Some _, 1) -> ()
+              | other -> failtestf "expected an IGNORE_SPACE prepared statement, got %A" other
+
+              match prepareStatementForSession defaultSession "SELECT COUNT (?)" with
+              | Error(1064, _) -> ()
+              | other -> failtestf "expected default prepared parsing to reject spaced COUNT, got %A" other
+
+              let ignoreSession, setResult = handle ignoreSession "SET @spaced = CAST (1 AS SIGNED)"
+              Expect.equal setResult (Affected 0UL) "SET expression should honor IGNORE_SPACE"
+
+              match handle ignoreSession "SELECT @spaced" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the spaced SET expression result, got %A" other
+
+              match handle defaultSession "SET @spaced = CAST (1 AS SIGNED)" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected default SET expression parsing to reject spaced CAST, got %A" other
+
+              match handle ignoreSession "CREATE TABLE count (i INT)" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected COUNT to be reserved under IGNORE_SPACE, got %A" other
+
+              match handle ignoreSession "CREATE TABLE `count` (i INT)" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected a quoted COUNT table, got %A" other
+
+              let ansiSession, _ = handle (create 3 store) "SET sql_mode = 'ANSI'"
+
+              match handle ansiSession "SELECT COUNT (*)" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected ANSI to imply IGNORE_SPACE, got %A" other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -280,6 +280,39 @@ let tests =
                         (mkSelect([ FuncCall("HEX", [ Lit(VString "a") ]), None ], None, None, [], None, None))
                         "hex call"
 
+                testCase "IGNORE_SPACE permits spaced built-ins and reserves their unquoted names"
+                <| fun _ ->
+                    let options: ParserOptions =
+                        { AnsiQuotes = false
+                          IgnoreSpace = true }
+
+                    Expect.equal
+                        (parseWithOptions options "SELECT COUNT (*) FROM t")
+                        (Ok(mkSelect([ FuncCall("COUNT", [ Star None ]), None ], Some "t", None, [], None, None)))
+                        "spaced COUNT"
+
+                    for sql in
+                        [ "SELECT CAST (1 AS SIGNED)"
+                          "SELECT EXTRACT (YEAR FROM created_at) FROM t"
+                          "SELECT GROUP_CONCAT (a) FROM t"
+                          "SELECT NOW ()"
+                          "SELECT TRIM (' a ')" ] do
+                        match parseWithOptions options sql with
+                        | Ok _ -> ()
+                        | Error error -> failtestf "expected IGNORE_SPACE to parse %s, got %s" sql error
+
+                    match parseWithOptions options "SELECT COUNT /**/ (*) FROM t" with
+                    | Error _ -> ()
+                    | Ok statement -> failtestf "expected an intervening comment to remain invalid, got %A" statement
+
+                    match parseWithOptions options "CREATE TABLE count (i INT)" with
+                    | Error _ -> ()
+                    | Ok statement -> failtestf "expected COUNT to be reserved, got %A" statement
+
+                    match parseWithOptions options "CREATE TABLE `count` (i INT)" with
+                    | Ok(CreateTable { Name = "count" }) -> ()
+                    | other -> failtestf "expected a quoted COUNT table, got %A" other
+
                 testCase "SELECT cannot be parsed as a function name"
                 <| fun _ ->
                     match parse "SELECT SELECT(1)" with

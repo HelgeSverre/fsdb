@@ -16,6 +16,13 @@ open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Temporal
 
+[<Struct>]
+type ParserOptions =
+    { AnsiQuotes: bool
+      IgnoreSpace: bool }
+
+let private ignoreSpaceMode = System.Threading.AsyncLocal<bool>()
+
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
 type LocalLoad =
@@ -46,11 +53,14 @@ let private lineComment: Parser<unit, unit> =
     attempt (pstring "--" .>> followedBy (skipSatisfy Char.IsWhiteSpace <|> eof))
     >>. skipManyTill anyChar (skipNewline <|> eof)
 
+let private hashComment: Parser<unit, unit> =
+    pchar '#' >>. skipManyTill anyChar (skipNewline <|> eof)
+
 let private blockComment: Parser<unit, unit> = pstring "/*" >>. skipManyTill anyChar (pstring "*/" >>% ())
 
 /// Whitespace and comments, skipped after every token so parsers never have
 /// to think about trailing space.
-let private ws: Parser<unit, unit> = skipMany (choice [ spaces1; lineComment; blockComment ])
+let private ws: Parser<unit, unit> = skipMany (choice [ spaces1; lineComment; hashComment; blockComment ])
 
 /// The numeric form of `Protocol.ServerVersion` ("8.4.0-fsdb"), for
 /// `stripVersionComments` below. Duplicated rather than shared because
@@ -67,13 +77,10 @@ let private serverVersionNumber = 80400
 /// the first half (splice it back in) doesn't need its own grammar rule.
 /// Not recursive — mysqldump never nests these.
 ///
-/// Ordinary comments are stripped in the same pass — `# ...`-to-EOL,
-/// `-- `-to-EOL (MySQL requires whitespace/EOL after the `--`, `5--3` is
-/// arithmetic), and plain `/* ... */` — because `QueryHandler`'s text
-/// probes (SET/SHOW/...) match on this normalized text, and a dump-import
-/// client (TablePlus) ships each statement with its surrounding comment
-/// banner attached rather than stripping client-side like the mysql CLI.
-let stripVersionComments (sql: string) : string =
+/// `stripVersionComments` also removes ordinary comments for text probes;
+/// parser entry points preserve them because a comment is not interchangeable
+/// with whitespace between a built-in name and `(` under `IGNORE_SPACE`.
+let private rewriteVersionComments (stripOrdinaryComments: bool) (sql: string) =
     let sb = Text.StringBuilder(sql.Length)
     let mutable i = 0
     // `'`/`"`/`` ` `` while inside a string/identifier literal — a `/*!`
@@ -105,18 +112,29 @@ let stripVersionComments (sql: string) : string =
         | None when sql.[i] = '#' ->
             // `# ...` comment: to end of line.
             let eol = sql.IndexOf('\n', i)
-            sb.Append ' ' |> ignore
-            i <- (if eol = -1 then sql.Length else eol)
+            let stop = if eol = -1 then sql.Length else eol
+
+            if stripOrdinaryComments then
+                sb.Append ' ' |> ignore
+            else
+                sb.Append(sql, i, stop - i) |> ignore
+
+            i <- stop
         | None when
             sql.[i] = '-'
             && i + 1 < sql.Length
             && sql.[i + 1] = '-'
             && (i + 2 = sql.Length || Char.IsWhiteSpace sql.[i + 2])
             ->
-            // `-- ` comment: to end of line.
             let eol = sql.IndexOf('\n', i)
-            sb.Append ' ' |> ignore
-            i <- (if eol = -1 then sql.Length else eol)
+            let stop = if eol = -1 then sql.Length else eol
+
+            if stripOrdinaryComments then
+                sb.Append ' ' |> ignore
+            else
+                sb.Append(sql, i, stop - i) |> ignore
+
+            i <- stop
         | None when
             i + 2 < sql.Length
             && sql.[i] = '/'
@@ -131,7 +149,11 @@ let stripVersionComments (sql: string) : string =
                 sb.Append(sql.Substring i) |> ignore
                 i <- sql.Length
             else
-                sb.Append ' ' |> ignore
+                if stripOrdinaryComments then
+                    sb.Append ' ' |> ignore
+                else
+                    sb.Append(sql, i, closeAt + 2 - i) |> ignore
+
                 i <- closeAt + 2
         | None when i + 2 < sql.Length && sql.[i] = '/' && sql.[i + 1] = '*' && sql.[i + 2] = '!' ->
             match sql.IndexOf("*/", i + 3) with
@@ -172,6 +194,12 @@ let stripVersionComments (sql: string) : string =
 
     sb.ToString()
 
+let stripVersionComments (sql: string) : string =
+    rewriteVersionComments true sql
+
+let private expandVersionComments (sql: string) =
+    rewriteVersionComments false sql
+
 /// True when `sql` is nothing but whitespace/comments — real MySQL treats
 /// that as a harmless no-op (`Query OK, 0 rows affected`), not a syntax
 /// error, which matters once a version-gated comment above strips down to
@@ -195,7 +223,14 @@ let private keyword (s: string) : Parser<unit, unit> =
     attempt (pstringCI s >>. nextCharSatisfiesNot isIdentChar) .>> ws <?> s
 
 let private functionKeyword (s: string) : Parser<unit, unit> =
-    attempt (pstringCI s >>. nextCharSatisfiesNot isIdentChar >>. pchar '(') >>. ws <?> s
+    let openParen: Parser<unit, unit> =
+        fun stream ->
+            if ignoreSpaceMode.Value then
+                (spaces >>. pchar '(' >>. ws) stream
+            else
+                (pchar '(' >>. ws) stream
+
+    attempt (pstringCI s >>. nextCharSatisfiesNot isIdentChar >>. openParen) <?> s
 
 let private intTok: Parser<int, unit> = pint32 .>> ws
 
@@ -224,6 +259,16 @@ let private windowOnlyFunctionNames =
 
 let private reservedWindowFunctionNames =
     HashSet<string>(windowOnlyFunctionNames, StringComparer.OrdinalIgnoreCase)
+
+let private whitespaceSensitiveFunctionNames =
+    HashSet<string>(
+        [ "adddate"; "bit_and"; "bit_or"; "bit_xor"; "cast"; "count"; "curdate"; "curtime"
+          "date_add"; "date_sub"; "extract"; "group_concat"; "max"; "mid"; "min"; "now"
+          "position"; "session_user"; "std"; "stddev"; "stddev_pop"; "stddev_samp"; "subdate"
+          "substr"; "substring"; "sum"; "sysdate"; "system_user"; "trim"; "variance"; "var_pop"
+          "var_samp" ],
+        StringComparer.OrdinalIgnoreCase
+    )
 
 let private reservedWords =
     HashSet<string>(
@@ -327,7 +372,11 @@ let private charsetIntroducerNames =
 let private bareIdent: Parser<string, unit> =
     many1Satisfy2 isIdentStart isIdentChar
     >>= fun w ->
-        if reservedWords.Contains w || charsetIntroducerNames.Contains w then
+        if
+            reservedWords.Contains w
+            || charsetIntroducerNames.Contains w
+            || ignoreSpaceMode.Value && whitespaceSensitiveFunctionNames.Contains w
+        then
             fail (sprintf "'%s' is a reserved keyword" w)
         else
             preturn w
@@ -833,13 +882,6 @@ let private rowConstructorAtom: Parser<Expr, unit> =
 
 let private genericFuncCall: Parser<Expr, unit> =
     let reservedNames = set [ "any"; "select"; "some"; "regexp" ]
-    let whitespaceSensitiveNames =
-        set
-            [ "adddate"; "bit_and"; "bit_or"; "bit_xor"; "cast"; "count"; "curdate"; "curtime"
-              "date_add"; "date_sub"; "extract"; "group_concat"; "max"; "mid"; "min"; "now"
-              "position"; "session_user"; "std"; "stddev"; "stddev_pop"; "stddev_samp"; "subdate"
-              "substr"; "substring"; "sum"; "sysdate"; "system_user"; "trim"; "variance"; "var_pop"
-              "var_samp" ]
 
     attempt (
         many1Satisfy2 isIdentStart isIdentChar
@@ -850,8 +892,11 @@ let private genericFuncCall: Parser<Expr, unit> =
                 fail "reserved function name"
             else
                 let openParen =
-                    if whitespaceSensitiveNames.Contains normalizedName then
-                        pchar '(' >>. ws
+                    if whitespaceSensitiveFunctionNames.Contains normalizedName then
+                        if ignoreSpaceMode.Value then
+                            spaces >>. pchar '(' >>. ws
+                        else
+                            pchar '(' >>. ws
                     else
                         ws >>. pchar '(' >>. ws
 
@@ -3703,11 +3748,13 @@ let private ansiQuotedIdentifiers (sql: string) : string =
 
     output.ToString()
 
-let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
+let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0
     exprDepth.Value <- 0
-    let sql = if enabled then ansiQuotedIdentifiers sql else sql
-    let sql = stripVersionComments sql
+    let previousIgnoreSpace = ignoreSpaceMode.Value
+    ignoreSpaceMode.Value <- options.IgnoreSpace
+    let sql = if options.AnsiQuotes then ansiQuotedIdentifiers sql else sql
+    let sql = expandVersionComments sql
     let full = ws >>. statement .>> opt (sym ";") .>> eof
 
     // `open FParsec` brings its own `Ok`/`Error` (from `Reply`'s status) into
@@ -3717,17 +3764,27 @@ let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string
     // exception should ever be able to escape as a raw .NET exception and
     // drop the caller's connection — a syntax error is always a clean
     // `Result.Error`, however it originates.
-    try
-        if exceedsParenthesisDepthLimit sql then
-            Result.Error "expression nested too deeply"
-        else
-            match run full sql with
-            | Success(stmt, _, _) -> Result.Ok stmt
-            | Failure(msg, _, _) -> Result.Error msg
-    with ex ->
-        Result.Error ex.Message
+    let parse () =
+        try
+            if exceedsParenthesisDepthLimit sql then
+                Result.Error "expression nested too deeply"
+            else
+                match run full sql with
+                | Success(stmt, _, _) -> Result.Ok stmt
+                | Failure(msg, _, _) -> Result.Error msg
+        with ex ->
+            Result.Error ex.Message
 
-let parse (sql: string) : Result<Statement, string> = parseWithAnsiQuotes false sql
+    try
+        parse ()
+    finally
+        ignoreSpaceMode.Value <- previousIgnoreSpace
+
+let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
+    parseWithOptions { AnsiQuotes = enabled; IgnoreSpace = false } sql
+
+let parse (sql: string) : Result<Statement, string> =
+    parseWithOptions { AnsiQuotes = false; IgnoreSpace = false } sql
 
 /// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
 /// client-to-server data stream.
@@ -3873,20 +3930,32 @@ let splitStatements (sql: string) : Result<string list, string> =
 /// CHECK constraints. It shares the statement parser's placeholder/depth
 /// guards so damaged catalog text fails as a normal schema error rather
 /// than escaping through the query worker.
-let parseExpression (sql: string) : Result<Expr, string> =
+let parseExpressionWithOptions (options: ParserOptions) (sql: string) : Result<Expr, string> =
     placeholderCounterLocal.Value <- 0
     exprDepth.Value <- 0
-    let sql = stripVersionComments sql
+    let previousIgnoreSpace = ignoreSpaceMode.Value
+    ignoreSpaceMode.Value <- options.IgnoreSpace
+    let sql = if options.AnsiQuotes then ansiQuotedIdentifiers sql else sql
+    let sql = expandVersionComments sql
+
+    let parse () =
+        try
+            if exceedsParenthesisDepthLimit sql then
+                Result.Error "expression nested too deeply"
+            else
+                match run (ws >>. expr .>> eof) sql with
+                | Success(expression, _, _) -> Result.Ok expression
+                | Failure(message, _, _) -> Result.Error message
+        with ex ->
+            Result.Error ex.Message
 
     try
-        if exceedsParenthesisDepthLimit sql then
-            Result.Error "expression nested too deeply"
-        else
-            match run (ws >>. expr .>> eof) sql with
-            | Success(expression, _, _) -> Result.Ok expression
-            | Failure(message, _, _) -> Result.Error message
-    with ex ->
-        Result.Error ex.Message
+        parse ()
+    finally
+        ignoreSpaceMode.Value <- previousIgnoreSpace
+
+let parseExpression (sql: string) : Result<Expr, string> =
+    parseExpressionWithOptions { AnsiQuotes = false; IgnoreSpace = false } sql
 
 /// Parses the user-defined-variable target at the front of a `SET`
 /// assignment. The right-hand side remains source text because `SET` has
