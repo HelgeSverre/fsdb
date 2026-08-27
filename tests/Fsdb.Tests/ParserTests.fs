@@ -284,7 +284,8 @@ let tests =
                 <| fun _ ->
                     let options: ParserOptions =
                         { AnsiQuotes = false
-                          IgnoreSpace = true }
+                          IgnoreSpace = true
+                          PipesAsConcat = false }
 
                     Expect.equal
                         (parseWithOptions options "SELECT COUNT (*) FROM t")
@@ -312,6 +313,31 @@ let tests =
                     match parseWithOptions options "CREATE TABLE `count` (i INT)" with
                     | Ok(CreateTable { Name = "count" }) -> ()
                     | other -> failtestf "expected a quoted COUNT table, got %A" other
+
+                testCase "PIPES_AS_CONCAT rewrites only unquoted SQL operators"
+                <| fun _ ->
+                    let options: ParserOptions =
+                        { AnsiQuotes = false
+                          IgnoreSpace = false
+                          PipesAsConcat = true }
+
+                    Expect.equal
+                        (parse "SELECT 1 || 0")
+                        (Ok(mkSelect([ BinOp(Or, Lit(VInt 1L), Lit(VInt 0L)), None ], None, None, [], None, None)))
+                        "default pipes are logical OR"
+
+                    Expect.equal
+                        (parseWithOptions options "SELECT 'a' || 'b'")
+                        (Ok(mkSelect([ FuncCall("CONCAT", [ Lit(VString "a"); Lit(VString "b") ]), None ], None, None, [], None, None)))
+                        "mode pipes are CONCAT"
+
+                    match parseWithOptions options "SELECT 'a||b', 'a' /* || */ || 'b'" with
+                    | Ok(Select { Projections = [ Lit(VString "a||b"), _; FuncCall("CONCAT", _), _ ] }) -> ()
+                    | other -> failtestf "expected quoted/comment pipes to remain untouched, got %A" other
+
+                    match parseWithOptions options "SELECT /*!80000 'a' || */ 'b'" with
+                    | Ok(Select { Projections = [ FuncCall("CONCAT", _), _ ] }) -> ()
+                    | other -> failtestf "expected executable-comment pipes to use the active mode, got %A" other
 
                 testCase "SELECT cannot be parsed as a function name"
                 <| fun _ ->

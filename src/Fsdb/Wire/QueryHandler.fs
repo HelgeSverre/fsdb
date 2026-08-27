@@ -826,6 +826,9 @@ let private usesAnsiQuotes modes =
 let private usesIgnoreSpace modes =
     hasSqlMode modes "IGNORE_SPACE" || hasSqlMode modes "ANSI"
 
+let private usesPipesAsConcat modes =
+    hasSqlMode modes "PIPES_AS_CONCAT" || hasSqlMode modes "ANSI"
+
 let private parserOptionsForSession (session: Session) =
     let modes =
         lookupVar session "sql_mode"
@@ -835,7 +838,8 @@ let private parserOptionsForSession (session: Session) =
 
     let options: Parser.ParserOptions =
         { AnsiQuotes = usesAnsiQuotes modes
-          IgnoreSpace = usesIgnoreSpace modes }
+          IgnoreSpace = usesIgnoreSpace modes
+          PipesAsConcat = usesPipesAsConcat modes }
 
     options
 
@@ -1955,7 +1959,7 @@ type private BoundedConcurrentCache<'key, 'value when 'key: equality>(capacity: 
             false
 
 let private parsedStatements =
-    BoundedConcurrentCache<struct (bool * bool * string), Statement>(parsedStatementCapacity)
+    BoundedConcurrentCache<struct (Parser.ParserOptions * string), Statement>(parsedStatementCapacity)
 
 let private parsedStatementCandidates =
     BoundedConcurrentCache<int, byte>(parsedStatementCandidateCapacity)
@@ -1964,7 +1968,7 @@ let private isRepeatedStatement (options: Parser.ParserOptions) (sql: string) =
     // The fingerprint only decides admission. Cache lookups still use the
     // complete SQL and mode, so collisions cannot select the wrong AST.
     let fingerprint =
-        HashCode.Combine(options.AnsiQuotes, options.IgnoreSpace, StringComparer.Ordinal.GetHashCode sql)
+        HashCode.Combine(options.AnsiQuotes, options.IgnoreSpace, options.PipesAsConcat, StringComparer.Ordinal.GetHashCode sql)
 
     if parsedStatementCandidates.TryAdd(fingerprint, 0uy) then
         false
@@ -1972,7 +1976,7 @@ let private isRepeatedStatement (options: Parser.ParserOptions) (sql: string) =
         true
 
 let private parseStatement (options: Parser.ParserOptions) (sql: string) =
-    let key = struct (options.AnsiQuotes, options.IgnoreSpace, sql)
+    let key = struct (options, sql)
 
     match parsedStatements.TryGetValue key with
     | true, statement -> Result.Ok statement
@@ -2879,7 +2883,7 @@ let private prepareStatementWithOptions
             | _ -> Result.Error(1064, "syntax error")
 
 let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
-    prepareStatementWithOptions { AnsiQuotes = false; IgnoreSpace = false } sql
+    prepareStatementWithOptions { AnsiQuotes = false; IgnoreSpace = false; PipesAsConcat = false } sql
 
 let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
     prepareStatementWithOptions (parserOptionsForSession session) sql

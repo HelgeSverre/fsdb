@@ -818,6 +818,38 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected ANSI to imply IGNORE_SPACE, got %A" other
 
+          testCase "PIPES_AS_CONCAT changes pipes from logical OR to concatenation"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let defaultSession = create 1 store
+              let concatSession, _ = handle (create 2 store) "SET sql_mode = 'PIPES_AS_CONCAT'"
+
+              match handle defaultSession "SELECT 'a' || 'b', 1 || 0, NULL || 1" |> snd with
+              | ResultSet(_, [ [ Some "0"; Some "1"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected default pipes to be logical OR, got %A" other
+
+              match handle concatSession "SELECT 'a' || 'b', 'a' || 1 + 2, 1 + 2 || 'x', NULL || 'x'" |> snd with
+              | ResultSet(_, [ [ Some "ab"; Some "2"; Some "3"; None ] ]) -> ()
+              | other -> failtestf "expected PIPES_AS_CONCAT precedence and NULL propagation, got %A" other
+
+              match prepareStatementForSession concatSession "SELECT ? || ?" with
+              | Ok(Some(Select { Projections = [ FuncCall("CONCAT", [ Placeholder 0; Placeholder 1 ]), _ ] }), 2) -> ()
+              | other -> failtestf "expected prepared pipes to capture concatenation mode, got %A" other
+
+              match prepareStatementForSession defaultSession "SELECT ? || ?" with
+              | Ok(Some(Select { Projections = [ BinOp(Or, Placeholder 0, Placeholder 1), _ ] }), 2) -> ()
+              | other -> failtestf "expected prepared pipes to retain default OR semantics, got %A" other
+
+              match handle concatSession "SELECT 'a' || 'b'" |> snd, handle defaultSession "SELECT 'a' || 'b'" |> snd with
+              | ResultSet(_, [ [ Some "ab" ] ]), ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected parse-cache isolation between pipe modes, got %A" other
+
+              let ansiSession, _ = handle (create 3 store) "SET sql_mode = 'ANSI'"
+
+              match handle ansiSession "SELECT 'a' || 'b'" |> snd with
+              | ResultSet(_, [ [ Some "ab" ] ]) -> ()
+              | other -> failtestf "expected ANSI to imply PIPES_AS_CONCAT, got %A" other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

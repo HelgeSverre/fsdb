@@ -19,9 +19,11 @@ open Fsdb.Temporal
 [<Struct>]
 type ParserOptions =
     { AnsiQuotes: bool
-      IgnoreSpace: bool }
+      IgnoreSpace: bool
+      PipesAsConcat: bool }
 
 let private ignoreSpaceMode = System.Threading.AsyncLocal<bool>()
+let private pipesAsConcatMode = System.Threading.AsyncLocal<bool>()
 
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
@@ -1603,7 +1605,16 @@ let private collateTerm: Parser<Expr, unit> =
             | None -> fail (sprintf "Unknown collation '%s'" name)
 
 opp.TermParser <- collateTerm
-opp.AddOperator(InfixOperator("|", ws, 1, Associativity.Left, (fun a b -> FuncCall("BITWISE_OR", [ a; b ]))))
+let private singlePipeBoundary = notFollowedBy (pchar '|') >>. ws
+let private concatOperatorToken = "\u001f"
+
+let private concatOperatorBoundary: Parser<unit, unit> =
+    fun stream ->
+        if pipesAsConcatMode.Value then ws stream else (fail "PIPES_AS_CONCAT is disabled") stream
+
+opp.AddOperator(
+    InfixOperator("|", singlePipeBoundary, 1, Associativity.Left, (fun a b -> FuncCall("BITWISE_OR", [ a; b ])))
+)
 opp.AddOperator(InfixOperator("^", ws, 2, Associativity.Left, (fun a b -> FuncCall("BITWISE_XOR", [ a; b ]))))
 opp.AddOperator(InfixOperator("&", ws, 3, Associativity.Left, (fun a b -> FuncCall("BITWISE_AND", [ a; b ]))))
 opp.AddOperator(InfixOperator("<<", ws, 4, Associativity.Left, (fun a b -> FuncCall("BITWISE_SHIFT_LEFT", [ a; b ]))))
@@ -1653,6 +1664,15 @@ let private negateExpr (e: Expr) : Expr =
 
 opp.AddOperator(PrefixOperator("-", ws, 7, true, negateExpr))
 opp.AddOperator(PrefixOperator("~", ws, 7, true, (fun value -> FuncCall("BITWISE_NOT", [ value ]))))
+opp.AddOperator(
+    InfixOperator(
+        concatOperatorToken,
+        concatOperatorBoundary,
+        7,
+        Associativity.Left,
+        (fun a b -> FuncCall("CONCAT", [ a; b ]))
+    )
+)
 
 /// `IN (SELECT ...)` vs. `IN (expr, expr, ...)` — both start with `(`, so
 /// the subquery form is tried first (`attempt`ed since `selectWithCtes`
@@ -1768,7 +1788,8 @@ let private xorExpr: Parser<Expr, unit> =
     chainl1 andExpr (keyword "XOR" >>% fun a b -> BinOp(Xor, a, b))
 
 let private orExpr: Parser<Expr, unit> =
-    chainl1 xorExpr (keyword "OR" >>% fun a b -> BinOp(Or, a, b))
+    let logicalOr = (keyword "OR" <|> sym "||") >>% fun a b -> BinOp(Or, a, b)
+    chainl1 xorExpr logicalOr
 
 let private assignmentExpr: Parser<Expr, unit> =
     attempt (userVariableTarget .>> sym ":=" .>>. expr)
@@ -3682,37 +3703,37 @@ statementRef.Value <-
           explainStmt ]
     <?> "statement"
 
-/// Parses one SQL statement, with an optional trailing `;`. Session-variable
-/// forms like `SELECT @@version` are deliberately out of scope — those are
-/// handled by `QueryHandler` before reaching this parser.
-let private ansiQuotedIdentifiers (sql: string) : string =
-    let output = Text.StringBuilder(sql.Length)
-    let mutable index = 0
+/// Rewrites syntax whose token meaning is selected by `sql_mode`, without
+/// touching quoted text or ordinary comments. ANSI double-quoted identifiers
+/// become backticks, while concatenating pipes become one private
+/// high-precedence operator token understood by the expression parser.
+let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string =
+    if not options.AnsiQuotes && not options.PipesAsConcat then
+        sql
+    else
+        let output = Text.StringBuilder(sql.Length)
+        let mutable index = 0
 
-    let copyQuoted (quote: char) =
-        output.Append quote |> ignore
-        index <- index + 1
-        let mutable closed = false
+        let copyQuoted (quote: char) =
+            output.Append quote |> ignore
+            index <- index + 1
+            let mutable closed = false
 
-        while index < sql.Length && not closed do
-            let current = sql.[index]
+            while index < sql.Length && not closed do
+                let current = sql.[index]
 
-            if quote <> '`' && current = '\\' && index + 1 < sql.Length then
-                output.Append(current).Append(sql.[index + 1]) |> ignore
-                index <- index + 2
-            elif current = quote && index + 1 < sql.Length && sql.[index + 1] = quote then
-                output.Append(current).Append(current) |> ignore
-                index <- index + 2
-            else
-                output.Append current |> ignore
-                index <- index + 1
-                closed <- current = quote
+                if quote <> '`' && current = '\\' && index + 1 < sql.Length then
+                    output.Append(current).Append(sql.[index + 1]) |> ignore
+                    index <- index + 2
+                elif current = quote && index + 1 < sql.Length && sql.[index + 1] = quote then
+                    output.Append(current).Append(current) |> ignore
+                    index <- index + 2
+                else
+                    output.Append current |> ignore
+                    index <- index + 1
+                    closed <- current = quote
 
-    while index < sql.Length do
-        match sql.[index] with
-        | '\''
-        | '`' as quote -> copyQuoted quote
-        | '"' ->
+        let copyAnsiIdentifier () =
             output.Append '`' |> ignore
             index <- index + 1
             let mutable closed = false
@@ -3732,37 +3753,48 @@ let private ansiQuotedIdentifiers (sql: string) : string =
                 | current ->
                     output.Append current |> ignore
                     index <- index + 1
-        | '#' ->
-            let endOfLine = sql.IndexOf('\n', index)
-            let length = if endOfLine < 0 then sql.Length - index else endOfLine - index
-            output.Append(sql, index, length) |> ignore
-            index <- index + length
-        | '-' when index + 1 < sql.Length && sql.[index + 1] = '-' && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2]) ->
-            let endOfLine = sql.IndexOf('\n', index)
-            let length = if endOfLine < 0 then sql.Length - index else endOfLine - index
-            output.Append(sql, index, length) |> ignore
-            index <- index + length
-        | '/' when index + 1 < sql.Length && sql.[index + 1] = '*' ->
-            let closeAt = sql.IndexOf("*/", index + 2, StringComparison.Ordinal)
-            let length = if closeAt < 0 then sql.Length - index else closeAt + 2 - index
-            output.Append(sql, index, length) |> ignore
-            index <- index + length
-        | current ->
-            output.Append current |> ignore
-            index <- index + 1
 
-    output.ToString()
+        let copyLineComment () =
+            let endOfLine = sql.IndexOf('\n', index)
+            let length = if endOfLine < 0 then sql.Length - index else endOfLine - index
+            output.Append(sql, index, length) |> ignore
+            index <- index + length
+
+        while index < sql.Length do
+            match sql.[index] with
+            | '\''
+            | '`' as quote -> copyQuoted quote
+            | '"' when options.AnsiQuotes -> copyAnsiIdentifier ()
+            | '"' -> copyQuoted '"'
+            | '#' -> copyLineComment ()
+            | '-' when index + 1 < sql.Length && sql.[index + 1] = '-' && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2]) ->
+                copyLineComment ()
+            | '/' when index + 1 < sql.Length && sql.[index + 1] = '*' ->
+                let closeAt = sql.IndexOf("*/", index + 2, StringComparison.Ordinal)
+                let length = if closeAt < 0 then sql.Length - index else closeAt + 2 - index
+                output.Append(sql, index, length) |> ignore
+                index <- index + length
+            | '|' when options.PipesAsConcat && index + 1 < sql.Length && sql.[index + 1] = '|' ->
+                output.Append concatOperatorToken |> ignore
+                index <- index + 2
+            | current ->
+                output.Append current |> ignore
+                index <- index + 1
+
+        output.ToString()
 
 let private withParserOptions (options: ParserOptions) (sql: string) parse =
     let previousIgnoreSpace = ignoreSpaceMode.Value
+    let previousPipesAsConcat = pipesAsConcatMode.Value
     ignoreSpaceMode.Value <- options.IgnoreSpace
-    let sql = if options.AnsiQuotes then ansiQuotedIdentifiers sql else sql
-    let sql = expandVersionComments sql
+    pipesAsConcatMode.Value <- options.PipesAsConcat
+    let sql = sql |> expandVersionComments |> rewriteSqlForOptions options
 
     try
         parse sql
     finally
         ignoreSpaceMode.Value <- previousIgnoreSpace
+        pipesAsConcatMode.Value <- previousPipesAsConcat
 
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0
@@ -3790,10 +3822,10 @@ let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, 
     withParserOptions options sql parse
 
 let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
-    parseWithOptions { AnsiQuotes = enabled; IgnoreSpace = false } sql
+    parseWithOptions { AnsiQuotes = enabled; IgnoreSpace = false; PipesAsConcat = false } sql
 
 let parse (sql: string) : Result<Statement, string> =
-    parseWithOptions { AnsiQuotes = false; IgnoreSpace = false } sql
+    parseWithOptions { AnsiQuotes = false; IgnoreSpace = false; PipesAsConcat = false } sql
 
 /// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
 /// client-to-server data stream.
@@ -3957,7 +3989,7 @@ let parseExpressionWithOptions (options: ParserOptions) (sql: string) : Result<E
     withParserOptions options sql parse
 
 let parseExpression (sql: string) : Result<Expr, string> =
-    parseExpressionWithOptions { AnsiQuotes = false; IgnoreSpace = false } sql
+    parseExpressionWithOptions { AnsiQuotes = false; IgnoreSpace = false; PipesAsConcat = false } sql
 
 /// Parses the user-defined-variable target at the front of a `SET`
 /// assignment. The right-hand side remains source text because `SET` has
