@@ -3289,7 +3289,7 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
         index.KeyColumns
         |> traverse (partLength index)
         |> Result.bind (fun lengths ->
-            if List.sum lengths > 3072 then
+            if index.Kind = BTree && List.sum lengths > 3072 then
                 Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes"))
             else
                 Ok()))

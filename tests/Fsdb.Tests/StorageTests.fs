@@ -183,6 +183,13 @@ let tests =
 
                     Expect.equal (createTable store defaultDatabase "bounded_key" keyColumns [ boundedKey ] [] None None) (Ok()) "prefixes bound the key size"
 
+                    let fullTextKey = { wideKey with Kind = FullTextIndex }
+
+                    Expect.equal
+                        (createTable store defaultDatabase "wide_fulltext_key" keyColumns [ fullTextKey ] [] None None)
+                        (Ok())
+                        "FULLTEXT indexes are not bounded by the B-tree key limit"
+
                 testCase "column comments allow 1024 Unicode scalars and reject longer text"
                 <| fun _ ->
                     let store = create ()
