@@ -96,7 +96,9 @@ module Routine =
           Name: string
           Definition: string
           Created: DateTime option
-          Definer: string }
+          Definer: string
+          Parameters: string
+          SecurityType: string }
 
     let tryRead (row: Value[]) : Entry option =
         if row.Length < 5 then
@@ -107,7 +109,9 @@ module Routine =
                   Name = textAt 1 row
                   Definition = textAt 2 row
                   Created = dateTimeAt 3 row
-                  Definer = textAt 4 row }
+                  Definer = textAt 4 row
+                  Parameters = row |> Array.tryItem 5 |> Option.bind toText |> Option.defaultValue ""
+                  SecurityType = row |> Array.tryItem 6 |> Option.bind toText |> Option.defaultValue "DEFINER" }
 
     let matches schema name (entry: Entry) =
         sameIdentity schema name entry.Schema entry.Name

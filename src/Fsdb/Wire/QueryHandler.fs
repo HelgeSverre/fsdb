@@ -2614,7 +2614,15 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             | None -> session, Err(1305, sprintf "%s %s does not exist" kind name)
             | Some routine ->
                 let definer = accountRefOf routine.Definer
-                let ddl = sprintf "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`() %s" definer.Name definer.Host name routine.Definition
+                let ddl =
+                    sprintf
+                        "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`(%s) SQL SECURITY %s %s"
+                        definer.Name
+                        definer.Host
+                        name
+                        routine.Parameters
+                        routine.SecurityType
+                        routine.Definition
 
                 session,
                 ResultSet(
@@ -2943,18 +2951,18 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
         Ok None
 
 type private TextRoutineCommand =
-    | CreateProcedure of name: string * body: string
-    | CallProcedure of name: string
+    | CreateProcedure of name: string * parameters: string * securityType: string * body: string
+    | CallProcedure of name: string * arguments: string
     | DropProcedure of name: string * ifExists: bool
 
 let private createProcedureRe =
     Regex(
-        @"^\s*CREATE\s+PROCEDURE\s+(?<name>\S+)\s*\(\s*\)\s+(?<body>.+)$",
+        @"^\s*CREATE\s+PROCEDURE\s+(?<name>\S+)\s*\((?<parameters>(?:[^()]|\([^()]*\))*)\)\s+(?:SQL\s+SECURITY\s+(?<security>INVOKER|DEFINER)\s+)?(?<body>.+)$",
         RegexOptions.IgnoreCase ||| RegexOptions.Singleline
     )
 
 let private callProcedureRe =
-    Regex(@"^\s*CALL\s+(?<name>[^\s(]+)(?:\s*\(\s*\))?\s*$", RegexOptions.IgnoreCase)
+    Regex(@"^\s*CALL\s+(?<name>[^\s(]+)(?:\s*\((?<arguments>.*)\))?\s*$", RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
 
 let private dropProcedureRe =
     Regex(@"^\s*DROP\s+PROCEDURE\s+(?<ifExists>IF\s+EXISTS\s+)?(?<name>\S+)\s*$", RegexOptions.IgnoreCase)
@@ -2965,13 +2973,32 @@ let private tryTextRoutineCommand (sql: string) =
     let drop = dropProcedureRe.Match(sql)
 
     if create.Success then
-        Some(CreateProcedure(create.Groups.["name"].Value, create.Groups.["body"].Value))
+        let security =
+            create.Groups.["security"].Value
+            |> function
+                | "" -> "DEFINER"
+                | value -> value.ToUpperInvariant()
+
+        Some(
+            CreateProcedure(
+                create.Groups.["name"].Value,
+                create.Groups.["parameters"].Value.Trim(),
+                security,
+                create.Groups.["body"].Value
+            )
+        )
     elif call.Success then
-        Some(CallProcedure call.Groups.["name"].Value)
+        Some(CallProcedure(call.Groups.["name"].Value, call.Groups.["arguments"].Value.Trim()))
     elif drop.Success then
         Some(DropProcedure(drop.Groups.["name"].Value, drop.Groups.["ifExists"].Success))
     else
         None
+
+let private routineParameterRe =
+    Regex(
+        @"^\s*(?:IN\s+)?(?:`(?:``|[^`])+`|[A-Za-z_$][A-Za-z0-9_$]*)\s+[A-Za-z]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?(?:\s+UNSIGNED)?\s*$",
+        RegexOptions.IgnoreCase
+    )
 
 let private routineStatement (body: string) =
     let trimmed = body.Trim()
@@ -3089,13 +3116,14 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             Auth.checkForAccount session.Store (accountOf session) [ privilege, Auth.OnDb database ]
 
         match command with
-        | CreateProcedure(qualifiedName, body) ->
+        | CreateProcedure(qualifiedName, parameters, securityType, body) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
             match authorize "CREATE ROUTINE" database with
             | Error(code, message) -> session, Err(code, message)
             | Ok() when routineEntries () |> List.exists (SystemCatalog.Routine.matches database name) ->
                 session, Err(1304, sprintf "PROCEDURE %s already exists" name)
+            | Ok() when parameters <> "" && not (routineParameterRe.IsMatch parameters) -> session, syntaxError parameters
             | Ok() ->
                 let statement = routineStatement body
 
@@ -3115,13 +3143,19 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
                             "mysql"
                             "routines"
                             None
-                            [ [ VString database; VString name; VString body; VDateTime DateTime.Now; VString definer ] ]
+                            [ [ VString database
+                                VString name
+                                VString body
+                                VDateTime DateTime.Now
+                                VString definer
+                                VString parameters
+                                VString securityType ] ]
                     with
                     | Ok _ -> session, Affected 0UL
                     | Error error ->
                         let code, message = Storage.toMySqlError error
                         session, Err(code, message)
-        | CallProcedure qualifiedName ->
+        | CallProcedure(qualifiedName, arguments) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
             match routineEntries () |> List.tryFind (SystemCatalog.Routine.matches database name) with
@@ -3129,6 +3163,10 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             | Some routine ->
                 match authorize "EXECUTE" database with
                 | Error(code, message) -> session, Err(code, message)
+                | Ok() when routine.Parameters <> "" ->
+                    session, Err(1235, "Executing parameterized stored procedures is not supported")
+                | Ok() when arguments <> "" ->
+                    session, Err(1318, sprintf "Incorrect number of arguments for PROCEDURE %s; expected 0" name)
                 | Ok() ->
                     match routineStatement routine.Definition with
                     | Some statement -> dispatch session statement

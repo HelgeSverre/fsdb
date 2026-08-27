@@ -1134,7 +1134,7 @@ let tests =
 
                   match handle session "SHOW CREATE PROCEDURE answer" |> snd with
                   | ResultSet(_, [ [ Some "answer"; _; Some ddl; _; _; _ ] ]) ->
-                      Expect.stringContains ddl "PROCEDURE `answer`() SELECT 42 AS value" "stored definition"
+                      Expect.stringContains ddl "PROCEDURE `answer`() SQL SECURITY DEFINER SELECT 42 AS value" "stored definition"
                   | other -> failtestf "expected create procedure, got %A" other
 
                   match handle session "SELECT routine_name FROM information_schema.routines WHERE routine_schema = 'fsdb'" |> snd with
@@ -1148,6 +1148,23 @@ let tests =
                   | Err(1305, _) -> ()
                   | other -> failtestf "expected missing procedure, got %A" other
               | _, other -> failtestf "expected procedure result, got %A" other
+
+          testCase "procedure declarations preserve one parameter and SQL SECURITY"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result =
+                  handle session "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT 10; END"
+
+              Expect.equal result (Affected 0UL) "created"
+
+              match handle session "SHOW CREATE PROCEDURE topics" |> snd with
+              | ResultSet(_, [ [ Some "topics"; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "PROCEDURE `topics`(IN num INT) SQL SECURITY INVOKER" "signature retained"
+              | other -> failtestf "expected parameterized procedure metadata, got %A" other
+
+              match handle session "CALL topics(1)" |> snd with
+              | Err(1235, _) -> ()
+              | other -> failtestf "expected explicit parameterized execution refusal, got %A" other
 
           testCase "single-statement procedure blocks persist and execute"
           <| fun _ ->

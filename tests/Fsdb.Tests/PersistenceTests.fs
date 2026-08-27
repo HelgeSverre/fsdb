@@ -941,6 +941,25 @@ let tests =
               let users = rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1])
               Expect.equal users [ VString "root" ] "bootstrap root row present"
 
+          testCase "procedure signatures and security survive WAL recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              match handle session "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT 10; END" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected procedure creation, got %A" other
+
+              let reloaded = load dir
+              let recovered = Fsdb.Session.create 2 reloaded
+
+              match handle recovered "SHOW CREATE PROCEDURE topics" |> snd with
+              | ResultSet(_, [ [ Some "topics"; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "PROCEDURE `topics`(IN num INT) SQL SECURITY INVOKER" "signature recovered"
+              | other -> failtestf "expected recovered procedure metadata, got %A" other
+
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->
               let dir = tempDataDir ()

@@ -2406,7 +2406,9 @@ let mysqlRoutinesColumns: ColumnDef list =
       keyCol "routine_name" 64
       sysCol "routine_definition" TText false (Some(VString ""))
       sysCol "created" (TDateTime 2) false None
-      sysCol "definer" (TChar 93) false (Some(VString "")) ]
+      sysCol "definer" (TChar 93) false (Some(VString ""))
+      sysCol "parameter_definition" TText false (Some(VString ""))
+      sysCol "security_type" (TChar 7) false (Some(VString "DEFINER")) ]
 
 let mysqlEventsColumns: ColumnDef list =
     [ keyCol "event_schema" 64
@@ -2449,60 +2451,41 @@ let private mysqlSystemDatabase () : Database =
 /// schema existed doesn't carry it). A no-op when `mysql` is already there,
 /// so a snapshot that *does* carry it (users/grants included) wins — except
 /// for individual system tables added after that snapshot was written
-/// (`triggers`/`views`), which are seeded empty into the existing schema so
+/// (`triggers`/`views`/`routines`), which are seeded empty into the existing schema so
 /// DDL and WAL replay against them can't hit `NoSuchTable`.
 let ensureMysqlSchema (store: Store) : unit =
     store.Databases.TryAdd("mysql", ref (mysqlSystemDatabase ())) |> ignore
 
     let dbRef = store.Databases.["mysql"]
 
-    if not (Map.containsKey "triggers" dbRef.Value) then
-        dbRef.Value <- Map.add "triggers" (sysTable "triggers" mysqlTriggersColumns []) dbRef.Value
-    else
-        // A snapshot written before `definer` existed carries 7-cell trigger
-        // rows: widen the table and pad them with the empty definer, which
-        // refuses to fire. Failing closed is the point — reading empty as
-        // "skip the check" or "run as root" is the escalation the column
-        // exists to stop, and a loud error is one DROP/CREATE from fixed.
-        let t = dbRef.Value.["triggers"]
-
-        if t.Columns.Length < mysqlTriggersColumns.Length then
-            let pad = List.skip t.Columns.Length mysqlTriggersColumns
-            let fill = pad |> List.map (fun c -> match c.Default with Some(DConst v) -> v | _ -> VNull) |> Array.ofList
+    let ensureTable name columns =
+        match Map.tryFind name dbRef.Value with
+        | None -> dbRef.Value <- Map.add name (sysTable name columns []) dbRef.Value
+        | Some table when table.Columns.Length < columns.Length ->
+            let addedColumns = List.skip table.Columns.Length columns
+            let defaultValues =
+                addedColumns
+                |> List.map (fun column -> match column.Default with Some(DConst value) -> value | _ -> VNull)
+                |> Array.ofList
 
             dbRef.Value <-
                 Map.add
-                    "triggers"
-                    { t with
-                        Columns = t.Columns @ pad
-                        RowsArray = t.RowsArray |> RowStore.map (fun row -> Array.append row fill) }
+                    name
+                    { table with
+                        Columns = table.Columns @ addedColumns
+                        RowsArray = table.RowsArray |> RowStore.map (fun row -> Array.append row defaultValues) }
                     dbRef.Value
+        | Some _ -> ()
 
-    if not (Map.containsKey "views" dbRef.Value) then
-        dbRef.Value <- Map.add "views" (sysTable "views" mysqlViewsColumns []) dbRef.Value
-    else
-        let views = dbRef.Value.["views"]
+    // Old trigger rows receive an empty definer and therefore fail closed;
+    // treating a missing identity as root would turn catalog migration into
+    // a privilege escalation.
+    ensureTable "triggers" mysqlTriggersColumns
+    ensureTable "views" mysqlViewsColumns
+    ensureTable "routines" mysqlRoutinesColumns
 
-        if views.Columns.Length < mysqlViewsColumns.Length then
-            let pad = List.skip views.Columns.Length mysqlViewsColumns
-            let fill = pad |> List.map (fun column -> match column.Default with Some(DConst value) -> value | _ -> VNull) |> Array.ofList
-
-            dbRef.Value <-
-                Map.add
-                    "views"
-                    { views with
-                        Columns = views.Columns @ pad
-                        RowsArray = views.RowsArray |> RowStore.map (fun row -> Array.append row fill) }
-                    dbRef.Value
-
-    if not (Map.containsKey "routines" dbRef.Value) then
-        dbRef.Value <- Map.add "routines" (sysTable "routines" mysqlRoutinesColumns []) dbRef.Value
-
-    if not (Map.containsKey "events" dbRef.Value) then
-        dbRef.Value <- Map.add "events" (sysTable "events" mysqlEventsColumns []) dbRef.Value
-
-    if not (Map.containsKey "check_constraints" dbRef.Value) then
-        dbRef.Value <- Map.add "check_constraints" (sysTable "check_constraints" mysqlCheckConstraintsColumns []) dbRef.Value
+    ensureTable "events" mysqlEventsColumns
+    ensureTable "check_constraints" mysqlCheckConstraintsColumns
 
 let create () : Store =
     let databases = ConcurrentDictionary<string, Database ref>()
