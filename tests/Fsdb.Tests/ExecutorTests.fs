@@ -4745,37 +4745,36 @@ let tests =
 
                 testCase "single-row INSERT into a child of a large PK-indexed parent stays flat, not linear in the parent's size"
                 <| fun _ ->
-                    // insertCore's own FK-parent lookup (`foreignKeyLookups`,
-                    // separate from `checkFkParent`'s fast path exercised
-                    // above) must answer via the parent's PK/UNIQUE index in
-                    // O(log n), not by scanning the *entire* parent table on
-                    // every INSERT statement.
-                    let store = newStore ()
-                    runDefault store "CREATE TABLE parent (id INT PRIMARY KEY)" |> ignore
-                    runDefault store "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent(id))" |> ignore
+                    let timeInserts parentRows =
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE parent (id INT PRIMARY KEY)" |> ignore
+                        runDefault store "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent(id))" |> ignore
 
-                    let batch = [ for i in 1 .. 20_000 -> sprintf "(%d)" i ] |> String.concat ", "
-                    runDefault store (sprintf "INSERT INTO parent VALUES %s" batch) |> ignore
+                        let batch = [ for i in 1 .. parentRows -> sprintf "(%d)" i ] |> String.concat ", "
+                        runDefault store (sprintf "INSERT INTO parent VALUES %s" batch) |> ignore
+                        runDefault store "INSERT INTO child VALUES (1, 1)" |> ignore
 
-                    // Warm up (JIT, allocator) before timing.
-                    runDefault store "INSERT INTO child VALUES (1, 1)" |> ignore
+                        let sw = System.Diagnostics.Stopwatch.StartNew()
 
-                    let sw = System.Diagnostics.Stopwatch.StartNew()
+                        for i in 2 .. 200 do
+                            runDefault store (sprintf "INSERT INTO child VALUES (%d, %d)" i i) |> ignore
 
-                    for i in 2 .. 200 do
-                        runDefault store (sprintf "INSERT INTO child VALUES (%d, %d)" i i) |> ignore
+                        sw.Stop()
+                        sw.Elapsed.TotalMilliseconds
 
-                    sw.Stop()
-
-                    let perInsertMs = sw.Elapsed.TotalMilliseconds / 199.0
+                    let at2k = timeInserts 2_000
+                    let at20k = timeInserts 20_000
+                    let ratio = at20k / max at2k 0.001
 
                     if not (TestSupport.skipTimingAssertions ()) then
                         Expect.isLessThan
-                            perInsertMs
-                            1.0
+                            ratio
+                            2.5
                             (sprintf
-                                "199 single-row INSERTs into a child of a 20,000-row PK-indexed parent averaged %f ms/insert — looks like a full parent scan again"
-                                perInsertMs)
+                                "FK inserts took %fms at 2k parent rows and %fms at 20k (ratio %f) — looks linear in parent size again"
+                                at2k
+                                at20k
+                                ratio)
 
                 testCase "point SELECT by PRIMARY KEY on a 50,000-row table stays flat, not linear in table size"
                 <| fun _ ->
