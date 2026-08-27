@@ -3762,7 +3762,7 @@ let splitStatements (sql: string) : Result<string list, string> =
         )
         || System.Text.RegularExpressions.Regex.IsMatch(
             prefix,
-            @"^\s*CREATE\s+PROCEDURE\s+\S+\s*\(\s*\)\s*$",
+            @"^\s*CREATE\s+PROCEDURE\s+\S+\s*\((?:[^()]|\([^()]*\))*\)\s*(?:SQL\s+SECURITY\s+(?:INVOKER|DEFINER)\s*)?$",
             options
         )
 

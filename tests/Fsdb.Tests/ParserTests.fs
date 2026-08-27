@@ -2827,6 +2827,20 @@ let tests =
                       "the procedure body remains one statement"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "statement batches preserve parameterized procedure bodies"
+          <| fun _ ->
+              let sql =
+                  "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT * FROM topics LIMIT num; END; SELECT 1"
+
+              match splitStatements sql with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT * FROM topics LIMIT num; END"
+                        "SELECT 1" ]
+                      "routine characteristics do not expose body delimiters"
+              | Error error -> failtestf "unexpected split error: %s" error
+
           testCase "statement batches reject unterminated literals"
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with
