@@ -349,6 +349,62 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                 && column.Generated.IsNone)
             |> List.forall (fun column -> Set.contains (column.Name.ToLowerInvariant()) columns)
 
+    let selectExpressions (select: SelectStmt) =
+        (select.Projections |> List.map fst)
+        @ (select.Where |> Option.toList)
+        @ (select.Having |> Option.toList)
+        @ select.GroupBy
+        @ (select.OrderBy |> List.map fst)
+        @ (select.Joins |> List.map _.On)
+
+    let hasBareOuterReference outerColumns (select: SelectStmt) =
+        let tableRefs =
+            (match select.From with Some(FromTable table) -> [ table ] | None -> [] | _ -> [])
+            @ (select.Joins |> List.choose (fun join -> match join.Table with FromTable table -> Some table | _ -> None))
+
+        let physicalSourcesOnly =
+            (select.From |> Option.forall (function FromTable _ -> true | _ -> false))
+            && (select.Joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false))
+
+        if not physicalSourcesOnly then
+            false
+        else
+            let localColumns =
+                tableRefs
+                |> List.collect (fun tableRef ->
+                    let database = tableRef.Database |> Option.defaultValue view.Schema
+
+                    InformationSchema.findTable store.Catalog database tableRef.Table
+                    |> Result.toOption
+                    |> Option.map (fun table -> table.Columns |> List.map (fun column -> column.Name.ToLowerInvariant()))
+                    |> Option.defaultValue [])
+                |> Set.ofList
+
+            let referencesOuterColumn =
+                Expression.exists (function
+                    | Col column ->
+                        let name = column.ToLowerInvariant()
+                        Set.contains name outerColumns && not (Set.contains name localColumns)
+                    | _ -> false)
+
+            selectExpressions select |> List.exists referencesOuterColumn
+
+    let hasDependentSubquery outerColumns expression =
+        Expression.fold
+            (fun found node ->
+                let dependent =
+                    Expression.subqueries node
+                    |> List.exists (fun select ->
+                        Expression.hasQualifiedOuterReference select
+                        || hasBareOuterReference outerColumns select)
+
+                if found || dependent then
+                    Expression.Prune true
+                else
+                    Expression.Descend false)
+            false
+            expression
+
     let rec classify seen (view: StoredView) (select: SelectStmt) =
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
@@ -364,7 +420,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                 let rec simplePredicate =
                     function
-                    | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ | WindowOver _ -> false
+                    | Exists _
+                    | Subquery _ -> true
+                    | InSubquery(value, _)
+                    | QuantifiedComparison(value, _, _, _) -> simplePredicate value
+                    | WindowOver _ -> false
                     | QualifiedCol(qualifier, _) ->
                         sourceNames
                         |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
@@ -461,6 +521,10 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         projectedColumns.IsEmpty
                         && (select.Projections |> List.exists (fun (expression, _) -> match expression with Star _ -> true | _ -> false))
 
+                    let dependentProjection =
+                        expandedProjections
+                        |> List.exists (fst >> hasDependentSubquery (projectedColumns |> List.map _.ToLowerInvariant() |> Set.ofList))
+
                     let projected =
                         expandedProjections
                         |> List.map (fun (expression, alias) ->
@@ -476,6 +540,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     if
                         unresolvedStar
+                        || dependentProjection
                         ||
                         outputNames.Length <> projected.Length
                         || (outputNames |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList).Count <> outputNames.Length
@@ -542,7 +607,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               UpdateFrom =
                                 { Database = Some database
                                   Table = table
-                                  Alias = None }
+                                  Alias = source.Alias }
                               UpdateJoins = []
                               AccessPath =
                                 { SecurityType = view.SecurityType
@@ -10383,67 +10448,6 @@ let private selectSubqueryExprs (select: SelectStmt) : Expr list =
     @ select.GroupBy
     @ (select.OrderBy |> List.map fst)
 
-/// Whether any expression in `sub` (its projections/`WHERE`/`HAVING`/
-/// `GROUP BY`/`ORDER BY`) references a table qualifier that isn't one of
-/// `sub`'s own `FROM`/`JOIN` aliases — `EXPLAIN`'s `DEPENDENT SUBQUERY` vs.
-/// plain `SUBQUERY` (a correlated `WHERE EXISTS (SELECT 1 FROM t2 WHERE
-/// t2.parent_id = t1.id)` references `t1`, which isn't one of `t2`'s own
-/// aliases). ponytail: only catches *qualified* correlation (`t1.id`, not a
-/// bare `id` that happens to resolve to the outer row) — good enough for
-/// every correlated subquery this codebase's own Laravel-shaped test suite
-/// writes, which always qualifies the outer reference.
-let private isCorrelated (sub: SelectStmt) : bool =
-    let ownAliases =
-        ((sub.From |> Option.map fromItemQualifier |> Option.toList) @ (sub.Joins |> List.map (fun j -> fromItemQualifier j.Table)))
-        |> List.map (fun s -> s.ToLowerInvariant())
-        |> Set.ofList
-
-    let rec references (expr: Expr) : bool =
-        match expr with
-        | Placeholder _ -> false
-        | MatchAgainst(_, q, _) -> references q
-        | QualifiedCol(t, _) -> not (ownAliases.Contains(t.ToLowerInvariant()))
-        | Exists _
-        | Subquery _ -> false
-        | InSubquery(e, _) -> references e
-        | QuantifiedComparison(e, _, _, _) -> references e
-        | BinOp(_, a, b) -> references a || references b
-        | Row values -> values |> List.exists references
-        | AssignUserVariable(_, value) -> references value
-        | Not e
-        | IsNull e
-        | IsNotNull e
-        | IsTrue e
-        | IsFalse e
-        | Distinct e
-        | OrderBy(e, _) -> references e
-        | Like(e, p, _, _) -> references e || references p
-        | Regexp(e, p) -> references e || references p
-        | In(e, xs) -> references e || xs |> List.exists references
-        | Between(e, lo, hi) -> references e || references lo || references hi
-        | Cast(e, _) -> references e
-        | Collate(e, _) -> references e
-        | Case(subject, whens, elseBranch) ->
-            (subject |> Option.map references |> Option.defaultValue false)
-            || whens |> List.exists (fun (c, r) -> references c || references r)
-            || (elseBranch |> Option.map references |> Option.defaultValue false)
-        | FuncCall(_, args) -> args |> List.exists references
-        | Lit _
-        | UserVariable _
-        | SystemVariable _
-        | Col _
-        | Star _
-        | WindowOver _ -> false
-
-    let exprs =
-        (sub.Projections |> List.map fst)
-        @ (sub.Where |> Option.toList)
-        @ (sub.Having |> Option.toList)
-        @ sub.GroupBy
-        @ (sub.OrderBy |> List.map fst)
-
-    exprs |> List.exists references
-
 /// `EXPLAIN`'s `type`/`rows` pair for one real (or `information_schema`
 /// virtual) table: `system` for a table with at most one row, `ALL`
 /// otherwise, and the table's actual current row count. `EXPLAIN` still
@@ -10770,7 +10774,7 @@ let rec private explainJoinBlock
         |> List.collect collectSubqueries
         |> traverse (fun sub ->
             let sid = nextId ()
-            let stype = if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
+            let stype = if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
             explainSelectBlock store registry dbName nextId acc sid stype sub)
         |> Result.map ignore)
 
@@ -11090,7 +11094,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 |> List.collect collectSubqueries
                 |> traverse (fun sub ->
                     let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                    explainSelectBlock store registry dbName nextId acc sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
                 |> Result.map ignore)
         )
     | ReplaceSet(table, assignments) ->
@@ -11104,7 +11108,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 |> List.collect (snd >> collectSubqueries)
                 |> traverse (fun sub ->
                     let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                    explainSelectBlock store registry dbName nextId acc sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
                 |> Result.map ignore)
         )
     | InsertSelect(table, _, select, _, _)
@@ -14340,8 +14344,8 @@ let rec executeAs
             let rewrite = rewriteViewExpression view
             let rewritten =
                 { deleteStmt with
-                    From = { deleteStmt.From with Database = Some view.Database; Table = view.Table }
-                    Targets = [ deleteStmt.From.Alias |> Option.defaultValue view.Table ]
+                    From = view.UpdateFrom
+                    Targets = [ view.UpdateFrom.Alias |> Option.defaultValue view.Table ]
                     Where = combineViewPredicate view.Predicate (deleteStmt.Where |> Option.map rewrite)
                     OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }

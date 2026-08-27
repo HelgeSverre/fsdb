@@ -102,6 +102,35 @@ let exists (predicate: Expr -> bool) (expression: Expr) : bool =
         false
         expression
 
+let private fromItemQualifier =
+    function
+    | FromTable table -> table.Alias |> Option.defaultValue table.Table
+    | FromSubquery(_, alias)
+    | FromLateral(_, alias)
+    | FromJsonTable(_, _, _, alias) -> alias
+
+let hasQualifiedOuterReference (select: SelectStmt) =
+    let localQualifiers =
+        (select.From |> Option.map fromItemQualifier |> Option.toList)
+        @ (select.Joins |> List.map (fun join -> fromItemQualifier join.Table))
+        |> List.map _.ToLowerInvariant()
+        |> Set.ofList
+
+    let expressions =
+        (select.Projections |> List.map fst)
+        @ (select.Where |> Option.toList)
+        @ (select.Having |> Option.toList)
+        @ select.GroupBy
+        @ (select.OrderBy |> List.map fst)
+        @ (select.Joins |> List.map _.On)
+
+    let referencesUnknownQualifier =
+        exists (function
+            | QualifiedCol(qualifier, _) -> not (Set.contains (qualifier.ToLowerInvariant()) localQualifiers)
+            | _ -> false)
+
+    expressions |> List.exists referencesUnknownQualifier
+
 let collect (chooser: Expr -> 'value option) (expression: Expr) : 'value list =
     fold
         (fun values node ->

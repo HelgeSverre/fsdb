@@ -270,6 +270,9 @@ INSERT ... SELECT, REPLACE VALUES/SET/SELECT, and ODKU, with required-column,
 repeated-column, exposed-column, and definer privilege checks. `LOCAL` and
 `CASCADED` CHECK OPTION values are persisted, exposed through metadata, and
 composed through nested views.
+Uncorrelated scalar projection subqueries preserve updateability but not
+insertability, dependent projection subqueries refuse writes, and subqueries
+inside view predicates lower with the base-table write.
 Direct physical inner-join views can update one component table per statement
 and insert through an explicit column list into one insertable component.
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are

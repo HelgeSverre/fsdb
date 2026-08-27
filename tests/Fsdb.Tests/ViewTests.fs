@@ -265,6 +265,72 @@ let tests =
                   [ [ Some "1"; Some "changed" ]; [ Some "2"; Some "two" ]; [ Some "4"; Some "four" ] ]
                   "right-table update persists"
 
+          testCase "subquery views follow MySQL updateability boundaries"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE subquery_rows (id INT PRIMARY KEY, n INT NOT NULL)") "create rows"
+              expectOk (run store "CREATE TABLE subquery_lookup (id INT PRIMARY KEY, v INT NOT NULL)") "create lookup"
+              expectOk (run store "INSERT INTO subquery_rows VALUES (1, 10), (2, 20)") "seed rows"
+              expectOk (run store "INSERT INTO subquery_lookup VALUES (1, 100), (2, 200)") "seed lookup"
+
+              expectOk
+                  (run store "CREATE VIEW projection_uncorrelated AS SELECT r.id, r.n, (SELECT MAX(v) FROM subquery_lookup) AS maximum FROM subquery_rows r")
+                  "create uncorrelated projection"
+
+              expectOk
+                  (run store "CREATE VIEW projection_correlated AS SELECT r.id, r.n, (SELECT v FROM subquery_lookup WHERE subquery_lookup.id = r.id) AS found FROM subquery_rows r")
+                  "create correlated projection"
+
+              expectOk
+                  (run store "CREATE VIEW projection_bare_correlated AS SELECT r.id, r.n, (SELECT v FROM subquery_lookup WHERE v = n) AS found FROM subquery_rows r")
+                  "create bare correlated projection"
+
+              expectOk
+                  (run store "CREATE VIEW predicate_uncorrelated AS SELECT r.id, r.n FROM subquery_rows r WHERE r.n < (SELECT MAX(v) FROM subquery_lookup)")
+                  "create uncorrelated predicate"
+
+              expectOk
+                  (run store "CREATE VIEW predicate_correlated AS SELECT r.id, r.n FROM subquery_rows r WHERE EXISTS (SELECT 1 FROM subquery_lookup WHERE subquery_lookup.id = r.id)")
+                  "create correlated predicate"
+
+              Expect.equal
+                  (rows store "SELECT table_name, is_updatable FROM information_schema.views WHERE table_name IN ('projection_uncorrelated', 'projection_correlated', 'projection_bare_correlated', 'predicate_uncorrelated', 'predicate_correlated') ORDER BY table_name")
+                  [ [ Some "predicate_correlated"; Some "YES" ]
+                    [ Some "predicate_uncorrelated"; Some "YES" ]
+                    [ Some "projection_bare_correlated"; Some "YES" ]
+                    [ Some "projection_correlated"; Some "YES" ]
+                    [ Some "projection_uncorrelated"; Some "YES" ] ]
+                  "metadata matches MySQL's creation-time flag"
+
+              expectOk (run store "UPDATE projection_uncorrelated SET n = 11 WHERE id = 1") "update through uncorrelated projection"
+              expectOk (run store "DELETE FROM projection_uncorrelated WHERE id = 2") "delete through uncorrelated projection"
+
+              match run store "INSERT INTO projection_uncorrelated(id, n) VALUES (3, 30)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected expression projection insert rejection, got %A" other
+
+              [ "UPDATE projection_correlated SET n = 12 WHERE id = 1"
+                "DELETE FROM projection_correlated WHERE id = 1"
+                "UPDATE projection_bare_correlated SET n = 12 WHERE id = 1" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1288, _) -> ()
+                  | other -> failtestf "expected dependent projection rejection for %s, got %A" sql other)
+
+              match run store "INSERT INTO projection_correlated(id, n) VALUES (4, 40)" with
+              | Err(1471, _) -> ()
+              | other -> failtestf "expected dependent projection insert rejection, got %A" other
+
+              expectOk (run store "UPDATE predicate_uncorrelated SET n = 13 WHERE id = 1") "update through uncorrelated predicate"
+              expectOk (run store "INSERT INTO predicate_uncorrelated VALUES (5, 50)") "insert through uncorrelated predicate"
+              expectOk (run store "UPDATE predicate_correlated SET n = 14 WHERE id = 1") "update through correlated predicate"
+              expectOk (run store "INSERT INTO predicate_correlated VALUES (6, 60)") "insert through correlated predicate"
+
+              Expect.equal
+                  (rows store "SELECT id, n FROM subquery_rows ORDER BY id")
+                  [ [ Some "1"; Some "14" ]; [ Some "5"; Some "50" ]; [ Some "6"; Some "60" ] ]
+                  "legal subquery-view writes persist"
+
           testCase "a direct view streams an ordered limit from its base table"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -370,14 +436,12 @@ let tests =
               expectOk (run store "CREATE VIEW check_text AS SELECT 'WITH CHECK OPTION' AS phrase") "create literal view"
               Expect.equal (rows store "SELECT * FROM check_text") [ [ Some "WITH CHECK OPTION" ] ] "literal tail is not a view clause"
 
-          testCase "a view predicate with a subquery is not writable"
+          testCase "a view predicate with a subquery remains writable"
           <| fun _ ->
               let store = setup ()
               expectOk (run store "CREATE VIEW filtered AS SELECT id, name FROM vendors WHERE id IN (SELECT vendor_id FROM receipts)") "create view"
-
-              match run store "UPDATE filtered SET name = 'blocked'" with
-              | Err(1288, _) -> ()
-              | other -> failtestf "expected complex predicate refusal, got %A" other
+              expectOk (run store "UPDATE filtered SET name = 'updated'") "update through subquery predicate"
+              Expect.equal (rows store "SELECT name FROM vendors ORDER BY id") [ [ Some "updated" ]; [ Some "updated" ] ] "matching rows update"
 
           testCase "writable views do not expose unprojected base columns"
           <| fun _ ->
