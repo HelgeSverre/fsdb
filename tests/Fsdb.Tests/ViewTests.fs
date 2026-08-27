@@ -213,6 +213,12 @@ let tests =
               expectOk (run store "UPDATE joined_filtered SET n = 12 WHERE doubled = 22") "rewrite computed predicate"
 
               expectOk
+                  (run store "CREATE VIEW layered_join AS SELECT id, n, note, n * 3 AS tripled FROM joined_rows WHERE n < 30")
+                  "create outer join layer"
+
+              expectOk (run store "UPDATE layered_join SET note = 'layered' WHERE tripled = 60") "update through outer join layer"
+
+              expectOk
                   (run store "CREATE VIEW joined_duplicates AS SELECT l.id, l.n, m.marker FROM joined_left l JOIN joined_many m ON m.left_id = l.id")
                   "create duplicate-match view"
 
@@ -262,7 +268,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT id, note FROM joined_right ORDER BY id")
-                  [ [ Some "1"; Some "changed" ]; [ Some "2"; Some "two" ]; [ Some "4"; Some "four" ] ]
+                  [ [ Some "1"; Some "changed" ]; [ Some "2"; Some "layered" ]; [ Some "4"; Some "four" ] ]
                   "right-table update persists"
 
           testCase "subquery views follow MySQL updateability boundaries"
@@ -330,6 +336,53 @@ let tests =
                   (rows store "SELECT id, n FROM subquery_rows ORDER BY id")
                   [ [ Some "1"; Some "14" ]; [ Some "5"; Some "50" ]; [ Some "6"; Some "60" ] ]
                   "legal subquery-view writes persist"
+
+          testCase "nested join views preserve component writes and checks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE nested_join_left (id INT PRIMARY KEY, n INT NOT NULL)") "create left"
+              expectOk (run store "CREATE TABLE nested_join_right (id INT PRIMARY KEY, note VARCHAR(20) NOT NULL)") "create right"
+              expectOk (run store "INSERT INTO nested_join_left VALUES (1, 10), (2, 20)") "seed left"
+              expectOk (run store "INSERT INTO nested_join_right VALUES (1, 'one'), (2, 'two')") "seed right"
+
+              expectOk
+                  (run store "CREATE VIEW positive_join_left AS SELECT id, n FROM nested_join_left WHERE n > 0 WITH CASCADED CHECK OPTION")
+                  "create checked component"
+
+              expectOk (run store "CREATE VIEW visible_join_right AS SELECT id, note FROM nested_join_right") "create right component"
+
+              expectOk
+                  (run store "CREATE VIEW nested_join_rows AS SELECT l.id, l.n, r.note FROM positive_join_left l JOIN visible_join_right r ON r.id = l.id")
+                  "create nested join"
+
+              expectOk
+                  (run store "CREATE VIEW filtered_nested_join AS SELECT id, n, note, n * 2 AS doubled FROM nested_join_rows WHERE n < 20")
+                  "create outer join view"
+
+              Expect.equal
+                  (rows store "SELECT table_name, is_updatable FROM information_schema.views WHERE table_name IN ('nested_join_rows', 'filtered_nested_join') ORDER BY table_name")
+                  [ [ Some "filtered_nested_join"; Some "YES" ]; [ Some "nested_join_rows"; Some "YES" ] ]
+                  "nested join layers remain updatable"
+
+              expectOk (run store "UPDATE nested_join_rows SET n = 11 WHERE id = 1") "update through component views"
+              expectOk (run store "UPDATE filtered_nested_join SET n = 12 WHERE doubled = 22") "update through outer view"
+              expectOk (run store "INSERT INTO nested_join_rows(id, n) VALUES (3, 30)") "insert into one nested component"
+
+              [ "UPDATE nested_join_rows SET n = -1 WHERE id = 1"
+                "INSERT INTO nested_join_rows(id, n) VALUES (4, -1)" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1369, "CHECK OPTION failed 'fsdb.nested_join_rows'") -> ()
+                  | other -> failtestf "expected nested component check failure for %s, got %A" sql other)
+
+              match run store "DELETE FROM filtered_nested_join WHERE id = 1" with
+              | Err(1395, "Can not delete from join view 'fsdb.filtered_nested_join'") -> ()
+              | other -> failtestf "expected nested join delete rejection, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id, n FROM nested_join_left ORDER BY id")
+                  [ [ Some "1"; Some "12" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
+                  "nested join writes persist"
 
           testCase "a direct view streams an ordered limit from its base table"
           <| fun _ ->

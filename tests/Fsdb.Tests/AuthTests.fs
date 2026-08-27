@@ -197,6 +197,22 @@ let tests =
                           "a derived mutation source requires SELECT"
                   | Error error -> failtestf "parse derived mutation: %s" error
 
+              match Fsdb.Parser.parse "UPDATE mine m JOIN lookup l ON l.id = m.id SET m.x = l.value" with
+              | Ok statement ->
+                  let privileges = requiredPrivileges "app" statement
+                  Expect.contains privileges ("UPDATE", OnTable("app", "mine")) "assigned table requires UPDATE"
+                  Expect.isFalse (privileges |> List.contains ("UPDATE", OnTable("app", "lookup"))) "read-only join table does not require UPDATE"
+                  Expect.contains privileges ("SELECT", OnTable("app", "mine")) "join target is read"
+                  Expect.contains privileges ("SELECT", OnTable("app", "lookup")) "joined table is read"
+              | Error error -> failtestf "parse joined update: %s" error
+
+              match Fsdb.Parser.parse "UPDATE mine m JOIN lookup l ON l.id = m.id SET x = 1, l.value = 2" with
+              | Ok statement ->
+                  let privileges = requiredPrivileges "app" statement
+                  Expect.contains privileges ("UPDATE", OnTable("app", "mine")) "unqualified assignment updates the leading table"
+                  Expect.contains privileges ("UPDATE", OnTable("app", "lookup")) "qualified assignment updates the joined table"
+              | Error error -> failtestf "parse mixed joined update: %s" error
+
               for sql, privilege in
                   [ "WITH chosen AS (SELECT id FROM secret) UPDATE mine SET x = 1 WHERE id IN (SELECT id FROM chosen)", "UPDATE"
                     "WITH chosen AS (SELECT id FROM secret) DELETE FROM mine WHERE id IN (SELECT id FROM chosen)", "DELETE" ] do

@@ -198,6 +198,18 @@ type private ViewColumnTarget =
       Qualifier: string
       Column: string }
 
+type private ViewTargetKey = string * string * string
+
+type private WritableViewSource =
+    { Reference: TableRef
+      Qualifier: string
+      Columns: string list
+      Expressions: Map<string, Expr>
+      Targets: Map<string, ViewColumnTarget>
+      Predicate: Expr option
+      CheckPredicates: Map<ViewTargetKey, Expr>
+      InsertableTargets: Set<ViewTargetKey> }
+
 type private UpdatableView =
     { ViewDatabase: string
       ViewName: string
@@ -208,7 +220,7 @@ type private UpdatableView =
       Expressions: Map<string, Expr>
       OrderedColumns: string list
       Predicate: Expr option
-      CheckPredicate: Expr option
+      CheckPredicates: Map<ViewTargetKey, Expr>
       Insertable: bool
       InsertableTargets: Set<string * string * string>
       UpdateFrom: TableRef
@@ -458,8 +470,10 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                 else
                     let sourceDb = source.Database |> Option.defaultValue view.Schema
 
+                    let underlyingStored = tryStoredView store sourceDb source.Table
+
                     let underlying =
-                        tryStoredView store sourceDb source.Table
+                        underlyingStored
                         |> Option.bind (fun stored ->
                             match Parser.parse stored.Definition with
                             | Ok(Select definition) -> classify (Set.add key seen) stored definition
@@ -483,18 +497,30 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                     nested.Expressions |> Map.tryFind (column.ToLowerInvariant())
                                 | _ -> None)
 
-                    let directColumn =
+                    let physicalQualifier = source.Alias |> Option.defaultValue source.Table
+
+                    let directTarget =
                         function
                         | Col column ->
                             match underlying with
-                            | None -> Some column
-                            | Some nested -> nested.Columns |> Map.tryFind (column.ToLowerInvariant())
+                            | None ->
+                                Some
+                                    { Database = sourceDb
+                                      Table = source.Table
+                                      Qualifier = physicalQualifier
+                                      Column = column }
+                            | Some nested -> nested.Targets |> Map.tryFind (column.ToLowerInvariant())
                         | QualifiedCol(qualifier, column)
                             when sourceNames
                                  |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)) ->
                             match underlying with
-                            | None -> Some column
-                            | Some nested -> nested.Columns |> Map.tryFind (column.ToLowerInvariant())
+                            | None ->
+                                Some
+                                    { Database = sourceDb
+                                      Table = source.Table
+                                      Qualifier = physicalQualifier
+                                      Column = column }
+                            | Some nested -> nested.Targets |> Map.tryFind (column.ToLowerInvariant())
                         | _ -> None
 
                     let projectedColumns =
@@ -534,16 +560,27 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 | QualifiedCol(_, column) -> column
                                 | _ -> InformationSchema.exprToSql expression
 
-                            alias |> Option.defaultValue defaultName, rewriteSource expression, directColumn expression)
+                            alias |> Option.defaultValue defaultName, rewriteSource expression, directTarget expression)
 
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
                     if
                         unresolvedStar
                         || dependentProjection
-                        ||
-                        outputNames.Length <> projected.Length
+                        || outputNames.Length <> projected.Length
                         || (outputNames |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList).Count <> outputNames.Length
+                        || (projected |> List.forall (fun (_, _, target) -> target.IsNone))
+                        || (underlying
+                            |> Option.exists (fun nested ->
+                                not nested.UpdateJoins.IsEmpty
+                                && not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase))))
+                        || (underlying
+                            |> Option.exists (fun nested ->
+                                not nested.UpdateJoins.IsEmpty
+                                && (underlyingStored
+                                    |> Option.exists (fun stored ->
+                                        not (stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase))
+                                        || not (stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase))))))
                     then
                         None
                     else
@@ -551,14 +588,19 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             List.map2 (fun (output: string) (_, expression, _) -> output.ToLowerInvariant(), expression) outputNames projected
                             |> Map.ofList
 
-                        let writableColumns =
-                            List.map2 (fun (output: string) (_, _, column) -> column |> Option.map (fun column -> output.ToLowerInvariant(), column)) outputNames projected
+                        let writableTargets =
+                            List.map2 (fun (output: string) (_, _, target) -> target |> Option.map (fun target -> output.ToLowerInvariant(), target)) outputNames projected
                             |> List.choose id
                             |> Map.ofList
 
                         let ownPredicate = select.Where |> Option.map rewriteSource
                         let underlyingPredicate = underlying |> Option.bind _.Predicate
-                        let underlyingCheck = underlying |> Option.bind _.CheckPredicate
+                        let underlyingCheck =
+                            underlying
+                            |> Option.bind (fun nested ->
+                                match Map.toList nested.CheckPredicates with
+                                | [ _, predicate ] -> Some predicate
+                                | _ -> None)
                         let predicate = combine underlyingPredicate ownPredicate
 
                         let checkPredicate =
@@ -567,48 +609,67 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             | "LOCAL" -> combine underlyingCheck ownPredicate
                             | _ -> underlyingCheck
 
-                        let database, table =
+                        let firstTarget = writableTargets |> Map.toSeq |> Seq.head |> snd
+                        let database, table = firstTarget.Database, firstTarget.Table
+
+                        let updateFrom =
                             underlying
-                            |> Option.map (fun nested -> nested.Database, nested.Table)
-                            |> Option.defaultValue (sourceDb, source.Table)
+                            |> Option.map _.UpdateFrom
+                            |> Option.defaultValue
+                                { Database = Some database
+                                  Table = table
+                                  Alias = source.Alias }
 
-                        let directColumns = projected |> List.choose (fun (_, _, column) -> column)
-                        let distinctDirectColumns = directColumns |> List.map _.ToLowerInvariant() |> Set.ofList
+                        let allowedInsertTargets =
+                            underlying
+                            |> Option.map _.InsertableTargets
+                            |> Option.defaultValue (Set.singleton (sourceDb, source.Table, physicalQualifier))
 
-                        let insertable =
-                            projected |> List.forall (fun (_, _, column) -> column.IsSome)
-                            && distinctDirectColumns.Count = directColumns.Length
-                            && (underlying |> Option.forall _.Insertable)
-                            && exposesRequiredColumns database table distinctDirectColumns
+                        let insertableTargets =
+                            if projected |> List.exists (fun (_, _, target) -> target.IsNone) then
+                                Set.empty
+                            else
+                                projected
+                                |> List.choose (fun (_, _, target) -> target)
+                                |> List.groupBy (fun target -> target.Database, target.Table, target.Qualifier)
+                                |> List.choose (fun (targetKey, targetColumns) ->
+                                    let database, table, _ = targetKey
+                                    let columns = targetColumns |> List.map (fun target -> target.Column.ToLowerInvariant())
+                                    let distinct = Set.ofList columns
+
+                                    if
+                                        Set.contains targetKey allowedInsertTargets
+                                        && distinct.Count = columns.Length
+                                        && exposesRequiredColumns database table distinct
+                                    then
+                                        Some targetKey
+                                    else
+                                        None)
+                                |> Set.ofList
 
                         Some
                             { ViewDatabase = view.Schema
                               ViewName = view.Name
                               Database = database
                               Table = table
-                              Columns = writableColumns
-                              Targets =
-                                writableColumns
-                                |> Map.map (fun _ column ->
-                                    { Database = database
-                                      Table = table
-                                      Qualifier = table
-                                      Column = column })
+                              Columns = writableTargets |> Map.map (fun _ target -> target.Column)
+                              Targets = writableTargets
                               Expressions = expressions
                               OrderedColumns = outputNames
                               Predicate = predicate
-                              CheckPredicate = checkPredicate
-                              Insertable = insertable
-                              InsertableTargets =
-                                if insertable then
-                                    Set.singleton (database, table, table)
-                                else
-                                    Set.empty
-                              UpdateFrom =
-                                { Database = Some database
-                                  Table = table
-                                  Alias = source.Alias }
-                              UpdateJoins = []
+                              CheckPredicates =
+                                match underlying with
+                                | Some nested when not nested.UpdateJoins.IsEmpty -> nested.CheckPredicates
+                                | _ ->
+                                    match checkPredicate with
+                                    | Some predicate ->
+                                        let targetKey = firstTarget.Database, firstTarget.Table, firstTarget.Qualifier
+                                        Map.ofList [ targetKey, predicate ]
+                                    | None -> Map.empty
+                              Insertable = not insertableTargets.IsEmpty
+                              InsertableTargets = insertableTargets
+                              UpdateFrom = updateFrom
+                              UpdateJoins = underlying |> Option.map _.UpdateJoins |> Option.defaultValue []
                               AccessPath =
                                 { SecurityType = view.SecurityType
                                   Definer = view.Definer
@@ -631,15 +692,89 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             | FromTable table -> Some table
                             | _ -> None))
 
-                let sources =
-                    tableRefs
-                    |> List.choose (fun tableRef ->
-                        let database = tableRef.Database |> Option.defaultValue view.Schema
-                        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+                let resolveSource (tableRef: TableRef) : WritableViewSource option =
+                    let database = tableRef.Database |> Option.defaultValue view.Schema
+                    let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
 
+                    match tryStoredView store database tableRef.Table with
+                    | Some stored ->
+                        if
+                            not (stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase))
+                            || not (stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase))
+                        then
+                            None
+                        else
+                            match Parser.parse stored.Definition with
+                            | Ok(Select definition) ->
+                                classify (Set.add key seen) stored definition
+                                |> Option.bind (fun nested ->
+                                    if not nested.UpdateJoins.IsEmpty then
+                                        None
+                                    else
+                                        let qualify =
+                                            Expression.rewrite (function
+                                                | Col column
+                                                | QualifiedCol(_, column) -> Some(QualifiedCol(qualifier, column))
+                                                | _ -> None)
+
+                                        let targets =
+                                            nested.Targets
+                                            |> Map.map (fun _ target -> { target with Qualifier = qualifier })
+
+                                        let checkPredicates =
+                                            nested.CheckPredicates
+                                            |> Map.toList
+                                            |> List.map (fun ((targetDatabase, targetTable, _), predicate) ->
+                                                (targetDatabase, targetTable, qualifier), predicate)
+                                            |> Map.ofList
+
+                                        let insertableTargets =
+                                            nested.InsertableTargets
+                                            |> Set.map (fun (targetDatabase, targetTable, _) -> targetDatabase, targetTable, qualifier)
+
+                                        Some
+                                            { Reference =
+                                                { nested.UpdateFrom with
+                                                    Alias = Some qualifier }
+                                              Qualifier = qualifier
+                                              Columns = nested.OrderedColumns
+                                              Expressions = nested.Expressions |> Map.map (fun _ expression -> qualify expression)
+                                              Targets = targets
+                                              Predicate = nested.Predicate |> Option.map qualify
+                                              CheckPredicates = checkPredicates
+                                              InsertableTargets = insertableTargets })
+                            | _ -> None
+                    | None ->
                         InformationSchema.findTable store.Catalog database tableRef.Table
                         |> Result.toOption
-                        |> Option.map (fun table -> tableRef, database, qualifier, table))
+                        |> Option.map (fun table ->
+                            let expressions =
+                                table.Columns
+                                |> List.map (fun column -> column.Name.ToLowerInvariant(), QualifiedCol(qualifier, column.Name))
+                                |> Map.ofList
+
+                            let targets =
+                                table.Columns
+                                |> List.map (fun column ->
+                                    column.Name.ToLowerInvariant(),
+                                    { Database = database
+                                      Table = tableRef.Table
+                                      Qualifier = qualifier
+                                      Column = column.Name })
+                                |> Map.ofList
+
+                            { Reference = { tableRef with Database = Some database }
+                              Qualifier = qualifier
+                              Columns = table.Columns |> List.map _.Name
+                              Expressions = expressions
+                              Targets = targets
+                              Predicate = None
+                              CheckPredicates = Map.empty
+                              InsertableTargets = Set.singleton (database, tableRef.Table, qualifier) })
+
+                let sources =
+                    tableRefs
+                    |> List.choose resolveSource
 
                 if sources.Length <> tableRefs.Length then
                     None
@@ -648,25 +783,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         function
                         | QualifiedCol(qualifier, column) ->
                             sources
-                            |> List.tryFind (fun (_, _, sourceQualifier, _) -> sourceQualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
-                            |> Option.bind (fun (tableRef, database, sourceQualifier, table) ->
-                                table.Columns
-                                |> List.tryFind (fun candidate -> candidate.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
-                                |> Option.map (fun _ ->
-                                    { Database = database
-                                      Table = tableRef.Table
-                                      Qualifier = sourceQualifier
-                                      Column = column }))
+                            |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                            |> Option.bind (fun source -> source.Targets |> Map.tryFind (column.ToLowerInvariant()))
                         | Col column ->
                             sources
-                            |> List.choose (fun (tableRef, database, qualifier, table) ->
-                                table.Columns
-                                |> List.tryFind (fun candidate -> candidate.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
-                                |> Option.map (fun _ ->
-                                    { Database = database
-                                      Table = tableRef.Table
-                                      Qualifier = qualifier
-                                      Column = column }))
+                            |> List.choose (fun source -> source.Targets |> Map.tryFind (column.ToLowerInvariant()))
                             |> function
                                 | [ target ] -> Some target
                                 | _ -> None
@@ -678,15 +799,29 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             match expression with
                             | Star None ->
                                 sources
-                                |> List.collect (fun (_, _, qualifier, table) ->
-                                    table.Columns |> List.map (fun column -> QualifiedCol(qualifier, column.Name), None))
+                                |> List.collect (fun source ->
+                                    source.Columns |> List.map (fun column -> QualifiedCol(source.Qualifier, column), None))
                             | Star(Some qualifier) ->
                                 sources
-                                |> List.tryFind (fun (_, _, sourceQualifier, _) -> sourceQualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
-                                |> Option.map (fun (_, _, sourceQualifier, table) ->
-                                    table.Columns |> List.map (fun column -> QualifiedCol(sourceQualifier, column.Name), None))
+                                |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                                |> Option.map (fun source ->
+                                    source.Columns |> List.map (fun column -> QualifiedCol(source.Qualifier, column), None))
                                 |> Option.defaultValue [ expression, alias ]
                             | _ -> [ expression, alias ])
+
+                    let rewriteSources =
+                        Expression.rewrite (function
+                            | QualifiedCol(qualifier, column) ->
+                                sources
+                                |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                                |> Option.bind (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
+                            | Col column ->
+                                sources
+                                |> List.choose (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
+                                |> function
+                                    | [ expression ] -> Some expression
+                                    | _ -> None
+                            | _ -> None)
 
                     let projected =
                         expandedProjections
@@ -697,7 +832,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 | QualifiedCol(_, column) -> column
                                 | _ -> InformationSchema.exprToSql expression
 
-                            alias |> Option.defaultValue defaultName, expression, directTarget expression)
+                            alias |> Option.defaultValue defaultName, rewriteSources expression, directTarget expression)
 
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
@@ -728,15 +863,41 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 |> List.choose (fun (targetKey, targetColumns) ->
                                     let distinct = targetColumns |> List.map (fun target -> target.Column.ToLowerInvariant()) |> Set.ofList
                                     let targetTable = targetColumns.Head
+                                    let sourceAllowsInsert =
+                                        sources
+                                        |> List.exists (fun source -> Set.contains targetKey source.InsertableTargets)
 
                                     match InformationSchema.findTable store.Catalog targetTable.Database targetTable.Table with
                                     | Error _ -> None
-                                    | Ok _ when distinct.Count = targetColumns.Length && exposesRequiredColumns targetTable.Database targetTable.Table distinct ->
+                                    | Ok _
+                                        when sourceAllowsInsert
+                                             && distinct.Count = targetColumns.Length
+                                             && exposesRequiredColumns targetTable.Database targetTable.Table distinct ->
                                         Some targetKey
                                     | Ok _ -> None)
                                 |> Set.ofList
 
                         let firstTarget = directTargets.Head
+                        let rewrittenJoins =
+                            List.map2
+                                (fun join source ->
+                                    { join with
+                                        Table = FromTable source.Reference
+                                        On = rewriteSources join.On })
+                                select.Joins
+                                (List.tail sources)
+
+                        let sourcePredicate =
+                            sources
+                            |> List.choose _.Predicate
+                            |> List.fold (fun combined predicate -> combine combined (Some predicate)) None
+
+                        let predicate = combine sourcePredicate (select.Where |> Option.map rewriteSources)
+
+                        let checkPredicates =
+                            sources
+                            |> List.collect (fun source -> Map.toList source.CheckPredicates)
+                            |> Map.ofList
 
                         Some
                             { ViewDatabase = view.Schema
@@ -747,12 +908,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Targets = targets
                               Expressions = expressions
                               OrderedColumns = outputNames
-                              Predicate = select.Where
-                              CheckPredicate = None
+                              Predicate = predicate
+                              CheckPredicates = checkPredicates
                               Insertable = not insertableTargets.IsEmpty
                               InsertableTargets = insertableTargets
-                              UpdateFrom = source
-                              UpdateJoins = select.Joins
+                              UpdateFrom = (List.head sources).Reference
+                              UpdateJoins = rewrittenJoins
                               AccessPath = []
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
@@ -12701,7 +12862,7 @@ let rec executeAs
                     rowsValues
                     (prepareInsertRow targetStore db table tableColumns))
 
-    let executeViewWrite (view: UpdatableView) statement =
+    let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
         let retarget (access: ViewAccess) =
             let qualified = access.Database + "." + access.Table
 
@@ -12731,18 +12892,19 @@ let rec executeAs
         | Error(code, message) -> ids, Err(code, message)
         | Ok authorized ->
             let execute () = executeAs store authorized dbName ids foundRows currentAccount statement
+            let targetKey = target.Database, target.Table, target.Qualifier
 
-            if view.CheckPredicate.IsSome then
+            match Map.tryFind targetKey view.CheckPredicates with
+            | Some predicate ->
                 withAsyncLocalValue
                     viewCheckScope
                     (Some
-                        { Database = view.Database
-                          Table = view.Table
+                        { Database = target.Database
+                          Table = target.Table
                           View = view.ViewDatabase + "." + view.ViewName
-                          Predicate = view.CheckPredicate })
+                          Predicate = Some predicate })
                     execute
-            else
-                execute ()
+            | None -> execute ()
 
     match stmt with
     | Update update when not update.Ctes.IsEmpty ->
@@ -13706,7 +13868,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = Insert(target.Database + "." + target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
-                    executeViewWrite view rewritten
+                    executeViewWrite view target rewritten
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -13752,7 +13914,7 @@ let rec executeAs
                 | Ok(), Ok assignments ->
                     let rewritten = InsertSelect(target.Database + "." + target.Table, baseColumns, select, assignments, ignoreDuplicates)
 
-                    executeViewWrite view rewritten
+                    executeViewWrite view target rewritten
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -13817,7 +13979,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = Replace(target.Database + "." + target.Table, baseColumns, rowsExprs)
 
-                executeViewWrite view rewritten
+                executeViewWrite view target rewritten
 
     | Replace(table, columns, rowsExprs) ->
         let db, table = splitQualified dbName table
@@ -13845,7 +14007,7 @@ let rec executeAs
             | Ok(target, baseColumns) ->
                 let rewritten = ReplaceSelect(target.Database + "." + target.Table, baseColumns, select)
 
-                executeViewWrite view rewritten
+                executeViewWrite view target rewritten
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
@@ -13874,7 +14036,7 @@ let rec executeAs
             | Ok(target, _), Ok rewrittenAssignments ->
                 let rewritten = ReplaceSet(target.Database + "." + target.Table, rewrittenAssignments)
 
-                executeViewWrite view rewritten
+                executeViewWrite view target rewritten
 
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table
@@ -13967,7 +14129,8 @@ let rec executeAs
                             OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                             Limit = updateStmt.Limit |> Option.map rewrite }
 
-                    executeViewWrite view (Update rewritten)
+                    let target = assignments |> List.head |> snd
+                    executeViewWrite view target (Update rewritten)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -14308,11 +14471,15 @@ let rec executeAs
 
                                                 Ok(applyOnUpdateTimestamps physicalColumns.[i] assignedIdxsByPhys.[i] row newRow)
                                                 |> Result.bind (computeGeneratedRow snapshot registry tdb tname physicalColumns.[i])
+                                                |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i])
                                             | false, _ -> Ok row
 
                                         match updated with
                                         | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
                                             Diagnostics.warning 3819 message
+                                            Ok row
+                                        | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
+                                            Diagnostics.warning 1369 message
                                             Ok row
                                         | result -> result
 

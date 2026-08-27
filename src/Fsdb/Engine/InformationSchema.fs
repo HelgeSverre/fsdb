@@ -1034,6 +1034,19 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
         |> Option.isSome
 
     let rec check seen schema definition =
+        let sourceAllowsUpdates (source: TableRef) =
+            let sourceSchema = source.Database |> Option.defaultValue schema
+            let key = sourceSchema.ToLowerInvariant(), source.Table.ToLowerInvariant()
+
+            if isPhysicalTable schema source then
+                true
+            else
+                views
+                |> List.tryFind (fun view ->
+                    view.Schema.Equals(sourceSchema, StringComparison.OrdinalIgnoreCase)
+                    && view.Name.Equals(source.Table, StringComparison.OrdinalIgnoreCase))
+                |> Option.exists (fun view -> not (Set.contains key seen) && check (Set.add key seen) sourceSchema view.Definition)
+
         match Fsdb.Parser.parse definition with
         | Ok(Select select) ->
             match select.From with
@@ -1065,21 +1078,14 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                 if not shapeAllowsUpdates then
                     false
                 elif not select.Joins.IsEmpty then
-                    isPhysicalTable schema source
+                    sourceAllowsUpdates source
                     && (select.Joins
                         |> List.forall (fun join ->
                             match join.Table with
-                            | FromTable table -> isPhysicalTable schema table
+                            | FromTable table -> sourceAllowsUpdates table
                             | _ -> false))
                 else
-                    let sourceSchema = source.Database |> Option.defaultValue schema
-                    let key = sourceSchema.ToLowerInvariant(), source.Table.ToLowerInvariant()
-
-                    views
-                    |> List.tryFind (fun view ->
-                        view.Schema.Equals(sourceSchema, StringComparison.OrdinalIgnoreCase)
-                        && view.Name.Equals(source.Table, StringComparison.OrdinalIgnoreCase))
-                    |> Option.forall (fun view -> not (Set.contains key seen) && check (Set.add key seen) sourceSchema view.Definition)
+                    sourceAllowsUpdates source
             | _ -> false
         | _ -> false
 

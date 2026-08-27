@@ -845,6 +845,21 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | Update u ->
         let cteTables, boundCtes = cteReadTablesIn Set.empty defaultDb u.Ctes
 
+        let physicalSources =
+            u.From
+            :: (u.Joins
+                |> List.choose (fun join ->
+                    match join.Table with
+                    | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
+                    | FromTable table -> Some table
+                    | _ -> None))
+
+        let sourceForQualifier qualifier =
+            physicalSources
+            |> List.tryFind (fun table ->
+                let sourceName = table.Alias |> Option.defaultValue table.Table
+                sourceName.Equals(qualifier, StringComparison.OrdinalIgnoreCase))
+
         let readInExprs =
             (u.Assignments |> List.collect (fun a -> exprReadTablesIn boundCtes defaultDb a.Value))
             @ (u.Where |> Option.map (exprReadTablesIn boundCtes defaultDb) |> Option.defaultValue [])
@@ -856,17 +871,31 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
                       | source -> fromItemReadTablesIn boundCtes defaultDb source)))
             |> List.distinct
 
+        let resolvedUpdateSources =
+            u.Assignments
+            |> List.map (fun assignment ->
+                match assignment.Table with
+                | None -> Some u.From
+                | Some qualifier -> sourceForQualifier qualifier)
+
         let updatedTables =
-            (u.From.Database |> Option.defaultValue defaultDb, u.From.Table)
-            :: (u.Joins
-                |> List.choose (fun join ->
-                    match join.Table with
-                    | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
-                    | FromTable table -> Some(table.Database |> Option.defaultValue defaultDb, table.Table)
-                    | _ -> None))
+            if resolvedUpdateSources |> List.exists Option.isNone then
+                physicalSources
+            else
+                resolvedUpdateSources |> List.choose id
+            |> List.map (fun table -> table.Database |> Option.defaultValue defaultDb, table.Table)
+            |> List.distinct
+
+        let joinedTables =
+            if u.Joins.IsEmpty then
+                []
+            else
+                physicalSources
+                |> List.map (fun table -> table.Database |> Option.defaultValue defaultDb, table.Table)
+                |> List.distinct
 
         onTables "UPDATE" updatedTables
-        @ onTables "SELECT" ((cteTables @ readInExprs) |> List.distinct)
+        @ onTables "SELECT" ((cteTables @ joinedTables @ readInExprs) |> List.distinct)
     | Delete d ->
         let cteTables, boundCtes = cteReadTablesIn Set.empty defaultDb d.Ctes
 
