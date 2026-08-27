@@ -1153,7 +1153,7 @@ let tests =
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, result =
-                  handle session "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT 10; END"
+                  handle session "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT 10 LIMIT num; END"
 
               Expect.equal result (Affected 0UL) "created"
 

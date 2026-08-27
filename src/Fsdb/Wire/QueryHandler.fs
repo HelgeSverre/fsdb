@@ -3126,13 +3126,15 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             | Ok() when parameters <> "" && not (routineParameterRe.IsMatch parameters) -> session, syntaxError parameters
             | Ok() ->
                 let statement = routineStatement body
-
-                if
-                    statement
-                    |> Option.forall (fun sql ->
+                let invalidBody =
+                    match statement with
+                    | None -> true
+                    | Some _ when parameters <> "" -> false
+                    | Some sql ->
                         let upper = sql.ToUpperInvariant()
-                        Parser.parse sql |> Result.isError && tryProbe sql upper |> Option.isNone)
-                then
+                        Parser.parse sql |> Result.isError && tryProbe sql upper |> Option.isNone
+
+                if invalidBody then
                     session, syntaxError body
                 else
                     let definer = session.User + "@" + session.AccountHost
