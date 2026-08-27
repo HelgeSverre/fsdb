@@ -992,6 +992,55 @@ let tests =
                   | ResultSet(_, [ [ Some "value"; Some "float"; _; _; _; _ ] ]) -> ()
                   | other -> failtestf "expected %s REAL to mean FLOAT, got %A" table other
 
+          testCase "NO_BACKSLASH_ESCAPES is session-scoped and cache-safe"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let defaultSession = create 1 store
+
+              let literalSession, _ =
+                  handle (create 2 store) "SET sql_mode = 'NO_BACKSLASH_ESCAPES,PIPES_AS_CONCAT'"
+
+              for _ in 1..2 do
+                  match handle defaultSession "SELECT HEX('a\\nb')" |> snd with
+                  | ResultSet(_, [ [ Some "610A62" ] ]) -> ()
+                  | other -> failtestf "expected default backslash escapes, got %A" other
+
+                  match handle literalSession "SELECT HEX('a\\nb')" |> snd with
+                  | ResultSet(_, [ [ Some "615C6E62" ] ]) -> ()
+                  | other -> failtestf "expected literal backslashes, got %A" other
+
+              match handle literalSession "SELECT HEX('a\\' || 'b')" |> snd with
+              | ResultSet(_, [ [ Some "615C62" ] ]) -> ()
+              | other -> failtestf "expected quote scanning and pipe rewriting to share the active mode, got %A" other
+
+              match handle literalSession "SELECT 'it\\'s'" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected an unescaped quote to terminate the literal, got %A" other
+
+              match prepareStatementForSession literalSession "SELECT CONCAT('x\\', ?)" with
+              | Ok(Some(Select { Projections = [ FuncCall("CONCAT", [ Lit(VString "x\\"); Placeholder 0 ]), _ ] }), 1) -> ()
+              | other -> failtestf "expected placeholder scanning to respect literal backslashes, got %A" other
+
+              let textStatement =
+                  { Ast = None
+                    Sql = "SET @escaped = ?"
+                    ParamCount = 1
+                    LastParamTypes = None }
+
+              let literalSession, result = executePrepared literalSession textStatement [ VString "O'Brien\\" ]
+              Expect.equal result (Affected 0UL) "text-prepared substitution should use mode-aware quoting"
+
+              match handle literalSession "SELECT @escaped" |> snd with
+              | ResultSet(_, [ [ Some "O'Brien\\" ] ]) -> ()
+              | other -> failtestf "expected the prepared string to round-trip, got %A" other
+
+              let literalSession, result = handle literalSession "SET @first = 'a,b', @second = 2"
+              Expect.equal result (Affected 0UL) "commas inside literal strings should not split assignments"
+
+              match handle literalSession "SELECT @first, @second" |> snd with
+              | ResultSet(_, [ [ Some "a,b"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected both assignments to persist, got %A" other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

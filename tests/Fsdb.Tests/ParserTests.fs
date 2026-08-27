@@ -335,6 +335,24 @@ let tests =
                     | Ok(Select { Projections = [ FuncCall("CONCAT", _), _ ] }) -> ()
                     | other -> failtestf "expected executable-comment pipes to use the active mode, got %A" other
 
+                testCase "NO_BACKSLASH_ESCAPES keeps backslashes literal"
+                <| fun _ ->
+                    let options =
+                        { defaultOptions with
+                            NoBackslashEscapes = true }
+
+                    match parseWithOptions options "SELECT 'a\\nb', 'it''s'" with
+                    | Ok(Select { Projections = [ Lit(VString "a\\nb"), None; Lit(VString "it's"), None ] }) -> ()
+                    | other -> failtestf "expected literal backslashes and doubled quotes, got %A" other
+
+                    match parseWithOptions options "SELECT 'it\\'s'" with
+                    | Error _ -> ()
+                    | Ok statement -> failtestf "expected a backslash before a quote to remain literal, got %A" statement
+
+                    match parseWithOptions options "SELECT 'x\\' /*!80000 + 1 */" with
+                    | Ok(Select { Projections = [ BinOp(Add, Lit(VString "x\\"), Lit(VInt 1L)), None ] }) -> ()
+                    | other -> failtestf "expected executable comments to respect quote boundaries, got %A" other
+
                 testCase "SELECT cannot be parsed as a function name"
                 <| fun _ ->
                     match parse "SELECT SELECT(1)" with

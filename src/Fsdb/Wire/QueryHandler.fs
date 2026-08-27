@@ -84,7 +84,7 @@ let private completeResultMetadata (session: Session) (result: QueryResult) (met
 /// following quote inside `'`/`"` strings (MySQL's default
 /// NO_BACKSLASH_ESCAPES-off behavior); backtick identifiers only escape via
 /// a doubled backtick, matching MySQL's identifier-quoting rules.
-let placeholderPositions (sql: string) : int list =
+let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql: string) : int list =
     let n = sql.Length
     let positions = ResizeArray<int>()
     let mutable i = 0
@@ -92,7 +92,7 @@ let placeholderPositions (sql: string) : int list =
     while i < n do
         match sql.[i] with
         | ('\'' | '"' | '`') as quote ->
-            let allowBackslashEscape = quote <> '`'
+            let allowBackslashEscape = quote <> '`' && not options.NoBackslashEscapes
             i <- i + 1
             let mutable closed = false
 
@@ -128,16 +128,22 @@ let placeholderPositions (sql: string) : int list =
 
     List.ofSeq positions
 
+let placeholderPositions (sql: string) : int list =
+    placeholderPositionsWithOptions Parser.defaultOptions sql
+
 /// Replaces each top-level `?` in `sql` (per `placeholderPositions`) with
 /// the corresponding entry of `literals`, in the order both appear.
 /// COM_STMT_EXECUTE's own bound-parameter count check guarantees the
 /// lengths already match — this is the one substitution path prepared
-/// statements use (see the `PreparedStmt` ponytail note in Session.fs for
-/// why it's textual rather than a typed plan).
+/// statements without an AST use.
 exception PlaceholderCountMismatch of expected: int * got: int
 
-let substitutePlaceholders (sql: string) (literals: string list) : string =
-    let positions = placeholderPositions sql
+let private substitutePlaceholdersWithOptions
+    (options: Parser.ParserOptions)
+    (sql: string)
+    (literals: string list)
+    : string =
+    let positions = placeholderPositionsWithOptions options sql
 
     if positions.Length <> literals.Length then
         raise (PlaceholderCountMismatch(positions.Length, literals.Length))
@@ -156,20 +162,26 @@ let substitutePlaceholders (sql: string) (literals: string list) : string =
     sb.Append(sql.Substring last) |> ignore
     sb.ToString()
 
+let substitutePlaceholders (sql: string) (literals: string list) : string =
+    substitutePlaceholdersWithOptions Parser.defaultOptions sql literals
+
 /// Renders a bound parameter value as a SQL literal safe to splice into the
-/// stored statement text — the string-escaping mirrors MySQL's default
-/// (`NO_BACKSLASH_ESCAPES` off) rules: backslash and single quote both
-/// escape with a leading backslash. CR/LF are escaped too (`\r`/`\n`), not
+/// stored statement text. Default mode escapes backslash, quotes, and line
+/// endings with backslashes; `NO_BACKSLASH_ESCAPES` doubles quotes and keeps
+/// every other character literal. In default mode, CR/LF use `\r`/`\n`, not
 /// left as raw bytes — `Parser.quotedStringChar` already round-trips those
 /// two escapes back to CR/LF, but a raw CR spliced into the SQL text gets
 /// silently normalized away by FParsec's CharStream on re-parse (it treats
 /// bare `\r`/`\r\n` as line endings), corrupting any multi-line value
 /// (e.g. an HTML textarea's CRLF body) on the way through a prepared
 /// statement.
-let private escapeSqlString (s: string) : string =
-    s.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\r", "\\r").Replace("\n", "\\n")
+let private escapeSqlString (options: Parser.ParserOptions) (s: string) : string =
+    if options.NoBackslashEscapes then
+        s.Replace("'", "''")
+    else
+        s.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\r", "\\r").Replace("\n", "\\n")
 
-let valueToSqlLiteral (v: Value) : string =
+let private valueToSqlLiteralWithOptions (options: Parser.ParserOptions) (v: Value) : string =
     match v with
     | VNull -> "NULL"
     | VInt i -> string i
@@ -184,8 +196,11 @@ let valueToSqlLiteral (v: Value) : string =
     | VZeroDate _
     | VZeroDateTime _
     | VString _
-    | VJson _ -> "'" + escapeSqlString (v |> toText |> Option.defaultValue "") + "'"
+    | VJson _ -> "'" + escapeSqlString options (v |> toText |> Option.defaultValue "") + "'"
     | VGeometry geometry -> "ST_GeomFromWKB(X'" + Convert.ToHexString(geometryToWkb geometry) + "', " + string geometry.Srid + ")"
+
+let valueToSqlLiteral (v: Value) : string =
+    valueToSqlLiteralWithOptions Parser.defaultOptions v
 
 /// Whether a scope prefix means GLOBAL. The SET grammar includes the `@@`
 /// sigil while expression parsing keeps it separate, so GLOBAL can begin at
@@ -785,11 +800,13 @@ let private setVarNameForError = Regex(@"^(?:SESSION\s+|GLOBAL\s+)?(\S+?)\s*=", 
 let private quotedSetLiteral = Regex("^(['\"])(.*)\\1$", RegexOptions.Singleline)
 let private bareSetIdentifier = Regex("^\\w+$")
 
-let private literalSetRhs (rhs: string) : Value option =
+let private literalSetRhs (options: Parser.ParserOptions) (rhs: string) : Value option =
     let rhs = rhs.Trim()
     let quoted = quotedSetLiteral.Match rhs
 
-    if quoted.Success then
+    if options.NoBackslashEscapes then
+        None
+    elif quoted.Success then
         // MySQL leaves the final escaped quote's preceding slash in this
         // SET-specific spelling; Parser's generic string grammar cannot
         // preserve it.
@@ -830,7 +847,8 @@ let private parserOptionsForModes modes =
         PipesAsConcat = enabled "PIPES_AS_CONCAT"
         HighNotPrecedence = hasSqlMode modes "HIGH_NOT_PRECEDENCE"
         NoUnsignedSubtraction = hasSqlMode modes "NO_UNSIGNED_SUBTRACTION"
-        RealAsFloat = enabled "REAL_AS_FLOAT" }
+        RealAsFloat = enabled "REAL_AS_FLOAT"
+        NoBackslashEscapes = hasSqlMode modes "NO_BACKSLASH_ESCAPES" }
 
 let private parserOptionsForSession (session: Session) =
     lookupVar session "sql_mode"
@@ -848,10 +866,12 @@ let private resolveUserSetRhs
     (sql: string)
     (rhs: string)
     : Result<Value * Map<string, Value>, QueryResult> =
-    match literalSetRhs rhs with
+    let options = parserOptionsForSession session
+
+    match literalSetRhs options rhs with
     | Some value -> Ok(value, userVariables)
     | None ->
-        match Parser.parseExpressionWithOptions (parserOptionsForSession session) rhs with
+        match Parser.parseExpressionWithOptions options rhs with
         | Error _ -> Error(syntaxError sql)
         | Ok expression ->
             let variables = expressionVariablesFor session userVariables
@@ -868,7 +888,7 @@ let private resolveSystemSetRhs
     (sql: string)
     (rhs: string)
     : Result<Value * Map<string, Value>, QueryResult> =
-    match literalSetRhs rhs with
+    match literalSetRhs (parserOptionsForSession session) rhs with
     | Some value -> Ok(value, userVariables)
     | None when bareSetIdentifier.IsMatch(rhs.Trim()) -> Ok(VString(rhs.Trim()), userVariables)
     | None ->
@@ -890,7 +910,7 @@ let private applySqlMode (store: Store) (value: string) =
 /// (`sql_mode`'s comma-separated mode list) nor a function call's argument
 /// list (`SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')`) gets
 /// split apart.
-let private splitSetAssignments (sql: string) : string list =
+let private splitSetAssignments (options: Parser.ParserOptions) (sql: string) : string list =
     let body = Regex.Replace(sql, @"^SET\s+", "", RegexOptions.IgnoreCase)
     let parts = ResizeArray()
     let current = StringBuilder()
@@ -909,7 +929,7 @@ let private splitSetAssignments (sql: string) : string list =
             escaped <- false
             current.Append c |> ignore
             index <- index + 1
-        | Some q when q <> '`' && c = '\\' ->
+        | Some q when not options.NoBackslashEscapes && q <> '`' && c = '\\' ->
             escaped <- true
             current.Append c |> ignore
             index <- index + 1
@@ -1186,8 +1206,10 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
 /// Applies every assignment only after the whole `SET` parses; MySQL leaves
 /// all variables unchanged when any assignment is invalid.
 let private handleSet (session: Session) (sql: string) : Session * QueryResult =
+    let options = parserOptionsForSession session
+
     let parsed =
-        splitSetAssignments sql
+        splitSetAssignments options sql
         |> List.fold
             (fun state fragment ->
                 state
@@ -1995,16 +2017,7 @@ let private parsedStatementCandidates =
 let private isRepeatedStatement (options: Parser.ParserOptions) (sql: string) =
     // The fingerprint only decides admission. Cache lookups still use the
     // complete SQL and mode, so collisions cannot select the wrong AST.
-    let fingerprint =
-        HashCode.Combine(
-            options.AnsiQuotes,
-            options.IgnoreSpace,
-            options.PipesAsConcat,
-            options.HighNotPrecedence,
-            options.NoUnsignedSubtraction,
-            options.RealAsFloat,
-            StringComparer.Ordinal.GetHashCode sql
-        )
+    let fingerprint = HashCode.Combine(options, StringComparer.Ordinal.GetHashCode sql)
 
     if parsedStatementCandidates.TryAdd(fingerprint, 0uy) then
         false
@@ -2895,7 +2908,7 @@ let private prepareStatementWithOptions
     if upper.StartsWith("LOAD DATA", StringComparison.Ordinal) then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
     elif (tryProbe trimmed upper).IsSome then
-        Result.Ok(None, placeholderPositions sql |> List.length)
+        Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
     else
         match Parser.parseWithOptions options sql with
         | Result.Ok stmt ->
@@ -2907,7 +2920,7 @@ let private prepareStatementWithOptions
             // would survive unbound into execution (and `FailFast` a
             // --data-dir server via `Persistence.encodeExpr`), so reject the
             // prepare as a 1064, same as the COM_QUERY guard in `dispatch`.
-            if (placeholderPositions sql |> List.length) <> count then
+            if (placeholderPositionsWithOptions options sql |> List.length) <> count then
                 match syntaxError sql with
                 | Err(code, msg) -> Result.Error(code, msg)
                 | _ -> Result.Error(1064, "syntax error")
@@ -3110,7 +3123,8 @@ let private tryTextEventCommand (sql: string) =
 /// in the AST, so a placeholder in any legal spot gets bound; DDL is left as
 /// the `_` pass-through since MySQL never accepts a `?` there.
 let rec private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
-    let sql = (Parser.stripVersionComments rawSql).Trim().TrimEnd(';').Trim()
+    let parserOptions = parserOptionsForSession session
+    let sql = (Parser.stripVersionCommentsWithOptions parserOptions rawSql).Trim().TrimEnd(';').Trim()
 
     // A mysqldump preamble/postamble is a run of `/*!NNNNN ... */;` lines;
     // once the version comment above strips down to nothing (or this was a
@@ -3165,7 +3179,13 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
 
                 match statement.Ast with
                 | Some ast -> executeParsed session (bindPlaceholders ast values)
-                | None -> dispatch session (substitutePlaceholders statement.Sql (values |> List.map valueToSqlLiteral))
+                | None ->
+                    dispatch
+                        session
+                        (substitutePlaceholdersWithOptions
+                            parserOptions
+                            statement.Sql
+                            (values |> List.map (valueToSqlLiteralWithOptions parserOptions)))
         | DeallocateText name ->
             if Map.containsKey name session.TextStatements then
                 { session with TextStatements = Map.remove name session.TextStatements }, Affected 0UL
@@ -3316,7 +3336,7 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
                 match tryTextPreparedCommand sql with
                 | Error result -> session, result
                 | Ok(Some command) -> runTextPrepared command
-                | Ok None when not (placeholderPositions sql |> List.isEmpty) ->
+                | Ok None when not (placeholderPositionsWithOptions parserOptions sql |> List.isEmpty) ->
                     // A `?` outside a string/comment is a bind parameter, only
                     // legal via COM_STMT_PREPARE. Rejecting it here also keeps
                     // unreachable placeholders out of persisted expressions.
@@ -3486,7 +3506,14 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
     // the connection with no ERR packet. Give it the same 1105 safety net
     // `handle` gives the text path.
     match stmt.Ast with
-    | None -> handle session (substitutePlaceholders stmt.Sql (values |> List.map valueToSqlLiteral))
+    | None ->
+        let options = parserOptionsForSession session
+        handle
+            session
+            (substitutePlaceholdersWithOptions
+                options
+                stmt.Sql
+                (values |> List.map (valueToSqlLiteralWithOptions options)))
     | Some ast ->
         recordDiagnostics session false (fun () ->
             try

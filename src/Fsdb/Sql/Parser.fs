@@ -23,7 +23,8 @@ type ParserOptions =
       PipesAsConcat: bool
       HighNotPrecedence: bool
       NoUnsignedSubtraction: bool
-      RealAsFloat: bool }
+      RealAsFloat: bool
+      NoBackslashEscapes: bool }
 
 let defaultOptions: ParserOptions =
     { AnsiQuotes = false
@@ -31,9 +32,21 @@ let defaultOptions: ParserOptions =
       PipesAsConcat = false
       HighNotPrecedence = false
       NoUnsignedSubtraction = false
-      RealAsFloat = false }
+      RealAsFloat = false
+      NoBackslashEscapes = false }
 
 let private currentOptions = System.Threading.AsyncLocal<ParserOptions>()
+
+let private whenOption
+    (enabled: ParserOptions -> bool)
+    (message: string)
+    (parser: Parser<'a, unit>)
+    : Parser<'a, unit> =
+    fun stream ->
+        if enabled currentOptions.Value then
+            parser stream
+        else
+            (fail message) stream
 
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
@@ -92,7 +105,7 @@ let private serverVersionNumber = 80400
 /// `stripVersionComments` also removes ordinary comments for text probes;
 /// parser entry points preserve them because a comment is not interchangeable
 /// with whitespace between a built-in name and `(` under `IGNORE_SPACE`.
-let private rewriteVersionComments (stripOrdinaryComments: bool) (sql: string) =
+let private rewriteVersionComments (stripOrdinaryComments: bool) (options: ParserOptions) (sql: string) =
     let sb = Text.StringBuilder(sql.Length)
     let mutable i = 0
     // `'`/`"`/`` ` `` while inside a string/identifier literal — a `/*!`
@@ -102,7 +115,7 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (sql: string) =
 
     while i < sql.Length do
         match quoteChar with
-        | Some q when sql.[i] = '\\' && q <> '`' && i + 1 < sql.Length ->
+        | Some q when not options.NoBackslashEscapes && sql.[i] = '\\' && q <> '`' && i + 1 < sql.Length ->
             // backslash-escapes only apply inside '...'/"...", not `...`
             sb.Append(sql.[i]).Append(sql.[i + 1]) |> ignore
             i <- i + 2
@@ -206,11 +219,14 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (sql: string) =
 
     sb.ToString()
 
-let stripVersionComments (sql: string) : string =
-    rewriteVersionComments true sql
+let stripVersionCommentsWithOptions (options: ParserOptions) (sql: string) : string =
+    rewriteVersionComments true options sql
 
-let private expandVersionComments (sql: string) =
-    rewriteVersionComments false sql
+let stripVersionComments (sql: string) : string =
+    stripVersionCommentsWithOptions defaultOptions sql
+
+let private expandVersionComments (options: ParserOptions) (sql: string) =
+    rewriteVersionComments false options sql
 
 /// True when `sql` is nothing but whitespace/comments — real MySQL treats
 /// that as a harmless no-op (`Query OK, 0 rows affected`), not a syntax
@@ -478,21 +494,26 @@ let private numberLit: Parser<Value, unit> =
 /// special meaning) — except `\%` and `\_`, which MySQL deliberately leaves
 /// as the two literal characters `\%`/`\_` rather than collapsing them, so
 /// `LIKE` (via `Executor.likeToRegex`) can still tell "match the wildcard
-/// literally" apart from "the wildcard". Anything else is literal.
+/// literally" apart from "the wildcard". Anything else is literal. Under
+/// `NO_BACKSLASH_ESCAPES`, the backslash branch is disabled entirely.
 let private quotedStringChar (quote: char) : Parser<string, unit> =
+    let backslashEscape: Parser<string, unit> =
+        pchar '\\'
+        >>. anyChar
+        |>> function
+            | 'n' -> "\n"
+            | 't' -> "\t"
+            | 'r' -> "\r"
+            | 'b' -> "\b"
+            | '0' -> "\000"
+            | 'Z' -> "\x1A"
+            | '%' -> "\\%"
+            | '_' -> "\\_"
+            | other -> string other
+        |> whenOption (fun options -> not options.NoBackslashEscapes) "backslash escapes are disabled"
+
     (pstring (string quote + string quote) >>% string quote)
-    <|> (pchar '\\'
-         >>. anyChar
-         |>> function
-             | 'n' -> "\n"
-             | 't' -> "\t"
-             | 'r' -> "\r"
-             | 'b' -> "\b"
-             | '0' -> "\000"
-             | 'Z' -> "\x1A"
-             | '%' -> "\\%"
-             | '_' -> "\\_"
-             | other -> string other)
+    <|> backslashEscape
     <|> (satisfy (fun c -> c <> quote) |>> string)
 
 /// Single- and double-quoted string literals, with identical escaping
@@ -795,9 +816,10 @@ let private depthGuard (p: Parser<'a, unit>) : Parser<'a, unit> =
         else
             exprDepth.Value <- exprDepth.Value + 1
 
-            let reply = p stream
-            exprDepth.Value <- exprDepth.Value - 1
-            reply
+            try
+                p stream
+            finally
+                exprDepth.Value <- exprDepth.Value - 1
 
 // Parenthesized expressions, function-call arguments and `IN (...)` lists all recurse back
 // into the full expression grammar, which is itself built on top of them —
@@ -1625,15 +1647,12 @@ let private singlePipeBoundary = notFollowedBy (pchar '|') >>. ws
 let private concatOperatorToken = "\u001f"
 
 let private concatOperatorBoundary: Parser<unit, unit> =
-    fun stream ->
-        if currentOptions.Value.PipesAsConcat then ws stream else (fail "PIPES_AS_CONCAT is disabled") stream
+    ws |> whenOption _.PipesAsConcat "PIPES_AS_CONCAT is disabled"
 
 let private highNotBoundary: Parser<unit, unit> =
-    fun stream ->
-        if currentOptions.Value.HighNotPrecedence then
-            (nextCharSatisfiesNot isIdentChar >>. ws) stream
-        else
-            (fail "HIGH_NOT_PRECEDENCE is disabled") stream
+    nextCharSatisfiesNot isIdentChar
+    >>. ws
+    |> whenOption _.HighNotPrecedence "HIGH_NOT_PRECEDENCE is disabled"
 
 opp.AddOperator(
     InfixOperator("|", singlePipeBoundary, 1, Associativity.Left, (fun a b -> FuncCall("BITWISE_OR", [ a; b ])))
@@ -3760,7 +3779,7 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
             while index < sql.Length && not closed do
                 let current = sql.[index]
 
-                if quote <> '`' && current = '\\' && index + 1 < sql.Length then
+                if quote <> '`' && not options.NoBackslashEscapes && current = '\\' && index + 1 < sql.Length then
                     output.Append(current).Append(sql.[index + 1]) |> ignore
                     index <- index + 2
                 elif current = quote && index + 1 < sql.Length && sql.[index + 1] = quote then
@@ -3835,10 +3854,9 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
 let private withParserOptions (options: ParserOptions) (sql: string) parse =
     let previous = currentOptions.Value
     currentOptions.Value <- options
-    let sql = sql |> expandVersionComments |> rewriteSqlForOptions options
 
     try
-        parse sql
+        sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse
     finally
         currentOptions.Value <- previous
 
