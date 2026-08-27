@@ -8623,7 +8623,7 @@ and private runWindowedSelect
 
             let extendedRows =
                 matched
-                |> List.mapi (fun idx row -> Array.append row (computedColumns |> List.map (fun col -> col.[idx]) |> Array.ofList))
+                |> Seq.mapi (fun idx row -> Array.append row (computedColumns |> List.map (fun col -> col.[idx]) |> Array.ofList))
 
             let rewriteProjection (expr: Expr, aliasOpt: string option) : (Expr * string option) list =
                 match expr with
