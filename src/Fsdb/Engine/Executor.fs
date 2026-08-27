@@ -192,17 +192,27 @@ type private ViewAccess =
       Database: string
       Table: string }
 
+type private ViewColumnTarget =
+    { Database: string
+      Table: string
+      Qualifier: string
+      Column: string }
+
 type private UpdatableView =
     { ViewDatabase: string
       ViewName: string
       Database: string
       Table: string
       Columns: Map<string, string>
+      Targets: Map<string, ViewColumnTarget>
       Expressions: Map<string, Expr>
       OrderedColumns: string list
       Predicate: Expr option
       CheckPredicate: Expr option
       Insertable: bool
+      InsertableTargets: Set<string * string * string>
+      UpdateFrom: TableRef
+      UpdateJoins: Join list
       AccessPath: ViewAccess list
       Definer: string
       SecurityType: string }
@@ -314,6 +324,31 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
         | None, Some predicate -> Some predicate
         | None, None -> None
 
+    let hasWritableShape (select: SelectStmt) =
+        not select.Distinct
+        && not select.CalculateFoundRows
+        && select.GroupBy.IsEmpty
+        && not select.Rollup
+        && select.Windows.IsEmpty
+        && select.Ctes.IsEmpty
+        && select.Having.IsNone
+        && select.OrderBy.IsEmpty
+        && select.Limit.IsNone
+        && select.Offset.IsNone
+        && not select.Locking
+
+    let exposesRequiredColumns database table columns =
+        match InformationSchema.findTable store.Catalog database table with
+        | Error _ -> true
+        | Ok target ->
+            target.Columns
+            |> List.filter (fun column ->
+                not column.Nullable
+                && column.Default.IsNone
+                && not column.AutoIncrement
+                && column.Generated.IsNone)
+            |> List.forall (fun column -> Set.contains (column.Name.ToLowerInvariant()) columns)
+
     let rec classify seen (view: StoredView) (select: SelectStmt) =
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
@@ -323,17 +358,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
             match select.From with
             | Some(FromTable source)
                 when select.Joins.IsEmpty
-                     && not select.Distinct
-                     && not select.CalculateFoundRows
-                     && select.GroupBy.IsEmpty
-                     && not select.Rollup
-                     && select.Windows.IsEmpty
-                     && select.Ctes.IsEmpty
-                     && select.Having.IsNone
-                     && select.OrderBy.IsEmpty
-                     && select.Limit.IsNone
-                     && select.Offset.IsNone
-                     && not select.Locking ->
+                     && hasWritableShape select ->
                 let sourceNames = [ source.Table; source.Alias |> Option.defaultValue source.Table ]
                 let aggregateNames = set [ "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT" ]
 
@@ -485,17 +510,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         let directColumns = projected |> List.choose (fun (_, _, column) -> column)
                         let distinctDirectColumns = directColumns |> List.map _.ToLowerInvariant() |> Set.ofList
 
-                        let includesRequiredColumns =
-                            match InformationSchema.findTable store.Catalog database table with
-                            | Error _ -> true
-                            | Ok target ->
-                                target.Columns
-                                |> List.filter (fun column ->
-                                    not column.Nullable
-                                    && column.Default.IsNone
-                                    && not column.AutoIncrement
-                                    && column.Generated.IsNone)
-                                |> List.forall (fun column -> Set.contains (column.Name.ToLowerInvariant()) distinctDirectColumns)
+                        let insertable =
+                            projected |> List.forall (fun (_, _, column) -> column.IsSome)
+                            && distinctDirectColumns.Count = directColumns.Length
+                            && (underlying |> Option.forall _.Insertable)
+                            && exposesRequiredColumns database table distinctDirectColumns
 
                         Some
                             { ViewDatabase = view.Schema
@@ -503,21 +522,173 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Database = database
                               Table = table
                               Columns = writableColumns
+                              Targets =
+                                writableColumns
+                                |> Map.map (fun _ column ->
+                                    { Database = database
+                                      Table = table
+                                      Qualifier = table
+                                      Column = column })
                               Expressions = expressions
                               OrderedColumns = outputNames
                               Predicate = predicate
                               CheckPredicate = checkPredicate
-                              Insertable =
-                                projected |> List.forall (fun (_, _, column) -> column.IsSome)
-                                && distinctDirectColumns.Count = directColumns.Length
-                                && (underlying |> Option.forall _.Insertable)
-                                && includesRequiredColumns
+                              Insertable = insertable
+                              InsertableTargets =
+                                if insertable then
+                                    Set.singleton (database, table, table)
+                                else
+                                    Set.empty
+                              UpdateFrom =
+                                { Database = Some database
+                                  Table = table
+                                  Alias = None }
+                              UpdateJoins = []
                               AccessPath =
                                 { SecurityType = view.SecurityType
                                   Definer = view.Definer
                                   Database = sourceDb
                                   Table = source.Table }
                                 :: (underlying |> Option.map _.AccessPath |> Option.defaultValue [])
+                              Definer = view.Definer
+                              SecurityType = view.SecurityType }
+            | Some(FromTable source)
+                when not select.Joins.IsEmpty
+                     && (select.Joins |> List.forall (fun join -> join.Kind = InnerJoin))
+                     && (select.Joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false))
+                     && hasWritableShape select
+                     && view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase) ->
+                let tableRefs =
+                    source
+                    :: (select.Joins
+                        |> List.choose (fun join ->
+                            match join.Table with
+                            | FromTable table -> Some table
+                            | _ -> None))
+
+                let sources =
+                    tableRefs
+                    |> List.choose (fun tableRef ->
+                        let database = tableRef.Database |> Option.defaultValue view.Schema
+                        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+
+                        InformationSchema.findTable store.Catalog database tableRef.Table
+                        |> Result.toOption
+                        |> Option.map (fun table -> tableRef, database, qualifier, table))
+
+                if sources.Length <> tableRefs.Length then
+                    None
+                else
+                    let directTarget =
+                        function
+                        | QualifiedCol(qualifier, column) ->
+                            sources
+                            |> List.tryFind (fun (_, _, sourceQualifier, _) -> sourceQualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                            |> Option.bind (fun (tableRef, database, sourceQualifier, table) ->
+                                table.Columns
+                                |> List.tryFind (fun candidate -> candidate.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
+                                |> Option.map (fun _ ->
+                                    { Database = database
+                                      Table = tableRef.Table
+                                      Qualifier = sourceQualifier
+                                      Column = column }))
+                        | Col column ->
+                            sources
+                            |> List.choose (fun (tableRef, database, qualifier, table) ->
+                                table.Columns
+                                |> List.tryFind (fun candidate -> candidate.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
+                                |> Option.map (fun _ ->
+                                    { Database = database
+                                      Table = tableRef.Table
+                                      Qualifier = qualifier
+                                      Column = column }))
+                            |> function
+                                | [ target ] -> Some target
+                                | _ -> None
+                        | _ -> None
+
+                    let expandedProjections =
+                        select.Projections
+                        |> List.collect (fun (expression, alias) ->
+                            match expression with
+                            | Star None ->
+                                sources
+                                |> List.collect (fun (_, _, qualifier, table) ->
+                                    table.Columns |> List.map (fun column -> QualifiedCol(qualifier, column.Name), None))
+                            | Star(Some qualifier) ->
+                                sources
+                                |> List.tryFind (fun (_, _, sourceQualifier, _) -> sourceQualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                                |> Option.map (fun (_, _, sourceQualifier, table) ->
+                                    table.Columns |> List.map (fun column -> QualifiedCol(sourceQualifier, column.Name), None))
+                                |> Option.defaultValue [ expression, alias ]
+                            | _ -> [ expression, alias ])
+
+                    let projected =
+                        expandedProjections
+                        |> List.map (fun (expression, alias) ->
+                            let defaultName =
+                                match expression with
+                                | Col column
+                                | QualifiedCol(_, column) -> column
+                                | _ -> InformationSchema.exprToSql expression
+
+                            alias |> Option.defaultValue defaultName, expression, directTarget expression)
+
+                    let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
+
+                    if
+                        outputNames.Length <> projected.Length
+                        || (outputNames |> List.map _.ToLowerInvariant() |> Set.ofList).Count <> outputNames.Length
+                        || (projected |> List.forall (fun (_, _, target) -> target.IsNone))
+                    then
+                        None
+                    else
+                        let expressions =
+                            List.map2 (fun (output: string) (_, expression, _) -> output.ToLowerInvariant(), expression) outputNames projected
+                            |> Map.ofList
+
+                        let targets =
+                            List.map2 (fun (output: string) (_, _, target) -> target |> Option.map (fun target -> output.ToLowerInvariant(), target)) outputNames projected
+                            |> List.choose id
+                            |> Map.ofList
+
+                        let directTargets = projected |> List.choose (fun (_, _, target) -> target)
+
+                        let insertableTargets =
+                            if projected |> List.exists (fun (_, _, target) -> target.IsNone) then
+                                Set.empty
+                            else
+                                directTargets
+                                |> List.groupBy (fun target -> target.Database, target.Table, target.Qualifier)
+                                |> List.choose (fun (targetKey, targetColumns) ->
+                                    let distinct = targetColumns |> List.map (fun target -> target.Column.ToLowerInvariant()) |> Set.ofList
+                                    let targetTable = targetColumns.Head
+
+                                    match InformationSchema.findTable store.Catalog targetTable.Database targetTable.Table with
+                                    | Error _ -> None
+                                    | Ok _ when distinct.Count = targetColumns.Length && exposesRequiredColumns targetTable.Database targetTable.Table distinct ->
+                                        Some targetKey
+                                    | Ok _ -> None)
+                                |> Set.ofList
+
+                        let firstTarget = directTargets.Head
+
+                        Some
+                            { ViewDatabase = view.Schema
+                              ViewName = view.Name
+                              Database = firstTarget.Database
+                              Table = firstTarget.Table
+                              Columns = targets |> Map.map (fun _ target -> target.Column)
+                              Targets = targets
+                              Expressions = expressions
+                              OrderedColumns = outputNames
+                              Predicate = select.Where
+                              CheckPredicate = None
+                              Insertable = not insertableTargets.IsEmpty
+                              InsertableTargets = insertableTargets
+                              UpdateFrom = source
+                              UpdateJoins = select.Joins
+                              AccessPath = []
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
             | _ -> None
@@ -5936,6 +6107,7 @@ and private tryMergeDirectView
                 match updatableViewOfSelect store view definition with
                 | Some direct
                     when direct.Predicate |> Option.forall mergeablePredicate
+                         && direct.UpdateJoins.IsEmpty
                          && (direct.OrderedColumns
                              |> List.forall (fun column -> Map.containsKey (column.ToLowerInvariant()) direct.Columns)) ->
                     let source =
@@ -10073,7 +10245,42 @@ let private resolveViewColumn (view: UpdatableView) (column: string) =
         Error(Err(1348, sprintf "Column '%s' is not updatable" column))
     | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column))
 
-let private resolveViewColumns (view: UpdatableView) (columns: string list) = columns |> traverse (resolveViewColumn view)
+let private resolveViewInsertTarget (view: UpdatableView) (columns: string list) =
+    columns
+    |> traverse (fun column ->
+        match Map.tryFind (column.ToLowerInvariant()) view.Targets with
+        | Some target -> Ok target
+        | None when view.OrderedColumns |> List.exists (fun name -> name.Equals(column, System.StringComparison.OrdinalIgnoreCase)) ->
+            Error(Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" view.ViewName))
+        | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column)))
+    |> Result.bind (fun targets ->
+        let targetKeys = targets |> List.map (fun target -> target.Database, target.Table, target.Qualifier) |> List.distinct
+
+        match targetKeys with
+        | [ targetKey ] when Set.contains targetKey view.InsertableTargets ->
+            Ok(List.head targets, targets |> List.map _.Column)
+        | _ :: _ :: _ -> Error(Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName))
+        | _ -> Error(Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" view.ViewName)))
+
+let private validateViewAssignmentTarget (view: UpdatableView) (target: ViewColumnTarget) (assignments: (string * Expr) list) =
+    assignments
+    |> traverse (fun (column, _) ->
+        match Map.tryFind (column.ToLowerInvariant()) view.Targets with
+        | Some assignmentTarget -> Ok assignmentTarget
+        | None when view.OrderedColumns |> List.exists (fun name -> name.Equals(column, System.StringComparison.OrdinalIgnoreCase)) ->
+            Error(Err(1348, sprintf "Column '%s' is not updatable" column))
+        | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column)))
+    |> Result.bind (fun targets ->
+        if
+            targets
+            |> List.forall (fun candidate ->
+                candidate.Database.Equals(target.Database, System.StringComparison.OrdinalIgnoreCase)
+                && candidate.Table.Equals(target.Table, System.StringComparison.OrdinalIgnoreCase)
+                && candidate.Qualifier.Equals(target.Qualifier, System.StringComparison.OrdinalIgnoreCase))
+        then
+            Ok()
+        else
+            Error(Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)))
 
 let private rewriteViewAssignments (view: UpdatableView) (assignments: (string * Expr) list) =
     let rewrite = rewriteViewExpression view
@@ -12505,13 +12712,16 @@ let rec executeAs
             | other -> other
 
         let authorizedRegistry =
-            view.AccessPath
-            |> List.fold
-                (fun state access ->
-                    state
-                    |> Result.bind (fun current ->
-                        registryForViewSecurity store current access.SecurityType access.Definer access.Database (retarget access)))
-                (Ok registry)
+            if view.AccessPath.IsEmpty then
+                registryForViewSecurity store registry view.SecurityType view.Definer view.ViewDatabase statement
+            else
+                view.AccessPath
+                |> List.fold
+                    (fun state access ->
+                        state
+                        |> Result.bind (fun current ->
+                            registryForViewSecurity store current access.SecurityType access.Definer access.Database (retarget access)))
+                    (Ok registry)
 
         match authorizedRegistry with
         | Error(code, message) -> ids, Err(code, message)
@@ -13479,15 +13689,20 @@ let rec executeAs
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" viewName)
+        | Some view when not view.UpdateJoins.IsEmpty && columns.IsEmpty ->
+            ids, Err(1394, sprintf "Can not insert into join view '%s.%s' without fields list" view.ViewDatabase view.ViewName)
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
-            match resolveViewColumns view viewColumns, rewriteViewAssignments view onDuplicateUpdate with
-            | Error error, _
-            | _, Error error -> ids, error
-            | Ok baseColumns, Ok assignments ->
-                let rewritten = Insert(view.Database + "." + view.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
+            match resolveViewInsertTarget view viewColumns with
+            | Error error -> ids, error
+            | Ok(target, baseColumns) ->
+                match validateViewAssignmentTarget view target onDuplicateUpdate, rewriteViewAssignments view onDuplicateUpdate with
+                | Error error, _
+                | _, Error error -> ids, error
+                | Ok(), Ok assignments ->
+                    let rewritten = Insert(target.Database + "." + target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
-                executeViewWrite view rewritten
+                    executeViewWrite view rewritten
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -13520,15 +13735,20 @@ let rec executeAs
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" viewName)
+        | Some view when not view.UpdateJoins.IsEmpty && columns.IsEmpty ->
+            ids, Err(1394, sprintf "Can not insert into join view '%s.%s' without fields list" view.ViewDatabase view.ViewName)
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
-            match resolveViewColumns view viewColumns, rewriteViewAssignments view onDuplicateUpdate with
-            | Error error, _
-            | _, Error error -> ids, error
-            | Ok baseColumns, Ok assignments ->
-                let rewritten = InsertSelect(view.Database + "." + view.Table, baseColumns, select, assignments, ignoreDuplicates)
+            match resolveViewInsertTarget view viewColumns with
+            | Error error -> ids, error
+            | Ok(target, baseColumns) ->
+                match validateViewAssignmentTarget view target onDuplicateUpdate, rewriteViewAssignments view onDuplicateUpdate with
+                | Error error, _
+                | _, Error error -> ids, error
+                | Ok(), Ok assignments ->
+                    let rewritten = InsertSelect(target.Database + "." + target.Table, baseColumns, select, assignments, ignoreDuplicates)
 
-                executeViewWrite view rewritten
+                    executeViewWrite view rewritten
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -13582,14 +13802,16 @@ let rec executeAs
 
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
+        | Some view when not view.UpdateJoins.IsEmpty ->
+            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the REPLACE is not insertable-into" viewName)
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
 
-            match resolveViewColumns view viewColumns with
+            match resolveViewInsertTarget view viewColumns with
             | Error error -> ids, error
-            | Ok baseColumns ->
-                let rewritten = Replace(view.Database + "." + view.Table, baseColumns, rowsExprs)
+            | Ok(target, baseColumns) ->
+                let rewritten = Replace(target.Database + "." + target.Table, baseColumns, rowsExprs)
 
                 executeViewWrite view rewritten
 
@@ -13608,14 +13830,16 @@ let rec executeAs
 
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
+        | Some view when not view.UpdateJoins.IsEmpty ->
+            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the REPLACE is not insertable-into" viewName)
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
 
-            match resolveViewColumns view viewColumns with
+            match resolveViewInsertTarget view viewColumns with
             | Error error -> ids, error
-            | Ok baseColumns ->
-                let rewritten = ReplaceSelect(view.Database + "." + view.Table, baseColumns, select)
+            | Ok(target, baseColumns) ->
+                let rewritten = ReplaceSelect(target.Database + "." + target.Table, baseColumns, select)
 
                 executeViewWrite view rewritten
 
@@ -13636,12 +13860,15 @@ let rec executeAs
 
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
+        | Some view when not view.UpdateJoins.IsEmpty ->
+            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
         | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the REPLACE is not insertable-into" viewName)
         | Some view ->
-            match rewriteViewAssignments view assignments with
-            | Error error -> ids, error
-            | Ok rewrittenAssignments ->
-                let rewritten = ReplaceSet(view.Database + "." + view.Table, rewrittenAssignments)
+            match resolveViewInsertTarget view (assignments |> List.map fst), rewriteViewAssignments view assignments with
+            | Error error, _
+            | _, Error error -> ids, error
+            | Ok(target, _), Ok rewrittenAssignments ->
+                let rewritten = ReplaceSet(target.Database + "." + target.Table, rewrittenAssignments)
 
                 executeViewWrite view rewritten
 
@@ -13696,26 +13923,47 @@ let rec executeAs
 
         match tryUpdatableView store viewDb updateStmt.From.Table with
         | None -> ids, Err(1288, sprintf "The target table '%s' of the UPDATE is not updatable" updateStmt.From.Table)
+        | Some view when not view.UpdateJoins.IsEmpty && not updateStmt.OrderBy.IsEmpty ->
+            ids, Err(1221, "Incorrect usage of UPDATE and ORDER BY")
+        | Some view when not view.UpdateJoins.IsEmpty && updateStmt.Limit.IsSome ->
+            ids, Err(1221, "Incorrect usage of UPDATE and LIMIT")
         | Some view ->
             let rewrite = rewriteViewExpression view
-            match updateStmt.Assignments |> traverse (fun assignment -> resolveViewColumns view [ assignment.Column ] |> Result.map (fun columns -> assignment, List.head columns)) with
-            | Error error -> ids, error
+            match
+                updateStmt.Assignments
+                |> traverse (fun assignment ->
+                    match Map.tryFind (assignment.Column.ToLowerInvariant()) view.Targets with
+                    | Some target -> Ok(assignment, target)
+                    | None when view.OrderedColumns |> List.exists (fun name -> name.Equals(assignment.Column, System.StringComparison.OrdinalIgnoreCase)) ->
+                        Error(1348, sprintf "Column '%s' is not updatable" assignment.Column)
+                    | None -> Error(1054, sprintf "Unknown column '%s' in field list" assignment.Column))
+            with
+            | Error(code, message) -> ids, Err(code, message)
             | Ok assignments ->
-                let rewritten =
-                    { updateStmt with
-                        From = { updateStmt.From with Database = Some view.Database; Table = view.Table }
-                        Assignments =
-                            assignments
-                            |> List.map (fun (assignment, column) ->
-                                { assignment with
-                                    Table = assignment.Table |> Option.map (fun _ -> updateStmt.From.Alias |> Option.defaultValue view.Table)
-                                    Column = column
-                                    Value = rewrite assignment.Value })
-                        Where = combineViewPredicate view.Predicate (updateStmt.Where |> Option.map rewrite)
-                        OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
-                        Limit = updateStmt.Limit |> Option.map rewrite }
+                let targets =
+                    assignments
+                    |> List.map (fun (_, target) -> target.Database.ToLowerInvariant(), target.Table.ToLowerInvariant(), target.Qualifier.ToLowerInvariant())
+                    |> List.distinct
 
-                executeViewWrite view (Update rewritten)
+                if targets.Length > 1 then
+                    ids, Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)
+                else
+                    let rewritten =
+                        { updateStmt with
+                            From = view.UpdateFrom
+                            Joins = view.UpdateJoins
+                            Assignments =
+                                assignments
+                                |> List.map (fun (assignment, target) ->
+                                    { assignment with
+                                        Table = if view.UpdateJoins.IsEmpty then None else Some target.Qualifier
+                                        Column = target.Column
+                                        Value = rewrite assignment.Value })
+                            Where = combineViewPredicate view.Predicate (updateStmt.Where |> Option.map rewrite)
+                            OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+                            Limit = updateStmt.Limit |> Option.map rewrite }
+
+                    executeViewWrite view (Update rewritten)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -14086,6 +14334,8 @@ let rec executeAs
 
         match tryUpdatableView store viewDb deleteStmt.From.Table with
         | None -> ids, Err(1288, sprintf "The target table '%s' of the DELETE is not updatable" deleteStmt.From.Table)
+        | Some view when not view.UpdateJoins.IsEmpty ->
+            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
         | Some view ->
             let rewrite = rewriteViewExpression view
             let rewritten =

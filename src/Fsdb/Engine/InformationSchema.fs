@@ -1025,13 +1025,25 @@ let private viewsColumns =
 let private isUpdatableView (catalog: Catalog) (schema: string) (definition: string) =
     let views = viewCatalogEntries catalog
 
+    let isPhysicalTable defaultSchema (source: TableRef) =
+        let sourceSchema = source.Database |> Option.defaultValue defaultSchema
+
+        catalog
+        |> Map.tryFind sourceSchema
+        |> Option.bind (Map.tryFind (source.Table.ToLowerInvariant()))
+        |> Option.isSome
+
     let rec check seen schema definition =
         match Fsdb.Parser.parse definition with
         | Ok(Select select) ->
             match select.From with
             | Some(FromTable source) ->
                 let shapeAllowsUpdates =
-                    select.Joins.IsEmpty
+                    (select.Joins.IsEmpty
+                     || (select.Joins
+                         |> List.forall (fun join ->
+                             join.Kind = InnerJoin
+                             && match join.Table with FromTable _ -> true | _ -> false)))
                     && not select.Distinct
                     && not select.CalculateFoundRows
                     && select.GroupBy.IsEmpty
@@ -1052,6 +1064,13 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
 
                 if not shapeAllowsUpdates then
                     false
+                elif not select.Joins.IsEmpty then
+                    isPhysicalTable schema source
+                    && (select.Joins
+                        |> List.forall (fun join ->
+                            match join.Table with
+                            | FromTable table -> isPhysicalTable schema table
+                            | _ -> false))
                 else
                     let sourceSchema = source.Database |> Option.defaultValue schema
                     let key = sourceSchema.ToLowerInvariant(), source.Table.ToLowerInvariant()

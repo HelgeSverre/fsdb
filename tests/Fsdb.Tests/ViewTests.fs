@@ -177,6 +177,94 @@ let tests =
                   [ [ Some "2"; Some "11" ]; [ Some "3"; Some "31" ] ]
                   "legal writes persist"
 
+          testCase "inner join views update or insert one base table at a time"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE joined_left (id INT PRIMARY KEY, n INT, hidden INT DEFAULT 7)") "create left"
+              expectOk (run store "CREATE TABLE joined_right (id INT PRIMARY KEY, note VARCHAR(20))") "create right"
+              expectOk (run store "CREATE TABLE joined_many (left_id INT, marker VARCHAR(20))") "create many"
+              expectOk (run store "INSERT INTO joined_left VALUES (1, 10, 7), (2, 20, 7)") "seed left"
+              expectOk (run store "INSERT INTO joined_right VALUES (1, 'one'), (2, 'two')") "seed right"
+              expectOk (run store "INSERT INTO joined_many VALUES (1, 'a'), (1, 'b'), (2, 'c')") "seed many"
+
+              expectOk
+                  (run store "CREATE VIEW joined_rows AS SELECT l.id, l.n, r.note FROM joined_left l JOIN joined_right r ON r.id = l.id")
+                  "create join view"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name = 'joined_rows'")
+                  [ [ Some "YES" ] ]
+                  "inner join view is updatable"
+
+              expectOk (run store "UPDATE joined_rows SET n = 11 WHERE id = 1") "update left table"
+              expectOk (run store "UPDATE joined_rows SET note = 'changed' WHERE id = 1") "update right table"
+              expectOk (run store "INSERT INTO joined_rows(id, n) VALUES (3, 30)") "insert into one join component"
+
+              expectOk
+                  (run store "CREATE VIEW joined_right_rows AS SELECT r.id AS right_id, r.note, l.n FROM joined_left l JOIN joined_right r ON r.id = l.id")
+                  "create right-insert view"
+
+              expectOk (run store "INSERT INTO joined_right_rows(right_id, note) VALUES (4, 'four')") "insert into right table"
+
+              expectOk
+                  (run store "CREATE VIEW joined_filtered AS SELECT l.id, l.n, r.note, l.n * 2 AS doubled FROM joined_left l JOIN joined_right r ON r.id = l.id WHERE l.n < 20")
+                  "create filtered join view"
+
+              expectOk (run store "UPDATE joined_filtered SET n = 12 WHERE doubled = 22") "rewrite computed predicate"
+
+              expectOk
+                  (run store "CREATE VIEW joined_duplicates AS SELECT l.id, l.n, m.marker FROM joined_left l JOIN joined_many m ON m.left_id = l.id")
+                  "create duplicate-match view"
+
+              expectOk (run store "UPDATE joined_duplicates SET n = n + 1 WHERE id = 1") "update a duplicated target once"
+
+              match run store "UPDATE joined_rows SET n = 12, note = 'both' WHERE id = 1" with
+              | Err(1393, "Can not modify more than one base table through a join view 'fsdb.joined_rows'") -> ()
+              | other -> failtestf "expected cross-table update rejection, got %A" other
+
+              match run store "DELETE FROM joined_rows WHERE id = 1" with
+              | Err(1395, "Can not delete from join view 'fsdb.joined_rows'") -> ()
+              | other -> failtestf "expected join-view delete rejection, got %A" other
+
+              match run store "INSERT INTO joined_rows VALUES (5, 50, 'five')" with
+              | Err(1394, "Can not insert into join view 'fsdb.joined_rows' without fields list") -> ()
+              | other -> failtestf "expected implicit multi-table insert rejection, got %A" other
+
+              match run store "INSERT INTO joined_rows(id, n) VALUES (1, 99) ON DUPLICATE KEY UPDATE note = 'bad'" with
+              | Err(1393, _) -> ()
+              | other -> failtestf "expected cross-table duplicate update rejection, got %A" other
+
+              match run store "REPLACE INTO joined_rows(id, n) VALUES (5, 50)" with
+              | Err(1395, "Can not delete from join view 'fsdb.joined_rows'") -> ()
+              | other -> failtestf "expected join-view replace rejection, got %A" other
+
+              match run store "UPDATE joined_rows SET n = 0 ORDER BY id LIMIT 1" with
+              | Err(1221, "Incorrect usage of UPDATE and ORDER BY") -> ()
+              | other -> failtestf "expected join-view ordered update rejection, got %A" other
+
+              expectOk
+                  (run store "CREATE VIEW outer_joined_rows AS SELECT l.id, l.n, r.note FROM joined_left l LEFT JOIN joined_right r ON r.id = l.id")
+                  "create outer join view"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name = 'outer_joined_rows'")
+                  [ [ Some "NO" ] ]
+                  "outer join view is not updatable"
+
+              match run store "UPDATE outer_joined_rows SET n = 0" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected outer join update rejection, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id, n, hidden FROM joined_left ORDER BY id")
+                  [ [ Some "1"; Some "13"; Some "7" ]; [ Some "2"; Some "20"; Some "7" ]; [ Some "3"; Some "30"; Some "7" ] ]
+                  "left-table writes persist"
+
+              Expect.equal
+                  (rows store "SELECT id, note FROM joined_right ORDER BY id")
+                  [ [ Some "1"; Some "changed" ]; [ Some "2"; Some "two" ]; [ Some "4"; Some "four" ] ]
+                  "right-table update persists"
+
           testCase "a direct view streams an ordered limit from its base table"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -39,7 +39,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
-| Views & triggers | Direct updatable views with all insert/replace forms; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
+| Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
 | Routines & events | Single-statement procedure declarations, zero-parameter execution, and one-time event declarations | Parameterized and compound stored programs plus event scheduling |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, and multi-result batches | No session-state tracking |
@@ -270,6 +270,10 @@ INSERT ... SELECT, REPLACE VALUES/SET/SELECT, and ODKU, with required-column,
 repeated-column, exposed-column, and definer privilege checks. `LOCAL` and
 `CASCADED` CHECK OPTION values are persisted, exposed through metadata, and
 composed through nested views.
+Direct physical inner-join views can update one component table per statement
+and insert through an explicit column list into one insertable component.
+Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
+refused with MySQL-compatible errors.
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
 STATUS. Their metadata is derived from the saved query without evaluating it.
 Direct single-table projections with a static predicate merge into the outer
@@ -287,7 +291,7 @@ OLD/NEW images are rejected when the trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | inner joins and single-table/nested expressions where MySQL deems individual columns writable | single-table and nested views compose predicates and check options; direct columns update/delete, computed columns remain readable, and insertability is tracked separately | medium | refusal |
+| Updatable-view breadth | nested joins, outer-join rules, and additional expression shapes where MySQL deems individual columns writable | single-table and nested views compose predicates and check options; direct physical inner joins update or insert one component at a time; computed columns remain readable | medium | refusal |
 | ALGORITHM / explicit DEFINER / ALTER VIEW | supported | SQL SECURITY DEFINER and INVOKER execute with their respective identities; algorithm selection, explicit definers, and alteration remain absent | low | refusal |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | `InformationSchema.showCreateView` returns raw user text without the wrapper | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
@@ -488,7 +492,7 @@ implementation effort:
 2. Transaction scheduling and READ UNCOMMITTED. Indexed point/range UPDATE and
    DELETE statements wait and rebase, but deadlock victim selection, dirty
    reads, and the remaining transaction write shapes are not implemented.
-3. Complex/nested updatable views and the remaining stored-program control
+3. Complex join-derived updatable views and the remaining stored-program control
    language inside trigger bodies. Ordered multi-trigger slots, local values,
    nested conditional branches, and sequential compound DML bodies are covered.
 4. Spatial indexes, overlay/buffer operations, and geographic SRS behavior.

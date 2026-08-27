@@ -147,10 +147,15 @@ fsdb supports stored queries broadly and a narrow writable subset:
   metadata shape as populated views.
 
 Single-table views and nested views over that shape accept `UPDATE` and
-`DELETE`, including predicates over computed projections. Only direct column
-projections are assignable; computed columns return 1348. A view is insertable
-only when every projection is direct, no base column is repeated, and every
-required base column is exposed. Insertable views accept `INSERT`, `INSERT ...
+`DELETE`, including predicates over computed projections. Direct physical
+inner-join views accept `UPDATE` against one component table and `INSERT` with
+an explicit column list against one insertable component. Outer joins,
+join-view `DELETE`/`REPLACE`, and one statement that writes multiple component
+tables are refused with MySQL's corresponding errors. Only direct column
+projections are assignable; computed columns return 1348. A component is
+insertable only when every selected projection for that component is direct,
+no base column is repeated, and every required base column is exposed.
+Single-table insertable views additionally accept `INSERT`, `INSERT ...
 SELECT`, `REPLACE` in each supported source form, and `ON DUPLICATE KEY
 UPDATE`. Every written or referenced column must be exposed, and the privilege
 identity is checked at every nested view boundary. `LOCAL` and `CASCADED`
