@@ -42,6 +42,11 @@ let roundTimeTicksToFsp (fsp: int) (ticks: int64) : int64 =
     else
         int64 rounded
 
+let truncateTicksToFsp (fsp: int) (ticks: int64) : int64 =
+    let precision = max 0 (min 6 fsp)
+    let unit = pown 10L (7 - precision)
+    ticks - ticks % unit
+
 let private timePattern =
     Regex(@"^([+-])?(?:(\d+)\s+)?(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d+))?$", RegexOptions.CultureInvariant)
 

@@ -117,7 +117,7 @@ identities for bit aggregates.
 | Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once; exact-integer `IN` reuses an ordered membership set and narrows a direct indexed physical outer table; simple EXISTS stops at one row; direct correlated equalities use persistent indexes or a statement-local canonical-key lookup over a physical inner table; string/decimal and compound semi-joins remain scans, while other correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
-| sql_mode | ~20 mode bits with semantic effect | strictness, zero-date modes, ERROR_FOR_DIVISION_BY_ZERO diagnostics, ONLY_FULL_GROUP_BY, ANSI_QUOTES, IGNORE_SPACE, PIPES_AS_CONCAT, REAL_AS_FLOAT (including ANSI implications), HIGH_NOT_PRECEDENCE, NO_AUTO_VALUE_ON_ZERO, NO_UNSIGNED_SUBTRACTION, and NO_BACKSLASH_ESCAPES have effect; most other mode bits remain inert | medium | divergence |
+| sql_mode | ~20 mode bits with semantic effect | strictness, zero-date modes, ERROR_FOR_DIVISION_BY_ZERO diagnostics, ONLY_FULL_GROUP_BY, ANSI_QUOTES, IGNORE_SPACE, PIPES_AS_CONCAT, REAL_AS_FLOAT (including ANSI implications), HIGH_NOT_PRECEDENCE, NO_AUTO_VALUE_ON_ZERO, NO_UNSIGNED_SUBTRACTION, NO_BACKSLASH_ESCAPES, and TIME_TRUNCATE_FRACTIONAL have effect; most other mode bits remain inert | medium | divergence |
 
 ## 3. Built-in functions
 
@@ -162,7 +162,8 @@ Working: TINYINT–BIGINT signed/unsigned, DECIMAL(p,s) with fixed-point
 round-trip, FLOAT/DOUBLE with MySQL exponent rendering, CHAR/VARCHAR,
 TINYTEXT–LONGTEXT, BINARY/VARBINARY, TINYBLOB–LONGBLOB, ENUM/SET with
 canonicalization, DATE/DATETIME(fsp)/TIMESTAMP(fsp)/TIME(fsp) with half-up
-fsp rounding and carry cases, all-zero and partial-zero dates with sql_mode
+rounding by default and truncation under `TIME_TRUNCATE_FRACTIONAL`, all-zero
+and partial-zero dates with sql_mode
 enforcement, YEAR, JSON, per-column charset/collation,
 wire-faithful column metadata (`ColumnWire.metadataOfType`), `BIT(1)`–`BIT(64)`
 fields with binary literals and defaults, per-row functional defaults with

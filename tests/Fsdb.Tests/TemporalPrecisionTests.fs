@@ -46,6 +46,15 @@ let private allRows (statements: string list) : string option list list =
     | Fsdb.Executor.ResultSet(_, rows) -> rows
     | other -> failtestf "expected a resultset, got %A" other
 
+let private expectRow session sql expected message =
+    let session, result = handle session sql
+
+    match result with
+    | Fsdb.Executor.ResultSet(_, [ row ]) -> Expect.equal row expected message
+    | other -> failtestf "expected exactly one row, got %A" other
+
+    session
+
 let private tempDataDir () =
     TestSupport.directory "temporal-precision"
 
@@ -124,6 +133,82 @@ let tests =
                     // bare datetime literal has none — it must not gain a fraction.
                     let row = oneRow [ "SELECT CAST('2024-01-01 00:00:00' AS DATETIME) AS x" ]
                     Expect.equal row [ Some "2024-01-01 00:00:00" ] "no spurious fraction" ]
+
+          testList
+              "TIME_TRUNCATE_FRACTIONAL sql mode"
+              [ testCase "storage, casts, defaults, and ALTER use the session rounding policy"
+                <| fun _ ->
+                    let store = Fsdb.Storage.create ()
+                    let rounded = create 1 store
+
+                    let truncated, setResult =
+                        handle (create 2 store) "SET sql_mode = 'STRICT_TRANS_TABLES,TIME_TRUNCATE_FRACTIONAL'"
+
+                    Expect.equal setResult (Fsdb.Executor.Affected 0UL) "mode assignment"
+
+                    let rounded, _ =
+                        handle
+                            rounded
+                            "CREATE TABLE rounded (d DATETIME(2), ts TIMESTAMP(2), tm TIME(2), d0 DATETIME, tm0 TIME)"
+
+                    let truncated, _ =
+                        handle
+                            truncated
+                            "CREATE TABLE truncated (id INT, d DATETIME(2) DEFAULT '2024-01-01 00:00:00.129', ts TIMESTAMP(2), tm TIME(2), d0 DATETIME, tm0 TIME)"
+
+                    let rounded, _ =
+                        handle
+                            rounded
+                            "INSERT INTO rounded VALUES ('2024-01-01 00:00:00.129', '2024-01-01 00:00:00.129', '12:34:56.129', '2024-01-01 00:00:00.6', '12:34:56.6')"
+
+                    let truncated, _ =
+                        handle
+                            truncated
+                            "INSERT INTO truncated (id, ts, tm, d0, tm0) VALUES (1, '2024-01-01 00:00:00.129', '12:34:56.129', '2024-01-01 00:00:00.6', '12:34:56.6')"
+
+                    Expect.isEmpty truncated.Diagnostics "fraction truncation is silent"
+
+                    let rounded =
+                        expectRow
+                            rounded
+                            "SELECT d, ts, tm, d0, tm0 FROM rounded"
+                            [ Some "2024-01-01 00:00:00.13"
+                              Some "2024-01-01 00:00:00.13"
+                              Some "12:34:56.13"
+                              Some "2024-01-01 00:00:01"
+                              Some "12:34:57" ]
+                            "default mode rounds"
+
+                    let truncated =
+                        expectRow
+                            truncated
+                            "SELECT d, ts, tm, d0, tm0 FROM truncated"
+                            [ Some "2024-01-01 00:00:00.12"
+                              Some "2024-01-01 00:00:00.12"
+                              Some "12:34:56.12"
+                              Some "2024-01-01 00:00:00"
+                              Some "12:34:56" ]
+                            "truncate mode truncates"
+
+                    let truncated =
+                        expectRow
+                            truncated
+                            "SELECT CAST('2024-01-01 00:00:00.129' AS DATETIME(2)), CAST('-12:34:56.129' AS TIME(2))"
+                            [ Some "2024-01-01 00:00:00.12"; Some "-12:34:56.12" ]
+                            "casts truncate"
+
+                    let truncated, _ = handle truncated "CREATE TABLE truncate_alter (d DATETIME(3), tm TIME(3))"
+                    let truncated, _ = handle truncated "INSERT INTO truncate_alter VALUES ('2024-01-01 00:00:00.129', '12:34:56.129')"
+                    let truncated, alterResult = handle truncated "ALTER TABLE truncate_alter MODIFY d DATETIME(2), MODIFY tm TIME(2)"
+                    Expect.equal alterResult (Fsdb.Executor.Affected 0UL) "truncate-mode ALTER"
+                    Expect.isEmpty truncated.Diagnostics "ALTER truncation is silent"
+
+                    expectRow
+                        truncated
+                        "SELECT d, tm FROM truncate_alter"
+                        [ Some "2024-01-01 00:00:00.12"; Some "12:34:56.12" ]
+                        "ALTER truncates existing values"
+                    |> ignore ]
 
           testList
               "information_schema / SHOW"

@@ -307,6 +307,7 @@ type Store =
       mutable OnlyFullGroupBy: bool
       mutable NoAutoValueOnZero: bool
       mutable ErrorForDivisionByZero: bool
+      mutable TimeTruncateFractional: bool
       /// Applies only when no column or explicit COLLATE supplies precedence.
       mutable ConnectionCollation: Collation.Collation
       /// Lowercase names overlay real tables in the reserved fsdb schema.
@@ -414,6 +415,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       OnlyFullGroupBy = store.OnlyFullGroupBy
       NoAutoValueOnZero = store.NoAutoValueOnZero
       ErrorForDivisionByZero = store.ErrorForDivisionByZero
+      TimeTruncateFractional = store.TimeTruncateFractional
       ConnectionCollation = store.ConnectionCollation
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
@@ -509,6 +511,9 @@ let setNoAutoValueOnZero (store: Store) (enabled: bool) : unit =
 
 let setErrorForDivisionByZero (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ErrorForDivisionByZero <- enabled)
+
+let setTimeTruncateFractional (store: Store) (enabled: bool) : unit =
+    lock store.Lock (fun () -> store.TimeTruncateFractional <- enabled)
 
 /// Table names are keyed case-insensitively by their lowercased form —
 /// public because `Persistence`'s WAL replay looks tables up in `Catalog`
@@ -869,12 +874,23 @@ let private parseDecimal (s: string) : decimal option =
 type TemporalCoercionMode =
     { Strict: bool
       NoZeroDate: bool
-      NoZeroInDate: bool }
+      NoZeroInDate: bool
+      TruncateFractional: bool }
 
 let temporalCoercionMode (store: Store) =
     { Strict = store.StrictMode
       NoZeroDate = store.NoZeroDate
-      NoZeroInDate = store.NoZeroInDate }
+      NoZeroInDate = store.NoZeroInDate
+      TruncateFractional = store.TimeTruncateFractional }
+
+let private adjustTicksToFsp (mode: TemporalCoercionMode) (fsp: int) (ticks: int64) =
+    if mode.TruncateFractional then
+        truncateTicksToFsp fsp ticks
+    else
+        roundTimeTicksToFsp fsp ticks
+
+let private adjustDateTimeToFsp (mode: TemporalCoercionMode) (fsp: int) (value: DateTime) =
+    DateTime(adjustTicksToFsp mode fsp value.Ticks, value.Kind)
 
 let private truncateRunes (length: int) (text: string) =
     let runes = text.EnumerateRunes() |> Seq.toArray
@@ -1305,15 +1321,15 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     Ok(VTime(timeValueOrClamp 0L))
 
             let finish ticks =
-                let rounded = roundTimeTicksToFsp fsp ticks
+                let adjusted = adjustTicksToFsp mode fsp ticks
 
-                if abs rounded <= maxTimeTicks then
-                    Ok(VTime(timeValueOrClamp rounded))
+                if abs adjusted <= maxTimeTicks then
+                    Ok(VTime(timeValueOrClamp adjusted))
                 elif strict then
                     invalid ()
                 else
                     warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
-                    Ok(VTime(timeValueOrClamp rounded))
+                    Ok(VTime(timeValueOrClamp adjusted))
 
             let parsed =
                 match v with
@@ -1450,13 +1466,11 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             | _ -> temporalFallback ()
         | TDateTime fsp
         | TTimestamp fsp ->
-            // Round the sub-second part to the column's declared fsp so the
-            // stored ticks already reflect the precision — MySQL rounds (half
-            // up), it does not truncate: `DATETIME(0)` of `.6` stores `:01`,
-            // and a `.9999995` into `(6)` carries all the way to the next day
-            // (both oracle-verified). The resultset renderer then shows
-            // exactly `fsp` digits off these rounded ticks.
-            let round dt = VDateTime(Functions.roundDateTimeToFsp fsp dt)
+            // Quantize the sub-second part to the declared precision before
+            // storage. MySQL rounds half-up by default and truncates under
+            // TIME_TRUNCATE_FRACTIONAL; rendering then emits exactly `fsp`
+            // digits from the stored ticks.
+            let adjust dt = VDateTime(adjustDateTimeToFsp mode fsp dt)
             let zeroDateError () =
                 Error(ZeroTemporalForColumn("datetime", v |> toText |> Option.defaultValue "0000-00-00 00:00:00", col.Name))
 
@@ -1487,8 +1501,8 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 zeroDateFallback warningCode
 
             match v with
-            | VDateTime dt -> Ok(round dt)
-            | VDate d -> Ok(round (d.ToDateTime(TimeOnly.MinValue)))
+            | VDateTime dt -> Ok(adjust dt)
+            | VDate d -> Ok(adjust (d.ToDateTime(TimeOnly.MinValue)))
             | VZeroDate d ->
                 match tryZeroDateTime d 0 0 0 0 with
                 | Some dt -> zeroDateResult dt
@@ -1510,7 +1524,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                         | Some(year, month, day) when year = 0 || month = 0 || day = 0 -> invalidZeroDateResult year month day
                         | _ ->
                             match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                            | true, dt -> Ok(round dt)
+                            | true, dt -> Ok(adjust dt)
                             | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
@@ -1524,7 +1538,8 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
     coerceStoredValueWithMode
         { Strict = strict
           NoZeroDate = true
-          NoZeroInDate = true }
+          NoZeroInDate = true
+          TruncateFractional = false }
         col
         v
 
@@ -1577,29 +1592,33 @@ let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Res
     | Some(DExpression _) -> Ok col
     | _ -> Ok col
 
-/// `NOW()` rounded to `col`'s own declared fsp — a `TIMESTAMP(6)` column
-/// keeps microseconds, a bare `DATETIME`/`TIMESTAMP` truncates to whole
-/// seconds. Shared by `DEFAULT CURRENT_TIMESTAMP` (`evalDefault`, insert
-/// time) and `ON UPDATE CURRENT_TIMESTAMP` (`Executor`, update time) since
-/// both evaluate the same "current time at this column's precision" rule.
-let currentTimestampForColumn (col: ColumnDef) : Value =
+/// Evaluates the current time at a column's declared precision.
+let currentTimestampForColumn (mode: TemporalCoercionMode) (col: ColumnDef) : Value =
     let fsp =
         match col.Type with
         | TDateTime fsp
         | TTimestamp fsp -> fsp
         | _ -> 0
 
-    VDateTime(Functions.roundDateTimeToFsp fsp DateTime.Now)
+    VDateTime(adjustDateTimeToFsp mode fsp DateTime.Now)
 
 /// Evaluates a column's `DEFAULT` clause into the value to insert when none
 /// was provided — `CURRENT_TIMESTAMP` evaluates fresh here (insert time),
 /// rather than being carried around as a stored marker value.
-let evalDefault (col: ColumnDef) : Value =
+let evalDefaultWithMode (mode: TemporalCoercionMode) (col: ColumnDef) : Value =
     match col.Default with
     | None -> VNull
     | Some(DConst v) -> v
-    | Some DCurrentTimestamp -> currentTimestampForColumn col
+    | Some DCurrentTimestamp -> currentTimestampForColumn mode col
     | Some(DExpression _) -> VNull
+
+let evalDefault (col: ColumnDef) : Value =
+    evalDefaultWithMode
+        { Strict = true
+          NoZeroDate = true
+          NoZeroInDate = true
+          TruncateFractional = false }
+        col
 
 let private coerceAndCheck (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     match v with
@@ -2518,6 +2537,7 @@ let create () : Store =
       OnlyFullGroupBy = true
       NoAutoValueOnZero = false
       ErrorForDivisionByZero = true
+      TimeTruncateFractional = false
       ConnectionCollation = Collation.defaultCollation
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
@@ -3669,7 +3689,7 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
 /// `implicitZeroSeed`).
 let private addedColumnFill (mode: TemporalCoercionMode) (col: ColumnDef) : Result<Value, StorageError> =
     match col.Default with
-    | Some _ -> coerceStoredValueWithMode mode col (evalDefault col)
+    | Some _ -> coerceStoredValueWithMode mode col (evalDefaultWithMode mode col)
     | None ->
         if col.Nullable then
             Ok VNull
@@ -4308,7 +4328,7 @@ let private processRow
                 elif missingRequired then
                     Error(ExpressionError(1364, sprintf "Field '%s' doesn't have a default value" col.Name))
                 else
-                    Ok(provided |> Option.defaultValue (evalDefault col))
+                    Ok(provided |> Option.defaultValue (evalDefaultWithMode mode col))
 
             match pending with
             | Error error -> Error error

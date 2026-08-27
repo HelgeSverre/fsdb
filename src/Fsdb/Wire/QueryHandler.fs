@@ -901,6 +901,7 @@ let private applySqlMode (store: Store) (value: string) =
     setOnlyFullGroupBy store (hasSqlMode modes "ONLY_FULL_GROUP_BY")
     setNoAutoValueOnZero store (hasSqlMode modes "NO_AUTO_VALUE_ON_ZERO")
     setErrorForDivisionByZero store (hasSqlMode modes "ERROR_FOR_DIVISION_BY_ZERO")
+    setTimeTruncateFractional store (hasSqlMode modes "TIME_TRUNCATE_FRACTIONAL")
 
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends

@@ -573,7 +573,8 @@ let tests =
                         coerceValueWithMode
                             { Strict = false
                               NoZeroDate = false
-                              NoZeroInDate = false }
+                              NoZeroInDate = false
+                              TruncateFractional = false }
                             (col "established" TDate false)
                             (VString "2020-00-01")
                     with

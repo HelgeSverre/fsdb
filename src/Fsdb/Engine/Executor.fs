@@ -3755,7 +3755,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
         match tryColumnDefForExpr ctx argument with
         | Some { Default = Some(DExpression expression) } -> eval expression
-        | Some column when column.Default.IsSome || column.Nullable -> Ok(Storage.evalDefault column)
+        | Some column when column.Default.IsSome || column.Nullable ->
+            Ok(Storage.evalDefaultWithMode (Storage.temporalCoercionMode ctx.Store) column)
         | Some column -> Error(1364, sprintf "Field '%s' doesn't have a default value" column.Name)
         | None -> Error(1054, "Unknown column in 'field list'")
     | FuncCall(name, [ argument ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
@@ -3983,7 +3984,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     Storage.coerceValueWithMode
                         { Strict = false
                           NoZeroDate = true
-                          NoZeroInDate = true }
+                          NoZeroInDate = true
+                          TruncateFractional = ctx.Store.TimeTruncateFractional }
                         castCol
                         v)
             with
@@ -10169,7 +10171,13 @@ let private applyAssignments
 /// real leaves the auto column alone too. An explicit assignment to the
 /// auto column itself always wins, whether or not it changes the value —
 /// `assignedIdxs` excludes it from this pass entirely.
-let private applyOnUpdateTimestamps (columns: ColumnDef list) (assignedIdxs: Set<int>) (original: Value[]) (row: Value[]) : Value[] =
+let private applyOnUpdateTimestamps
+    (mode: TemporalCoercionMode)
+    (columns: ColumnDef list)
+    (assignedIdxs: Set<int>)
+    (original: Value[])
+    (row: Value[])
+    : Value[] =
     let autoCols =
         columns
         |> List.indexed
@@ -10181,7 +10189,7 @@ let private applyOnUpdateTimestamps (columns: ColumnDef list) (assignedIdxs: Set
         let newRow = Array.copy row
 
         for i, c in autoCols do
-            newRow.[i] <- Storage.currentTimestampForColumn c
+            newRow.[i] <- Storage.currentTimestampForColumn mode c
 
         newRow
 
@@ -12769,7 +12777,7 @@ let rec executeAs
                     else
                         evalExpr context expression |> Result.map Some |> Result.mapError ExpressionError)
                 |> Result.bind (fun values ->
-                    let candidate = columns |> List.map evalDefault |> Array.ofList
+                    let candidate = columns |> List.map (evalDefaultWithMode (temporalCoercionMode runStore)) |> Array.ofList
 
                     List.zip indices values
                     |> List.iter (function
@@ -12885,7 +12893,7 @@ let rec executeAs
             for idx, v in idxVals do
                 newRow.[idx] <- v
             let assignedIdxs = idxVals |> List.map fst |> Set.ofList
-            applyOnUpdateTimestamps tableColumns assignedIdxs existing newRow)
+            applyOnUpdateTimestamps (temporalCoercionMode store) tableColumns assignedIdxs existing newRow)
 
     let upsertEvaluated
         (db: string)
@@ -14117,7 +14125,7 @@ let rec executeAs
         | Error error -> ids, storageErr error
         | Ok(tableColumns, _) ->
             let columnIndex = columnIndexOf tableColumns
-            let defaults = tableColumns |> List.map evalDefault |> Array.ofList
+            let defaults = tableColumns |> List.map (evalDefaultWithMode (temporalCoercionMode store)) |> Array.ofList
             let functional =
                 tableColumns
                 |> List.indexed
@@ -14298,7 +14306,7 @@ let rec executeAs
                         let updater row =
                             let updated =
                                 applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
-                                |> Result.map (applyOnUpdateTimestamps columns assignedIdxs row)
+                                |> Result.map (applyOnUpdateTimestamps (temporalCoercionMode targetStore) columns assignedIdxs row)
                                 |> Result.bind (computeGeneratedRow targetStore registry db table columns)
 
                             match updated with
@@ -14541,7 +14549,14 @@ let rec executeAs
                                                 for colIdx, v in vals do
                                                     newRow.[colIdx] <- v
 
-                                                Ok(applyOnUpdateTimestamps physicalColumns.[i] assignedIdxsByPhys.[i] row newRow)
+                                                Ok(
+                                                    applyOnUpdateTimestamps
+                                                        (temporalCoercionMode snapshot)
+                                                        physicalColumns.[i]
+                                                        assignedIdxsByPhys.[i]
+                                                        row
+                                                        newRow
+                                                )
                                                 |> Result.bind (computeGeneratedRow snapshot registry tdb tname physicalColumns.[i])
                                                 |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i])
                                             | false, _ -> Ok row
