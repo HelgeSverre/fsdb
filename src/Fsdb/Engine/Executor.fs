@@ -2178,9 +2178,8 @@ let private keepMatches
     (candidates: (int * int * 'x) list)
     : Result<(int * int * 'x) list, QueryResult> =
     candidates
-    |> traverse (fun (li, ri, x) -> residualHolds (extract x) |> Result.map (fun ok -> if ok then Some(li, ri, x) else None))
+    |> traverseSeq (fun (li, ri, x) -> residualHolds (extract x) |> Result.map (fun ok -> if ok then Some(li, ri, x) else None))
     |> Result.mapError Err
-    |> Result.map (List.choose id)
 
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
@@ -7069,9 +7068,8 @@ and private evalAggregate
                 | v -> orderKeys |> traverse (fst >> evalOrderKey ctx) |> Result.map (fun keys -> Some(v, collationKeyOf ctx innerExpr v, keys)))
 
         rows
-        |> traverse evalRow
-        |> Result.map (fun results ->
-            let present = results |> List.choose id
+        |> traverseSeq evalRow
+        |> Result.map (fun present ->
             let ordered =
                 if orderKeys.IsEmpty then
                     present
@@ -7705,10 +7703,9 @@ and private runGroupedSelect
     | Ok probeProjected ->
         let colNames = probeProjected |> List.map fst
 
-        match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
+        match rows |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
         | Error(code, message) -> Err(code, message), [], []
-        | Ok maybeMatched ->
-            let matched = maybeMatched |> List.choose id
+        | Ok matched ->
 
             // A bare `GROUP BY` with no `ORDER BY` isn't sorted by the SQL
             // standard, but real MySQL sorts by the group key ascending
@@ -7816,10 +7813,9 @@ and private runGroupedSelect
                                 |> Result.bind (fun proj ->
                                     orderKeysOf rollup proj groupRows |> Result.map (fun keys -> Some(proj, keys, key)))))
 
-                match groups |> traverse processGroup with
+                match groups |> traverseSeq processGroup with
                 | Error(code, message) -> Err(code, message), [], []
-                | Ok maybeRows ->
-                    let kept = maybeRows |> List.choose id
+                | Ok kept ->
 
                     let sorted =
                         if indexOrdered then
@@ -8019,10 +8015,9 @@ and private runWindowedSelect
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
     let matches = whereMatches ctxFor select.Where
 
-    match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
+    match rows |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
     | Error(code, message) -> Err(code, message), [], []
-    | Ok maybeMatched ->
-        let matched = maybeMatched |> List.choose id
+    | Ok matched ->
 
         // One partitioned-and-ordered pass per distinct window function.
         // Original row indexes break equal ORDER BY keys so peers retain
