@@ -63,7 +63,8 @@ Each run writes the upstream output and the corresponding fsdb server log under
 the ignored `smoke/results/<UTC timestamp>-<process ID>/` directory. The command
 continues through all selected targets and exits nonzero when any target fails.
 
-Reproducible fsdb failures found by these probes are tracked in `BUGS.md`.
+Reproducible fsdb failures found by these probes become focused regression
+tests. Deliberate compatibility boundaries remain inventoried in `GAPS.md`.
 
 Most targets remain focused compatibility gates. Drupal is the exception: its
 target runs every upstream PHPUnit suite (28,475 tests at the current pin),

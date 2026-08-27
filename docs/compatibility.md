@@ -81,8 +81,8 @@ phpMyAdmin 5.2.x's query builders read from source. All 23
 live MySQL 8.4.11 (`SHOW COLUMNS` per table, both sides), and a ~70-query
 replay fixture covering both clients' connect/browse/structure flows runs
 with a single divergence: `SHOW SLAVE STATUS`, which real 8.4 also rejects
-with 1064. Stored views and triggers populate their real object catalogs;
-routines and events remain genuinely empty rather than stubbed. PROCESSLIST,
+with 1064. Stored views, triggers, procedure declarations, and events populate
+their object catalogs. PROCESSLIST,
 `Threads_connected`, and `KILL` operate on the real connection registry.
 
 ## TLS transport
