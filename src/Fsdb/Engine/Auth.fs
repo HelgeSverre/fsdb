@@ -431,7 +431,7 @@ let isAccountLocked (cols: ColumnDef list) (row: Value[]) = userColumnText cols 
 // ---------------------------------------------------------------------------
 // GRANT / REVOKE and privilege checks. Scope hierarchy is MySQL's:
 // global (mysql.user) ⊃ db (mysql.db) ⊃ table (mysql.tables_priv).
-// ponytail: no column-level privileges, no roles, no partial-revoke — the
+// Column-level privileges, roles, and partial revokes are not modeled; the
 // three levels above are what real clients and apps actually exercise.
 // ---------------------------------------------------------------------------
 
@@ -648,7 +648,7 @@ let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (str
 
 // ---------------------------------------------------------------------------
 // Enforcement: the privileges a parsed statement needs, and whether a user
-// has them. ponytail: per-check linear scans of the tiny grant tables via
+// has them. Each check scans the tiny grant tables through
 // the lock-free catalog snapshot — cache the lookups if profiling ever says
 // a real workload notices.
 // ---------------------------------------------------------------------------
@@ -1237,7 +1237,7 @@ let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string 
 
 /// The `SHOW GRANTS FOR 'name'@'host'` rows: the global line from the
 /// mysql.user row, one line per mysql.db row, one per tables_priv row —
-/// 1141 when the account doesn't exist. ponytail: no dynamic-privilege or
+/// 1141 when the account doesn't exist. Dynamic-privilege and
 /// PROXY lines (real root shows both; nothing here models either).
 let renderGrantsForAccount (store: Store) (wanted: Account) : Result<string * string list, int * string> =
     match tryUserRowForAccount store wanted with

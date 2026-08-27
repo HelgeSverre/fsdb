@@ -1355,7 +1355,7 @@ module private MySqlTemporal =
 /// has to be validated where it's written. Only a string literal follows the
 /// type word, so `DATE(x)`/`TIME(x)` calls are untouched.
 ///
-/// ponytail: a DATETIME literal's declared fraction width is lost — `VDateTime`
+/// A DATETIME literal's declared fraction width is lost: `VDateTime`
 /// carries no fsp, so `Value.toText` always renders six digits where MySQL
 /// renders the three of `TIMESTAMP '2020-01-01 10:00:00.123'`. The value
 /// itself is exact; fixing the width needs an fsp channel on the value (or on
@@ -1620,7 +1620,7 @@ opp.AddOperator(InfixOperator("%", ws, 6, Associativity.Left, (fun a b -> FuncCa
 // followed by a stray `_price` term. `OperatorPrecedenceParser.InfixOperator`
 // matches its operator string case-sensitively with no case-insensitive
 // option, so both the all-caps and all-lowercase spellings (by far the two
-// real-world casings) are registered explicitly — ponytail: a query mixing
+// real-world casings) are registered explicitly. A query mixing
 // case mid-keyword (`Div`) won't match; fold in real case-insensitive
 // matching if that ever shows up outside a lint test.
 let private divKeywordBoundary: Parser<unit, unit> = nextCharSatisfiesNot isIdentChar >>. ws
@@ -1638,7 +1638,7 @@ opp.AddOperator(InfixOperator("mod", divKeywordBoundary, 6, Associativity.Left, 
 /// `0 - x` desugaring would subtract from the `BIGINT UNSIGNED` those digits
 /// parse as and leave the unsigned domain (error 1690).
 ///
-/// ponytail: `-(<unsigned expression>)` still desugars, so it raises 1690
+/// `-(<unsigned expression>)` still desugars, so it raises 1690
 /// where MySQL negates into DECIMAL. Give `Ast.Expr` a real `Neg` case if
 /// that shape shows up outside literals.
 let private negateExpr (e: Expr) : Expr =
@@ -2818,7 +2818,7 @@ let private selectOrUnionBranches, selectOrUnionBranchesRef =
 /// keeps that case out — it falls through and fails the parse rather than
 /// answering the wrong grouping.
 ///
-/// ponytail: a real nested set-expression tree in `Ast` is the upgrade path
+/// A nested set-expression tree in `Ast` is the upgrade path
 /// if a workload ever writes an operator after a parenthesized group.
 let private parenSetGroup: Parser<(SelectStmt * bool) * (SetOp * (SelectStmt * bool)) list, unit> =
     attempt (
@@ -3748,13 +3748,20 @@ let private ansiQuotedIdentifiers (sql: string) : string =
 
     output.ToString()
 
-let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
-    placeholderCounterLocal.Value <- 0
-    exprDepth.Value <- 0
+let private withParserOptions (options: ParserOptions) (sql: string) parse =
     let previousIgnoreSpace = ignoreSpaceMode.Value
     ignoreSpaceMode.Value <- options.IgnoreSpace
     let sql = if options.AnsiQuotes then ansiQuotedIdentifiers sql else sql
     let sql = expandVersionComments sql
+
+    try
+        parse sql
+    finally
+        ignoreSpaceMode.Value <- previousIgnoreSpace
+
+let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
+    placeholderCounterLocal.Value <- 0
+    exprDepth.Value <- 0
     let full = ws >>. statement .>> opt (sym ";") .>> eof
 
     // `open FParsec` brings its own `Ok`/`Error` (from `Reply`'s status) into
@@ -3764,7 +3771,7 @@ let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, 
     // exception should ever be able to escape as a raw .NET exception and
     // drop the caller's connection — a syntax error is always a clean
     // `Result.Error`, however it originates.
-    let parse () =
+    let parse sql =
         try
             if exceedsParenthesisDepthLimit sql then
                 Result.Error "expression nested too deeply"
@@ -3775,10 +3782,7 @@ let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, 
         with ex ->
             Result.Error ex.Message
 
-    try
-        parse ()
-    finally
-        ignoreSpaceMode.Value <- previousIgnoreSpace
+    withParserOptions options sql parse
 
 let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
     parseWithOptions { AnsiQuotes = enabled; IgnoreSpace = false } sql
@@ -3933,12 +3937,8 @@ let splitStatements (sql: string) : Result<string list, string> =
 let parseExpressionWithOptions (options: ParserOptions) (sql: string) : Result<Expr, string> =
     placeholderCounterLocal.Value <- 0
     exprDepth.Value <- 0
-    let previousIgnoreSpace = ignoreSpaceMode.Value
-    ignoreSpaceMode.Value <- options.IgnoreSpace
-    let sql = if options.AnsiQuotes then ansiQuotedIdentifiers sql else sql
-    let sql = expandVersionComments sql
 
-    let parse () =
+    let parse sql =
         try
             if exceedsParenthesisDepthLimit sql then
                 Result.Error "expression nested too deeply"
@@ -3949,10 +3949,7 @@ let parseExpressionWithOptions (options: ParserOptions) (sql: string) : Result<E
         with ex ->
             Result.Error ex.Message
 
-    try
-        parse ()
-    finally
-        ignoreSpaceMode.Value <- previousIgnoreSpace
+    withParserOptions options sql parse
 
 let parseExpression (sql: string) : Result<Expr, string> =
     parseExpressionWithOptions { AnsiQuotes = false; IgnoreSpace = false } sql

@@ -332,7 +332,7 @@ type Store =
 
     /// Materializes one catalog root in O(database count), with row structures
     /// shared immutably. Hot single-database paths read `Databases` directly.
-    /// ponytail: slots are sampled independently, so cross-database snapshots
+    /// Slots are sampled independently, so cross-database snapshots
     /// are not linearizable; add a store epoch if a consumer requires that.
     member this.Catalog
         with get () : Catalog = this.Databases |> Seq.map (fun kv -> kv.Key, kv.Value.Value) |> Map.ofSeq
@@ -2231,7 +2231,7 @@ let acquireTransactionWriteTargets
 
 // mysql.* uses ordinary stored tables, including DML and persistence paths.
 // Column shapes follow MySQL 8.4.
-// ponytail: no charset/collation fidelity on these columns (MySQL uses
+// These columns do not preserve charset/collation fidelity (MySQL uses
 // utf8mb3_bin/ascii here) — add if a client diff ever cares.
 
 let private sysCol (name: string) (ty: ColumnType) (nullable: bool) (dflt: Value option) : ColumnDef =
@@ -4222,7 +4222,7 @@ let renameTable (store: Store) (dbName: string) (oldName: string) (newName: stri
 /// WAL event, because MySQL's RENAME TABLE is atomic across its pairs and
 /// per-pair `alterTable` calls are not: N events mean a crash can replay half
 /// a rename, leaving `a` renamed and `c` untouched.
-/// ponytail: atomic *per database*. A cross-database rename still emits one
+/// Atomicity is per database. A cross-database rename still emits one
 /// event per database, since each database is its own catalog cell — spanning
 /// them would need a lock above the per-database one.
 let renameTables (store: Store) (dbName: string) (pairs: (string * string) list) : Result<unit, StorageError> =
@@ -4308,7 +4308,7 @@ let private processRow
 /// in table order") to indices against `table`.
 let private resolveInsertColumns (table: Table) (columns: string list option) : Result<int list, StorageError> =
     match columns with
-    // ponytail: a bare `INSERT INTO t VALUES (...)` still accepts a non-DEFAULT
+    // A bare `INSERT INTO t VALUES (...)` still accepts a non-DEFAULT
     // value in a generated column's slot and recomputes over it. MySQL accepts
     // only DEFAULT there.
     | None -> Ok [ 0 .. table.Columns.Length - 1 ]

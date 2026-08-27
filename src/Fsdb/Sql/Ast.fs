@@ -63,7 +63,7 @@ type ColumnType =
     /// The allowed value set, stored so `Storage.coerceValue` can validate an
     /// inserted string against it.
     | TEnum of values: string list
-    /// Accepted like a string column — ponytail: no comma-set validation
+    /// Accepted like a string column; comma-set validation is not performed
     /// against `values`, add it if a migration actually needs SET semantics
     /// enforced rather than just accepted.
     | TSet of values: string list
@@ -771,7 +771,7 @@ type Statement =
     /// row-backed `mysql.views` catalog can persist it through ordinary row
     /// events; it is parsed when the view is read. `columns` is the optional
     /// explicit view-column list, and `orReplace` selects CREATE OR REPLACE.
-    /// ponytail: fsdb materializes the definition once per referencing
+    /// Fsdb materializes the definition once per referencing
     /// statement; INSERT, UPDATE, and DELETE accept only direct projections
     /// of one table. No MERGE.
     | CreateView of name: string * columns: string list * definition: string * orReplace: bool * security: ViewSecurity

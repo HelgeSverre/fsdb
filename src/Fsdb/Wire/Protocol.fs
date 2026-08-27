@@ -307,7 +307,7 @@ let okEndOfResultSetPayloadWithWarnings (capabilities: uint32) (statusFlags: int
 /// SQLSTATE, not the vendor code — PDO/Doctrine map 42000 to a syntax-error
 /// exception, 08S01 to a retryable link failure, etc. — so reporting every
 /// error as the generic HY000 silently degrades error classification and
-/// retry logic. ponytail: grows as new error codes are introduced; anything
+/// retry logic. This grows as new error codes are introduced; anything
 /// unmapped falls back to HY000, matching MySQL's own default.
 let sqlStateForCode (code: int) : string =
     match code with

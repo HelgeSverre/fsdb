@@ -1005,8 +1005,8 @@ type Value =
     | VTime of TimeValue
     | VZeroDate of ZeroDate
     | VZeroDateTime of ZeroDateTime
-    /// Raw JSON text — ponytail: no parsed representation yet, add one
-    /// (JVal DU or similar) when JSON_EXTRACT-style path queries land.
+    /// Raw JSON text. A parsed representation belongs here if JSON values
+    /// eventually need to survive across several operations without reparsing.
     | VJson of string
     | VGeometry of Geometry
 
@@ -1471,14 +1471,8 @@ let toDouble (v: Value) : float =
     | VJson _
     | VGeometry _ -> v |> toText |> Option.map parseLeadingNumeric |> Option.defaultValue 0.0
 
-/// String comparison matching MySQL 8's default collation,
-/// utf8mb4_0900_ai_ci: case-insensitive ("ai" is accent-insensitive, which
-/// .NET's OrdinalIgnoreCase doesn't model — ponytail: ASCII/Latin case
-/// folding only, add real accent folding if a _ai collation edge case
-/// actually matters) and PAD SPACE-insensitive, so `'a' = 'a '` is true the
-/// MySQL 8's default collation (utf8mb4_0900_ai_ci) — accent- and
-/// case-insensitive, NO PAD (trailing spaces significant) — delegated to
-/// the one home for those rules, `Collation`. This is the *folded* order
+/// String comparison under the server's default MySQL collation. Collation
+/// owns accent, case, and padding behavior. This is the folded order
 /// (accent/case-only differences compare equal, returning 0) because
 /// `compare` drives equality everywhere — `equals`, hash-join keys, unique
 /// lookups. `ORDER BY`'s tie-breaks among equal-primary strings use

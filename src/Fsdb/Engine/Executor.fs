@@ -4109,7 +4109,7 @@ and private resolveTableRef
         // overlay, not a whole-schema shadow: a registered name wins over a
         // same-named real table, every other real table falls through to
         // `scanList` below unchanged.
-        // ponytail: full scan, engine post-filters — no
+        // Full scan; the engine post-filters. There is no
         // information_schema-style narrowing analogue until a big virtual
         // table hurts.
         let vt = store.VirtualTables.[tableRef.Table.ToLowerInvariant()]
@@ -4633,7 +4633,7 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
 /// rows are post-filtered. Pure narrowing: the full WHERE still runs over
 /// the result. `None` when the FROM isn't information_schema or the WHERE
 /// has no usable conjunct (plain scan then).
-/// ponytail: the pre-filter compares OrdinalIgnoreCase where the WHERE
+/// The pre-filter compares OrdinalIgnoreCase where the WHERE
 /// proper compares ai_ci — an accented table name queried by its unaccented
 /// spelling would be over-filtered; GUI clients echo names the server gave
 /// them, so this stays until something real hits it. Joined
@@ -4873,7 +4873,7 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
     // One column value: extract → unquote → coerce through a throwaway
     // ColumnDef (the `Cast` case's `Storage.coerceValue` trick), but
     // *strict*, so an uncoercible value ('abc' into INT) becomes the pinned
-    // NULL rather than non-strict's 0. ponytail: numeric fractions truncate
+    // NULL rather than non-strict's 0. Numeric fractions truncate
     // toward zero like this engine's CAST (MySQL's column store rounds,
     // 3.7 → 4); align `coerceValue` if a workload ever notices.
     // Strict coercion into the declared column type, shared by an extracted
@@ -4957,7 +4957,7 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
 
                             Ok(coerce ty (VInt hit) |> Result.defaultValue (VInt hit))
                         | PathColumn(name, ty, colPath, onEmpty, onError) ->
-                            // ponytail: an unparseable *column* path takes the
+                            // An unparseable *column* path takes the
                             // ON ERROR branch instead of MySQL's 3143 at
                             // prepare time; a multi-node match is ON ERROR too.
                             match Functions.jsonPathNodes node colPath with
@@ -5348,7 +5348,7 @@ and private applyJoin
 /// join drops a left row whose body produced nothing; a `LEFT JOIN ... ON
 /// TRUE` pads it with NULLs instead, which is the whole point of the
 /// spelling.
-/// ponytail: `USING`/`NATURAL` and RIGHT JOIN against a LATERAL body are
+/// `USING`/`NATURAL` and RIGHT JOIN against a LATERAL body are
 /// refused rather than silently run as something else — same policy as
 /// `applyJsonTableJoin`'s.
 and private applyLateralJoin
@@ -5902,7 +5902,7 @@ and private applyMutationJoin
     | FromLateral _ ->
         Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | FromJsonTable _ ->
-        // ponytail: MySQL allows a JSON_TABLE join source in multi-table
+        // MySQL allows a JSON_TABLE join source in multi-table
         // UPDATE/DELETE; its lateral row expansion does not yet preserve the
         // source identity list used by physical mutation targets.
         Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
@@ -6192,7 +6192,7 @@ and private rewriteNaturalSelect
                 (baseColumns |> List.map (fun c -> c.Name, qualified baseQualifier c.Name))
 
     // Unqualified refs to a coalesced name resolve to the COALESCE over
-    // every source occurrence of that name (ponytail: a name re-added by a
+    // every source occurrence of that name (a name re-added by a
     // later plain join with the same column would be silently included —
     // MySQL errors 1052 there; ORM-shaped queries never hit it).
     let coalesceMap =
@@ -9953,7 +9953,7 @@ and private runSelect
         // wire (post `DISTINCT`/`LIMIT`/`OFFSET`), not the full matched set
         // — the same data-driven "first non-NULL value" approximation
         // `columnMetadataOf` always used, narrowed to the rows a client can
-        // observe. ponytail: a column that's NULL in every *returned* row
+        // observe. A column that's NULL in every *returned* row
         // but non-NULL further down the matched set (past `LIMIT`)
         // reports `VAR_STRING` instead of that later type; scanning the
         // full matched set just to pick a wire type would defeat the
@@ -10197,7 +10197,7 @@ let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
 /// (unhex(md5(key)))`) sees its real value at collision-detection time
 /// instead of a not-yet-computed NULL. Left-to-right column order lets one
 /// generated column reference an earlier one in the same row.
-/// ponytail: MySQL's DDL-time restriction errors (3102 nondeterministic fn,
+/// MySQL's DDL-time restriction errors (3102 nondeterministic fn,
 /// 3106 VIRTUAL as PK, 3107 forward reference, 3109 auto_increment ref)
 /// aren't validated — misuse degrades to a stale/NULL value, not
 /// corruption; add a CREATE/ALTER validation pass if a real workload hits
@@ -12528,7 +12528,7 @@ let rec executeAs
             // before any row's body executes: a body targeting a
             // table the invoking chain is already writing, or a
             // chain deeper than the cap, fires nothing at all.
-            // ponytail: fixed depth cap 8 — raise it if a legitimate
+            // The fixed depth cap is 8; raise it if a legitimate
             // trigger chain that deep ever exists.
             let checkBody trigger =
                 match parseTriggerBody trigger.Body with
@@ -13495,7 +13495,7 @@ let rec executeAs
 
     | RenameTable pairs ->
         // A cross-database `RENAME TABLE a.t TO b.t` only takes the target
-        // name's table part — ponytail: doesn't actually move the table
+        // name's table part. It does not move the table
         // between catalogs, add that once a migration renames across
         // databases rather than within one.
         // Grouped by database and applied per group, so a multi-pair rename

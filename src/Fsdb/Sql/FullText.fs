@@ -253,7 +253,7 @@ let naturalScoresOf (corpus: Corpus) (query: string) : float[] =
 // behavior for the modifiers: `>` adds +1.0 to a matched term's
 // contribution and `<` subtracts 1.0 (a weak match can go negative);
 // `~` zeroes a matched term's contribution (observed on 8.4.11 — the
-// manual's "lowers" is MyISAM's older behavior). ponytail: `@N` proximity
+// manual's "lowers" is MyISAM's older behavior). `@N` proximity
 // is "all quoted words within an N-token window", the common reading; the
 // manual doesn't pin the exact distance definition.
 // ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ let private phraseCount (doc: Token[]) (words: Token[]) (proximity: int option) 
             count
         | Some dist ->
             // All words present with positions spanning at most `dist`.
-            // ponytail: the window search is exponential in the phrase's
+            // The window search is exponential in the phrase's
             // word count over each word's occurrence list — fine for the
             // short quoted phrases proximity is used with; make it a sliding
             // window if anyone feeds it a paragraph.

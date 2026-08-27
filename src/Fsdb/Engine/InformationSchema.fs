@@ -334,7 +334,7 @@ let private charOctetLength (ty: ColumnType) : int64 option =
 /// style: backticked column refs, paren-wrapped binops, lowercased function
 /// names. Total over every `Expr` case — the subquery/window shapes can't
 /// appear in a generated expression, but must render rather than throw.
-/// ponytail: no charset introducer on string literals (MySQL prints
+/// String literals have no charset introducer (MySQL prints
 /// `_latin1'x'`, this prints `'x'`) — add it if a tool ever diffs the text.
 let rec exprToSql (e: Expr) : string =
     let opText =
@@ -479,7 +479,7 @@ let private columnRowWith (privileges: string) (dbName: string) (tableName: stri
        vopt (defaultText c)
        // A primary key column is implicitly NOT NULL in MySQL even
        // without an explicit `NOT NULL` — `Ast.ColumnDef.Nullable`
-       // only tracks the explicit modifier (ponytail: `Storage`
+       // only tracks the explicit modifier (`Storage`
        // itself still doesn't reject a NULL insert into an implicit
        // PK column; add that enforcement too if a migration's
        // assertions ever depend on it, not just this metadata view).
@@ -1913,7 +1913,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
         // declares either (verified: a column with only COLLATE utf8mb4_bin
         // shows `CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`) — and never
         // on non-string columns (an INT column shows plain `id int` even
-        // under a table-level COLLATE). ponytail: a charset/collation the
+        // under a table-level COLLATE). A charset/collation the
         // column merely *inherits* from the table's declaration renders
         // here too, where MySQL shows only the collation when it differs
         // from the charset's default (`varchar(10) COLLATE utf8mb4_unicode_ci`

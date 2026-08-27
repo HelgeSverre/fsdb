@@ -1591,7 +1591,7 @@ let private handleConnection
                             | Some(StmtSendLongData payload) ->
                                 // No response is ever sent for this command,
                                 // success or failure — the client doesn't
-                                // wait for one. ponytail: buffered rather
+                                // wait for one. The payload is buffered rather
                                 // than streamed straight into the value —
                                 // COM_STMT_EXECUTE substitutes the buffered
                                 // text in place of reading that param off

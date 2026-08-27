@@ -46,7 +46,7 @@ type QueryContext =
 /// generated-column definitions — SQLite's DIRECTONLY rationale: a
 /// network-calling UDF re-invoked by every later write is a footgun);
 /// `Deterministic` is carried metadata for host-side caches.
-/// ponytail: no planner constant-folding reads `Deterministic` — add that
+/// No planner constant-folding reads `Deterministic`; add that
 /// only if repeated evaluation of a deterministic call ever shows up hot.
 type ScalarFunction =
     { Name: string
@@ -71,7 +71,7 @@ module ScalarFunction =
 /// (a model registry, a metrics snapshot) to SQL without inserting rows.
 /// `Rows` is pulled fresh once per statement that references the table; the
 /// engine post-filters WHERE/JOIN over the full row list.
-/// ponytail: no qual pushdown and no table-valued functions — add a
+/// There is no predicate pushdown or table-valued-function support; add a
 /// narrow-scan analogue only when a big virtual table hurts.
 type VirtualTable =
     { Name: string
@@ -1590,10 +1590,9 @@ let private jsonKeysFn: Scalar =
 
 /// JSON_SET/JSON_INSERT/JSON_REPLACE's shared write semantics: `Set` always
 /// writes, `Insert` only writes if the target doesn't already exist,
-/// `Replace` only writes if it does. ponytail: no auto-vivification of
-/// missing intermediate containers (MySQL doesn't either — only the final
-/// path leg may be created against an existing object, or one past the end
-/// of an existing array), add it if a migration path needs deeper creation.
+/// `Replace` only writes if it does. As in MySQL, missing intermediate
+/// containers are not created automatically; only the final path leg may be
+/// created against an existing object or one past the end of an array.
 type private JsonWriteMode =
     | JSet
     | JInsert
@@ -5074,7 +5073,7 @@ let internal tryEmptyAggregate (name: string) =
 // ---------------------------------------------------------------------------
 // MySQL 9 VECTOR. A vector is a `VBytes` of little-endian 4-byte floats —
 // no new `Value` case, so storage/persistence/wire all carry it as the
-// binary string real pre-9 clients see anyway. ponytail: only these
+// binary string real pre-9 clients see anyway. Only these
 // functions interpret the bytes — no whitelist polices which expressions a
 // vector flows through; anything byte-shaped is allowed until it reaches a
 // function that must decode it.

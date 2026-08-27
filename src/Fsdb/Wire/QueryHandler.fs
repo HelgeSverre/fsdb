@@ -799,39 +799,43 @@ let private literalSetRhs (rhs: string) : Value option =
     else
         None
 
-let private hasSqlMode (name: string) (value: string) =
-    let modes =
-        value.Split(',')
-        |> Array.map (fun mode -> mode.Trim().ToUpperInvariant())
-        |> Set.ofArray
+let private traditionalSqlModes =
+    set
+        [ "STRICT_TRANS_TABLES"
+          "STRICT_ALL_TABLES"
+          "NO_ZERO_IN_DATE"
+          "NO_ZERO_DATE"
+          "ERROR_FOR_DIVISION_BY_ZERO"
+          "NO_ENGINE_SUBSTITUTION" ]
 
-    let traditionalModes =
-        Set.ofList
-            [ "STRICT_TRANS_TABLES"
-              "STRICT_ALL_TABLES"
-              "NO_ZERO_IN_DATE"
-              "NO_ZERO_DATE"
-              "ERROR_FOR_DIVISION_BY_ZERO"
-              "NO_ENGINE_SUBSTITUTION" ]
+let private parseSqlModes (value: string) =
+    value.Split(',')
+    |> Seq.map (fun mode -> mode.Trim().ToUpperInvariant())
+    |> Set.ofSeq
 
+let private hasSqlMode (modes: Set<string>) (name: string) =
     let requested = name.ToUpperInvariant()
-    Set.contains requested modes || Set.contains "TRADITIONAL" modes && Set.contains requested traditionalModes
+    modes.Contains requested || modes.Contains "TRADITIONAL" && traditionalSqlModes.Contains requested
 
-let private isStrictSqlMode value =
-    hasSqlMode "STRICT_TRANS_TABLES" value || hasSqlMode "STRICT_ALL_TABLES" value
+let private isStrictSqlMode modes =
+    hasSqlMode modes "STRICT_TRANS_TABLES" || hasSqlMode modes "STRICT_ALL_TABLES"
 
-let private usesAnsiQuotes (value: string) =
-    hasSqlMode "ANSI_QUOTES" value || hasSqlMode "ANSI" value
+let private usesAnsiQuotes modes =
+    hasSqlMode modes "ANSI_QUOTES" || hasSqlMode modes "ANSI"
 
-let private usesIgnoreSpace (value: string) =
-    hasSqlMode "IGNORE_SPACE" value || hasSqlMode "ANSI" value
+let private usesIgnoreSpace modes =
+    hasSqlMode modes "IGNORE_SPACE" || hasSqlMode modes "ANSI"
 
 let private parserOptionsForSession (session: Session) =
-    let sqlMode = lookupVar session "sql_mode" |> Option.flatten |> Option.defaultValue ""
+    let modes =
+        lookupVar session "sql_mode"
+        |> Option.flatten
+        |> Option.defaultValue ""
+        |> parseSqlModes
 
     let options: Parser.ParserOptions =
-        { AnsiQuotes = usesAnsiQuotes sqlMode
-          IgnoreSpace = usesIgnoreSpace sqlMode }
+        { AnsiQuotes = usesAnsiQuotes modes
+          IgnoreSpace = usesIgnoreSpace modes }
 
     options
 
@@ -871,9 +875,10 @@ let private resolveSystemSetRhs
         resolveUserSetRhs session userVariables sql rhs
 
 let private applySqlMode (store: Store) (value: string) =
-    setStrictMode store (isStrictSqlMode value)
-    setZeroDateModes store (hasSqlMode "NO_ZERO_DATE" value) (hasSqlMode "NO_ZERO_IN_DATE" value)
-    setOnlyFullGroupBy store (hasSqlMode "ONLY_FULL_GROUP_BY" value)
+    let modes = parseSqlModes value
+    setStrictMode store (isStrictSqlMode modes)
+    setZeroDateModes store (hasSqlMode modes "NO_ZERO_DATE") (hasSqlMode modes "NO_ZERO_IN_DATE")
+    setOnlyFullGroupBy store (hasSqlMode modes "ONLY_FULL_GROUP_BY")
 
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends
@@ -3324,7 +3329,7 @@ let private recoverExecutionError (session: Session) (description: string) (erro
     | Storage.LockWaitTimeout dbName ->
         Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- %s" dbName description
         session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
-    // ponytail: MySQL's 1690 message names the offending expression; fsdb
+    // MySQL's 1690 message names the offending expression; fsdb
     // needs an AST printer before it can do the same without reconstructing SQL.
     | Value.UnsignedOutOfRange ->
         Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- %s" description
