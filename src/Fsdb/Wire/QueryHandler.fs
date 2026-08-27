@@ -1897,8 +1897,11 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
 
 let private executeParsedWithTemporaryAction (action: TemporaryAction option) (session: Session) (stmt: Statement) =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
+    let usesTemporary = action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt
 
-    if action.IsNone && causesImplicitCommit stmt then
+    if usesTemporary then
+        executeWithTemporaryCatalog action session stmt
+    elif causesImplicitCommit stmt then
         let session = commitSession session
 
         if changesCatalogMembership stmt then
@@ -1916,10 +1919,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
             else
                 session
 
-        if action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt then
-            executeWithTemporaryCatalog action session stmt
-        else
-            executeParsedCore session stmt
+        executeParsedCore session stmt
 
 let private executeParsed session stmt = executeParsedWithTemporaryAction None session stmt
 

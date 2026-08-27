@@ -2685,7 +2685,42 @@ let tests =
               | ResultSet(_, [ [ Some "3,4" ] ]) -> ()
               | other -> failtestf "expected rows copied from the temporary table, got %A" other
 
-              Expect.isFalse (Map.containsKey "staging" store.Catalog.[Fsdb.Storage.defaultDatabase]) "temporary table was not published"
+              let published =
+                  store.Catalog
+                  |> Map.tryFind Fsdb.Storage.defaultDatabase
+                  |> Option.exists (Map.containsKey "staging")
+
+              Expect.isFalse published "temporary table was not published"
+
+          testCase "temporary tables support ALTER and CREATE INDEX"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, created = handle session "CREATE TEMPORARY TABLE staging (n INT)"
+              Expect.equal created (Affected 0UL) "temporary table created"
+
+              let session, altered = handle session "ALTER TABLE staging COMMENT='temporary work'"
+              Expect.equal altered (Affected 0UL) "temporary table altered"
+
+              let session, uniqueIndex = handle session "CREATE UNIQUE INDEX ux_staging ON staging (n)"
+              Expect.equal uniqueIndex (Affected 0UL) "unique index created"
+
+              let session, index = handle session "CREATE INDEX ix_staging ON staging (n)"
+              Expect.equal index (Affected 0UL) "secondary index created"
+
+              match handle session "SHOW CREATE TABLE staging" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "COMMENT='temporary work'" "table comment"
+                  Expect.stringContains ddl "UNIQUE KEY `ux_staging` (`n`)" "unique index"
+                  Expect.stringContains ddl "KEY `ix_staging` (`n`)" "secondary index"
+              | other -> failtestf "expected temporary DDL, got %A" other
+
+              let published =
+                  store.Catalog
+                  |> Map.tryFind Fsdb.Storage.defaultDatabase
+                  |> Option.exists (Map.containsKey "staging")
+
+              Expect.isFalse published "temporary table was not published"
 
           testCase "temporary tables support engine-qualified create-as-select"
           <| fun _ ->
