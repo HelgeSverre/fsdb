@@ -320,8 +320,9 @@ type Store =
       /// Orders durable enqueue and observer delivery without covering fsync.
       CommitLock: obj
       /// Indexed updates coordinate stable row identities before reading
-      /// their current values. Logical ownership may span transaction
-      /// statements without depending on managed thread affinity.
+      /// their current values. Each nested dictionary belongs to one table.
+      /// Logical ownership may span transaction statements without depending
+      /// on managed thread affinity.
       RowLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
       /// A separate namespace prevents key hashes from aliasing held rows.
       KeyLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
@@ -490,6 +491,9 @@ let setZeroDateModes (store: Store) (noZeroDate: bool) (noZeroInDate: bool) : un
 /// directly (bypassing this module's checked write paths on purpose; see
 /// the note on `Persistence.applyEvent`), so it needs the same key.
 let normalizeTableName (name: string) = name.ToLowerInvariant()
+
+let private lockNamespaceKey (databaseName: string) (tableName: string) =
+    databaseName.ToLowerInvariant() + "\u0000" + normalizeTableName tableName
 
 /// `CREATE DATABASE name` errors 1007 when the name exists. The store lock
 /// coordinates catalog membership with SERIALIZABLE snapshot validation;
@@ -2115,17 +2119,15 @@ let private withWriteLocksFor
     (keys: string list)
     body
     =
-    let databaseKey = normalizeTableName dbName
-    let rowLocks = store.RowLocks.GetOrAdd(databaseKey, (fun _ -> ConcurrentDictionary()))
-    let keyLocks = store.KeyLocks.GetOrAdd(databaseKey, (fun _ -> ConcurrentDictionary()))
-    let tableOffset =
-        StringComparer.OrdinalIgnoreCase.GetHashCode(tableName) &&& Int32.MaxValue
+    let tableKey = lockNamespaceKey dbName tableName
+    let rowLocks = store.RowLocks.GetOrAdd(tableKey, (fun _ -> ConcurrentDictionary()))
+    let keyLocks = store.KeyLocks.GetOrAdd(tableKey, (fun _ -> ConcurrentDictionary()))
 
     let stripeIndex rowId =
-        (int64 tableOffset + int64 (RowId.value rowId)) % int64 rowLockStripeCount |> int
+        int64 (RowId.value rowId) % int64 rowLockStripeCount |> int
 
     let keyStripeIndex key =
-        int ((int64 tableOffset + int64 (StringComparer.Ordinal.GetHashCode key &&& Int32.MaxValue)) % int64 rowLockStripeCount)
+        (StringComparer.Ordinal.GetHashCode key &&& Int32.MaxValue) % rowLockStripeCount
 
     let rowStripes =
         rowIds
