@@ -1170,16 +1170,8 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1229, sprintf "Variable '%s' is a GLOBAL variable and should be set with SET GLOBAL" name))
     | _ -> Ok()
 
-/// `SET NAMES x`, `SET [SESSION|@@session.]var = value`, and `SET @var =
-/// value` update `Session.Variables`/`Session.UserVariables` so a later
-/// `SELECT @@var`/`SELECT @var`/`SHOW VARIABLES` reflects them, one
-/// comma-split assignment at a time (`splitSetAssignments`). Two-phase:
-/// every fragment is parsed first (`parseSetFragment`), and only if *all*
-/// of them parse does any of them apply (`applySetAction`) — an assignment
-/// recognizably shaped like one but matched by neither `setVar` nor
-/// `setUserVar` aborts the whole statement with a loud 1193 and no partial
-/// effect, same as real MySQL abandoning a multi-assignment `SET` on its
-/// first bad name without acting on the assignments before it.
+/// Applies every assignment only after the whole `SET` parses; MySQL leaves
+/// all variables unchanged when any assignment is invalid.
 let private handleSet (session: Session) (sql: string) : Session * QueryResult =
     let parsed =
         splitSetAssignments sql
@@ -1928,10 +1920,34 @@ let private executeParsed session stmt = executeParsedWithTemporaryAction None s
 let private parsedStatementCapacity = 16384
 let private parsedStatementCandidateCapacity = parsedStatementCapacity * 2
 let private cacheableSqlLength = 512
-let private parsedStatements = ConcurrentDictionary<struct (bool * string), Statement>()
-let private parsedStatementOrder = ConcurrentQueue<struct (bool * string)>()
-let private parsedStatementCandidates = ConcurrentDictionary<int, byte>()
-let private parsedStatementCandidateOrder = ConcurrentQueue<int>()
+
+type private BoundedConcurrentCache<'key, 'value when 'key: equality>(capacity: int) =
+    let entries = ConcurrentDictionary<'key, 'value>()
+    let order = ConcurrentQueue<'key>()
+
+    let trim () =
+        let mutable canTrim = true
+
+        while canTrim && entries.Count > capacity do
+            match order.TryDequeue() with
+            | true, oldest -> entries.TryRemove oldest |> ignore
+            | false, _ -> canTrim <- false
+
+    member _.TryGetValue key = entries.TryGetValue key
+
+    member _.TryAdd(key, value) =
+        if entries.TryAdd(key, value) then
+            order.Enqueue key
+            trim ()
+            true
+        else
+            false
+
+let private parsedStatements =
+    BoundedConcurrentCache<struct (bool * string), Statement>(parsedStatementCapacity)
+
+let private parsedStatementCandidates =
+    BoundedConcurrentCache<int, byte>(parsedStatementCandidateCapacity)
 
 let private isRepeatedStatement (ansiQuotes: bool) (sql: string) =
     // The fingerprint only decides admission. Cache lookups still use the
@@ -1939,13 +1955,6 @@ let private isRepeatedStatement (ansiQuotes: bool) (sql: string) =
     let fingerprint = HashCode.Combine(ansiQuotes, StringComparer.Ordinal.GetHashCode sql)
 
     if parsedStatementCandidates.TryAdd(fingerprint, 0uy) then
-        parsedStatementCandidateOrder.Enqueue fingerprint
-
-        while parsedStatementCandidates.Count > parsedStatementCandidateCapacity do
-            match parsedStatementCandidateOrder.TryDequeue() with
-            | true, oldest -> parsedStatementCandidates.TryRemove oldest |> ignore
-            | false, _ -> ()
-
         false
     else
         true
@@ -1962,13 +1971,8 @@ let private parseStatement (ansiQuotes: bool) (sql: string) =
                 sql.Length <= cacheableSqlLength
                 && isRepeatedStatement ansiQuotes sql
 
-            if cacheable && parsedStatements.TryAdd(key, statement) then
-                parsedStatementOrder.Enqueue key
-
-                while parsedStatements.Count > parsedStatementCapacity do
-                    match parsedStatementOrder.TryDequeue() with
-                    | true, oldest -> parsedStatements.TryRemove oldest |> ignore
-                    | false, _ -> ()
+            if cacheable then
+                parsedStatements.TryAdd(key, statement) |> ignore
 
             parsed
         | Result.Error _ as error -> error

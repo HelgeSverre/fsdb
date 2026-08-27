@@ -2765,7 +2765,6 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
                     Expect.isEmpty store.OnCommit "no subscriber by default"
-                    // Just proving this doesn't throw with OnCommit = None.
                     insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VNull ] ] |> ignore
 
                 testCase "an INSERT that inserts zero rows (INSERT IGNORE, every row skipped) fires nothing"

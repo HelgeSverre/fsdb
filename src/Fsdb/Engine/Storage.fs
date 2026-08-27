@@ -351,6 +351,9 @@ let setCatalog (store: Store) (catalog: Catalog) : unit = store.Catalog <- catal
 let private hasCommitConsumer (store: Store) =
     store.Durability.Sink.IsSome || store.OnCommit.Count > 0
 
+let private collectsCommitEvents (store: Store) =
+    store.PendingEvents.IsSome || hasCommitConsumer store
+
 let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
     match events, store.PendingEvents with
     | [], _ -> ignore
@@ -383,7 +386,7 @@ let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> un
     | _ -> ignore
 
 let private prepareResultEvents (store: Store) (eventsOf: 'a -> CommitEvent list) (result: 'a) : unit -> unit =
-    if store.PendingEvents.IsSome || hasCommitConsumer store then
+    if collectsCommitEvents store then
         prepareEvents store (eventsOf result)
     else
         ignore
@@ -412,7 +415,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       OnCommit = ResizeArray()
       Durability = store.Durability
       // Nested statement snapshots inherit the outer transaction's buffering.
-      PendingEvents = if hasCommitConsumer store || store.PendingEvents.IsSome then Some(ResizeArray()) else None
+      PendingEvents = if collectsCommitEvents store then Some(ResizeArray()) else None
       Lock = obj ()
       CommitLock = store.CommitLock
       RowLocks = store.RowLocks
@@ -435,7 +438,7 @@ let beginTransactionContext (store: Store) : Store =
 
     { store with
         OnCommit = ResizeArray()
-        PendingEvents = if hasCommitConsumer store || store.PendingEvents.IsSome then Some(ResizeArray()) else None
+        PendingEvents = if collectsCommitEvents store then Some(ResizeArray()) else None
         Lock = obj ()
         TransactionLocks =
             Some
@@ -5806,13 +5809,15 @@ let private withPointUpdateDatabase
                         | true, current -> obj.ReferenceEquals(current, slot)
                         | false, _ -> false
 
+                    let liveDb = slot.Value
+
                     if not attached then
                         Error(NoSuchDatabase dbName)
-                    elif obj.ReferenceEquals(slot.Value, baseDb) then
+                    elif obj.ReferenceEquals(liveDb, baseDb) then
                         slot.Value <- batchDb
                         Ok(prepareResultEvents store eventsOf result)
-                    elif not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb slot.Value then
-                        slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb slot.Value
+                    elif not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb then
+                        slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
                         Ok(prepareResultEvents store eventsOf result)
                     else
                         Ok(

@@ -15,13 +15,6 @@ let tests =
         "User variables"
         [ testCase "a bad multi-assignment SET applies none of its assignments, not just the ones before the bad one"
           <| fun _ ->
-              // Two-phase: every fragment parses before any of them apply,
-              // so a `SET` that fails partway through — the same as real
-              // MySQL — can't leave `sql_mode` (or any other variable it
-              // named first) half-updated. `bad-name` (a hyphen isn't a
-              // valid identifier char) matches neither `setVar` nor
-              // `setUserVar`; `@user_var=1` can't serve as the bad fragment
-              // because `SET @foo = ...` is a real feature.
               let session = create 1 (Fsdb.Storage.create ())
 
               let session, result = handle session "SET SESSION sql_mode='ANSI_QUOTES', bad-name=1"
