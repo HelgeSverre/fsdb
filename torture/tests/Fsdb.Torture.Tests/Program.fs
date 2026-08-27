@@ -501,6 +501,12 @@ let tests =
                           "collation_join" ] do
                         Expect.contains features feature feature
 
+                    for feature in
+                        [ "nested_join_view_update"
+                          "outer_join_view_update"
+                          "nested_join_view_insert" ] do
+                        Expect.contains features feature feature
+
                     let commentedReplace =
                         candidates
                         |> Array.find (fun candidate ->

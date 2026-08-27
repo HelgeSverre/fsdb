@@ -68,6 +68,9 @@ module SyntaxFuzz =
            "range_delete", "DELETE FROM syntax_target WHERE id >= 999"
            "composite_index", sprintf "CREATE INDEX ix_syntax_%s ON syntax_target (n, label)" suffix
            "view_check_option", sprintf "CREATE VIEW syntax_view_%s AS SELECT id, n FROM syntax_target WHERE n > 0 WITH CHECK OPTION" suffix
+           "nested_join_view_update", "UPDATE syntax_nested_join SET n = n WHERE id = 1"
+           "outer_join_view_update", "UPDATE syntax_outer_join SET note = note WHERE doubled = 20"
+           "nested_join_view_insert", "INSERT INTO syntax_nested_join (id, n) VALUES (999999, 1) ON DUPLICATE KEY UPDATE n = VALUES(n)"
            "ordered_compound_trigger",
            sprintf
                "CREATE TRIGGER syntax_after_%s BEFORE INSERT ON syntax_trigger_target FOR EACH ROW FOLLOWS syntax_first BEGIN INSERT INTO syntax_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END"
@@ -129,6 +132,14 @@ module SyntaxFuzz =
            "INSERT INTO syntax_fulltext VALUES (1, 'Database tutorial', 'Database security guide'), (2, 'Other notes', 'Unrelated material')"
            "CREATE TABLE syntax_fulltext_notes (article_id INT, body TEXT, FULLTEXT(body))"
            "INSERT INTO syntax_fulltext_notes VALUES (1, 'Security notes'), (2, 'Other notes')"
+           "CREATE TABLE syntax_view_left (id INT PRIMARY KEY, n INT NOT NULL)"
+           "CREATE TABLE syntax_view_right (id INT PRIMARY KEY, note VARCHAR(20) NOT NULL)"
+           "INSERT INTO syntax_view_left VALUES (1, 10)"
+           "INSERT INTO syntax_view_right VALUES (1, 'one')"
+           "CREATE VIEW syntax_left_view AS SELECT id, n FROM syntax_view_left WHERE n > 0 WITH CASCADED CHECK OPTION"
+           "CREATE VIEW syntax_right_view AS SELECT id, note FROM syntax_view_right"
+           "CREATE VIEW syntax_nested_join AS SELECT l.id, l.n, r.note FROM syntax_left_view AS l JOIN syntax_right_view AS r ON r.id = l.id"
+           "CREATE VIEW syntax_outer_join AS SELECT id, n, note, n * 2 AS doubled FROM syntax_nested_join WHERE n < 50"
            "CREATE TABLE syntax_partitioned (id INT) PARTITION BY HASH(id) PARTITIONS 2"
            "INSERT INTO syntax_partitioned VALUES (1), (2), (3)"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]

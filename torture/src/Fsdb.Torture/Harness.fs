@@ -1345,7 +1345,13 @@ module ScenarioProbes =
 [<RequireQualifiedAccess>]
 module DmlBattery =
     let private cleanup =
-        [| "DROP VIEW IF EXISTS fsdb_dml_view"
+        [| "DROP VIEW IF EXISTS fsdb_dml_outer_join"
+           "DROP VIEW IF EXISTS fsdb_dml_nested_join"
+           "DROP VIEW IF EXISTS fsdb_dml_right_view"
+           "DROP VIEW IF EXISTS fsdb_dml_left_view"
+           "DROP VIEW IF EXISTS fsdb_dml_view"
+           "DROP TABLE IF EXISTS fsdb_dml_join_right"
+           "DROP TABLE IF EXISTS fsdb_dml_join_left"
            "DROP TABLE IF EXISTS fsdb_trigger_contract"
            "DROP TABLE IF EXISTS fsdb_trigger_log"
            "DROP TABLE IF EXISTS fsdb_replace_contract"
@@ -1356,6 +1362,10 @@ module DmlBattery =
     let private fixtures =
         [| yield! cleanup
            "CREATE TABLE fsdb_dml_contract (id INT PRIMARY KEY, n INT)"
+           "CREATE TABLE fsdb_dml_join_left (id INT PRIMARY KEY, n INT NOT NULL)"
+           "CREATE TABLE fsdb_dml_join_right (id INT PRIMARY KEY, note VARCHAR(20) NOT NULL)"
+           "INSERT INTO fsdb_dml_join_left VALUES (1, 10), (2, 20)"
+           "INSERT INTO fsdb_dml_join_right VALUES (1, 'one'), (2, 'two')"
            "CREATE TABLE fsdb_odku_source (id INT, selected_n INT, update_n INT)"
            "INSERT INTO fsdb_odku_source VALUES (1, 70, 80), (1, 70, 90)"
            "CREATE TABLE fsdb_replace_contract (id INT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7, INDEX ix_n_u (n, u))"
@@ -1364,6 +1374,10 @@ module DmlBattery =
            "CREATE TABLE fsdb_fulltext_contract (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
            "INSERT INTO fsdb_fulltext_contract VALUES (1, 'needle alpha'), (2, 'needle beta'), (3, 'ordinary')"
            "CREATE VIEW fsdb_dml_view AS SELECT id, n FROM fsdb_dml_contract WHERE n > 0 WITH CHECK OPTION"
+           "CREATE VIEW fsdb_dml_left_view AS SELECT id, n FROM fsdb_dml_join_left WHERE n > 0 WITH CASCADED CHECK OPTION"
+           "CREATE VIEW fsdb_dml_right_view AS SELECT id, note FROM fsdb_dml_join_right"
+           "CREATE VIEW fsdb_dml_nested_join AS SELECT l.id, l.n, r.id AS right_id, r.note FROM fsdb_dml_left_view AS l JOIN fsdb_dml_right_view AS r ON r.id = l.id"
+           "CREATE VIEW fsdb_dml_outer_join AS SELECT id, n, right_id, note, n * 2 AS doubled FROM fsdb_dml_nested_join WHERE n < 50"
            "CREATE TRIGGER fsdb_trigger_first BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW SET NEW.n = NEW.n + 1"
            "CREATE TRIGGER fsdb_trigger_second BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW FOLLOWS fsdb_trigger_first BEGIN INSERT INTO fsdb_trigger_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END" |]
 
@@ -1386,6 +1400,18 @@ module DmlBattery =
            "replace_set_default_function", "REPLACE INTO fsdb_replace_contract SET id = 4, u = 40, n = DEFAULT(n)"
            "composite_index_update", "UPDATE fsdb_replace_contract SET n = 8 WHERE n = 3 AND u = 20"
            "view_insert", "INSERT INTO fsdb_dml_view VALUES (30, 3)"
+           "nested_join_update_left", "UPDATE fsdb_dml_nested_join SET n = 11 WHERE id = 1"
+           "nested_join_update_right", "UPDATE fsdb_dml_nested_join SET note = 'changed' WHERE id = 1"
+           "outer_join_update", "UPDATE fsdb_dml_outer_join SET n = 12 WHERE doubled = 22"
+           "nested_join_insert_left", "INSERT INTO fsdb_dml_nested_join (id, n) VALUES (3, 30)"
+           "nested_join_insert_right", "INSERT INTO fsdb_dml_nested_join (right_id, note) VALUES (4, 'four')"
+           "nested_join_checked_update", "UPDATE fsdb_dml_nested_join SET n = 13 WHERE id = 1"
+           "nested_join_checked_ignore", "UPDATE IGNORE fsdb_dml_nested_join SET n = -1 WHERE id = 1"
+           "outer_join_no_match", "UPDATE fsdb_dml_outer_join SET note = 'absent' WHERE doubled = 999"
+           "nested_join_left_state", "UPDATE fsdb_dml_join_left SET n = 130 WHERE id = 1 AND n = 13"
+           "nested_join_right_state", "UPDATE fsdb_dml_join_right SET note = 'verified' WHERE id = 1 AND note = 'changed'"
+           "nested_join_left_insert_state", "UPDATE fsdb_dml_join_left SET n = 31 WHERE id = 3 AND n = 30"
+           "nested_join_right_insert_state", "UPDATE fsdb_dml_join_right SET note = 'verified' WHERE id = 4 AND note = 'four'"
            "ordered_compound_trigger", "INSERT INTO fsdb_trigger_contract VALUES (1, 10)"
            "trigger_side_effect", "UPDATE fsdb_trigger_log SET n = n + 1 WHERE n = 11"
            "insert_ignore_duplicate", "INSERT IGNORE INTO fsdb_dml_contract VALUES (1, 99)"

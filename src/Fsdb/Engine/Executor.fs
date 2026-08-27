@@ -10454,6 +10454,10 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
 
 let private rewriteViewExpression (view: UpdatableView) (expression: Expr) =
     rewriteExprWith (function
+        | FuncCall(name, [ Col column ]) when name.Equals("VALUES", System.StringComparison.OrdinalIgnoreCase) ->
+            view.Columns
+            |> Map.tryFind (column.ToLowerInvariant())
+            |> Option.map (fun baseColumn -> FuncCall(name, [ Col baseColumn ]))
         | Col name ->
             match Map.tryFind (name.ToLowerInvariant()) view.Expressions with
             | Some expression -> Some expression

@@ -366,6 +366,9 @@ let tests =
 
               expectOk (run store "UPDATE nested_join_rows SET n = 11 WHERE id = 1") "update through component views"
               expectOk (run store "UPDATE filtered_nested_join SET n = 12 WHERE doubled = 22") "update through outer view"
+              expectOk
+                  (run store "INSERT INTO nested_join_rows(id, n) VALUES (1, 14) ON DUPLICATE KEY UPDATE n = values(n)")
+                  "upsert through nested component"
               expectOk (run store "INSERT INTO nested_join_rows(id, n) VALUES (3, 30)") "insert into one nested component"
 
               [ "UPDATE nested_join_rows SET n = -1 WHERE id = 1"
@@ -381,7 +384,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT id, n FROM nested_join_left ORDER BY id")
-                  [ [ Some "1"; Some "12" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
+                  [ [ Some "1"; Some "14" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
                   "nested join writes persist"
 
           testCase "a direct view streams an ordered limit from its base table"

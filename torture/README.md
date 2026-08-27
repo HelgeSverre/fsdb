@@ -26,8 +26,8 @@ they are understood and minimized.
 - Scenario-specific SELECT probes compare column names, declared result types,
   and ordered typed results before the final schema/data snapshot.
 - An ordered DML battery compares affected-row counts in both found-row and
-  changed-row client modes, including composite-index, checked-view, and
-  ordered compound-trigger writes.
+  changed-row client modes, including composite-index, checked-view, nested
+  join-view, and ordered compound-trigger writes.
 - A deterministic syntax lane mutates known-valid feature statements and
   compares MySQL and FSDB error codes and SQLSTATEs.
 - A durability lane runs fsdb as a child process, kills it during concurrent
