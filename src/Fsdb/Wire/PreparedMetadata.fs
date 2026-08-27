@@ -203,7 +203,7 @@ let parameterDefinitions
 
             let fallback =
                 match operator, expected with
-                | (Add | Sub | Mul | Div | IntDiv), None when leftMetadata.IsNone && rightMetadata.IsNone ->
+                | (Add | Sub | SignedSub | Mul | Div | IntDiv), None when leftMetadata.IsNone && rightMetadata.IsNone ->
                     Some(ColumnWire.parameterMetadataOfType (TDouble false))
                 | _ -> expected
 

@@ -1166,6 +1166,29 @@ let tests =
                   | other -> failtestf "expected the generated expression to survive the restart intact, got %A" other
               | Error e -> failtestf "expected table 'g' to reload, got %A" e
 
+          testCase "a generated signed-subtraction expression survives a restart"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let source = mkCol "source" (TBigInt true)
+              let difference =
+                  { mkCol "difference" (TBigInt false) with
+                      Generated = Some(BinOp(SignedSub, Col "source", Lit(VInt 1L)), Stored) }
+
+              createTable store defaultDatabase "signed_generated" [ source; difference ] [] [] None None
+              |> ignore
+
+              let reloaded = load dir
+
+              match scan reloaded defaultDatabase "signed_generated" with
+              | Ok(columns, _) ->
+                  match columns |> List.tryFind (fun column -> column.Name = "difference") |> Option.bind _.Generated with
+                  | Some(BinOp(SignedSub, Col "source", Lit(VInt 1L)), Stored) -> ()
+                  | other -> failtestf "expected signed subtraction to survive the restart, got %A" other
+              | Error error -> failtestf "expected signed_generated to reload, got %A" error
+
           testCase "a crash between the fsynced .new snapshot and the WAL truncation still recovers the full catalog, no duplicates"
           <| fun _ ->
               let dir = tempDataDir ()

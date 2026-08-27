@@ -926,6 +926,49 @@ let tests =
               | ResultSet(_, [ [ Some "0" ]; [ Some "1" ] ]) -> ()
               | other -> failtestf "expected an ignored explicit zero not to consume an id, got %A" other
 
+          testCase "NO_UNSIGNED_SUBTRACTION produces signed integer results"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let defaultSession = create 1 store
+              let signedSession, _ = handle (create 2 store) "SET sql_mode = 'NO_UNSIGNED_SUBTRACTION'"
+
+              match handle defaultSession "SELECT CAST(0 AS UNSIGNED) - 1" |> snd with
+              | Err(1690, message) -> Expect.stringContains message "UNSIGNED" "default subtraction remains unsigned"
+              | other -> failtestf "expected default unsigned subtraction to fail, got %A" other
+
+              let signedSession, signedResult =
+                  handle signedSession "SELECT CAST(0 AS UNSIGNED) - 1, CAST(5 AS UNSIGNED) - 2, CAST(0 AS UNSIGNED) - 1.5"
+
+              match signedResult with
+              | ResultSet(_, [ [ Some "-1"; Some "3"; Some "-1.5" ] ]) -> ()
+              | other -> failtestf "expected signed subtraction results, got %A" other
+
+              match signedSession.LastResultColumnMetadata with
+              | integer :: _ ->
+                  Expect.equal integer.TypeId TypeLongLong "integer subtraction reports BIGINT"
+                  Expect.isFalse (integer.Flags &&& UnsignedFlag <> 0us) "mode result is signed"
+              | metadata -> failtestf "expected subtraction metadata, got %A" metadata
+
+              match prepareStatementForSession signedSession "SELECT CAST(? AS UNSIGNED) - ?" with
+              | Ok(Some(Select { Projections = [ BinOp(SignedSub, _, _), _ ] }), 2) -> ()
+              | other -> failtestf "expected prepared signed-subtraction AST, got %A" other
+
+              match prepareStatementForSession defaultSession "SELECT CAST(? AS UNSIGNED) - ?" with
+              | Ok(Some(Select { Projections = [ BinOp(Sub, _, _), _ ] }), 2) -> ()
+              | other -> failtestf "expected prepared default-subtraction AST, got %A" other
+
+              match handle signedSession "SELECT CAST(0 AS UNSIGNED) - 1" |> snd with
+              | ResultSet(_, [ [ Some "-1" ] ]) -> ()
+              | other -> failtestf "expected parse-cache isolation for signed subtraction, got %A" other
+
+              match handle signedSession "SELECT CAST(9223372036854775808 AS UNSIGNED) - 0" |> snd with
+              | Err(1690, message) -> Expect.stringContains message "BIGINT value" "signed overflow names the signed domain"
+              | other -> failtestf "expected signed subtraction overflow, got %A" other
+
+              match handle defaultSession "SELECT CAST(0 AS UNSIGNED) - 1" |> snd with
+              | Err(1690, _) -> ()
+              | other -> failtestf "expected the sibling session to retain unsigned subtraction, got %A" other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

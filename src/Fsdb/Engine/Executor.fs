@@ -1270,6 +1270,7 @@ let private opSymbol =
     | Gte -> ">="
     | Add -> "+"
     | Sub -> "-"
+    | SignedSub -> "-"
     | Mul -> "*"
     | Div -> "/"
     | IntDiv -> "DIV"
@@ -1904,7 +1905,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | QuantifiedComparison _
     | Between _
     | Exists _ -> simple TypeLongLong
-    | BinOp((Add | Sub | Mul), left, right) -> numeric left right
+    | BinOp((Add | Sub | SignedSub | Mul), left, right) -> numeric left right
     | BinOp(Div, left, right) ->
         match typeIdOf left, typeIdOf right with
         | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
@@ -3513,8 +3514,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     // give it rather than falling into generic numeric add/sub.
                     | Add when isIntervalValue vb -> tryDateIntervalBinOp 1.0 va vb |> Option.defaultValue (Value.add va vb) |> Ok
                     | Sub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.sub va vb) |> Ok
+                    | SignedSub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.subSigned va vb) |> Ok
                     | Add -> Ok(arith Value.add)
                     | Sub -> Ok(arith Value.sub)
+                    | SignedSub -> Ok(arith Value.subSigned)
                     | Mul -> Ok(arith Value.mul)
                     | Div -> Ok(arith Value.div)
                     | IntDiv -> Ok(arith Value.intDiv)
@@ -4525,7 +4528,7 @@ and private describeQueryColumns
 
                     let arithmeticColumn =
                         match expression with
-                        | BinOp((Add | Sub | Mul | Div), left, right) ->
+                        | BinOp((Add | Sub | SignedSub | Mul | Div), left, right) ->
                             let isDecimal expression =
                                 match tryColumnDefForExpr context expression with
                                 | Some { Type = TDecimal _ } -> true
@@ -4538,7 +4541,7 @@ and private describeQueryColumns
                             | true, Some(leftPrecision, leftScale), Some(rightPrecision, rightScale) ->
                                 let precision, scale =
                                     match expression with
-                                    | BinOp((Add | Sub), _, _) ->
+                                    | BinOp((Add | Sub | SignedSub), _, _) ->
                                         let scale = max leftScale rightScale
                                         min 65 (max (leftPrecision - leftScale) (rightPrecision - rightScale) + scale + 1), scale
                                     | BinOp(Mul, _, _) -> min 65 (leftPrecision + rightPrecision), min 30 (leftScale + rightScale)

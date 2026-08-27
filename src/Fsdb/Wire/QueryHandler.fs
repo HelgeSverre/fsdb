@@ -828,7 +828,8 @@ let private parserOptionsForModes modes =
         AnsiQuotes = enabled "ANSI_QUOTES"
         IgnoreSpace = enabled "IGNORE_SPACE"
         PipesAsConcat = enabled "PIPES_AS_CONCAT"
-        HighNotPrecedence = hasSqlMode modes "HIGH_NOT_PRECEDENCE" }
+        HighNotPrecedence = hasSqlMode modes "HIGH_NOT_PRECEDENCE"
+        NoUnsignedSubtraction = hasSqlMode modes "NO_UNSIGNED_SUBTRACTION" }
 
 let private parserOptionsForSession (session: Session) =
     lookupVar session "sql_mode"
@@ -1968,6 +1969,7 @@ let private isRepeatedStatement (options: Parser.ParserOptions) (sql: string) =
             options.IgnoreSpace,
             options.PipesAsConcat,
             options.HighNotPrecedence,
+            options.NoUnsignedSubtraction,
             StringComparer.Ordinal.GetHashCode sql
         )
 
@@ -3339,6 +3341,9 @@ let private recoverExecutionError (session: Session) (description: string) (erro
     | Value.UnsignedOutOfRange ->
         Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- %s" description
         session, Err(1690, "BIGINT UNSIGNED value is out of range")
+    | Value.SignedOutOfRange ->
+        Log.diagnostic "fsdb: ERR 1690 signed out of range -- %s" description
+        session, Err(1690, "BIGINT value is out of range")
     // Extension functions may fail after an effect, so their chosen SQL error
     // must not leave a transaction containing partially applied state.
     | Functions.SqlError(code, message) ->

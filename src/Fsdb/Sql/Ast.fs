@@ -23,6 +23,9 @@ type Op =
     | Gte
     | Add
     | Sub
+    /// `-` parsed under `NO_UNSIGNED_SUBTRACTION`; exact integer operands
+    /// produce a signed BIGINT result even when either side is unsigned.
+    | SignedSub
     | Mul
     | Div
     /// `DIV` — MySQL's integer-division operator: always an `INT` (or

@@ -350,6 +350,7 @@ let rec exprToSql (e: Expr) : string =
         | Gte -> ">="
         | Add -> "+"
         | Sub -> "-"
+        | SignedSub -> "-"
         | Mul -> "*"
         | Div -> "/"
         | IntDiv -> "DIV"

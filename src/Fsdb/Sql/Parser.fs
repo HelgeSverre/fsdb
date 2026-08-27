@@ -21,17 +21,20 @@ type ParserOptions =
     { AnsiQuotes: bool
       IgnoreSpace: bool
       PipesAsConcat: bool
-      HighNotPrecedence: bool }
+      HighNotPrecedence: bool
+      NoUnsignedSubtraction: bool }
 
 let defaultOptions: ParserOptions =
     { AnsiQuotes = false
       IgnoreSpace = false
       PipesAsConcat = false
-      HighNotPrecedence = false }
+      HighNotPrecedence = false
+      NoUnsignedSubtraction = false }
 
 let private ignoreSpaceMode = System.Threading.AsyncLocal<bool>()
 let private pipesAsConcatMode = System.Threading.AsyncLocal<bool>()
 let private highNotPrecedenceMode = System.Threading.AsyncLocal<bool>()
+let private noUnsignedSubtractionMode = System.Threading.AsyncLocal<bool>()
 
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
@@ -1635,7 +1638,15 @@ opp.AddOperator(InfixOperator("&", ws, 3, Associativity.Left, (fun a b -> FuncCa
 opp.AddOperator(InfixOperator("<<", ws, 4, Associativity.Left, (fun a b -> FuncCall("BITWISE_SHIFT_LEFT", [ a; b ]))))
 opp.AddOperator(InfixOperator(">>", ws, 4, Associativity.Left, (fun a b -> FuncCall("BITWISE_SHIFT_RIGHT", [ a; b ]))))
 opp.AddOperator(InfixOperator("+", ws, 5, Associativity.Left, (fun a b -> BinOp(Add, a, b))))
-opp.AddOperator(InfixOperator("-", ws, 5, Associativity.Left, (fun a b -> BinOp(Sub, a, b))))
+opp.AddOperator(
+    InfixOperator(
+        "-",
+        ws,
+        5,
+        Associativity.Left,
+        (fun a b -> BinOp((if noUnsignedSubtractionMode.Value then SignedSub else Sub), a, b))
+    )
+)
 opp.AddOperator(InfixOperator("*", ws, 6, Associativity.Left, (fun a b -> BinOp(Mul, a, b))))
 opp.AddOperator(InfixOperator("/", ws, 6, Associativity.Left, (fun a b -> BinOp(Div, a, b))))
 opp.AddOperator(InfixOperator("%", ws, 6, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
@@ -3820,9 +3831,11 @@ let private withParserOptions (options: ParserOptions) (sql: string) parse =
     let previousIgnoreSpace = ignoreSpaceMode.Value
     let previousPipesAsConcat = pipesAsConcatMode.Value
     let previousHighNotPrecedence = highNotPrecedenceMode.Value
+    let previousNoUnsignedSubtraction = noUnsignedSubtractionMode.Value
     ignoreSpaceMode.Value <- options.IgnoreSpace
     pipesAsConcatMode.Value <- options.PipesAsConcat
     highNotPrecedenceMode.Value <- options.HighNotPrecedence
+    noUnsignedSubtractionMode.Value <- options.NoUnsignedSubtraction
     let sql = sql |> expandVersionComments |> rewriteSqlForOptions options
 
     try
@@ -3831,6 +3844,7 @@ let private withParserOptions (options: ParserOptions) (sql: string) parse =
         ignoreSpaceMode.Value <- previousIgnoreSpace
         pipesAsConcatMode.Value <- previousPipesAsConcat
         highNotPrecedenceMode.Value <- previousHighNotPrecedence
+        noUnsignedSubtractionMode.Value <- previousNoUnsignedSubtraction
 
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0

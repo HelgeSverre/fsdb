@@ -787,6 +787,19 @@ let tests =
                 testCase "int - int stays int"
                 <| fun _ -> Expect.equal (sub (VInt 5L) (VInt 3L)) (VInt 2L) "5 - 3"
 
+                testCase "signed subtraction accepts unsigned operands only inside BIGINT's signed range"
+                <| fun _ ->
+                    Expect.equal (subSigned (VUInt 0UL) (VInt 1L)) (VInt -1L) "unsigned zero minus one"
+                    Expect.equal (subSigned (VUInt 5UL) (VUInt 2UL)) (VInt 3L) "two unsigned operands"
+                    Expect.equal (subSigned (VUInt 0UL) (VDecimal 1.5M)) (VDecimal -1.5M) "decimal promotion"
+                    Expect.equal (subSigned VNull (VUInt 1UL)) VNull "NULL propagation"
+
+                    Expect.throwsC
+                        (fun () -> subSigned (VUInt 9223372036854775808UL) (VInt 0L) |> ignore)
+                        (function
+                            | SignedOutOfRange -> ()
+                            | error -> failtestf "expected SignedOutOfRange, got %A" error)
+
                 testCase "int * int stays int"
                 <| fun _ -> Expect.equal (mul (VInt 4L) (VInt 3L)) (VInt 12L) "4 * 3"
 

@@ -1856,6 +1856,7 @@ let private maxUInt64 = decimal UInt64.MaxValue
 /// A non-integral `decimal` (a fractional intermediate inside a still-exact
 /// promotion) is in-domain and just stays a `DECIMAL`.
 exception UnsignedOutOfRange
+exception SignedOutOfRange
 
 let narrowUnsigned (d: decimal) : Value =
     if d >= 0m && d <= maxUInt64 then
@@ -1905,6 +1906,19 @@ let private arith
 let add = arith (Checked.(+)) (+) (+)
 let sub = arith (Checked.(-)) (-) (-)
 let mul = arith (Checked.( * )) ( * ) ( * )
+
+let subSigned (a: Value) (b: Value) : Value =
+    match classify a, classify b with
+    | None, _
+    | _, None -> VNull
+    | Some((KInt _ | KUInt _) as left), Some((KInt _ | KUInt _) as right) ->
+        let result = asDecimal left - asDecimal right
+
+        if result < decimal Int64.MinValue || result > decimal Int64.MaxValue then
+            raise SignedOutOfRange
+        else
+            VInt(int64 result)
+    | _ -> sub a b
 
 /// A `decimal`'s own scale (digits after the point) as constructed —
 /// `10.00m` reports 2, `5m` reports 0 — read straight out of its bit
