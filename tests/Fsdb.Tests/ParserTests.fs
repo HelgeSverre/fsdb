@@ -2259,6 +2259,22 @@ let tests =
                     | Select { From = Some(FromTable { Database = Some "db"; Table = "with" }) } -> ()
                     | other -> failtestf "expected a reserved qualified table name, got %A" other
 
+                testCase "window function names require quoting when used as aliases"
+                <| fun _ ->
+                    for name in
+                        [ "ROW_NUMBER"; "RANK"; "DENSE_RANK"; "PERCENT_RANK"; "CUME_DIST"; "NTILE"
+                          "LAG"; "LEAD"; "FIRST_VALUE"; "LAST_VALUE"; "NTH_VALUE" ] do
+                        Expect.isError (parse (sprintf "SELECT 1 AS %s" name)) name
+
+                    match parseOk "SELECT ROW_NUMBER() OVER () AS `rank`" with
+                    | Select { Projections = [ WindowOver(WinRowNumber, _), Some "rank" ] } -> ()
+                    | other -> failtestf "expected a quoted window alias, got %A" other
+
+                    for name in [ "OFFSET"; "TRUNCATE"; "CAST"; "ANY"; "SOME"; "END" ] do
+                        match parseOk (sprintf "SELECT 1 AS %s" name) with
+                        | Select { Projections = [ Lit(VInt 1L), Some alias ] } -> Expect.equal alias name name
+                        | other -> failtestf "expected explicit alias %s, got %A" name other
+
                 testCase "IN (SELECT ...) parses as InSubquery"
                 <| fun _ ->
                     match parseOk "SELECT a FROM t WHERE a IN (SELECT b FROM u)" with

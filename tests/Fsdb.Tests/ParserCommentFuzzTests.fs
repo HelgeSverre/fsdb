@@ -87,6 +87,23 @@ let private injectEverywhere (sql: string) comment =
     |> Array.rev
     |> Array.fold (fun current run -> injectAt current run comment) sql
 
+let private punctuationTemplate =
+    "WITH c AS (§SELECT 1 AS id UNION ALL SELECT 2) "
+    + "SELECT COUNT(§*), COALESCE(§MAX(§c§.§id§),§0), ROW(§c.id§,§c.id + 1§) "
+    + "FROM (§SELECT id FROM c§) AS d JOIN c ON d§.§id§=§c.id "
+    + "WHERE (§d.id§+§1§)§>§1 AND EXISTS(§SELECT 1 FROM c AS nested WHERE nested.id = d.id§)"
+
+let private punctuationParts = punctuationTemplate.Split '§'
+
+let private injectPunctuation ordinal comment =
+    punctuationParts
+    |> Array.mapi (fun index part ->
+        if index = ordinal + 1 then
+            comment + part
+        else
+            part)
+    |> String.concat ""
+
 let private expectParse sampleName formName sql =
     match Fsdb.Parser.parse sql with
     | Ok _ -> ()
@@ -114,6 +131,20 @@ let tests =
               for sample in samples do
                   for formName, comment in commentForms do
                       expectParse sample.Name formName (injectEverywhere sample.Sql comment)
+
+          testCase "comments parse beside punctuation and qualified identifiers"
+          <| fun _ ->
+              let forms =
+                  [| "block", "/* boundary */"
+                     "multiline", "/* boundary\nline */"
+                     "hash", "# boundary\n"
+                     "dash", "-- boundary\n" |]
+
+              let boundaryCount = punctuationParts.Length - 1
+
+              for boundary in 0 .. boundaryCount - 1 do
+                  for formName, comment in forms do
+                      expectParse "punctuation boundaries" formName (injectPunctuation boundary comment)
 
           testCase "executable comment versions follow MySQL boundaries"
           <| fun _ ->

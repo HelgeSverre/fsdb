@@ -417,6 +417,60 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "y" ]; [ Some "2"; Some "z" ] ] "max tag per joined group"
               | other -> failtestf "expected the derived-table join, got %A" other
 
+          testCase "nested CTEs and mixed comments preserve a composed join result"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(10), active INT)" |> ignore
+              runDefault store "CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, amount INT)" |> ignore
+              runDefault store "INSERT INTO customers VALUES (1,'alice',1),(2,'bob',1),(3,'carol',0),(4,'dana',1)" |> ignore
+              runDefault store "INSERT INTO orders VALUES (1,1,10),(2,1,15),(3,2,7),(4,3,99)" |> ignore
+
+              let baseline =
+                  "WITH RECURSIVE limits(n) AS ("
+                  + "SELECT 1 UNION ALL SELECT n + 1 FROM limits WHERE n < 4), "
+                  + "filtered AS ("
+                  + "SELECT o.id, o.customer_id, o.amount FROM orders AS o "
+                  + "JOIN limits AS l ON l.n = o.id "
+                  + "WHERE EXISTS (SELECT 1 FROM customers AS present WHERE present.id = o.customer_id)), "
+                  + "totals AS ("
+                  + "SELECT customer_id, SUM(amount) AS total, COUNT(*) AS count FROM filtered GROUP BY customer_id), "
+                  + "ranked AS ("
+                  + "SELECT customer_id, total, count, "
+                  + "ROW_NUMBER() OVER (ORDER BY total DESC, customer_id) AS row_rank FROM totals) "
+                  + "SELECT c.id, c.name, COALESCE(r.total, 0), r.row_rank, "
+                  + "(SELECT COUNT(*) FROM filtered AS again WHERE again.customer_id = c.id) "
+                  + "FROM customers AS c LEFT JOIN ranked AS r ON r.customer_id = c.id "
+                  + "LEFT JOIN (SELECT customer_id, MAX(amount) AS biggest FROM filtered GROUP BY customer_id) AS maxima "
+                  + "ON maxima.customer_id = c.id "
+                  + "WHERE c.active = 1 AND (r.customer_id IS NULL OR maxima.biggest >= 10) ORDER BY c.id"
+
+              let commented =
+                  "WITH/* lead */RECURSIVE limits/* name */(n) AS ("
+                  + "SELECT /*!80400 SQL_NO_CACHE */ 1 UNION/* branch */ALL SELECT n/* lhs */+/* rhs */1 "
+                  + "FROM limits WHERE n < 4),# next cte\n"
+                  + "filtered AS (SELECT o/* qualifier */.id, o.customer_id, o.amount FROM orders AS o "
+                  + "JOIN/* source */limits AS l ON l.n = o.id -- correlated filter\n"
+                  + "WHERE EXISTS/* call */(SELECT 1 FROM customers AS present WHERE present.id = o.customer_id)), "
+                  + "totals AS (SELECT customer_id, SUM(/* argument */amount) AS total, COUNT(/* star */*) AS count "
+                  + "FROM filtered GROUP BY customer_id),/* ranked rows */"
+                  + "ranked AS (SELECT customer_id, total, count, ROW_NUMBER(/* empty */) OVER ("
+                  + "ORDER BY total DESC, customer_id) AS row_rank FROM totals) "
+                  + "SELECT c.id, c.name, COALESCE(/* argument */r.total, 0), r.row_rank, "
+                  + "(SELECT COUNT(*) FROM filtered AS again WHERE again.customer_id = c.id) "
+                  + "FROM customers AS c LEFT/* outer */JOIN ranked AS r ON r.customer_id = c.id "
+                  + "LEFT JOIN (SELECT customer_id, MAX(amount) AS biggest FROM filtered GROUP BY customer_id) AS maxima "
+                  + "ON maxima.customer_id = c.id WHERE c.active = 1 "
+                  + "AND (r.customer_id IS NULL OR maxima.biggest >= 10) ORDER/* final */BY c.id"
+
+              let expected =
+                  [ [ Some "1"; Some "alice"; Some "25"; Some "2"; Some "2" ]
+                    [ Some "4"; Some "dana"; Some "0"; None; Some "0" ] ]
+
+              for sql in [ baseline; commented ] do
+                  match runDefault store sql with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "expected the composed resultset, got %A from %s" other sql
+
           // NATURAL/USING expectations below were verified against a
           // real MySQL 8.4 (same schema/data, differential probe) —
           // column order, coalesced values, and padding all match.

@@ -218,6 +218,13 @@ let private intTok: Parser<int, unit> = pint32 .>> ws
 /// Laravel's `Blueprint::change()`, is one such query) from parsing as a
 /// plain column reference. Real MySQL agrees: `AUTO_INCREMENT` is a
 /// non-reserved keyword there too.
+let private windowOnlyFunctionNames =
+    [ "ROW_NUMBER"; "RANK"; "DENSE_RANK"; "PERCENT_RANK"; "CUME_DIST"; "NTILE"
+      "LAG"; "LEAD"; "FIRST_VALUE"; "LAST_VALUE"; "NTH_VALUE" ]
+
+let private reservedWindowFunctionNames =
+    HashSet<string>(windowOnlyFunctionNames, StringComparer.OrdinalIgnoreCase)
+
 let private reservedWords =
     HashSet<string>(
         [ "select"
@@ -300,6 +307,7 @@ let private reservedWords =
           "window"
           "partition"
           "row"
+          yield! windowOnlyFunctionNames
           "lock"
           "with"
           "recursive" ],
@@ -967,8 +975,7 @@ let private overClause: Parser<OverClause, unit> =
 /// other name followed by `OVER` is a 1064, same as MySQL.
 let private windowFunctionNames =
     System.Collections.Generic.HashSet<string>(
-        [ "ROW_NUMBER"; "RANK"; "DENSE_RANK"; "PERCENT_RANK"; "CUME_DIST"; "NTILE"
-          "LAG"; "LEAD"; "FIRST_VALUE"; "LAST_VALUE"; "NTH_VALUE"
+        [ yield! windowOnlyFunctionNames
           "SUM"; "COUNT"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT"; "BIT_AND"; "BIT_OR"; "BIT_XOR"
           "STD"; "STDDEV"; "STDDEV_POP"; "STDDEV_SAMP"; "VARIANCE"; "VAR_POP"; "VAR_SAMP"
           "JSON_ARRAYAGG" ],
@@ -2635,13 +2642,23 @@ let private localLoadData: Parser<LocalLoad, unit> =
 /// `AS` at all (`SELECT 1 x FROM t`, `SELECT price * qty total FROM
 /// orders`): a bare word right after the expression that isn't the next
 /// clause's keyword. MySQL also accepts a quoted string in this alias-only
-/// position. `identifier` rejects every word in `reservedWords`
-/// (`FROM`/`WHERE`/`GROUP`/`ORDER`/`HAVING`/`LIMIT`/...), so this only fires
-/// on an actual alias, not the start of the next clause; `attempt`ed so a
-/// comma or clause keyword cleanly falls through to `None`.
+/// position. Implicit aliases use `identifier`, so a following clause keyword
+/// cannot be consumed as the alias. Explicit aliases retain MySQL's
+/// context-sensitive non-reserved words, while its reserved window-function
+/// names still require quoting.
 let private projectionAlias: Parser<string option, unit> =
-    let explicitName = (identifierWord .>> ws) <|> (stringLit |>> function VString value -> value | _ -> "")
-    let implicitName = identifier <|> (stringLit |>> function VString value -> value | _ -> "")
+    let stringName = stringLit |>> function VString value -> value | _ -> ""
+
+    let explicitBareName =
+        many1Satisfy2 isIdentStart isIdentChar
+        >>= fun name ->
+            if reservedWindowFunctionNames.Contains name then
+                fail (sprintf "'%s' is a reserved keyword" name)
+            else
+                preturn name
+
+    let explicitName = ((backtickIdent <|> attempt explicitBareName) .>> ws) <|> stringName
+    let implicitName = identifier <|> stringName
     (attempt (keyword "AS" >>. explicitName) |>> Some) <|> (attempt implicitName |>> Some) <|> preturn None
 
 let private projection: Parser<Projection, unit> = expr .>>. projectionAlias
