@@ -820,28 +820,21 @@ let private hasSqlMode (modes: Set<string>) (name: string) =
 let private isStrictSqlMode modes =
     hasSqlMode modes "STRICT_TRANS_TABLES" || hasSqlMode modes "STRICT_ALL_TABLES"
 
-let private usesAnsiQuotes modes =
-    hasSqlMode modes "ANSI_QUOTES" || hasSqlMode modes "ANSI"
+let private parserOptionsForModes modes =
+    let ansi = hasSqlMode modes "ANSI"
+    let enabled mode = ansi || hasSqlMode modes mode
 
-let private usesIgnoreSpace modes =
-    hasSqlMode modes "IGNORE_SPACE" || hasSqlMode modes "ANSI"
-
-let private usesPipesAsConcat modes =
-    hasSqlMode modes "PIPES_AS_CONCAT" || hasSqlMode modes "ANSI"
+    { Parser.defaultOptions with
+        AnsiQuotes = enabled "ANSI_QUOTES"
+        IgnoreSpace = enabled "IGNORE_SPACE"
+        PipesAsConcat = enabled "PIPES_AS_CONCAT" }
 
 let private parserOptionsForSession (session: Session) =
-    let modes =
-        lookupVar session "sql_mode"
-        |> Option.flatten
-        |> Option.defaultValue ""
-        |> parseSqlModes
-
-    let options: Parser.ParserOptions =
-        { AnsiQuotes = usesAnsiQuotes modes
-          IgnoreSpace = usesIgnoreSpace modes
-          PipesAsConcat = usesPipesAsConcat modes }
-
-    options
+    lookupVar session "sql_mode"
+    |> Option.flatten
+    |> Option.defaultValue ""
+    |> parseSqlModes
+    |> parserOptionsForModes
 
 /// Evaluates a `SET` user-variable right-hand side through the ordinary
 /// expression grammar. A private variable map preserves SET's all-or-
@@ -2883,7 +2876,7 @@ let private prepareStatementWithOptions
             | _ -> Result.Error(1064, "syntax error")
 
 let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
-    prepareStatementWithOptions { AnsiQuotes = false; IgnoreSpace = false; PipesAsConcat = false } sql
+    prepareStatementWithOptions Parser.defaultOptions sql
 
 let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
     prepareStatementWithOptions (parserOptionsForSession session) sql

@@ -283,9 +283,7 @@ let tests =
                 testCase "IGNORE_SPACE permits spaced built-ins and reserves their unquoted names"
                 <| fun _ ->
                     let options: ParserOptions =
-                        { AnsiQuotes = false
-                          IgnoreSpace = true
-                          PipesAsConcat = false }
+                        { defaultOptions with IgnoreSpace = true }
 
                     Expect.equal
                         (parseWithOptions options "SELECT COUNT (*) FROM t")
@@ -317,9 +315,7 @@ let tests =
                 testCase "PIPES_AS_CONCAT rewrites only unquoted SQL operators"
                 <| fun _ ->
                     let options: ParserOptions =
-                        { AnsiQuotes = false
-                          IgnoreSpace = false
-                          PipesAsConcat = true }
+                        { defaultOptions with PipesAsConcat = true }
 
                     Expect.equal
                         (parse "SELECT 1 || 0")

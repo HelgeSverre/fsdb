@@ -22,6 +22,11 @@ type ParserOptions =
       IgnoreSpace: bool
       PipesAsConcat: bool }
 
+let defaultOptions: ParserOptions =
+    { AnsiQuotes = false
+      IgnoreSpace = false
+      PipesAsConcat = false }
+
 let private ignoreSpaceMode = System.Threading.AsyncLocal<bool>()
 let private pipesAsConcatMode = System.Threading.AsyncLocal<bool>()
 
@@ -3801,13 +3806,8 @@ let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, 
     exprDepth.Value <- 0
     let full = ws >>. statement .>> opt (sym ";") .>> eof
 
-    // `open FParsec` brings its own `Ok`/`Error` (from `Reply`'s status) into
-    // scope, shadowing `Result`'s — qualify to get the ones this signature means.
-    //
-    // Belt-and-braces around `numberLit`'s overflow guard above: no parser
-    // exception should ever be able to escape as a raw .NET exception and
-    // drop the caller's connection — a syntax error is always a clean
-    // `Result.Error`, however it originates.
+    // FParsec's ReplyStatus cases shadow Result cases in this module.
+    // Malformed input is kept inside the parser boundary as a syntax error.
     let parse sql =
         try
             if exceedsParenthesisDepthLimit sql then
@@ -3822,10 +3822,10 @@ let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, 
     withParserOptions options sql parse
 
 let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
-    parseWithOptions { AnsiQuotes = enabled; IgnoreSpace = false; PipesAsConcat = false } sql
+    parseWithOptions { defaultOptions with AnsiQuotes = enabled } sql
 
 let parse (sql: string) : Result<Statement, string> =
-    parseWithOptions { AnsiQuotes = false; IgnoreSpace = false; PipesAsConcat = false } sql
+    parseWithOptions defaultOptions sql
 
 /// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
 /// client-to-server data stream.
@@ -3989,7 +3989,7 @@ let parseExpressionWithOptions (options: ParserOptions) (sql: string) : Result<E
     withParserOptions options sql parse
 
 let parseExpression (sql: string) : Result<Expr, string> =
-    parseExpressionWithOptions { AnsiQuotes = false; IgnoreSpace = false; PipesAsConcat = false } sql
+    parseExpressionWithOptions defaultOptions sql
 
 /// Parses the user-defined-variable target at the front of a `SET`
 /// assignment. The right-hand side remains source text because `SET` has
