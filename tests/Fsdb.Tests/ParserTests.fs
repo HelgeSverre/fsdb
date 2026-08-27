@@ -1216,6 +1216,16 @@ let tests =
                         ()
                     | other -> failtestf "expected binary column attributes and named unique constraints, got %A" other
 
+                testCase "REAL_AS_FLOAT changes the REAL type synonym"
+                <| fun _ ->
+                    let realAsFloat =
+                        { defaultOptions with
+                            RealAsFloat = true }
+
+                    match parseWithOptions realAsFloat "CREATE TABLE reading (value REAL UNSIGNED)" with
+                    | Ok(CreateTable { Columns = [ { Type = TFloat true } ] }) -> ()
+                    | other -> failtestf "expected REAL_AS_FLOAT to select FLOAT, got %A" other
+
                 testCase "ANSI_QUOTES treats double-quoted table names as identifiers"
                 <| fun _ ->
                     match parseWithAnsiQuotes true "CREATE TABLE \"quoted table\" (\"id\" INT PRIMARY KEY)" with

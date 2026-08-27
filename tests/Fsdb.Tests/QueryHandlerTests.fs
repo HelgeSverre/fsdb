@@ -969,6 +969,29 @@ let tests =
               | Err(1690, _) -> ()
               | other -> failtestf "expected the sibling session to retain unsigned subtraction, got %A" other
 
+          testCase "REAL_AS_FLOAT changes the REAL type synonym"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let defaultSession = create 1 store
+              let floatSession, _ = handle (create 2 store) "SET sql_mode = 'REAL_AS_FLOAT'"
+              let ansiSession, _ = handle (create 3 store) "SET sql_mode = 'ANSI'"
+
+              let defaultSession, defaultCreate = handle defaultSession "CREATE TABLE default_real (value REAL)"
+              let floatSession, floatCreate = handle floatSession "CREATE TABLE float_real (value REAL)"
+              let ansiSession, ansiCreate = handle ansiSession "CREATE TABLE ansi_real (value REAL)"
+              Expect.equal defaultCreate (Affected 0UL) "default REAL DDL"
+              Expect.equal floatCreate (Affected 0UL) "REAL_AS_FLOAT DDL"
+              Expect.equal ansiCreate (Affected 0UL) "ANSI DDL"
+
+              match handle defaultSession "SHOW COLUMNS FROM default_real" |> snd with
+              | ResultSet(_, [ [ Some "value"; Some "double"; _; _; _; _ ] ]) -> ()
+              | other -> failtestf "expected default REAL to mean DOUBLE, got %A" other
+
+              for session, table in [ floatSession, "float_real"; ansiSession, "ansi_real" ] do
+                  match handle session ("SHOW COLUMNS FROM " + table) |> snd with
+                  | ResultSet(_, [ [ Some "value"; Some "float"; _; _; _; _ ] ]) -> ()
+                  | other -> failtestf "expected %s REAL to mean FLOAT, got %A" table other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

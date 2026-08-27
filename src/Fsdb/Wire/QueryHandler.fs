@@ -829,7 +829,8 @@ let private parserOptionsForModes modes =
         IgnoreSpace = enabled "IGNORE_SPACE"
         PipesAsConcat = enabled "PIPES_AS_CONCAT"
         HighNotPrecedence = hasSqlMode modes "HIGH_NOT_PRECEDENCE"
-        NoUnsignedSubtraction = hasSqlMode modes "NO_UNSIGNED_SUBTRACTION" }
+        NoUnsignedSubtraction = hasSqlMode modes "NO_UNSIGNED_SUBTRACTION"
+        RealAsFloat = enabled "REAL_AS_FLOAT" }
 
 let private parserOptionsForSession (session: Session) =
     lookupVar session "sql_mode"
@@ -1970,6 +1971,7 @@ let private isRepeatedStatement (options: Parser.ParserOptions) (sql: string) =
             options.PipesAsConcat,
             options.HighNotPrecedence,
             options.NoUnsignedSubtraction,
+            options.RealAsFloat,
             StringComparer.Ordinal.GetHashCode sql
         )
 

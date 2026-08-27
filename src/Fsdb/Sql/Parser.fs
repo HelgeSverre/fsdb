@@ -22,19 +22,18 @@ type ParserOptions =
       IgnoreSpace: bool
       PipesAsConcat: bool
       HighNotPrecedence: bool
-      NoUnsignedSubtraction: bool }
+      NoUnsignedSubtraction: bool
+      RealAsFloat: bool }
 
 let defaultOptions: ParserOptions =
     { AnsiQuotes = false
       IgnoreSpace = false
       PipesAsConcat = false
       HighNotPrecedence = false
-      NoUnsignedSubtraction = false }
+      NoUnsignedSubtraction = false
+      RealAsFloat = false }
 
-let private ignoreSpaceMode = System.Threading.AsyncLocal<bool>()
-let private pipesAsConcatMode = System.Threading.AsyncLocal<bool>()
-let private highNotPrecedenceMode = System.Threading.AsyncLocal<bool>()
-let private noUnsignedSubtractionMode = System.Threading.AsyncLocal<bool>()
+let private currentOptions = System.Threading.AsyncLocal<ParserOptions>()
 
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
@@ -238,7 +237,7 @@ let private keyword (s: string) : Parser<unit, unit> =
 let private functionKeyword (s: string) : Parser<unit, unit> =
     let openParen: Parser<unit, unit> =
         fun stream ->
-            if ignoreSpaceMode.Value then
+            if currentOptions.Value.IgnoreSpace then
                 (spaces >>. pchar '(' >>. ws) stream
             else
                 (pchar '(' >>. ws) stream
@@ -388,7 +387,7 @@ let private bareIdent: Parser<string, unit> =
         if
             reservedWords.Contains w
             || charsetIntroducerNames.Contains w
-            || ignoreSpaceMode.Value && whitespaceSensitiveFunctionNames.Contains w
+            || currentOptions.Value.IgnoreSpace && whitespaceSensitiveFunctionNames.Contains w
         then
             fail (sprintf "'%s' is a reserved keyword" w)
         else
@@ -692,6 +691,12 @@ let private columnType: Parser<ColumnType, unit> =
               match size with
               | Some(p, scale) -> TDecimal(p, Option.defaultValue 0 scale, unsigned)
               | None -> TDecimal(10, 0, unsigned)
+          keyword "REAL" >>. ignoredWidth >>. unsignedFlag
+          |>> fun unsigned ->
+              if currentOptions.Value.RealAsFloat then
+                  TFloat unsigned
+              else
+                  TDouble unsigned
           keyword "DOUBLE" >>. optional (keyword "PRECISION") >>. ignoredWidth >>. unsignedFlag |>> TDouble
           keyword "FLOAT" >>. ignoredWidth >>. unsignedFlag |>> TFloat
           keyword "DATETIME" >>. optFsp |>> TDateTime
@@ -906,7 +911,7 @@ let private genericFuncCall: Parser<Expr, unit> =
             else
                 let openParen =
                     if whitespaceSensitiveFunctionNames.Contains normalizedName then
-                        if ignoreSpaceMode.Value then
+                        if currentOptions.Value.IgnoreSpace then
                             spaces >>. pchar '(' >>. ws
                         else
                             pchar '(' >>. ws
@@ -1621,11 +1626,11 @@ let private concatOperatorToken = "\u001f"
 
 let private concatOperatorBoundary: Parser<unit, unit> =
     fun stream ->
-        if pipesAsConcatMode.Value then ws stream else (fail "PIPES_AS_CONCAT is disabled") stream
+        if currentOptions.Value.PipesAsConcat then ws stream else (fail "PIPES_AS_CONCAT is disabled") stream
 
 let private highNotBoundary: Parser<unit, unit> =
     fun stream ->
-        if highNotPrecedenceMode.Value then
+        if currentOptions.Value.HighNotPrecedence then
             (nextCharSatisfiesNot isIdentChar >>. ws) stream
         else
             (fail "HIGH_NOT_PRECEDENCE is disabled") stream
@@ -1644,7 +1649,7 @@ opp.AddOperator(
         ws,
         5,
         Associativity.Left,
-        (fun a b -> BinOp((if noUnsignedSubtractionMode.Value then SignedSub else Sub), a, b))
+        (fun a b -> BinOp((if currentOptions.Value.NoUnsignedSubtraction then SignedSub else Sub), a, b))
     )
 )
 opp.AddOperator(InfixOperator("*", ws, 6, Associativity.Left, (fun a b -> BinOp(Mul, a, b))))
@@ -1806,7 +1811,7 @@ let private notExpr, notExprRef = createParserForwardedToRef<Expr, unit> ()
 
 notExprRef.Value <-
     depthGuard (fun stream ->
-        if highNotPrecedenceMode.Value then
+        if currentOptions.Value.HighNotPrecedence then
             comparisonExpr stream
         else
             ((keyword "NOT" >>. notExpr |>> Not) <|> comparisonExpr) stream)
@@ -3828,23 +3833,14 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
         output.ToString()
 
 let private withParserOptions (options: ParserOptions) (sql: string) parse =
-    let previousIgnoreSpace = ignoreSpaceMode.Value
-    let previousPipesAsConcat = pipesAsConcatMode.Value
-    let previousHighNotPrecedence = highNotPrecedenceMode.Value
-    let previousNoUnsignedSubtraction = noUnsignedSubtractionMode.Value
-    ignoreSpaceMode.Value <- options.IgnoreSpace
-    pipesAsConcatMode.Value <- options.PipesAsConcat
-    highNotPrecedenceMode.Value <- options.HighNotPrecedence
-    noUnsignedSubtractionMode.Value <- options.NoUnsignedSubtraction
+    let previous = currentOptions.Value
+    currentOptions.Value <- options
     let sql = sql |> expandVersionComments |> rewriteSqlForOptions options
 
     try
         parse sql
     finally
-        ignoreSpaceMode.Value <- previousIgnoreSpace
-        pipesAsConcatMode.Value <- previousPipesAsConcat
-        highNotPrecedenceMode.Value <- previousHighNotPrecedence
-        noUnsignedSubtractionMode.Value <- previousNoUnsignedSubtraction
+        currentOptions.Value <- previous
 
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0
