@@ -126,6 +126,16 @@ wide-input costs in that run were `GROUP BY` at 98.2 ms versus 19.9 ms and the
 are diagnostic rather than release-grade, but distinguish the closed planner
 cliffs from the remaining aggregate/window execution gap.
 
+The later [10k/50k quick matrix](results/11463b1-quick.md) includes the
+streaming aggregate path: `GROUP BY` measured 38.9 ms versus MySQL's 26.2 ms,
+and the aggregate view measured 33.8 ms versus 26.0 ms. Aggregate execution is
+therefore no longer a dominant cliff in this dataset. Window execution remains
+the clearest CPU-bound query gap: `ROW_NUMBER` measured 343 ms versus 62.7 ms,
+and `CUME_DIST` 172 ms versus 26.2 ms. FULLTEXT ranged from 2.2x for the boolean
+query to 12.2x for the joined query. ShortRun's three samples make these
+directional measurements; use the scale suite before treating small changes
+as regressions.
+
 ### Durability-matched (single-connection latency, `ebc3fca-durable.md`)
 
 fsdb in-memory vs fsdb `--data-dir` (binary WAL) vs MySQL durable vs MySQL no-fsync:
