@@ -866,6 +866,7 @@ let private usesAnsiQuotes (value: string) =
 let private applySqlMode (store: Store) (value: string) =
     setStrictMode store (isStrictSqlMode value)
     setZeroDateModes store (hasSqlMode "NO_ZERO_DATE" value) (hasSqlMode "NO_ZERO_IN_DATE" value)
+    setOnlyFullGroupBy store (hasSqlMode "ONLY_FULL_GROUP_BY" value)
 
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends

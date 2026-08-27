@@ -16,7 +16,7 @@ let defaultVariables: Map<string, string option> =
         [ "version", ServerVersion
           "version_comment", "fsdb"
           "version_compile_os", "osx"
-          "sql_mode", "STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,NO_ENGINE_SUBSTITUTION"
+          "sql_mode", "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,NO_ENGINE_SUBSTITUTION"
           "character_set_client", "utf8mb4"
           "character_set_connection", "utf8mb4"
           "character_set_results", "utf8mb4"

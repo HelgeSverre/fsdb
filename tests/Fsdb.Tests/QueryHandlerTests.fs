@@ -602,6 +602,121 @@ let tests =
               | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES, got %A" other
 
+          testCase "ONLY_FULL_GROUP_BY is enabled by default and scoped to the session"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let strictSession = create 1 store
+              let permissiveSession = create 2 store
+              let strictSession, _ = handle strictSession "CREATE TABLE grouped_values (group_name VARCHAR(10), label VARCHAR(10), amount INT)"
+
+              let strictSession, _ =
+                  handle strictSession "INSERT INTO grouped_values VALUES ('a', 'first', 10), ('a', 'second', 20)"
+
+              match handle strictSession "SELECT @@sql_mode" |> snd with
+              | ResultSet(_, [ [ Some modes ] ]) ->
+                  Expect.isTrue
+                      (modes.Split(',') |> Array.contains "ONLY_FULL_GROUP_BY")
+                      "the default mode includes ONLY_FULL_GROUP_BY"
+              | other -> failtestf "expected the session sql_mode, got %A" other
+
+              match handle strictSession "SELECT group_name, label, COUNT(*) FROM grouped_values GROUP BY group_name" |> snd with
+              | Err(1055, message) -> Expect.stringContains message "only_full_group_by" "grouping error names the mode"
+              | other -> failtestf "expected 1055 for a nondeterministic grouped projection, got %A" other
+
+              match handle strictSession "SELECT label, COUNT(*) FROM grouped_values" |> snd with
+              | Err(1140, message) -> Expect.stringContains message "only_full_group_by" "aggregate error names the mode"
+              | other -> failtestf "expected 1140 for an aggregate without GROUP BY, got %A" other
+
+              let permissiveSession, _ = handle permissiveSession "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+
+              match handle permissiveSession "SELECT group_name, label, COUNT(*) FROM grouped_values GROUP BY group_name" |> snd with
+              | ResultSet(_, [ [ Some "a"; Some "first"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected the permissive session to retain first-row behavior, got %A" other
+
+              match handle strictSession "SELECT group_name, label, COUNT(*) FROM grouped_values GROUP BY group_name" |> snd with
+              | Err(1055, _) -> ()
+              | other -> failtestf "expected the sibling session to remain strict, got %A" other
+
+          testCase "ONLY_FULL_GROUP_BY accepts functionally determined columns"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TABLE grouped_values (id INT PRIMARY KEY, group_name VARCHAR(10), label VARCHAR(10), amount INT, unique_name VARCHAR(10) NOT NULL UNIQUE, nullable_name VARCHAR(10) UNIQUE)"
+
+              let session, _ =
+                  handle
+                      session
+                      "INSERT INTO grouped_values VALUES (1, 'a', 'first', 10, 'u1', 'n1'), (2, 'a', 'second', 20, 'u2', NULL), (3, 'b', 'third', 30, 'u3', NULL)"
+
+              let session, _ = handle session "CREATE TABLE parents (id INT PRIMARY KEY, name VARCHAR(10))"
+              let session, _ = handle session "CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, amount INT)"
+              let session, _ = handle session "CREATE TABLE composite_values (left_key INT NOT NULL, right_key INT NOT NULL, label VARCHAR(10), UNIQUE KEY uq_pair (left_key, right_key))"
+              let session, _ = handle session "INSERT INTO parents VALUES (1, 'p1'), (2, 'p2')"
+              let session, _ = handle session "INSERT INTO children VALUES (1, 1, 5), (2, 1, 7), (3, 2, 9)"
+              let session, _ = handle session "INSERT INTO composite_values VALUES (1, 1, 'one'), (1, 2, 'two')"
+
+              match handle session "SELECT id, label, COUNT(*) FROM grouped_values GROUP BY id ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "first"; Some "1" ]; [ Some "2"; Some "second"; Some "1" ]; [ Some "3"; Some "third"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected primary-key dependency to be accepted, got %A" other
+
+              match handle session "SELECT unique_name, label, COUNT(*) FROM grouped_values GROUP BY unique_name ORDER BY unique_name" |> snd with
+              | ResultSet(_, [ [ Some "u1"; Some "first"; Some "1" ]; [ Some "u2"; Some "second"; Some "1" ]; [ Some "u3"; Some "third"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected non-null unique dependency to be accepted, got %A" other
+
+              match handle session "SELECT nullable_name, label, COUNT(*) FROM grouped_values GROUP BY nullable_name" |> snd with
+              | Err(1055, _) -> ()
+              | other -> failtestf "expected nullable unique columns not to determine a row, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT p.id, p.name, SUM(c.amount) FROM parents p JOIN children c ON c.parent_id = p.id GROUP BY p.id ORDER BY p.id"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "1"; Some "p1"; Some "12" ]; [ Some "2"; Some "p2"; Some "9" ] ]) -> ()
+              | other -> failtestf "expected join equality to preserve primary-key dependency, got %A" other
+
+              match handle session "SELECT left_key, right_key, label, COUNT(*) FROM composite_values GROUP BY left_key, right_key ORDER BY right_key" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1"; Some "one"; Some "1" ]; [ Some "1"; Some "2"; Some "two"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected a complete composite unique key to determine the row, got %A" other
+
+              match handle session "SELECT left_key, label, COUNT(*) FROM composite_values GROUP BY left_key" |> snd with
+              | Err(1055, _) -> ()
+              | other -> failtestf "expected a partial composite key not to determine the row, got %A" other
+
+              match handle session "SELECT group_name, label, SUM(amount) FROM grouped_values WHERE label = 'first' GROUP BY group_name" |> snd with
+              | ResultSet(_, [ [ Some "a"; Some "first"; Some "10" ] ]) -> ()
+              | other -> failtestf "expected an ANDed equality singleton to be accepted, got %A" other
+
+              match handle session "SELECT label, SUM(amount) FROM grouped_values WHERE 'first' = label" |> snd with
+              | ResultSet(_, [ [ Some "first"; Some "10" ] ]) -> ()
+              | other -> failtestf "expected a reversed singleton equality to be accepted, got %A" other
+
+              match handle session "SELECT label, SUM(amount) FROM grouped_values WHERE label = 'first' OR id = 2" |> snd with
+              | Err(1140, _) -> ()
+              | other -> failtestf "expected an OR predicate not to promise a singleton, got %A" other
+
+              match handle session "SELECT group_name, ANY_VALUE(label), COUNT(*) FROM grouped_values GROUP BY group_name ORDER BY group_name" |> snd with
+              | ResultSet(_, [ [ Some "a"; Some "first"; Some "2" ]; [ Some "b"; Some "third"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected ANY_VALUE to opt out of dependency checking, got %A" other
+
+          testCase "ONLY_FULL_GROUP_BY validates ORDER BY expressions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE grouped_values (group_name VARCHAR(10), label VARCHAR(10))"
+              let session, _ = handle session "INSERT INTO grouped_values VALUES ('a', 'first'), ('a', 'second')"
+
+              match handle session "SELECT group_name, COUNT(*) FROM grouped_values GROUP BY group_name ORDER BY label" |> snd with
+              | Err(1055, message) -> Expect.stringContains message "ORDER BY clause" "error identifies the clause"
+              | other -> failtestf "expected 1055 for a nondeterministic ordering expression, got %A" other
+
+              match handle session "SELECT group_name, COUNT(*), ROW_NUMBER() OVER (ORDER BY label) FROM grouped_values GROUP BY group_name" |> snd with
+              | Err(1055, _) -> ()
+              | other -> failtestf "expected 1055 for a nondeterministic window ordering expression, got %A" other
+
           testCase "ANSI_QUOTES applies to later statements in the same session"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

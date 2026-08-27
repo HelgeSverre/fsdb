@@ -3185,6 +3185,7 @@ let tests =
                 testCase "a bare non-aggregated column picks the first row of its group (ANY_VALUE-style, ONLY_FULL_GROUP_BY off)"
                 <| fun _ ->
                     let store = newStore ()
+                    Fsdb.Storage.setOnlyFullGroupBy store false
                     runDefault store "CREATE TABLE t (grp VARCHAR(10), tag VARCHAR(10))" |> ignore
                     runDefault store "INSERT INTO t VALUES ('a', 'first'), ('a', 'second')" |> ignore
 

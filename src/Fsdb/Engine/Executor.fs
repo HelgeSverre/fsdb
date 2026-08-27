@@ -7451,8 +7451,8 @@ and private resolveOrderKey
 /// real `GROUP BY` with nothing to group correctly produces zero rows
 /// instead). Every projection/`HAVING`/`ORDER BY` expression runs through
 /// `rewriteAggregates` per group before evaluating what's left against that
-/// group's first row — MySQL's `ONLY_FULL_GROUP_BY`-off behavior for a bare
-/// non-aggregated column, equivalent to wrapping it in `ANY_VALUE`.
+/// group's first row. `validateOnlyFullGroupBy` permits that fallback only
+/// when the session disables the mode or the expression is deterministic.
 /// Whether a `GROUP BY` key is a plain column list — real MySQL's own
 /// "GROUP BY optimization using an index" (see `groupByIsIndexOrdered`
 /// below) only ever applies to grouping by actual columns, never by an
@@ -7535,6 +7535,230 @@ and private groupByIsIndexOrdered (store: Store) (dbName: string) (select: Selec
             (if pkColumns.IsEmpty then [] else [ pkColumns ]) @ (secondaryIndexes |> List.map _.Columns)
             |> List.exists (indexSortsGroupBy pinned groupColsLower)
     | _ -> false
+
+and private validateOnlyFullGroupBy
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (columns: ColumnDef list)
+    (qualifiers: Map<string, ColumnDef list * int>)
+    (select: SelectStmt)
+    : Result<unit, EvalError> =
+    let columnIndex = columnIndexOf columns
+
+    let tryQualifiedPosition (qualifier: string) (name: string) =
+        qualifiers
+        |> Map.tryFind (qualifier.ToLowerInvariant())
+        |> Option.bind (fun (sourceColumns, offset) ->
+            sourceColumns
+            |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
+            |> Option.map ((+) offset))
+
+    let tryColumnPosition =
+        function
+        | QualifiedCol(qualifier, name) -> tryQualifiedPosition qualifier name
+        | Col name ->
+            columns
+            |> List.indexed
+            |> List.filter (fun (_, column) -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
+            |> function
+                | [ (position, _) ] -> Some position
+                | _ -> None
+        | _ -> None
+
+    let expressionColumns expr =
+        Expression.fold
+            (fun found node ->
+                match node with
+                | Col _
+                | QualifiedCol _ -> Expression.Prune(node :: found)
+                | _ -> Expression.Descend found)
+            []
+            expr
+        |> List.rev
+
+    let addEquality (left, right) pairs =
+        match tryColumnPosition left, tryColumnPosition right with
+        | Some leftPosition, Some rightPosition -> (leftPosition, rightPosition) :: pairs
+        | _ -> pairs
+
+    let rec equalityPairs expr pairs =
+        match expr with
+        | BinOp(And, left, right) -> equalityPairs right (equalityPairs left pairs)
+        | BinOp(Eq, left, right) -> addEquality (left, right) pairs
+        | _ -> pairs
+
+    let isConstant expr = expressionColumns expr |> List.isEmpty
+
+    let rec singletonColumns expr found =
+        match expr with
+        | BinOp(And, left, right) -> singletonColumns right (singletonColumns left found)
+        | BinOp(Eq, left, right) ->
+            match tryColumnPosition left, tryColumnPosition right with
+            | Some position, None when isConstant right -> Set.add position found
+            | None, Some position when isConstant left -> Set.add position found
+            | _ -> found
+        | _ -> found
+
+    let physicalSources =
+        (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+        |> List.choose (function
+            | FromTable tableRef ->
+                let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+                let tableDb = tableRef.Database |> Option.defaultValue dbName
+
+                match Map.tryFind (qualifier.ToLowerInvariant()) qualifiers, InformationSchema.findTable store.Catalog tableDb tableRef.Table with
+                | Some(sourceColumns, offset), Ok table -> Some(sourceColumns, offset, table)
+                | _ -> None
+            | _ -> None)
+
+    let uniqueKeys =
+        physicalSources
+        |> List.collect (fun (sourceColumns, offset, table) ->
+            table.Indexes
+            |> List.filter (fun index -> index.Unique || System.String.Equals(index.Name, "PRIMARY", System.StringComparison.OrdinalIgnoreCase))
+            |> List.choose (fun index ->
+                let keyColumns =
+                    index.Columns
+                    |> List.choose (fun name ->
+                        sourceColumns
+                        |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
+                        |> Option.map (fun position -> offset + position, sourceColumns.[position]))
+
+                if keyColumns.Length = index.Columns.Length && keyColumns |> List.forall (snd >> _.Nullable >> not) then
+                    Some(keyColumns |> List.map fst, [ offset .. offset + sourceColumns.Length - 1 ])
+                else
+                    None))
+
+    let resolveGroupExprs () = select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections)
+
+    let expandDetermined equalities keys initial =
+        let rec expand determined =
+            let throughEqualities =
+                equalities
+                |> List.fold (fun found (left, right) ->
+                    if Set.contains left found then Set.add right found
+                    elif Set.contains right found then Set.add left found
+                    else found) determined
+
+            let throughKeys =
+                keys
+                |> List.fold (fun found (key, source) ->
+                    if key |> List.forall (fun position -> Set.contains position found) then
+                        Set.union found (Set.ofList source)
+                    else
+                        found) throughEqualities
+
+            if throughKeys = determined then determined else expand throughKeys
+
+        expand initial
+
+    let resolveOrderExpr expr =
+        match resolveOrderPosition select.Projections expr with
+        | Col name as column ->
+            select.Projections
+            |> List.choose (fun (projection, alias) ->
+                alias
+                |> Option.filter (fun alias -> System.String.Equals(alias, name, System.StringComparison.OrdinalIgnoreCase))
+                |> Option.map (fun _ -> projection))
+            |> function
+                | [ projection ] -> projection
+                | _ -> column
+        | resolved -> resolved
+
+    let columnLabel position =
+        qualifiers
+        |> Map.toList
+        |> List.tryPick (fun (qualifier, (sourceColumns, offset)) ->
+            let local = position - offset
+            sourceColumns |> List.tryItem local |> Option.map (fun column -> sprintf "%s.%s.%s" dbName qualifier column.Name))
+        |> Option.defaultValue columns.[position].Name
+
+    let invalidColumn groupExprs determined expr =
+        Expression.fold
+            (fun invalid node ->
+                match invalid with
+                | Some _ -> Expression.Prune invalid
+                | None when groupExprs |> List.contains node -> Expression.Prune None
+                | None when isAggregateCall registry node -> Expression.Prune None
+                | None ->
+                    match node with
+                    | FuncCall(name, _) when System.String.Equals(name, "ANY_VALUE", System.StringComparison.OrdinalIgnoreCase) -> Expression.Prune None
+                    | Star None ->
+                        [ 0 .. columns.Length - 1 ]
+                        |> List.tryFind (fun position -> not (Set.contains position determined))
+                        |> Expression.Prune
+                    | Star(Some qualifier) ->
+                        qualifiers
+                        |> Map.tryFind (qualifier.ToLowerInvariant())
+                        |> Option.bind (fun (sourceColumns, offset) ->
+                            [ offset .. offset + sourceColumns.Length - 1 ]
+                            |> List.tryFind (fun position -> not (Set.contains position determined)))
+                        |> Expression.Prune
+                    | Col _
+                    | QualifiedCol _ ->
+                        tryColumnPosition node
+                        |> Option.filter (fun position -> not (Set.contains position determined))
+                        |> Expression.Prune
+                    | _ -> Expression.Descend None)
+            None
+            expr
+
+    let groupingError clause index groupExprs determined expr =
+        match invalidColumn groupExprs determined expr with
+        | None -> Ok()
+        | Some position when groupExprs.IsEmpty && clause = "SELECT list" ->
+            Error(
+                1140,
+                sprintf
+                    "In aggregated query without GROUP BY, expression #%d of SELECT list contains nonaggregated column '%s'; this is incompatible with sql_mode=only_full_group_by"
+                    index
+                    (columnLabel position)
+            )
+        | Some position ->
+            Error(
+                1055,
+                sprintf
+                    "Expression #%d of %s is not in GROUP BY clause and contains nonaggregated column '%s' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by"
+                    index
+                    clause
+                    (columnLabel position)
+            )
+
+    if not store.OnlyFullGroupBy then
+        Ok()
+    else
+        resolveGroupExprs ()
+        |> Result.bind (fun groupExprs ->
+            let equalities =
+                (select.Where |> Option.map (fun expr -> equalityPairs expr []) |> Option.defaultValue [])
+                @ (select.Joins |> List.collect (fun join -> equalityPairs join.On []))
+
+            let initial =
+                groupExprs
+                |> List.collect expressionColumns
+                |> List.choose tryColumnPosition
+                |> Set.ofList
+                |> fun grouped ->
+                    select.Where
+                    |> Option.map (fun expr -> singletonColumns expr grouped)
+                    |> Option.defaultValue grouped
+
+            let determined = expandDetermined equalities uniqueKeys initial
+
+            select.Projections
+            |> List.mapi (fun index (expr, _) -> groupingError "SELECT list" (index + 1) groupExprs determined expr)
+            |> traverse id
+            |> Result.bind (fun _ ->
+                select.Having
+                |> Option.map (resolveHavingRef columnIndex select.Projections)
+                |> Option.defaultValue (Ok(Lit(VInt 1L)))
+                |> Result.bind (groupingError "HAVING clause" 1 groupExprs determined))
+            |> Result.bind (fun _ ->
+                select.OrderBy
+                |> List.mapi (fun index (expr, _) -> groupingError "ORDER BY clause" (index + 1) groupExprs determined (resolveOrderExpr expr))
+                |> traverse id
+                |> Result.map ignore))
 
 and private runGroupedSelect
     (store: Store)
@@ -7693,6 +7917,10 @@ and private runGroupedSelect
     match rollupRewrite 0 with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeRewrite ->
+
+    match validateOnlyFullGroupBy store registry dbName columns qualifiers select with
+    | Error(code, message) -> Err(code, message), [], []
+    | Ok() ->
 
     match matches (probeRow columns)
           |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr (ctxFor (probeRow columns))) |> Result.map ignore)
@@ -7893,6 +8121,10 @@ and private runGroupedWindowSelect
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
     let columnIndex = columnIndexOf columns
+
+    match validateOnlyFullGroupBy store registry dbName columns qualifiers select with
+    | Error(code, message) -> Err(code, message), [], []
+    | Ok() ->
 
     match select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections) with
     | Error(code, message) -> Err(code, message), [], []
