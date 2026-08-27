@@ -506,6 +506,39 @@ let tests =
                         (mkSelect([ Not(BinOp(Eq, col "a", col "b")), None ], None, None, [], None, None))
                         "not precedence"
 
+                testCase "HIGH_NOT_PRECEDENCE binds prefix NOT before comparisons"
+                <| fun _ ->
+                    let options =
+                        { defaultOptions with
+                            HighNotPrecedence = true }
+
+                    Expect.equal
+                        (parseWithOptions options "SELECT nOt a = b, NOT 1 BETWEEN -1 AND 1")
+                        (Ok(mkSelect(
+                            [ BinOp(Eq, Not(col "a"), col "b"), None
+                              Between(Not(Lit(VInt 1L)), Lit(VInt -1L), Lit(VInt 1L)), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        )))
+                        "prefix NOT should bind like unary minus"
+
+                    Expect.equal
+                        (parseWithOptions options "SELECT a NOT BETWEEN 1 AND 2, a NOT IN (1, 2), a NOT LIKE 'x'")
+                        (Ok(mkSelect(
+                            [ Not(Between(col "a", Lit(VInt 1L), Lit(VInt 2L))), None
+                              Not(In(col "a", [ Lit(VInt 1L); Lit(VInt 2L) ])), None
+                              Not(Like(col "a", Lit(VString "x"), false, None)), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        )))
+                        "infix NOT predicates should retain their grammar"
+
                 testCase "a AND NOT b: NOT binds only to b"
                 <| fun _ ->
                     Expect.equal

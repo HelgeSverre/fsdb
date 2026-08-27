@@ -850,6 +850,32 @@ let tests =
               | ResultSet(_, [ [ Some "ab" ] ]) -> ()
               | other -> failtestf "expected ANSI to imply PIPES_AS_CONCAT, got %A" other
 
+          testCase "HIGH_NOT_PRECEDENCE binds NOT as a high-precedence unary operator"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let defaultSession = create 1 store
+              let highNotSession, _ = handle (create 2 store) "SET sql_mode = 'HIGH_NOT_PRECEDENCE'"
+
+              match handle defaultSession "SELECT NOT 1 BETWEEN -1 AND 1, NOT NULL IS NULL, NOT 1 + 1" |> snd with
+              | ResultSet(_, [ [ Some "0"; Some "0"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected default low-precedence NOT results, got %A" other
+
+              match handle highNotSession "SELECT NOT 1 BETWEEN -1 AND 1, NOT NULL IS NULL, NOT 1 + 1" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected HIGH_NOT_PRECEDENCE results, got %A" other
+
+              match prepareStatementForSession highNotSession "SELECT NOT ? BETWEEN -1 AND 1" with
+              | Ok(Some(Select { Projections = [ Between(Not(Placeholder 0), _, _), _ ] }), 1) -> ()
+              | other -> failtestf "expected prepared HIGH_NOT_PRECEDENCE AST, got %A" other
+
+              match prepareStatementForSession defaultSession "SELECT NOT ? BETWEEN -1 AND 1" with
+              | Ok(Some(Select { Projections = [ Not(Between(Placeholder 0, _, _)), _ ] }), 1) -> ()
+              | other -> failtestf "expected prepared default NOT AST, got %A" other
+
+              match handle highNotSession "SELECT NOT 1 BETWEEN -1 AND 1" |> snd, handle defaultSession "SELECT NOT 1 BETWEEN -1 AND 1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]), ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected parse-cache isolation between NOT modes, got %A" other
+
           testCase "SET default_storage_engine accepts InnoDB"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

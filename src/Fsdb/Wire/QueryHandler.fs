@@ -827,7 +827,8 @@ let private parserOptionsForModes modes =
     { Parser.defaultOptions with
         AnsiQuotes = enabled "ANSI_QUOTES"
         IgnoreSpace = enabled "IGNORE_SPACE"
-        PipesAsConcat = enabled "PIPES_AS_CONCAT" }
+        PipesAsConcat = enabled "PIPES_AS_CONCAT"
+        HighNotPrecedence = hasSqlMode modes "HIGH_NOT_PRECEDENCE" }
 
 let private parserOptionsForSession (session: Session) =
     lookupVar session "sql_mode"
@@ -1961,7 +1962,13 @@ let private isRepeatedStatement (options: Parser.ParserOptions) (sql: string) =
     // The fingerprint only decides admission. Cache lookups still use the
     // complete SQL and mode, so collisions cannot select the wrong AST.
     let fingerprint =
-        HashCode.Combine(options.AnsiQuotes, options.IgnoreSpace, options.PipesAsConcat, StringComparer.Ordinal.GetHashCode sql)
+        HashCode.Combine(
+            options.AnsiQuotes,
+            options.IgnoreSpace,
+            options.PipesAsConcat,
+            options.HighNotPrecedence,
+            StringComparer.Ordinal.GetHashCode sql
+        )
 
     if parsedStatementCandidates.TryAdd(fingerprint, 0uy) then
         false

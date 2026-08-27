@@ -20,15 +20,18 @@ open Fsdb.Temporal
 type ParserOptions =
     { AnsiQuotes: bool
       IgnoreSpace: bool
-      PipesAsConcat: bool }
+      PipesAsConcat: bool
+      HighNotPrecedence: bool }
 
 let defaultOptions: ParserOptions =
     { AnsiQuotes = false
       IgnoreSpace = false
-      PipesAsConcat = false }
+      PipesAsConcat = false
+      HighNotPrecedence = false }
 
 let private ignoreSpaceMode = System.Threading.AsyncLocal<bool>()
 let private pipesAsConcatMode = System.Threading.AsyncLocal<bool>()
+let private highNotPrecedenceMode = System.Threading.AsyncLocal<bool>()
 
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
@@ -1617,6 +1620,13 @@ let private concatOperatorBoundary: Parser<unit, unit> =
     fun stream ->
         if pipesAsConcatMode.Value then ws stream else (fail "PIPES_AS_CONCAT is disabled") stream
 
+let private highNotBoundary: Parser<unit, unit> =
+    fun stream ->
+        if highNotPrecedenceMode.Value then
+            (nextCharSatisfiesNot isIdentChar >>. ws) stream
+        else
+            (fail "HIGH_NOT_PRECEDENCE is disabled") stream
+
 opp.AddOperator(
     InfixOperator("|", singlePipeBoundary, 1, Associativity.Left, (fun a b -> FuncCall("BITWISE_OR", [ a; b ])))
 )
@@ -1669,6 +1679,7 @@ let private negateExpr (e: Expr) : Expr =
 
 opp.AddOperator(PrefixOperator("-", ws, 7, true, negateExpr))
 opp.AddOperator(PrefixOperator("~", ws, 7, true, (fun value -> FuncCall("BITWISE_NOT", [ value ]))))
+opp.AddOperator(PrefixOperator("NOT", highNotBoundary, 7, true, Not))
 opp.AddOperator(
     InfixOperator(
         concatOperatorToken,
@@ -1781,7 +1792,13 @@ let private comparisonExpr: Parser<Expr, unit> =
 /// since `let rec` on a parser *value* (rather than a function) would
 /// evaluate the right-hand side eagerly and see itself undefined.
 let private notExpr, notExprRef = createParserForwardedToRef<Expr, unit> ()
-notExprRef.Value <- depthGuard ((keyword "NOT" >>. notExpr |>> Not) <|> comparisonExpr)
+
+notExprRef.Value <-
+    depthGuard (fun stream ->
+        if highNotPrecedenceMode.Value then
+            comparisonExpr stream
+        else
+            ((keyword "NOT" >>. notExpr |>> Not) <|> comparisonExpr) stream)
 
 let private andExpr: Parser<Expr, unit> =
     chainl1 notExpr (keyword "AND" >>% fun a b -> BinOp(And, a, b))
@@ -3713,7 +3730,7 @@ statementRef.Value <-
 /// become backticks, while concatenating pipes become one private
 /// high-precedence operator token understood by the expression parser.
 let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string =
-    if not options.AnsiQuotes && not options.PipesAsConcat then
+    if not options.AnsiQuotes && not options.PipesAsConcat && not options.HighNotPrecedence then
         sql
     else
         let output = Text.StringBuilder(sql.Length)
@@ -3765,6 +3782,16 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
             output.Append(sql, index, length) |> ignore
             index <- index + length
 
+        let copyWord () =
+            let start = index
+            index <- index + 1
+
+            while index < sql.Length && isIdentChar sql.[index] do
+                index <- index + 1
+
+            let word = sql.Substring(start, index - start)
+            output.Append(if word.Equals("NOT", StringComparison.OrdinalIgnoreCase) then "NOT" else word) |> ignore
+
         while index < sql.Length do
             match sql.[index] with
             | '\''
@@ -3782,6 +3809,7 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
             | '|' when options.PipesAsConcat && index + 1 < sql.Length && sql.[index + 1] = '|' ->
                 output.Append concatOperatorToken |> ignore
                 index <- index + 2
+            | current when options.HighNotPrecedence && isIdentStart current -> copyWord ()
             | current ->
                 output.Append current |> ignore
                 index <- index + 1
@@ -3791,8 +3819,10 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
 let private withParserOptions (options: ParserOptions) (sql: string) parse =
     let previousIgnoreSpace = ignoreSpaceMode.Value
     let previousPipesAsConcat = pipesAsConcatMode.Value
+    let previousHighNotPrecedence = highNotPrecedenceMode.Value
     ignoreSpaceMode.Value <- options.IgnoreSpace
     pipesAsConcatMode.Value <- options.PipesAsConcat
+    highNotPrecedenceMode.Value <- options.HighNotPrecedence
     let sql = sql |> expandVersionComments |> rewriteSqlForOptions options
 
     try
@@ -3800,6 +3830,7 @@ let private withParserOptions (options: ParserOptions) (sql: string) parse =
     finally
         ignoreSpaceMode.Value <- previousIgnoreSpace
         pipesAsConcatMode.Value <- previousPipesAsConcat
+        highNotPrecedenceMode.Value <- previousHighNotPrecedence
 
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0
