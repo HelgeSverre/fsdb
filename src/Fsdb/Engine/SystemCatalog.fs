@@ -3,8 +3,10 @@ module Fsdb.Engine.SystemCatalog
 open System
 open Fsdb.Value
 
-let private textAt index (row: Value[]) =
-    row |> Array.tryItem index |> Option.bind toText |> Option.defaultValue ""
+let private textOr fallback index (row: Value[]) =
+    row |> Array.tryItem index |> Option.bind toText |> Option.defaultValue fallback
+
+let private textAt index row = textOr "" index row
 
 let private dateTimeAt index (row: Value[]) =
     row
@@ -33,6 +35,9 @@ let private sameIdentity schema name actualSchema actualName =
     String.Equals(actualSchema, schema, StringComparison.OrdinalIgnoreCase)
     && String.Equals(actualName, name, StringComparison.OrdinalIgnoreCase)
 
+let private readCompleteRow requiredValues read (row: Value[]) =
+    if row.Length < requiredValues then None else Some(read row)
+
 module Trigger =
     type Entry =
         { Name: string
@@ -48,10 +53,8 @@ module Trigger =
     let actionOrder row = int64At 1L 8 row
 
     let tryRead (row: Value[]) : Entry option =
-        if row.Length < 6 then
-            None
-        else
-            Some
+        readCompleteRow 6
+            (fun row ->
                 { Name = textAt 0 row
                   Schema = textAt 1 row
                   Table = textAt 2 row
@@ -60,7 +63,8 @@ module Trigger =
                   Body = textAt 5 row
                   Created = dateTimeAt 6 row
                   Definer = textAt 7 row
-                  Order = actionOrder row }
+                  Order = actionOrder row })
+            row
 
     let withTable table row = withValue 2 (VString table) row
     let withActionOrder order row = withValue 8 (VInt order) row
@@ -77,18 +81,17 @@ module View =
           SecurityType: string }
 
     let tryRead (row: Value[]) : Entry option =
-        if row.Length < 5 then
-            None
-        else
-            Some
+        readCompleteRow 5
+            (fun row ->
                 { Name = textAt 0 row
                   Schema = textAt 1 row
                   Definition = textAt 2 row
                   ColumnNames = textAt 3 row
                   Created = dateTimeAt 4 row
                   Definer = textAt 5 row
-                  CheckOption = row |> Array.tryItem 6 |> Option.bind toText |> Option.defaultValue "NONE"
-                  SecurityType = row |> Array.tryItem 7 |> Option.bind toText |> Option.defaultValue "DEFINER" }
+                  CheckOption = textOr "NONE" 6 row
+                  SecurityType = textOr "DEFINER" 7 row })
+            row
 
 module Routine =
     type Entry =
@@ -101,17 +104,16 @@ module Routine =
           SecurityType: string }
 
     let tryRead (row: Value[]) : Entry option =
-        if row.Length < 5 then
-            None
-        else
-            Some
+        readCompleteRow 5
+            (fun row ->
                 { Schema = textAt 0 row
                   Name = textAt 1 row
                   Definition = textAt 2 row
                   Created = dateTimeAt 3 row
                   Definer = textAt 4 row
-                  Parameters = row |> Array.tryItem 5 |> Option.bind toText |> Option.defaultValue ""
-                  SecurityType = row |> Array.tryItem 6 |> Option.bind toText |> Option.defaultValue "DEFINER" }
+                  Parameters = textAt 5 row
+                  SecurityType = textOr "DEFINER" 6 row })
+            row
 
     let matches schema name (entry: Entry) =
         sameIdentity schema name entry.Schema entry.Name
@@ -129,17 +131,16 @@ module Event =
           Status: string }
 
     let tryRead (row: Value[]) : Entry option =
-        if row.Length < 7 then
-            None
-        else
-            Some
+        readCompleteRow 7
+            (fun row ->
                 { Schema = textAt 0 row
                   Name = textAt 1 row
                   Schedule = textAt 2 row
                   Definition = textAt 3 row
                   Created = dateTimeAt 4 row
                   Definer = textAt 5 row
-                  Status = textAt 6 row }
+                  Status = textAt 6 row })
+            row
 
     let matches schema name (entry: Entry) =
         sameIdentity schema name entry.Schema entry.Name
@@ -158,10 +159,8 @@ module Check =
           Ordinal: int }
 
     let tryRead (row: Value[]) : Entry option =
-        if row.Length < 5 then
-            None
-        else
-            Some
+        readCompleteRow 5
+            (fun row ->
                 { Name = textAt 0 row
                   Schema = textAt 1 row
                   Table = textAt 2 row
@@ -169,7 +168,8 @@ module Check =
                   Enforced = String.Equals(textAt 4 row, "YES", StringComparison.OrdinalIgnoreCase)
                   Column = row |> Array.tryItem 5 |> Option.bind toText
                   GeneratedName = String.Equals(textAt 6 row, "YES", StringComparison.OrdinalIgnoreCase)
-                  Ordinal = int (int64At 1L 7 row) }
+                  Ordinal = int (int64At 1L 7 row) })
+            row
 
     let withName name row = withValue 0 (VString name) row
     let withTable table row = withValue 2 (VString table) row

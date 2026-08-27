@@ -112,6 +112,14 @@ let collect (chooser: Expr -> 'value option) (expression: Expr) : 'value list =
         expression
     |> List.rev
 
+let tryPick (chooser: Expr -> 'value option) (expression: Expr) : 'value option =
+    let rec loop node =
+        match chooser node with
+        | Some value -> Some value
+        | None -> children node |> List.tryPick loop
+
+    loop expression
+
 let private mapFrameBound mapper =
     function
     | BoundPreceding expression -> BoundPreceding(mapper expression)

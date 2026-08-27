@@ -10659,63 +10659,14 @@ let statementColumnOrigins (store: Store) (schema: string) (statement: Statement
 let private nextIds ((okId, generatedId): int64 * int64) ((newOkId: int64), (newGenerated: int64 option)) : int64 * int64 =
     (if newOkId <> 0L then newOkId else okId), (newGenerated |> Option.defaultValue generatedId)
 
-/// Executes one parsed statement against `store`, threading the session's
-/// AUTO_INCREMENT bookkeeping through as a plain value rather than a
-/// `Session` (this module knows nothing about sessions or connections —
-/// `QueryHandler` is the layer that owns that). Returns the (possibly
-/// updated) `ids` alongside the result.
-///
-/// `ids` is `(okPacketId, generatedId)`: `okPacketId` is what the OK
-/// packet's `last_insert_id` reports (first generated id this statement, or
-/// else the last explicitly-supplied one — see `Storage.insertCore`'s doc),
-/// `generatedId` is the narrower value the SQL function `LAST_INSERT_ID()`
-/// reads, which only ever reflects a *generated* id and holds its previous
-/// value across a statement that generated none at all. Every non-insert
-/// statement passes both straight through unchanged.
-/// `foundRows` is the session's negotiated CLIENT_FOUND_ROWS capability
-/// (`Protocol.ClientFoundRows`, read by `QueryHandler` off `Session.Capabilities`
-/// — this module can't reference `Protocol` itself, it compiles earlier).
-/// UPDATE's affected-rows count is MySQL's one behavior this flag actually
-/// changes: matched rows (including no-op `SET x = x` ones) when set, changed
-/// rows (the default) when not. Every other statement kind ignores it.
-/// The first call to a `DirectOnly` extension function anywhere inside
-/// `expr` — the DDL-time half of DIRECTONLY enforcement (see
-/// `Functions.ScalarFunction`): a generated column's expression is
-/// re-evaluated by the *engine* on every later write, exactly the indirect
-/// invocation the flag exists to ban, so the definition itself is rejected
-/// rather than letting every future INSERT trip over it. Best-effort by
-/// design: the generated-column grammar reuses the full expr grammar, so a
-/// subquery (or a window function's argument) can smuggle a call past this
-/// traversal — those shapes, and definitions that never saw this check at
-/// all (loaded from a data dir persisted before the function's
-/// registration), are caught by the eval-time backstop in
-/// `computeGeneratedRow` instead.
-let rec private firstDirectOnlyCall (registry: Registry) (expr: Expr) : string option =
-    let inExprs exprs = exprs |> List.tryPick (firstDirectOnlyCall registry)
-
-    match expr with
-    | FuncCall(name, args) ->
-        match Map.tryFind (name.ToUpperInvariant()) registry.Extensions with
-        | Some ext when ext.DirectOnly -> Some name
-        | _ -> inExprs args
-    | MatchAgainst(_, q, _) -> firstDirectOnlyCall registry q
-    | BinOp(_, a, b) -> inExprs [ a; b ]
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _)
-    | Cast(e, _)
-    | Collate(e, _) -> firstDirectOnlyCall registry e
-    | Like(e, p, _, _) -> inExprs [ e; p ]
-    | Regexp(e, p) -> inExprs [ e; p ]
-    | In(e, xs) -> inExprs (e :: xs)
-    | Between(e, lo, hi) -> inExprs [ e; lo; hi ]
-    | Case(subject, whens, elseBranch) ->
-        inExprs (Option.toList subject @ (whens |> List.collect (fun (c, r) -> [ c; r ])) @ Option.toList elseBranch)
-    | _ -> None
+let private firstDirectOnlyCall (registry: Registry) =
+    Expression.tryPick (function
+        | FuncCall(name, _) ->
+            registry.Extensions
+            |> Map.tryFind (name.ToUpperInvariant())
+            |> Option.filter _.DirectOnly
+            |> Option.map (fun _ -> name)
+        | _ -> None)
 
 /// MySQL's own ER_GENERATED_COLUMN_FUNCTION_IS_NOT_ALLOWED (3102) shape,
 /// for the first offending column in a CREATE/ALTER's column definitions.
@@ -10724,42 +10675,8 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
-let rec private containsQuantifiedComparison (expression: Expr) : bool =
-    let any expressions = expressions |> List.exists containsQuantifiedComparison
-
-    match expression with
-    | QuantifiedComparison _ -> true
-    | MatchAgainst(_, query, _) -> containsQuantifiedComparison query
-    | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
-    | FuncCall(_, arguments) -> any arguments
-    | Row values -> any values
-    | BinOp(_, left, right)
-    | Like(left, right, _, _)
-    | Regexp(left, right) -> any [ left; right ]
-    | AssignUserVariable(_, value)
-    | Not value
-    | IsNull value
-    | IsNotNull value
-    | IsTrue value
-    | IsFalse value
-    | Distinct value
-    | OrderBy(value, _)
-    | Cast(value, _)
-    | Collate(value, _) -> containsQuantifiedComparison value
-    | In(value, candidates) -> any (value :: candidates)
-    | Between(value, lower, upper) -> any [ value; lower; upper ]
-    | Case(subject, branches, otherwise) ->
-        any (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | Lit _
-    | Exists _
-    | Subquery _
-    | InSubquery _ -> false
+let private containsQuantifiedComparison =
+    Expression.exists (function QuantifiedComparison _ -> true | _ -> false)
 
 let private rejectQuantifiedComparisonsInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
     columns
@@ -10884,84 +10801,41 @@ let rec private checkColumnReferences (expression: Expr) : (string option * stri
     | Subquery _
     | Lit _ -> []
 
-let rec private firstDisallowedCheckFunction (registry: Registry) (expression: Expr) : string option =
-    let first expressions = expressions |> List.tryPick (firstDisallowedCheckFunction registry)
-    let nondeterministic =
-        set
-            [ "BENCHMARK"; "CONNECTION_ID"; "CURDATE"; "CURRENT_DATE"; "CURRENT_TIME"; "CURRENT_TIMESTAMP"
-              "CURRENT_USER"; "CURTIME"; "DATABASE"; "FOUND_ROWS"; "LAST_INSERT_ID"; "LOCALTIME"
-              "LOCALTIMESTAMP"; "NOW"; "RAND"; "ROW_COUNT"; "SYSDATE"; "UNIX_TIMESTAMP"
-              "USER"; "UUID"; "UUID_SHORT"; "VERSION" ]
+let private nondeterministicCheckFunctions =
+    set
+        [ "BENCHMARK"; "CONNECTION_ID"; "CURDATE"; "CURRENT_DATE"; "CURRENT_TIME"; "CURRENT_TIMESTAMP"
+          "CURRENT_USER"; "CURTIME"; "DATABASE"; "FOUND_ROWS"; "LAST_INSERT_ID"; "LOCALTIME"
+          "LOCALTIMESTAMP"; "NOW"; "RAND"; "ROW_COUNT"; "SYSDATE"; "UNIX_TIMESTAMP"
+          "USER"; "UUID"; "UUID_SHORT"; "VERSION" ]
 
-    match expression with
-    | FuncCall(name, arguments) ->
-        let key = name.ToUpperInvariant()
+let private firstDisallowedCheckFunction (registry: Registry) =
+    Expression.tryPick (fun expression ->
+        match expression with
+        | FuncCall(name, _) ->
+            let key = name.ToUpperInvariant()
 
-        if nondeterministic.Contains key || isAggregateCall registry expression then
-            Some name
-        else
             match Map.tryFind key registry.Extensions with
+            | _ when nondeterministicCheckFunctions.Contains key || isAggregateCall registry expression -> Some name
             | Some extension when extension.DirectOnly || not extension.Deterministic -> Some name
-            | _ -> first arguments
-    | BinOp(_, left, right) -> first [ left; right ]
-    | AssignUserVariable(_, value) -> firstDisallowedCheckFunction registry value
-    | Not value
-    | IsNull value
-    | IsNotNull value
-    | IsTrue value
-    | IsFalse value
-    | Distinct value
-    | OrderBy(value, _)
-    | Cast(value, _)
-    | Collate(value, _) -> firstDisallowedCheckFunction registry value
-    | Like(value, pattern, _, _)
-    | Regexp(value, pattern) -> first [ value; pattern ]
-    | In(value, candidates) -> first (value :: candidates)
-    | Between(value, lower, upper) -> first [ value; lower; upper ]
-    | Case(subject, branches, otherwise) ->
-        first (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
-    | MatchAgainst(_, query, _) -> firstDisallowedCheckFunction registry query
-    | InSubquery(value, _) -> firstDisallowedCheckFunction registry value
-    | QuantifiedComparison(value, _, _, _) -> firstDisallowedCheckFunction registry value
-    | Row values -> first values
-    | _ -> None
+            | _ -> None
+        | _ -> None)
 
-let rec private firstDisallowedCheckShape (expression: Expr) : string option =
-    let first expressions = expressions |> List.tryPick firstDisallowedCheckShape
-
-    match expression with
-    | Placeholder _ -> Some "parameter"
-    | WindowOver _ -> Some "window function"
-    | Star _ -> Some "wildcard"
-    | MatchAgainst _ -> Some "full-text expression"
-    | UserVariable _
-    | SystemVariable _
-    | AssignUserVariable _ -> Some "session variable"
-    | Distinct _
-    | OrderBy _ -> Some "aggregate modifier"
-    | Exists _
-    | Subquery _
-    | InSubquery _
-    | QuantifiedComparison _ -> Some "subquery"
-    | Row values -> first values
-    | BinOp(_, left, right) -> first [ left; right ]
-    | Not value
-    | IsNull value
-    | IsNotNull value
-    | IsTrue value
-    | IsFalse value
-    | Cast(value, _)
-    | Collate(value, _) -> firstDisallowedCheckShape value
-    | Like(value, pattern, _, _)
-    | Regexp(value, pattern) -> first [ value; pattern ]
-    | In(value, candidates) -> first (value :: candidates)
-    | Between(value, lower, upper) -> first [ value; lower; upper ]
-    | FuncCall(_, arguments) -> first arguments
-    | Case(subject, branches, otherwise) ->
-        first (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
-    | Col _
-    | QualifiedCol _
-    | Lit _ -> None
+let private firstDisallowedCheckShape =
+    Expression.tryPick (function
+        | Placeholder _ -> Some "parameter"
+        | WindowOver _ -> Some "window function"
+        | Star _ -> Some "wildcard"
+        | MatchAgainst _ -> Some "full-text expression"
+        | UserVariable _
+        | SystemVariable _
+        | AssignUserVariable _ -> Some "session variable"
+        | Distinct _
+        | OrderBy _ -> Some "aggregate modifier"
+        | Exists _
+        | Subquery _
+        | InSubquery _
+        | QuantifiedComparison _ -> Some "subquery"
+        | _ -> None)
 
 let private validateFunctionalDefaults (registry: Registry) (columns: ColumnDef list) : Result<unit, QueryResult> =
     let disallowedFunctions = set [ "BENCHMARK"; "SLEEP" ]
@@ -11829,6 +11703,8 @@ let private storeTriggerDefinition
                 |> Result.map (fun _ ->
                     Storage.commitCatalogInto store baseCatalog snapshot))
 
+/// Executes a statement under `currentAccount`; `ids` carries the OK-packet
+/// and generated AUTO_INCREMENT identities between statements.
 let rec executeAs
     (store: Store)
     (registry: Registry)

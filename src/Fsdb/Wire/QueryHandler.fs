@@ -2642,55 +2642,18 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | UnlockTables -> session, Affected 0UL
 let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     let rec mapExpr (e: Expr) : Expr =
-        match e with
-        | Placeholder i -> replace i
-        | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, mapExpr q, mode)
-        | Lit _
-        | UserVariable _
-        | SystemVariable _
-        | Col _
-        | QualifiedCol _
-        | Star _ -> e
-        | Row values -> Row(List.map mapExpr values)
-        | BinOp(op, a, b) -> BinOp(op, mapExpr a, mapExpr b)
-        | AssignUserVariable(name, value) -> AssignUserVariable(name, mapExpr value)
-        | Not x -> Not(mapExpr x)
-        | IsNull x -> IsNull(mapExpr x)
-        | IsNotNull x -> IsNotNull(mapExpr x)
-        | IsTrue x -> IsTrue(mapExpr x)
-        | IsFalse x -> IsFalse(mapExpr x)
-        | Like(x, p, cs, esc) -> Like(mapExpr x, mapExpr p, cs, esc)
-        | Regexp(x, p) -> Regexp(mapExpr x, mapExpr p)
-        | In(x, xs) -> In(mapExpr x, List.map mapExpr xs)
-        | InSubquery(x, s) -> InSubquery(mapExpr x, mapSelect s)
-        | QuantifiedComparison(x, op, quantifier, s) -> QuantifiedComparison(mapExpr x, op, quantifier, mapSelect s)
-        | Between(x, lo, hi) -> Between(mapExpr x, mapExpr lo, mapExpr hi)
-        | FuncCall(name, args) -> FuncCall(name, List.map mapExpr args)
-        | WindowOver(fn, over) -> WindowOver(mapWindowFn fn, mapOver over)
-        | Distinct x -> Distinct(mapExpr x)
-        | OrderBy(x, d) -> OrderBy(mapExpr x, d)
-        | Cast(x, t) -> Cast(mapExpr x, t)
-        | Collate(x, c) -> Collate(mapExpr x, c)
-        | Case(subject, whens, elseBranch) ->
-            Case(Option.map mapExpr subject, whens |> List.map (fun (c, r) -> mapExpr c, mapExpr r), Option.map mapExpr elseBranch)
-        | Exists s -> Exists(mapSelect s)
-        | Subquery s -> Subquery(mapSelect s)
+        Fsdb.Sql.Expression.rewrite
+            (function
+            | Placeholder index -> Some(replace index)
+            | Exists select -> Some(Exists(mapSelect select))
+            | Subquery select -> Some(Subquery(mapSelect select))
+            | InSubquery(value, select) -> Some(InSubquery(mapExpr value, mapSelect select))
+            | QuantifiedComparison(value, operator, quantifier, select) ->
+                Some(QuantifiedComparison(mapExpr value, operator, quantifier, mapSelect select))
+            | _ -> None)
+            e
 
     and mapOrderKey (x, d) = mapExpr x, d
-
-    and mapWindowFn (fn: WindowFn) : WindowFn =
-        match fn with
-        | WinRowNumber
-        | WinRank _
-        | WinPercentRank
-        | WinCumeDist -> fn
-        | WinNTile n -> WinNTile(mapExpr n)
-        | WinLagLead(lead, x, offset, deflt) ->
-            WinLagLead(lead, mapExpr x, Option.map mapExpr offset, Option.map mapExpr deflt)
-        | WinFirstValue x -> WinFirstValue(mapExpr x)
-        | WinLastValue x -> WinLastValue(mapExpr x)
-        | WinNthValue(x, n) -> WinNthValue(mapExpr x, mapExpr n)
-        | WinAggregate(name, args) -> WinAggregate(name, List.map mapExpr args)
 
     and mapWindowSpec (spec: WindowSpec) : WindowSpec =
         let mapBound bound =
@@ -2703,11 +2666,6 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
           PartitionBy = List.map mapExpr spec.PartitionBy
           OrderBy = List.map mapOrderKey spec.OrderBy
           Frame = spec.Frame |> Option.map (fun f -> { f with Start = mapBound f.Start; End = mapBound f.End }) }
-
-    and mapOver (over: OverClause) : OverClause =
-        match over with
-        | OverSpec spec -> OverSpec(mapWindowSpec spec)
-        | OverName _ -> over
 
     and mapFromItem (fi: FromItem) : FromItem =
         match fi with

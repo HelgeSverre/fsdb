@@ -2446,13 +2446,7 @@ let private mysqlSystemDatabase () : Database =
       "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
     |> Map.ofList
 
-/// Re-seeds the `mysql` system schema when it's absent — called after a
-/// snapshot load replaces the whole catalog (a snapshot written before this
-/// schema existed doesn't carry it). A no-op when `mysql` is already there,
-/// so a snapshot that *does* carry it (users/grants included) wins — except
-/// for individual system tables added after that snapshot was written
-/// (`triggers`/`views`/`routines`), which are seeded empty into the existing schema so
-/// DDL and WAL replay against them can't hit `NoSuchTable`.
+/// Restores catalog tables absent from snapshots written by older versions.
 let ensureMysqlSchema (store: Store) : unit =
     store.Databases.TryAdd("mysql", ref (mysqlSystemDatabase ())) |> ignore
 
@@ -2480,12 +2474,12 @@ let ensureMysqlSchema (store: Store) : unit =
     // Old trigger rows receive an empty definer and therefore fail closed;
     // treating a missing identity as root would turn catalog migration into
     // a privilege escalation.
-    ensureTable "triggers" mysqlTriggersColumns
-    ensureTable "views" mysqlViewsColumns
-    ensureTable "routines" mysqlRoutinesColumns
-
-    ensureTable "events" mysqlEventsColumns
-    ensureTable "check_constraints" mysqlCheckConstraintsColumns
+    [ "triggers", mysqlTriggersColumns
+      "views", mysqlViewsColumns
+      "routines", mysqlRoutinesColumns
+      "events", mysqlEventsColumns
+      "check_constraints", mysqlCheckConstraintsColumns ]
+    |> List.iter (fun (name, columns) -> ensureTable name columns)
 
 let create () : Store =
     let databases = ConcurrentDictionary<string, Database ref>()
