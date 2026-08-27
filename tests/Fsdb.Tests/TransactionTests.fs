@@ -102,6 +102,85 @@ let tests =
               | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
               | result -> failtestf "expected every committed row, got %A" result
 
+          testCase "READ COMMITTED upserts serialize duplicate rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_upsert (collection VARCHAR(32), name VARCHAR(32), value VARCHAR(32), PRIMARY KEY (collection, name))"
+              let setup, _ = handle setup "INSERT INTO tx_upsert VALUES ('state', 'entry', 'initial')"
+              let transaction, _ = handle setup "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+              let transaction, _ = handle transaction "BEGIN"
+              let transaction, first = handle transaction "INSERT INTO tx_upsert VALUES ('state', 'entry', 'transaction') ON DUPLICATE KEY UPDATE value = VALUES(value)"
+              Expect.equal first (Affected 2UL) "the transaction updates the duplicate row"
+
+              use writerStarted = new Threading.ManualResetEventSlim(false)
+              let writer = create 2 store
+
+              let concurrent =
+                  Threading.Tasks.Task.Run(fun () ->
+                      writerStarted.Set()
+                      handle writer "INSERT INTO tx_upsert VALUES ('state', 'entry', 'concurrent') ON DUPLICATE KEY UPDATE value = VALUES(value)")
+
+              Expect.isTrue (writerStarted.Wait(TimeSpan.FromSeconds 1.0)) "the concurrent upsert started"
+              Threading.Thread.Sleep 50
+
+              let transaction, visible = handle transaction "SELECT value FROM tx_upsert WHERE collection = 'state' AND name = 'entry'"
+
+              match visible with
+              | ResultSet(_, [ [ Some "transaction" ] ]) -> ()
+              | result -> failtestf "expected the transaction's row without a rebase conflict, got %A" result
+
+              let _, committed = handle transaction "COMMIT"
+              Expect.equal committed (Affected 0UL) "the transaction commits before the waiting writer"
+              Expect.isTrue (concurrent.Wait(TimeSpan.FromSeconds 5.0)) "the waiting upsert completes after commit"
+
+              match concurrent.GetAwaiter().GetResult() |> snd with
+              | Affected 2UL -> ()
+              | result -> failtestf "expected the waiting upsert to update the committed row, got %A" result
+
+              match handle writer "SELECT value FROM tx_upsert WHERE collection = 'state' AND name = 'entry'" |> snd with
+              | ResultSet(_, [ [ Some "concurrent" ] ]) -> ()
+              | result -> failtestf "expected the later writer's value, got %A" result
+
+          testCase "READ COMMITTED inserts serialize unique keys"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let transaction = create 1 store
+              let transaction, _ = handle transaction "CREATE TABLE tx_insert_key (collection VARCHAR(32), name VARCHAR(32), value VARCHAR(32), PRIMARY KEY (collection, name))"
+              let transaction, _ = handle transaction "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+              let transaction, _ = handle transaction "BEGIN"
+              let transaction, inserted = handle transaction "INSERT INTO tx_insert_key VALUES ('state', 'new-entry', 'transaction')"
+              Expect.equal inserted (Affected 1UL) "the transaction inserts the unique key privately"
+
+              use writerStarted = new Threading.ManualResetEventSlim(false)
+              let writer = create 2 store
+
+              let concurrent =
+                  Threading.Tasks.Task.Run(fun () ->
+                      writerStarted.Set()
+                      handle writer "INSERT INTO tx_insert_key VALUES ('state', 'new-entry', 'concurrent') ON DUPLICATE KEY UPDATE value = VALUES(value)")
+
+              Expect.isTrue (writerStarted.Wait(TimeSpan.FromSeconds 1.0)) "the concurrent upsert started"
+              Threading.Thread.Sleep 50
+
+              let transaction, visible = handle transaction "SELECT value FROM tx_insert_key WHERE collection = 'state' AND name = 'new-entry'"
+
+              match visible with
+              | ResultSet(_, [ [ Some "transaction" ] ]) -> ()
+              | result -> failtestf "expected the private insert without a rebase conflict, got %A" result
+
+              let _, committed = handle transaction "COMMIT"
+              Expect.equal committed (Affected 0UL) "the new key commits before the waiting writer"
+              Expect.isTrue (concurrent.Wait(TimeSpan.FromSeconds 5.0)) "the waiting upsert completes after commit"
+
+              match concurrent.GetAwaiter().GetResult() |> snd with
+              | Affected 2UL -> ()
+              | result -> failtestf "expected the waiting upsert to update the committed key, got %A" result
+
+              match handle writer "SELECT value FROM tx_insert_key WHERE collection = 'state' AND name = 'new-entry'" |> snd with
+              | ResultSet(_, [ [ Some "concurrent" ] ]) -> ()
+              | result -> failtestf "expected the later writer's value, got %A" result
+
           testCase "READ COMMITTED keeps generated values and trigger effects stable across refreshes"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -774,42 +853,49 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected the merged secondary bucket, got %A" result
 
-          testCase "concurrent transaction identity uses primary-key collation"
+          testCase "concurrent transaction identity locks primary-key collations"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup, _ = handle (create 1 store) "CREATE TABLE tx_text_key (id VARCHAR(20) PRIMARY KEY)"
               let first, _ = handle (create 2 store) "BEGIN"
-              let second, _ = handle (create 3 store) "BEGIN"
-              let first, _ = handle first "INSERT INTO tx_text_key VALUES ('A')"
-              let second, _ = handle second "INSERT INTO tx_text_key VALUES ('a')"
+              let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 1"
+              let second, _ = handle second "BEGIN"
+              let first, firstInsert = handle first "INSERT INTO tx_text_key VALUES ('A')"
+              let second, secondInsert = handle second "INSERT INTO tx_text_key VALUES ('a')"
+
+              Expect.equal firstInsert (Affected 1UL) "the first spelling claims the collation key"
+
+              match secondInsert with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected the collation-equivalent key to wait, got %A" result
+
               let _, firstCommit = handle first "COMMIT"
               Expect.equal firstCommit (Affected 0UL) "the first spelling commits"
-
-              match handle second "COMMIT" |> snd with
-              | Err(1205, _) -> ()
-              | result -> failtestf "expected the collation-equivalent key to be rejected, got %A" result
+              handle second "ROLLBACK" |> ignore
 
               match handle setup "SELECT id FROM tx_text_key" |> snd with
               | ResultSet(_, [ [ Some "A" ] ]) -> ()
               | result -> failtestf "expected only the first key to remain, got %A" result
 
-          testCase "concurrent transactions cannot commit the same primary key"
+          testCase "concurrent transactions cannot insert the same primary key"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
               let setup, _ = handle setup "CREATE TABLE tx_unique (id INT PRIMARY KEY)"
               let first, _ = handle (create 2 store) "BEGIN"
-              let second, _ = handle (create 3 store) "BEGIN"
+              let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 1"
+              let second, _ = handle second "BEGIN"
               let first, firstInsert = handle first "INSERT INTO tx_unique VALUES (1)"
               let second, secondInsert = handle second "INSERT INTO tx_unique VALUES (1)"
 
-              Expect.equal firstInsert (Affected 1UL) "the first snapshot accepts the key"
-              Expect.equal secondInsert (Affected 1UL) "the second snapshot accepts the key"
-              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first transaction commits"
+              Expect.equal firstInsert (Affected 1UL) "the first transaction claims the key"
 
-              match handle second "COMMIT" |> snd with
+              match secondInsert with
               | Err(1205, _) -> ()
-              | result -> failtestf "expected the conflicting commit to fail, got %A" result
+              | result -> failtestf "expected the second insert to wait for the key, got %A" result
+
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first transaction commits"
+              handle second "ROLLBACK" |> ignore
 
               match handle setup "SELECT id FROM tx_unique" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()

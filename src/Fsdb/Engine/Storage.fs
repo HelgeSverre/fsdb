@@ -1747,6 +1747,65 @@ let private encodeUniqueKey (columns: ColumnDef list) (group: UniqueKeyGroup) (r
 
         Some(encodeEqualityKey columns group.Indices keyRow)
 
+type WriteLockTargets =
+    { RowIds: RowId list
+      Keys: string list }
+
+let tryInsertLockTargets
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rows: Value list list)
+    : WriteLockTargets option =
+    let findInTable table =
+        let indices =
+            match columns with
+            | None -> Some [ 0 .. table.Columns.Length - 1 ]
+            | Some names -> names |> traverse (resolveColumn table.Columns) |> Result.toOption
+
+        indices
+        |> Option.bind (fun indices ->
+            if rows |> List.exists (fun row -> row.Length <> indices.Length) then
+                None
+            else
+                let supplied = Set.ofList indices
+                let groups = uniqueKeyGroups table |> List.filter (fun group -> Set.isSubset (Set.ofList group.Indices) supplied)
+                let keyIndices = groups |> Seq.collect _.Indices |> Set.ofSeq
+
+                rows
+                |> traverse (fun values ->
+                    let candidate = Array.create table.Columns.Length VNull
+
+                    List.zip indices values
+                    |> List.filter (fun (index, _) -> Set.contains index keyIndices)
+                    |> traverse (fun (index, value) ->
+                        Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value)
+                        |> Result.map (fun coerced -> candidate.[index] <- coerced))
+                    |> Result.map (fun _ ->
+                        groups
+                        |> List.choose (fun group ->
+                            encodeUniqueKey table.Columns group candidate
+                            |> Option.map (fun key -> group.Name, key, group.Name + "\u0000" + key))))
+                |> Result.toOption
+                |> Option.map (fun encodedKeys ->
+                    let encodedKeys = encodedKeys |> List.concat |> List.distinct
+
+                    let rowIds =
+                        encodedKeys
+                        |> List.choose (fun (groupName, key, _) ->
+                            table.UniqueIndex
+                            |> Map.tryFind groupName
+                            |> Option.bind (Map.tryFind key))
+                        |> List.distinct
+
+                    { RowIds = rowIds
+                      Keys = encodedKeys |> List.map (fun (_, _, lockKey) -> lockKey) }))
+
+    match store.Databases.TryGetValue dbName with
+    | true, slot -> tryGetTable slot.Value tableName |> Result.toOption |> Option.bind findInTable
+    | false, _ -> None
+
 let private constraintLookup columns indices rows =
     let lookup = HashSet<string>(StringComparer.Ordinal)
 
@@ -2044,12 +2103,13 @@ let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
                                 conflict ()
                 | _ -> conflict ()
 
-let private withRowLocksFor
+let private withWriteLocksFor
     (timeout: TimeSpan)
     (store: Store)
     (dbName: string)
     (tableName: string)
     (rowIds: RowId list)
+    (keys: string list)
     body
     =
     let rowLocks = store.RowLocks.GetOrAdd(normalizeTableName dbName, (fun _ -> ConcurrentDictionary()))
@@ -2059,9 +2119,11 @@ let private withRowLocksFor
     let stripeIndex rowId =
         (int64 tableOffset + int64 (RowId.value rowId)) % int64 rowLockStripeCount |> int
 
+    let keyStripeIndex key =
+        int ((int64 tableOffset + int64 (StringComparer.Ordinal.GetHashCode key &&& Int32.MaxValue)) % int64 rowLockStripeCount)
+
     let stripes =
-        rowIds
-        |> List.map stripeIndex
+        (rowIds |> List.map stripeIndex) @ (keys |> List.map keyStripeIndex)
         |> List.distinct
         |> List.sort
         |> List.map (fun index -> rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ())))
@@ -2110,18 +2172,22 @@ let private withRowLocksFor
             releaseTransactionLocks temporary
 
 let private withRowLocks store dbName tableName rowIds body =
-    withRowLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds body
+    withWriteLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds [] body
 
-let acquireTransactionRows
+let private withInsertLocks store dbName tableName rowIds keys body =
+    withWriteLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds keys body
+
+let acquireTransactionWriteTargets
     (timeout: TimeSpan)
     (store: Store)
     (dbName: string)
     (tableName: string)
     (rowIds: RowId list)
+    (keys: string list)
     : unit =
     match store.TransactionLocks with
-    | Some _ -> withRowLocksFor timeout store dbName tableName rowIds ignore
-    | None -> invalidArg (nameof store) "transaction row claims require a transaction snapshot"
+    | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
+    | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
 
 // mysql.* uses ordinary stored tables, including DML and persistence paths.
 // Column shapes follow MySQL 8.4.
@@ -4467,7 +4533,7 @@ let private insertRowsPreparedCore
     : Result<InsertOutcome, StorageError> =
     let key = normalizeTableName tableName
 
-    let result =
+    let publish () =
         withDatabasePublishing
             store
             dbName
@@ -4480,6 +4546,11 @@ let private insertRowsPreparedCore
                     resolveInsertColumns table columns
                     |> Result.bind (fun indices ->
                         insertCore store.ForeignKeyChecks (temporalCoercionMode store) ignoreErrors db key rowsIn indices prepare)))
+
+    let result =
+        match tryInsertLockTargets store dbName tableName columns rowsIn with
+        | Some targets when not targets.Keys.IsEmpty -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
+        | _ -> publish ()
 
     match result with
     | Ok(lastId, generatedId, affected, rows, ignoredErrors) ->
@@ -4766,12 +4837,17 @@ and upsertRowsWithOrdinal
                   if not changes.IsEmpty then
                       RowsUpdated(dbName, originalNameOf tableKey, changes) ]
 
-        let result =
+        let publish () =
             withDatabasePublishing store dbName eventsOf (fun db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable db tableName)
                 |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn prepare applyUpdate foundRows)
                 |> Result.map (fun (db', cascaded, summary) -> db', (summary, cascaded, db)))
+
+        let result =
+            match tryInsertLockTargets store dbName tableName columns rowsIn with
+            | Some targets when not targets.Keys.IsEmpty -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
+            | _ -> publish ()
 
         match result with
         | Ok((lastId, generatedId, affected, inserted, updated), cascaded, db) ->

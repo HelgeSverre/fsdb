@@ -13929,17 +13929,36 @@ let rec executeAs
     | Explain(format, inner) ->
         ids, explainStatement format store registry dbName inner
 
-let transactionRowTargets (store: Store) (dbName: string) (statement: Statement) : (string * string * RowId list) option =
+let transactionWriteTargets (store: Store) (dbName: string) (statement: Statement) : (string * string * WriteLockTargets) option =
     let targets (tableRef: TableRef) predicate =
         let database = tableRef.Database |> Option.defaultValue dbName
 
         tryEqualityLookup store dbName tableRef predicate
         |> Option.orElseWith (fun () -> tryRangeLookup store dbName tableRef predicate)
-        |> Option.map (fun (_, rows) -> database, tableRef.Table, rows |> List.map fst)
+        |> Option.map (fun (_, rows) ->
+            database,
+            tableRef.Table,
+            { RowIds = rows |> List.map fst
+              Keys = [] })
 
     match statement with
     | Update update when update.Ctes.IsEmpty && update.Joins.IsEmpty -> targets update.From update.Where
     | Delete delete when delete.Ctes.IsEmpty && delete.Joins.IsEmpty -> targets delete.From delete.Where
+    | Insert(tableName, columns, rows, _, _) ->
+        let values =
+            rows
+            |> traverse (traverse (function
+                | Lit value -> Ok value
+                | _ -> Error()))
+            |> Result.toOption
+
+        values
+        |> Option.bind (fun rows ->
+            let database, table = splitQualified dbName tableName
+            let columns = if columns.IsEmpty then None else Some columns
+
+            tryInsertLockTargets store database table columns rows
+            |> Option.map (fun targets -> database, table, targets))
     | _ -> None
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =

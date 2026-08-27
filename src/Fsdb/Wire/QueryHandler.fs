@@ -1397,11 +1397,17 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
     | Some transaction ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-        match Executor.transactionRowTargets transaction.Snapshot dbName statement with
+        match Executor.transactionWriteTargets transaction.Snapshot dbName statement with
         | None -> session
-        | Some(database, table, rowIds) when rowIds.IsEmpty -> session
-        | Some(database, table, rowIds) ->
-            Storage.acquireTransactionRows (lockWaitTimeout session) transaction.Snapshot database table rowIds
+        | Some(_, _, targets) when targets.RowIds.IsEmpty && targets.Keys.IsEmpty -> session
+        | Some(database, table, targets) ->
+            Storage.acquireTransactionWriteTargets
+                (lockWaitTimeout session)
+                transaction.Snapshot
+                database
+                table
+                targets.RowIds
+                targets.Keys
             let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
 
             { session with

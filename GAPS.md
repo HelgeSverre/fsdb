@@ -220,7 +220,8 @@ comparisons; default utf8mb4_0900_ai_ci.
 Working: private-snapshot transactions with three-way optimistic merge and a
 point-update fast path for disjoint writes, wait-and-rebase coordination for
 indexed point/range UPDATE and DELETE statements, incremental unique-index
-validation and merged-result FK revalidation, savepoints with MySQL establishment-order semantics,
+validation, unique-key claims for literal VALUES inserts/upserts, merged-result FK revalidation,
+savepoints with MySQL establishment-order semantics,
 autocommit implicit transactions, read-only transactions never blocking
 writers, per-database sharding so cross-database writers never contend,
 4,096-stripe row ownership, and InnoDB-style burned AUTO_INCREMENT on rollback.
@@ -234,7 +235,7 @@ lock-free.
 | READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads remain unsupported | medium | partial |
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
-| Write parallelism within a database | row-lock concurrency | indexed autocommit and transaction UPDATE/DELETE paths coordinate row stripes; full-scan, CTE, multi-table, and insert/upsert transaction writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
+| Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes, while literal VALUES inserts/upserts claim supplied unique keys and existing duplicate rows; generated/default keys, INSERT SELECT, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 1.06x | medium | partial |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 
@@ -428,6 +429,7 @@ that predates the implementation it measured:
 | Same-row transaction contention | The original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts. Row-delta publication removed whole-table copy/reindex work. A later 64x200 campaign completed all 12,800 prepared transactions with exact commit/rollback parity and zero failures; fsdb reached 1,216 tx/s with p99 72 ms | correctness resolved; constant-factor and high-contention performance open |
 | Multi-database scaling | Single-capture snapshots, deferred transaction catalogs, and per-database lock namespaces prevent cross-database conflicts. A 12-database, 19,200-transaction campaign preserved every database independently with no cross-database bleed; wall time was 0.38x the serial projection against a 0.80 ceiling | correctness and scaling threshold resolved 2026-08-27 |
 | Crash/restart durability | Concurrent two-table transactions were interrupted by 80 forced process crashes across four 16-worker campaigns. Recovery retained every acknowledged commit, exposed no partial transaction, invented no row, and preserved identical state through graceful snapshot restarts; the latest 20-restart campaign retained all 1,939 acknowledged operations and resolved 320 ambiguous operations consistently | resolved 2026-08-27; broader snapshot-rotation volume remains useful stress coverage |
+| Drupal full gauntlet | The complete pinned inventory ran 3,882 classes and 28,588 assertions. MySQL 8.4 replays separated browser/environment failures from two fsdb READ COMMITTED insert/upsert conflicts; row and unique-key claims removed both, with the affected moderation classes passing 11/11 and the serializer replay producing no database error or 1205 | transaction findings resolved 2026-08-27; retained artifacts classify remaining upstream failures |
 | Planner slope rerun | a focused 10k/50k ShortRun measured the indexed join at 371 µs versus MySQL's 178 µs and uncorrelated `IN` at 534 µs versus 155 µs, replacing the historical 4.49 ms and 103 ms fsdb results. Streaming common aggregate folds reduced `GROUP BY` from 98.2 ms to 77.1 ms versus MySQL's 20.6 ms; allocation-free order comparison reduced the representative 50k-row window from 354 ms to 315 ms versus 50.1 ms. Window peer bounds are now linear rather than rescanned per row | join/subquery cliffs and quadratic peer scans resolved; aggregate/window constants open |
 | Set-operation syntax ceiling | parenthesized set-op groups `(A UNION B) INTERSECT C` are refused | ponytail ceiling |
 
