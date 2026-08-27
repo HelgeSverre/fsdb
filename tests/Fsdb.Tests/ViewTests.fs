@@ -432,6 +432,42 @@ let tests =
                   [ [ Some "1"; Some "11" ]; [ Some "2"; Some "21" ] ]
                   "only the mergeable component changes"
 
+          testCase "join views update mergeable components beside union views"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE union_view_values (id INT, marker INT)") "create union values"
+              expectOk (run store "INSERT INTO union_view_values VALUES (1, 10), (2, 20)") "seed union values"
+              expectOk (run store "CREATE TABLE union_view_targets (id INT PRIMARY KEY, n INT NOT NULL)") "create union targets"
+              expectOk (run store "INSERT INTO union_view_targets VALUES (1, 1), (2, 2)") "seed union targets"
+
+              expectOk
+                  (run store "CREATE VIEW union_markers AS SELECT id, marker FROM union_view_values WHERE id = 1 UNION ALL SELECT id, marker FROM union_view_values WHERE id = 2")
+                  "create union component"
+
+              expectOk
+                  (run store "CREATE VIEW targets_with_union AS SELECT t.id, t.n, u.marker FROM union_view_targets t JOIN union_markers u ON u.id = t.id")
+                  "create union join"
+
+              Expect.equal
+                  (rows store "SELECT is_updatable FROM information_schema.views WHERE table_name = 'targets_with_union'")
+                  [ [ Some "YES" ] ]
+                  "a mergeable component makes the union join updatable"
+
+              expectOk (run store "UPDATE targets_with_union SET n = 11 WHERE id = 1 AND marker = 10") "update beside union component"
+
+              match run store "UPDATE targets_with_union SET marker = 99 WHERE id = 1" with
+              | Err(1348, "Column 'marker' is not updatable") -> ()
+              | other -> failtestf "expected union-column refusal, got %A" other
+
+              match run store "INSERT INTO targets_with_union(id, n) VALUES (3, 3)" with
+              | Err(1471, "The target table targets_with_union of the INSERT is not insertable-into") -> ()
+              | other -> failtestf "expected union join insert refusal, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT id, n FROM union_view_targets ORDER BY id")
+                  [ [ Some "1"; Some "11" ]; [ Some "2"; Some "2" ] ]
+                  "the mergeable component stores the union-selected update"
+
           testCase "a direct view streams an ordered limit from its base table"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

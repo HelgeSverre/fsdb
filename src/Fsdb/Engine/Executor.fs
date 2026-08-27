@@ -697,9 +697,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     let database = tableRef.Database |> Option.defaultValue view.Schema
                     let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
 
-                    let readOnlySource (stored: StoredView) (definition: SelectStmt) =
+                    let readOnlySource (stored: StoredView) projections =
                         let projectedNames =
-                            definition.Projections
+                            projections
                             |> List.map (fun (expression, alias) ->
                                 alias
                                 |> Option.orElseWith (fun () ->
@@ -785,7 +785,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                           CheckPredicates = checkPredicates
                                           InsertableTargets = insertableTargets
                                           Mergeable = true })
-                            |> Option.orElseWith (fun () -> readOnlySource stored definition)
+                            |> Option.orElseWith (fun () -> readOnlySource stored definition.Projections)
+                        | Ok(Union(first, _, _, _, _)) -> readOnlySource stored first.Projections
                         | _ -> None
                     | None ->
                         InformationSchema.findTable store.Catalog database tableRef.Table
