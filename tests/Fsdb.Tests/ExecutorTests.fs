@@ -1417,6 +1417,12 @@ let tests =
                     | ResultSet(_, [ [ Some "HELLO!" ] ]) -> ()
                     | other -> failtestf "expected HELLO!, got %A" other
 
+                    let registry = registry |> registerScalar "MOD" (fun _ -> VInt 42L)
+
+                    match run store registry "SELECT MOD(1, 0)" with
+                    | ResultSet(_, [ [ Some "42" ] ]) -> ()
+                    | other -> failtestf "expected the custom MOD override, got %A" other
+
                 testCase "IF() works even though IF is also a reserved keyword"
                 <| fun _ ->
                     let store = newStore ()

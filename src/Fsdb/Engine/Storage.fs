@@ -306,6 +306,7 @@ type Store =
       mutable NoZeroInDate: bool
       mutable OnlyFullGroupBy: bool
       mutable NoAutoValueOnZero: bool
+      mutable ErrorForDivisionByZero: bool
       /// Applies only when no column or explicit COLLATE supplies precedence.
       mutable ConnectionCollation: Collation.Collation
       /// Lowercase names overlay real tables in the reserved fsdb schema.
@@ -412,6 +413,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       NoZeroInDate = store.NoZeroInDate
       OnlyFullGroupBy = store.OnlyFullGroupBy
       NoAutoValueOnZero = store.NoAutoValueOnZero
+      ErrorForDivisionByZero = store.ErrorForDivisionByZero
       ConnectionCollation = store.ConnectionCollation
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
@@ -504,6 +506,9 @@ let setOnlyFullGroupBy (store: Store) (enabled: bool) : unit =
 
 let setNoAutoValueOnZero (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.NoAutoValueOnZero <- enabled)
+
+let setErrorForDivisionByZero (store: Store) (enabled: bool) : unit =
+    lock store.Lock (fun () -> store.ErrorForDivisionByZero <- enabled)
 
 /// Table names are keyed case-insensitively by their lowercased form —
 /// public because `Persistence`'s WAL replay looks tables up in `Catalog`
@@ -2512,6 +2517,7 @@ let create () : Store =
       NoZeroInDate = true
       OnlyFullGroupBy = true
       NoAutoValueOnZero = false
+      ErrorForDivisionByZero = true
       ConnectionCollation = Collation.defaultCollation
       VirtualTables = Map.empty
       OnCommit = ResizeArray()

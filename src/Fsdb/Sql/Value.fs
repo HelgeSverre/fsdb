@@ -1837,6 +1837,14 @@ let private asDecimal =
     | KDecimal d -> d
     | KDouble d -> decimal d
 
+let isArithmeticZero (value: Value) : bool =
+    match classify value with
+    | None -> false
+    | Some(KInt number) -> number = 0L
+    | Some(KUInt number) -> number = 0UL
+    | Some(KDecimal number) -> number = 0M
+    | Some(KDouble number) -> number = 0.0
+
 /// The largest `BIGINT UNSIGNED`, as a `decimal` — the ceiling the exact
 /// integral operations narrow back through.
 let private maxUInt64 = decimal UInt64.MaxValue

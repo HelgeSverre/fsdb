@@ -13,8 +13,16 @@ type Condition =
       Code: int
       Message: string }
 
+type DivisionByZeroPolicy =
+    | Silent = 0
+    | Warn = 1
+    | Fail = 2
+
+exception EvaluationError of code: int * message: string
+
 let private active = AsyncLocal<ResizeArray<Condition> option>()
 let private rowNumber = AsyncLocal<int option>()
+let private divisionByZeroPolicy = AsyncLocal<DivisionByZeroPolicy>()
 
 let record (condition: Condition) : unit =
     active.Value |> Option.iter (fun conditions -> conditions.Add condition)
@@ -27,6 +35,27 @@ let error code message =
 
 let note code message =
     record { Level = Note; Code = code; Message = message }
+
+let divisionByZero () : Result<unit, int * string> =
+    let code = 1365
+    let message = "Division by 0"
+
+    match divisionByZeroPolicy.Value with
+    | DivisionByZeroPolicy.Silent -> Ok()
+    | DivisionByZeroPolicy.Warn ->
+        warning code message
+        Ok()
+    | DivisionByZeroPolicy.Fail -> Result.Error(code, message)
+    | unsupported -> invalidArg (nameof unsupported) "unsupported division-by-zero policy"
+
+let withDivisionByZeroPolicy (policy: DivisionByZeroPolicy) (body: unit -> 'a) : 'a =
+    let previous = divisionByZeroPolicy.Value
+    divisionByZeroPolicy.Value <- policy
+
+    try
+        body ()
+    finally
+        divisionByZeroPolicy.Value <- previous
 
 let currentRowNumber () = rowNumber.Value |> Option.defaultValue 1
 

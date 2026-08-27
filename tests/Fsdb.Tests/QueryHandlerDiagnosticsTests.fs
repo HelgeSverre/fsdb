@@ -100,6 +100,102 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected warning count to include errors, got %A" other
 
+          testCase "division by zero follows the session sql mode in reads"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "SELECT 1 / 0, 1 DIV 0, MOD(1, 0)"
+
+              match result with
+              | ResultSet(_, [ [ None; None; None ] ]) -> ()
+              | other -> failtestf "expected NULL division results, got %A" other
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Warning, 1365, "Division by 0"
+                    Fsdb.Diagnostics.Warning, 1365, "Division by 0"
+                    Fsdb.Diagnostics.Warning, 1365, "Division by 0" ]
+                  "default mode reports each zero divisor"
+
+              let session, result = handle session "SELECT NULL / 0, NULL DIV 0, MOD(NULL, 0), 1 / NULL"
+
+              match result with
+              | ResultSet(_, [ [ None; None; None; None ] ]) -> ()
+              | other -> failtestf "expected NULL arithmetic to remain NULL, got %A" other
+
+              Expect.isEmpty session.Diagnostics "NULL arithmetic does not report division by zero"
+
+              let session, _ = handle session "SET SESSION sql_mode = 'STRICT_TRANS_TABLES'"
+              let session, result = handle session "SELECT 1 / 0"
+
+              match result with
+              | ResultSet(_, [ [ None ] ]) -> ()
+              | other -> failtestf "expected mode-disabled division to remain NULL, got %A" other
+
+              Expect.isEmpty session.Diagnostics "disabled ERROR_FOR_DIVISION_BY_ZERO is silent"
+
+          testCase "strict writes reject division by zero unless errors are ignored"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT PRIMARY KEY, value INT NULL)"
+              let session, _ = handle session "INSERT INTO t VALUES (1, 10)"
+              let session, result = handle session "INSERT INTO t VALUES (2, NULL / 0)"
+              Expect.equal result (Affected 1UL) "NULL arithmetic remains valid in a strict write"
+              Expect.isEmpty session.Diagnostics "NULL arithmetic remains silent in a strict write"
+
+              let session, result = handle session "INSERT INTO t VALUES (9, 1 / 0)"
+
+              match result with
+              | Err(1365, "Division by 0") -> ()
+              | other -> failtestf "expected strict INSERT division error, got %A" other
+
+              let session, result = handle session "UPDATE t SET value = 99 WHERE 1 DIV 0"
+
+              match result with
+              | Err(1365, "Division by 0") -> ()
+              | other -> failtestf "expected strict UPDATE predicate division error, got %A" other
+
+              let session, result = handle session "INSERT IGNORE INTO t VALUES (3, MOD(1, 0))"
+              Expect.equal result (Affected 1UL) "IGNORE retains the row"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1365 ] "IGNORE downgrades the error"
+
+              let session, _ = handle session "SET SESSION sql_mode = 'ERROR_FOR_DIVISION_BY_ZERO'"
+              let session, result = handle session "INSERT INTO t VALUES (4, 1 / 0)"
+              Expect.equal result (Affected 1UL) "non-strict mode retains the row"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1365 ] "non-strict mode reports a warning"
+
+              let session, _ = handle session "SET SESSION sql_mode = 'STRICT_TRANS_TABLES'"
+              let session, result = handle session "INSERT INTO t VALUES (5, 1 / 0)"
+              Expect.equal result (Affected 1UL) "disabled error mode retains the row"
+              Expect.isEmpty session.Diagnostics "disabled error mode is silent"
+
+              let session, _ = handle session "SET SESSION sql_mode = 'STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO'"
+              let session, _ = handle session "START TRANSACTION"
+              let session, _ = handle session "INSERT INTO t VALUES (6, 60)"
+              let session, result = handle session "INSERT INTO t VALUES (7, 1 / 0)"
+
+              match result with
+              | Err(1365, "Division by 0") -> ()
+              | other -> failtestf "expected the transaction statement to fail, got %A" other
+
+              let session, result = handle session "INSERT INTO t VALUES (8, 80)"
+              Expect.equal result (Affected 1UL) "the transaction remains usable after the statement error"
+              let session, result = handle session "COMMIT"
+              Expect.equal result (Affected 0UL) "the surviving transaction writes commit"
+
+              match handle session "SELECT id, value FROM t ORDER BY id" |> snd with
+              | ResultSet(
+                  _,
+                  [ [ Some "1"; Some "10" ]
+                    [ Some "2"; None ]
+                    [ Some "3"; None ]
+                    [ Some "4"; None ]
+                    [ Some "5"; None ]
+                    [ Some "6"; Some "60" ]
+                    [ Some "8"; Some "80" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected only successful writes, got %A" other
+
           testCase "GROUP_CONCAT truncation records warning 1260"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

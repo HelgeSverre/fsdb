@@ -3487,6 +3487,17 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     let arith (f: Value -> Value -> Value) =
                         f (enumNumericOperand ctx a va) (enumNumericOperand ctx b vb)
 
+                    let divide (f: Value -> Value -> Value) =
+                        let left = enumNumericOperand ctx a va
+                        let right = enumNumericOperand ctx b vb
+
+                        match left, right with
+                        | VNull, _
+                        | _, VNull -> Ok VNull
+                        | _, divisor when Value.isArithmeticZero divisor ->
+                            Diagnostics.divisionByZero () |> Result.map (fun () -> VNull)
+                        | _ -> Ok(f left right)
+
                     match op with
                     | And ->
                         match truthy va, truthy vb with
@@ -3519,8 +3530,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Sub -> Ok(arith Value.sub)
                     | SignedSub -> Ok(arith Value.subSigned)
                     | Mul -> Ok(arith Value.mul)
-                    | Div -> Ok(arith Value.div)
-                    | IntDiv -> Ok(arith Value.intDiv)
+                    | Div -> divide Value.div
+                    | IntDiv -> divide Value.intDiv
                     | Eq -> compareWith Eq
                     | Neq -> compareWith Neq
                     | Lt -> compareWith Lt
@@ -3833,7 +3844,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
-        | Some fn -> args |> traverse eval |> Result.map fn
+        | Some fn ->
+            args
+            |> traverse eval
+            |> Result.bind (fun values ->
+                try
+                    Ok(fn values)
+                with Diagnostics.EvaluationError(code, message) ->
+                    Error(code, message))
     // `expr COLLATE name` evaluates as its inner expression — the tag
     // only steers which collation comparisons resolve under.
     | Collate(e, _) -> eval e

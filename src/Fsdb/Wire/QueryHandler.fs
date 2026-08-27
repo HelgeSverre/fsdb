@@ -880,6 +880,7 @@ let private applySqlMode (store: Store) (value: string) =
     setZeroDateModes store (hasSqlMode modes "NO_ZERO_DATE") (hasSqlMode modes "NO_ZERO_IN_DATE")
     setOnlyFullGroupBy store (hasSqlMode modes "ONLY_FULL_GROUP_BY")
     setNoAutoValueOnZero store (hasSqlMode modes "NO_AUTO_VALUE_ON_ZERO")
+    setErrorForDivisionByZero store (hasSqlMode modes "ERROR_FOR_DIVISION_BY_ZERO")
 
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends
@@ -1534,6 +1535,33 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
 /// execute) and COM_STMT_EXECUTE (bind placeholders then execute), so the
 /// prepared path reuses this one execution body instead of splicing literals
 /// back into SQL text and re-parsing.
+let private isDataChangeStatement =
+    function
+    | Insert _
+    | InsertSelect _
+    | Replace _
+    | ReplaceSelect _
+    | ReplaceSet _
+    | Update _
+    | Delete _
+    | CreateTableAs _ -> true
+    | _ -> false
+
+let private ignoresDataChangeErrors =
+    function
+    | Insert(_, _, _, _, true)
+    | InsertSelect(_, _, _, _, true)
+    | Update { Ignore = true } -> true
+    | _ -> false
+
+let private divisionByZeroPolicy (store: Store) (statement: Statement) =
+    if not store.ErrorForDivisionByZero then
+        Diagnostics.DivisionByZeroPolicy.Silent
+    elif store.StrictMode && isDataChangeStatement statement && not (ignoresDataChangeErrors statement) then
+        Diagnostics.DivisionByZeroPolicy.Fail
+    else
+        Diagnostics.DivisionByZeroPolicy.Warn
+
 let private executeParsedCore (session: Session) (stmt: Statement) : Session * QueryResult =
     match stmt with
     | Select _
@@ -1620,7 +1648,7 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
         // on `session` instead of widening this function's own return type.
         let variables = expressionVariables session
 
-        let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
+        let evaluate () =
             Executor.withVariableContext variables (fun () ->
                 match stmt with
                 | Select select ->
@@ -1672,6 +1700,9 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
                             Executor.executeAs store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows (accountOf session) stmt)
 
                     lastInsertId, lastGeneratedId, result, [], None)
+
+        let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
+            Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluate
 
         let columnMetadata = completeResultMetadata session result columnMetadata
 

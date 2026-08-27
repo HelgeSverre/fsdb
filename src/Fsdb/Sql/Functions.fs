@@ -378,6 +378,10 @@ let private roundFn: Scalar =
 /// keeping its scale).
 let private modFn: Scalar =
     function
+    | [ a; b ] when a <> VNull && isArithmeticZero b ->
+        match Diagnostics.divisionByZero () with
+        | Ok() -> VNull
+        | Error(code, message) -> raise (Diagnostics.EvaluationError(code, message))
     | [ a; b ] -> modulo a b
     | _ -> VNull
 
