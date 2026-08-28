@@ -174,9 +174,12 @@ top-(n+offset) set instead of materializing the full sort.
 
 ### Engine
 
-Databases and tables live in a value-swapped catalog. A transaction establishes
-a repeatable-read snapshot on its first database statement and keeps writes
-private until commit. Commit performs a row-level three-way merge: disjoint
+Databases and tables live in a value-swapped catalog. Repeatable-read
+transactions establish a snapshot on their first database statement;
+read-committed transactions refresh from committed roots per statement;
+read-uncommitted transactions additionally compose active private deltas into
+that statement view. Writes remain private until commit under every isolation
+level. Commit performs a row-level three-way merge: disjoint
 concurrent changes combine, while indexed point/range UPDATE and DELETE
 statements wait for an existing row owner and rebase before applying their
 change. Remaining overlapping write shapes fail with MySQL's retryable 1205

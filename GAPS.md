@@ -37,7 +37,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, PK/unique/secondary range, grouping, and bounded index-order probes | Outer-join, unconstrained composite ordering, and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
-| Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused |
+| Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Deadlock victim selection and remaining coarse write shapes |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound condition-handling bodies | Complex views, procedure calls, and multi-table DML firing |
 | Routines & events | Typed procedures, read-only stored functions, and persisted definer-context event scheduling | Data-changing stored functions and procedure calls from triggers |
@@ -224,6 +224,9 @@ savepoints with MySQL establishment-order semantics,
 autocommit implicit transactions, read-only transactions never blocking
 writers, per-database sharding for databases not linked by qualified foreign keys,
 4,096-stripe row ownership, and InnoDB-style burned AUTO_INCREMENT on rollback.
+`READ UNCOMMITTED` composes the immutable deltas of active transactions into a
+fresh statement view without publishing them; rolled-back deltas disappear on
+the next statement, while stronger isolation levels never consult that view.
 `SERIALIZABLE` uses conservative whole-catalog validation for writing
 transactions, preventing write skew while keeping read-only transactions
 lock-free.
@@ -232,7 +235,6 @@ lock-free.
 |---|---|---|---|---|
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads remain unsupported | medium | partial |
-| READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes, while literal VALUES inserts/upserts claim supplied unique keys and existing duplicate rows; generated/default keys, INSERT SELECT, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize their catalog-wide referential actions; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 1.06x | medium | partial |
@@ -454,8 +456,8 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | The 79-case corpus passes 78 cases against native MySQL 8.4.11. Account requirements, typed/compound procedures, CALL, HASH partition selection, and partition growth now match; READ UNCOMMITTED is the one intentional finding. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-29 |
-| Depth-three syntax stress | Three 10,000-mutation seeds over the earlier corpus produced no crash, timeout, protocol fault, or invariant failure. The current baseline-only rerun leaves only the declared READ UNCOMMITTED difference plus executable-comment/error-contract edges outside the baseline. Fuzz-found incomplete procedure blocks and reserved row, partition, and window-function aliases reject with 1064 | compatibility differences retained; baseline inventory verified 2026-08-29 |
+| Executable gap baselines | The complete 79-case corpus matches native MySQL 8.4.11. Account requirements, typed/compound procedures, CALL, HASH partition selection/growth, and all four transaction isolation settings now pass. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-29 |
+| Depth-three syntax stress | Three 10,000-mutation seeds over the earlier corpus produced no crash, timeout, protocol fault, or invariant failure. The current baseline-only rerun has no differences; executable-comment/error-contract edges remain mutation targets rather than declared baseline gaps. Fuzz-found incomplete procedure blocks and reserved row, partition, and window-function aliases reject with 1064 | baseline inventory resolved; mutation stress retained 2026-08-29 |
 | Same-row transaction contention | The original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts. Row-delta publication removed whole-table copy/reindex work. A 64x200 campaign then completed all 12,800 prepared transactions with exact parity and zero failures. After unique-key claims landed, a separate 32x100 hot-account campaign matched all 3,200 MySQL outcomes with zero failures; fsdb reached 267 tx/s at p99 373 ms versus MySQL's 132 tx/s at p99 871 ms on the same host | correctness resolved; constant-factor and higher-contention performance open |
 | Multi-database scaling | Single-capture snapshots, deferred transaction catalogs, and per-database lock namespaces prevent cross-database conflicts. A 12-database, 19,200-transaction campaign preserved every database independently with no cross-database bleed; wall time was 0.38x the serial projection against a 0.80 ceiling | correctness and scaling threshold resolved 2026-08-27 |
 | Crash/restart durability | Concurrent two-table transactions were interrupted by 80 forced process crashes across four 16-worker campaigns. Recovery retained every acknowledged commit, exposed no partial transaction, invented no row, and preserved identical state through graceful snapshot restarts; the latest 20-restart campaign retained all 1,939 acknowledged operations and resolved 320 ambiguous operations consistently | resolved 2026-08-27; broader snapshot-rotation volume remains useful stress coverage |
@@ -513,9 +515,9 @@ implementation effort:
 1. General cost-based planning beyond qualified physical inner joins, plus
    correlated forms that cannot use a direct physical-table equality lookup. Correctness holds,
    but scale still diverges from MySQL past small data.
-2. Transaction scheduling and READ UNCOMMITTED. Indexed point/range UPDATE and
-   DELETE statements wait and rebase, but deadlock victim selection, dirty
-   reads, and the remaining transaction write shapes are not implemented.
+2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements
+   wait and rebase, but deadlock victim selection and the remaining transaction
+   write shapes are not implemented.
 3. Complex join-derived updatable views, data-changing stored functions, and procedure calls
    from triggers. Procedures cover nested calls with local OUT/INOUT targets;
    procedures and triggers cover typed locals, condition handlers,

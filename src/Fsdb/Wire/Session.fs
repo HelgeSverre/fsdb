@@ -120,8 +120,8 @@ type TransportMetrics =
       mutable BytesSent: int64 }
 
 /// One open transaction. `Snapshot` is private until COMMIT. `BaseCatalog`
-/// distinguishes its concrete changes from committed rows: repeatable read
-/// retains one base, while read committed replaces both at each statement.
+/// distinguishes its concrete changes from visible rows: fixed views retain
+/// one base, while statement-scoped isolation replaces both when it refreshes.
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog

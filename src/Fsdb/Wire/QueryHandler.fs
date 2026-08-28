@@ -1154,9 +1154,7 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetTransactionIsolationAction(NextTransactionIsolation, _) when session.Tx.IsSome ->
         Error(Err(1568, "Transaction characteristics can't be changed while a transaction is in progress"))
-    | SetTransactionIsolationAction(_, (RepeatableRead | ReadCommitted | Serializable)) -> Ok()
-    | SetTransactionIsolationAction(_, isolation) ->
-        Error(Err(1235, sprintf "This version of MySQL doesn't yet support '%s transaction isolation'" (transactionIsolationName isolation)))
+    | SetTransactionIsolationAction(_, (ReadUncommitted | ReadCommitted | RepeatableRead | Serializable)) -> Ok()
     | SetVarAction(_, _, true) when not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
@@ -1299,12 +1297,69 @@ let private setTransactionAccess =
 let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", RegexOptions.IgnoreCase)
 let private setRoleNone = Regex(@"^SET\s+ROLE\s+NONE$", RegexOptions.IgnoreCase)
 
+type private DirtyTransactionView =
+    { BaseCatalog: Catalog
+      Snapshot: Store }
+
+let private dirtyTransactionViews =
+    ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<int, DirtyTransactionView>>()
+
+let private transactionViews (store: Store) =
+    dirtyTransactionViews.GetValue(store.Databases, fun _ -> ConcurrentDictionary<int, DirtyTransactionView>())
+
+let private removeTransactionView (session: Session) =
+    match dirtyTransactionViews.TryGetValue session.Store.Databases with
+    | true, views -> views.TryRemove session.ConnectionId |> ignore
+    | false, _ -> ()
+
+let private syncTransactionView (session: Session) =
+    match session.Tx with
+    | Some transaction when transaction.Seeded ->
+        let views = transactionViews session.Store
+
+        views.[session.ConnectionId] <-
+            { BaseCatalog = transaction.BaseCatalog
+              Snapshot = transaction.Snapshot }
+    | _ -> removeTransactionView session
+
+    session
+
 let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
     let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
     let snapshot =
         transactionSnapshot
         |> Storage.carryTransactionLocks tx.Snapshot
 
+    Storage.mergeCatalogInto snapshot tx.BaseCatalog tx.Snapshot.Catalog
+
+    match tx.Snapshot.PendingEvents, snapshot.PendingEvents with
+    | Some source, Some target -> target.AddRange source
+    | _ -> ()
+
+    baseCatalog, snapshot
+
+let private readUncommittedBase (session: Session) =
+    let _, initial = Storage.beginTransactionSnapshotWithBase session.Store
+    let mutable snapshot = initial
+
+    transactionViews session.Store
+    |> Seq.filter (fun entry -> entry.Key <> session.ConnectionId)
+    |> Seq.sortBy _.Key
+    |> Seq.iter (fun entry ->
+        let view = entry.Value
+        let candidate = Storage.beginTransactionSnapshotFromCatalog session.Store snapshot.Catalog
+
+        try
+            Storage.mergeCatalogInto candidate view.BaseCatalog view.Snapshot.Catalog
+            snapshot <- candidate
+        with :? Storage.LockWaitTimeout ->
+            ())
+
+    snapshot.Catalog, snapshot
+
+let private rebaseReadUncommittedSnapshot (session: Session) (tx: Transaction) =
+    let baseCatalog, transactionSnapshot = readUncommittedBase session
+    let snapshot = transactionSnapshot |> Storage.carryTransactionLocks tx.Snapshot
     Storage.mergeCatalogInto snapshot tx.BaseCatalog tx.Snapshot.Catalog
 
     match tx.Snapshot.PendingEvents, snapshot.PendingEvents with
@@ -1330,6 +1385,7 @@ let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx when not tx.Seeded ->
         Storage.releaseTransactionLocks tx.Snapshot
+        removeTransactionView session
         { session with Tx = None; Cursors = Map.empty }
     | Some tx ->
         let timeout = lockWaitTimeout session
@@ -1339,6 +1395,7 @@ let private commitSession (session: Session) : Session =
         | _ -> Storage.commitCatalogIntoWithTimeout timeout session.Store tx.BaseCatalog tx.Snapshot
 
         Storage.releaseTransactionLocks tx.Snapshot
+        removeTransactionView session
 
         { session with Tx = None; Cursors = Map.empty }
     | None -> { session with Cursors = Map.empty }
@@ -1357,6 +1414,8 @@ let private rollbackSession (session: Session) : Session =
         Storage.bumpAutoIncrementsInto session.Store tx.Snapshot.Catalog
         Storage.releaseTransactionLocks tx.Snapshot
     | None -> ()
+
+    removeTransactionView session
 
     { session with Tx = None; Cursors = Map.empty }
 
@@ -1396,9 +1455,20 @@ let private beginTransaction (readOnly: bool) (session: Session) : Session =
                   Savepoints = Map.empty
                   NextSavepointSeq = 0 } }
 
-/// Seeds repeatable-read snapshots and refreshes read-committed views.
+/// Seeds fixed snapshots and refreshes statement-scoped isolation views.
 let startTransactionStatement (session: Session) : Session =
     match session.Tx with
+    | Some tx when not tx.Seeded && tx.Isolation = ReadUncommitted ->
+        let baseCatalog, transactionSnapshot = readUncommittedBase session
+        let snapshot = transactionSnapshot |> Storage.carryTransactionLocks tx.Snapshot
+
+        { session with
+            Tx =
+                Some
+                    { tx with
+                        Snapshot = snapshot
+                        BaseCatalog = baseCatalog
+                        Seeded = true } }
     | Some tx when not tx.Seeded ->
         let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
         let snapshot =
@@ -1420,8 +1490,12 @@ let startTransactionStatement (session: Session) : Session =
                         BaseCatalog = baseCatalog
                         Seeded = true
                         Savepoints = savepoints } }
-    | Some tx when tx.Isolation = ReadCommitted ->
-        let baseCatalog, snapshot = rebaseTransactionSnapshot session tx
+    | Some tx when tx.Isolation = ReadCommitted || tx.Isolation = ReadUncommitted ->
+        let baseCatalog, snapshot =
+            if tx.Isolation = ReadUncommitted then
+                rebaseReadUncommittedSnapshot session tx
+            else
+                rebaseTransactionSnapshot session tx
 
         { session with
             Tx =
@@ -1450,7 +1524,11 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
                 table
                 targets.RowIds
                 targets.Keys
-            let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
+            let baseCatalog, snapshot =
+                if transaction.Isolation = ReadUncommitted then
+                    rebaseReadUncommittedSnapshot session transaction
+                else
+                    rebaseTransactionSnapshot session transaction
 
             { session with
                 Tx =
@@ -4940,6 +5018,7 @@ let private recordResult ((session, result): Session * QueryResult) : Session * 
 
 let private abortTransaction (session: Session) =
     session.Tx |> Option.iter (fun transaction -> Storage.releaseTransactionLocks transaction.Snapshot)
+    removeTransactionView session
     { session with Tx = None }
 
 let private recoverExecutionError (session: Session) (description: string) (error: exn) : Session * QueryResult =
@@ -5147,37 +5226,40 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let resetsPassword = resetsOwnPassword session accountStatement
     let countsAsUpdate = accountStatementCountsAsUpdate accountStatement && accountUpdateIsAuthorized session accountStatement
 
-    recordDiagnostics session (preservesDiagnostics parserOptions sql) (fun () ->
-        if session.PasswordExpired && not resetsPassword then
-            session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
-        else
-            match
-                Auth.tryConsumeAccountStatementWithLimits
-                    store
-                    account
-                    limits
-                    countsAsUpdate
-            with
-            | Error(code, message) -> session, Err(code, message)
-            | Ok() ->
-                try
-                    let executed, result = dispatchNormalized session rawSql parserOptions sql
-                    let executed =
-                        if resetsPassword && terminalErrorInfo result |> Option.isNone then
-                            { executed with PasswordExpired = false }
-                        else
-                            executed
-
-                    match terminalResult result with
-                    | TerminalError(code, msg) ->
-                        Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
-                        executed, result
-                    | _ -> executed, result
+    let executed, result =
+        recordDiagnostics session (preservesDiagnostics parserOptions sql) (fun () ->
+            if session.PasswordExpired && not resetsPassword then
+                session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
+            else
+                match
+                    Auth.tryConsumeAccountStatementWithLimits
+                        store
+                        account
+                        limits
+                        countsAsUpdate
                 with
-                | :? OperationCanceledException ->
-                    abortTransaction session |> ignore
-                    reraise ()
-                | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
+                | Error(code, message) -> session, Err(code, message)
+                | Ok() ->
+                    try
+                        let executed, result = dispatchNormalized session rawSql parserOptions sql
+                        let executed =
+                            if resetsPassword && terminalErrorInfo result |> Option.isNone then
+                                { executed with PasswordExpired = false }
+                            else
+                                executed
+
+                        match terminalResult result with
+                        | TerminalError(code, msg) ->
+                            Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
+                            executed, result
+                        | _ -> executed, result
+                    with
+                    | :? OperationCanceledException ->
+                        abortTransaction session |> ignore
+                        reraise ()
+                    | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
+
+    syncTransactionView executed, result
 
 let executeEventBody (session: Session) (body: string) : Session * QueryResult =
     let options = parserOptionsForSession session
@@ -5257,12 +5339,15 @@ let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value li
         else
             Insert(load.Table, load.Columns, rows |> List.map (List.map Lit), [], load.Ignore)
 
-    recordDiagnostics session false (fun () ->
-        try
-            withStoredFunctionRegistry session (fun current -> executeParsed current statement)
-        with
-        | :? OperationCanceledException -> reraise ()
-        | ex -> recoverExecutionError session "LOAD DATA LOCAL INFILE" ex)
+    let executed, result =
+        recordDiagnostics session false (fun () ->
+            try
+                withStoredFunctionRegistry session (fun current -> executeParsed current statement)
+            with
+            | :? OperationCanceledException -> reraise ()
+            | ex -> recoverExecutionError session "LOAD DATA LOCAL INFILE" ex)
+
+    syncTransactionView executed, result
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it
@@ -5287,38 +5372,41 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
                 stmt.Sql
                 (values |> List.map (valueToSqlLiteralWithOptions options)))
     | Some ast ->
-        recordDiagnostics session false (fun () ->
-            try
-                let statement = bindPlaceholders ast values
-                let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
+        let executed, result =
+            recordDiagnostics session false (fun () ->
+                try
+                    let statement = bindPlaceholders ast values
+                    let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
 
-                if session.PasswordExpired && not resetsPassword then
-                    session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
-                else
-                    let accountStatement = ParsedAccountStatement statement
-                    let account = accountOf session
-                    let store = Session.currentStore session
+                    if session.PasswordExpired && not resetsPassword then
+                        session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
+                    else
+                        let accountStatement = ParsedAccountStatement statement
+                        let account = accountOf session
+                        let store = Session.currentStore session
 
-                    match
-                        Auth.tryConsumeAccountStatementWithLimits
-                            store
-                            account
-                            (Auth.tryAccountLimits store account)
-                            (accountStatementCountsAsUpdate accountStatement
-                             && accountUpdateIsAuthorized session accountStatement)
-                    with
-                    | Error(code, message) -> session, Err(code, message)
-                    | Ok() ->
-                        let executed, result =
-                            withStoredFunctionRegistry session (fun current -> executeParsed current statement)
+                        match
+                            Auth.tryConsumeAccountStatementWithLimits
+                                store
+                                account
+                                (Auth.tryAccountLimits store account)
+                                (accountStatementCountsAsUpdate accountStatement
+                                 && accountUpdateIsAuthorized session accountStatement)
+                        with
+                        | Error(code, message) -> session, Err(code, message)
+                        | Ok() ->
+                            let executed, result =
+                                withStoredFunctionRegistry session (fun current -> executeParsed current statement)
 
-                        (if resetsPassword && terminalErrorInfo result |> Option.isNone then
-                             { executed with PasswordExpired = false }
-                         else
-                             executed),
-                        result
-            with
-            | PlaceholderCountMismatch(expected, got) ->
-                session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)
-            | :? OperationCanceledException -> reraise ()
-            | ex -> recoverExecutionError session "prepared statement" ex)
+                            (if resetsPassword && terminalErrorInfo result |> Option.isNone then
+                                 { executed with PasswordExpired = false }
+                             else
+                                 executed),
+                            result
+                with
+                | PlaceholderCountMismatch(expected, got) ->
+                    session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)
+                | :? OperationCanceledException -> reraise ()
+                | ex -> recoverExecutionError session "prepared statement" ex)
+
+        syncTransactionView executed, result

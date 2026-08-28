@@ -4636,7 +4636,7 @@ let tests =
                       "a new session inherits the global isolation default"
               | _, other -> failtestf "expected OK, got %A" other
 
-          testCase "SERIALIZABLE is accepted and READ UNCOMMITTED remains explicit"
+          testCase "SERIALIZABLE and READ UNCOMMITTED are accepted"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
@@ -4648,9 +4648,84 @@ let tests =
                   | _ -> failtest "BEGIN did not create a transaction"
               | _, other -> failtestf "expected SERIALIZABLE to be accepted, got %A" other
 
-              match handle session "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED" |> snd with
-              | Err(1235, _) -> ()
-              | other -> failtestf "expected READ UNCOMMITTED to remain explicit, got %A" other
+              match handle session "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED" with
+              | configured, Affected 0UL ->
+                  match handle configured "BEGIN" |> fst with
+                  | { Tx = Some transaction } ->
+                      Expect.equal transaction.Isolation ReadUncommitted "the transaction captures READ UNCOMMITTED"
+                  | _ -> failtest "BEGIN did not create a transaction"
+              | _, other -> failtestf "expected READ UNCOMMITTED to be accepted, got %A" other
+
+          testCase "READ UNCOMMITTED refreshes dirty rows and forgets rolled-back changes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE dirty_rows (id INT PRIMARY KEY, value INT)"
+              let _, _ = handle setup "INSERT INTO dirty_rows VALUES (1, 10),(3, 30)"
+
+              let writer = create 2 store
+              let writer, _ = handle writer "BEGIN"
+              let writer, _ = handle writer "UPDATE dirty_rows SET value = 99 WHERE id = 1"
+              let writer, _ = handle writer "INSERT INTO dirty_rows VALUES (2, 20)"
+              let writer, _ = handle writer "DELETE FROM dirty_rows WHERE id = 3"
+
+              let repeatable = create 3 store
+              let repeatable, _ = handle repeatable "BEGIN"
+
+              match handle repeatable "SELECT id,value FROM dirty_rows ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "3"; Some "30" ] ]) -> ()
+              | other -> failtestf "expected stronger isolation to hide dirty rows, got %A" other
+
+              let reader = create 4 store
+              let reader, _ = handle reader "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let reader, _ = handle reader "BEGIN"
+              let reader, firstRead = handle reader "SELECT id,value FROM dirty_rows ORDER BY id"
+
+              match firstRead with
+              | ResultSet(_, [ [ Some "1"; Some "99" ]; [ Some "2"; Some "20" ] ]) -> ()
+              | other -> failtestf "expected the writer's uncommitted update and insert, got %A" other
+
+              let _, _ = handle writer "ROLLBACK"
+
+              match handle reader "SELECT id,value FROM dirty_rows ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "3"; Some "30" ] ]) -> ()
+              | other -> failtestf "expected rolled-back dirty rows to disappear on the next statement, got %A" other
+
+          testCase "READ UNCOMMITTED composes disjoint active transactions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE dirty_many (id INT PRIMARY KEY, value INT)"
+              let _, _ = handle setup "INSERT INTO dirty_many VALUES (1, 10),(2, 20)"
+
+              let first, _ = handle (create 2 store) "BEGIN"
+              let first, _ = handle first "UPDATE dirty_many SET value = 11 WHERE id = 1"
+              let second, _ = handle (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let second, _ = handle second "BEGIN"
+              let second, _ = handle second "UPDATE dirty_many SET value = 22 WHERE id = 2"
+              let reader, _ = handle (create 4 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let reader, _ = handle reader "BEGIN"
+
+              let read session = handle session "SELECT value FROM dirty_many ORDER BY id"
+
+              let reader, both = read reader
+
+              match both with
+              | ResultSet(_, [ [ Some "11" ]; [ Some "22" ] ]) -> ()
+              | other -> failtestf "expected both active deltas, got %A" other
+
+              let _, _ = handle first "ROLLBACK"
+              let reader, one = read reader
+
+              match one with
+              | ResultSet(_, [ [ Some "10" ]; [ Some "22" ] ]) -> ()
+              | other -> failtestf "expected only the surviving dirty delta, got %A" other
+
+              let _, _ = handle second "COMMIT"
+
+              match read reader |> snd with
+              | ResultSet(_, [ [ Some "10" ]; [ Some "22" ] ]) -> ()
+              | other -> failtestf "expected the committed second delta, got %A" other
 
           testCase "ordinary transaction commits do not wait on the store-wide coordination lock"
           <| fun _ ->
