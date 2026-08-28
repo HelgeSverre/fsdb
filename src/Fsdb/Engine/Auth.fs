@@ -767,6 +767,10 @@ let private tableRefsOfFrom (defaultDb: string) (from: FromItem option) (joins: 
 let private selectTables (defaultDb: string) (s: SelectStmt) : (string * string) list =
     selectReadTables defaultDb s
 
+let requiredPrivilegesForExpression (defaultDb: string) (expression: Expr) : (string * PrivTarget) list =
+    exprReadTables defaultDb expression
+    |> List.map (fun (database, table) -> "SELECT", OnTable(database, table))
+
 /// The `(privilege, target)` pairs `stmt` needs. Table references are
 /// collected recursively (`selectReadTables`/`exprReadTables`), so a table
 /// read through a derived table or a subquery in any clause still requires

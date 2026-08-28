@@ -999,17 +999,25 @@ let private rowConstructorAtom: Parser<Expr, unit> =
 
 let private genericFuncCall: Parser<Expr, unit> =
     let reservedNames = set [ "any"; "select"; "some"; "regexp" ]
+    let rawIdentifier = backtickIdent <|> many1Satisfy2 isIdentStart isIdentChar
+
+    let functionName =
+        attempt (
+            identifier .>> sym "." .>>. rawIdentifier
+            |>> fun (schema, name) -> schema + "." + name, name, true
+        )
+        <|> (rawIdentifier |>> fun name -> name, name, false)
 
     attempt (
-        many1Satisfy2 isIdentStart isIdentChar
-        >>= fun name ->
-            let normalizedName = name.ToLowerInvariant()
+        functionName
+        >>= fun (name, unqualifiedName, qualified) ->
+            let normalizedName = unqualifiedName.ToLowerInvariant()
 
-            if reservedNames.Contains normalizedName then
+            if not qualified && reservedNames.Contains normalizedName then
                 fail "reserved function name"
             else
                 let openParen =
-                    if whitespaceSensitiveFunctionNames.Contains normalizedName then
+                    if not qualified && whitespaceSensitiveFunctionNames.Contains normalizedName then
                         if currentOptions.Value.IgnoreSpace then
                             spaces >>. pchar '(' >>. ws
                         else
@@ -1018,7 +1026,7 @@ let private genericFuncCall: Parser<Expr, unit> =
                         ws >>. pchar '(' >>. ws
 
                 openParen
-                >>. sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+                >>. sepBy (if not qualified && distinctAggregates.Contains name then distinctArg else expr) (sym ",")
                 .>> sym ")"
                 |>> fun args ->
                     match normalizedName, args with

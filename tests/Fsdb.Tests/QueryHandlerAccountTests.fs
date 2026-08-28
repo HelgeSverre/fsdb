@@ -51,7 +51,17 @@ let tests =
                       let names = rows |> List.map (List.head >> Option.get)
                       Expect.equal
                           names
-                          [ "check_constraints"; "columns_priv"; "db"; "events"; "global_grants"; "routines"; "tables_priv"; "triggers"; "user"; "views" ]
+                          [ "check_constraints"
+                            "columns_priv"
+                            "db"
+                            "events"
+                            "functions"
+                            "global_grants"
+                            "routines"
+                            "tables_priv"
+                            "triggers"
+                            "user"
+                            "views" ]
                           "the system tables"
                   | other -> failtestf "expected the mysql table list, got %A" other
               | _, other -> failtestf "expected USE mysql to succeed, got %A" other

@@ -305,6 +305,20 @@ let private expressionVariables (session: Session) = expressionVariablesFor sess
 
 let private accountOf (session: Session) = Auth.account session.User session.AccountHost
 
+let private canInspectRoutine (session: Session) schema definer =
+    match Auth.tryParseAccount definer with
+    | None -> false
+    | Some owner ->
+        let viewer = accountOf session
+
+        Auth.sameAccount viewer owner
+        || Auth.hasGlobalPrivForAccount session.Store viewer "SELECT"
+        || (Auth.checkForAccount session.Store viewer [ "ALTER ROUTINE", Auth.OnDb schema ] |> Result.isOk)
+
+let private canSeeRoutine session schema definer =
+    canInspectRoutine session schema definer
+    || (Auth.checkForAccount session.Store (accountOf session) [ "EXECUTE", Auth.OnDb schema ] |> Result.isOk)
+
 type private AdvisoryLock =
     { Owner: int
       Count: int }
@@ -434,6 +448,14 @@ let private registryFor (session: Session) : Functions.Registry =
     let registry =
         session.CustomFunctions.Scalars
         |> Map.fold (fun current name fn -> Functions.registerScalar name fn current) Functions.builtins
+        |> fun current ->
+            session.CustomFunctions.ScalarMetadata
+            |> Map.fold
+                (fun registry name metadata ->
+                    match Functions.lookup name registry with
+                    | Some scalar -> Functions.registerScalarWithMetadata name metadata scalar registry
+                    | None -> registry)
+                current
         |> fun current ->
             session.CustomFunctions.Aggregates
             |> Map.fold (fun registry name fn -> Functions.registerAggregate name fn registry) current
@@ -580,7 +602,7 @@ let private showEventsRe =
     Regex(@"^SHOW\s+EVENTS(?:\s+(?:FROM|IN)\s+(\S+))?", RegexOptions.IgnoreCase)
 
 let private showRoutineStatusRe =
-    Regex(@"^SHOW\s+(?:PROCEDURE|FUNCTION)\s+STATUS(\s|$)", RegexOptions.IgnoreCase)
+    Regex(@"^SHOW\s+(PROCEDURE|FUNCTION)\s+STATUS(?:\s|$)", RegexOptions.IgnoreCase)
 
 let private killRe = Regex(@"^KILL\s+(?:(QUERY|CONNECTION)\s+)?(\d+)\s*$", RegexOptions.IgnoreCase)
 
@@ -2035,7 +2057,7 @@ type private Probe =
     | ShowProcesslist of full: bool
     | ShowTriggers of db: string option
     | ShowEvents of db: string option
-    | ShowRoutineStatus
+    | ShowRoutineStatus of kind: string
     | Kill of queryOnly: bool * id: int64
     | AlterKeysNoop of table: string
     | ShowConditions of errorsOnly: bool
@@ -2172,7 +2194,7 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         let m = showEventsRe.Match sql
         Some(ShowEvents(if m.Groups.[1].Success then Some(stripIdentifierQuotes m.Groups.[1].Value) else None))
     elif showRoutineStatusRe.IsMatch sql then
-        Some ShowRoutineStatus
+        Some(ShowRoutineStatus((showRoutineStatusRe.Match sql).Groups.[1].Value.ToUpperInvariant()))
     elif killRe.IsMatch sql then
         let m = killRe.Match sql
         Some(Kill(m.Groups.[1].Value.ToUpperInvariant() = "QUERY", int64 m.Groups.[2].Value))
@@ -2476,7 +2498,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
         session, InformationSchema.showTriggers (Session.currentStore session).Catalog dbName |> showResult
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
-    | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus (Session.currentStore session).Catalog |> showResult
+    | ShowRoutineStatus kind ->
+        session,
+        InformationSchema.withViewer (Session.currentStore session) (accountOf session) (fun () ->
+            InformationSchema.showRoutineStatus (Session.currentStore session).Catalog kind)
+        |> showResult
     | Kill(queryOnly, id) ->
         let canSeeAll = Auth.hasGlobalPrivForAccount session.Store (accountOf session) "PROCESS"
         let canKillAll = Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
@@ -2669,22 +2695,70 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
             match routine with
             | None -> session, Err(1305, sprintf "%s %s does not exist" kind name)
+            | Some routine when not (canSeeRoutine session routine.Schema routine.Definer) ->
+                session, Err(1305, sprintf "%s %s does not exist" kind name)
             | Some routine ->
                 let definer = accountRefOf routine.Definer
                 let ddl =
-                    sprintf
-                        "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`(%s) SQL SECURITY %s %s"
-                        definer.Name
-                        definer.Host
-                        name
-                        routine.Parameters
-                        routine.SecurityType
-                        routine.Definition
+                    if canInspectRoutine session routine.Schema routine.Definer then
+                        Some(
+                            sprintf
+                                "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`(%s) SQL SECURITY %s %s"
+                                definer.Name
+                                definer.Host
+                                name
+                                routine.Parameters
+                                routine.SecurityType
+                                routine.Definition
+                        )
+                    else
+                        None
 
                 session,
                 ResultSet(
                     [ "Procedure"; "sql_mode"; "Create Procedure"; "character_set_client"; "collation_connection"; "Database Collation" ],
-                    [ [ Some name; Some routine.SqlMode; Some ddl; Some routine.CharacterSetClient
+                    [ [ Some name; Some routine.SqlMode; ddl; Some routine.CharacterSetClient
+                        Some routine.CollationConnection; Some routine.DatabaseCollation ] ]
+                )
+        elif kind = "FUNCTION" then
+            let routine =
+                match Storage.scanList (Session.currentStore session) "mysql" "functions" with
+                | Error _ -> None
+                | Ok(_, rows) ->
+                    rows
+                    |> List.choose SystemCatalog.StoredFunction.tryRead
+                    |> List.tryFind (SystemCatalog.StoredFunction.matches database name)
+
+            match routine with
+            | None -> session, Err(1305, sprintf "%s %s does not exist" kind name)
+            | Some routine when not (canSeeRoutine session routine.Schema routine.Definer) ->
+                session, Err(1305, sprintf "%s %s does not exist" kind name)
+            | Some routine ->
+                let definer = accountRefOf routine.Definer
+                let deterministic = if routine.Deterministic then " DETERMINISTIC" else ""
+
+                let ddl =
+                    if canInspectRoutine session routine.Schema routine.Definer then
+                        Some(
+                            sprintf
+                                "CREATE DEFINER=`%s`@`%s` FUNCTION `%s`(%s) RETURNS %s%s %s SQL SECURITY %s %s"
+                                definer.Name
+                                definer.Host
+                                name
+                                routine.Parameters
+                                routine.ReturnType
+                                deterministic
+                                routine.SqlDataAccess
+                                routine.SecurityType
+                                routine.Definition
+                        )
+                    else
+                        None
+
+                session,
+                ResultSet(
+                    [ "Function"; "sql_mode"; "Create Function"; "character_set_client"; "collation_connection"; "Database Collation" ],
+                    [ [ Some name; Some routine.SqlMode; ddl; Some routine.CharacterSetClient
                         Some routine.CollationConnection; Some routine.DatabaseCollation ] ]
                 )
         else
@@ -2885,8 +2959,17 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
 
 type private TextRoutineCommand =
     | CreateProcedure of name: string * parameters: string * securityType: string * body: string * definer: string option
+    | CreateFunction of
+        name: string *
+        ifNotExists: bool *
+        parameters: string *
+        returnType: string *
+        characteristics: string *
+        body: string *
+        definer: string option
     | CallProcedure of name: string * arguments: string
     | DropProcedure of name: string * ifExists: bool
+    | DropFunction of name: string * ifExists: bool
 
 let private createProcedureRe =
     Regex(
@@ -2900,10 +2983,26 @@ let private callProcedureRe =
 let private dropProcedureRe =
     Regex(@"^\s*DROP\s+PROCEDURE\s+(?<ifExists>IF\s+EXISTS\s+)?(?<name>\S+)\s*$", RegexOptions.IgnoreCase)
 
+let private functionCharacteristicsPattern =
+    """(?:(?:LANGUAGE\s+SQL|(?:NOT\s+)?DETERMINISTIC|SQL\s+SECURITY\s+(?:DEFINER|INVOKER)|NO\s+SQL|CONTAINS\s+SQL|READS\s+SQL\s+DATA|MODIFIES\s+SQL\s+DATA|COMMENT\s+'(?:''|\\.|[^'])*')\s*)*"""
+
+let private createFunctionRe =
+    Regex(
+        """^\s*CREATE\s+(?:DEFINER\s*=\s*(?<definer>(?:CURRENT_USER(?:\(\))?|(?:'[^']*'|\`[^\`]*\`|[A-Za-z0-9_$.-]+)(?:\s*@\s*(?:'[^']*'|\`[^\`]*\`|[A-Za-z0-9_$.:/%-]+))?))\s+)?FUNCTION\s+(?<ifNotExists>IF\s+NOT\s+EXISTS\s+)?(?<name>\S+)\s*\((?<parameters>(?:[^()]|\([^()]*\))*)\)\s+RETURNS\s+(?<returns>[A-Za-z]+(?:\s*\([^)]*\))?(?:\s+UNSIGNED)?)\s*(?<characteristics>"""
+        + functionCharacteristicsPattern
+        + """)(?<body>(?:BEGIN|RETURN)\b[\s\S]+)$""",
+        RegexOptions.IgnoreCase
+    )
+
+let private dropFunctionRe =
+    Regex(@"^\s*DROP\s+FUNCTION\s+(?<ifExists>IF\s+EXISTS\s+)?(?<name>\S+)\s*$", RegexOptions.IgnoreCase)
+
 let private tryTextRoutineCommand (sql: string) =
     let create = createProcedureRe.Match(sql)
+    let createFunction = createFunctionRe.Match(sql)
     let call = callProcedureRe.Match(sql)
     let drop = dropProcedureRe.Match(sql)
+    let dropFunction = dropFunctionRe.Match(sql)
 
     if create.Success then
         let security =
@@ -2921,10 +3020,27 @@ let private tryTextRoutineCommand (sql: string) =
                 if create.Groups.["definer"].Success then Some(create.Groups.["definer"].Value.Trim()) else None
             )
         )
+    elif createFunction.Success then
+        Some(
+            CreateFunction(
+                createFunction.Groups.["name"].Value,
+                createFunction.Groups.["ifNotExists"].Success,
+                createFunction.Groups.["parameters"].Value.Trim(),
+                createFunction.Groups.["returns"].Value.Trim(),
+                createFunction.Groups.["characteristics"].Value.Trim(),
+                createFunction.Groups.["body"].Value,
+                if createFunction.Groups.["definer"].Success then
+                    Some(createFunction.Groups.["definer"].Value.Trim())
+                else
+                    None
+            )
+        )
     elif call.Success then
         Some(CallProcedure(call.Groups.["name"].Value, call.Groups.["arguments"].Value.Trim()))
     elif drop.Success then
         Some(DropProcedure(drop.Groups.["name"].Value, drop.Groups.["ifExists"].Success))
+    elif dropFunction.Success then
+        Some(DropFunction(dropFunction.Groups.["name"].Value, dropFunction.Groups.["ifExists"].Success))
     else
         None
 
@@ -2947,6 +3063,57 @@ let private parseRoutineDefinition options parameters body =
         |> Result.map (fun () -> parsedParameters, statements)
     | Error _, _ -> Error(syntaxError parameters)
     | _, Error _ -> Error(syntaxError body)
+
+let private parseFunctionCharacteristics (text: string) =
+    let security =
+        let matched = Regex.Match(text, @"\bSQL\s+SECURITY\s+(?<value>DEFINER|INVOKER)\b", RegexOptions.IgnoreCase)
+        if matched.Success then matched.Groups.["value"].Value.ToUpperInvariant() else "DEFINER"
+
+    let deterministic =
+        not (Regex.IsMatch(text, @"\bNOT\s+DETERMINISTIC\b", RegexOptions.IgnoreCase))
+        && Regex.IsMatch(text, @"\bDETERMINISTIC\b", RegexOptions.IgnoreCase)
+
+    let dataAccess =
+        [ "NO SQL"; "CONTAINS SQL"; "READS SQL DATA"; "MODIFIES SQL DATA" ]
+        |> List.tryFind (fun value -> Regex.IsMatch(text, @"\b" + value.Replace(" ", @"\s+") + @"\b", RegexOptions.IgnoreCase))
+        |> Option.defaultValue "CONTAINS SQL"
+
+    let residue =
+        text
+        |> fun value -> Regex.Replace(value, @"\bSQL\s+SECURITY\s+(?:DEFINER|INVOKER)\b", "", RegexOptions.IgnoreCase)
+        |> fun value -> Regex.Replace(value, @"\b(?:NOT\s+)?DETERMINISTIC\b", "", RegexOptions.IgnoreCase)
+        |> fun value -> Regex.Replace(value, @"\b(?:NO\s+SQL|CONTAINS\s+SQL|READS\s+SQL\s+DATA|MODIFIES\s+SQL\s+DATA)\b", "", RegexOptions.IgnoreCase)
+        |> fun value -> Regex.Replace(value, @"\bLANGUAGE\s+SQL\b", "", RegexOptions.IgnoreCase)
+        |> fun value -> Regex.Replace(value, @"\bCOMMENT\s+'(?:''|\\.|[^'])*'", "", RegexOptions.IgnoreCase)
+        |> _.Trim()
+
+    if residue = "" then
+        Ok(security, deterministic, dataAccess)
+    else
+        Error(syntaxError text)
+
+let private parseFunctionDefinition options parameters returnType body =
+    match
+        StoredProgram.parseParameters options parameters,
+        Parser.parseColumnTypeWithOptions options returnType,
+        StoredProgram.parse options body
+    with
+    | Ok parsedParameters, Ok parsedReturnType, Ok statements
+        when parsedParameters |> List.exists (fun parameter -> parameter.Mode <> StoredProgram.In) ->
+        Error(syntaxError parameters)
+    | Ok parsedParameters, Ok parsedReturnType, Ok statements ->
+        StoredProgram.validateFunction parsedParameters statements
+        |> Result.mapError routineValidationError
+        |> Result.bind (fun () ->
+            match statements |> List.collect StoredProgram.executableSqlStatements with
+            | (Select _ | Union _) :: _ -> Error(Err(1415, "Not allowed to return a result set from a function"))
+            | _ :: _ -> Error(Err(1235, "SQL statements in stored functions are not supported"))
+            | [] -> Ok(parsedParameters, parsedReturnType, statements))
+    | Error _, _, _ -> Error(syntaxError parameters)
+    | _, Error _, _ -> Error(syntaxError returnType)
+    | _, _, Error _ when Regex.IsMatch(body, @"\b(?:PREPARE|EXECUTE|DEALLOCATE\s+PREPARE)\b", RegexOptions.IgnoreCase) ->
+        Error(Err(1336, "Dynamic SQL is not allowed in stored function or trigger"))
+    | _, _, Error _ -> Error(syntaxError body)
 
 let private routineColumn name columnType =
     { Name = name
@@ -3343,6 +3510,12 @@ let private runRoutineStatements
                         let locals = Map.add localName { local with Value = value } locals
                         clearDiagnostics ()
                         run scope next locals results affectedRows rest
+            | StoredProgram.Return expression ->
+                let next, evaluated = evaluate locals current expression
+
+                match evaluated with
+                | Error error -> handleQueryResult scope next locals results affectedRows rest error
+                | Ok value -> flowing next locals results affectedRows (StoredProgram.Flow.Return value)
             | StoredProgram.If(condition, whenTrue, whenFalse) ->
                 let next, evaluated = evaluate locals current condition
 
@@ -3637,21 +3810,21 @@ let private runRoutineStatements
 
     outcome
 
-let private routineExecutionSettings (routine: SystemCatalog.Routine.Entry) : ExecutionSettings =
-    { SqlModeText = routine.SqlMode
-      SqlMode = SqlMode.settingsFor routine.SqlMode
-      ConnectionCharset = routine.CharacterSetClient
+let private storedExecutionSettings sqlMode characterSetClient collationConnection : ExecutionSettings =
+    { SqlModeText = sqlMode
+      SqlMode = SqlMode.settingsFor sqlMode
+      ConnectionCharset = characterSetClient
       ConnectionCollation =
-        routine.CollationConnection
+        collationConnection
         |> Collation.tryFind
         |> Option.defaultValue Collation.defaultCollation }
 
-let private routineVariables (routine: SystemCatalog.Routine.Entry) variables =
+let private storedExecutionVariables sqlMode characterSetClient collationConnection variables =
     variables
-    |> Map.add "sql_mode" (Some routine.SqlMode)
-    |> Map.add "character_set_client" (Some routine.CharacterSetClient)
-    |> Map.add "character_set_connection" (Some routine.CharacterSetClient)
-    |> Map.add "collation_connection" (Some routine.CollationConnection)
+    |> Map.add "sql_mode" (Some sqlMode)
+    |> Map.add "character_set_client" (Some characterSetClient)
+    |> Map.add "character_set_connection" (Some characterSetClient)
+    |> Map.add "collation_connection" (Some collationConnection)
 
 let private restoreRoutineVariables original changed variables =
     [ "sql_mode"; "character_set_client"; "character_set_connection"; "collation_connection" ]
@@ -3743,6 +3916,191 @@ let private tryTextEventCommand (sql: string) =
     else
         None
 
+let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
+let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
+
+let private raiseFunctionError result =
+    match Executor.errorInfo result with
+    | Some error -> raise (Diagnostics.EvaluationError(error.Code, error.Message))
+    | None -> raise (Diagnostics.EvaluationError(1105, "Stored function execution failed"))
+
+let rec private invokeStoredFunction
+    (declaredSession: Session)
+    (routine: SystemCatalog.StoredFunction.Entry)
+    (arguments: Value list)
+    =
+    let caller = storedFunctionSession.Value |> Option.defaultValue declaredSession
+    let caller =
+        match Executor.currentScalarExecutionAccount () with
+        | Some account ->
+            { caller with
+                User = account.Name
+                AccountHost = account.Host }
+        | None -> caller
+
+    let caller = withStoredFunctions caller
+    let calls = storedFunctionCalls.Value |> Option.defaultValue []
+    let key = routine.Schema.ToLowerInvariant(), routine.Name.ToLowerInvariant()
+
+    if List.contains key calls then
+        raise (Diagnostics.EvaluationError(1424, "Recursive stored functions and triggers are not allowed"))
+
+    match Auth.checkForAccount caller.Store (accountOf caller) [ "EXECUTE", Auth.OnDb routine.Schema ] with
+    | Error(code, message) -> raise (Diagnostics.EvaluationError(code, message))
+    | Ok() -> ()
+
+    let executionAccount =
+        if routine.SecurityType.Equals("INVOKER", StringComparison.OrdinalIgnoreCase) then
+            accountOf caller
+        else
+            match Auth.tryParseAccount routine.Definer with
+            | Some account when Auth.tryUserRowForAccount caller.Store account |> Option.isSome -> account
+            | _ -> raise (Diagnostics.EvaluationError(1449, sprintf "The user specified as a definer ('%s') does not exist" routine.Definer))
+
+    let options = SqlMode.parserOptionsFor routine.SqlMode
+
+    let parameters, returnType, statements =
+        match parseFunctionDefinition options routine.Parameters routine.ReturnType routine.Definition with
+        | Ok definition -> definition
+        | Error error -> raiseFunctionError error
+
+    let expressionPrivileges =
+        let expressions =
+            statements
+            |> List.collect StoredProgram.expressions
+            |> List.collect (Auth.requiredPrivilegesForExpression routine.Schema)
+
+        let cursorQueries =
+            statements
+            |> List.collect StoredProgram.sqlStatements
+            |> List.collect (Auth.requiredPrivilegesInStore caller.Store routine.Schema)
+
+        List.distinct (expressions @ cursorQueries)
+
+    match Auth.checkForAccount caller.Store executionAccount expressionPrivileges with
+    | Error(code, message) -> raise (Diagnostics.EvaluationError(code, message))
+    | Ok() -> ()
+
+    if parameters.Length <> arguments.Length then
+        raise (
+            Diagnostics.EvaluationError(
+                1318,
+                sprintf
+                    "Incorrect number of arguments for FUNCTION %s.%s; expected %d, got %d"
+                    routine.Schema
+                    routine.Name
+                    parameters.Length
+                    arguments.Length
+            )
+        )
+
+    let executionStore = Session.currentStore caller
+    let capturedSettings =
+        storedExecutionSettings routine.SqlMode routine.CharacterSetClient routine.CollationConnection
+
+    let executionSession =
+        { caller with
+            User = executionAccount.Name
+            AccountHost = executionAccount.Host
+            Database = Some routine.Schema
+            RoutineStack = ("FUNCTION", routine.Schema, routine.Name) :: caller.RoutineStack
+            Variables =
+                storedExecutionVariables
+                    routine.SqlMode
+                    routine.CharacterSetClient
+                    routine.CollationConnection
+                    caller.Variables }
+
+    let initializeParameter ((parameter: StoredProgram.Parameter), value) =
+        let column = routineColumn parameter.Name parameter.ColumnType
+
+        coerceRoutineValue executionStore column value
+        |> Result.map (fun value -> parameter.Name, { Executor.RoutineVariable.Column = column; Value = value })
+
+    let locals =
+        match List.zip parameters arguments |> traverse initializeParameter with
+        | Ok initialized -> Map.ofList initialized
+        | Error error -> raiseFunctionError error
+
+    let run () =
+        runRoutineStatements
+            executionStore
+            executeParsed
+            (fun current _ -> current, Err(1235, "SQL statements in stored functions are not supported"))
+            executionSession
+            locals
+            statements
+
+    let outcome =
+        DynamicScope.withValue storedFunctionCalls (Some(key :: calls)) (fun () ->
+            DynamicScope.withValue storedFunctionSession (Some executionSession) (fun () ->
+                Storage.withExecutionSettings executionStore capturedSettings run))
+
+    match outcome.Error, outcome.Results, outcome.Flow with
+    | Some error, _, _ -> raiseFunctionError error
+    | None, _ :: _, _ -> raise (Diagnostics.EvaluationError(1415, "Not allowed to return a result set from a function"))
+    | None, [], StoredProgram.Flow.Return value ->
+        let column = routineColumn routine.Name returnType
+
+        match coerceRoutineValue executionStore column value with
+        | Ok value -> value
+        | Error error -> raiseFunctionError error
+    | None, [], _ ->
+        raise (
+            Diagnostics.EvaluationError(
+                1321,
+                sprintf "FUNCTION %s.%s ended without RETURN" routine.Schema routine.Name
+            )
+        )
+
+and private withStoredFunctions current =
+    let functions =
+        match Storage.scanList current.Store "mysql" "functions" with
+        | Ok(_, rows) -> rows |> List.choose SystemCatalog.StoredFunction.tryRead
+        | Error _ -> []
+
+    let register name routine registry =
+        let invoke = invokeStoredFunction current routine
+
+        match Parser.parseColumnTypeWithOptions (SqlMode.parserOptionsFor routine.SqlMode) routine.ReturnType with
+        | Error _ -> Functions.registerScalar name invoke registry
+        | Ok columnType ->
+            let metadata =
+                let metadata = ColumnWire.metadataOfType columnType
+
+                match columnType with
+                | TChar _
+                | TVarchar _
+                | TTinyText
+                | TText
+                | TMediumText
+                | TLongText
+                | TEnum _
+                | TSet _ ->
+                    let collationId =
+                        Collation.idAndSortlen
+                        |> Map.tryFind routine.CollationConnection
+                        |> Option.map (fst >> uint16)
+
+                    { metadata with CollationId = collationId }
+                | _ -> metadata
+
+            Functions.registerScalarWithMetadata name metadata invoke registry
+
+    let registry =
+        functions
+        |> List.fold
+            (fun registry routine -> register (routine.Schema + "." + routine.Name) routine registry)
+            current.CustomFunctions
+
+    { current with CustomFunctions = registry }
+
+let private withStoredFunctionRegistry session execute =
+    let customFunctions = session.CustomFunctions
+    let decorated = withStoredFunctions session
+    let executed, result = execute decorated
+    { executed with CustomFunctions = customFunctions }, result
+
 let private normalizeDispatchedSql parserOptions rawSql =
     (Parser.stripVersionCommentsWithOptions parserOptions rawSql).Trim().TrimEnd(';').Trim()
 
@@ -3812,7 +4170,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
                     |> List.map (fun variable -> session.UserVariables |> Map.tryFind variable.Name |> Option.defaultValue VNull)
 
                 match statement.Ast with
-                | Some ast -> executeParsed session (bindPlaceholders ast values)
+                | Some ast ->
+                    withStoredFunctionRegistry session (fun current ->
+                        executeParsed current (bindPlaceholders ast values))
                 | None ->
                     dispatch
                         session
@@ -3831,7 +4191,12 @@ and private dispatchNormalized session rawSql parserOptions sql =
         | Ok(_, rows) -> rows |> List.choose SystemCatalog.Routine.tryRead
         | Error _ -> []
 
-    let runTextRoutine command =
+    let functionEntries () =
+        match Storage.scanList session.Store "mysql" "functions" with
+        | Ok(_, rows) -> rows |> List.choose SystemCatalog.StoredFunction.tryRead
+        | Error _ -> []
+
+    let runTextRoutine session command =
         let authorize privilege database =
             Auth.checkForAccount session.Store (accountOf session) [ privilege, Auth.OnDb database ]
 
@@ -3892,11 +4257,77 @@ and private dispatchNormalized session rawSql parserOptions sql =
                     | Error error ->
                         let code, message = Storage.toMySqlError error
                         session, Err(code, message)
+        | CreateFunction(qualifiedName, ifNotExists, parameters, returnType, characteristics, body, requestedDefiner) ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+            let definer =
+                match requestedDefiner with
+                | None -> accountOf session
+                | Some value when Regex.IsMatch(value, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) -> accountOf session
+                | Some value -> accountRefOf value
+
+            let mayChooseDefiner =
+                Auth.sameAccount definer (accountOf session)
+                || Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
+
+            match Storage.databaseExists (Session.currentStore session) database, authorize "CREATE ROUTINE" database with
+            | false, _ -> session, Err(1049, sprintf "Unknown database '%s'" database)
+            | true, Error(code, message) -> session, Err(code, message)
+            | true, Ok() when not mayChooseDefiner ->
+                session,
+                Err(1227, "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation")
+            | true, Ok() when functionEntries () |> List.exists (SystemCatalog.StoredFunction.matches database name) && ifNotExists ->
+                Diagnostics.note 1304 (sprintf "FUNCTION %s already exists" name)
+                session, Affected 0UL
+            | true, Ok() when functionEntries () |> List.exists (SystemCatalog.StoredFunction.matches database name) ->
+                session, Err(1304, sprintf "FUNCTION %s already exists" name)
+            | true, Ok() ->
+                let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
+
+                match parseFunctionCharacteristics characteristics, parseFunctionDefinition options parameters returnType body with
+                | Error error, _
+                | _, Error error -> session, error
+                | Ok(securityType, deterministic, dataAccess), Ok(_, parsedReturnType, _) ->
+                    if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
+                        Diagnostics.note
+                            1449
+                            (sprintf "The user specified as a definer ('%s'@'%s') does not exist" definer.Name definer.Host)
+
+                    match
+                        Storage.insertRows
+                            session.Store
+                            "mysql"
+                            "functions"
+                            (Some
+                                [ "function_schema"; "function_name"; "return_type"; "function_definition"; "created"
+                                  "definer"; "parameter_definition"; "security_type"; "is_deterministic"; "sql_data_access"
+                                  "sql_mode"; "character_set_client"; "collation_connection"; "database_collation" ])
+                            [ [ VString database
+                                VString name
+                                VString(InformationSchema.columnTypeText parsedReturnType)
+                                VString body
+                                VDateTime DateTime.Now
+                                VString(Auth.formatAccount definer)
+                                VString parameters
+                                VString securityType
+                                VString(if deterministic then "YES" else "NO")
+                                VString dataAccess
+                                VString session.Store.ExecutionSettings.SqlModeText
+                                VString session.Store.ExecutionSettings.ConnectionCharset
+                                VString session.Store.ExecutionSettings.ConnectionCollation.Name
+                                VString Collation.defaultCollation.Name ] ]
+                    with
+                    | Ok _ -> session, Affected 0UL
+                    | Error error ->
+                        let code, message = Storage.toMySqlError error
+                        session, Err(code, message)
         | CallProcedure(qualifiedName, arguments) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let recursive =
                 session.RoutineStack
-                |> List.exists (fun (activeDatabase, activeName) ->
+                |> List.exists (fun (activeType, activeDatabase, activeName) ->
+                    activeType = "PROCEDURE"
+                    &&
                     activeDatabase.Equals(database, StringComparison.OrdinalIgnoreCase)
                     && activeName.Equals(name, StringComparison.OrdinalIgnoreCase))
 
@@ -3949,14 +4380,20 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         | Ok account, Ok(callerSession, parameterValues, outputs) ->
                             let executionStore = Session.currentStore callerSession
                             let originalSettings = Storage.executionSettings executionStore
-                            let capturedSettings = routineExecutionSettings routine
+                            let capturedSettings =
+                                storedExecutionSettings routine.SqlMode routine.CharacterSetClient routine.CollationConnection
                             let executionSession =
                                 { callerSession with
                                     User = account.Name
                                     AccountHost = account.Host
                                     Database = Some routine.Schema
-                                    RoutineStack = (routine.Schema, routine.Name) :: callerSession.RoutineStack
-                                    Variables = routineVariables routine callerSession.Variables }
+                                    RoutineStack = ("PROCEDURE", routine.Schema, routine.Name) :: callerSession.RoutineStack
+                                    Variables =
+                                        storedExecutionVariables
+                                            routine.SqlMode
+                                            routine.CharacterSetClient
+                                            routine.CollationConnection
+                                            callerSession.Variables }
 
                             let mutable resultingSettings = capturedSettings
 
@@ -4050,6 +4487,20 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 | Error error ->
                     let code, message = Storage.toMySqlError error
                     session, Err(code, message)
+        | DropFunction(qualifiedName, ifExists) ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+            let exists = functionEntries () |> List.exists (SystemCatalog.StoredFunction.matches database name)
+
+            match authorize "ALTER ROUTINE" database with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() when not exists && not ifExists -> session, Err(1305, sprintf "FUNCTION %s does not exist" name)
+            | Ok() when not exists -> session, Affected 0UL
+            | Ok() ->
+                match Storage.deleteRows session.Store "mysql" "functions" (SystemCatalog.StoredFunction.rowMatches database name >> Ok) with
+                | Ok _ -> session, Affected 0UL
+                | Error error ->
+                    let code, message = Storage.toMySqlError error
+                    session, Err(code, message)
 
     let eventEntries () =
         match Storage.scanList session.Store "mysql" "events" with
@@ -4112,7 +4563,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | Some command -> runTextEvent command
             | None ->
                 match tryTextRoutineCommand sql with
-                | Some command -> runTextRoutine command
+                | Some(CallProcedure _ as command) ->
+                    withStoredFunctionRegistry session (fun current -> runTextRoutine current command)
+                | Some command -> runTextRoutine (commitSession session) command
                 | None ->
                     match tryTextPreparedCommand sql with
                     | Error result -> session, result
@@ -4131,7 +4584,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             // values from which descriptors can be inferred.
                             let session, result = runProbe session sql probe
                             { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
-                        | None -> executeStatement session sql rawSql
+                        | None -> withStoredFunctionRegistry session (fun current -> executeStatement current sql rawSql)
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and
@@ -4280,7 +4733,7 @@ let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value li
 
     recordDiagnostics session false (fun () ->
         try
-            executeParsed session statement
+            withStoredFunctionRegistry session (fun current -> executeParsed current statement)
         with
         | :? OperationCanceledException -> reraise ()
         | ex -> recoverExecutionError session "LOAD DATA LOCAL INFILE" ex)
@@ -4310,7 +4763,8 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
     | Some ast ->
         recordDiagnostics session false (fun () ->
             try
-                executeParsed session (bindPlaceholders ast values)
+                withStoredFunctionRegistry session (fun current ->
+                    executeParsed current (bindPlaceholders ast values))
             with
             | PlaceholderCountMismatch(expected, got) ->
                 session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)

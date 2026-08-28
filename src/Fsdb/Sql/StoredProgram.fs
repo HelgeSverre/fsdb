@@ -83,6 +83,7 @@ type Statement =
     | Resignal of condition: ConditionValue option * information: (string * Expr) list
     | GetDiagnostics of DiagnosticsStatement
     | SetLocal of name: string * value: Expr
+    | Return of value: Expr
 
 [<RequireQualifiedAccess>]
 type Flow =
@@ -90,6 +91,7 @@ type Flow =
     | Leave of label: string
     | Iterate of label: string
     | ExitHandler
+    | Return of value: Value
 
 type ParameterMode =
     | In
@@ -114,6 +116,8 @@ type ValidationError =
     | VariableAfterCursorOrHandler
     | CursorAfterHandler
     | DeclarationAfterStatement
+    | ReturnOutsideFunction
+    | MissingReturn
     | InvalidSqlState of state: string
     | InvalidUserVariable of message: string
     | RedefiningLabel of name: string
@@ -133,6 +137,8 @@ let validationError =
     | VariableAfterCursorOrHandler -> 1337, "Variable or condition declaration after cursor or handler declaration"
     | CursorAfterHandler -> 1338, "Cursor declaration after handler declaration"
     | DeclarationAfterStatement -> 1064, "Declarations must precede executable statements"
+    | ReturnOutsideFunction -> 1313, "RETURN is only allowed in a FUNCTION"
+    | MissingReturn -> 1320, "No RETURN found in FUNCTION"
     | InvalidSqlState state -> 1407, sprintf "Bad SQLSTATE: '%s'" state
     | InvalidUserVariable message -> 3061, message
     | RedefiningLabel name -> 1309, sprintf "Redefining label %s" name
@@ -163,6 +169,7 @@ let rec private collectSqlStatements includeCursors =
     | Signal _
     | Resignal _
     | SetLocal _
+    | Return _
     | Leave _
     | Iterate _ -> []
 
@@ -195,6 +202,7 @@ let rec expressions =
     | FetchCursor _
     | CloseCursor _ -> []
     | SetLocal(_, value) -> [ value ]
+    | Return value -> [ value ]
     | Leave _
     | Iterate _ -> []
 
@@ -656,6 +664,9 @@ let private fetchCursorPattern =
 
 let private closeCursorPattern =
     Regex(sprintf @"^CLOSE%s(?<name>%s)$" separatorPattern labelPattern, RegexOptions.IgnoreCase)
+
+let private returnPattern =
+    Regex(sprintf @"^RETURN%s(?<value>[\s\S]+)$" separatorPattern, RegexOptions.IgnoreCase)
 
 let private signalPattern =
     Regex(
@@ -1248,6 +1259,7 @@ let private parseWithFallback
             let openCursor = openCursorPattern.Match text
             let fetchCursor = fetchCursorPattern.Match text
             let closeCursor = closeCursorPattern.Match text
+            let returnStatement = returnPattern.Match text
             let assignment = assignmentPattern.Match text
             let leave = leavePattern.Match text
             let iterate = iteratePattern.Match text
@@ -1293,6 +1305,9 @@ let private parseWithFallback
                 Ok(FetchCursor(normalizeLabel fetchCursor.Groups.["name"].Value, targets))
             | Ok None when closeCursor.Success ->
                 Ok(CloseCursor(normalizeLabel closeCursor.Groups.["name"].Value))
+            | Ok None when returnStatement.Success ->
+                Parser.parseExpressionWithOptions options returnStatement.Groups.["value"].Value
+                |> Result.map Return
             | Ok None when leave.Success ->
                 Ok(Leave(normalizeLabel leave.Groups.["label"].Value))
             | Ok None when iterate.Success ->
@@ -1333,13 +1348,19 @@ let private parseWithFallback
                     | Some label -> Ok [ Block(Some label, statements) ]
                     | None -> Ok statements)
     else
-        match Parser.parseStoredStatementWithOptions options body with
-        | Ok statement -> Ok [ Sql statement ]
-        | Error _
-            when not (body.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase))
-                 && isSupportedText body ->
-            Ok [ TextSql body ]
-        | Error error -> Error error
+        let returned = returnPattern.Match(body.Trim())
+
+        if returned.Success then
+            Parser.parseExpressionWithOptions options returned.Groups.["value"].Value
+            |> Result.map (fun value -> [ Return value ])
+        else
+            match Parser.parseStoredStatementWithOptions options body with
+            | Ok statement -> Ok [ Sql statement ]
+            | Error _
+                when not (body.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase))
+                     && isSupportedText body ->
+                Ok [ TextSql body ]
+            | Error error -> Error error
 
 let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
     parseWithFallback options (fun _ -> false) body
@@ -1347,7 +1368,7 @@ let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list
 let parseRoutine (options: Parser.ParserOptions) isSupportedText body =
     parseWithFallback options isSupportedText body
 
-let validate (parameters: Parameter list) (statements: Statement list) : Result<unit, ValidationError> =
+let private validateProgram allowReturn (parameters: Parameter list) (statements: Statement list) =
     let rec addParameters names =
         function
         | [] -> Ok names
@@ -1466,6 +1487,8 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
                     | None -> Ok()
                 | LocalVariable _ -> Ok())
             |> Result.bind (fun _ -> validateStatements afterStatement rest)
+        | Return _ :: _ when not allowReturn -> Error ReturnOutsideFunction
+        | Return _ :: rest -> validateStatements afterStatement rest
         | If(_, whenTrue, whenFalse) :: rest ->
             validateStatements afterStatement whenTrue
             |> Result.bind (fun _ -> validateStatements afterStatement whenFalse)
@@ -1527,3 +1550,24 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
               Labels = [] }
             statements)
     |> Result.map ignore
+
+let validate parameters statements = validateProgram false parameters statements
+
+let rec private containsReturn =
+    function
+    | Return _ -> true
+    | Block(_, body)
+    | Loop(_, body)
+    | While(_, _, body)
+    | Repeat(_, body, _) -> List.exists containsReturn body
+    | If(_, whenTrue, whenFalse) -> List.exists containsReturn whenTrue || List.exists containsReturn whenFalse
+    | Case(_, branches, otherwise) ->
+        (branches |> List.exists (snd >> List.exists containsReturn))
+        || (otherwise |> Option.exists (List.exists containsReturn))
+    | DeclareHandler(_, _, body) -> containsReturn body
+    | _ -> false
+
+let validateFunction parameters statements =
+    validateProgram true parameters statements
+    |> Result.bind (fun () ->
+        if List.exists containsReturn statements then Ok() else Error MissingReturn)

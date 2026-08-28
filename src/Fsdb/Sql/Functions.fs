@@ -86,6 +86,7 @@ type Aggregate = Value list -> Value
 /// Case-insensitive scalar, aggregate, and extension registrations.
 type Registry =
     { Scalars: Map<string, Scalar>
+      ScalarMetadata: Map<string, ColumnMetadata>
       Aggregates: Map<string, Aggregate>
       /// Rich (`QueryContext`-aware) registrations, kept separate from
       /// `Scalars` so builtins and plain `registerScalar` users never pay
@@ -97,11 +98,23 @@ type Registry =
 
 let empty: Registry =
     { Scalars = Map.empty
+      ScalarMetadata = Map.empty
       Aggregates = Map.empty
       Extensions = Map.empty }
 
 let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
-    { registry with Scalars = Map.add (name.ToUpperInvariant()) fn registry.Scalars }
+    let name = name.ToUpperInvariant()
+
+    { registry with
+        Scalars = Map.add name fn registry.Scalars
+        ScalarMetadata = Map.remove name registry.ScalarMetadata }
+
+let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
+    let name = name.ToUpperInvariant()
+
+    { registry with
+        Scalars = Map.add name fn registry.Scalars
+        ScalarMetadata = Map.add name metadata registry.ScalarMetadata }
 
 let registerAggregate (name: string) (fn: Aggregate) (registry: Registry) : Registry =
     { registry with Aggregates = Map.add (name.ToUpperInvariant()) fn registry.Aggregates }
@@ -111,6 +124,9 @@ let registerExtension (fn: ScalarFunction) (registry: Registry) : Registry =
 
 let lookup (name: string) (registry: Registry) : Scalar option =
     Map.tryFind (name.ToUpperInvariant()) registry.Scalars
+
+let lookupScalarMetadata (name: string) (registry: Registry) : ColumnMetadata option =
+    Map.tryFind (name.ToUpperInvariant()) registry.ScalarMetadata
 
 let lookupAggregate (name: string) (registry: Registry) : Aggregate option =
     Map.tryFind (name.ToUpperInvariant()) registry.Aggregates

@@ -2496,6 +2496,22 @@ let mysqlRoutinesColumns: ColumnDef list =
       sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCollationConnection))
       sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyDatabaseCollation)) ]
 
+let mysqlStoredFunctionsColumns: ColumnDef list =
+    [ keyCol "function_schema" 64
+      keyCol "function_name" 64
+      sysCol "return_type" TText false (Some(VString ""))
+      sysCol "function_definition" TText false (Some(VString ""))
+      sysCol "created" (TDateTime 2) false None
+      sysCol "definer" (TChar 93) false (Some(VString ""))
+      sysCol "parameter_definition" TText false (Some(VString ""))
+      sysCol "security_type" (TChar 7) false (Some(VString "DEFINER"))
+      sysCol "is_deterministic" (TChar 3) false (Some(VString "NO"))
+      sysCol "sql_data_access" (TChar 16) false (Some(VString "CONTAINS SQL"))
+      sysCol "sql_mode" TText false (Some(VString SystemCatalog.StoredExecutionContext.legacySqlMode))
+      sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCharacterSetClient))
+      sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCollationConnection))
+      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyDatabaseCollation)) ]
+
 let mysqlEventsColumns: ColumnDef list =
     [ keyCol "event_schema" 64
       keyCol "event_name" 64
@@ -2528,6 +2544,7 @@ let private mysqlSystemDatabase () : Database =
       "triggers", sysTable "triggers" mysqlTriggersColumns []
       "views", sysTable "views" mysqlViewsColumns []
       "routines", sysTable "routines" mysqlRoutinesColumns []
+      "functions", sysTable "functions" mysqlStoredFunctionsColumns []
       "events", sysTable "events" mysqlEventsColumns []
       "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
     |> Map.ofList
@@ -2563,6 +2580,7 @@ let ensureMysqlSchema (store: Store) : unit =
     [ "triggers", mysqlTriggersColumns
       "views", mysqlViewsColumns
       "routines", mysqlRoutinesColumns
+      "functions", mysqlStoredFunctionsColumns
       "events", mysqlEventsColumns
       "check_constraints", mysqlCheckConstraintsColumns ]
     |> List.iter (fun (name, columns) -> ensureTable name columns)

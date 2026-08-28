@@ -3057,6 +3057,10 @@ let tests =
                   Expect.equal initial 1.25M "declaration default"
               | other -> failtestf "unexpected stored program: %A" other
 
+              match Fsdb.StoredProgram.parse defaultOptions "RETURN amount * 2" with
+              | Ok [ Fsdb.StoredProgram.Return(BinOp(Mul, Col "amount", Lit(VInt 2L))) ] -> ()
+              | other -> failtestf "unexpected stored function return: %A" other
+
           testCase "stored condition syntax accepts comments as token separators"
           <| fun _ ->
               match

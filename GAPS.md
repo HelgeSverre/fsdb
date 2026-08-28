@@ -31,7 +31,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 
 | Area | State | Largest single gap |
 |---|---|---|
-| SQL statements | Broad core; large admin/programmatic tail missing | Stored functions and replication/admin SQL |
+| SQL statements | Broad core; large admin/programmatic tail missing | Data-changing stored functions and replication/admin SQL |
 | Query execution | Composite equality/range access, bounded index ordering, restricted join reordering, and stable/correlated index probes | General cost-based planning and broader correlated forms |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, non-point buffers, and geographic SRS semantics |
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
@@ -40,11 +40,11 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound condition-handling bodies | Complex views, procedure calls, and multi-table DML firing |
-| Routines & events | Typed IN/OUT/INOUT procedures with nested calls, compound variables, cursors, dynamic SQL, condition handlers, diagnostics, loops, multi-result CALL, and one-time event declarations | Stored functions and event scheduling |
+| Routines & events | Typed procedures and read-only stored functions with nested calls, compound variables, cursors, condition handlers, diagnostics, loops, and persisted metadata | Data-changing stored functions and event scheduling |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
 | Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
-| Metadata | 23 INFORMATION_SCHEMA views, 10 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
+| Metadata | 23 INFORMATION_SCHEMA views, 11 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -66,7 +66,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Statement family | Impact | Class |
 |---|---|---|
-| Procedures support typed `IN`/`OUT`/`INOUT` parameters, nested calls with local output targets, scoped variables, read-only cursors, dynamic `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE`, compound control flow, condition handlers, `SIGNAL`/`RESIGNAL`, `GET CURRENT/STACKED DIAGNOSTICS`, and multi-result CALL; stored functions remain absent | medium | divergence/refusal |
+| Procedures support typed `IN`/`OUT`/`INOUT` parameters, nested calls with local output targets, scoped variables, read-only cursors, dynamic `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE`, compound control flow, condition handlers, `SIGNAL`/`RESIGNAL`, `GET CURRENT/STACKED DIAGNOSTICS`, and multi-result CALL. Stored functions support typed parameters/results, read-only cursors, handlers, control flow, nested calls, SQL SECURITY, prepared invocation, and metadata; data-changing statements and procedure calls from functions remain refused | medium | divergence/refusal |
 | One-time and recurring `CREATE/DROP EVENT` declarations and metadata are supported; ALTER, status changes, definer execution, and the scheduler thread remain absent | low | divergence/refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
@@ -322,14 +322,20 @@ routine variables in expressions and `LIMIT`, and multiple resultsets with
 the protocol's final OK result. CREATE/DROP/CALL, SHOW CREATE PROCEDURE, SHOW
 PROCEDURE STATUS, and persisted ROUTINES metadata are covered. DEFINER and
 INVOKER bodies use the corresponding account, routine schema, and captured SQL
-mode, client charset, and connection collation. One-time
-and recurring event declarations support CREATE/DROP, SHOW
+mode, client charset, and connection collation.
+Stored functions support typed parameters and return coercion, `RETURN`,
+compound control flow, handlers, read-only cursors and subqueries, nested
+function calls, DEFINER/INVOKER execution, native-function name precedence,
+prepared execution, SHOW metadata, and WAL/snapshot catalog persistence.
+Their creation-time SQL mode, client charset, and connection collation are
+restored while each body runs. One-time and recurring event declarations
+support CREATE/DROP, SHOW
 CREATE EVENT, SHOW EVENTS, and persisted EVENTS metadata. CREATE ROUTINE,
 ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, diagnostics, and dynamic SQL | typed procedure parameters, nested calls with local OUT/INOUT targets, scoped local variables and conditions, read-only cursors, dynamic PREPARE/EXECUTE/DEALLOCATE PREPARE, CONTINUE/EXIT handlers, SIGNAL/RESIGNAL, GET CURRENT/STACKED DIAGNOSTICS, branches, labeled loops, sequential statements, and multi-result CALL are covered; stored functions remain absent | medium | refusal |
+| Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, diagnostics, and the statement forms permitted in each routine kind | procedures cover typed parameters, nested calls, local OUT/INOUT targets, dynamic SQL, sequential statements, and multi-result CALL; functions cover typed scalar returns, nested calls, handlers, cursors, and read-only SQL, but data-changing statements and procedure calls from functions remain refused | medium | refusal |
 | Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and schedule metadata persist, but no event is scheduled or executed | medium | refusal |
 | Event alteration | ALTER EVENT schedule/status/body/rename | absent | low | refusal |
 
@@ -512,7 +518,7 @@ implementation effort:
 2. Transaction scheduling and READ UNCOMMITTED. Indexed point/range UPDATE and
    DELETE statements wait and rebase, but deadlock victim selection, dirty
    reads, and the remaining transaction write shapes are not implemented.
-3. Complex join-derived updatable views, stored functions, and procedure calls
+3. Complex join-derived updatable views, data-changing stored functions, and procedure calls
    from triggers. Procedures cover nested calls with local OUT/INOUT targets;
    procedures and triggers cover typed locals, condition handlers,
    SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential statements.

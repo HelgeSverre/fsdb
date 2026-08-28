@@ -2222,6 +2222,232 @@ let tests =
               | Err(1064, _) -> ()
               | other -> failtestf "expected local PREPARE source rejection, got %A" other
 
+          testCase "stored functions return typed scalar values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE function_source (value INT)"
+              let session, _ = handle session "INSERT INTO function_source VALUES (8)"
+
+              let definitions =
+                  [ "CREATE FUNCTION doubled(value INT) RETURNS INT DETERMINISTIC RETURN value * 2"
+                    "CREATE FUNCTION magnitude(value INT) RETURNS INT BEGIN IF value < 0 THEN RETURN -value; END IF; RETURN value; END"
+                    "CREATE FUNCTION quadrupled(value INT) RETURNS INT RETURN doubled(doubled(value))"
+                    "CREATE FUNCTION clipped(value DECIMAL(5,2)) RETURNS DECIMAL(5,2) RETURN value"
+                    "CREATE FUNCTION handled(value INT) RETURNS INT BEGIN DECLARE CONTINUE HANDLER FOR SQLWARNING SET value = 9; SIGNAL SQLSTATE '01000'; RETURN value; END"
+                    "CREATE FUNCTION cursor_value() RETURNS INT BEGIN DECLARE fetched INT; DECLARE values_cursor CURSOR FOR SELECT value FROM function_source; OPEN values_cursor; FETCH values_cursor INTO fetched; CLOSE values_cursor; RETURN fetched; END" ]
+
+              let session =
+                  definitions
+                  |> List.fold (fun current definition ->
+                      let current, created = handle current definition
+                      Expect.equal created (Affected 0UL) "created stored function"
+                      current) session
+
+              match handle session "SELECT function_schema, function_name FROM mysql.functions ORDER BY function_name" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.sequenceEqual
+                      rows
+                      [ [ Some "fsdb"; Some "clipped" ]
+                        [ Some "fsdb"; Some "cursor_value" ]
+                        [ Some "fsdb"; Some "doubled" ]
+                        [ Some "fsdb"; Some "handled" ]
+                        [ Some "fsdb"; Some "magnitude" ]
+                        [ Some "fsdb"; Some "quadrupled" ] ]
+                      "stored function catalog rows"
+              | other -> failtestf "expected stored function catalog rows, got %A" other
+
+              match Fsdb.Storage.scanList session.Store "mysql" "functions" with
+              | Ok(_, rows) ->
+                  Expect.equal
+                      (rows |> List.choose Fsdb.Engine.SystemCatalog.StoredFunction.tryRead |> List.map _.Name |> List.sort)
+                      [ "clipped"; "cursor_value"; "doubled"; "handled"; "magnitude"; "quadrupled" ]
+                      "stored function catalog decoding"
+              | Error error -> failtestf "expected stored function storage rows, got %A" error
+
+              for sql, expected in
+                  [ "SELECT doubled(3)", "6"
+                    "SELECT fsdb.magnitude(-4)", "4"
+                    "SELECT quadrupled(5)", "20"
+                    "SELECT clipped(123.456)", "123.46"
+                    "SELECT handled(1)", "9"
+                    "SELECT cursor_value()", "8" ] do
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ Some actual ] ]) -> Expect.equal actual expected "stored function value"
+                  | other -> failtestf "expected stored function value for %s, got %A" sql other
+
+              let session, created =
+                  handle session "CREATE PROCEDURE call_function(IN value INT) SELECT doubled(value)"
+
+              Expect.equal created (Affected 0UL) "created procedure that calls a function"
+
+              match handle session "CALL call_function(6)" |> snd with
+              | ProcedureResult(_, [ [ Some "12" ] ]) -> ()
+              | other -> failtestf "expected stored procedure function result, got %A" other
+
+              match prepareStatementForSession session "SELECT doubled(?)" with
+              | Ok(Some ast, 1) ->
+                  let statement =
+                      { Ast = Some ast
+                        Sql = "SELECT doubled(?)"
+                        ParamCount = 1
+                        LastParamTypes = None }
+
+                  match executePrepared session statement [ VInt 7L ] with
+                  | preparedSession, ResultSet(_, [ [ Some "14" ] ]) ->
+                      match preparedSession.LastResultColumnMetadata with
+                      | [ metadata ] -> Expect.equal metadata.TypeId TypeLong "prepared stored function metadata"
+                      | metadata -> failtestf "expected prepared stored function metadata, got %A" metadata
+                  | _, other -> failtestf "expected prepared stored function value, got %A" other
+              | other -> failtestf "expected stored function prepare, got %A" other
+
+              match handle session "SELECT doubled(3), clipped(1.2) LIMIT 0" with
+              | metadataSession, ResultSet(_, []) ->
+                  match metadataSession.LastResultColumnMetadata with
+                  | [ integer; decimal ] ->
+                      Expect.equal integer.TypeId TypeLong "integer function return metadata"
+                      Expect.equal decimal.TypeId TypeNewDecimal "decimal function return metadata"
+                      Expect.equal decimal.Decimals 2uy "decimal function return scale"
+                  | metadata -> failtestf "expected two stored function metadata records, got %A" metadata
+              | _, other -> failtestf "expected empty stored function metadata result, got %A" other
+
+              let session, created = handle session "CREATE FUNCTION abs(value INT) RETURNS VARCHAR(8) RETURN 'stored'"
+              Expect.equal created (Affected 0UL) "created function with native name"
+
+              match handle session "SELECT ABS(-3), fsdb.ABS(-3)" |> snd with
+              | ResultSet(_, [ [ Some "3"; Some "stored" ] ]) -> ()
+              | other -> failtestf "expected native function precedence and qualified stored function, got %A" other
+
+              match handle session "SELECT ABS(-3), fsdb.ABS(-3) LIMIT 0" with
+              | metadataSession, ResultSet(_, []) ->
+                  match metadataSession.LastResultColumnMetadata with
+                  | [ native; stored ] ->
+                      Expect.notEqual native.TypeId TypeVarString "native function metadata"
+                      Expect.equal stored.TypeId TypeVarString "qualified stored function metadata"
+                  | metadata -> failtestf "expected native and stored function metadata, got %A" metadata
+              | _, other -> failtestf "expected empty function precedence metadata result, got %A" other
+
+              match handle session "SHOW CREATE FUNCTION doubled" |> snd with
+              | ResultSet([ "Function"; "sql_mode"; "Create Function"; _; _; _ ], [ [ Some "doubled"; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "FUNCTION `doubled`(value INT) RETURNS int" "function DDL"
+                  Expect.stringContains ddl "DETERMINISTIC" "function characteristic"
+              | other -> failtestf "expected SHOW CREATE FUNCTION, got %A" other
+
+              match handle session "SHOW FUNCTION STATUS" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows.Length (definitions.Length + 1) "function status rows"
+                  Expect.isTrue (rows |> List.forall (fun row -> row.[2] = Some "FUNCTION")) "function status type"
+              | other -> failtestf "expected SHOW FUNCTION STATUS, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT ROUTINE_TYPE, DATA_TYPE, IS_DETERMINISTIC, SQL_DATA_ACCESS FROM information_schema.ROUTINES WHERE ROUTINE_NAME = 'doubled'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "FUNCTION"; Some "int"; Some "YES"; Some "CONTAINS SQL" ] ]) -> ()
+              | other -> failtestf "expected function information schema row, got %A" other
+
+              let session, _ = handle session "CREATE DATABASE routine_other"
+              let session, _ =
+                  handle session "CREATE FUNCTION schema_marker() RETURNS VARCHAR(8) RETURN 'fsdb'"
+              let session, _ =
+                  handle session "CREATE FUNCTION routine_other.schema_marker() RETURNS VARCHAR(8) RETURN 'other'"
+              let session, _ =
+                  handle session "CREATE VIEW function_schema_view AS SELECT schema_marker() AS marker"
+              let session, _ = handle session "USE routine_other"
+
+              match handle session "SELECT marker FROM fsdb.function_schema_view" |> snd with
+              | ResultSet(_, [ [ Some "fsdb" ] ]) -> ()
+              | other -> failtestf "expected a view to resolve functions in its own schema, got %A" other
+
+          testCase "stored functions validate bodies and calls"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql, code in
+                  [ "CREATE FUNCTION missing_return(value INT) RETURNS INT BEGIN SET value = value + 1; END", 1320
+                    "CREATE FUNCTION bad_out(OUT value INT) RETURNS INT RETURN value", 1064
+                    "CREATE FUNCTION result_function() RETURNS INT BEGIN SELECT 1; RETURN 1; END", 1415
+                    "CREATE FUNCTION writing_function() RETURNS INT BEGIN INSERT INTO function_target VALUES (1); RETURN 1; END", 1235
+                    "CREATE FUNCTION dynamic_function() RETURNS INT BEGIN PREPARE selected FROM 'SELECT 1'; RETURN 1; END", 1336
+                    "CREATE PROCEDURE invalid_return() RETURN 1", 1313 ] do
+                  match handle session sql |> snd with
+                  | Err(actual, _) -> Expect.equal actual code "stored function validation error"
+                  | other -> failtestf "expected error %d, got %A" code other
+
+              let session, created = handle session "CREATE FUNCTION one_argument(value INT) RETURNS INT RETURN value"
+              Expect.equal created (Affected 0UL) "created argument function"
+
+              let session, duplicate =
+                  handle session "CREATE FUNCTION IF NOT EXISTS one_argument(value INT) RETURNS INT RETURN 0"
+
+              Expect.equal duplicate (Affected 0UL) "ignored existing function"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ Some "Note"; Some "1304"; Some message ] ]) ->
+                  Expect.stringContains message "one_argument" "duplicate function warning"
+              | other -> failtestf "expected duplicate function note, got %A" other
+
+              let session, created =
+                  handle session "CREATE FUNCTION spaced_nondeterministic() RETURNS INT NOT   DETERMINISTIC RETURN 1"
+
+              Expect.equal created (Affected 0UL) "created nondeterministic function"
+
+              let session, created =
+                  handle session "CREATE FUNCTION commented_function() RETURNS INT COMMENT 'BEGIN RETURN' RETURN 1"
+
+              Expect.equal created (Affected 0UL) "function comment does not become its body"
+
+              match handle session "SELECT commented_function()" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected function with a keyword-bearing comment, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT IS_DETERMINISTIC FROM information_schema.ROUTINES WHERE ROUTINE_NAME = 'spaced_nondeterministic'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "NO" ] ]) -> ()
+              | other -> failtestf "expected nondeterministic routine metadata, got %A" other
+
+              match handle session "CREATE FUNCTION missing_schema.function_name() RETURNS INT RETURN 1" |> snd with
+              | Err(1049, _) -> ()
+              | other -> failtestf "expected unknown function schema error, got %A" other
+
+              let session, created = handle session "CREATE FUNCTION recursive_function() RETURNS INT RETURN recursive_function()"
+              Expect.equal created (Affected 0UL) "created recursive function"
+
+              match handle session "SELECT one_argument()" |> snd with
+              | Err(1318, _) -> ()
+              | other -> failtestf "expected argument-count error, got %A" other
+
+              match handle session "SELECT recursive_function()" |> snd with
+              | Err(1424, _) -> ()
+              | other -> failtestf "expected recursive function refusal, got %A" other
+
+              let session, dropped = handle session "DROP FUNCTION one_argument"
+              Expect.equal dropped (Affected 0UL) "dropped stored function"
+
+              match handle session "SELECT one_argument(1)" |> snd with
+              | Err(1305, _) -> ()
+              | other -> failtestf "expected dropped function to be unavailable, got %A" other
+
+              let session, _ = handle session "CREATE TABLE routine_commit (value INT)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO routine_commit VALUES (1)"
+              let session, created =
+                  handle session "CREATE FUNCTION commit_probe() RETURNS INT RETURN 1"
+
+              Expect.equal created (Affected 0UL) "created function after transaction write"
+              Expect.isNone session.Tx "function DDL commits the transaction"
+
+              let session, _ = handle session "ROLLBACK"
+
+              match handle session "SELECT value FROM routine_commit" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected pre-function transaction write to stay committed, got %A" other
+
           testCase "stored procedures call procedures with local outputs"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -2473,6 +2699,28 @@ let tests =
                       root
                       "CREATE DEFINER='owner'@'%' PROCEDURE dynamic_invoker() SQL SECURITY INVOKER BEGIN SET @dynamic_sql = 'SELECT n FROM secret'; PREPARE dynamic_secret FROM @dynamic_sql; EXECUTE dynamic_secret; DEALLOCATE PREPARE dynamic_secret; END"
 
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER='owner'@'%' FUNCTION function_definer() RETURNS VARCHAR(100) SQL SECURITY DEFINER RETURN CONCAT(CURRENT_USER(), '|', USER(), '|', (SELECT n FROM secret))"
+
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER='owner'@'%' FUNCTION function_invoker() RETURNS INT SQL SECURITY INVOKER RETURN (SELECT n FROM secret)"
+
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER='owner'@'%' FUNCTION function_identity() RETURNS VARCHAR(100) SQL SECURITY INVOKER RETURN CURRENT_USER()"
+
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER=`owner`@`%` SQL SECURITY DEFINER VIEW function_identity_view AS SELECT function_identity() AS identity"
+
+              let root = apply root "GRANT SELECT ON fsdb.function_identity_view TO 'caller'@'%'"
+
               let caller =
                   { create 2 store with
                       User = "caller"
@@ -2504,6 +2752,38 @@ let tests =
               match handle caller "CALL dynamic_invoker()" |> snd with
               | Err(1142, _) -> ()
               | other -> failtestf "expected dynamic SQL to use invoker privileges, got %A" other
+
+              match handle caller "SELECT function_definer()" |> snd with
+              | ResultSet(_, [ [ Some "owner@%|caller@localhost|9" ] ]) -> ()
+              | other -> failtestf "expected stored function definer identity and privileges, got %A" other
+
+              match handle caller "SELECT function_invoker()" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected stored function invoker privileges, got %A" other
+
+              match handle caller "SELECT identity FROM function_identity_view" |> snd with
+              | ResultSet(_, [ [ Some "owner@%" ] ]) -> ()
+              | other -> failtestf "expected a view definer to become the function invoker, got %A" other
+
+              match handle caller "SHOW CREATE FUNCTION function_definer" |> snd with
+              | ResultSet(_, [ [ Some "function_definer"; _; None; _; _; _ ] ]) -> ()
+              | other -> failtestf "expected an EXECUTE grantee to see redacted function DDL, got %A" other
+
+              match
+                  handle
+                      caller
+                      "SELECT ROUTINE_NAME, ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_NAME = 'function_definer'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "function_definer"; None ] ]) -> ()
+              | other -> failtestf "expected redacted routine information for an EXECUTE grantee, got %A" other
+
+              match handle caller "SHOW FUNCTION STATUS" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.isTrue
+                      (rows |> List.exists (fun row -> row.[1] = Some "function_definer"))
+                      "EXECUTE grantee sees function status"
+              | other -> failtestf "expected function status for an EXECUTE grantee, got %A" other
 
               let root = apply root "CREATE DEFINER='missing'@'%' PROCEDURE missing_definer() SELECT 1"
 

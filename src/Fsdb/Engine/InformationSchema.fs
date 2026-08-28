@@ -10,6 +10,7 @@ open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Engine
+open Fsdb.Sql
 
 let private col (name: string) (ty: ColumnType) : ColumnDef =
     { Name = name
@@ -1135,21 +1136,75 @@ let private routinesColumns =
       strCol "COLLATION_CONNECTION"
       strCol "DATABASE_COLLATION" ]
 
-let private routinesRows (catalog: Catalog) =
-    mysqlTable catalog "routines"
-    |> Option.map (fun table ->
-        table.RowsArray
-        |> Seq.choose SystemCatalog.Routine.tryRead
-        |> Seq.map (fun routine ->
-            let created = routine.Created |> Option.map VDateTime |> Option.defaultValue VNull
+let private routineAccess schema definer =
+    match currentViewer.Value, Fsdb.Auth.tryParseAccount definer with
+    | None, _ -> true, true
+    | Some _, None -> false, false
+    | Some(store, viewer), Some owner ->
+        let ownsRoutine = Fsdb.Auth.sameAccount viewer owner
+        let seesDefinitions =
+            ownsRoutine
+            || Fsdb.Auth.hasGlobalPrivForAccount store viewer "SELECT"
+            || (Fsdb.Auth.checkForAccount store viewer [ "ALTER ROUTINE", Fsdb.Auth.OnDb schema ] |> Result.isOk)
+        let canExecute = Fsdb.Auth.checkForAccount store viewer [ "EXECUTE", Fsdb.Auth.OnDb schema ] |> Result.isOk
+        seesDefinitions || canExecute, seesDefinitions
 
-            [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "PROCEDURE"; vs ""; VNull; VNull
-               VNull; VNull; VNull; VNull; VNull; VNull; vs "SQL"; vs routine.Definition; VNull; vs "SQL"; vs "SQL"
-               vs "NO"; vs "CONTAINS SQL"; VNull; vs routine.SecurityType; created; created; vs routine.SqlMode
-               vs ""; vs routine.Definer; vs routine.CharacterSetClient; vs routine.CollationConnection
-               vs routine.DatabaseCollation |])
-        |> List.ofSeq)
-    |> Option.defaultValue []
+let private routineVisible schema definer = routineAccess schema definer |> fst
+let private routineDefinitionVisible schema definer = routineAccess schema definer |> snd
+
+let private routinesRows (catalog: Catalog) =
+    let procedures =
+        mysqlTable catalog "routines"
+        |> Option.map (fun table ->
+            table.RowsArray
+            |> Seq.choose SystemCatalog.Routine.tryRead
+            |> Seq.filter (fun routine -> routineVisible routine.Schema routine.Definer)
+            |> Seq.map (fun routine ->
+                let created = routine.Created |> Option.map VDateTime |> Option.defaultValue VNull
+
+                [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "PROCEDURE"; vs ""; VNull; VNull
+                   VNull; VNull; VNull; VNull; VNull; VNull; vs "SQL"
+                   (if routineDefinitionVisible routine.Schema routine.Definer then vs routine.Definition else VNull)
+                   VNull; vs "SQL"; vs "SQL"
+                   vs "NO"; vs "CONTAINS SQL"; VNull; vs routine.SecurityType; created; created; vs routine.SqlMode
+                   vs ""; vs routine.Definer; vs routine.CharacterSetClient; vs routine.CollationConnection
+                   vs routine.DatabaseCollation |])
+            |> List.ofSeq)
+        |> Option.defaultValue []
+
+    let functions =
+        mysqlTable catalog "functions"
+        |> Option.map (fun table ->
+            table.RowsArray
+            |> Seq.choose SystemCatalog.StoredFunction.tryRead
+            |> Seq.filter (fun routine -> routineVisible routine.Schema routine.Definer)
+            |> Seq.map (fun routine ->
+                let created = routine.Created |> Option.map VDateTime |> Option.defaultValue VNull
+                let columnType = Parser.parseColumnType routine.ReturnType |> Result.toOption
+                let dataType = columnType |> Option.map dataTypeName |> Option.defaultValue routine.ReturnType
+                let characterLength = columnType |> Option.bind charMaxLength
+                let numeric = columnType |> Option.bind numericPrecisionScale
+                let temporal = columnType |> Option.bind datetimePrecision
+                let isCharacter = columnType |> Option.exists isStringy
+
+                [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "FUNCTION"; vs dataType
+                   characterLength |> Option.map VInt |> Option.defaultValue VNull
+                   characterLength |> Option.map (fun length -> VInt(length * 4L)) |> Option.defaultValue VNull
+                   numeric |> Option.map (fst >> VInt) |> Option.defaultValue VNull
+                   numeric |> Option.map (snd >> VInt) |> Option.defaultValue VNull
+                   temporal |> Option.map VInt |> Option.defaultValue VNull
+                   if isCharacter then vs "utf8mb4" else VNull
+                   if isCharacter then vs routine.CollationConnection else VNull
+                   vs routine.ReturnType; vs "SQL"
+                   (if routineDefinitionVisible routine.Schema routine.Definer then vs routine.Definition else VNull)
+                   VNull; vs "SQL"; vs "SQL"
+                   vs (if routine.Deterministic then "YES" else "NO"); vs routine.SqlDataAccess; VNull
+                   vs routine.SecurityType; created; created; vs routine.SqlMode; vs ""; vs routine.Definer
+                   vs routine.CharacterSetClient; vs routine.CollationConnection; vs routine.DatabaseCollation |])
+            |> List.ofSeq)
+        |> Option.defaultValue []
+
+    procedures @ functions
 
 let private parametersColumns =
     [ strCol "SPECIFIC_CATALOG"
@@ -2337,11 +2392,13 @@ let showEvents (catalog: Catalog) (dbName: string option) : ShowResult =
     )
 
 /// `SHOW PROCEDURE STATUS` / `SHOW FUNCTION STATUS [LIKE|WHERE ...]`.
-let showRoutineStatus (catalog: Catalog) : ShowResult =
+let showRoutineStatus (catalog: Catalog) kind : ShowResult =
     let rows =
         routinesRows catalog
+        |> List.filter (fun row ->
+            String.Equals(toText row.[4] |> Option.defaultValue "", kind, StringComparison.OrdinalIgnoreCase))
         |> List.map (fun row ->
-            [ toText row.[2]; toText row.[3]; Some "PROCEDURE"; Some "SQL"; toText row.[27]; toText row.[24]
+            [ toText row.[2]; toText row.[3]; toText row.[4]; Some "SQL"; toText row.[27]; toText row.[24]
               toText row.[23]; Some "DEFINER"; Some ""; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
               Some "utf8mb4_0900_ai_ci" ])
 

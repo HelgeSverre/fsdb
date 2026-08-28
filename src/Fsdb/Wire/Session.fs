@@ -181,7 +181,7 @@ type Session =
       /// integer ids assigned by COM_STMT_PREPARE.
       TextStatements: Map<string, PreparedStmt>
       /// Active stored-procedure identities, innermost first.
-      RoutineStack: (string * string) list
+      RoutineStack: (string * string * string) list
       /// The next id COM_STMT_PREPARE will assign.
       NextStmtId: int
       /// Bytes buffered by COM_STMT_SEND_LONG_DATA, keyed by (statement id,

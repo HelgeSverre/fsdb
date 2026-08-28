@@ -298,6 +298,11 @@ let private registryAccount (registry: Registry) =
     Functions.lookup "CURRENT_USER" registry
     |> Option.bind (fun currentUser -> currentUser [] |> toText |> Option.bind Auth.tryParseAccount)
 
+let private scalarExecutionAccount = System.Threading.AsyncLocal<Auth.Account option>()
+
+let currentScalarExecutionAccount () : Auth.Account option =
+    scalarExecutionAccount.Value
+
 let private registryForViewSecurity
     (store: Store)
     (registry: Registry)
@@ -1862,6 +1867,12 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             let length = max sourceLength charLength |> max 8L |> min (int64 System.UInt32.MaxValue)
             Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 length; Flags = BinaryFlag }
 
+    let (|RegisteredScalarResult|_|) name =
+        match Functions.lookup name ctx.Registry with
+        | Some _ -> Functions.lookupScalarMetadata name ctx.Registry
+        | None when name.Contains('.', System.StringComparison.Ordinal) -> None
+        | None -> Functions.lookupScalarMetadata (ctx.DbName + "." + name) ctx.Registry
+
     match expr with
     | Lit VNull -> None
     | Lit(VInt value) ->
@@ -1956,6 +1967,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         weightStringMetadata source (Some length)
     | FuncCall(name, [ source ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
         weightStringMetadata source None
+    | FuncCall(RegisteredScalarResult metadata, _) -> Some metadata
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
         | "COUNT", _ -> simple TypeLongLong
@@ -3873,14 +3885,25 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | Some function_ -> function_ arguments
                         | None -> VNull))))
     | FuncCall(name, args) ->
-        match Functions.lookup name ctx.Registry with
+        let scalar =
+            match Functions.lookup name ctx.Registry with
+            | Some function_ -> Some function_
+            | None when name.Contains('.', System.StringComparison.Ordinal) -> None
+            | None -> Functions.lookup (ctx.DbName + "." + name) ctx.Registry
+
+        match scalar with
         | None -> Error(unknownFunction name)
         | Some fn ->
             args
             |> traverse eval
             |> Result.bind (fun values ->
                 try
-                    Ok(fn values)
+                    let invoke () = fn values
+
+                    match registryAccount ctx.Registry with
+                    | Some account ->
+                        DynamicScope.withValue scalarExecutionAccount (Some account) invoke |> Ok
+                    | None -> Ok(invoke ())
                 with Diagnostics.EvaluationError(code, message) ->
                     Error(code, message))
     // `expr COLLATE name` evaluates as its inner expression — the tag
@@ -12609,6 +12632,8 @@ let rec executeAs
                                     | Ok value ->
                                         locals.Value <- Map.add name value locals.Value
                                         complete (Affected 0UL)
+                                | StoredProgram.Return _ ->
+                                    complete (Err(1313, "RETURN is only allowed in a FUNCTION"))
                                 | StoredProgram.Block(label, body) ->
                                     let before = locals.Value
                                     let beforeCursors = cursors.Value

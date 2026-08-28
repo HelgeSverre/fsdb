@@ -942,7 +942,7 @@ let tests =
               let users = rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1])
               Expect.equal users [ VString "root" ] "bootstrap root row present"
 
-          testCase "compound procedure signatures and bodies survive WAL recovery"
+          testCase "stored procedures and functions survive WAL and snapshot recovery"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -963,6 +963,15 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected procedure creation, got %A" other
 
+              match
+                  handle
+                      session
+                      "CREATE FUNCTION doubled(value INT) RETURNS INT DETERMINISTIC RETURN value * 2"
+                  |> snd
+              with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected function creation, got %A" other
+
               let reloaded = load dir
               let recovered = Fsdb.Session.create 2 reloaded
 
@@ -974,6 +983,19 @@ let tests =
               match handle recovered "CALL topics(6)" |> snd with
               | MultipleResults [ (ResultSet([ "doubled" ], [ [ Some "12" ] ]), _); (Affected 0UL, []) ] -> ()
               | other -> failtestf "expected recovered compound procedure execution, got %A" other
+
+              match handle recovered "SELECT doubled(7)" |> snd with
+              | ResultSet(_, [ [ Some "14" ] ]) -> ()
+              | other -> failtestf "expected recovered stored function execution, got %A" other
+
+              snapshotNow dir reloaded
+
+              let snapshotted = load dir
+              let recovered = Fsdb.Session.create 3 snapshotted
+
+              match handle recovered "SELECT doubled(9)" |> snd with
+              | ResultSet(_, [ [ Some "18" ] ]) -> ()
+              | other -> failtestf "expected snapshotted stored function execution, got %A" other
 
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->

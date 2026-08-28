@@ -149,6 +149,47 @@ module Routine =
 
     let rowMatches schema name row = tryRead row |> Option.exists (matches schema name)
 
+module StoredFunction =
+    type Entry =
+        { Schema: string
+          Name: string
+          ReturnType: string
+          Definition: string
+          Created: DateTime option
+          Definer: string
+          Parameters: string
+          SecurityType: string
+          Deterministic: bool
+          SqlDataAccess: string
+          SqlMode: string
+          CharacterSetClient: string
+          CollationConnection: string
+          DatabaseCollation: string }
+
+    let tryRead (row: Value[]) : Entry option =
+        readCompleteRow 6
+            (fun row ->
+                { Schema = textAt 0 row
+                  Name = textAt 1 row
+                  ReturnType = textAt 2 row
+                  Definition = textAt 3 row
+                  Created = dateTimeAt 4 row
+                  Definer = textAt 5 row
+                  Parameters = textAt 6 row
+                  SecurityType = textOr "DEFINER" 7 row
+                  Deterministic = String.Equals(textAt 8 row, "YES", StringComparison.OrdinalIgnoreCase)
+                  SqlDataAccess = textOr "CONTAINS SQL" 9 row
+                  SqlMode = textOr StoredExecutionContext.legacySqlMode 10 row
+                  CharacterSetClient = textOr StoredExecutionContext.legacyCharacterSetClient 11 row
+                  CollationConnection = textOr StoredExecutionContext.legacyCollationConnection 12 row
+                  DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 13 row })
+            row
+
+    let matches schema name (entry: Entry) =
+        sameIdentity schema name entry.Schema entry.Name
+
+    let rowMatches schema name row = tryRead row |> Option.exists (matches schema name)
+
 module Event =
     type Entry =
         { Schema: string

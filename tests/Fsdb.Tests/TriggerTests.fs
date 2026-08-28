@@ -1174,25 +1174,32 @@ let tests =
               let sql (session: Fsdb.Session.Session) text = handle session text |> snd
 
               expectOk (sql root "CREATE TABLE pub (id INT PRIMARY KEY)") "create pub"
-              expectOk (sql root "CREATE TABLE audit (definer_identity VARCHAR(100), invoker_identity VARCHAR(100))") "create audit"
+              expectOk
+                  (sql root "CREATE TABLE audit (definer_identity VARCHAR(100), invoker_identity VARCHAR(100), function_identity VARCHAR(100))")
+                  "create audit"
               expectOk (sql root "CREATE USER owner") "create owner"
               expectOk (sql root "CREATE USER writer") "create writer"
               expectOk (sql root "GRANT SELECT, INSERT, TRIGGER ON fsdb.pub TO owner") "grant owner subject privileges"
               expectOk (sql root "GRANT INSERT ON fsdb.audit TO owner") "grant owner body privilege"
+              expectOk (sql root "GRANT CREATE ROUTINE, EXECUTE ON fsdb.* TO owner") "grant owner routine privileges"
               expectOk (sql root "GRANT INSERT ON fsdb.pub TO writer") "grant writer"
 
               let owner = { Fsdb.Session.create 2 store with User = "owner" }
               let writer = { Fsdb.Session.create 3 store with User = "writer" }
 
               expectOk
-                  (sql owner "CREATE TRIGGER identity AFTER INSERT ON pub FOR EACH ROW INSERT INTO audit VALUES (CURRENT_USER(), USER())")
+                  (sql owner "CREATE FUNCTION trigger_identity() RETURNS VARCHAR(100) SQL SECURITY INVOKER RETURN CURRENT_USER()")
+                  "create trigger function"
+
+              expectOk
+                  (sql owner "CREATE TRIGGER identity AFTER INSERT ON pub FOR EACH ROW INSERT INTO audit VALUES (CURRENT_USER(), USER(), trigger_identity())")
                   "create identity trigger"
               expectOk (sql writer "INSERT INTO pub VALUES (1)") "fire identity trigger"
 
               Expect.equal
-                  (rows store "SELECT definer_identity, invoker_identity FROM audit")
-                  [ [ Some "owner@%"; Some "writer@localhost" ] ]
-                  "definer and invoker identities"
+                  (rows store "SELECT definer_identity, invoker_identity, function_identity FROM audit")
+                  [ [ Some "owner@%"; Some "writer@localhost"; Some "owner@%" ] ]
+                  "definer, invoker, and nested function identities"
 
           testCase "SHOW TRIGGERS reports the real definer, not a constant"
           <| fun _ ->
