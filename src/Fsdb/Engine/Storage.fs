@@ -2519,7 +2519,17 @@ let mysqlEventsColumns: ColumnDef list =
       sysCol "event_definition" TText false (Some(VString ""))
       sysCol "created" (TDateTime 2) false None
       sysCol "definer" (TChar 93) false (Some(VString ""))
-      sysCol "status" (TChar 8) false (Some(VString "ENABLED")) ]
+      sysCol "status" (TChar 21) false (Some(VString "ENABLED"))
+      sysCol "on_completion" (TChar 12) false (Some(VString "NOT PRESERVE"))
+      sysCol "event_comment" (TVarchar 2048) false (Some(VString ""))
+      sysCol "last_altered" (TDateTime 2) true None
+      sysCol "last_executed" (TDateTime 0) true None
+      sysCol "sql_mode" TText false (Some(VString SystemCatalog.StoredExecutionContext.legacySqlMode))
+      sysCol "time_zone" (TChar 64) false (Some(VString "SYSTEM"))
+      sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCharacterSetClient))
+      sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCollationConnection))
+      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyDatabaseCollation))
+      sysCol "originator" (TBigInt true) false (Some(VUInt 1UL)) ]
 
 /// Row-backed CHECK definitions. Keeping these beside views/triggers avoids
 /// changing the binary Table snapshot layout: ordinary row WAL events carry
@@ -2558,21 +2568,28 @@ let ensureMysqlSchema (store: Store) : unit =
     let ensureTable name columns =
         match Map.tryFind name dbRef.Value with
         | None -> dbRef.Value <- Map.add name (sysTable name columns []) dbRef.Value
-        | Some table when table.Columns.Length < columns.Length ->
-            let addedColumns = List.skip table.Columns.Length columns
+        | Some table ->
+            let retainedColumns =
+                if table.Columns.Length > columns.Length then
+                    List.skip columns.Length table.Columns
+                else
+                    []
+
+            let currentColumns = columns @ retainedColumns
+            let addedColumns = currentColumns |> List.skip table.Columns.Length
             let defaultValues =
                 addedColumns
                 |> List.map (fun column -> match column.Default with Some(DConst value) -> value | _ -> VNull)
                 |> Array.ofList
 
-            dbRef.Value <-
-                Map.add
-                    name
-                    { table with
-                        Columns = table.Columns @ addedColumns
-                        RowsArray = table.RowsArray |> RowStore.map (fun row -> Array.append row defaultValues) }
-                    dbRef.Value
-        | Some _ -> ()
+            if table.Columns <> currentColumns then
+                dbRef.Value <-
+                    Map.add
+                        name
+                        { table with
+                            Columns = currentColumns
+                            RowsArray = table.RowsArray |> RowStore.map (fun row -> Array.append row defaultValues) }
+                        dbRef.Value
 
     // Old trigger rows receive an empty definer and therefore fail closed;
     // treating a missing identity as root would turn catalog migration into

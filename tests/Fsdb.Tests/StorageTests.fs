@@ -114,6 +114,9 @@ let tests =
                             SystemCatalog.StoredExecutionContext.legacyCollationConnection
                             "legacy routine collation"
                         Expect.equal event.Schedule "EVERY 1 DAY" "event schedule"
+                        Expect.equal event.Status Fsdb.Sql.Event.Status.Enabled "legacy event status"
+                        Expect.equal event.OnCompletion "NOT PRESERVE" "legacy completion policy"
+                        Expect.equal event.LastAltered (Some created) "legacy last-altered fallback"
                         Expect.isTrue (SystemCatalog.Routine.matches "APP" "REFRESH" routine) "routine identity"
                         Expect.isTrue (SystemCatalog.Event.rowMatches "APP" "NIGHTLY" eventRow) "event row identity"
                     | _ -> failtest "expected routine and event rows" ]

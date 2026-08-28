@@ -942,7 +942,7 @@ let tests =
               let users = rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1])
               Expect.equal users [ VString "root" ] "bootstrap root row present"
 
-          testCase "stored procedures and functions survive WAL and snapshot recovery"
+          testCase "stored routines and events survive WAL and snapshot recovery"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -972,6 +972,15 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected function creation, got %A" other
 
+              match
+                  handle
+                      session
+                      "CREATE EVENT durable_event ON SCHEDULE EVERY 1 DAY ON COMPLETION PRESERVE DISABLE COMMENT 'durable' DO SELECT 1"
+                  |> snd
+              with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected event creation, got %A" other
+
               let reloaded = load dir
               let recovered = Fsdb.Session.create 2 reloaded
 
@@ -988,6 +997,11 @@ let tests =
               | ResultSet(_, [ [ Some "14" ] ]) -> ()
               | other -> failtestf "expected recovered stored function execution, got %A" other
 
+              match handle recovered "SHOW CREATE EVENT durable_event" |> snd with
+              | ResultSet(_, [ [ Some "durable_event"; Some ""; Some "SYSTEM"; Some ddl; Some "latin1"; Some "latin1_bin"; _ ] ]) ->
+                  Expect.stringContains ddl "ON COMPLETION PRESERVE DISABLE COMMENT 'durable'" "event metadata recovered"
+              | other -> failtestf "expected recovered event metadata, got %A" other
+
               snapshotNow dir reloaded
 
               let snapshotted = load dir
@@ -996,6 +1010,11 @@ let tests =
               match handle recovered "SELECT doubled(9)" |> snd with
               | ResultSet(_, [ [ Some "18" ] ]) -> ()
               | other -> failtestf "expected snapshotted stored function execution, got %A" other
+
+              match handle recovered "SHOW CREATE EVENT durable_event" |> snd with
+              | ResultSet(_, [ [ Some "durable_event"; _; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "COMMENT 'durable'" "snapshotted event metadata recovered"
+              | other -> failtestf "expected snapshotted event metadata, got %A" other
 
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->

@@ -1323,10 +1323,14 @@ let private eventsRows (catalog: Catalog) =
                     vs "ONE TIME", VNull, VNull
 
             let created = event.Created |> Option.map VDateTime |> Option.defaultValue VNull
+            let lastAltered = event.LastAltered |> Option.map VDateTime |> Option.defaultValue VNull
+            let lastExecuted = event.LastExecuted |> Option.map VDateTime |> Option.defaultValue VNull
 
-            [| vs "def"; vs event.Schema; vs event.Name; vs event.Definer; vs "SYSTEM"; vs "SQL"; vs event.Definition
-               eventType; VNull; intervalValue; intervalField; vs ""; VNull; VNull; vs event.Status; vs "NOT PRESERVE"
-               created; created; VNull; vs ""; VInt 1L; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+            [| vs "def"; vs event.Schema; vs event.Name; vs event.Definer; vs event.TimeZone; vs "SQL"; vs event.Definition
+               eventType; VNull; intervalValue; intervalField; vs event.SqlMode; VNull; VNull
+               vs (Fsdb.Sql.Event.statusText event.Status); vs event.OnCompletion; created; lastAltered; lastExecuted
+               vs event.Comment; VInt event.Originator; vs event.CharacterSetClient; vs event.CollationConnection
+               vs event.DatabaseCollation |])
         |> List.ofSeq)
     |> Option.defaultValue []
 

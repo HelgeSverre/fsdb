@@ -198,7 +198,17 @@ module Event =
           Definition: string
           Created: DateTime option
           Definer: string
-          Status: string }
+          Status: Fsdb.Sql.Event.Status
+          OnCompletion: string
+          Comment: string
+          LastAltered: DateTime option
+          LastExecuted: DateTime option
+          SqlMode: string
+          TimeZone: string
+          CharacterSetClient: string
+          CollationConnection: string
+          DatabaseCollation: string
+          Originator: int64 }
 
     let tryRead (row: Value[]) : Entry option =
         readCompleteRow 7
@@ -209,7 +219,17 @@ module Event =
                   Definition = textAt 3 row
                   Created = dateTimeAt 4 row
                   Definer = textAt 5 row
-                  Status = textAt 6 row })
+                  Status = textAt 6 row |> Fsdb.Sql.Event.statusOfText
+                  OnCompletion = textOr "NOT PRESERVE" 7 row
+                  Comment = textAt 8 row
+                  LastAltered = dateTimeAt 9 row |> Option.orElseWith (fun () -> dateTimeAt 4 row)
+                  LastExecuted = dateTimeAt 10 row
+                  SqlMode = textOr StoredExecutionContext.legacySqlMode 11 row
+                  TimeZone = textOr "SYSTEM" 12 row
+                  CharacterSetClient = textOr StoredExecutionContext.legacyCharacterSetClient 13 row
+                  CollationConnection = textOr StoredExecutionContext.legacyCollationConnection 14 row
+                  DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 15 row
+                  Originator = int64At 1L 16 row })
             row
 
     let matches schema name (entry: Entry) =

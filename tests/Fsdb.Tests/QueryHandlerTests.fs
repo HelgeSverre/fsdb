@@ -3022,6 +3022,95 @@ let tests =
               | Err(1064, _) -> ()
               | other -> failtestf "expected altered body validation, got %A" other
 
+          testCase "event declaration options preserve security and metadata"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let apply session sql =
+                  match handle session sql with
+                  | next, Affected _ -> next
+                  | _, result -> failtestf "expected %s to succeed, got %A" sql result
+
+              let session = apply session "CREATE TABLE event_log (value INT, note VARCHAR(100))"
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE DEFINER=CURRENT_USER EVENT IF NOT EXISTS decorated ON SCHEDULE EVERY 1 DAY ON COMPLETION PRESERVE DISABLE ON REPLICA COMMENT 'mentions DO and ''quotes''' DO INSERT INTO event_log VALUES (1, 'DO stays in the body')"
+
+              Expect.equal created (Affected 0UL) "created decorated event"
+
+              let session, duplicate =
+                  handle
+                      session
+                      "CREATE EVENT IF NOT EXISTS decorated ON SCHEDULE EVERY 2 DAY DO INSERT INTO event_log VALUES (999, 'duplicate')"
+
+              Expect.equal duplicate (Affected 0UL) "duplicate IF NOT EXISTS is a no-op"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ _; Some "1537"; Some "Event 'decorated' already exists" ] ]) -> ()
+              | other -> failtestf "expected duplicate event note, got %A" other
+
+              match
+                  handle
+                      session
+                      "CREATE EVENT IF NOT EXISTS decorated ON SCHEDULE EVERY 1 DAY DO this is invalid"
+                  |> snd
+              with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected duplicate declarations to validate their body, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT definer,status,on_completion,event_comment,created=last_altered,last_executed IS NULL FROM information_schema.events WHERE event_name='decorated'"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "root@%"; Some "REPLICA_SIDE_DISABLED"; Some "PRESERVE"; Some "mentions DO and 'quotes'"
+                      Some "1"; Some "1" ] ]
+                ) -> ()
+              | other -> failtestf "expected event declaration metadata, got %A" other
+
+              match handle session "SHOW CREATE EVENT decorated" |> snd with
+              | ResultSet(_, [ [ _; _; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "DEFINER=`root`@`%`" "stored definer"
+                  Expect.stringContains ddl "ON COMPLETION PRESERVE" "completion policy"
+                  Expect.stringContains ddl "DISABLE ON REPLICA" "replica status"
+                  Expect.stringContains ddl "COMMENT 'mentions DO and ''quotes'''" "escaped comment"
+                  Expect.stringContains ddl "DO INSERT INTO event_log VALUES (1, 'DO stays in the body')" "original body"
+                  Expect.isFalse (ddl.Contains "999") "duplicate declaration did not replace the event"
+              | other -> failtestf "expected decorated event DDL, got %A" other
+
+              let session = apply session "CREATE USER event_editor"
+              let session = apply session "GRANT EVENT ON fsdb.* TO event_editor"
+              let editor = { create 2 store with User = "event_editor" }
+
+              match
+                  handle
+                      editor
+                      "CREATE DEFINER='root'@'%' EVENT denied_definer ON SCHEDULE EVERY 1 DAY DO SELECT 1"
+                  |> snd
+              with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected explicit-definer denial, got %A" other
+
+              let session =
+                  apply
+                      session
+                      "ALTER DEFINER=CURRENT_USER EVENT decorated ON COMPLETION NOT PRESERVE ENABLE COMMENT 'changed'"
+
+              match handle session "SHOW CREATE EVENT decorated" |> snd with
+              | ResultSet(_, [ [ _; _; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "ON COMPLETION NOT PRESERVE ENABLE COMMENT 'changed'" "altered options"
+              | other -> failtestf "expected altered declaration options, got %A" other
+
+              match handle session ("ALTER EVENT decorated COMMENT '" + String.replicate 2049 "x" + "'") |> snd with
+              | Err(3507, "Failed to update events dictionary object.") -> ()
+              | other -> failtestf "expected oversized event comment rejection, got %A" other
+
           testCase "SQL PREPARE accepts user-variable source text and text-probed statements"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
