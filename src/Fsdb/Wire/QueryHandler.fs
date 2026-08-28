@@ -864,71 +864,7 @@ let private resolveSystemSetRhs
 /// split apart.
 let private splitSetAssignments (options: Parser.ParserOptions) (sql: string) : string list =
     let body = Regex.Replace(sql, @"^SET\s+", "", RegexOptions.IgnoreCase)
-    let parts = ResizeArray()
-    let current = StringBuilder()
-    let mutable quoteChar = None
-    let mutable escaped = false
-    let mutable parenDepth = 0
-    let mutable hasContent = false
-
-    let mutable index = 0
-
-    while index < body.Length do
-        let c = body.[index]
-
-        match quoteChar with
-        | Some q when escaped ->
-            escaped <- false
-            current.Append c |> ignore
-            index <- index + 1
-        | Some q when not options.NoBackslashEscapes && q <> '`' && c = '\\' ->
-            escaped <- true
-            current.Append c |> ignore
-            index <- index + 1
-        | Some q when c = q && index + 1 < body.Length && body.[index + 1] = q ->
-            current.Append c |> ignore
-            current.Append body.[index + 1] |> ignore
-            index <- index + 2
-        | Some q when c = q ->
-            quoteChar <- None
-            current.Append c |> ignore
-            index <- index + 1
-        | Some _ ->
-            current.Append c |> ignore
-            index <- index + 1
-        | None ->
-            match c with
-            | '\'' | '"' | '`' ->
-                quoteChar <- Some c
-                hasContent <- true
-                current.Append c |> ignore
-                index <- index + 1
-            | '(' ->
-                parenDepth <- parenDepth + 1
-                hasContent <- true
-                current.Append c |> ignore
-                index <- index + 1
-            | ')' ->
-                parenDepth <- max 0 (parenDepth - 1)
-                hasContent <- true
-                current.Append c |> ignore
-                index <- index + 1
-            | ',' when parenDepth = 0 ->
-                if hasContent then
-                    parts.Add(current.ToString())
-
-                current.Clear() |> ignore
-                hasContent <- false
-                index <- index + 1
-            | _ ->
-                hasContent <- hasContent || not (Char.IsWhiteSpace c)
-                current.Append c |> ignore
-                index <- index + 1
-
-    if hasContent then
-        parts.Add(current.ToString())
-
-    parts |> Seq.map (fun s -> s.Trim()) |> Seq.filter (fun s -> s <> "") |> List.ofSeq
+    Parser.splitTopLevelCommaSeparatedWithOptions options body
 
 /// One `SET` fragment's parsed effect, applied only once every fragment in
 /// the statement has parsed successfully (see `handleSet`) — mirrors real
@@ -2714,107 +2650,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | FlushLogs -> session, Affected 0UL
     | LockTables
     | UnlockTables -> session, Affected 0UL
-let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
-    let rec mapExpr (e: Expr) : Expr =
-        Fsdb.Sql.Expression.rewrite
-            (function
-            | Placeholder index -> Some(replace index)
-            | Exists select -> Some(Exists(mapSelect select))
-            | Subquery select -> Some(Subquery(mapSelect select))
-            | InSubquery(value, select) -> Some(InSubquery(mapExpr value, mapSelect select))
-            | QuantifiedComparison(value, operator, quantifier, select) ->
-                Some(QuantifiedComparison(mapExpr value, operator, quantifier, mapSelect select))
-            | _ -> None)
-            e
-
-    and mapOrderKey (x, d) = mapExpr x, d
-
-    and mapWindowSpec (spec: WindowSpec) : WindowSpec =
-        let mapBound bound =
-            match bound with
-            | BoundPreceding e -> BoundPreceding(mapExpr e)
-            | BoundFollowing e -> BoundFollowing(mapExpr e)
-            | other -> other
-
-        { Inherit = spec.Inherit
-          PartitionBy = List.map mapExpr spec.PartitionBy
-          OrderBy = List.map mapOrderKey spec.OrderBy
-          Frame = spec.Frame |> Option.map (fun f -> { f with Start = mapBound f.Start; End = mapBound f.End }) }
-
-    and mapFromItem (fi: FromItem) : FromItem =
-        match fi with
-        | FromTable _ -> fi
-        | FromSubquery(sou, alias) -> FromSubquery(mapSelectOrUnion sou, alias)
-        | FromJsonTable(source, path, cols, alias) -> FromJsonTable(mapExpr source, path, cols, alias)
-        | FromLateral(sou, alias) -> FromLateral(mapSelectOrUnion sou, alias)
-
-    and mapJoin (j: Join) : Join = { j with On = mapExpr j.On; Table = mapFromItem j.Table }
-
-    and mapSelect (s: SelectStmt) : SelectStmt =
-        { s with
-            Projections = s.Projections |> List.map (fun (e, alias) -> mapExpr e, alias)
-            From = Option.map mapFromItem s.From
-            Joins = List.map mapJoin s.Joins
-            Where = Option.map mapExpr s.Where
-            GroupBy = List.map mapExpr s.GroupBy
-            Windows = s.Windows |> List.map (fun (n, spec) -> n, mapWindowSpec spec)
-            Ctes = s.Ctes |> List.map (fun cte -> { cte with Body = mapSelectOrUnion cte.Body })
-            Having = Option.map mapExpr s.Having
-            OrderBy = List.map mapOrderKey s.OrderBy
-            Limit = Option.map mapExpr s.Limit
-            Offset = Option.map mapExpr s.Offset }
-
-    and mapSelectOrUnion (sou: SelectOrUnion) : SelectOrUnion =
-        match sou with
-        | PlainSelect s -> PlainSelect(mapSelect s)
-        | UnionSelect(first, rest, orderBy, limit, offset) ->
-            UnionSelect(
-                mapSelect first,
-                rest |> List.map (fun (b, s) -> b, mapSelect s),
-                List.map mapOrderKey orderBy,
-                Option.map mapExpr limit,
-                Option.map mapExpr offset
-            )
-
-    let mapAssignment (a: Assignment) = { a with Value = mapExpr a.Value }
-
-    match stmt with
-    | CreateTableAs(name, query, ifNotExists) -> CreateTableAs(name, mapPlaceholders replace query, ifNotExists)
-    | Select s -> Select(mapSelect s)
-    | Union(first, rest, orderBy, limit, offset) ->
-        Union(
-            mapSelect first,
-            rest |> List.map (fun (b, s) -> b, mapSelect s),
-            List.map mapOrderKey orderBy,
-            Option.map mapExpr limit,
-            Option.map mapExpr offset
-        )
-    | Insert(table, columns, rows, onDup, ignore) ->
-        Insert(table, columns, rows |> List.map (List.map mapExpr), onDup |> List.map (fun (c, e) -> c, mapExpr e), ignore)
-    | InsertSelect(table, columns, select, onDup, ignore) ->
-        InsertSelect(table, columns, mapSelect select, onDup |> List.map (fun (c, e) -> c, mapExpr e), ignore)
-    | Replace(table, columns, rows) -> Replace(table, columns, rows |> List.map (List.map mapExpr))
-    | ReplaceSelect(table, columns, select) -> ReplaceSelect(table, columns, mapSelect select)
-    | ReplaceSet(table, assignments) -> ReplaceSet(table, assignments |> List.map (fun (name, value) -> name, mapExpr value))
-    | Update u ->
-        Update
-            { u with
-                Ctes = u.Ctes |> List.map (fun cte -> { cte with Body = mapSelectOrUnion cte.Body })
-                Assignments = List.map mapAssignment u.Assignments
-                Where = Option.map mapExpr u.Where
-                OrderBy = List.map mapOrderKey u.OrderBy
-                Joins = List.map mapJoin u.Joins
-                Limit = Option.map mapExpr u.Limit }
-    | Delete d ->
-        Delete
-            { d with
-                Ctes = d.Ctes |> List.map (fun cte -> { cte with Body = mapSelectOrUnion cte.Body })
-                Where = Option.map mapExpr d.Where
-                OrderBy = List.map mapOrderKey d.OrderBy
-                Joins = List.map mapJoin d.Joins
-                Limit = Option.map mapExpr d.Limit }
-    | Explain(format, statement) -> Explain(format, mapPlaceholders replace statement)
-    | _ -> stmt
+let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
+    Fsdb.Sql.Expression.rewriteStatement
+        (function
+        | Placeholder index -> Some(replace index)
+        | _ -> None)
+        statement
 
 /// Binds parameter `Value`s into a parsed `Statement`, replacing every
 /// `Placeholder i` with `Lit values.[i]`.

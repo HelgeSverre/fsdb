@@ -12423,9 +12423,17 @@ let rec executeAs
                             and runStatement =
                                 function
                                 | StoredProgram.Sql statement -> runDml statement
-                                | StoredProgram.Declare name ->
-                                    locals.Value <- Map.add name VNull locals.Value
-                                    Affected 0UL
+                                | StoredProgram.Declare declaration ->
+                                    match declaration.InitialValue with
+                                    | None ->
+                                        locals.Value <- Map.add declaration.Name VNull locals.Value
+                                        Affected 0UL
+                                    | Some expression ->
+                                        match evalExpr (localContext ()) expression with
+                                        | Error(code, message) -> Err(code, message)
+                                        | Ok value ->
+                                            locals.Value <- Map.add declaration.Name value locals.Value
+                                            Affected 0UL
                                 | StoredProgram.SetLocal(name, expression) ->
                                     match evalExpr (localContext ()) expression with
                                     | Error(code, message) -> Err(code, message)

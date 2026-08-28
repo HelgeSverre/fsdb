@@ -3025,6 +3025,38 @@ let tests =
                       "routine characteristics do not expose body delimiters"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "top-level comma splitting preserves nested and commented commas"
+          <| fun _ ->
+              let text = "a INT, label VARCHAR(10), calculated DECIMAL(8, 2) /* retained, comment */, note TEXT"
+
+              Expect.sequenceEqual
+                  (splitTopLevelCommaSeparatedWithOptions defaultOptions text)
+                  [ "a INT"
+                    "label VARCHAR(10)"
+                    "calculated DECIMAL(8, 2) /* retained, comment */"
+                    "note TEXT" ]
+                  "only top-level commas split the list"
+
+          testCase "stored programs parse typed parameters and local declarations"
+          <| fun _ ->
+              match Fsdb.StoredProgram.parseParameters defaultOptions "IN n INT, OUT label VARCHAR(10), INOUT amount DECIMAL(8, 2)" with
+              | Ok
+                  [ { Name = "n"; ColumnType = TInt false; Mode = Fsdb.StoredProgram.In }
+                    { Name = "label"; ColumnType = TVarchar 10; Mode = Fsdb.StoredProgram.Out }
+                    { Name = "amount"; ColumnType = TDecimal(8, 2, false); Mode = Fsdb.StoredProgram.InOut } ] ->
+                  ()
+              | other -> failtestf "unexpected parameters: %A" other
+
+              match Fsdb.StoredProgram.parse defaultOptions "BEGIN DECLARE amount DECIMAL(8, 2) DEFAULT 1.25; SET amount = amount + 1; END" with
+              | Ok
+                  [ Fsdb.StoredProgram.Declare
+                        { Name = "amount"
+                          ColumnType = TDecimal(8, 2, false)
+                          InitialValue = Some(Lit(VDecimal initial)) }
+                    Fsdb.StoredProgram.SetLocal("amount", BinOp(Add, Col "amount", Lit(VInt 1L))) ] ->
+                  Expect.equal initial 1.25M "declaration default"
+              | other -> failtestf "unexpected stored program: %A" other
+
           testCase "statement batches reject unterminated literals"
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with

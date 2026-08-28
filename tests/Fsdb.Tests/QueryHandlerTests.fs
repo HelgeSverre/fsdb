@@ -1575,6 +1575,16 @@ let tests =
                   | other -> failtestf "expected unknown statement error, got %A" other
               | _, other -> failtestf "expected prepared result, got %A" other
 
+          testCase "placeholder binding covers DO expressions"
+          <| fun _ ->
+              match Fsdb.Parser.parse "DO ?, ABS(?)" with
+              | Ok statement ->
+                  Expect.equal
+                      (bindPlaceholders statement [ VInt 2L; VInt -3L ])
+                      (Do [ Lit(VInt 2L); FuncCall("ABS", [ Lit(VInt -3L) ]) ])
+                      "every executable expression is rewritten"
+              | Error error -> failtestf "unexpected parse error: %s" error
+
           testCase "LOCK TABLES accepts MySQL lock-list syntax"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

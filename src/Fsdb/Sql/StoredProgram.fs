@@ -4,11 +4,26 @@ open System
 open System.Text.RegularExpressions
 open Fsdb.Ast
 
+type Declaration =
+    { Name: string
+      ColumnType: ColumnType
+      InitialValue: Expr option }
+
 type Statement =
     | Sql of Ast.Statement
     | If of condition: Expr * whenTrue: Statement list * whenFalse: Statement list
-    | Declare of name: string
+    | Declare of Declaration
     | SetLocal of name: string * value: Expr
+
+type ParameterMode =
+    | In
+    | Out
+    | InOut
+
+type Parameter =
+    { Name: string
+      ColumnType: ColumnType
+      Mode: ParameterMode }
 
 let rec sqlStatements =
     function
@@ -23,8 +38,19 @@ let rec expressions =
     | Sql _ -> []
     | If(condition, whenTrue, whenFalse) ->
         condition :: ((whenTrue @ whenFalse) |> List.collect expressions)
-    | Declare _ -> []
+    | Declare declaration -> Option.toList declaration.InitialValue
     | SetLocal(_, value) -> [ value ]
+
+let private traverse f values =
+    let rec loop results =
+        function
+        | [] -> Ok(List.rev results)
+        | value :: rest ->
+            match f value with
+            | Ok result -> loop (result :: results) rest
+            | Error error -> Error error
+
+    loop [] values
 
 type private Boundary =
     | Then
@@ -33,6 +59,24 @@ type private Boundary =
     | EndIf
     | End
     | Semicolon
+
+let private parameterPattern =
+    Regex(
+        @"^(?:(?<mode>INOUT|IN|OUT)\s+)?(?<name>`(?:``|[^`])+`|[A-Za-z_$][A-Za-z0-9_$]*)\s+(?<type>[\s\S]+)$",
+        RegexOptions.IgnoreCase
+    )
+
+let private compoundPattern =
+    Regex(@"^\s*BEGIN\b(?<body>[\s\S]*)\bEND\s*$", RegexOptions.IgnoreCase)
+
+let private declarationPattern =
+    Regex(
+        @"^DECLARE\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s+(?<type>[A-Za-z]+(?:\s*\([^)]*\))?(?:\s+UNSIGNED)?)(?:\s+DEFAULT\s+(?<default>[\s\S]+))?$",
+        RegexOptions.IgnoreCase
+    )
+
+let private assignmentPattern =
+    Regex(@"^SET\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*(?<value>[\s\S]+)$", RegexOptions.IgnoreCase)
 
 let private wordAt (text: string) index (word: string) =
     let finish = index + word.Length
@@ -137,8 +181,33 @@ let private findBoundary boundaries (text: string) start =
 
     found
 
+let parseParameters (options: Parser.ParserOptions) (text: string) : Result<Parameter list, string> =
+    let parseOne value =
+        let matched = parameterPattern.Match value
+
+        if not matched.Success then
+            Error(sprintf "Invalid routine parameter: %s" value)
+        else
+            let name = matched.Groups.["name"].Value.Trim('`').Replace("``", "`").ToLowerInvariant()
+            let mode =
+                match matched.Groups.["mode"].Value.ToUpperInvariant() with
+                | "OUT" -> Out
+                | "INOUT" -> InOut
+                | _ -> In
+
+            Parser.parseColumnTypeWithOptions options matched.Groups.["type"].Value
+            |> Result.map (fun columnType ->
+                { Name = name
+                  ColumnType = columnType
+                  Mode = mode })
+
+    if String.IsNullOrWhiteSpace text then
+        Ok []
+    else
+        Parser.splitTopLevelCommaSeparatedWithOptions options text |> traverse parseOne
+
 let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
-    let compound = Regex.Match(body, @"^\s*BEGIN\b(?<body>[\s\S]*)\bEND\s*$", RegexOptions.IgnoreCase)
+    let compound = compoundPattern.Match body
 
     if compound.Success then
         let inner = compound.Groups.["body"].Value
@@ -199,11 +268,22 @@ let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list
                         | _ -> Error "IF is missing END IF"))
 
         and parseStatement text =
-            let declaration = Regex.Match(text, @"^DECLARE\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s+.+$", RegexOptions.IgnoreCase)
-            let assignment = Regex.Match(text, @"^SET\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*(?<value>[\s\S]+)$", RegexOptions.IgnoreCase)
+            let declaration = declarationPattern.Match text
+            let assignment = assignmentPattern.Match text
 
             if declaration.Success then
-                Ok(Declare(declaration.Groups.["name"].Value.ToLowerInvariant()))
+                Parser.parseColumnTypeWithOptions options declaration.Groups.["type"].Value
+                |> Result.bind (fun columnType ->
+                    if declaration.Groups.["default"].Success then
+                        Parser.parseExpressionWithOptions options declaration.Groups.["default"].Value
+                        |> Result.map Some
+                    else
+                        Ok None
+                    |> Result.map (fun initialValue ->
+                        Declare
+                            { Name = declaration.Groups.["name"].Value.ToLowerInvariant()
+                              ColumnType = columnType
+                              InitialValue = initialValue }))
             elif assignment.Success then
                 Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
                 |> Result.map (fun value -> SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))

@@ -35,6 +35,82 @@ let defaultOptions: ParserOptions =
       RealAsFloat = false
       NoBackslashEscapes = false }
 
+let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : string list =
+    let parts = ResizeArray<string>()
+    let mutable start = 0
+    let mutable index = 0
+    let mutable depth = 0
+    let mutable quote = None
+    let mutable blockComment = false
+    let mutable lineComment = false
+
+    let addPart finish =
+        let mutable first = start
+        let mutable last = finish - 1
+
+        while first <= last && Char.IsWhiteSpace text.[first] do
+            first <- first + 1
+
+        while last >= first && Char.IsWhiteSpace text.[last] do
+            last <- last - 1
+
+        if first <= last then
+            parts.Add(text.Substring(first, last - first + 1))
+
+    while index < text.Length do
+        if blockComment then
+            if text.[index] = '*' && index + 1 < text.Length && text.[index + 1] = '/' then
+                blockComment <- false
+                index <- index + 2
+            else
+                index <- index + 1
+        elif lineComment then
+            if text.[index] = '\r' || text.[index] = '\n' then
+                lineComment <- false
+
+            index <- index + 1
+        else
+            match quote with
+            | Some delimiter when not options.NoBackslashEscapes && delimiter <> '`' && text.[index] = '\\' ->
+                index <- min text.Length (index + 2)
+            | Some delimiter when text.[index] = delimiter && index + 1 < text.Length && text.[index + 1] = delimiter ->
+                index <- index + 2
+            | Some delimiter when text.[index] = delimiter ->
+                quote <- None
+                index <- index + 1
+            | Some _ -> index <- index + 1
+            | None when text.[index] = '\'' || text.[index] = '"' || text.[index] = '`' ->
+                quote <- Some text.[index]
+                index <- index + 1
+            | None when text.[index] = '#' ->
+                lineComment <- true
+                index <- index + 1
+            | None when
+                text.[index] = '-'
+                && index + 2 < text.Length
+                && text.[index + 1] = '-'
+                && Char.IsWhiteSpace text.[index + 2]
+                ->
+                lineComment <- true
+                index <- index + 2
+            | None when text.[index] = '/' && index + 1 < text.Length && text.[index + 1] = '*' ->
+                blockComment <- true
+                index <- index + 2
+            | None when text.[index] = '(' ->
+                depth <- depth + 1
+                index <- index + 1
+            | None when text.[index] = ')' ->
+                depth <- max 0 (depth - 1)
+                index <- index + 1
+            | None when text.[index] = ',' && depth = 0 ->
+                addPart index
+                start <- index + 1
+                index <- index + 1
+            | None -> index <- index + 1
+
+    addPart text.Length
+    List.ofSeq parts
+
 let private currentOptions = System.Threading.AsyncLocal<ParserOptions>()
 
 let private whenOption
@@ -4096,6 +4172,12 @@ let parseExpressionWithOptions (options: ParserOptions) (sql: string) : Result<E
 
 let parseExpression (sql: string) : Result<Expr, string> =
     parseExpressionWithOptions defaultOptions sql
+
+let parseColumnTypeWithOptions (options: ParserOptions) (sql: string) : Result<ColumnType, string> =
+    withParserState options sql (runWithDepthLimit (ws >>. columnType .>> eof))
+
+let parseColumnType (sql: string) : Result<ColumnType, string> =
+    parseColumnTypeWithOptions defaultOptions sql
 
 /// Parses the user-defined-variable target at the front of a `SET`
 /// assignment. The right-hand side remains source text because `SET` has
