@@ -573,7 +573,8 @@ let tests =
                   store
                   defaultDatabase
                   "widgets"
-                  [ AddColumn(extraCol, PositionDefault); AddIndex { Name = "ix_sku"; KeyColumns = indexColumns [ "sku" ]; Unique = false; Kind = BTree } ]
+                  [ AddColumn(extraCol, PositionDefault)
+                    AddIndex { Name = "ix_sku"; KeyColumns = indexColumns [ "sku" ]; Unique = false; Visible = true; Kind = BTree } ]
               |> ignore
 
               renameTable store defaultDatabase "widgets" "gadgets" |> ignore
@@ -753,10 +754,11 @@ let tests =
               let category = { mkCol "category" (TVarchar 20) with Nullable = false }
               let prefixIndex =
                   { Name = "ix_category_prefix"
-                    KeyColumns = [ { Name = "category"; PrefixLength = Some 3; Transform = None } ]
+                    KeyColumns = [ { Name = "category"; PrefixLength = Some 3; Transform = None; Direction = Asc } ]
                     Unique = false
+                    Visible = true
                     Kind = BTree }
-              let fullIndex = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Kind = BTree }
+              let fullIndex = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Visible = true; Kind = BTree }
               createTable store defaultDatabase "items" [ mkCol "id" (TInt false); category ] [ prefixIndex; fullIndex ] [] None None |> ignore
               createTable store defaultDatabase "prefix_items" [ mkCol "id" (TInt false); category ] [ prefixIndex ] [] None None |> ignore
               insertRows store defaultDatabase "items" None [ [ VInt 1L; VString "books" ]; [ VInt 2L; VString "books" ]; [ VInt 3L; VString "music" ] ] |> ignore
@@ -1339,25 +1341,32 @@ let tests =
               attach dir store
               let session = Fsdb.Session.create 1 store
               let session, result =
-                  handle session "CREATE TABLE ordered_primary (first INT, second INT, body TEXT, PRIMARY KEY (second, first), KEY ix_body (body(12)))"
+                  handle session "CREATE TABLE ordered_primary (first INT, second INT, body TEXT, PRIMARY KEY (second DESC, first ASC), KEY ix_body (body(12) DESC) INVISIBLE)"
 
               match result with
               | Affected 0UL -> ()
               | other -> failtestf "expected CREATE TABLE to succeed, got %A" other
 
-              let assertOrder (sourceStore: Store) message =
+              let assertOrder (sourceStore: Store) visible message =
                   match Fsdb.InformationSchema.findTable sourceStore.Catalog defaultDatabase "ordered_primary" with
                   | Ok table ->
                       Expect.equal (primaryKeyColumns table) [ "second"; "first" ] message
 
+                      let primaryIndex = table.Indexes |> List.find (fun index -> index.Name = "PRIMARY")
+                      Expect.equal (primaryIndex.KeyColumns |> List.map _.Direction) [ Desc; Asc ] "primary directions survive recovery"
+
                       let bodyIndex = table.Indexes |> List.find (fun index -> index.Name = "ix_body")
-                      Expect.equal bodyIndex.KeyColumns [ { Name = "body"; PrefixLength = Some 12; Transform = None } ] "prefix survives recovery"
+                      Expect.equal bodyIndex.KeyColumns [ { Name = "body"; PrefixLength = Some 12; Transform = None; Direction = Desc } ] "key-part attributes survive recovery"
+                      Expect.equal bodyIndex.Visible visible "visibility survives recovery"
                   | Error error -> failtestf "expected ordered_primary after recovery, got %A" error
 
-              assertOrder (load dir) "WAL retains the key order"
+              assertOrder (load dir) false "WAL retains the key order"
               snapshotNow dir store
-              assertOrder (load dir) "snapshot retains the key order"
-              ignore session
+              assertOrder (load dir) false "snapshot retains the key order"
+
+              let _, altered = handle session "ALTER TABLE ordered_primary ALTER INDEX ix_body VISIBLE"
+              Expect.equal altered (Affected 0UL) "visibility altered"
+              assertOrder (load dir) true "WAL retains altered visibility"
 
           testCase "a column comment survives a restart"
           <| fun _ ->
@@ -1866,7 +1875,7 @@ let tests =
                     "ALTER TABLE acts DROP FOREIGN KEY fk_p"
                     "ALTER TABLE acts ADD PRIMARY KEY (id)"
                     "ALTER TABLE acts DROP PRIMARY KEY"
-                    "ALTER TABLE acts ADD PRIMARY KEY (id, pid)"
+                    "ALTER TABLE acts ADD PRIMARY KEY (id DESC, pid ASC)"
                     "ALTER TABLE acts ALTER COLUMN extra SET DEFAULT 9"
                     "ALTER TABLE acts CONVERT TO CHARACTER SET latin1"
                     "ALTER TABLE acts AUTO_INCREMENT = 500" ]
@@ -1919,6 +1928,8 @@ let tests =
                   Expect.isTrue (t.Indexes |> List.exists (fun ix -> ix.Name = "ix_new")) "the renamed index replayed"
                   let primary = t.Columns |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
                   Expect.equal primary [ "id"; "pid" ] "primary key replacement replayed"
+                  let primaryIndex = t.Indexes |> List.find (fun index -> index.Name = "PRIMARY")
+                  Expect.equal (primaryIndex.KeyColumns |> List.map _.Direction) [ Desc; Asc ] "primary-key directions replayed"
                   Expect.equal
                       (t.Columns |> List.find (fun c -> c.Name = "extra") |> _.Default)
                       (Some(DConst(VInt 9L)))

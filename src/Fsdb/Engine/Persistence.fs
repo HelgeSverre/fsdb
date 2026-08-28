@@ -456,60 +456,78 @@ let private decodeColumnDef (includeComment: bool) (r: #IReader) : ColumnDef =
       OnUpdateCurrentTimestamp = readBool r
       Comment = if includeComment then readStr r else "" }
 
-let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
-    // Key-part attributes stay inside the existing string-list field so the
-    // following payload remains aligned. NUL cannot occur in an identifier.
-    let encodeColumn column =
+let private lowercaseIndexColumnPrefix = "\u0000L:"
+let private expressionIndexColumnPrefix = "\u0000E:"
+let private descendingIndexColumnPrefix = "\u0000D:"
+let private invisibleIndexNamePrefix = "\u0000I:"
+let private lengthIndexColumnPrefix = "\u0001"
+
+let private (|Prefixed|_|) (prefix: string) (value: string) =
+    if value.StartsWith(prefix, StringComparison.Ordinal) then
+        Some(value.Substring prefix.Length)
+    else
+        None
+
+// Key-part attributes stay inside the existing string-list field so the
+// following payload remains aligned. NUL cannot occur in an identifier.
+let private encodeIndexColumn column =
+    let encoded =
         match column.Transform, column.PrefixLength with
-        | Some Lowercase, _ -> "\u0000L:" + column.Name
+        | Some Lowercase, _ -> lowercaseIndexColumnPrefix + column.Name
         | Some(Expression expression), _ ->
             let expressionBytes = Writer()
             encodeExpr expressionBytes expression
-            "\u0000E:" + Convert.ToBase64String(expressionBytes.ToArray())
+            expressionIndexColumnPrefix + Convert.ToBase64String(expressionBytes.ToArray())
         | None, None -> column.Name
-        | None, Some length -> sprintf "\u0001%d:%s" length column.Name
+        | None, Some length -> sprintf "%s%d:%s" lengthIndexColumnPrefix length column.Name
 
-    writeStr w ix.Name
-    ix.KeyColumns |> List.map encodeColumn |> writeStrList w
+    match column.Direction with
+    | Asc -> encoded
+    | Desc -> descendingIndexColumnPrefix + encoded
+
+let private decodeIndexColumn (encoded: string) =
+    let direction, encoded =
+        match encoded with
+        | Prefixed descendingIndexColumnPrefix encoded -> Desc, encoded
+        | _ -> Asc, encoded
+
+    let column name prefixLength transform =
+        { Name = name
+          PrefixLength = prefixLength
+          Transform = transform
+          Direction = direction }
+
+    match encoded with
+    | Prefixed lowercaseIndexColumnPrefix name -> column name None (Some Lowercase)
+    | Prefixed expressionIndexColumnPrefix expression ->
+        let expression = expression |> Convert.FromBase64String |> Reader |> decodeExpr
+        column "" None (Some(Expression expression))
+    | Prefixed lengthIndexColumnPrefix encoded ->
+        match encoded.IndexOf(':') with
+        | separator when separator > 0 ->
+            match Int32.TryParse(encoded.Substring(0, separator)) with
+            | true, length -> column (encoded.Substring(separator + 1)) (Some length) None
+            | _ -> column (lengthIndexColumnPrefix + encoded) None None
+        | _ -> column (lengthIndexColumnPrefix + encoded) None None
+    | _ -> column encoded None None
+
+let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
+    writeStr w (if ix.Visible then ix.Name else invisibleIndexNamePrefix + ix.Name)
+    ix.KeyColumns |> List.map encodeIndexColumn |> writeStrList w
     writeBool w ix.Unique
     writeBool w (ix.Kind = FullTextIndex)
 
 let private decodeIndexDef (r: #IReader) : IndexDef =
-    let decodeColumn (encoded: string) =
-        if encoded.StartsWith("\u0000L:", StringComparison.Ordinal) then
-            { Name = encoded.Substring 3
-              PrefixLength = None
-              Transform = Some Lowercase }
-        elif encoded.StartsWith("\u0000E:", StringComparison.Ordinal) then
-            let expression = encoded.Substring 3 |> Convert.FromBase64String |> Reader |> decodeExpr
+    let encodedName = readStr r
+    let visible, name =
+        match encodedName with
+        | Prefixed invisibleIndexNamePrefix name -> false, name
+        | _ -> true, encodedName
 
-            { Name = ""
-              PrefixLength = None
-              Transform = Some(Expression expression) }
-        elif encoded.StartsWith("\u0001", StringComparison.Ordinal) then
-            match encoded.IndexOf(':', 1) with
-            | separator when separator > 1 ->
-                match Int32.TryParse(encoded.Substring(1, separator - 1)) with
-                | true, length ->
-                    { Name = encoded.Substring(separator + 1)
-                      PrefixLength = Some length
-                      Transform = None }
-                | _ ->
-                    { Name = encoded
-                      PrefixLength = None
-                      Transform = None }
-            | _ ->
-                { Name = encoded
-                  PrefixLength = None
-                  Transform = None }
-        else
-            { Name = encoded
-              PrefixLength = None
-              Transform = None }
-
-    { Name = readStr r
-      KeyColumns = readStrList r |> List.map decodeColumn
+    { Name = name
+      KeyColumns = readStrList r |> List.map decodeIndexColumn
       Unique = readBool r
+      Visible = visible
       Kind = (if readBool r then FullTextIndex else BTree) }
 
 let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
@@ -554,7 +572,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | DropIndexAction name -> w.WriteByte 0x08uy; writeStr w name
     | AddForeignKey fk -> w.WriteByte 0x09uy; encodeForeignKeyDef w fk
     | DropForeignKey name -> w.WriteByte 0x0Auy; writeStr w name
-    | AddPrimaryKey columns -> w.WriteByte 0x0Buy; writeStrList w columns
+    | AddPrimaryKey columns -> w.WriteByte 0x0Buy; columns |> List.map encodeIndexColumn |> writeStrList w
     | SetAutoIncrement value -> w.WriteByte 0x0Cuy; w.WriteInt64LE value
     | SetDefault(column, value) ->
         w.WriteByte 0x0Duy
@@ -569,6 +587,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | ConvertCharset(charset, collation) -> w.WriteByte 0x0Fuy; writeStr w charset; writeOptStr w collation
     | SetTableComment comment when format.TableComments -> w.WriteByte 0x10uy; writeStr w comment
     | DropPrimaryKey -> w.WriteByte 0x11uy
+    | SetIndexVisibility(name, visible) -> w.WriteByte 0x12uy; writeStr w name; writeBool w visible
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _
@@ -596,7 +615,8 @@ let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterActi
     | 0x0Fuy -> ConvertCharset(readStr r, readOptStr r)
     | 0x10uy when format.TableComments -> SetTableComment(readStr r)
     | 0x11uy -> DropPrimaryKey
-    | _ -> AddPrimaryKey(readStrList r)
+    | 0x12uy -> SetIndexVisibility(readStr r, readBool r)
+    | _ -> AddPrimaryKey(readStrList r |> List.map decodeIndexColumn)
 
 let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) : unit =
     match s with

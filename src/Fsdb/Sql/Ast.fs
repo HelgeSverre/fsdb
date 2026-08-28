@@ -345,10 +345,6 @@ and ColumnDef =
       /// MySQL-verified).
       Charset: string option }
 
-/// A named `[UNIQUE] KEY|INDEX (cols)` — from a `CREATE TABLE` trailing item,
-/// `ALTER TABLE ADD INDEX`, `CREATE INDEX`, or a column-level `UNIQUE`
-/// modifier (which synthesizes one of these named after the column). Key
-/// columns retain optional prefix lengths for enforcement and introspection.
 and IndexKind =
     | BTree
     | FullTextIndex
@@ -365,12 +361,14 @@ and IndexTransform =
 and IndexColumn =
     { Name: string
       PrefixLength: int option
-      Transform: IndexTransform option }
+      Transform: IndexTransform option
+      Direction: Direction }
 
 and IndexDef =
     { Name: string
       KeyColumns: IndexColumn list
       Unique: bool
+      Visible: bool
       /// `FULLTEXT KEY` vs an ordinary index — drives `MATCH ... AGAINST`
       /// eligibility and the `Index_type` introspection column. SPATIAL
       /// collapses to `BTree` until fsdb has a spatial-index implementation.
@@ -597,7 +595,8 @@ let indexColumns names =
     |> List.map (fun name ->
         { Name = name
           PrefixLength = None
-          Transform = None })
+          Transform = None
+          Direction = Asc })
 
 /// Where `ADD`/`MODIFY`/`CHANGE COLUMN` places a column: `PositionDefault`
 /// means no `AFTER`/`FIRST` was written (a plain `ADD` appends at the end;
@@ -623,12 +622,13 @@ type AlterAction =
     | AddIndex of IndexDef
     | DropIndexAction of name: string
     | RenameIndex of oldName: string * newName: string
+    | SetIndexVisibility of name: string * visible: bool
     | AddForeignKey of ForeignKeyDef
     | DropForeignKey of name: string
     | AddCheck of CheckConstraintDef
     | DropCheck of name: string
     | SetCheckEnforced of name: string * enforced: bool
-    | AddPrimaryKey of columns: string list
+    | AddPrimaryKey of columns: IndexColumn list
     | DropPrimaryKey
     | SetDefault of column: string * value: ColumnDefault option
     | SetEngine of name: string
@@ -715,7 +715,7 @@ type Statement =
     | DropTable of names: string list * ifExists: bool
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list
-    | CreateIndex of name: string * table: string * columns: IndexColumn list * unique: bool * kind: IndexKind
+    | CreateIndex of name: string * table: string * columns: IndexColumn list * unique: bool * kind: IndexKind * visible: bool
     /// `DROP INDEX [IF EXISTS] name ON table` — `IF EXISTS` is accepted for
     /// MySQL parity. The executor doesn't need the flag: a missing *index*
     /// already drops to a silent no-op (the one thing `IF EXISTS` suppresses

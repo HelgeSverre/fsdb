@@ -4048,6 +4048,46 @@ let tests =
               | ResultSet(_, [ row ]) -> Expect.equal row.[7] (Some "191") "ALTER prefix metadata"
               | other -> failtestf "expected the altered prefix index, got %A" other
 
+          testCase "index direction and visibility round-trip through metadata and ALTER"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created = handle session "CREATE TABLE sorted (a INT, b INT, PRIMARY KEY (a DESC, b ASC), KEY ix_sorted (a DESC, b ASC) INVISIBLE)"
+              Expect.equal created (Affected 0UL) "table created"
+
+              match handle session "SHOW INDEX FROM sorted" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.filter (fun row -> row.[2] = Some "ix_sorted") |> List.map (fun row -> row.[4], row.[5], row.[13]))
+                      [ Some "a", Some "D", Some "NO"; Some "b", Some "A", Some "NO" ]
+                      "SHOW INDEX attributes"
+              | other -> failtestf "expected index metadata, got %A" other
+
+              match handle session "SHOW CREATE TABLE sorted" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "PRIMARY KEY (`a` DESC,`b`)" "primary-key direction"
+                  Expect.stringContains ddl "KEY `ix_sorted` (`a` DESC,`b`) /*!80000 INVISIBLE */" "SHOW CREATE attributes"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+              let session, altered = handle session "ALTER TABLE sorted ALTER INDEX ix_sorted VISIBLE"
+              Expect.equal altered (Affected 0UL) "visibility changed"
+
+              match handle session "SHOW INDEX FROM sorted" |> snd with
+              | ResultSet(_, rows) ->
+                  rows
+                  |> List.filter (fun row -> row.[2] = Some "ix_sorted")
+                  |> fun indexRows -> Expect.all indexRows (fun row -> row.[13] = Some "YES") "ALTER updates metadata"
+              | other -> failtestf "expected visible index metadata, got %A" other
+
+              match handle session "ALTER TABLE sorted ALTER INDEX `PRIMARY` INVISIBLE" |> snd with
+              | Err(3522, "A primary key index cannot be invisible") -> ()
+              | other -> failtestf "expected primary visibility error 3522, got %A" other
+
+              let session, _ = handle session "CREATE TABLE no_primary (id INT)"
+
+              match handle session "ALTER TABLE no_primary ALTER INDEX `PRIMARY` INVISIBLE" |> snd with
+              | Err(1176, _) -> ()
+              | other -> failtestf "expected missing primary error 1176, got %A" other
+
           testCase "composite primary metadata follows key declaration order"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

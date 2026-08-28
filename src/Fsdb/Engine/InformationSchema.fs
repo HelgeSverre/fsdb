@@ -552,8 +552,9 @@ let private indexesIncludingPrimary (table: Table) =
         | [] -> table.Indexes
         | columns ->
             { Name = "PRIMARY"
-              KeyColumns = columns |> List.map (fun name -> { Name = name; PrefixLength = None; Transform = None })
+              KeyColumns = indexColumns columns
               Unique = true
+              Visible = true
               Kind = BTree }
             :: table.Indexes
 
@@ -576,6 +577,12 @@ let private indexExpression (keyColumn: IndexColumn) =
     | Some Lowercase -> Some(sprintf "lower(`%s`)" (keyColumn.Name.Replace("`", "``")))
     | Some(Expression expression) -> Some(exprToSql expression)
     | None -> None
+
+let private indexDirectionText (keyColumn: IndexColumn) =
+    if keyColumn.Direction = Desc then "D" else "A"
+
+let private indexVisibilityText (index: IndexDef) =
+    if index.Visible then "YES" else "NO"
 
 /// One row per `(index, column)` pair.
 let private statisticsRows (catalog: Catalog) : Value[] list =
@@ -603,7 +610,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vs ix.Name
                    vi (i + 1)
                    colName
-                   (if ix.Kind = FullTextIndex then VNull else vs "A")
+                   (if ix.Kind = FullTextIndex then VNull else vs (indexDirectionText keyColumn))
                    vi 0
                    (effectivePrefixLength t keyColumn |> Option.map vi |> Option.defaultValue VNull)
                    VNull
@@ -611,7 +618,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vs (if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")
                    vs ""
                    vs ""
-                   vs "YES"
+                   vs (indexVisibilityText ix)
                    (expression |> Option.map vs |> Option.defaultValue VNull) |])))
 
 let private keyColumnUsageColumns =
@@ -1977,8 +1984,24 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
         |> List.filter ((<>) "")
         |> String.concat " "
 
-    let pkCols = Storage.primaryKeyColumns t
-    let pkLine = if pkCols.IsEmpty then [] else [ sprintf "PRIMARY KEY (%s)" (backtickCols pkCols) ]
+    let indexColumnsText (index: IndexDef) =
+        index.KeyColumns
+        |> List.map (fun column ->
+            let key =
+                match indexExpression column with
+                | Some expression -> "(" + expression + ")"
+                | None ->
+                    let length = column.PrefixLength |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
+                    backtick column.Name + length
+
+            if column.Direction = Desc then key + " DESC" else key)
+        |> String.concat ","
+
+    let pkLine =
+        indexesIncludingPrimary t
+        |> List.tryFind isPrimaryIndex
+        |> Option.map (fun index -> sprintf "PRIMARY KEY (%s)" (indexColumnsText index))
+        |> Option.toList
 
     let indexLines =
         t.Indexes
@@ -1989,17 +2012,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                 elif ix.Kind = FullTextIndex then "FULLTEXT "
                 else ""
 
-            let columns =
-                ix.KeyColumns
-                |> List.map (fun column ->
-                    match indexExpression column with
-                    | Some expression -> "(" + expression + ")"
-                    | None ->
-                        let length = column.PrefixLength |> Option.map (sprintf "(%d)") |> Option.defaultValue ""
-                        backtick column.Name + length)
-                |> String.concat ","
-
-            sprintf "%sKEY %s (%s)" prefix (backtick ix.Name) columns)
+            sprintf "%sKEY %s (%s)%s" prefix (backtick ix.Name) (indexColumnsText ix) (if ix.Visible then "" else " /*!80000 INVISIBLE */"))
 
     // The table's own declared defaults (server defaults when unset) —
     // MySQL renders these in the table options even when a column carries
@@ -2149,7 +2162,7 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       Some ix.Name
                       Some(string (i + 1))
                       (if expression.IsSome then None else Some keyColumn.Name)
-                      (if ix.Kind = FullTextIndex then None else Some "A")
+                      (if ix.Kind = FullTextIndex then None else Some(indexDirectionText keyColumn))
                       Some "0"
                       (effectivePrefixLength t keyColumn |> Option.map string)
                       None
@@ -2157,7 +2170,7 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       Some(if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")
                       Some ""
                       Some ""
-                      Some "YES"
+                      Some(indexVisibilityText ix)
                       expression ]))
 
         [ "Table"

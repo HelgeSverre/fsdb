@@ -67,6 +67,8 @@ module SyntaxFuzz =
            "range_update", "UPDATE syntax_target SET n = n WHERE id >= 999"
            "range_delete", "DELETE FROM syntax_target WHERE id >= 999"
            "composite_index", sprintf "CREATE INDEX ix_syntax_%s ON syntax_target (n, label)" suffix
+           "descending_invisible_index", sprintf "CREATE INDEX ix_direction_%s ON syntax_target (n DESC, label ASC) INVISIBLE" suffix
+           "alter_index_visibility", sprintf "ALTER TABLE syntax_target ALTER INDEX ix_direction_%s VISIBLE" suffix
            "view_check_option", sprintf "CREATE VIEW syntax_view_%s AS SELECT id, n FROM syntax_target WHERE n > 0 WITH CHECK OPTION" suffix
            "nested_join_view_update", "UPDATE syntax_nested_join SET n = n WHERE id = 1"
            "outer_join_view_update", "UPDATE syntax_outer_join SET note = note WHERE doubled = 20"

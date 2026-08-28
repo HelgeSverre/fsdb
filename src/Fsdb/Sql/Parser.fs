@@ -2161,15 +2161,27 @@ let private colPosition: Parser<ColumnPosition, unit> =
 // CREATE TABLE trailing items: PRIMARY KEY / INDEX / FOREIGN KEY
 // ---------------------------------------------------------------------------
 
-/// A trailing `PRIMARY KEY (col, ...)` table constraint. `Ast.CreateTable`
-/// has no separate slot for it, so it's applied as a post-pass that flags
-/// the matching columns' `PrimaryKey` field instead.
-let private trailingPrimaryKey: Parser<string list, unit> =
+/// Table-level primary keys also mark their columns because nullability and
+/// auto-increment validation read the column-local `PrimaryKey` flag.
+let private indexDirection: Parser<Direction, unit> =
+    opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc))
+    |>> Option.defaultValue Asc
+
+let private primaryKeyColumn: Parser<IndexColumn, unit> =
+    identifier
+    .>>. indexDirection
+    |>> fun (name, direction) ->
+        { Name = name
+          PrefixLength = None
+          Transform = None
+          Direction = direction }
+
+let private trailingPrimaryKey: Parser<IndexColumn list, unit> =
     attempt (keyword "PRIMARY" >>. keyword "KEY")
     >>. opt (notFollowedBy (sym "(") >>. identifier)
-    >>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
+    >>. between (sym "(") (sym ")") (sepBy1 primaryKeyColumn (sym ","))
 
-let private constrainedPrimaryKey: Parser<string list, unit> =
+let private constrainedPrimaryKey: Parser<IndexColumn list, unit> =
     keyword "CONSTRAINT"
     >>. opt (notFollowedBy (keyword "PRIMARY") >>. identifier)
     >>. trailingPrimaryKey
@@ -2178,27 +2190,30 @@ let private indexedColumn: Parser<IndexColumn, unit> =
     let storedColumn =
         identifier
         .>>. opt (between (sym "(") (sym ")") intTok)
-        .>> optional (keyword "ASC" <|> keyword "DESC")
-        |>> fun (name, prefixLength) ->
+        .>>. indexDirection
+        |>> fun ((name, prefixLength), direction) ->
             { Name = name
               PrefixLength = prefixLength
-              Transform = None }
+              Transform = None
+              Direction = direction }
 
     let lowerColumn =
         between (sym "(") (sym ")") (keyword "LOWER" >>. between (sym "(") (sym ")") identifier)
-        .>> optional (keyword "ASC" <|> keyword "DESC")
-        |>> fun name ->
+        .>>. indexDirection
+        |>> fun (name, direction) ->
             { Name = name
               PrefixLength = None
-              Transform = Some Lowercase }
+              Transform = Some Lowercase
+              Direction = direction }
 
     let expressionColumn =
         between (sym "(") (sym ")") expr
-        .>> optional (keyword "ASC" <|> keyword "DESC")
-        |>> fun expression ->
+        .>>. indexDirection
+        |>> fun (expression, direction) ->
             { Name = ""
               PrefixLength = None
-              Transform = Some(Expression expression) }
+              Transform = Some(Expression expression)
+              Direction = direction }
 
     attempt lowerColumn <|> attempt expressionColumn <|> storedColumn
 
@@ -2214,6 +2229,13 @@ let private indexPrefix: Parser<bool * IndexKind, unit> =
     <|> (keyword "SPATIAL" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
     <|> ((keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
 
+let private explicitIndexVisibility: Parser<bool, unit> =
+    (keyword "VISIBLE" >>% true) <|> (keyword "INVISIBLE" >>% false)
+
+let private indexVisibility: Parser<bool, unit> =
+    opt explicitIndexVisibility
+    |>> Option.defaultValue true
+
 let private indexItem: Parser<IndexDef, unit> =
     (indexPrefix .>>. opt identifier
      .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH"))
@@ -2221,11 +2243,12 @@ let private indexItem: Parser<IndexDef, unit> =
      // `USING BTREE|HASH` — parsed and discarded, every index here is the
      // same structure either way.
      .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH"))
-     .>> optional (keyword "VISIBLE" <|> keyword "INVISIBLE"))
-    |>> fun (((unique, kind), name), cols) ->
+     .>>. indexVisibility)
+    |>> fun ((((unique, kind), name), cols), visible) ->
         { Name = name |> Option.defaultValue (List.head cols).Name
           KeyColumns = cols
           Unique = unique
+          Visible = visible
           Kind = kind }
 
 let private namedUniqueConstraint: Parser<IndexDef, unit> =
@@ -2238,6 +2261,7 @@ let private namedUniqueConstraint: Parser<IndexDef, unit> =
         { Name = name
           KeyColumns = columns
           Unique = true
+          Visible = true
           Kind = BTree }
 
 let private refAction: Parser<string, unit> =
@@ -2289,7 +2313,7 @@ let private foreignKeyItem: Parser<ForeignKeyDef, unit> =
 /// KEY` vs. a column literally named `constraint`) before diverging.
 type private CreateItem =
     | CColumn of ColumnDef * CheckConstraintDef list
-    | CPrimaryKey of string list
+    | CPrimaryKey of IndexColumn list
     | CIndex of IndexDef
     | CForeignKey of ForeignKeyDef
     | CCheck of CheckConstraintDef
@@ -2396,7 +2420,8 @@ let private createTable: Parser<Statement, unit> =
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>>. tableOptions)
     |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed, tableComment)) ->
-        let pkNames = items |> List.collect (function CPrimaryKey names -> names | _ -> [])
+        let primaryKeyParts = items |> List.collect (function CPrimaryKey columns -> columns | _ -> [])
+        let pkNames = primaryKeyParts |> List.map _.Name
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
         let foreignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
 
@@ -2461,24 +2486,27 @@ let private createTable: Parser<Statement, unit> =
             |> List.filter (fun c -> c.Unique)
             |> List.map (fun c ->
                 { Name = c.Name
-                  KeyColumns = [ { Name = c.Name; PrefixLength = None; Transform = None } ]
+                  KeyColumns = indexColumns [ c.Name ]
                   Unique = true
+                  Visible = true
                   Kind = BTree })
 
         let primaryColumns =
-            if pkNames.IsEmpty then
+            if primaryKeyParts.IsEmpty then
                 columns
                 |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
+                |> indexColumns
             else
-                pkNames
+                primaryKeyParts
 
         let primaryIndex =
             if primaryColumns.IsEmpty then
                 []
             else
                 [ { Name = "PRIMARY"
-                    KeyColumns = primaryColumns |> List.map (fun name -> { Name = name; PrefixLength = None; Transform = None })
+                    KeyColumns = primaryColumns
                     Unique = true
+                    Visible = true
                     Kind = BTree } ]
 
         CreateTable
@@ -2512,8 +2540,9 @@ let private createIndexStmt: Parser<Statement, unit> =
      .>>. identifier
      .>> keyword "ON"
      .>>. qualifiedTableName
-     .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ",")))
-    |>> fun ((((unique, kind), name), table), cols) -> CreateIndex(name, table, cols, unique, kind)
+     .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ","))
+     .>>. indexVisibility)
+    |>> fun (((((unique, kind), name), table), cols), visible) -> CreateIndex(name, table, cols, unique, kind, visible)
 
 let private dropIndexStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "INDEX"
@@ -2668,6 +2697,10 @@ let private renameIndexAction: Parser<AlterAction, unit> =
     )
     |>> RenameIndex
 
+let private setIndexVisibilityAction: Parser<AlterAction, unit> =
+    attempt (keyword "ALTER" >>. keyword "INDEX" >>. identifier .>>. explicitIndexVisibility)
+    |>> SetIndexVisibility
+
 let private renameToAction: Parser<AlterAction, unit> =
     attempt (keyword "RENAME" >>. opt (keyword "TO" <|> keyword "AS") >>. identifier) |>> RenameTo
 
@@ -2721,6 +2754,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           changeColumnAction
           setColumnDefaultAction |>> List.singleton
           setCheckEnforcementAction |>> List.singleton
+          setIndexVisibilityAction |>> List.singleton
           renameIndexAction |>> List.singleton
           renameColumnAction |>> List.singleton
           setAutoIncrementAction |>> List.singleton

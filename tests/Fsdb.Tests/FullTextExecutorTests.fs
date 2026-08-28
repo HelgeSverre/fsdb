@@ -200,9 +200,18 @@ let tests =
           <| fun _ ->
               let store = setup ()
 
-              match run store "CREATE FULLTEXT INDEX ft_title ON articles (title)" with
+              match run store "CREATE FULLTEXT INDEX ft_title ON articles (title) INVISIBLE" with
               | Affected 0UL -> ()
               | other -> failtestf "expected OK, got %A" other
+
+              match run store "SELECT id FROM articles WHERE MATCH (title) AGAINST ('tutorial')" with
+              | Err(1191, _) -> ()
+              | other -> failtestf "expected the invisible FULLTEXT index to stay out of the plan, got %A" other
+
+              Expect.equal
+                  (run store "ALTER TABLE articles ALTER INDEX ft_title VISIBLE")
+                  (Affected 0UL)
+                  "the FULLTEXT index becomes visible"
 
               Expect.equal
                   (ids (run store "SELECT id FROM articles WHERE MATCH (title) AGAINST ('tutorial') ORDER BY id"))

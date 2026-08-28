@@ -7146,7 +7146,7 @@ and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: Table
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows))
 
-and private directOrderColumns (tref: TableRef) (select: SelectStmt) : (string list * Direction) option =
+and private directOrderColumns (tref: TableRef) (select: SelectStmt) : (string * Direction) list option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
     let directBareColumn name =
@@ -7165,13 +7165,12 @@ and private directOrderColumns (tref: TableRef) (select: SelectStmt) : (string l
         | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
         | _ -> None
 
-    match select.OrderBy |> List.map snd |> List.distinct with
-    | [ direction ] ->
-        select.OrderBy
-        |> traverse (fst >> directColumn >> function Some column -> Ok column | None -> Error())
-        |> Result.toOption
-        |> Option.map (fun columns -> columns, direction)
-    | _ -> None
+    select.OrderBy
+    |> traverse (fun (expression, direction) ->
+        match directColumn expression with
+        | Some column -> Ok(column, direction)
+        | None -> Error())
+    |> Result.toOption
 
 and private tryIndexOrder
     (store: Store)
@@ -7194,7 +7193,7 @@ and private tryIndexOrder
         None
     else
         directOrderColumns tref select
-        |> Option.bind (fun (orderedColumns, direction) ->
+        |> Option.bind (fun orderedColumns ->
             let plan (keyName: string) (indices: int list) (columns: ColumnDef list) (count: int) (rows: Value[] seq) =
                 let unsupported =
                     indices
@@ -7215,7 +7214,7 @@ and private tryIndexOrder
                           Rows = rows }
 
             match orderedColumns with
-            | [ column ] ->
+            | [ column, direction ] ->
                 let lower, upper =
                     rangeLookupBounds BareOrQualifiedRange tref select.Where
                     |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
@@ -7225,7 +7224,7 @@ and private tryIndexOrder
                 Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
                 |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
             | columns ->
-                Storage.tryCompositeOrderedLookup store tableDb tref.Table columns direction
+                Storage.tryCompositeOrderedLookup store tableDb tref.Table columns
                 |> Option.bind (fun lookup ->
                     plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows))
 
@@ -9595,7 +9594,7 @@ and private runWindowedSelect
 and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
     let indexColumns =
         table.Indexes
-        |> List.filter (fun index -> index.Kind = FullTextIndex)
+        |> List.filter (fun index -> index.Kind = FullTextIndex && index.Visible)
         |> List.map (fun index ->
             index,
             (index.Columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList))
@@ -13887,12 +13886,13 @@ let rec executeAs
             | Error error -> ids, storageErr error
         | Error e -> ids, storageErr e
 
-    | CreateIndex(name, table, columns, unique, kind) ->
+    | CreateIndex(name, table, columns, unique, kind, visible) ->
         let db, table = splitQualified dbName table
         let index =
             { Name = name
               KeyColumns = columns
               Unique = unique
+              Visible = visible
               Kind = kind }
 
         match scan store db table with

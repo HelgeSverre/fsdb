@@ -185,14 +185,15 @@ MATCH SIMPLE parent probes through unique indexes, ON DELETE CASCADE/SET
 NULL/RESTRICT with cycle-safe recursion, ON UPDATE cascade on update/upsert
 paths, session foreign_key_checks gate, named CHECK constraints with
 ENFORCED/NOT ENFORCED and ALTER ADD validation, ENUM/SET membership,
-ADD UNIQUE over colliding data fails 1062 rather than corrupting.
+ADD UNIQUE over colliding data fails 1062 rather than corrupting, mixed
+ascending/descending B-tree ordering, and invisible indexes that remain
+maintained for constraints while staying out of ordinary plans.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, prefix-key candidates with full residual checks, matching physical inner-join keys, direct literal SELECT/UPDATE/DELETE ranges, compatible grouping, and bounded composite index ordering; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; outer joins and unconstrained ordering remain scans | high (scale) | divergence |
 | Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | DDL, persistence, size validation, SHOW, INFORMATION_SCHEMA, UNIQUE enforcement, and equality/range probes for SELECT/DML/inner joins use character- or byte-prefix keys with complete residual checks; full-value ordering still sorts | low | divergence |
 | Expression indexes | functional key parts participate in physical access and uniqueness | `LOWER(column)` indexes maintain physical equality buckets for matching SELECT/DML predicates and enforce uniqueness; other non-unique expressions retain DDL, persistence, and metadata but use scan fallback, while other unique expressions are refused | low | divergence/refusal |
-| Descending/invisible indexes | direction controls key order; invisible indexes are omitted from ordinary planning | `ASC`/`DESC` and `VISIBLE`/`INVISIBLE` syntax is accepted but does not change storage or planning | low | divergence |
 | Cross-database FKs | supported | `Ast.ForeignKeyDef.RefTable` carries no database qualifier; cross-database references are invisible/unenforceable | low | divergence |
 | AUTO_INCREMENT | counter persists across restart via redo | burned ids survive rollback (InnoDB-like), but the counter rebuild after crash depends on replayed row events; ALTER can only move it forward | low | divergence |
 

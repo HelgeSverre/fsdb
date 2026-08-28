@@ -1022,6 +1022,7 @@ let tests =
                                     [ { Name = "PRIMARY"
                                         KeyColumns = indexColumns [ "id" ]
                                         Unique = true
+                                        Visible = true
                                         Kind = BTree } ] }
                         ))
                         "create table"
@@ -1115,6 +1116,7 @@ let tests =
                                     [ { Name = "PRIMARY"
                                         KeyColumns = indexColumns [ "id" ]
                                         Unique = true
+                                        Visible = true
                                         Kind = BTree } ] }
                         ))
                         "trailing primary key"
@@ -2026,8 +2028,8 @@ let tests =
                         (parseOk "ALTER TABLE t ADD UNIQUE INDEX uq (a), ADD KEY idx (b), DROP INDEX uq, DROP KEY idx")
                         (AlterTable(
                             "t",
-                            [ AddIndex { Name = "uq"; KeyColumns = indexColumns [ "a" ]; Unique = true; Kind = BTree }
-                              AddIndex { Name = "idx"; KeyColumns = indexColumns [ "b" ]; Unique = false; Kind = BTree }
+                            [ AddIndex { Name = "uq"; KeyColumns = indexColumns [ "a" ]; Unique = true; Visible = true; Kind = BTree }
+                              AddIndex { Name = "idx"; KeyColumns = indexColumns [ "b" ]; Unique = false; Visible = true; Kind = BTree }
                               DropIndexAction "uq"
                               DropIndexAction "idx" ]
                         ))
@@ -2066,13 +2068,19 @@ let tests =
                 testCase "ADD and DROP PRIMARY KEY"
                 <| fun _ ->
                     Expect.equal
-                        (parseOk "ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (id, tenant_id)")
-                        (AlterTable("t", [ DropPrimaryKey; AddPrimaryKey [ "id"; "tenant_id" ] ]))
+                        (parseOk "ALTER TABLE t DROP PRIMARY KEY, ADD PRIMARY KEY (id DESC, tenant_id ASC)")
+                        (AlterTable(
+                            "t",
+                            [ DropPrimaryKey
+                              AddPrimaryKey
+                                  [ { Name = "id"; PrefixLength = None; Transform = None; Direction = Desc }
+                                    { Name = "tenant_id"; PrefixLength = None; Transform = None; Direction = Asc } ] ]
+                        ))
                         "replace primary key"
 
                     Expect.equal
                         (parseOk "ALTER TABLE migrations_lock ADD PRIMARY KEY migrations_lock_pkey(lock_key)")
-                        (AlterTable("migrations_lock", [ AddPrimaryKey [ "lock_key" ] ]))
+                        (AlterTable("migrations_lock", [ AddPrimaryKey(indexColumns [ "lock_key" ]) ]))
                         "optional primary-key name"
 
                 testCase "ALTER TABLE named unique constraints and execution options"
@@ -2085,6 +2093,7 @@ let tests =
                                   { Name = "uniq.document_type.name"
                                     KeyColumns = indexColumns [ "technical_name" ]
                                     Unique = true
+                                    Visible = true
                                     Kind = BTree } ]
                         ))
                         "alter options"
@@ -2149,28 +2158,46 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE INDEX idx_a ON t (a)")
-                        (CreateIndex("idx_a", "t", indexColumns [ "a" ], false, BTree))
+                        (CreateIndex("idx_a", "t", indexColumns [ "a" ], false, BTree, true))
                         "create index"
 
                     Expect.equal
                         (parseOk "CREATE UNIQUE INDEX uq_a ON t (a)")
-                        (CreateIndex("uq_a", "t", indexColumns [ "a" ], true, BTree))
+                        (CreateIndex("uq_a", "t", indexColumns [ "a" ], true, BTree, true))
                         "create unique index"
 
+                    Expect.equal
+                        (parseOk "CREATE INDEX ix_desc ON t (a DESC) INVISIBLE")
+                        (CreateIndex("ix_desc", "t", [ { Name = "a"; PrefixLength = None; Transform = None; Direction = Desc } ], false, BTree, false))
+                        "index options"
+
                     match parseOk "CREATE INDEX ix_prefix ON t (a(12))" with
-                    | CreateIndex("ix_prefix", "t", [ { Name = "a"; PrefixLength = Some 12; Transform = None } ], false, BTree) -> ()
+                    | CreateIndex("ix_prefix", "t", [ { Name = "a"; PrefixLength = Some 12; Transform = None; Direction = Asc } ], false, BTree, true) -> ()
                     | other -> failtestf "expected CREATE INDEX prefix metadata, got %A" other
 
                     match parseOk "CREATE UNIQUE INDEX ix_lower ON t ((LOWER(external_id)))" with
-                    | CreateIndex("ix_lower", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Lowercase } ], true, BTree) -> ()
+                    | CreateIndex("ix_lower", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Lowercase; Direction = Asc } ], true, BTree, true) -> ()
                     | other -> failtestf "expected a lowercase functional key part, got %A" other
 
                     match
                         parseOk
                             "CREATE TABLE companies (name VARCHAR(255), rating BIGINT, firm_name VARCHAR(255), firm_id BIGINT, client_of BIGINT, INDEX company_name_index USING btree (name), INDEX company_expression_index ((CASE WHEN rating > 0 THEN lower(name) END) DESC), INDEX full_name_index ((CONCAT_WS(firm_name, name, _utf8mb4' '))), INDEX company_disabled_index (firm_id, client_of) INVISIBLE)"
                     with
-                    | CreateTable { Indexes = [ _; { KeyColumns = [ { Transform = Some(Expression(Case _)) } ] }; { KeyColumns = [ { Transform = Some(Expression(FuncCall("CONCAT_WS", _))) } ] }; _ ] } -> ()
+                    | CreateTable { Indexes = [ _; expressionIndex; concatenatedIndex; disabled ] } ->
+                        match expressionIndex.KeyColumns, concatenatedIndex.KeyColumns with
+                        | [ expression ], [ concatenated ] ->
+                            Expect.isTrue (match expression.Transform with Some(Expression(Case _)) -> true | _ -> false) "case expression"
+                            Expect.equal expression.Direction Desc "case direction"
+                            Expect.isTrue (match concatenated.Transform with Some(Expression(FuncCall("CONCAT_WS", _))) -> true | _ -> false) "function expression"
+                            Expect.equal concatenated.Direction Asc "default direction"
+                            Expect.isFalse disabled.Visible "visibility"
+                        | keyColumns -> failtestf "expected one key part per expression index, got %A" keyColumns
                     | other -> failtestf "expected Rails expression/index-option metadata, got %A" other
+
+                    Expect.equal
+                        (parseOk "ALTER TABLE companies ALTER INDEX company_disabled_index VISIBLE")
+                        (AlterTable("companies", [ SetIndexVisibility("company_disabled_index", true) ]))
+                        "index visibility alteration"
 
                 testCase "DROP INDEX [IF EXISTS] name ON table"
                 <| fun _ ->
@@ -2917,7 +2944,7 @@ let tests =
               | other -> failtestf "unexpected parse: %A" other
 
               match Fsdb.Parser.parse "CREATE FULLTEXT INDEX ft ON t (a)" with
-              | Ok(CreateIndex("ft", "t", [ { Name = "a" } ], false, FullTextIndex)) -> ()
+              | Ok(CreateIndex("ft", "t", [ { Name = "a" } ], false, FullTextIndex, true)) -> ()
               | other -> failtestf "unexpected parse: %A" other
 
               Expect.isError (Fsdb.Parser.parse "SELECT MATCH(body) partial") "MATCH requires AGAINST"

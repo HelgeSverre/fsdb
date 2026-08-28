@@ -188,7 +188,7 @@ let tests =
                     Expect.equal (createTable store defaultDatabase "wide_latin1" [ latin1 ] [] [] None None) (Ok()) "latin1 uses one byte per character"
 
                     let keyColumns = [ 1..5 ] |> List.map (fun index -> col (sprintf "value%d" index) (TVarchar 255) false)
-                    let wideKey = { Name = "ix_wide"; KeyColumns = indexColumns (keyColumns |> List.map _.Name); Unique = false; Kind = BTree }
+                    let wideKey = { Name = "ix_wide"; KeyColumns = indexColumns (keyColumns |> List.map _.Name); Unique = false; Visible = true; Kind = BTree }
 
                     match createTable store defaultDatabase "wide_key" keyColumns [ wideKey ] [] None None with
                     | Error(ExpressionError(1071, "Specified key was too long; max key length is 3072 bytes")) -> ()
@@ -201,7 +201,8 @@ let tests =
                                 |> List.map (fun column ->
                                     { Name = column.Name
                                       PrefixLength = Some 100
-                                      Transform = None }) }
+                                      Transform = None
+                                      Direction = Asc }) }
 
                     Expect.equal (createTable store defaultDatabase "bounded_key" keyColumns [ boundedKey ] [] None None) (Ok()) "prefixes bound the key size"
 
@@ -797,7 +798,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -825,8 +826,9 @@ let tests =
                         "prefixed"
                         [ col "value" (TVarchar 50) false ]
                         [ { Name = "uq_value"
-                            KeyColumns = [ { Name = "value"; PrefixLength = Some 10; Transform = None } ]
+                            KeyColumns = [ { Name = "value"; PrefixLength = Some 10; Transform = None; Direction = Asc } ]
                             Unique = true
+                            Visible = true
                             Kind = BTree } ]
                         []
                         None
@@ -853,8 +855,9 @@ let tests =
                         "binary_prefix"
                         [ col "id" (TInt false) false; col "value" (TVarBinary 8) false ]
                         [ { Name = "ix_value"
-                            KeyColumns = [ { Name = "value"; PrefixLength = Some 2; Transform = None } ]
+                            KeyColumns = [ { Name = "value"; PrefixLength = Some 2; Transform = None; Direction = Asc } ]
                             Unique = false
+                            Visible = true
                             Kind = BTree } ]
                         []
                         None
@@ -1065,7 +1068,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -1267,7 +1270,7 @@ let tests =
                 testCase "a candidate delete evaluates the current row after the row changes"
                 <| fun _ ->
                     let store = create ()
-                    let index = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Kind = BTree }
+                    let index = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Visible = true; Kind = BTree }
 
                     createTable
                         store
@@ -1731,7 +1734,7 @@ let tests =
                 testCase "AddIndex / DropIndexAction manage the table's index metadata"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let ix = { Name = "idx_name"; KeyColumns = indexColumns [ "name" ]; Unique = false; Kind = BTree }
+                    let ix = { Name = "idx_name"; KeyColumns = indexColumns [ "name" ]; Unique = false; Visible = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
                     | Ok() ->
@@ -1747,7 +1750,7 @@ let tests =
                 testCase "a secondary ordered index follows inserted, updated, deleted, and replaced row identities"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let index = { Name = "idx_age"; KeyColumns = indexColumns [ "age" ]; Unique = false; Kind = BTree }
+                    let index = { Name = "idx_age"; KeyColumns = indexColumns [ "age" ]; Unique = false; Visible = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex index ] with
                     | Ok() -> ()
@@ -1819,7 +1822,7 @@ let tests =
                 testCase "a composite secondary index follows row mutations incrementally"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let index = { Name = "idx_name_age"; KeyColumns = indexColumns [ "name"; "age" ]; Unique = false; Kind = BTree }
+                    let index = { Name = "idx_name_age"; KeyColumns = indexColumns [ "name"; "age" ]; Unique = false; Visible = true; Kind = BTree }
                     alterTable store defaultDatabase "users" [ AddIndex index ] |> Result.defaultWith (failtestf "add index failed: %A")
                     let reindexesBefore = reindexCallCount ()
 
@@ -1854,7 +1857,7 @@ let tests =
                     Expect.equal (ids "alice" 31L) [ VInt 1L ] "updated rows enter the new composite bucket"
 
                     let ordered =
-                        match tryCompositeOrderedLookup store defaultDatabase "users" [ "name"; "age" ] Asc with
+                        match tryCompositeOrderedLookup store defaultDatabase "users" [ "name", Asc; "age", Asc ] with
                         | Some lookup -> lookup.OrderedRows |> Seq.map (fun row -> row.[1], row.[2]) |> List.ofSeq
                         | None -> failtest "expected composite ordered rows"
 
@@ -1879,7 +1882,7 @@ let tests =
                         [ [ VNull; VString "dup"; VInt 1L ]; [ VNull; VString "dup"; VInt 2L ]; [ VNull; VString "unique"; VInt 3L ] ]
                     |> ignore
 
-                    let ix = { Name = "uq_name"; KeyColumns = indexColumns [ "name" ]; Unique = true; Kind = BTree }
+                    let ix = { Name = "uq_name"; KeyColumns = indexColumns [ "name" ]; Unique = true; Visible = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
                     | Error(DuplicateKey("uq_name", _)) -> ()
@@ -1912,7 +1915,7 @@ let tests =
                     let store = create ()
                     createTable store defaultDatabase "t" [ col "a" (TInt false) true; col "b" (TInt false) true ] [] [] None None |> ignore
 
-                    match alterTable store defaultDatabase "t" [ AddPrimaryKey [ "a"; "b" ] ] with
+                    match alterTable store defaultDatabase "t" [ AddPrimaryKey(indexColumns [ "a"; "b" ]) ] with
                     | Ok() ->
                         match scan store defaultDatabase "t" with
                         | Ok(columns, _) ->
@@ -1931,13 +1934,13 @@ let tests =
 
                     let withNull = withValues "nullable_key" [ VNull; VInt 1L ]
 
-                    match alterTable withNull defaultDatabase "nullable_key" [ AddPrimaryKey [ "id" ] ] with
+                    match alterTable withNull defaultDatabase "nullable_key" [ AddPrimaryKey(indexColumns [ "id" ]) ] with
                     | Error(ExpressionError(1138, "Invalid use of NULL value")) -> ()
                     | other -> failtestf "expected 1138 for a NULL primary-key candidate, got %A" other
 
                     let withDuplicate = withValues "duplicate_key" [ VInt 1L; VInt 1L ]
 
-                    match alterTable withDuplicate defaultDatabase "duplicate_key" [ AddPrimaryKey [ "id" ] ] with
+                    match alterTable withDuplicate defaultDatabase "duplicate_key" [ AddPrimaryKey(indexColumns [ "id" ]) ] with
                     | Error(DuplicateKey("PRIMARY", "1")) -> ()
                     | other -> failtestf "expected a duplicate PRIMARY rejection, got %A" other
 
@@ -2011,7 +2014,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Kind = BTree } ]
+                        [ { Name = "uq_email"; KeyColumns = indexColumns [ "email" ]; Unique = true; Visible = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -2153,6 +2156,7 @@ let tests =
                         [ { Name = "uq_pair"
                             KeyColumns = indexColumns [ "id"; "other" ]
                             Unique = true
+                            Visible = true
                             Kind = BTree } ]
                         []
                         None

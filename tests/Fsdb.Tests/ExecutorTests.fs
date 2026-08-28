@@ -4868,6 +4868,74 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "500" ] ] "updates move rows between transformed buckets"
                     | other -> failtestf "expected updated functional rows, got %A" other
 
+                testCase "invisible indexes enforce constraints without entering query plans"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE hidden (id INT PRIMARY KEY, code VARCHAR(20), UNIQUE INDEX uq_code (code) INVISIBLE)" |> ignore
+                    runDefault store "INSERT INTO hidden VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')" |> ignore
+
+                    match runDefault store "INSERT INTO hidden VALUES (4, 'alpha')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected invisible uniqueness enforcement, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id FROM hidden WHERE code = 'alpha'" with
+                    | ResultSet(_, [ row ]) when row.[4] = Some "ALL" && row.[6].IsNone -> ()
+                    | ResultSet(_, [ row ]) -> failtestf "expected a scan plan without uq_code, got %A" row
+                    | other -> failtestf "expected a scan plan, got %A" other
+
+                    runDefault store "ALTER TABLE hidden ALTER INDEX uq_code VISIBLE" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT id FROM hidden WHERE code = 'alpha'" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "const") "the visible unique index is planned"
+                        Expect.equal row.[6] (Some "uq_code") "the visible key is reported"
+                    | other -> failtestf "expected a point plan, got %A" other
+
+                testCase "mixed descending indexes stream compatible orders"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE ranked (id INT PRIMARY KEY, priority INT, created_at INT, INDEX ix_ranked (priority ASC, created_at DESC), INDEX ix_created (created_at DESC))" |> ignore
+                    runDefault store "INSERT INTO ranked VALUES (1, 1, 10), (2, 1, 30), (3, 1, 20), (4, 2, 10), (5, 2, 20), (6, 3, 15), (7, 3, NULL)" |> ignore
+
+                    match runDefault store "SELECT id FROM ranked ORDER BY priority ASC, created_at DESC LIMIT 4" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ]; [ Some "3" ]; [ Some "1" ]; [ Some "5" ] ] "declared direction"
+                    | other -> failtestf "expected ordered rows, got %A" other
+
+                    match runDefault store "SELECT id FROM ranked ORDER BY priority DESC, created_at ASC LIMIT 4" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ]; [ Some "6" ]; [ Some "4" ]; [ Some "5" ] ] "reverse direction"
+                    | other -> failtestf "expected reverse-ordered rows, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id FROM ranked ORDER BY priority ASC, created_at DESC LIMIT 4" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "index") "compatible directions stream the index"
+                        Expect.equal row.[6] (Some "ix_ranked") "the mixed-direction key is reported"
+                    | other -> failtestf "expected an index-order plan, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id FROM ranked ORDER BY priority ASC, created_at ASC LIMIT 4" with
+                    | ResultSet(_, [ row ]) -> Expect.equal row.[11] (Some "Using filesort") "incompatible directions sort"
+                    | other -> failtestf "expected a filesort plan, got %A" other
+
+                    match runDefault store "SELECT id FROM ranked WHERE created_at >= 15 AND created_at < 30 ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ]; [ Some "5" ]; [ Some "6" ] ] "descending range"
+                    | other -> failtestf "expected descending range rows, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id FROM ranked WHERE created_at >= 15 AND created_at < 30" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "range") "descending index range plan"
+                        Expect.equal row.[6] (Some "ix_created") "descending range key"
+                    | other -> failtestf "expected a descending range plan, got %A" other
+
+                    runDefault store "CREATE TABLE primary_ranked (priority INT, created_at INT, PRIMARY KEY (priority ASC, created_at DESC))" |> ignore
+                    runDefault store "INSERT INTO primary_ranked VALUES (1, 10), (1, 30), (1, 20), (2, 10)" |> ignore
+
+                    match runDefault store "SELECT created_at FROM primary_ranked ORDER BY priority ASC, created_at DESC LIMIT 3" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "30" ]; [ Some "20" ]; [ Some "10" ] ] "primary-key direction"
+                    | other -> failtestf "expected primary-key ordered rows, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT created_at FROM primary_ranked ORDER BY priority ASC, created_at DESC LIMIT 3" with
+                    | ResultSet(_, [ row ]) -> Expect.equal row.[6] (Some "PRIMARY") "primary key serves the order"
+                    | other -> failtestf "expected a primary-key order plan, got %A" other
+
                 testCase "composite prefix probes survive mutations"
                 <| fun _ ->
                     let store = newStore ()
