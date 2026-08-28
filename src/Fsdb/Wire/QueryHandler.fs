@@ -3854,8 +3854,18 @@ let private mergeRoutineExecutionSettings original changed result =
         else
             original.ConnectionCollation }
 
+type private EventStatus =
+    | Enabled
+    | Disabled
+
 type private TextEventCommand =
     | CreateEvent of name: string * schedule: string * body: string
+    | AlterEvent of
+        name: string *
+        schedule: string option *
+        renameTo: string option *
+        status: EventStatus option *
+        body: string option
     | DropEvent of name: string * ifExists: bool
 
 let private invalidDiagnosticsCondition session =
@@ -3902,15 +3912,40 @@ let private createEventRe =
         RegexOptions.IgnoreCase
     )
 
+let private alterEventRe =
+    Regex(
+        @"^\s*ALTER\s+EVENT\s+(?<name>\S+)\s+(?:(?:ON\s+SCHEDULE\s+(?<schedule>.+?)(?=\s+(?:RENAME\s+TO|ENABLE|DISABLE|DO)\b|$))\s*)?(?:(?:RENAME\s+TO\s+(?<rename>\S+))\s*)?(?:(?<status>ENABLE|DISABLE)\s*)?(?:DO\s+(?<body>.+))?\s*$",
+        RegexOptions.IgnoreCase ||| RegexOptions.Singleline
+    )
+
 let private dropEventRe =
     Regex(@"^\s*DROP\s+EVENT\s+(?<ifExists>IF\s+EXISTS\s+)?(?<name>\S+)\s*$", RegexOptions.IgnoreCase)
 
 let private tryTextEventCommand (sql: string) =
     let create = createEventRe.Match(sql)
+    let alter = alterEventRe.Match(sql)
     let drop = dropEventRe.Match(sql)
 
     if create.Success then
         Some(CreateEvent(create.Groups.["name"].Value, create.Groups.["schedule"].Value, create.Groups.["body"].Value))
+    elif
+        alter.Success
+        && [ "schedule"; "rename"; "status"; "body" ]
+           |> List.exists (fun name -> alter.Groups.[name].Success)
+    then
+        let optional (name: string) =
+            if alter.Groups.[name].Success then Some(alter.Groups.[name].Value.Trim()) else None
+
+        Some(
+            AlterEvent(
+                alter.Groups.["name"].Value,
+                optional "schedule",
+                optional "rename",
+                optional "status"
+                |> Option.map (fun value -> if value.Equals("ENABLE", StringComparison.OrdinalIgnoreCase) then Enabled else Disabled),
+                optional "body"
+            )
+        )
     elif drop.Success then
         Some(DropEvent(drop.Groups.["name"].Value, drop.Groups.["ifExists"].Success))
     else
@@ -4502,46 +4537,104 @@ and private dispatchNormalized session rawSql parserOptions sql =
                     let code, message = Storage.toMySqlError error
                     session, Err(code, message)
 
-    let eventEntries () =
+    let eventEntries session =
         match Storage.scanList session.Store "mysql" "events" with
         | Ok(_, rows) -> rows |> List.choose SystemCatalog.Event.tryRead
         | Error _ -> []
 
-    let runTextEvent command =
+    let validEventBody (body: string) =
+        let upper = body.Trim().ToUpperInvariant()
+        Parser.parseWithOptions parserOptions body |> Result.isOk || tryProbe body upper |> Option.isSome
+
+    let runTextEvent session command =
+        let authorize database =
+            Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ]
+
+        let sameEvent leftSchema leftName rightSchema rightName =
+            String.Equals(leftSchema, rightSchema, StringComparison.OrdinalIgnoreCase)
+            && String.Equals(leftName, rightName, StringComparison.OrdinalIgnoreCase)
+
         match command with
         | CreateEvent(qualifiedName, schedule, body) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
-            match Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] with
+            match authorize database with
             | Error(code, message) -> session, Err(code, message)
-            | Ok() when eventEntries () |> List.exists (SystemCatalog.Event.matches database name) ->
+            | Ok() when eventEntries session |> List.exists (SystemCatalog.Event.matches database name) ->
                 session, Err(1537, sprintf "Event '%s' already exists" name)
+            | Ok() when not (validEventBody body) -> session, syntaxError body
             | Ok() ->
-                let upper = body.Trim().ToUpperInvariant()
+                let definer = Auth.formatAccount (accountOf session)
 
-                if Parser.parse body |> Result.isError && tryProbe body upper |> Option.isNone then
-                    session, syntaxError body
-                else
-                    let definer = session.User + "@" + session.AccountHost
+                match
+                    Storage.insertRows
+                        session.Store
+                        "mysql"
+                        "events"
+                        None
+                        [ [ VString database; VString name; VString schedule; VString body; VDateTime DateTime.Now
+                            VString definer; VString "ENABLED" ] ]
+                with
+                | Ok _ -> session, Affected 0UL
+                | Error error ->
+                    let code, message = Storage.toMySqlError error
+                    session, Err(code, message)
+        | AlterEvent(qualifiedName, schedule, renameTo, status, body) ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+            let renamedDatabase, renamedName =
+                renameTo
+                |> Option.map (splitQualified database)
+                |> Option.defaultValue (database, name)
 
-                    match
-                        Storage.insertRows
-                            session.Store
-                            "mysql"
-                            "events"
-                            None
-                            [ [ VString database; VString name; VString schedule; VString body; VDateTime DateTime.Now
-                                VString definer; VString "ENABLED" ] ]
-                    with
-                    | Ok _ -> session, Affected 0UL
-                    | Error error ->
-                        let code, message = Storage.toMySqlError error
-                        session, Err(code, message)
+            let exists = eventEntries session |> List.exists (SystemCatalog.Event.matches database name)
+            let targetExists =
+                not (sameEvent database name renamedDatabase renamedName)
+                && (eventEntries session |> List.exists (SystemCatalog.Event.matches renamedDatabase renamedName))
+
+            match
+                Storage.databaseExists (Session.currentStore session) database,
+                Storage.databaseExists (Session.currentStore session) renamedDatabase,
+                authorize database,
+                if sameEvent database name renamedDatabase renamedName then Ok() else authorize renamedDatabase
+            with
+            | false, _, _, _ -> session, Err(1049, sprintf "Unknown database '%s'" database)
+            | _, false, _, _ -> session, Err(1049, sprintf "Unknown database '%s'" renamedDatabase)
+            | _, _, Error(code, message), _
+            | _, _, _, Error(code, message) -> session, Err(code, message)
+            | _ when not exists -> session, Err(1539, sprintf "Unknown event '%s'" name)
+            | _ when targetExists -> session, Err(1537, sprintf "Event '%s' already exists" renamedName)
+            | _ when body |> Option.exists (validEventBody >> not) -> session, syntaxError (Option.get body)
+            | _ ->
+                let update (row: Value[]) =
+                    let updated = Array.copy row
+                    updated.[0] <- VString renamedDatabase
+                    updated.[1] <- VString renamedName
+                    schedule |> Option.iter (fun value -> updated.[2] <- VString value)
+                    body |> Option.iter (fun value -> updated.[3] <- VString value)
+                    updated.[5] <- VString(Auth.formatAccount (accountOf session))
+                    status
+                    |> Option.iter (fun value ->
+                        updated.[6] <- VString(if value = Enabled then "ENABLED" else "DISABLED"))
+                    Ok updated
+
+                match
+                    Storage.updateRows
+                        session.Store
+                        "mysql"
+                        "events"
+                        None
+                        (SystemCatalog.Event.rowMatches database name >> Ok)
+                        update
+                with
+                | Ok _ -> session, Affected 0UL
+                | Error error ->
+                    let code, message = Storage.toMySqlError error
+                    session, Err(code, message)
         | DropEvent(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-            let exists = eventEntries () |> List.exists (SystemCatalog.Event.matches database name)
+            let exists = eventEntries session |> List.exists (SystemCatalog.Event.matches database name)
 
-            match Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] with
+            match authorize database with
             | Error(code, message) -> session, Err(code, message)
             | Ok() when not exists && not ifExists -> session, Err(1539, sprintf "Unknown event '%s'" name)
             | Ok() when not exists -> session, Affected 0UL
@@ -4560,7 +4653,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
         | Ok(Some diagnostics) -> runTextDiagnostics session diagnostics
         | Ok None ->
             match tryTextEventCommand sql with
-            | Some command -> runTextEvent command
+            | Some command -> runTextEvent (commitSession session) command
             | None ->
                 match tryTextRoutineCommand sql with
                 | Some(CallProcedure _ as command) ->

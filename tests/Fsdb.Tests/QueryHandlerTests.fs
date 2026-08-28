@@ -2950,6 +2950,78 @@ let tests =
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected no events after drop, got %A" other
 
+          testCase "ALTER EVENT changes schedule, status, name, schema, and body"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE event_log (value INT)"
+              let session, _ = handle session "CREATE DATABASE event_archive"
+              let session, _ =
+                  handle
+                      session
+                      "CREATE EVENT mutable_event ON SCHEDULE EVERY 1 DAY DO INSERT INTO event_log VALUES (1)"
+
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO event_log VALUES (9)"
+
+              let session, altered =
+                  handle
+                      session
+                      "ALTER EVENT mutable_event ON SCHEDULE EVERY 2 HOUR RENAME TO event_archive.renamed_event DISABLE DO INSERT INTO fsdb.event_log VALUES (2)"
+
+              Expect.equal altered (Affected 0UL) "altered event"
+              Expect.isNone session.Tx "ALTER EVENT commits an active transaction"
+              let session, _ = handle session "ROLLBACK"
+
+              match handle session "SELECT value FROM event_log" |> snd with
+              | ResultSet(_, [ [ Some "9" ] ]) -> ()
+              | other -> failtestf "expected the pre-ALTER write to stay committed, got %A" other
+
+              match handle session "SHOW EVENTS FROM event_archive" |> snd with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row.[1] (Some "renamed_event") "renamed event"
+                  Expect.equal row.[10] (Some "DISABLED") "disabled event"
+              | other -> failtestf "expected altered event metadata, got %A" other
+
+              match handle session "SHOW CREATE EVENT event_archive.renamed_event" |> snd with
+              | ResultSet(_, [ [ Some "renamed_event"; _; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "ON SCHEDULE EVERY 2 HOUR" "altered schedule"
+                  Expect.stringContains ddl "INSERT INTO fsdb.event_log VALUES (2)" "altered body"
+              | other -> failtestf "expected altered event DDL, got %A" other
+
+              match handle session "ALTER EVENT mutable_event ENABLE" |> snd with
+              | Err(1539, _) -> ()
+              | other -> failtestf "expected the old event identity to disappear, got %A" other
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE EVENT event_archive.taken ON SCHEDULE EVERY 1 DAY DO INSERT INTO fsdb.event_log VALUES (3)"
+
+              match handle session "ALTER EVENT event_archive.renamed_event RENAME TO event_archive.taken" |> snd with
+              | Err(1537, _) -> ()
+              | other -> failtestf "expected duplicate event rename error, got %A" other
+
+              let session, _ = handle session "CREATE USER event_editor"
+              let session, _ = handle session "GRANT EVENT ON fsdb.* TO event_editor"
+              let session, _ = handle session "GRANT EVENT ON event_archive.* TO event_editor"
+              let editor = { create 2 store with User = "event_editor" }
+
+              match handle editor "ALTER EVENT event_archive.renamed_event RENAME TO fsdb.renamed_event ENABLE" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected cross-schema event rename, got %A" other
+
+              match handle session "SHOW EVENTS FROM fsdb" |> snd with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row.[1] (Some "renamed_event") "event moved back"
+                  Expect.equal row.[2] (Some "event_editor@%") "altering account becomes definer"
+                  Expect.equal row.[10] (Some "ENABLED") "event enabled"
+              | other -> failtestf "expected redefined event metadata, got %A" other
+
+              match handle session "ALTER EVENT fsdb.renamed_event DO not valid sql" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected altered body validation, got %A" other
+
           testCase "SQL PREPARE accepts user-variable source text and text-probed statements"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
