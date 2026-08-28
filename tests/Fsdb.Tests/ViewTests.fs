@@ -698,6 +698,115 @@ let tests =
               | Err(1146, _) -> ()
               | other -> failtestf "expected missing view after DROP, got %A" other
 
+          testCase "view DDL retains declaration options and ALTER preserves omitted options"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = Fsdb.Session.create 1 store
+              let root = apply root "CREATE TABLE source (id INT PRIMARY KEY)"
+              let root = apply root "INSERT INTO source VALUES (1)"
+              let root = apply root "CREATE USER 'owner'@'%'"
+              let root = apply root "CREATE USER 'other'@'%'"
+              let root = apply root "CREATE USER 'blind'@'%'"
+              let root = apply root "GRANT CREATE VIEW, SELECT ON fsdb.* TO 'owner'@'%'"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO 'blind'@'%'"
+              let owner = { Fsdb.Session.create 2 store with User = "owner"; AccountHost = "%" }
+              let blind = { Fsdb.Session.create 3 store with User = "blind"; AccountHost = "%" }
+
+              match Fsdb.QueryHandler.handle blind "CREATE VIEW blind_view AS SELECT id FROM source WITH CHECK OPTION" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "SELECT" "definition privileges"
+              | other -> failtestf "expected CHECK OPTION definition privilege denial, got %A" other
+
+              let _owner =
+                  apply
+                      owner
+                      "CREATE ALGORITHM=MERGE DEFINER='owner'@'%' SQL SECURITY INVOKER VIEW controlled AS SELECT id FROM source"
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "controlled" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) ->
+                  Expect.stringContains ddl "ALGORITHM=MERGE" "algorithm"
+                  Expect.stringContains ddl "DEFINER=`owner`@`%`" "definer"
+                  Expect.stringContains ddl "SQL SECURITY INVOKER" "security"
+              | other -> failtestf "expected SHOW CREATE VIEW, got %A" other
+
+              match Fsdb.QueryHandler.handle owner "CREATE DEFINER='other'@'%' VIEW forbidden AS SELECT id FROM source" |> snd with
+              | Err(1227, message) -> Expect.stringContains message "SET_ANY_DEFINER" "definer authority"
+              | other -> failtestf "expected explicit definer denial, got %A" other
+
+              let root, missingCreated =
+                  Fsdb.QueryHandler.handle root "CREATE DEFINER='missing'@'%' VIEW missing_definer AS SELECT id FROM source"
+
+              expectOk missingCreated "missing definer metadata"
+              Expect.exists root.Diagnostics (fun condition -> condition.Code = 1449) "missing definer note"
+
+              match Fsdb.QueryHandler.handle root "SELECT * FROM missing_definer" |> snd with
+              | Err(1449, _) -> ()
+              | other -> failtestf "expected missing definer execution failure, got %A" other
+
+              let root, expressionCreated =
+                  Fsdb.QueryHandler.handle
+                      root
+                      "CREATE ALGORITHM=MERGE VIEW expression_view AS SELECT id + 1 AS next_id FROM source ORDER BY id"
+
+              expectOk expressionCreated "mergeable expression view"
+              Expect.isFalse (root.Diagnostics |> List.exists (fun condition -> condition.Code = 1354)) "MERGE remains valid"
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "expression_view" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) -> Expect.stringContains ddl "ALGORITHM=MERGE" "mergeable algorithm"
+              | other -> failtestf "expected mergeable expression view, got %A" other
+
+              let root, aggregateCreated =
+                  Fsdb.QueryHandler.handle root "CREATE ALGORITHM=MERGE VIEW aggregate_view AS SELECT COUNT(*) AS n FROM source"
+
+              expectOk aggregateCreated "aggregate view"
+              Expect.exists root.Diagnostics (fun condition -> condition.Code = 1354) "incompatible MERGE warning"
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "aggregate_view" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) -> Expect.stringContains ddl "ALGORITHM=UNDEFINED" "normalized algorithm"
+              | other -> failtestf "expected normalized aggregate view, got %A" other
+
+              let root = apply root "ALTER VIEW controlled AS SELECT id FROM source WHERE id > 0"
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "controlled" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) ->
+                  Expect.stringContains ddl "ALGORITHM=MERGE" "ALTER preserves algorithm"
+                  Expect.stringContains ddl "DEFINER=`owner`@`%`" "ALTER preserves definer"
+                  Expect.stringContains ddl "SQL SECURITY INVOKER" "ALTER preserves security"
+              | other -> failtestf "expected preserved ALTER envelope, got %A" other
+
+              let _root =
+                  apply
+                      root
+                      "ALTER ALGORITHM=TEMPTABLE DEFINER=CURRENT_USER SQL SECURITY DEFINER VIEW controlled AS SELECT id FROM source"
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "controlled" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) ->
+                  Expect.stringContains ddl "ALGORITHM=TEMPTABLE" "changed algorithm"
+                  Expect.stringContains ddl "DEFINER=`root`@`%`" "changed definer"
+                  Expect.stringContains ddl "SQL SECURITY DEFINER" "changed security"
+              | other -> failtestf "expected altered SHOW CREATE VIEW, got %A" other
+
+              match run store "UPDATE controlled SET id = 2" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected TEMPTABLE view to be non-updatable, got %A" other
+
+              match run store "ALTER VIEW absent AS SELECT 1" with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected missing ALTER target, got %A" other
+
+              match run store "ALTER VIEW source AS SELECT id FROM source" with
+              | Err(1347, _) -> ()
+              | other -> failtestf "expected table ALTER target rejection, got %A" other
+
+              match run store "CREATE OR REPLACE VIEW source AS SELECT 1" with
+              | Err(1347, _) -> ()
+              | other -> failtestf "expected table replacement rejection, got %A" other
+
           testCase "recursive view references fail cleanly"
           <| fun _ ->
               let store = setup ()
@@ -714,7 +823,9 @@ let tests =
                   Fsdb.Persistence.attach dir store
                   expectOk (run store "CREATE TABLE t (id INT PRIMARY KEY)") "create table"
                   expectOk (run store "INSERT INTO t VALUES (1), (2)") "seed"
-                  expectOk (run store "CREATE VIEW doubled AS SELECT id, id * 2 AS n FROM t") "create view"
+                  expectOk
+                      (run store "CREATE ALGORITHM=MERGE DEFINER='root'@'%' VIEW doubled AS SELECT id, id * 2 AS n FROM t")
+                      "create view"
                   expectOk (run store "CREATE VIEW positive AS SELECT id FROM t WHERE id > 0 WITH LOCAL CHECK OPTION") "create guarded view"
                   expectOk (run store "CREATE SQL SECURITY INVOKER VIEW invoked AS SELECT id FROM t") "create invoker view"
 
@@ -731,7 +842,13 @@ let tests =
                   Expect.equal
                       (rows reloaded "SELECT security_type FROM mysql.views WHERE view_name = 'invoked'")
                       [ [ Some "INVOKER" ] ]
-                      "reloaded security type")
+                      "reloaded security type"
+
+                  match Fsdb.InformationSchema.showCreateView reloaded.Catalog "fsdb" "doubled" with
+                  | Ok(_, [ [ _; Some ddl; _; _ ] ]) ->
+                      Expect.stringContains ddl "ALGORITHM=MERGE" "reloaded algorithm"
+                      Expect.stringContains ddl "DEFINER=`root`@`%`" "reloaded definer"
+                  | other -> failtestf "expected persisted view envelope, got %A" other)
 
           testCase "SHOW and information_schema expose stored views"
           <| fun _ ->

@@ -655,6 +655,28 @@ type ViewSecurity =
     | ViewDefiner
     | ViewInvoker
 
+type ViewAlgorithm =
+    | ViewAlgorithmUndefined
+    | ViewAlgorithmMerge
+    | ViewAlgorithmTemptable
+
+type ViewDefiner =
+    | CurrentViewDefiner
+    | ExplicitViewDefiner of user: string * host: string
+
+type ViewDdlAction =
+    | CreateViewDdl of orReplace: bool
+    | AlterViewDdl
+
+type ViewSpec =
+    { Action: ViewDdlAction
+      Algorithm: ViewAlgorithm option
+      Definer: ViewDefiner option
+      Security: ViewSecurity option
+      Name: string
+      Columns: string list
+      Definition: string }
+
 type AccountTlsRequirement =
     | RequireNone
     | RequireSsl
@@ -779,14 +801,10 @@ type Statement =
     /// `DROP TRIGGER [IF EXISTS] name` — resolved against the session
     /// database's triggers (error 1360 when missing, unless `ifExists`).
     | DropTrigger of name: string * ifExists: bool
-    /// A stored query. The definition remains SQL text so the
-    /// row-backed `mysql.views` catalog can persist it through ordinary row
-    /// events; it is parsed when the view is read. `columns` is the optional
-    /// explicit view-column list, and `orReplace` selects CREATE OR REPLACE.
-    /// Fsdb materializes the definition once per referencing
-    /// statement; INSERT, UPDATE, and DELETE accept only direct projections
-    /// of one table. No MERGE.
-    | CreateView of name: string * columns: string list * definition: string * orReplace: bool * security: ViewSecurity
+    /// A CREATE/ALTER VIEW declaration. The definition remains SQL text so
+    /// the row-backed `mysql.views` catalog can persist it through ordinary
+    /// row events; it is parsed when the view is read.
+    | CreateView of ViewSpec
     /// `DROP VIEW [IF EXISTS] view [, ...]`.
     | DropView of names: string list * ifExists: bool
     | ChecksumTables of tables: string list * quick: bool

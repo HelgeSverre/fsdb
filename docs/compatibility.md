@@ -128,8 +128,8 @@ materialized-view object. See the MySQL 8.4 documentation for
 
 fsdb supports stored queries broadly and a narrow writable subset:
 
-- `CREATE [OR REPLACE] VIEW name [(columns)] AS SELECT ...` and
-  `DROP VIEW [IF EXISTS] name [, ...]`.
+- `CREATE [OR REPLACE] [ALGORITHM=...] [DEFINER=...] [SQL SECURITY ...]
+  VIEW`, `ALTER VIEW`, and `DROP VIEW [IF EXISTS]`.
 - Nested views, joins, unions, CTEs, grouping, windows, and the rest of the
   supported SELECT grammar inside a definition.
 - Direct single-table projections with a static predicate use MERGE-like
@@ -173,8 +173,12 @@ UPDATE`. Every written or referenced column must be exposed, and the privilege
 identity is checked at every nested view boundary. `LOCAL` and `CASCADED`
 check predicates compose through nested views and are reported by `SHOW CREATE
 VIEW` and `information_schema.VIEWS`. `SQL SECURITY DEFINER` and `SQL SECURITY
-INVOKER` use their respective privilege identities. `ALTER VIEW`, `ALGORITHM`,
-and explicit `DEFINER` remain unsupported. Creation validates
+INVOKER` use their respective privilege identities. Explicit definers require
+the selected account or SUPER authority; missing definers are retained with a
+1449 note and fail closed when executed. ALTER preserves omitted declaration
+options. `TEMPTABLE` views are non-updatable; `MERGE` and `UNDEFINED` remain
+planner hints over fsdb's shape-driven execution, and incompatible `MERGE`
+definitions become `UNDEFINED` with warning 1354. Creation validates
 the saved SQL grammar but defers missing dependency and output-shape errors
 until the first read; `SELECT *` follows the base table's current columns
 instead of freezing them at creation.

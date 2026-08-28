@@ -3620,7 +3620,7 @@ let private setTriggerNewStmt: Parser<Statement, unit> =
     |>> SetTriggerNew
 
 // ---------------------------------------------------------------------------
-// CREATE VIEW / DROP VIEW.
+// CREATE VIEW / ALTER VIEW / DROP VIEW.
 // ---------------------------------------------------------------------------
 
 let private viewSecurity =
@@ -3628,23 +3628,45 @@ let private viewSecurity =
     >>. keyword "SECURITY"
     >>. ((keyword "INVOKER" >>% ViewInvoker) <|> (keyword "DEFINER" >>% ViewDefiner))
 
+let private viewAlgorithm =
+    keyword "ALGORITHM"
+    >>. sym "="
+    >>. choice
+            [ keyword "UNDEFINED" >>% ViewAlgorithmUndefined
+              keyword "MERGE" >>% ViewAlgorithmMerge
+              keyword "TEMPTABLE" >>% ViewAlgorithmTemptable ]
+
+let private viewDefiner =
+    let currentUser =
+        keyword "CURRENT_USER"
+        .>> opt (between (sym "(") (sym ")") (preturn ()))
+        >>% CurrentViewDefiner
+
+    keyword "DEFINER"
+    >>. sym "="
+    >>. (attempt currentUser <|> (userRef |>> ExplicitViewDefiner))
+
 let private createViewStmt: Parser<Statement, unit> =
-    (keyword "CREATE"
-     >>. (opt (attempt (keyword "OR" >>. keyword "REPLACE")) |>> Option.isSome)
+    (((keyword "CREATE"
+       >>. (opt (attempt (keyword "OR" >>. keyword "REPLACE")) |>> (Option.isSome >> CreateViewDdl)))
+      <|> (keyword "ALTER" >>% AlterViewDdl))
+     .>>. opt (attempt viewAlgorithm)
+     .>>. opt (attempt viewDefiner)
      .>>. opt (attempt viewSecurity)
      .>> keyword "VIEW"
      .>>. qualifiedTableName
      .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
      .>> keyword "AS"
      .>>. manyChars anyChar)
-    |>> fun ((((orReplace, security), name), columns), definition) ->
-        CreateView(
-            name,
-            columns |> Option.defaultValue [],
-            definition.Trim().TrimEnd(';').Trim(),
-            orReplace,
-            security |> Option.defaultValue ViewDefiner
-        )
+    |>> fun ((((((action, algorithm), definer), security), name), columns), definition) ->
+        CreateView
+            { Action = action
+              Algorithm = algorithm
+              Definer = definer
+              Security = security
+              Name = name
+              Columns = columns |> Option.defaultValue []
+              Definition = definition.Trim().TrimEnd(';').Trim() }
 
 let private dropViewStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "VIEW"
@@ -3890,6 +3912,50 @@ let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string
 
 let parse (sql: string) : Result<Statement, string> =
     parseWithOptions defaultOptions sql
+
+type ParsedViewDefinition =
+    { Statement: Statement
+      Sql: string
+      CheckOption: string }
+
+/// Parses a stored view query and separates its trailing CHECK OPTION clause.
+let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
+    let parsed = parse sql
+
+    let trailingCheckOption =
+        Text.RegularExpressions.Regex.Match(
+            sql,
+            @"\bWITH\s+(?:(CASCADED|LOCAL)\s+)?CHECK\s+OPTION\s*$",
+            Text.RegularExpressions.RegexOptions.IgnoreCase
+        )
+
+    let checkOptionMatch =
+        match parsed with
+        | Result.Ok _ -> None
+        | Result.Error _ when trailingCheckOption.Success -> Some trailingCheckOption
+        | Result.Error _ -> None
+
+    let checkOption =
+        match checkOptionMatch with
+        | None -> "NONE"
+        | Some value when value.Groups.[1].Value = "" -> "CASCADED"
+        | Some value -> value.Groups.[1].Value.ToUpperInvariant()
+
+    let definition =
+        match checkOptionMatch with
+        | Some value -> sql.Substring(0, value.Index).TrimEnd()
+        | None -> sql
+
+    let parsedDefinition =
+        match checkOptionMatch with
+        | Some _ -> parse definition
+        | None -> parsed
+
+    parsedDefinition
+    |> Result.map (fun statement ->
+        { Statement = statement
+          Sql = definition
+          CheckOption = checkOption })
 
 /// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
 /// client-to-server data stream.

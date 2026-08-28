@@ -78,7 +78,8 @@ module View =
           Created: DateTime option
           Definer: string
           CheckOption: string
-          SecurityType: string }
+          SecurityType: string
+          Algorithm: string }
 
     let tryRead (row: Value[]) : Entry option =
         readCompleteRow 5
@@ -90,7 +91,8 @@ module View =
                   Created = dateTimeAt 4 row
                   Definer = textAt 5 row
                   CheckOption = textOr "NONE" 6 row
-                  SecurityType = textOr "DEFINER" 7 row })
+                  SecurityType = textOr "DEFINER" 7 row
+                  Algorithm = textOr "UNDEFINED" 8 row })
             row
 
 module Routine =

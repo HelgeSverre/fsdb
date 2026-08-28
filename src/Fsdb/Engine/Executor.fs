@@ -160,7 +160,8 @@ type private StoredView =
       Columns: string list
       Definer: string
       CheckOption: string
-      SecurityType: string }
+      SecurityType: string
+      Algorithm: string }
 
 type private ViewAccess =
     { SecurityType: string
@@ -293,7 +294,8 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
               Columns = view.ColumnNames |> columns
               Definer = view.Definer
               CheckOption = view.CheckOption
-              SecurityType = view.SecurityType })
+              SecurityType = view.SecurityType
+              Algorithm = view.Algorithm })
 
 let private updatableViewOfSelect (store: Store) (view: StoredView) (select: SelectStmt) : UpdatableView option =
     let combine left right =
@@ -304,7 +306,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
         | None, None -> None
 
     let hasWritableShape (select: SelectStmt) =
-        not select.Distinct
+        not (view.Algorithm.Equals("TEMPTABLE", System.StringComparison.OrdinalIgnoreCase))
+        && not select.Distinct
         && not select.CalculateFoundRows
         && select.GroupBy.IsEmpty
         && not select.Rollup
@@ -13643,36 +13646,18 @@ let rec executeAs
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
-    | CreateView(name, columns, definition, orReplace, security) ->
-        let db, viewName = splitQualified dbName name
-        let parsedDefinition = Parser.parse definition
-        let trailingCheckOption =
-            Regex.Match(definition, @"\bWITH\s+(?:(CASCADED|LOCAL)\s+)?CHECK\s+OPTION\s*$", RegexOptions.IgnoreCase)
+    | CreateView viewSpec ->
+        let db, viewName = splitQualified dbName viewSpec.Name
+        let existing = tryStoredView store db viewName
+        let altering = viewSpec.Action = AlterViewDdl
 
-        let checkOptionMatch =
-            match parsedDefinition with
-            | Result.Ok _ -> None
-            | Result.Error _ when trailingCheckOption.Success -> Some trailingCheckOption
-            | Result.Error _ -> None
-
-        let checkOption =
-            match checkOptionMatch with
-            | None -> "NONE"
-            | Some checkOption when checkOption.Groups.[1].Value = "" -> "CASCADED"
-            | Some checkOption -> checkOption.Groups.[1].Value.ToUpperInvariant()
-
-        let viewDefinition =
-            match checkOptionMatch with
-            | Some checkOption -> definition.Substring(0, checkOption.Index).TrimEnd()
-            | None -> definition
-
-        let parsedView =
-            match checkOptionMatch with
-            | Some _ -> Parser.parse viewDefinition
-            | None -> parsedDefinition
+        let parsedView, viewDefinition, checkOption =
+            match Parser.parseViewDefinition viewSpec.Definition with
+            | Ok definition -> Ok definition.Statement, definition.Sql, definition.CheckOption
+            | Error error -> Error error, viewSpec.Definition, "NONE"
 
         let duplicateColumns =
-            columns
+            viewSpec.Columns
             |> List.countBy (fun column -> column.ToLowerInvariant())
             |> List.tryFind (fun (_, count) -> count > 1)
 
@@ -13685,81 +13670,157 @@ let rec executeAs
             System.String.Equals(db, defaultDatabase, System.StringComparison.OrdinalIgnoreCase)
             && store.VirtualTables.ContainsKey(normalizeTableName viewName)
 
-        let supportsCheckOption = function
+        let objectError =
+            match viewSpec.Action, baseObjectExists || virtualObjectExists, existing with
+            | AlterViewDdl, true, _ -> Some(1347, sprintf "'%s.%s' is not VIEW" db viewName)
+            | AlterViewDdl, false, None -> Some(1146, sprintf "Table '%s.%s' doesn't exist" db viewName)
+            | CreateViewDdl true, true, _ -> Some(1347, sprintf "'%s.%s' is not VIEW" db viewName)
+            | CreateViewDdl false, true, _
+            | CreateViewDdl false, false, Some _ -> Some(1050, sprintf "Table '%s' already exists" viewName)
+            | _ -> None
+
+        let algorithm =
+            match viewSpec.Algorithm, existing with
+            | Some ViewAlgorithmMerge, _ -> "MERGE"
+            | Some ViewAlgorithmTemptable, _ -> "TEMPTABLE"
+            | Some ViewAlgorithmUndefined, _ -> "UNDEFINED"
+            | None, Some view when altering -> view.Algorithm
+            | None, _ -> "UNDEFINED"
+
+        let security =
+            match viewSpec.Security, existing with
+            | Some ViewInvoker, _ -> "INVOKER"
+            | Some ViewDefiner, _ -> "DEFINER"
+            | None, Some view when altering -> view.SecurityType
+            | None, _ -> "DEFINER"
+
+        let requestedDefiner =
+            match viewSpec.Definer with
+            | Some CurrentViewDefiner -> Some currentAccount
+            | Some(ExplicitViewDefiner(user, host)) -> Some(Auth.account user host)
+            | None -> None
+
+        let definer =
+            match requestedDefiner with
+            | Some account
+                when not (Auth.sameAccount account currentAccount)
+                     && not (Auth.hasGlobalPrivForAccount store currentAccount "SUPER") ->
+                Error(
+                    1227,
+                    "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation"
+                )
+            | Some account -> Ok(Auth.formatAccount account)
+            | None ->
+                match existing with
+                | Some view when altering -> Ok view.Definer
+                | _ -> Ok(Auth.formatAccount currentAccount)
+
+        let missingDefiner =
+            requestedDefiner
+            |> Option.filter (fun account -> Auth.tryUserRowForAccount store account |> Option.isNone)
+
+        let candidateView algorithm definer =
+            { Name = viewName
+              Schema = db
+              Definition = viewDefinition
+              Columns = viewSpec.Columns
+              Definer = definer
+              CheckOption = checkOption
+              SecurityType = security
+              Algorithm = algorithm }
+
+        let supportsMergeAlgorithm = function
             | Select select ->
-                updatableViewOfSelect
-                    store
-                    { Name = viewName
-                      Schema = db
-                      Definition = viewDefinition
-                      Columns = columns
-                      Definer = Auth.formatAccount currentAccount
-                      CheckOption = checkOption
-                      SecurityType = if security = ViewInvoker then "INVOKER" else "DEFINER" }
-                    select
+                select.From.IsSome
+                && not select.Distinct
+                && not select.CalculateFoundRows
+                && select.GroupBy.IsEmpty
+                && not select.Rollup
+                && select.Windows.IsEmpty
+                && select.Having.IsNone
+                && select.Limit.IsNone
+                && select.Offset.IsNone
+                && not select.Locking
+                && not (select.Projections |> List.exists (fst >> containsAggregate registry))
+                && not (select.OrderBy |> List.exists (fst >> containsAggregate registry))
+            | _ -> false
+
+        let supportsCheckOption definer = function
+            | Select select ->
+                updatableViewOfSelect store (candidateView algorithm definer) select
                 |> Option.isSome
             | _ -> false
 
-        match parsedView, Map.containsKey db store.Catalog, duplicateColumns with
-        | Result.Error message, _, _ -> ids, Err(1064, sprintf "View definition has a syntax error: %s" message)
-        | _, false, _ -> ids, storageErr (NoSuchDatabase db)
-        | _, _, Some(column, _) -> ids, Err(1060, sprintf "Duplicate column name '%s'" column)
-        | Result.Ok((Select _ | Union _) as view), true, None ->
+        match parsedView, Map.containsKey db store.Catalog, duplicateColumns, objectError, definer with
+        | Result.Error message, _, _, _, _ -> ids, Err(1064, sprintf "View definition has a syntax error: %s" message)
+        | _, false, _, _, _ -> ids, storageErr (NoSuchDatabase db)
+        | _, _, Some(column, _), _, _ -> ids, Err(1060, sprintf "Duplicate column name '%s'" column)
+        | _, _, _, Some(code, message), _ -> ids, Err(code, message)
+        | _, _, _, _, Error(code, message) -> ids, Err(code, message)
+        | Result.Ok((Select _ | Union _) as view), true, None, None, Ok definer ->
+            let algorithm =
+                if algorithm = "MERGE" && not (supportsMergeAlgorithm view) then
+                    Diagnostics.warning 1354 "View merge algorithm can't be used here for now (assumed undefined algorithm)"
+                    "UNDEFINED"
+                else
+                    algorithm
+
             if viewContainsSessionVariable view then
                 ids, Err(1351, "View's SELECT contains a variable or parameter")
-            elif checkOption <> "NONE" && not (supportsCheckOption view) then
+            elif checkOption <> "NONE" && not (supportsCheckOption definer view) then
                 ids, Err(1368, sprintf "CHECK OPTION on non-updatable view '%s.%s'" db viewName)
             else
-                let existing = tryStoredView store db viewName
+                missingDefiner
+                |> Option.iter (fun account ->
+                    Diagnostics.note 1449 (sprintf "The user specified as a definer ('%s'@'%s') does not exist" account.Name account.Host))
 
-                if baseObjectExists || virtualObjectExists || (existing.IsSome && not orReplace) then
-                    ids, Err(1050, sprintf "Table '%s' already exists" viewName)
-                else
-                    let removeExisting () =
-                        match existing with
-                        | None -> Ok 0
-                        | Some _ ->
-                            deleteRows
-                                store
-                                "mysql"
-                                "views"
-                                (fun row ->
-                                    let text i = toText row.[i] |> Option.defaultValue ""
+                let removeExisting () =
+                    match existing with
+                    | None -> Ok 0
+                    | Some _ ->
+                        deleteRows
+                            store
+                            "mysql"
+                            "views"
+                            (fun row ->
+                                let text i = toText row.[i] |> Option.defaultValue ""
 
-                                    Ok(
-                                        System.String.Equals(text 0, viewName, System.StringComparison.OrdinalIgnoreCase)
-                                        && System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
-                                    ))
+                                Ok(
+                                    System.String.Equals(text 0, viewName, System.StringComparison.OrdinalIgnoreCase)
+                                    && System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
+                                ))
 
-                    match removeExisting () with
+                match removeExisting () with
+                | Error error -> ids, storageErr error
+                | Ok _ ->
+                    match
+                        insertRows
+                            store
+                            "mysql"
+                            "views"
+                            (Some
+                                [ "view_name"
+                                  "view_schema"
+                                  "view_definition"
+                                  "column_names"
+                                  "created"
+                                  "definer"
+                                  "check_option"
+                                  "security_type"
+                                  "algorithm" ])
+                            [ [ VString viewName
+                                VString db
+                                VString viewDefinition
+                                VString(JsonSerializer.Serialize(viewSpec.Columns |> List.toArray))
+                                VDateTime System.DateTime.Now
+                                VString definer
+                                VString checkOption
+                                VString security
+                                VString algorithm ] ]
+                    with
+                    | Ok _ -> ids, Affected 0UL
                     | Error error -> ids, storageErr error
-                    | Ok _ ->
-                        match
-                            insertRows
-                                store
-                                "mysql"
-                                "views"
-                                (Some
-                                    [ "view_name"
-                                      "view_schema"
-                                      "view_definition"
-                                      "column_names"
-                                      "created"
-                                      "definer"
-                                      "check_option"
-                                      "security_type" ])
-                                [ [ VString viewName
-                                    VString db
-                                    VString viewDefinition
-                                    VString(JsonSerializer.Serialize(columns |> List.toArray))
-                                    VDateTime System.DateTime.Now
-                                    VString(Auth.formatAccount currentAccount)
-                                    VString checkOption
-                                    VString(if security = ViewInvoker then "INVOKER" else "DEFINER") ] ]
-                        with
-                        | Ok _ -> ids, Affected 0UL
-                        | Error error -> ids, storageErr error
-        | Result.Ok _, true, None -> ids, Err(1347, sprintf "'%s.%s' is not VIEW" db viewName)
+        | Result.Ok _, true, None, None, Ok _ -> ids, Err(1347, sprintf "'%s.%s' is not VIEW" db viewName)
 
     | DropView(names, ifExists) ->
         let dropOne name =

@@ -1004,12 +1004,20 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | CreateTrigger(_, _, _, table, _, _) -> onTables "TRIGGER" [ split table ]
     | SetTriggerNew _ -> []
     | DropTrigger _ -> []
-    | CreateView(name, _, definition, orReplace, _) ->
-        let viewDb, _ = split name
-        let own = onTables "CREATE VIEW" [ split name ] @ (if orReplace then onTables "DROP" [ split name ] else [])
+    | CreateView view ->
+        let viewDb, _ = split view.Name
 
-        match Parser.parse definition with
-        | Ok select -> own @ requiredPrivileges viewDb select
+        let replaces =
+            match view.Action with
+            | CreateViewDdl orReplace -> orReplace
+            | AlterViewDdl -> true
+
+        let own =
+            onTables "CREATE VIEW" [ split view.Name ]
+            @ if replaces then onTables "DROP" [ split view.Name ] else []
+
+        match Parser.parseViewDefinition view.Definition with
+        | Ok definition -> own @ requiredPrivileges viewDb definition.Statement
         | Error _ -> own
     | DropView(names, _) -> onTables "DROP" (names |> List.map split)
     | ChecksumTables(tables, _) -> onTables "SELECT" (tables |> List.map split)

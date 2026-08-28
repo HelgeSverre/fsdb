@@ -2010,11 +2010,8 @@ let showCreateTemporaryTable (catalog: Catalog) (dbName: string) (tableName: str
     |> Result.map (fun t -> [ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL true catalog dbName t) ] ])
 
 let private quotedDefiner (definer: string) =
-    let separator = definer.LastIndexOf '@'
-    let user, host =
-        if separator < 0 then definer, "%" else definer[.. separator - 1], definer[(separator + 1) ..]
-
-    sprintf "%s@%s" (backtick user) (backtick host)
+    let account = Auth.tryParseAccount definer |> Option.defaultValue (Auth.account "" "%")
+    sprintf "%s@%s" (backtick account.Name) (backtick account.Host)
 
 let private storedViewColumns (serialized: string) =
     try
@@ -2047,7 +2044,8 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
 
             let ddl =
                 sprintf
-                    "CREATE ALGORITHM=UNDEFINED DEFINER=%s SQL SECURITY %s VIEW %s%s AS %s%s"
+                    "CREATE ALGORITHM=%s DEFINER=%s SQL SECURITY %s VIEW %s%s AS %s%s"
+                    view.Algorithm
                     (quotedDefiner view.Definer)
                     security
                     (backtick view.Name)

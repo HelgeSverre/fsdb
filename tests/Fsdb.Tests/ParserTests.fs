@@ -2733,6 +2733,48 @@ let tests =
                     | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt ]
 
           testList
+              "view statements"
+              [ testCase "CREATE VIEW parses its declaration envelope"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE OR REPLACE ALGORITHM=TEMPTABLE DEFINER='owner'@'localhost' SQL SECURITY INVOKER VIEW db.v (item) AS SELECT id FROM t")
+                        (CreateView
+                            { Action = CreateViewDdl true
+                              Algorithm = Some ViewAlgorithmTemptable
+                              Definer = Some(ExplicitViewDefiner("owner", "localhost"))
+                              Security = Some ViewInvoker
+                              Name = "db.v"
+                              Columns = [ "item" ]
+                              Definition = "SELECT id FROM t" })
+                        "create envelope"
+
+                testCase "ALTER VIEW distinguishes omitted and explicit envelope options"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER ALGORITHM=MERGE DEFINER=CURRENT_USER() VIEW v AS SELECT id FROM t")
+                        (CreateView
+                            { Action = AlterViewDdl
+                              Algorithm = Some ViewAlgorithmMerge
+                              Definer = Some CurrentViewDefiner
+                              Security = None
+                              Name = "v"
+                              Columns = []
+                              Definition = "SELECT id FROM t" })
+                        "alter envelope"
+
+                testCase "view definition parsing separates CHECK OPTION"
+                <| fun _ ->
+                    match parseViewDefinition "SELECT id FROM t WITH LOCAL CHECK OPTION" with
+                    | Ok definition ->
+                        Expect.equal definition.Sql "SELECT id FROM t" "stored SQL"
+                        Expect.equal definition.CheckOption "LOCAL" "check option"
+
+                        match definition.Statement with
+                        | Select _ -> ()
+                        | other -> failtestf "expected SELECT definition, got %A" other
+                    | Error error -> failtestf "expected parsed view definition, got %s" error ]
+
+          testList
               "user statements"
               [ testCase "CREATE USER parses quoted user@host, IDENTIFIED BY, IF NOT EXISTS, and multiple accounts"
                 <| fun _ ->

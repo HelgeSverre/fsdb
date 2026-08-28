@@ -260,7 +260,8 @@ expressions.
 
 ## 9. Views and triggers
 
-Views working: CREATE [OR REPLACE] VIEW with explicit column lists, views
+Views working: CREATE [OR REPLACE] VIEW and ALTER VIEW with explicit column lists,
+ALGORITHM, host-qualified DEFINER, and SQL SECURITY declarations; views
 over views, recursive-reference detection (1462), definer-privilege checking
 at read time so revokes take effect, persistence through WAL restarts,
 SHOW CREATE VIEW and I_S.VIEWS with correct shapes. Single-table and nested
@@ -303,7 +304,7 @@ OLD/NEW images are rejected when the trigger is created.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | single-table, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; one mergeable component updates or inserts at a time | medium | refusal |
-| ALGORITHM / explicit DEFINER / ALTER VIEW | supported | SQL SECURITY DEFINER and INVOKER execute with their respective identities; algorithm selection, explicit definers, and alteration remain absent | low | refusal |
+| View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 | VIEW_DEFINITION rendering | fully-qualified canonical expression text | SHOW CREATE VIEW renders the stored declaration envelope, but its SELECT body and I_S.VIEWS.VIEW_DEFINITION retain the user's original text | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
 | Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML, local DECLARE/SET, scalar-subquery assignment, nested IF/ELSEIF/ELSE, and SET NEW are covered; CASE, loops, handlers, SIGNAL, and dynamic SQL remain absent | medium | refusal |
