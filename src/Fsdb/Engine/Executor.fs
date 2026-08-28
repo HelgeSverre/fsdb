@@ -11942,27 +11942,10 @@ let private afterInsertTriggers (store: Store) (db: string) (table: string) =
 let private beforeInsertTriggers (store: Store) (db: string) (table: string) =
     triggersFor store db table "BEFORE" "INSERT"
 
-type private TriggerStatement =
-    | TriggerDml of Statement
-    | TriggerIf of condition: Expr * whenTrue: TriggerStatement list * whenFalse: TriggerStatement list
-    | TriggerDeclare of name: string
-    | TriggerSetLocal of name: string * value: Expr
+type private TriggerStatement = StoredProgram.Statement
 
-let rec private triggerDmlStatements =
-    function
-    | TriggerDml statement -> [ statement ]
-    | TriggerIf(_, whenTrue, whenFalse) ->
-        (whenTrue @ whenFalse) |> List.collect triggerDmlStatements
-    | TriggerDeclare _
-    | TriggerSetLocal _ -> []
-
-let rec private triggerConditions =
-    function
-    | TriggerDml _ -> []
-    | TriggerIf(condition, whenTrue, whenFalse) ->
-        condition :: ((whenTrue @ whenFalse) |> List.collect triggerConditions)
-    | TriggerDeclare _ -> []
-    | TriggerSetLocal(_, value) -> [ value ]
+let private triggerDmlStatements = StoredProgram.sqlStatements
+let private triggerConditions = StoredProgram.expressions
 
 /// The one table a trigger body statement writes — what 1442's "already
 /// used by the statement which invoked this trigger" check points at.
@@ -11979,190 +11962,6 @@ let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string
     | Delete d -> Some(d.From.Database |> Option.defaultValue dbName, normalizeTableName d.From.Table)
     | _ -> None
 
-type private TriggerBoundary =
-    | ThenBoundary
-    | ElseIfBoundary
-    | ElseBoundary
-    | EndIfBoundary
-    | EndBoundary
-    | SemicolonBoundary
-
-let private triggerWordAt (text: string) index (word: string) =
-    let finish = index + word.Length
-    let isWordCharacter c = System.Char.IsLetterOrDigit c || c = '_' || c = '$'
-    index >= 0
-    && finish <= text.Length
-    && System.String.Compare(text, index, word, 0, word.Length, System.StringComparison.OrdinalIgnoreCase) = 0
-    && (index = 0 || not (isWordCharacter text.[index - 1]))
-    && (finish = text.Length || not (isWordCharacter text.[finish]))
-
-let private triggerEndIfAt (text: string) index =
-    if triggerWordAt text index "END" then
-        let mutable next = index + 3
-        while next < text.Length && System.Char.IsWhiteSpace text.[next] do
-            next <- next + 1
-        if triggerWordAt text next "IF" then Some(next + 2) else None
-    else
-        None
-
-let private triggerBoundaryAt (boundaries: Set<TriggerBoundary>) (text: string) index =
-    if boundaries.Contains SemicolonBoundary && text.[index] = ';' then
-        Some(SemicolonBoundary, index + 1)
-    elif boundaries.Contains EndIfBoundary then
-        match triggerEndIfAt text index with
-        | Some finish -> Some(EndIfBoundary, finish)
-        | None ->
-            if boundaries.Contains ElseIfBoundary && triggerWordAt text index "ELSEIF" then
-                Some(ElseIfBoundary, index + 6)
-            elif boundaries.Contains ElseBoundary && triggerWordAt text index "ELSE" then
-                Some(ElseBoundary, index + 4)
-            elif boundaries.Contains ThenBoundary && triggerWordAt text index "THEN" then
-                Some(ThenBoundary, index + 4)
-            else
-                None
-    elif boundaries.Contains EndBoundary && triggerWordAt text index "END" then
-        Some(EndBoundary, index + 3)
-    elif boundaries.Contains ElseIfBoundary && triggerWordAt text index "ELSEIF" then
-        Some(ElseIfBoundary, index + 6)
-    elif boundaries.Contains ElseBoundary && triggerWordAt text index "ELSE" then
-        Some(ElseBoundary, index + 4)
-    elif boundaries.Contains ThenBoundary && triggerWordAt text index "THEN" then
-        Some(ThenBoundary, index + 4)
-    else
-        None
-
-let private findTriggerBoundary boundaries (text: string) start =
-    let mutable index = start
-    let mutable depth = 0
-    let mutable quote = None
-    let mutable lineComment = false
-    let mutable blockComment = false
-    let mutable found = None
-
-    while index < text.Length && found.IsNone do
-        if lineComment then
-            if text.[index] = '\n' || text.[index] = '\r' then lineComment <- false
-            index <- index + 1
-        elif blockComment then
-            if text.[index] = '*' && index + 1 < text.Length && text.[index + 1] = '/' then
-                blockComment <- false
-                index <- index + 2
-            else
-                index <- index + 1
-        else
-            match quote with
-            | Some delimiter when text.[index] = '\\' && index + 1 < text.Length -> index <- index + 2
-            | Some delimiter when text.[index] = delimiter ->
-                if index + 1 < text.Length && text.[index + 1] = delimiter then
-                    index <- index + 2
-                else
-                    quote <- None
-                    index <- index + 1
-            | Some _ -> index <- index + 1
-            | None when text.[index] = '\'' || text.[index] = '"' || text.[index] = '`' ->
-                quote <- Some text.[index]
-                index <- index + 1
-            | None when text.[index] = '#' ->
-                lineComment <- true
-                index <- index + 1
-            | None when text.[index] = '-' && index + 2 < text.Length && text.[index + 1] = '-' && System.Char.IsWhiteSpace text.[index + 2] ->
-                lineComment <- true
-                index <- index + 2
-            | None when text.[index] = '/' && index + 1 < text.Length && text.[index + 1] = '*' ->
-                blockComment <- true
-                index <- index + 2
-            | None when text.[index] = '(' ->
-                depth <- depth + 1
-                index <- index + 1
-            | None when text.[index] = ')' ->
-                depth <- max 0 (depth - 1)
-                index <- index + 1
-            | None when depth = 0 ->
-                match triggerBoundaryAt boundaries text index with
-                | Some(boundary, finish) -> found <- Some(index, finish, boundary)
-                | None -> index <- index + 1
-            | None -> index <- index + 1
-
-    found
-
-let private parseTriggerBody (options: Parser.ParserOptions) (body: string) : Result<TriggerStatement list, string> =
-    let compound = Regex.Match(body, @"^\s*BEGIN\b(?<body>[\s\S]*)\bEND\s*$", RegexOptions.IgnoreCase)
-
-    if compound.Success then
-        let inner = compound.Groups.["body"].Value
-        let skipSeparators offset =
-            let mutable next = offset
-            while next < inner.Length && (System.Char.IsWhiteSpace inner.[next] || inner.[next] = ';') do
-                next <- next + 1
-            next
-
-        let rec parseStatements offset (stops: Set<TriggerBoundary>) statements =
-            let offset = skipSeparators offset
-
-            if offset >= inner.Length then
-                if stops.IsEmpty then Ok(List.rev statements, offset, None)
-                else Error "Unterminated IF in trigger body"
-            else
-                match triggerBoundaryAt stops inner offset with
-                | Some(boundary, finish) -> Ok(List.rev statements, finish, Some boundary)
-                | None when triggerWordAt inner offset "IF" ->
-                    parseIf (offset + 2)
-                    |> Result.bind (fun (statement, next) -> parseStatements next stops (statement :: statements))
-                | None when triggerWordAt inner offset "BEGIN" ->
-                    parseStatements (offset + 5) (Set.singleton EndBoundary) []
-                    |> Result.bind (fun (block, next, boundary) ->
-                        match boundary with
-                        | Some EndBoundary -> parseStatements next stops (List.rev block @ statements)
-                        | _ -> Error "BEGIN is missing END")
-                | None ->
-                    match findTriggerBoundary (Set.singleton SemicolonBoundary) inner offset with
-                    | Some(finishStart, finish, _) ->
-                        parseTriggerStatement (inner.Substring(offset, finishStart - offset).Trim())
-                        |> Result.bind (fun statement -> parseStatements finish stops (statement :: statements))
-                    | None ->
-                        parseTriggerStatement (inner.Substring(offset).Trim())
-                        |> Result.map (fun statement -> List.rev (statement :: statements), inner.Length, None)
-
-        and parseIf conditionStart =
-            match findTriggerBoundary (Set.singleton ThenBoundary) inner conditionStart with
-            | None -> Error "IF is missing THEN"
-            | Some(conditionEnd, bodyStart, _) ->
-                Parser.parseExpression (inner.Substring(conditionStart, conditionEnd - conditionStart).Trim())
-                |> Result.bind (fun condition ->
-                    let stops = Set.ofList [ ElseIfBoundary; ElseBoundary; EndIfBoundary ]
-
-                    parseStatements bodyStart stops []
-                    |> Result.bind (fun (whenTrue, next, boundary) ->
-                        match boundary with
-                        | Some EndIfBoundary -> Ok(TriggerIf(condition, whenTrue, []), next)
-                        | Some ElseBoundary ->
-                            parseStatements next (Set.singleton EndIfBoundary) []
-                            |> Result.bind (fun (whenFalse, finish, ended) ->
-                                match ended with
-                                | Some EndIfBoundary -> Ok(TriggerIf(condition, whenTrue, whenFalse), finish)
-                                | _ -> Error "ELSE is missing END IF")
-                        | Some ElseIfBoundary ->
-                            parseIf next
-                            |> Result.map (fun (alternative, finish) -> TriggerIf(condition, whenTrue, [ alternative ]), finish)
-                        | _ -> Error "IF is missing END IF"))
-
-        and parseTriggerStatement text =
-            let declaration = Regex.Match(text, @"^DECLARE\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s+.+$", RegexOptions.IgnoreCase)
-            let assignment = Regex.Match(text, @"^SET\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*(?<value>[\s\S]+)$", RegexOptions.IgnoreCase)
-
-            if declaration.Success then
-                Ok(TriggerDeclare(declaration.Groups.["name"].Value.ToLowerInvariant()))
-            elif assignment.Success then
-                Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
-                |> Result.map (fun value -> TriggerSetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))
-            else
-                Parser.parseWithOptions options text |> Result.map TriggerDml
-
-        parseStatements 0 Set.empty []
-        |> Result.bind (fun (statements, _, _) -> if statements.IsEmpty then Error "Trigger body cannot be empty" else Ok statements)
-    else
-        Parser.parseWithOptions options body |> Result.map (TriggerDml >> List.singleton)
-
 /// Every database an INSERT into `dbName.tableName` can reach through its
 /// AFTER INSERT triggers, following the chain transitively.
 ///
@@ -12172,7 +11971,7 @@ let private parseTriggerBody (options: Parser.ParserOptions) (body: string) : Re
 /// one of the two rows is lost when the transaction merges
 /// (`Storage.mergeDatabaseSlot`).
 let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : string list =
-    let bodyTargets (defaultDb: string) (triggerStatement: TriggerStatement) =
+    let bodyTargets (defaultDb: string) (triggerStatement: StoredProgram.Statement) =
         let tableRefTarget (table: TableRef) =
             table.Database |> Option.defaultValue defaultDb, normalizeTableName table.Table
 
@@ -12183,7 +11982,7 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
                 | FromTable table -> Some(tableRefTarget table)
                 | _ -> None)
 
-        triggerDmlStatements triggerStatement
+        StoredProgram.sqlStatements triggerStatement
         |> List.collect (function
             | Insert(table, _, _, _, _)
             | InsertSelect(table, _, _, _, _)
@@ -12205,7 +12004,7 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
             afterInsertTriggers store db table
             |> List.fold
                 (fun (seen, databases) trigger ->
-                    match parseTriggerBody (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
+                    match StoredProgram.parse (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
                     | Ok statements ->
                         statements
                         |> List.collect (bodyTargets db)
@@ -12224,7 +12023,7 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
 /// INSERT...SELECT body's SELECT isn't traversed — the fire-time
 /// `shadowDirectOnly` backstop still catches those, the same backstop that
 /// covers functions registered only after the trigger was created.
-let private triggerBodyExprs (triggerStatement: TriggerStatement) : Expr list =
+let private triggerBodyExprs (triggerStatement: StoredProgram.Statement) : Expr list =
     let statementExprs =
         function
         | SetTriggerNew(_, expression) -> [ expression ]
@@ -12237,10 +12036,10 @@ let private triggerBodyExprs (triggerStatement: TriggerStatement) : Expr list =
         | Delete d -> Option.toList d.Where
         | _ -> []
 
-    triggerConditions triggerStatement
-    @ (triggerDmlStatements triggerStatement |> List.collect statementExprs)
+    StoredProgram.expressions triggerStatement
+    @ (StoredProgram.sqlStatements triggerStatement |> List.collect statementExprs)
 
-let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list) (triggerStatement: TriggerStatement) =
+let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list) (triggerStatement: StoredProgram.Statement) =
     let rec references =
         function
         | QualifiedCol(qualifier, column) when qualifier.Equals("OLD", System.StringComparison.OrdinalIgnoreCase) || qualifier.Equals("NEW", System.StringComparison.OrdinalIgnoreCase) ->
@@ -12311,7 +12110,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         triggerConditions triggerStatement |> List.collect references
 
     let statementReferences =
-        triggerDmlStatements triggerStatement
+        StoredProgram.sqlStatements triggerStatement
         |> List.collect (function
             | SetTriggerNew(_, expression) -> references expression
             | Insert(_, _, rows, assignments, _) -> (rows |> List.collect (List.collect references)) @ (assignments |> List.collect (snd >> references))
@@ -12367,7 +12166,7 @@ let private validateTriggerStatement
             | Ok _ -> Ok()
         | _ -> Error(Err(1064, "Trigger body accepts INSERT, UPDATE, DELETE, REPLACE, or SET NEW statements"))
 
-    match triggerDmlStatements triggerStatement |> traverse validateStatement with
+    match StoredProgram.sqlStatements triggerStatement |> traverse validateStatement with
     | Error error -> Error error
     | Ok _ ->
         match triggerRowImageError event columns triggerStatement with
@@ -12519,10 +12318,10 @@ let rec executeAs
             // body executes. A body targeting a table the invoking chain is
             // already writing fires nothing at all.
             let checkBody trigger =
-                match parseTriggerBody (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
+                match StoredProgram.parse (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
                 | Result.Ok bodyStatements ->
-                    let dmlStatements = bodyStatements |> List.collect triggerDmlStatements
+                    let dmlStatements = bodyStatements |> List.collect StoredProgram.sqlStatements
                     let targets = dmlStatements |> List.choose (writtenTableOf db)
 
                     match targets |> List.tryFind (fun target -> List.contains target (self :: chain)) with
@@ -12623,17 +12422,17 @@ let rec executeAs
 
                             and runStatement =
                                 function
-                                | TriggerDml statement -> runDml statement
-                                | TriggerDeclare name ->
+                                | StoredProgram.Sql statement -> runDml statement
+                                | StoredProgram.Declare name ->
                                     locals.Value <- Map.add name VNull locals.Value
                                     Affected 0UL
-                                | TriggerSetLocal(name, expression) ->
+                                | StoredProgram.SetLocal(name, expression) ->
                                     match evalExpr (localContext ()) expression with
                                     | Error(code, message) -> Err(code, message)
                                     | Ok value ->
                                         locals.Value <- Map.add name value locals.Value
                                         Affected 0UL
-                                | TriggerIf(condition, whenTrue, whenFalse) ->
+                                | StoredProgram.If(condition, whenTrue, whenFalse) ->
                                     let context = localContext ()
 
                                     match evalExpr context condition with
@@ -13898,7 +13697,7 @@ let rec executeAs
         match scan store db table with
         | Error e -> ids, storageErr e
         | Ok(columns, _) ->
-            match parseTriggerBody (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText) body with
+            match StoredProgram.parse (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText) body with
             | Result.Error msg -> ids, Err(1064, sprintf "Trigger body has a syntax error: %s" msg)
             | Result.Ok bodyStatements ->
                 match bodyStatements |> traverse (validateTriggerStatement registry timing event columns) with
