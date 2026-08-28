@@ -2818,8 +2818,12 @@ let preparedMetadata
 
             parameters, resultColumns
 
+type private TextPreparedSource =
+    | PreparedLiteral of string
+    | PreparedVariable of UserVariableRef
+
 type private TextPreparedCommand =
-    | PrepareText of name: string * source: string
+    | PrepareText of name: string * source: TextPreparedSource
     | ExecuteText of name: string * variables: UserVariableRef list
     | DeallocateText of name: string
 
@@ -2847,7 +2851,13 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
     let deallocate = deallocateTextRe.Match(sql)
 
     if prepared.Success then
-        Ok(Some(PrepareText(matchedPreparedName prepared, prepared.Groups.["source"].Value)))
+        let source = prepared.Groups.["source"].Value
+
+        match Parser.parseExpression source with
+        | Ok(Lit(VString text)) -> Ok(Some(PrepareText(matchedPreparedName prepared, PreparedLiteral text)))
+        | Ok(UserVariable variable) ->
+            Ok(Some(PrepareText(matchedPreparedName prepared, PreparedVariable variable)))
+        | _ -> Error(syntaxError source)
     elif execute.Success then
         let variables = execute.Groups.["variables"]
 
@@ -2924,7 +2934,8 @@ let private routineValidationError error =
 
 let private parseRoutineDefinition options parameters body =
     let isSupportedText sql =
-        tryProbe sql (sql.TrimStart().ToUpperInvariant()) |> Option.isSome
+        (tryProbe sql (sql.TrimStart().ToUpperInvariant()) |> Option.isSome)
+        || (tryTextPreparedCommand sql |> Result.exists Option.isSome)
 
     match StoredProgram.parseParameters options parameters, StoredProgram.parseRoutine options isSupportedText body with
     | Ok parsedParameters, Ok statements ->
@@ -3680,13 +3691,13 @@ and private dispatchNormalized session rawSql parserOptions sql =
             let session = { session with TextStatements = Map.remove name session.TextStatements }
 
             let sql =
-                match Parser.parseExpression source with
-                | Ok(Lit value) -> toText value
-                | Ok(UserVariable variable) -> session.UserVariables |> Map.tryFind variable.Name |> Option.bind toText
-                | _ -> None
+                match source with
+                | PreparedLiteral text -> Some text
+                | PreparedVariable variable ->
+                    session.UserVariables |> Map.tryFind variable.Name |> Option.bind toText
 
             match sql with
-            | None -> session, syntaxError source
+            | None -> session, syntaxError "PREPARE source"
             | Some sql ->
                 match prepareStatementForSession session sql with
                 | Error(code, message) -> session, Err(code, message)

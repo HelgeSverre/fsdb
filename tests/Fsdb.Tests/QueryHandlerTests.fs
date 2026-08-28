@@ -2176,6 +2176,52 @@ let tests =
                   | Err(actual, _) -> Expect.equal actual code "cursor declaration error code"
                   | other -> failtestf "expected cursor declaration error %d, got %A" code other
 
+          testCase "stored procedures execute dynamic SQL"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE dynamic_items (id INT PRIMARY KEY, label VARCHAR(20))"
+              let session, _ = handle session "INSERT INTO dynamic_items VALUES (1, 'one'), (2, 'two')"
+
+              let definition =
+                  """CREATE PROCEDURE dynamic_label(IN wanted INT)
+                      BEGIN
+                        SET @statement_sql = 'SELECT label FROM dynamic_items WHERE id = ?';
+                        SET @wanted = wanted;
+                        PREPARE selected FROM @statement_sql;
+                        EXECUTE selected USING @wanted;
+                        DEALLOCATE PREPARE selected;
+                      END"""
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created dynamic SQL procedure"
+
+              match handle session "CALL dynamic_label(2)" with
+              | session, MultipleResults [ (ResultSet(_, [ [ Some "two" ] ]), _); (Affected 0UL, []) ] ->
+                  Expect.isEmpty session.TextStatements "procedure deallocated its statement"
+              | _, other -> failtestf "expected dynamic procedure result, got %A" other
+
+              let persistentDefinition =
+                  """CREATE PROCEDURE prepare_persistent()
+                      PREPARE persistent_statement FROM 'SELECT 44'"""
+
+              let session, created = handle session persistentDefinition
+              Expect.equal created (Affected 0UL) "created persistent prepare procedure"
+              let session, called = handle session "CALL prepare_persistent()"
+              Expect.equal called (Affected 0UL) "prepared statement in procedure"
+
+              match handle session "EXECUTE persistent_statement" |> snd with
+              | ResultSet(_, [ [ Some "44" ] ]) -> ()
+              | other -> failtestf "expected persistent prepared result, got %A" other
+
+              match
+                  handle
+                      session
+                      "CREATE PROCEDURE invalid_dynamic_source() BEGIN DECLARE statement_sql TEXT DEFAULT 'SELECT 1'; PREPARE invalid_statement FROM statement_sql; END"
+                  |> snd
+              with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected local PREPARE source rejection, got %A" other
+
           testCase "SIGNAL preserves named conditions and RESIGNAL diagnostics"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -2346,6 +2392,16 @@ let tests =
                       root
                       "CREATE DEFINER='owner'@'%' PROCEDURE invoker_secret() SQL SECURITY INVOKER SELECT n FROM secret"
 
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER='owner'@'%' PROCEDURE dynamic_definer() SQL SECURITY DEFINER BEGIN SET @dynamic_sql = 'SELECT n FROM secret'; PREPARE dynamic_secret FROM @dynamic_sql; EXECUTE dynamic_secret; DEALLOCATE PREPARE dynamic_secret; END"
+
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER='owner'@'%' PROCEDURE dynamic_invoker() SQL SECURITY INVOKER BEGIN SET @dynamic_sql = 'SELECT n FROM secret'; PREPARE dynamic_secret FROM @dynamic_sql; EXECUTE dynamic_secret; DEALLOCATE PREPARE dynamic_secret; END"
+
               let caller =
                   { create 2 store with
                       User = "caller"
@@ -2370,9 +2426,13 @@ let tests =
               | Err(1142, _) -> ()
               | other -> failtestf "expected the invoker's missing SELECT privilege, got %A" other
 
-              match handle caller "CALL invoker_secret()" |> snd with
+              match handle caller "CALL dynamic_definer()" |> snd with
+              | ProcedureResult(_, [ [ Some "9" ] ]) -> ()
+              | other -> failtestf "expected dynamic SQL to use definer privileges, got %A" other
+
+              match handle caller "CALL dynamic_invoker()" |> snd with
               | Err(1142, _) -> ()
-              | other -> failtestf "expected invoker privilege enforcement, got %A" other
+              | other -> failtestf "expected dynamic SQL to use invoker privileges, got %A" other
 
               let root = apply root "CREATE DEFINER='missing'@'%' PROCEDURE missing_definer() SELECT 1"
 
@@ -2553,6 +2613,11 @@ let tests =
               match handle session "EXECUTE setanswer" |> snd with
               | Err(1210, _) -> ()
               | other -> failtestf "expected parameter-count error, got %A" other
+
+              for source in [ "1"; "X'53454C4543542031'" ] do
+                  match handle session ("PREPARE invalid_source FROM " + source) |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected PREPARE source rejection, got %A" other
 
           testCase "a failed SQL PREPARE replacement deallocates the previous statement"
           <| fun _ ->
