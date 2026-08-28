@@ -4366,6 +4366,64 @@ let private resolveInsertColumns (table: Table) (columns: string list option) : 
     | None -> Ok [ 0 .. table.Columns.Length - 1 ]
     | Some names -> names |> traverse (resolveAssignableColumn table.Columns table.OriginalName)
 
+type internal PreparedInsertCandidate =
+    { Values: Value[]
+      NextAutoId: int64
+      AssignedAutoId: (bool * int64) option }
+
+/// Builds one insert candidate without publishing it.
+let internal prepareInsertCandidate
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (values: Value list)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
+    : Result<PreparedInsertCandidate, StorageError> =
+    match tableAt store dbName tableName with
+    | None -> Error(NoSuchTable tableName)
+    | Some table ->
+        resolveInsertColumns table columns
+        |> Result.bind (fun indices ->
+            if values.Length <> indices.Length then
+                Error(ColumnCountMismatch(indices.Length, values.Length))
+            else
+                let supplied = List.zip indices values |> Map.ofList
+                let raw = table.Columns |> List.mapi (fun index _ -> Map.tryFind index supplied)
+
+                processRow
+                    (temporalCoercionMode store)
+                    (not store.SqlMode.NoAutoValueOnZero)
+                    table.NextAutoId
+                    raw
+                    table.Columns
+                |> Result.bind (fun (processed, nextAutoId, assignedAutoId, omitted) ->
+                    prepare omitted (Array.ofList processed)
+                    |> Result.map (fun candidate ->
+                        { Values = candidate
+                          NextAutoId = nextAutoId
+                          AssignedAutoId = assignedAutoId })))
+
+/// Finds every live row a prepared REPLACE candidate displaces.
+let internal replaceConflictRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (candidate: Value[])
+    : Result<(RowId * Value[]) list, StorageError> =
+    match tableAt store dbName tableName with
+    | None -> Error(NoSuchTable tableName)
+    | Some table ->
+        uniqueKeyGroups table
+        |> List.choose (fun group ->
+            encodeUniqueKey table.Columns group candidate
+            |> Option.bind (fun key ->
+                Map.tryFind group.Name table.UniqueIndex
+                |> Option.bind (Map.tryFind key)
+                |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))))
+        |> List.distinctBy fst
+        |> Ok
+
 /// Shared core of `insertRows` and `insertRowsIgnore`: builds each row via
 /// `processRow`, then checks it against the table's unique keys (including
 /// rows already accepted earlier in this same statement, since two rows in
@@ -4675,6 +4733,81 @@ let insertRowsPrepared
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
     insertRowsPreparedCore false prepare store dbName tableName columns rowsIn
+
+/// Publishes a candidate returned by `prepareInsertCandidate` without
+/// repeating defaults, generated expressions, or BEFORE triggers.
+let internal insertPreparedCandidate
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (prepared: PreparedInsertCandidate)
+    : Result<InsertOutcome, StorageError> =
+    let tableKey = normalizeTableName tableName
+
+    withDatabasePublishing
+        store
+        dbName
+        (fun candidate -> [ RowsInserted(dbName, tableName, [ candidate ]) ])
+        (fun db ->
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable db tableName)
+            |> Result.bind (fun table ->
+                let collision =
+                    uniqueKeyGroups table
+                    |> List.tryPick (fun group ->
+                        encodeUniqueKey table.Columns group prepared.Values
+                        |> Option.bind (fun key ->
+                            Map.tryFind group.Name table.UniqueIndex
+                            |> Option.bind (Map.tryFind key)
+                            |> Option.map (fun _ ->
+                                let value =
+                                    group.Indices
+                                    |> List.map (fun index -> prepared.Values.[index] |> toText |> Option.defaultValue "NULL")
+                                    |> String.concat "-"
+
+                                DuplicateKey(group.Name, value))))
+
+                match collision with
+                | Some error -> Error error
+                | None ->
+                    let rowId, rows = table.RowsArray.Append prepared.Values
+                    let uniqueIndex, secondaryIndex, secondaryOrder =
+                        reindexRow
+                            table.Columns
+                            (uniqueKeyGroups table)
+                            (secondaryKeyGroups table)
+                            None
+                            (Some(rowId, prepared.Values))
+                            table.UniqueIndex
+                            table.SecondaryIndex
+                            table.SecondaryOrder
+
+                    let candidateTable =
+                        { table with
+                            RowsArray = rows
+                            NextAutoId = max table.NextAutoId prepared.NextAutoId
+                            UniqueIndex = uniqueIndex
+                            SecondaryIndex = secondaryIndex
+                            SecondaryOrder = secondaryOrder }
+
+                    let candidateDatabase = Map.add tableKey candidateTable db
+
+                    checkFkParents candidateDatabase table.Columns table.ForeignKeys prepared.Values
+                    |> Result.map (fun () ->
+                        let updated = publishRows table candidateTable
+                        Map.add tableKey updated db, prepared.Values)))
+    |> Result.map (fun candidate ->
+        let generatedId, lastInsertId =
+            match prepared.AssignedAutoId with
+            | Some(true, value) -> Some value, value
+            | Some(false, value) -> None, value
+            | None -> None, 0L
+
+        { LastInsertId = lastInsertId
+          GeneratedId = generatedId
+          Affected = 1
+          InsertedRows = [ candidate ]
+          IgnoredErrors = [] })
 
 /// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
 /// NULL/unique/foreign-key constraints is skipped instead of failing the

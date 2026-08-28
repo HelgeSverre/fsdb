@@ -12919,14 +12919,15 @@ let rec executeAs
                 upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows)
 
     let replaceEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) =
-        let deleteTriggers =
-            triggersFor store db table "BEFORE" "DELETE"
-            @ triggersFor store db table "AFTER" "DELETE"
+        let beforeInsert = beforeInsertTriggers store db table
+        let afterInsert = afterInsertTriggers store db table
+        let beforeDelete = triggersFor store db table "BEFORE" "DELETE"
+        let afterDelete = triggersFor store db table "AFTER" "DELETE"
+        let hasTriggers = not (beforeInsert.IsEmpty && afterInsert.IsEmpty && beforeDelete.IsEmpty && afterDelete.IsEmpty)
 
-        match deleteTriggers, scan store db table with
-        | _ :: _, _ -> ids, Err(1235, "REPLACE on a table with DELETE triggers is not supported")
-        | [], Error error -> ids, storageErr error
-        | [], Ok(tableColumns, _) ->
+        match hasTriggers, scan store db table with
+        | _, Error error -> ids, storageErr error
+        | false, Ok(tableColumns, _) ->
             finishInsert db table (fun targetStore ->
                 replaceRows
                     targetStore
@@ -12935,6 +12936,74 @@ let rec executeAs
                     cols
                     rowsValues
                     (prepareInsertRow targetStore db table tableColumns))
+        | true, Ok(tableColumns, _) ->
+            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+
+            let fire timing event (triggers: StoredTrigger list) rows =
+                if List.isEmpty triggers then
+                    Ok()
+                else
+                    match fireTriggers snapshot db table timing event triggers rows with
+                    | Some error -> Error error
+                    | None -> Ok()
+
+            let deleteConflict result ((rowId, oldRow) as conflict) =
+                result
+                |> Result.bind (fun () -> fire Before TriggerDelete beforeDelete [ Some oldRow, None ])
+                |> Result.bind (fun () ->
+                    deleteRowsCandidates snapshot db table [ conflict ] (fun _ -> Ok true)
+                    |> Result.map ignore
+                    |> Result.mapError storageErr)
+                |> Result.bind (fun () -> fire After TriggerDelete afterDelete [ Some oldRow, None ])
+
+            let step result (rowNumber, values) =
+                Diagnostics.withRowNumber (rowNumber + 1) (fun () ->
+                    result
+                    |> Result.bind (fun (firstAuto, lastExplicit, affected, inserted) ->
+                        Storage.prepareInsertCandidate
+                            snapshot
+                            db
+                            table
+                            cols
+                            values
+                            (prepareInsertRow snapshot db table tableColumns)
+                        |> Result.mapError storageErr
+                        |> Result.bind (fun prepared ->
+                            replaceConflictRows snapshot db table prepared.Values
+                            |> Result.mapError storageErr
+                            |> Result.bind (fun conflicts ->
+                                conflicts
+                                |> List.fold deleteConflict (Ok())
+                                |> Result.bind (fun () ->
+                                    insertPreparedCandidate snapshot db table prepared
+                                    |> Result.mapError storageErr)
+                                |> Result.bind (fun _ ->
+                                    fire After TriggerInsert afterInsert [ None, Some prepared.Values ])
+                                |> Result.map (fun () ->
+                                    let firstAuto, lastExplicit =
+                                        match prepared.AssignedAutoId with
+                                        | Some(true, value) -> Option.orElse (Some value) firstAuto, lastExplicit
+                                        | Some(false, value) -> firstAuto, Some value
+                                        | None -> firstAuto, lastExplicit
+
+                                    firstAuto,
+                                    lastExplicit,
+                                    affected + conflicts.Length + 1,
+                                    prepared.Values :: inserted)))))
+
+            match rowsValues |> List.indexed |> List.fold step (Ok(None, None, 0, [])) with
+            | Error error -> ids, error
+            | Ok(firstAuto, lastExplicit, affected, inserted) ->
+                Storage.commitCatalogInto store baseCatalog snapshot
+
+                let outcome =
+                    { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
+                      GeneratedId = firstAuto
+                      Affected = affected
+                      InsertedRows = List.rev inserted
+                      IgnoredErrors = [] }
+
+                nextIds ids (outcome.LastInsertId, outcome.GeneratedId), Affected(uint64 outcome.Affected)
 
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
         let retarget (access: ViewAccess) =

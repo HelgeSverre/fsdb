@@ -208,10 +208,10 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
 - A trigger follows its subject through `RENAME TABLE`; dropping the subject
   table or its database removes the stored trigger definition.
 
-Remaining trigger gaps are CASE/loop control flow, handlers, SIGNAL, dynamic
-SQL, multi-table DML firing, and complete `REPLACE` delete-event behavior.
-`REPLACE` refuses when DELETE triggers exist instead of silently skipping
-them. The full MySQL surface is documented under
+`REPLACE` fires BEFORE INSERT, each conflicting row's DELETE pair, and AFTER
+INSERT in row order; every phase rolls back together on failure. Remaining
+trigger gaps are CASE/loop control flow, handlers, SIGNAL, dynamic SQL, and
+multi-table DML firing. The full MySQL surface is documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
 ## Check constraints

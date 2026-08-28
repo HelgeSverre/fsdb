@@ -1362,6 +1362,8 @@ module DmlBattery =
            "DROP TABLE IF EXISTS fsdb_dml_join_left"
            "DROP TABLE IF EXISTS fsdb_trigger_contract"
            "DROP TABLE IF EXISTS fsdb_trigger_log"
+           "DROP TABLE IF EXISTS fsdb_replace_trigger_contract"
+           "DROP TABLE IF EXISTS fsdb_replace_trigger_log"
            "DROP TABLE IF EXISTS fsdb_replace_contract"
            "DROP TABLE IF EXISTS fsdb_odku_source"
            "DROP TABLE IF EXISTS fsdb_fulltext_contract"
@@ -1381,6 +1383,9 @@ module DmlBattery =
            "CREATE TABLE fsdb_odku_source (id INT, selected_n INT, update_n INT)"
            "INSERT INTO fsdb_odku_source VALUES (1, 70, 80), (1, 70, 90)"
            "CREATE TABLE fsdb_replace_contract (id INT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7, INDEX ix_n_u (n, u))"
+           "CREATE TABLE fsdb_replace_trigger_contract (id INT PRIMARY KEY, u INT UNIQUE, n INT)"
+           "CREATE TABLE fsdb_replace_trigger_log (seq INT AUTO_INCREMENT PRIMARY KEY, event_name VARCHAR(2), n INT)"
+           "INSERT INTO fsdb_replace_trigger_contract VALUES (1, 10, 10), (2, 20, 20)"
            "CREATE TABLE fsdb_trigger_contract (id INT PRIMARY KEY, n INT)"
            "CREATE TABLE fsdb_trigger_log (n INT)"
            "CREATE TABLE fsdb_fulltext_contract (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
@@ -1397,7 +1402,11 @@ module DmlBattery =
            "CREATE VIEW fsdb_dml_union_join AS SELECT t.id, t.n, x.marker FROM fsdb_dml_materialized_target AS t JOIN fsdb_dml_union_component AS x ON x.group_id = t.group_id"
            "CREATE VIEW fsdb_dml_union_reversed AS SELECT t.id, t.n, x.marker FROM fsdb_dml_union_component AS x JOIN fsdb_dml_materialized_target AS t ON x.group_id = t.group_id"
            "CREATE TRIGGER fsdb_trigger_first BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW SET NEW.n = NEW.n + 1"
-           "CREATE TRIGGER fsdb_trigger_second BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW FOLLOWS fsdb_trigger_first BEGIN INSERT INTO fsdb_trigger_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END" |]
+           "CREATE TRIGGER fsdb_trigger_second BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW FOLLOWS fsdb_trigger_first BEGIN INSERT INTO fsdb_trigger_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END"
+           "CREATE TRIGGER fsdb_replace_bi BEFORE INSERT ON fsdb_replace_trigger_contract FOR EACH ROW INSERT INTO fsdb_replace_trigger_log(event_name, n) VALUES ('BI', NEW.n)"
+           "CREATE TRIGGER fsdb_replace_bd BEFORE DELETE ON fsdb_replace_trigger_contract FOR EACH ROW INSERT INTO fsdb_replace_trigger_log(event_name, n) VALUES ('BD', OLD.n)"
+           "CREATE TRIGGER fsdb_replace_ad AFTER DELETE ON fsdb_replace_trigger_contract FOR EACH ROW INSERT INTO fsdb_replace_trigger_log(event_name, n) VALUES ('AD', OLD.n)"
+           "CREATE TRIGGER fsdb_replace_ai AFTER INSERT ON fsdb_replace_trigger_contract FOR EACH ROW INSERT INTO fsdb_replace_trigger_log(event_name, n) VALUES ('AI', NEW.n)" |]
 
     let private cases =
         [| "insert_new", "INSERT INTO fsdb_dml_contract VALUES (1, 10)"
@@ -1413,6 +1422,9 @@ module DmlBattery =
            "replace_multi_unique_seed", "INSERT INTO fsdb_replace_contract VALUES (1, 10, 1), (2, 20, 2)"
            "replace_multi_unique", "REPLACE INTO fsdb_replace_contract VALUES (1, 20, 3)"
            "replace_batch_order", "REPLACE INTO fsdb_replace_contract VALUES (3, 30, 4), (3, 31, 5)"
+           "replace_trigger_multi_unique", "REPLACE INTO fsdb_replace_trigger_contract VALUES (1, 20, 99)"
+           "replace_trigger_unchanged", "REPLACE INTO fsdb_replace_trigger_contract VALUES (1, 20, 99)"
+           "replace_trigger_event_order", "SELECT event_name, n FROM fsdb_replace_trigger_log ORDER BY seq"
            "replace_select", "REPLACE INTO fsdb_dml_contract SELECT 20, 2"
            "replace_set_default_reference", "REPLACE INTO fsdb_replace_contract SET id = 1, u = 20, n = n + 1"
            "replace_set_default_function", "REPLACE INTO fsdb_replace_contract SET id = 4, u = 40, n = DEFAULT(n)"

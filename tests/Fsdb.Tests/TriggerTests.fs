@@ -229,23 +229,119 @@ let tests =
 
               Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 10)") (Affected 1UL) "insert path"
               Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 20)") (Affected 2UL) "replacement path"
-              Expect.equal (rows store "SELECT n FROM log ORDER BY id") [ [ Some "10" ]; [ Some "20" ] ] "one insert event per candidate"
+              Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 20)") (Affected 2UL) "triggered unchanged path"
 
-          testCase "REPLACE refuses tables with DELETE triggers"
+              Expect.equal
+                  (rows store "SELECT n FROM log ORDER BY id")
+                  [ [ Some "10" ]; [ Some "20" ]; [ Some "20" ] ]
+                  "one insert event per candidate"
+
+          testCase "REPLACE fires INSERT and DELETE timings in row order"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               setup store
               expectOk (runDefault store "INSERT INTO t VALUES (1, 10)") "seed t"
+
               expectOk
-                  (runDefault store "CREATE TRIGGER delete_log AFTER DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n)")
-                  "create delete trigger"
+                  (runDefault store "CREATE TRIGGER replace_bi BEFORE INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n * 10 + 1)")
+                  "create before insert trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_bd BEFORE DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n * 10 + 2)")
+                  "create before delete trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_ad AFTER DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n * 10 + 3)")
+                  "create after delete trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_ai AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n * 10 + 4)")
+                  "create after insert trigger"
 
               Expect.equal
                   (runDefault store "REPLACE INTO t VALUES (1, 20)")
-                  (Err(1235, "REPLACE on a table with DELETE triggers is not supported"))
-                  "REPLACE cannot silently skip DELETE triggers"
+                  (Affected 2UL)
+                  "delete and insert count separately"
 
-              Expect.equal (rows store "SELECT n FROM t") [ [ Some "10" ] ] "refused statement changes no rows"
+              Expect.equal
+                  (rows store "SELECT n FROM log ORDER BY id")
+                  [ [ Some "201" ]; [ Some "102" ]; [ Some "103" ]; [ Some "204" ] ]
+                  "BEFORE INSERT precedes the DELETE pair and AFTER INSERT"
+
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "20" ] ] "replacement is stored"
+
+          testCase "REPLACE fires DELETE triggers for every unique-key conflict"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (runDefault store "CREATE TABLE t (id INT PRIMARY KEY, u INT UNIQUE, n INT)") "create t"
+              expectOk (runDefault store "CREATE TABLE log (id INT AUTO_INCREMENT PRIMARY KEY, n INT)") "create log"
+              expectOk (runDefault store "INSERT INTO t VALUES (1, 10, 10), (2, 20, 20)") "seed t"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_bi BEFORE INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n * 10 + 1)")
+                  "create before insert trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_bd BEFORE DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n * 10 + 2)")
+                  "create before delete trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_ad AFTER DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n * 10 + 3)")
+                  "create after delete trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_ai AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n * 10 + 4)")
+                  "create after insert trigger"
+
+              Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 20, 99)") (Affected 3UL) "two deletes and one insert"
+
+              Expect.equal
+                  (rows store "SELECT n FROM log ORDER BY id")
+                  [ [ Some "991" ]; [ Some "102" ]; [ Some "103" ]; [ Some "202" ]; [ Some "203" ]; [ Some "994" ] ]
+                  "each conflicting row has its own DELETE trigger pair"
+
+          testCase "REPLACE trigger failures roll back every phase"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+              expectOk (runDefault store "CREATE TABLE unique_log (n INT UNIQUE)") "create unique log"
+              expectOk (runDefault store "INSERT INTO t VALUES (1, 10)") "seed t"
+              expectOk (runDefault store "INSERT INTO unique_log VALUES (10)") "seed unique log"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_bi BEFORE INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)")
+                  "create before insert trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER replace_ad AFTER DELETE ON t FOR EACH ROW INSERT INTO unique_log VALUES (OLD.n)")
+                  "create failing after delete trigger"
+
+              match runDefault store "REPLACE INTO t VALUES (1, 20)" with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected trigger failure, got %A" other
+
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "10" ] ] "deleted row is restored"
+              Expect.equal (rows store "SELECT n FROM log") [] "earlier trigger effects roll back"
+
+          testCase "triggered REPLACE inserts a new self-referencing candidate"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TABLE self_ref (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES self_ref(id))")
+                  "create self reference"
+
+              expectOk (runDefault store "CREATE TABLE log (n INT)") "create log"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER self_ref_insert AFTER INSERT ON self_ref FOR EACH ROW INSERT INTO log VALUES (NEW.id)")
+                  "create insert trigger"
+
+              Expect.equal (runDefault store "REPLACE INTO self_ref VALUES (1, 1)") (Affected 1UL) "insert self reference"
+              Expect.equal (rows store "SELECT * FROM self_ref") [ [ Some "1"; Some "1" ] ] "candidate can satisfy its own parent"
+              Expect.equal (rows store "SELECT * FROM log") [ [ Some "1" ] ] "delete trigger fired"
 
           testCase "ON DUPLICATE KEY UPDATE fires only for rows that actually inserted"
           <| fun _ ->
@@ -664,19 +760,27 @@ let tests =
 
               expectOk
                   (runDefault store "CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)")
-                  "create trigger"
+                  "create insert trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER trg_delete AFTER DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n + 100)")
+                  "create delete trigger"
 
               expectOk (runDefault store "INSERT INTO t(n) VALUES (7)") "insert before restart"
+              expectOk (runDefault store "REPLACE INTO t VALUES (1, 8)") "replace before restart"
 
               let reloaded = Fsdb.Persistence.load dir
-              Expect.equal (rows reloaded "SELECT n FROM log") [ [ Some "7" ] ] "replayed effect rows survive"
+              Expect.equal
+                  (rows reloaded "SELECT n FROM log ORDER BY id")
+                  [ [ Some "7" ]; [ Some "107" ]; [ Some "8" ] ]
+                  "replayed effect rows survive"
 
-              expectOk (runDefault reloaded "INSERT INTO t(n) VALUES (8)") "insert after restart"
+              expectOk (runDefault reloaded "REPLACE INTO t VALUES (1, 9)") "replace after restart"
 
               Expect.equal
-                  (rows reloaded "SELECT n FROM log ORDER BY n")
-                  [ [ Some "7" ]; [ Some "8" ] ]
-                  "the trigger itself survived the restart and fired again"
+                  (rows reloaded "SELECT n FROM log ORDER BY id")
+                  [ [ Some "7" ]; [ Some "107" ]; [ Some "8" ]; [ Some "108" ]; [ Some "9" ] ]
+                  "the triggers survived the restart and fired again"
 
           testCase "SHOW TRIGGERS renders the mysql.triggers row in MySQL's probed shape"
           <| fun _ ->
