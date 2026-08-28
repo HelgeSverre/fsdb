@@ -12546,12 +12546,9 @@ let rec executeAs
             let self = db, normalizeTableName table
 
             // Re-parse (body text is the single source of truth, see
-            // `Ast.CreateTrigger`) and run the 1442 checks up front,
-            // before any row's body executes: a body targeting a
-            // table the invoking chain is already writing, or a
-            // chain deeper than the cap, fires nothing at all.
-            // The fixed depth cap is 8; raise it if a legitimate
-            // trigger chain that deep ever exists.
+            // `Ast.CreateTrigger`) and run the 1442 checks before any row's
+            // body executes. A body targeting a table the invoking chain is
+            // already writing fires nothing at all.
             let checkBody trigger =
                 match parseTriggerBody trigger.Body with
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
@@ -12561,7 +12558,6 @@ let rec executeAs
 
                     match targets |> List.tryFind (fun target -> List.contains target (self :: chain)) with
                     | Some target -> Result.Error(err1442 (snd target))
-                    | None when not targets.IsEmpty && List.length chain >= 8 -> Result.Error(err1442 (snd targets.Head))
                     | _ ->
                         // A body runs with the DEFINER's privileges, not the
                         // invoking session's — otherwise GRANT TRIGGER on one

@@ -201,7 +201,7 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
   error rolls all of them back, and effects participate normally in explicit
   transaction commit or rollback.
 - Trigger writes may fire another table's trigger. Cycles and self-writes
-  return error 1442, and the current chain-depth ceiling is eight.
+  return error 1442; long acyclic chains continue normally.
 - Bodies run after a definer-privilege check, reject DirectOnly extension
   functions, persist through the ordinary WAL/snapshot path, and appear in
   `SHOW TRIGGERS` and `information_schema.TRIGGERS`.

@@ -583,23 +583,22 @@ let tests =
               | Err(1442, msg) -> Expect.equal msg (text1442 "t") "the cycle is caught when log's trigger loops back into t"
               | other -> failtestf "expected 1442, got %A" other
 
-          testCase "a trigger chain deeper than 8 fires 1442"
+          testCase "long acyclic trigger chains complete"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
 
-              for i in 0..9 do
+              for i in 0..12 do
                   expectOk (runDefault store (sprintf "CREATE TABLE c%d (n INT)" i)) "create chain table"
 
-              for i in 0..8 do
+              for i in 0..11 do
                   expectOk
                       (runDefault
                           store
                           (sprintf "CREATE TRIGGER chain%d AFTER INSERT ON c%d FOR EACH ROW INSERT INTO c%d(n) VALUES (NEW.n)" i i (i + 1)))
                       "create chain trigger"
 
-              match runDefault store "INSERT INTO c0(n) VALUES (1)" with
-              | Err(1442, _) -> ()
-              | other -> failtestf "expected the depth cap's 1442, got %A" other
+              expectOk (runDefault store "INSERT INTO c0(n) VALUES (1)") "fire chain"
+              Expect.equal (rows store "SELECT n FROM c12") [ [ Some "1" ] ] "the terminal trigger receives the row"
 
           testCase "multiple triggers honor creation and explicit action order"
           <| fun _ ->
