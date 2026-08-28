@@ -196,10 +196,8 @@ let isStringy (ty: ColumnType) : bool =
     | _ -> false
 
 /// `column_key`: `PRI` for a primary-key column, else `UNI`/`MUL` if it's
-/// the first column of a unique/plain index — MySQL's own rule for which of
-/// several indexes over the same leading column "wins" is more involved
-/// than this; good enough for what Laravel's schema introspection actually
-/// reads.
+/// the first column of the first declared unique/plain index that leads with
+/// this column.
 let columnKey (table: Table) (c: ColumnDef) : string =
     if c.PrimaryKey then
         "PRI"

@@ -1,6 +1,4 @@
-/// The scalar/aggregate function registry — every function call, including
-/// built-ins like CONCAT, resolves through this one SQLite-style registry
-/// via `registerScalar` rather than a hardcoded dispatch table.
+/// Scalar and aggregate function registries used by every SQL function call.
 module Fsdb.Functions
 
 open System
@@ -22,32 +20,19 @@ open Fsdb.Temporal
 /// A scalar function: its already-evaluated arguments in, one `Value` out.
 type Scalar = Value list -> Value
 
-/// How an extension function raises a *chosen* MySQL error code instead of
-/// the generic 1105 the catch-all would give it — `raise (SqlError(1210,
-/// "no such model"))` reaches the client as exactly that code/message.
-/// Deliberately still an exception (not a `Result`-widening of `Scalar`):
-/// builtins and the executor's evaluation pipeline stay untouched, and the
-/// transaction-abort semantics of a throwing function stay identical to any
-/// other failure (`QueryHandler.handle` clears `session.Tx` either way).
+/// An extension-function failure with an explicit MySQL error code.
 exception SqlError of code: int * message: string
 
-/// What a rich extension function (`ScalarFunction`) sees about the query
-/// it's executing inside. `Cancellation` is the killed-client token
-/// (`Storage.queryCancellation`) — hosts hand it to `HttpClient` so a
-/// network-calling function stops when its client vanishes. No async
-/// executor: scalars block the connection thread for as long as they run.
+/// Statement context supplied to registered scalar functions.
+/// `Cancellation` is signalled when the client disconnects or is killed.
 type QueryContext =
     { Database: string option
       User: string
       Cancellation: System.Threading.CancellationToken }
 
-/// The rich registration shape: a context-aware function plus the two
-/// SQLite-style flags. Only `DirectOnly` is *enforced* (rejected inside
-/// generated-column definitions — SQLite's DIRECTONLY rationale: a
-/// network-calling UDF re-invoked by every later write is a footgun);
-/// `Deterministic` is carried metadata for host-side caches.
-/// No planner constant-folding reads `Deterministic`; add that
-/// only if repeated evaluation of a deterministic call ever shows up hot.
+/// A context-aware scalar function and its execution constraints.
+/// Direct-only functions are rejected from stored expressions;
+/// deterministic metadata is available to host-side caches.
 type ScalarFunction =
     { Name: string
       Fn: QueryContext -> Value list -> Value
@@ -59,29 +44,19 @@ module ScalarFunction =
     let create (name: string) (fn: QueryContext -> Value list -> Value) : ScalarFunction =
         { Name = name; Fn = fn; Deterministic = true; DirectOnly = false }
 
-    /// The network-calling shape in one word: non-deterministic (results
-    /// may differ per call) and direct-only (banned from generated-column
-    /// definitions, where the engine — not the user's statement — would
-    /// re-invoke it on every later write).
+    /// Marks a function non-deterministic and unavailable to stored expressions.
     let effectful (fn: ScalarFunction) : ScalarFunction =
         { fn with Deterministic = false; DirectOnly = true }
 
-/// A host-registered read-only table, living in the reserved `fsdb` schema
-/// (`SELECT * FROM fsdb.models`) — how an embedder exposes its own state
-/// (a model registry, a metrics snapshot) to SQL without inserting rows.
-/// `Rows` is pulled fresh once per statement that references the table; the
-/// engine post-filters WHERE/JOIN over the full row list.
-/// There is no predicate pushdown or table-valued-function support; add a
-/// narrow-scan analogue only when a big virtual table hurts.
+/// A host-provided read-only table in the reserved `fsdb` schema.
+/// `Rows` is evaluated once per referencing statement before SQL filtering.
 type VirtualTable =
     { Name: string
       Columns: Ast.ColumnDef list
       Rows: unit -> Value[] list }
 
 module VirtualTable =
-    /// The complete `ColumnDef` an embedder should never hand-build: every
-    /// flag off, nullable, server-default collation/charset — the shape the
-    /// `text`/`int`/... shorthands below all share.
+    /// Creates a nullable column with server-default charset and collation.
     let private col (name: string) (ty: Ast.ColumnType) : Ast.ColumnDef =
         { Name = name
           Type = ty
@@ -104,22 +79,11 @@ module VirtualTable =
     let create (name: string) (columns: Ast.ColumnDef list) (rows: unit -> Value[] list) : VirtualTable =
         { Name = name; Columns = columns; Rows = rows }
 
-/// An aggregate function: the whole-row-set list of one already-evaluated,
-/// already NULL-filtered `Value` per row, folded to one `Value` out —
-/// `Executor.evalAggregate` owns evaluating the argument expression against
-/// every row and dropping the NULLs (both need a `Store`/row context this
-/// module doesn't have), so what lands here is always a nonempty plain
-/// list. `COUNT(*)` doesn't evaluate any expression per row (`*` isn't a
-/// valid `Expr` to evaluate) — `evalAggregate` special-cases it directly
-/// rather than routing it through here.
+/// An aggregate over already-evaluated, non-NULL argument values.
+/// `COUNT(*)` is handled directly by the executor.
 type Aggregate = Value list -> Value
 
-/// Case-insensitive by construction: every key is upper-invariant on the
-/// way in, so `lookup`/`lookupAggregate` just normalize the same way rather
-/// than needing a custom `IComparer`. A record (not a bare `Map` alias) so
-/// `Aggregates` is a field here rather than a breaking change to what
-/// `Registry` *is* everywhere it's named (`Executor.evalExpr`,
-/// `QueryHandler.registryFor`, every test).
+/// Case-insensitive scalar, aggregate, and extension registrations.
 type Registry =
     { Scalars: Map<string, Scalar>
       Aggregates: Map<string, Aggregate>
@@ -2005,11 +1969,7 @@ let private convertFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
-// ---------------------------------------------------------------------------
-// Dates. `NOW()`/`CURRENT_TIMESTAMP` already exist above; everything else
-// MySQL's date/time surface needs for a Laravel app (timestamps, `Carbon`
-// comparisons, `whereDate`, etc.) lives here.
-// ---------------------------------------------------------------------------
+// Date and time functions.
 
 let private dateTimeFormats =
     [| "yyyy-MM-dd HH:mm:ss"

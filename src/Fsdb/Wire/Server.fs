@@ -1588,14 +1588,8 @@ let private handleConnection
                                 return! loop session
                             | Some(StmtSendLongData payload) ->
                                 // No response is ever sent for this command,
-                                // success or failure — the client doesn't
-                                // wait for one. The payload is buffered rather
-                                // than streamed straight into the value —
-                                // COM_STMT_EXECUTE substitutes the buffered
-                                // text in place of reading that param off
-                                // the wire (see there); fine for the sizes
-                                // Laravel/PDO send, revisit if a client ever
-                                // streams something too big to buffer.
+                                // success or failure. Chunks are buffered until
+                                // COM_STMT_EXECUTE consumes the parameter.
                                 let r = Reader(payload)
                                 let stmtId = r.ReadInt32LE()
                                 let paramIndex = r.ReadInt16LE()
