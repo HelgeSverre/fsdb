@@ -13887,9 +13887,9 @@ let rec executeAs
                     Storage.commitCatalogInto store baseCatalog snapshot
                     ids, Affected 0UL
 
-    | CreateUser(users, ifNotExists, locked) ->
+    | CreateUser(users, ifNotExists, locked, tlsRequirement) ->
         let createOne (name, host, password) =
-            match Auth.createUser store name host password with
+            match Auth.createUserWithTlsRequirement store name host password tlsRequirement with
             | Error(1396, _) when ifNotExists -> Ok()
             | Ok() -> Auth.setAccountLocked store name host locked
             | error -> error

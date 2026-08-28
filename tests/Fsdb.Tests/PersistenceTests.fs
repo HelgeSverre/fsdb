@@ -876,7 +876,7 @@ let tests =
               let store = load dir
               attach dir store
 
-              Fsdb.Auth.createUser store "alice" "%" (Some "pw1") |> ignore
+              Fsdb.Auth.createUserWithTlsRequirement store "alice" "%" (Some "pw1") RequireSsl |> ignore
               Fsdb.Auth.createUser store "alice" "localhost" (Some "local") |> ignore
               Fsdb.Auth.createUser store "bob" "%" None |> ignore
               Fsdb.Auth.setPassword store "alice" "%" "pw2" |> ignore
@@ -890,6 +890,7 @@ let tests =
                       (Fsdb.Auth.storedPasswordHash cols row)
                       (Fsdb.Auth.nativePasswordHash "pw2")
                       "replayed alice with her updated hash"
+                  Expect.equal (Fsdb.Auth.accountTlsRequirement cols row) RequireSsl "replayed TLS requirement"
               | None -> failtest "expected alice to survive the reload"
 
               match Fsdb.Auth.tryUserRowForAccount reloaded (Fsdb.Auth.account "alice" "localhost") with

@@ -700,6 +700,8 @@ let private authenticateHandshake
     (authData: byte[])
     (resp: HandshakeResponse)
     (clientHost: string option)
+    (encryptedTransport: bool)
+    (clientCertificate: bool)
     (firstSeq: byte)
     : Async<(byte * Auth.Account) option> =
     async {
@@ -727,6 +729,15 @@ let private authenticateHandshake
 
             do! writePacketAsync stream { SeqId = firstSeq; Payload = errPayload capabilities 3118 message } |> Async.Ignore
             return None
+        | Some(_, cols, row) when
+            not (
+                Auth.transportSatisfiesAccount
+                    { Encrypted = encryptedTransport
+                      ClientCertificateValidated = clientCertificate }
+                    cols
+                    row
+            ) ->
+            return! deny firstSeq (resp.AuthResponse.Length > 0)
         | Some(selected, cols, row) ->
             let stored = Auth.storedPasswordHash cols row
 
@@ -930,7 +941,19 @@ let private handleConnection
                             return None
                         }
                     else
-                        authenticateHandshake client stream capabilities store authData resp clientHost (handshakeResp.SeqId + 1uy)
+                        let validatedClientCertificate = false
+
+                        authenticateHandshake
+                            client
+                            stream
+                            capabilities
+                            store
+                            authData
+                            resp
+                            clientHost
+                            tlsVersion.IsSome
+                            validatedClientCertificate
+                            (handshakeResp.SeqId + 1uy)
                 let mutable databaseAccepted = false
                 let selectedAccount = authOkSeq |> Option.map snd |> Option.defaultValue (Auth.account resp.Username "%")
 

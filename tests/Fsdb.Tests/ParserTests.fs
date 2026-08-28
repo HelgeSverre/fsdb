@@ -2738,23 +2738,33 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE USER 'bob'@'%' IDENTIFIED BY 's3cret'")
-                        (CreateUser([ "bob", "%", Some "s3cret" ], false, false))
+                        (CreateUser([ "bob", "%", Some "s3cret" ], false, false, RequireNone))
                         "quoted with password"
 
                     Expect.equal
                         (parseOk "CREATE USER IF NOT EXISTS bob")
-                        (CreateUser([ "bob", "%", None ], true, false))
+                        (CreateUser([ "bob", "%", None ], true, false, RequireNone))
                         "bare name defaults host to %"
 
                     Expect.equal
                         (parseOk "CREATE USER 'a'@'localhost', 'b'@'%' IDENTIFIED BY 'pw'")
-                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false, false))
+                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false, false, RequireNone))
                         "per-account password in a list"
 
                     Expect.equal
                         (parseOk "CREATE USER locked ACCOUNT LOCK")
-                        (CreateUser([ "locked", "%", None ], false, true))
+                        (CreateUser([ "locked", "%", None ], false, true, RequireNone))
                         "account state"
+
+                    Expect.equal
+                        (parseOk "CREATE USER secure REQUIRE SSL")
+                        (CreateUser([ "secure", "%", None ], false, false, RequireSsl))
+                        "SSL requirement"
+
+                    Expect.equal
+                        (parseOk "CREATE USER certified REQUIRE X509 ACCOUNT LOCK")
+                        (CreateUser([ "certified", "%", None ], false, true, RequireX509))
+                        "X509 requirement"
 
                 testCase "CREATE ROLE and DROP ROLE parse account lists"
                 <| fun _ ->

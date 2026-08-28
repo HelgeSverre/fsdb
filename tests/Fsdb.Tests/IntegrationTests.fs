@@ -559,6 +559,49 @@ let tests =
                   (fun () -> TestSupport.ServerFixture.startWithOptions options (Fsdb.Storage.create ()) Fsdb.Functions.empty |> ignore)
                   "a certificate without a private key cannot start TLS"
 
+          testCase "REQUIRE SSL accounts reject plaintext authentication"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let root = Fsdb.Session.create 1 store
+                  let _, created = Fsdb.QueryHandler.handle root "CREATE USER 'secure_user'@'%' REQUIRE SSL"
+                  Expect.equal created (Affected 0UL) "secure account created"
+
+                  use certificate = selfSignedCertificate ()
+                  let options = Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withCertificate certificate
+                  use server = TestSupport.ServerFixture.startWithOptions options store Fsdb.Functions.empty
+                  let port = server.Port
+
+                  use client = new Net.Sockets.TcpClient()
+                  do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                  let stream = client.GetStream()
+                  let! greeting = readPacketAsync stream
+                  let greeting = greeting |> Option.defaultWith (fun () -> failtest "the server sends its greeting")
+
+                  do!
+                      writePacketAsync
+                          stream
+                          { SeqId = greeting.SeqId + 1uy
+                            Payload = passwordlessHandshakeResponse ClientProtocol41 "secure_user" }
+                      |> Async.Ignore
+
+                  let! rejected = readPacketAsync stream
+                  let rejected = rejected |> Option.defaultWith (fun () -> failtest "the server rejects plaintext authentication")
+                  Expect.equal rejected.Payload.[0] 0xffuy "plaintext handshake receives ERR"
+                  Expect.equal (Reader(rejected.Payload.[1..]).ReadInt16LE()) 1045 "plaintext account denial"
+
+                  let connectionString =
+                      sprintf "Server=127.0.0.1;Port=%d;User ID=secure_user;Password=;SslMode=Required;Pooling=false" port
+
+                  use connection = new MySqlConnector.MySqlConnection(connectionString)
+                  do! connection.OpenAsync() |> Async.AwaitTask
+                  use query = connection.CreateCommand()
+                  query.CommandText <- "SELECT CURRENT_USER()"
+                  let! identity = query.ExecuteScalarAsync() |> Async.AwaitTask
+                  Expect.equal (string identity) "secure_user@%" "TLS account connects"
+              }
+              |> Async.RunSynchronously
+
           testCase "PROCESSLIST shows the live connection and KILL CONNECTION tears a victim down"
           <| fun _ ->
               async {

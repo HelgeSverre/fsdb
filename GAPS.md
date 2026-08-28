@@ -76,7 +76,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `CREATE/DROP ROLE` are backed by locked `mysql.user` accounts and `SET ROLE NONE` clears the empty active-role set; other `SET ROLE`, `SET DEFAULT ROLE`, role grants/inheritance, dynamic privileges (`BACKUP_ADMIN`…), and `GRANT PROXY` remain absent | medium | divergence/refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
-| `CREATE USER … ACCOUNT LOCK/UNLOCK` is enforced; auth-plugin selection, `REQUIRE SSL/X509`, resource limits, `PASSWORD EXPIRE`, and `ALTER USER` beyond password change remain absent | medium | refusal |
+| `CREATE USER … ACCOUNT LOCK/UNLOCK` and `REQUIRE SSL` are enforced; `REQUIRE X509` is retained but cannot authenticate without client-certificate transport, while auth-plugin selection, resource limits, `PASSWORD EXPIRE`, and `ALTER USER` beyond password change remain absent | medium | refusal |
 
 ### SELECT-level syntax gaps
 
@@ -369,7 +369,7 @@ disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| TLS client authentication | account `REQUIRE SSL`/`REQUIRE X509`, client certificates, certificate reload | server certificate authentication only; no account-level TLS requirement | medium (mutual TLS deployments) | refusal |
+| TLS client authentication | account `REQUIRE SSL`/`REQUIRE X509`, client certificates, certificate reload | `REQUIRE SSL` is enforced; `REQUIRE X509` is stored and fails closed because the server does not request client certificates | medium (mutual TLS deployments) | subset/refusal |
 | Compression | CLIENT_COMPRESS/ZSTD | CLIENT_COMPRESS zlib framing is negotiated; Zstandard is not offered | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, one-character field/line separators, `REPLACE`/`IGNORE`, column lists, and header skipping; no server-file loading, `SET`, user variables, or multibyte separators | low | subset |
@@ -387,7 +387,7 @@ disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 
 Working: mysql.user with MySQL 8.4's exact 51-column order, root bootstrap,
 SHA1-double password hashing with constant-time compare, CREATE/DROP/ALTER
-USER and SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
+USER with account lock and TLS requirements, SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
 level-shaped denials (1045/1044/1142), GRANT OPTION checked at target level,
 fail-closed unknown privileges, DROP USER cleanup across grant tables,
 privilege collection recursing through subqueries/derived tables/CTEs,

@@ -93,8 +93,9 @@ options work in the server sections of an option file.
 `--require-secure-transport` rejects plaintext handshakes with 3159.
 Embedding hosts supply an already-loaded `X509Certificate2` through
 `Db.withTlsCertificate`; `Db.requireSecureTransport` enables the same
-plaintext restriction. Client certificates and account-level `REQUIRE SSL` or
-`REQUIRE X509` remain unsupported.
+plaintext restriction. Accounts created with `REQUIRE SSL` reject plaintext
+authentication. `REQUIRE X509` is retained in `mysql.user` and SHOW CREATE
+USER but cannot authenticate because client certificates are not requested.
 
 ## Bulk wire commands
 

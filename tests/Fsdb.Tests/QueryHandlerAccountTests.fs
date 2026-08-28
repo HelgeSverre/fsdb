@@ -221,6 +221,43 @@ let tests =
               | Err(1396, _) -> ()
               | other -> failtestf "expected missing account error 1396, got %A" other
 
+          testCase "CREATE USER retains TLS requirements"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, sslCreated = handle session "CREATE USER 'ssl_user'@'%' REQUIRE SSL"
+              let session, x509Created = handle session "CREATE USER 'x509_user'@'%' REQUIRE X509"
+
+              Expect.equal sslCreated (Affected 0UL) "SSL account created"
+              Expect.equal x509Created (Affected 0UL) "X509 account created"
+
+              match handle session "SELECT User, ssl_type FROM mysql.user WHERE User IN ('ssl_user', 'x509_user') ORDER BY User" |> snd with
+              | ResultSet(_, [ [ Some "ssl_user"; Some "ANY" ]; [ Some "x509_user"; Some "X509" ] ]) -> ()
+              | other -> failtestf "expected stored TLS requirements, got %A" other
+
+              match handle session "SHOW CREATE USER 'ssl_user'@'%'" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) -> Expect.stringContains ddl " REQUIRE SSL " "SSL requirement"
+              | other -> failtestf "expected SHOW CREATE USER for SSL account, got %A" other
+
+              match handle session "SHOW CREATE USER 'x509_user'@'%'" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) -> Expect.stringContains ddl " REQUIRE X509 " "X509 requirement"
+              | other -> failtestf "expected SHOW CREATE USER for X509 account, got %A" other
+
+              let transportAllowed name encrypted clientCertificate =
+                  match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account name "%") with
+                  | Some(columns, row) ->
+                      Fsdb.Auth.transportSatisfiesAccount
+                          { Encrypted = encrypted
+                            ClientCertificateValidated = clientCertificate }
+                          columns
+                          row
+                  | None -> failtestf "expected account %s" name
+
+              Expect.isFalse (transportAllowed "ssl_user" false false) "SSL rejects plaintext"
+              Expect.isTrue (transportAllowed "ssl_user" true false) "SSL accepts encryption"
+              Expect.isFalse (transportAllowed "x509_user" true false) "X509 requires a client certificate"
+              Expect.isTrue (transportAllowed "x509_user" true true) "X509 accepts an encrypted certificate transport"
+
           testCase "roles are locked accounts and retain role-specific duplicate semantics"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

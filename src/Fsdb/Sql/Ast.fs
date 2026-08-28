@@ -655,6 +655,11 @@ type ViewSecurity =
     | ViewDefiner
     | ViewInvoker
 
+type AccountTlsRequirement =
+    | RequireNone
+    | RequireSsl
+    | RequireX509
+
 type ExplainFormat =
     | ExplainTraditional
     | ExplainJson
@@ -729,8 +734,12 @@ type Statement =
     | Delete of DeleteStmt
     | Truncate of table: string
     /// `CREATE USER [IF NOT EXISTS] 'name'@'host' [IDENTIFIED BY 'pw'], ...
-    /// [ACCOUNT LOCK|UNLOCK]`; host defaults to `%` when omitted.
-    | CreateUser of users: (string * string * string option) list * ifNotExists: bool * locked: bool
+    /// [REQUIRE NONE|SSL|X509] [ACCOUNT LOCK|UNLOCK]`; host defaults to `%`.
+    | CreateUser of
+        users: (string * string * string option) list *
+        ifNotExists: bool *
+        locked: bool *
+        tlsRequirement: AccountTlsRequirement
     /// `DROP USER [IF EXISTS] 'name'@'host', ...`
     | DropUser of users: (string * string) list * ifExists: bool
     | RenameUser of users: ((string * string) * (string * string)) list

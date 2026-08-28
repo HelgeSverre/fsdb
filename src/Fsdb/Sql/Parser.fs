@@ -3529,13 +3529,23 @@ let private identifiedBy: Parser<string, unit> =
     keyword "IDENTIFIED" >>. keyword "BY"
     >>. (stringLit |>> (function VString s -> s | _ -> ""))
 
+let private accountTlsRequirement: Parser<AccountTlsRequirement, unit> =
+    keyword "REQUIRE"
+    >>. choice [ keyword "NONE" >>% RequireNone; keyword "SSL" >>% RequireSsl; keyword "X509" >>% RequireX509 ]
+
 let private createUserStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. sepBy1 (userRef .>>. opt identifiedBy) (sym ",")
+     .>>. opt accountTlsRequirement
      .>>. opt ((keyword "ACCOUNT" >>. keyword "LOCK" >>% true) <|> (keyword "ACCOUNT" >>. keyword "UNLOCK" >>% false)))
-    |>> fun ((ifNotExists, users), locked) ->
-        CreateUser(users |> List.map (fun ((n, h), pw) -> n, h, pw), ifNotExists, Option.defaultValue false locked)
+    |>> fun (((ifNotExists, users), tlsRequirement), locked) ->
+        CreateUser(
+            users |> List.map (fun ((n, h), pw) -> n, h, pw),
+            ifNotExists,
+            Option.defaultValue false locked,
+            Option.defaultValue RequireNone tlsRequirement
+        )
 
 let private dropUserStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "USER"

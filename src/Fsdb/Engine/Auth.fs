@@ -223,6 +223,23 @@ let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string
 /// The stored password hash for a user row — `""` means no password is set.
 let storedPasswordHash (cols: ColumnDef list) (row: Value[]) : string = userColumnText cols row "authentication_string"
 
+let accountTlsRequirement (cols: ColumnDef list) (row: Value[]) =
+    match (userColumnText cols row "ssl_type").ToUpperInvariant() with
+    | "ANY" -> RequireSsl
+    | "X509"
+    | "SPECIFIED" -> RequireX509
+    | _ -> RequireNone
+
+type TransportSecurity =
+    { Encrypted: bool
+      ClientCertificateValidated: bool }
+
+let transportSatisfiesAccount (transport: TransportSecurity) (cols: ColumnDef list) (row: Value[]) =
+    match accountTlsRequirement cols row with
+    | RequireNone -> true
+    | RequireSsl -> transport.Encrypted
+    | RequireX509 -> transport.Encrypted && transport.ClientCertificateValidated
+
 // ---------------------------------------------------------------------------
 // The static privilege vocabulary: SQL name ↔ mysql.user column, plus where
 // (if anywhere) the privilege exists at db level (mysql.db column) and table
@@ -291,25 +308,39 @@ let private privBySql (sql: string) : PrivDef option =
 let private operationFailed (op: string) (name: string) (host: string) =
     Error(1396, sprintf "Operation %s failed for '%s'@'%s'" op name host)
 
-/// `CREATE USER 'name'@'host' [IDENTIFIED BY 'pw']` — one account.
-let createUser (store: Store) (name: string) (host: string) (password: string option) : Result<unit, int * string> =
+let createUserWithTlsRequirement
+    (store: Store)
+    (name: string)
+    (host: string)
+    (password: string option)
+    (tlsRequirement: AccountTlsRequirement)
+    : Result<unit, int * string> =
     let wanted = account name host
 
     if (tryUserRowForAccount store wanted).IsSome then
         operationFailed "CREATE USER" name host
     else
         let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
+        let sslType =
+            match tlsRequirement with
+            | RequireNone -> ""
+            | RequireSsl -> "ANY"
+            | RequireX509 -> "X509"
 
         match
             insertRows
                 store
                 "mysql"
                 "user"
-                (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
-                [ [ VString wanted.Host; VString name; VString "mysql_native_password"; VString hash ] ]
+                (Some [ "Host"; "User"; "plugin"; "authentication_string"; "ssl_type" ])
+                [ [ VString wanted.Host; VString name; VString "mysql_native_password"; VString hash; VString sslType ] ]
         with
         | Ok _ -> Ok()
         | Error e -> Error(toMySqlError e)
+
+/// `CREATE USER 'name'@'host' [IDENTIFIED BY 'pw']` — one account.
+let createUser (store: Store) (name: string) (host: string) (password: string option) : Result<unit, int * string> =
+    createUserWithTlsRequirement store name host password RequireNone
 
 /// `DROP USER 'name'@'host'` — removes the account and any of its rows in
 /// the other grant tables.
@@ -1173,15 +1204,21 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
         let plugin = userColumnText cols row "plugin"
         let hash = userColumnText cols row "authentication_string"
         let accountState = if isAccountLocked cols row then "LOCK" else "UNLOCK"
+        let tlsRequirement =
+            match accountTlsRequirement cols row with
+            | RequireNone -> "NONE"
+            | RequireSsl -> "SSL"
+            | RequireX509 -> "X509"
         let account = sprintf "`%s`@`%s`" (name.Replace("`", "``")) (host.Replace("`", "``"))
 
         Ok(
             sprintf "CREATE USER for %s@%s" name host,
             sprintf
-                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT %s PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT"
+                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE %s PASSWORD EXPIRE DEFAULT ACCOUNT %s PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT"
                 account
                 plugin
                 hash
+                tlsRequirement
                 accountState
         )
 
