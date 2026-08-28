@@ -86,6 +86,13 @@ let subqueries =
     | QuantifiedComparison(_, _, _, select) -> [ select ]
     | _ -> []
 
+/// Subqueries embedded anywhere in an expression, in encounter order.
+let collectSubqueries expression =
+    let rec loop node =
+        (children node |> List.collect loop) @ subqueries node
+
+    loop expression
+
 let fold (visit: 'state -> Expr -> Traversal<'state>) (state: 'state) (expression: Expr) : 'state =
     let rec loop current node =
         match visit current node with

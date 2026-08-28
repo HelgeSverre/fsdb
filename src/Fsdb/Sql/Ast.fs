@@ -406,10 +406,7 @@ and CheckConstraintDef =
 /// A `SELECT` projection: the expression and its optional `AS alias`.
 and Projection = Expr * string option
 
-/// `FROM [db.]table [[AS] alias]`. A record (not a bare string) so a
-/// qualified name (`information_schema.tables`) and an alias have somewhere
-/// to live — needed for schema introspection and, later, joins —
-/// without another breaking edit to every `Select` call site.
+/// `FROM [db.]table [[AS] alias]`, preserving qualification and aliasing.
 and TableRef =
     { Database: string option
       Table: string
@@ -455,9 +452,8 @@ and SetOp =
 
 /// A `SELECT`'s `FROM` target: a real (or `information_schema` virtual)
 /// table, or a derived table — `FROM (SELECT ...) AS alias` — whose alias is
-/// mandatory (MySQL requires one) and doubles as the qualifier later
-/// `t.col` references resolve against, the same way a real table's alias
-/// does.
+/// mandatory (MySQL requires one) and qualifies `t.col` references like a
+/// real table alias.
 and FromItem =
     | FromTable of TableRef
     | FromSubquery of SelectOrUnion * alias: string

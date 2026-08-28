@@ -1,7 +1,4 @@
-/// Shared binary writer/reader + CRC-32. Extracted from `Packet` (which used
-/// to own `Writer`/`Reader` for the wire protocol) so `Persistence` — which
-/// compiles *before* `Packet` — can use the same primitives for the binary
-/// WAL. Both are IO-free byte accumulators/readers.
+/// IO-free binary primitives shared by the wire and persistence codecs.
 module Fsdb.Binary
 
 open System

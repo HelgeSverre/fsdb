@@ -686,23 +686,14 @@ let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (str
                 applyAtLevel store name host defs target revokesGrantOption false)
         |> Result.map ignore)
 
-// ---------------------------------------------------------------------------
-// Enforcement: the privileges a parsed statement needs, and whether a user
-// has them. Each check scans the tiny grant tables through
-// the lock-free catalog snapshot — cache the lookups if profiling ever says
-// a real workload notices.
-// ---------------------------------------------------------------------------
-
 /// Every real table a statement's expressions and sources read, walked
 /// recursively — a derived table (`FROM (SELECT ... secret)`), a scalar or
 /// `IN`/`EXISTS` subquery in any clause (WHERE, projections, SET, VALUES),
 /// and unions nested in either all reach their tables here, so a privilege
 /// check can't be dodged by burying the reference below the top level.
 let rec private exprReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (expr: Expr) : (string * string) list =
-    let recur = exprReadTablesIn boundCtes defaultDb
-
-    (Expression.children expr |> List.collect recur)
-    @ (Expression.subqueries expr |> List.collect (selectReadTablesIn boundCtes defaultDb))
+    Expression.collectSubqueries expr
+    |> List.collect (selectReadTablesIn boundCtes defaultDb)
 
 and private fromItemReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (item: FromItem) : (string * string) list =
     match item with

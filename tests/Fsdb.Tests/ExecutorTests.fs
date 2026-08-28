@@ -982,6 +982,17 @@ let tests =
                         Expect.contains selectTypes (Some "SUBQUERY") "the uncorrelated subquery is plain SUBQUERY"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "EXPLAIN finds a subquery inside a window function"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT SUM((SELECT id FROM t)) OVER ()" with
+                    | ResultSet(_, rows) ->
+                        let selectTypes = rows |> List.map (fun row -> row.[1])
+                        Expect.contains selectTypes (Some "SUBQUERY") "the window argument subquery has its own plan block"
+                    | other -> failtestf "expected a resultset, got %A" other
+
                 testCase "EXPLAIN SELECT with a quantified comparison plans its subquery"
                 <| fun _ ->
                     let store = newStore ()

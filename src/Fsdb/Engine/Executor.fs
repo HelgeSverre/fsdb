@@ -10704,17 +10704,6 @@ let private combineViewPredicate predicate whereClause =
     | Some predicate, None -> Some predicate
     | None, whereClause -> whereClause
 
-// ---------------------------------------------------------------------------
-// EXPLAIN — a pure *description* of what this executor would actually do
-// (join order, subquery/derived-table/union structure, current row counts),
-// never a speculative index-planner: `type` is `ALL` (a full scan),
-// `system` for a 0/1-row table, `const` for a literal unique probe,
-// `eq_ref` for a joined unique probe, or `ref` for an ordinary equality
-// bucket. The plan reports an index only
-// when execution genuinely uses one. `rows` is the table's current count
-// for scans and one for a per-row equality probe.
-// ---------------------------------------------------------------------------
-
 /// One row of `EXPLAIN`'s classic 12-column tabular output. `Id`/`Table` are
 /// `option` since a few rows render `NULL` there (`UNION RESULT`'s `Id`
 /// doesn't belong to any one branch; a from-less `SELECT 1`'s `Table`
@@ -10735,44 +10724,7 @@ type private ExplainRow =
 /// Every subquery `expr` embeds, in encounter order — `EXPLAIN`'s source of
 /// `SUBQUERY`/`DEPENDENT SUBQUERY` rows, one nested block per subquery form
 /// found this way.
-let rec private collectSubqueries (expr: Expr) : SelectStmt list =
-    match expr with
-    | Placeholder _ -> []
-    | UserVariable _
-    | SystemVariable _ -> []
-    | MatchAgainst(_, q, _) -> collectSubqueries q
-    | Exists s
-    | Subquery s -> [ s ]
-    | InSubquery(e, s) -> collectSubqueries e @ [ s ]
-    | QuantifiedComparison(e, _, _, s) -> collectSubqueries e @ [ s ]
-    | BinOp(_, a, b) -> collectSubqueries a @ collectSubqueries b
-    | Row values -> values |> List.collect collectSubqueries
-    | AssignUserVariable(_, value) -> collectSubqueries value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _) -> collectSubqueries e
-    | Like(e, p, _, _) -> collectSubqueries e @ collectSubqueries p
-    | Regexp(e, p) -> collectSubqueries e @ collectSubqueries p
-    | In(e, xs) -> collectSubqueries e @ (xs |> List.collect collectSubqueries)
-    | Between(e, lo, hi) -> collectSubqueries e @ collectSubqueries lo @ collectSubqueries hi
-    | Cast(e, _) -> collectSubqueries e
-    | Collate(e, _) -> collectSubqueries e
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map collectSubqueries |> Option.defaultValue [])
-        @ (whens |> List.collect (fun (c, r) -> collectSubqueries c @ collectSubqueries r))
-        @ (elseBranch |> Option.map collectSubqueries |> Option.defaultValue [])
-    | FuncCall(_, args) -> args |> List.collect collectSubqueries
-    | Lit _
-    | UserVariable _
-    | SystemVariable _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | WindowOver _ -> []
+let private collectSubqueries = Expression.collectSubqueries
 
 /// Whether `expr` contains a subquery form (`Exists`/`Subquery`/
 /// `InSubquery`) anywhere inside it — the same walk `collectSubqueries`

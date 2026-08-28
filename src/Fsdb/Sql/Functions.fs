@@ -131,11 +131,6 @@ let lookupScalarMetadata (name: string) (registry: Registry) : ColumnMetadata op
 let lookupAggregate (name: string) (registry: Registry) : Aggregate option =
     Map.tryFind (name.ToUpperInvariant()) registry.Aggregates
 
-// ---------------------------------------------------------------------------
-// Built-ins, registered through the same `registerScalar` API user code
-// gets — no special-casing for the ones that ship in the box.
-// ---------------------------------------------------------------------------
-
 let private stringBytes (value: Value) =
     tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.UTF8.GetBytes(toText value |> Option.defaultValue ""))
 
@@ -593,10 +588,8 @@ let rec private formatJsonNode (node: JsonNode) : string =
     | _ when node.GetValueKind() = JsonValueKind.String -> jsonQuote (node.GetValue<string>())
     | _ -> node.ToJsonString jsonRenderOptions
 
-// JSON_TABLE's hooks into this module's private path machinery —
-// `Executor.jsonTableRows` compiles later and can't see the private
-// helpers directly, and re-implementing the path walker there would be a
-// second grammar to keep in sync.
+// JSON_TABLE shares this path implementation with scalar JSON functions so
+// path parsing cannot diverge between the two call sites.
 
 /// Parses a document's text as JSON. `Error` = malformed (the executor's
 /// 3141) — distinct from a legal top-level `null`, which parses to a null
