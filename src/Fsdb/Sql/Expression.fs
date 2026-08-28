@@ -14,7 +14,8 @@ let private frameBoundExpressions =
     | CurrentRow
     | UnboundedFollowing -> []
 
-let private windowFunctionExpressions =
+/// Expressions evaluated by a window function.
+let windowExpressions =
     function
     | WinRowNumber
     | WinRank _
@@ -28,7 +29,8 @@ let private windowFunctionExpressions =
     | WinNthValue(expression, nth) -> [ expression; nth ]
     | WinAggregate(_, arguments) -> arguments
 
-let private overClauseExpressions =
+/// Expressions evaluated by an OVER clause, including frame bounds.
+let overExpressions =
     function
     | OverName _ -> []
     | OverSpec spec ->
@@ -61,7 +63,7 @@ let children =
     | Between(value, lower, upper) -> [ value; lower; upper ]
     | FuncCall(_, arguments) -> arguments
     | MatchAgainst(_, query, _) -> [ query ]
-    | WindowOver(fn, over) -> windowFunctionExpressions fn @ overClauseExpressions over
+    | WindowOver(fn, over) -> windowExpressions fn @ overExpressions over
     | Case(subject, branches, fallback) ->
         Option.toList subject
         @ (branches |> List.collect (fun (condition, result) -> [ condition; result ]))

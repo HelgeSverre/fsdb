@@ -8,6 +8,7 @@ open System.Security.Cryptography
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
+open Fsdb.Sql
 open Fsdb.Engine
 
 let private sha1 (bytes: byte[]) : byte[] = SHA1.HashData bytes
@@ -697,76 +698,11 @@ let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (str
 /// `IN`/`EXISTS` subquery in any clause (WHERE, projections, SET, VALUES),
 /// and unions nested in either all reach their tables here, so a privilege
 /// check can't be dodged by burying the reference below the top level.
-/// Mirrors `Executor.collectSubqueries`' traversal; kept local since
-/// `Auth` compiles before `Executor`.
 let rec private exprReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (expr: Expr) : (string * string) list =
     let recur = exprReadTablesIn boundCtes defaultDb
 
-    match expr with
-    | Subquery s
-    | Exists s -> selectReadTablesIn boundCtes defaultDb s
-    | InSubquery(e, s) -> recur e @ selectReadTablesIn boundCtes defaultDb s
-    | QuantifiedComparison(e, _, _, s) -> recur e @ selectReadTablesIn boundCtes defaultDb s
-    | BinOp(_, a, b) -> recur a @ recur b
-    | Row values -> values |> List.collect recur
-    | AssignUserVariable(_, value) -> recur value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _)
-    | Cast(e, _)
-    | Collate(e, _) -> recur e
-    | Like(e, p, _, _) -> recur e @ recur p
-    | Regexp(e, p) -> recur e @ recur p
-    | In(e, xs) -> recur e @ (xs |> List.collect recur)
-    | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
-    | FuncCall(_, args) -> args |> List.collect recur
-    | MatchAgainst(_, q, _) -> recur q
-    | WindowOver(fn, over) ->
-        let fnExprs =
-            match fn with
-            | WinNTile buckets -> [ buckets ]
-            | WinLagLead(_, expr, offset, deflt) -> expr :: (offset |> Option.toList) @ (deflt |> Option.toList)
-            | WinFirstValue expr
-            | WinLastValue expr -> [ expr ]
-            | WinNthValue(expr, n) -> [ expr; n ]
-            | WinAggregate(_, args) -> args
-            | WinRowNumber
-            | WinRank _
-            | WinPercentRank
-            | WinCumeDist -> []
-
-        let frameExprs frame =
-            let boundExpr = function
-                | BoundPreceding expr
-                | BoundFollowing expr -> [ expr ]
-                | _ -> []
-
-            boundExpr frame.Start @ boundExpr frame.End
-
-        let overExprs =
-            match over with
-            | OverName _ -> []
-            | OverSpec spec ->
-                spec.PartitionBy
-                @ (spec.OrderBy |> List.map fst)
-                @ (spec.Frame |> Option.map frameExprs |> Option.defaultValue [])
-
-        (fnExprs @ overExprs) |> List.collect recur
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map recur |> Option.defaultValue [])
-        @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
-        @ (elseBranch |> Option.map recur |> Option.defaultValue [])
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | Lit _
-    | Col _
-    | QualifiedCol _
-    | Star _ -> []
+    (Expression.children expr |> List.collect recur)
+    @ (Expression.subqueries expr |> List.collect (selectReadTablesIn boundCtes defaultDb))
 
 and private fromItemReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (item: FromItem) : (string * string) list =
     match item with
@@ -797,16 +733,7 @@ and private selectReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (s: 
     @ (s.GroupBy |> List.collect (exprReadTablesIn localCtes defaultDb))
     @ (s.Windows
        |> List.collect (fun (_, spec) ->
-           spec.PartitionBy
-           @ (spec.OrderBy |> List.map fst)
-           @ (spec.Frame
-              |> Option.map (fun frame ->
-                  [ frame.Start; frame.End ]
-                  |> List.collect (function
-                      | BoundPreceding expr
-                      | BoundFollowing expr -> [ expr ]
-                      | _ -> []))
-              |> Option.defaultValue []))
+           Expression.overExpressions (OverSpec spec))
        |> List.collect (exprReadTablesIn localCtes defaultDb))
     @ (s.OrderBy |> List.collect (fst >> exprReadTablesIn localCtes defaultDb))
     |> List.distinct

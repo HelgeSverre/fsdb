@@ -1093,47 +1093,20 @@ let private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr list 
         expr
     |> List.rev
 
-/// The sub-expressions a window function and its `OVER` clause carry —
-/// used both by the collector above and by the grouped-window rewrite,
-/// which has to substitute inside them too.
-let private windowFnExprs (fn: WindowFn) : Expr list =
-    match fn with
-    | WinRowNumber
-    | WinRank _
-    | WinPercentRank
-    | WinCumeDist -> []
-    | WinNTile n -> [ n ]
-    | WinLagLead(_, e, offset, deflt) -> e :: (Option.toList offset @ Option.toList deflt)
-    | WinFirstValue e
-    | WinLastValue e -> [ e ]
-    | WinNthValue(e, n) -> [ e; n ]
-    | WinAggregate(_, args) -> args
-
 type private WindowRow = int * (Value list * (Value * Collation.Collation option) list * Value[])
-
-let private overExprs (over: OverClause) : Expr list =
-    match over with
-    | OverName _ -> []
-    | OverSpec spec -> spec.PartitionBy @ (spec.OrderBy |> List.map fst)
 
 /// Every call to the named function inside `expr` — one walker, since the
 /// only caller (`GROUPING`, whose value depends on the ROLLUP level rather
 /// than on any row) needs the nodes themselves to substitute, not a boolean.
 let private collectCallsNamed (name: string) (expr: Expr) : Expr list =
-    Expression.fold
-        (fun found node ->
-            match node with
-            | FuncCall(called, _) when System.String.Equals(called, name, System.StringComparison.OrdinalIgnoreCase) ->
-                Expression.Descend(node :: found)
-            | _ -> Expression.Descend found)
-        []
+    Expression.collect
+        (function
+        | FuncCall(called, _) as call
+            when System.String.Equals(called, name, System.StringComparison.OrdinalIgnoreCase) ->
+            Some call
+        | _ -> None)
         expr
-    |> List.rev
 
-/// Every bare `Col` name inside `expr` — same walk shape as
-/// `collectWindowFuncs`. `runWindowedSelect` uses it to spot a `HAVING`
-/// clause referencing a windowed projection's alias, which MySQL rejects
-/// with a dedicated error (3594) rather than resolving.
 /// A synthetic pre-pass column (`__fsdb_window_N__`/`__fsdb_match_N__`).
 /// Callers with expression metadata should prefer `deriveColumns`, since an
 /// empty result has no runtime value from which to recover the wire type.
@@ -1166,6 +1139,7 @@ let private collectMatchAgainst (expr: Expr) : Expr list =
         expr
     |> List.rev
 
+/// Bare column names outside window expressions, including MATCH columns.
 let private collectColRefs (expr: Expr) : string list =
     Expression.fold
         (fun found node ->
@@ -6276,7 +6250,8 @@ and private selectOrUnionTableNames (body: SelectOrUnion) : Set<string> =
             @ select.GroupBy
             @ Option.toList select.Having
             @ (select.OrderBy |> List.map fst)
-            @ (select.Windows |> List.collect (fun (_, spec) -> overExprs (OverSpec spec)))
+            @ (select.Windows
+               |> List.collect (fun (_, spec) -> Expression.overExpressions (OverSpec spec)))
             @ Option.toList select.Limit
             @ Option.toList select.Offset
 
@@ -10376,7 +10351,8 @@ let private insertSelectSourceReferences (assignments: (string * Expr) list) : E
                 collectSelect shadowed select
                 Some subquery
             | WindowOver(windowFunction, over) as window ->
-                windowFnExprs windowFunction @ overExprs over |> List.iter (collect shadowed)
+                Expression.windowExpressions windowFunction @ Expression.overExpressions over
+                |> List.iter (collect shadowed)
                 Some window
             | _ -> None)
         |> ignore
@@ -10392,7 +10368,9 @@ let private insertSelectSourceReferences (assignments: (string * Expr) list) : E
         select.Joins |> List.iter (fun join -> collect shadowed join.On)
         select.Where |> Option.iter (collect shadowed)
         select.GroupBy |> List.iter (collect shadowed)
-        select.Windows |> List.iter (fun (_, spec) -> overExprs (OverSpec spec) |> List.iter (collect shadowed))
+        select.Windows
+        |> List.iter (fun (_, spec) ->
+            Expression.overExpressions (OverSpec spec) |> List.iter (collect shadowed))
         select.Ctes |> List.iter (fun cte -> collectSelectOrUnion shadowed cte.Body)
         select.Having |> Option.iter (collect shadowed)
         select.OrderBy |> List.iter (fst >> collect shadowed)
@@ -11491,41 +11469,22 @@ let private rejectQuantifiedComparisonsInGenerated (columns: Ast.ColumnDef list)
     |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
 
 let rec private containsSessionVariable (expression: Expr) : bool =
-    let any expressions = expressions |> List.exists containsSessionVariable
-
-    match expression with
-    | UserVariable _
-    | SystemVariable _
-    | AssignUserVariable _ -> true
-    | Exists select
-    | Subquery select -> selectContainsSessionVariable select
-    | InSubquery(value, select) -> containsSessionVariable value || selectContainsSessionVariable select
-    | QuantifiedComparison(value, _, _, select) -> containsSessionVariable value || selectContainsSessionVariable select
-    | MatchAgainst(_, query, _) -> containsSessionVariable query
-    | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
-    | BinOp(_, left, right) -> any [ left; right ]
-    | Row values -> any values
-    | Not value
-    | IsNull value
-    | IsNotNull value
-    | IsTrue value
-    | IsFalse value
-    | Distinct value
-    | OrderBy(value, _)
-    | Cast(value, _)
-    | Collate(value, _) -> containsSessionVariable value
-    | Like(value, pattern, _, _)
-    | Regexp(value, pattern) -> any [ value; pattern ]
-    | In(value, candidates) -> any (value :: candidates)
-    | Between(value, lower, upper) -> any [ value; lower; upper ]
-    | FuncCall(_, arguments) -> any arguments
-    | Case(subject, branches, otherwise) ->
-        any (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
-    | Placeholder _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | Lit _ -> false
+    Expression.fold
+        (fun found node ->
+            if found then
+                Expression.Prune true
+            else
+                match node with
+                | UserVariable _
+                | SystemVariable _
+                | AssignUserVariable _ -> Expression.Prune true
+                | _ ->
+                    if Expression.subqueries node |> List.exists selectContainsSessionVariable then
+                        Expression.Prune true
+                    else
+                        Expression.Descend false)
+        false
+        expression
 
 and private selectContainsSessionVariable (select: SelectStmt) : bool =
     let fromContainsSessionVariable =
@@ -11541,7 +11500,8 @@ and private selectContainsSessionVariable (select: SelectStmt) : bool =
     || (select.Where |> Option.exists containsSessionVariable)
     || (select.GroupBy |> List.exists containsSessionVariable)
     || (select.Windows
-        |> List.exists (fun (_, spec) -> overExprs (OverSpec spec) |> List.exists containsSessionVariable))
+        |> List.exists (fun (_, spec) ->
+            Expression.overExpressions (OverSpec spec) |> List.exists containsSessionVariable))
     || (select.Ctes |> List.exists (fun cte -> selectOrUnionContainsSessionVariable cte.Body))
     || (select.Having |> Option.exists containsSessionVariable)
     || (select.OrderBy |> List.exists (fst >> containsSessionVariable))
@@ -11570,43 +11530,21 @@ let private viewContainsSessionVariable =
         selectOrUnionContainsSessionVariable (UnionSelect(first, rest, orderBy, limit, offset))
     | _ -> false
 
-let rec private checkColumnReferences (expression: Expr) : (string option * string) list =
-    let many expressions = expressions |> List.collect checkColumnReferences
-
-    match expression with
-    | Col column -> [ None, column ]
-    | QualifiedCol(table, column) -> [ Some table, column ]
-    | BinOp(_, left, right) -> many [ left; right ]
-    | Row values -> many values
-    | AssignUserVariable(_, value) -> checkColumnReferences value
-    | Not value
-    | IsNull value
-    | IsNotNull value
-    | IsTrue value
-    | IsFalse value
-    | Distinct value
-    | OrderBy(value, _)
-    | Cast(value, _)
-    | Collate(value, _) -> checkColumnReferences value
-    | Like(value, pattern, _, _)
-    | Regexp(value, pattern) -> many [ value; pattern ]
-    | In(value, candidates) -> many (value :: candidates)
-    | Between(value, lower, upper) -> many [ value; lower; upper ]
-    | FuncCall(_, arguments) -> many arguments
-    | Case(subject, branches, otherwise) ->
-        many (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
-    | MatchAgainst(columns, query, _) ->
-        (columns |> List.map (fun column -> column.Qualifier, column.Name)) @ checkColumnReferences query
-    | InSubquery(value, _) -> checkColumnReferences value
-    | QuantifiedComparison(value, _, _, _) -> checkColumnReferences value
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | WindowOver _
-    | Star _
-    | Exists _
-    | Subquery _
-    | Lit _ -> []
+let private checkColumnReferences (expression: Expr) : (string option * string) list =
+    Expression.fold
+        (fun references node ->
+            match node with
+            | Col column -> Expression.Descend((None, column) :: references)
+            | QualifiedCol(table, column) -> Expression.Descend((Some table, column) :: references)
+            | MatchAgainst(columns, _, _) ->
+                columns
+                |> List.fold (fun found column -> (column.Qualifier, column.Name) :: found) references
+                |> Expression.Descend
+            | WindowOver _ -> Expression.Prune references
+            | _ -> Expression.Descend references)
+        []
+        expression
+    |> List.rev
 
 let private nondeterministicCheckFunctions =
     set
@@ -12289,7 +12227,9 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | Subquery select -> selectReferences select
         | InSubquery(value, select) -> references value @ selectReferences select
         | QuantifiedComparison(value, _, _, select) -> references value @ selectReferences select
-        | WindowOver(functions, over) -> (windowFnExprs functions @ overExprs over) |> List.collect references
+        | WindowOver(functions, over) ->
+            Expression.windowExpressions functions @ Expression.overExpressions over
+            |> List.collect references
         | FuncCall(_, arguments) -> arguments |> List.collect references
         | BinOp(_, left, right)
         | Like(left, right, _, _)
@@ -12326,7 +12266,9 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         @ (select.Joins |> List.collect (fun join -> fromReferences join.Table @ references join.On))
         @ (select.Where |> Option.map references |> Option.defaultValue [])
         @ (select.GroupBy |> List.collect references)
-        @ (select.Windows |> List.collect (fun (_, spec) -> overExprs (OverSpec spec) |> List.collect references))
+        @ (select.Windows
+           |> List.collect (fun (_, spec) ->
+               Expression.overExpressions (OverSpec spec) |> List.collect references))
         @ (select.Ctes |> List.collect (fun cte -> selectOrUnionReferences cte.Body))
         @ (select.Having |> Option.map references |> Option.defaultValue [])
         @ (select.OrderBy |> List.collect (fst >> references))
