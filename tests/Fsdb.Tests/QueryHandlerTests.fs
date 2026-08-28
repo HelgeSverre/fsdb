@@ -1810,6 +1810,156 @@ let tests =
               | ResultSet(_, [ [ Some "100" ] ]) -> ()
               | other -> failtestf "expected nested CASE result, got %A" other
 
+          testCase "stored procedures signal and handle conditions by MySQL precedence"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let definition =
+                  """CREATE PROCEDURE condition_flow(
+                        OUT continued INT,
+                        OUT exited INT,
+                        OUT precedence_value INT,
+                        OUT warning_value INT)
+                      BEGIN
+                        SET continued = 1;
+                        BEGIN
+                          DECLARE CONTINUE HANDLER FOR SQLSTATE '45001'
+                            SET continued = continued + 10;
+                          SIGNAL SQLSTATE '45001'
+                            SET MYSQL_ERRNO = 60001, MESSAGE_TEXT = 'continued';
+                          SET continued = continued + 1;
+                        END;
+
+                        SET exited = 1;
+                        BEGIN
+                          DECLARE EXIT HANDLER FOR SQLEXCEPTION
+                            SET exited = exited + 10;
+                          SIGNAL SQLSTATE '45002'
+                            SET MYSQL_ERRNO = 60002, MESSAGE_TEXT = 'exited';
+                          SET exited = 100;
+                        END;
+                        SET exited = exited + 1;
+
+                        SET precedence_value = 0;
+                        BEGIN
+                          DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                            SET precedence_value = 1;
+                          DECLARE CONTINUE HANDLER FOR SQLSTATE '45003'
+                            SET precedence_value = 2;
+                          DECLARE CONTINUE HANDLER FOR 60003
+                            SET precedence_value = 3;
+                          SIGNAL SQLSTATE '45003' SET MYSQL_ERRNO = 60003;
+                        END;
+
+                        SET warning_value = 1;
+                        BEGIN
+                          DECLARE CONTINUE HANDLER FOR SQLWARNING
+                            SET warning_value = warning_value + 10;
+                          SIGNAL SQLSTATE '01000'
+                            SET MYSQL_ERRNO = 60004, MESSAGE_TEXT = 'warning';
+                          SET warning_value = warning_value + 1;
+                        END;
+                      END"""
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created condition procedure"
+
+              let session, called = handle session "CALL condition_flow(@continued, @exited, @precedence, @warning)"
+              Expect.equal called (Affected 0UL) "called condition procedure"
+
+              match handle session "SELECT @continued, @exited, @precedence, @warning" |> snd with
+              | ResultSet(_, [ [ Some "12"; Some "12"; Some "3"; Some "12" ] ]) -> ()
+              | other -> failtestf "expected handled condition results, got %A" other
+
+          testCase "SIGNAL preserves named conditions and RESIGNAL diagnostics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, created =
+                  handle
+                      session
+                      """CREATE PROCEDURE named_signal()
+                          BEGIN
+                            DECLARE custom_condition CONDITION FOR SQLSTATE '45004';
+                            SIGNAL custom_condition
+                              SET MYSQL_ERRNO = 60004,
+                                  MESSAGE_TEXT = 'named condition',
+                                  TABLE_NAME = 'things',
+                                  COLUMN_NAME = 'value';
+                          END"""
+
+              Expect.equal created (Affected 0UL) "created named signal"
+              let session, signaled = handle session "CALL named_signal()"
+
+              match Fsdb.Executor.errorInfo signaled with
+              | Some error ->
+                  Expect.equal error.Code 60004 "signal error code"
+                  Expect.equal error.State "45004" "signal SQLSTATE"
+                  Expect.equal error.Message "named condition" "signal message"
+                  Expect.equal error.Information.["table_name"] "things" "signal table name"
+                  Expect.equal error.Information.["column_name"] "value" "signal column name"
+              | None -> failtestf "expected named SIGNAL error, got %A" signaled
+
+              let session, created =
+                  handle
+                      session
+                      """CREATE PROCEDURE changed_signal()
+                          BEGIN
+                            DECLARE EXIT HANDLER FOR SQLEXCEPTION
+                            BEGIN
+                              RESIGNAL SQLSTATE '45009'
+                                SET MYSQL_ERRNO = 60009, MESSAGE_TEXT = 'changed condition';
+                            END;
+                            SIGNAL SQLSTATE '45008'
+                              SET MYSQL_ERRNO = 60008, MESSAGE_TEXT = 'original condition';
+                          END"""
+
+              Expect.equal created (Affected 0UL) "created resignal procedure"
+              let _, signaled = handle session "CALL changed_signal()"
+
+              match Fsdb.Executor.errorInfo signaled with
+              | Some error ->
+                  Expect.equal error.Code 60009 "resignal error code"
+                  Expect.equal error.State "45009" "resignal SQLSTATE"
+                  Expect.equal error.Message "changed condition" "resignal message"
+              | None -> failtestf "expected RESIGNAL error, got %A" signaled
+
+          testCase "condition declarations reject invalid scope and duplicate handlers"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let definitions =
+                  [ "CREATE PROCEDURE bad_state() BEGIN SIGNAL SQLSTATE '00001'; END", 1407
+                    "CREATE PROCEDURE missing_condition() BEGIN SIGNAL missing; END", 1319
+                    "CREATE PROCEDURE duplicate_handler() BEGIN DECLARE CONTINUE HANDLER FOR SQLWARNING SET @a = 1; DECLARE EXIT HANDLER FOR SQLWARNING SET @a = 2; END",
+                    1413 ]
+
+              for definition, expectedCode in definitions do
+                  match handle session definition |> snd with
+                  | Err(code, _) -> Expect.equal code expectedCode "condition declaration error"
+                  | other -> failtestf "expected condition declaration error %d, got %A" expectedCode other
+
+          testCase "unhandled warnings continue and RESIGNAL requires an active handler"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE PROCEDURE warning_signal(OUT value INT) BEGIN SIGNAL SQLSTATE '01001' SET MYSQL_ERRNO = 60010, MESSAGE_TEXT = 'routine warning'; SET value = 7; END"
+
+              Expect.equal created (Affected 0UL) "created warning procedure"
+              let session, called = handle session "CALL warning_signal(@value)"
+              Expect.equal called (Affected 0UL) "unhandled warning continued"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 60010 ] "warning diagnostics"
+
+              match handle session "CREATE PROCEDURE stray_resignal() BEGIN RESIGNAL; END" with
+              | session, Affected 0UL ->
+                  match handle session "CALL stray_resignal()" |> snd with
+                  | Err(1645, _) -> ()
+                  | other -> failtestf "expected RESIGNAL error 1645, got %A" other
+              | _, other -> failtestf "expected RESIGNAL procedure creation, got %A" other
+
           testCase "OUT and INOUT procedure parameters write typed user variables"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -3057,6 +3057,56 @@ let tests =
                   Expect.equal initial 1.25M "declaration default"
               | other -> failtestf "unexpected stored program: %A" other
 
+          testCase "stored condition syntax accepts comments as token separators"
+          <| fun _ ->
+              match
+                  Fsdb.StoredProgram.parse
+                      defaultOptions
+                      "BEGIN DECLARE/* declaration */ named CONDITION/* for */FOR SQLSTATE/* state */'45000'; SIGNAL named; END"
+              with
+              | Ok
+                  [ Fsdb.StoredProgram.DeclareCondition("named", Fsdb.StoredProgram.SqlState "45000")
+                    Fsdb.StoredProgram.Signal(Fsdb.StoredProgram.NamedCondition "named", []) ] ->
+                  ()
+              | other -> failtestf "unexpected commented declaration: %A" other
+
+              match
+                  Fsdb.StoredProgram.parse
+                      defaultOptions
+                      "BEGIN DECLARE named CONDITION FOR SQLSTATE '45000'; SIGNAL named; END"
+              with
+              | Ok
+                  [ Fsdb.StoredProgram.DeclareCondition("named", Fsdb.StoredProgram.SqlState "45000")
+                    Fsdb.StoredProgram.Signal(Fsdb.StoredProgram.NamedCondition "named", []) ] ->
+                  ()
+              | other -> failtestf "unexpected declaration and signal: %A" other
+
+              let body =
+                  """BEGIN
+                       DECLARE/* declaration */ named CONDITION/* for */FOR SQLSTATE/* state */'45000';
+                       DECLARE/* action */CONTINUE HANDLER/* target */FOR named,/* class */SQLWARNING
+                       BEGIN
+                         SIGNAL/* target */named SET MESSAGE_TEXT = 'handled';
+                       END;
+                     END"""
+
+              match Fsdb.StoredProgram.parse defaultOptions body with
+              | Ok
+                  [ Fsdb.StoredProgram.DeclareCondition("named", Fsdb.StoredProgram.SqlState "45000")
+                    Fsdb.StoredProgram.DeclareHandler(
+                        Fsdb.StoredProgram.Continue,
+                        [ Fsdb.StoredProgram.NamedCondition "named"; Fsdb.StoredProgram.SqlWarning ],
+                        Fsdb.StoredProgram.Block(
+                            None,
+                            [ Fsdb.StoredProgram.Signal(
+                                  Fsdb.StoredProgram.NamedCondition "named",
+                                  [ "message_text", Lit(VString "handled") ]
+                              ) ]
+                        )
+                    ) ] ->
+                  ()
+              | other -> failtestf "unexpected condition program: %A" other
+
           testCase "statement batches reject unterminated literals"
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with

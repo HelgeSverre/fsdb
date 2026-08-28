@@ -130,6 +130,27 @@ let tests =
               | Err(1308, "LEAVE with no matching label: nowhere") -> ()
               | other -> failtestf "expected unmatched-label error, got %A" other
 
+          testCase "trigger condition handlers can continue after SIGNAL"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault
+                      store
+                      """CREATE TRIGGER handled BEFORE INSERT ON t FOR EACH ROW
+                          BEGIN
+                            DECLARE CONTINUE HANDLER FOR SQLSTATE '45010'
+                              SET NEW.n = NEW.n + 10;
+                            SIGNAL SQLSTATE '45010'
+                              SET MYSQL_ERRNO = 60010, MESSAGE_TEXT = 'handled';
+                            SET NEW.n = NEW.n + 1;
+                          END""")
+                  "create handled trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (1)") "fire handled trigger"
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "12" ] ] "handler resumes trigger body"
+
           testCase "trigger blocks retain declared values from scalar subqueries"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

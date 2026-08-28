@@ -3,7 +3,8 @@ module Fsdb.SqlState
 type Error =
     { Code: int
       State: string
-      Message: string }
+      Message: string
+      Information: Map<string, string> }
 
 let forCode =
     function
@@ -31,9 +32,17 @@ let forCode =
 let create code message =
     { Code = code
       State = forCode code
-      Message = message }
+      Message = message
+      Information = Map.empty }
 
 let createWithState code state message =
     { Code = code
       State = state
-      Message = message }
+      Message = message
+      Information = Map.empty }
+
+let createDetailed code state message information =
+    { Code = code
+      State = state
+      Message = message
+      Information = information }

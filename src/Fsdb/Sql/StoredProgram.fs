@@ -10,6 +10,18 @@ type Declaration =
       ColumnType: ColumnType
       InitialValue: Expr option }
 
+type ConditionValue =
+    | ErrorCode of int
+    | SqlState of string
+    | NamedCondition of string
+    | SqlWarning
+    | NotFound
+    | SqlException
+
+type HandlerAction =
+    | Continue
+    | Exit
+
 type Statement =
     | Sql of Ast.Statement
     | TextSql of string
@@ -22,6 +34,10 @@ type Statement =
     | Leave of label: string
     | Iterate of label: string
     | Declare of Declaration
+    | DeclareCondition of name: string * value: ConditionValue
+    | DeclareHandler of action: HandlerAction * conditions: ConditionValue list * body: Statement
+    | Signal of condition: ConditionValue * information: (string * Expr) list
+    | Resignal of condition: ConditionValue option * information: (string * Expr) list
     | SetLocal of name: string * value: Expr
 
 [<RequireQualifiedAccess>]
@@ -29,6 +45,7 @@ type Flow =
     | Complete
     | Leave of label: string
     | Iterate of label: string
+    | ExitHandler
 
 type ParameterMode =
     | In
@@ -43,7 +60,11 @@ type Parameter =
 type ValidationError =
     | DuplicateParameter of name: string
     | DuplicateVariable of name: string
+    | DuplicateCondition of name: string
+    | DuplicateHandler
     | UnknownVariable of name: string
+    | UnknownCondition of name: string
+    | InvalidSqlState of state: string
     | RedefiningLabel of name: string
     | UnknownLabel of operation: string * name: string
 
@@ -51,7 +72,11 @@ let validationError =
     function
     | DuplicateParameter name -> 1330, sprintf "Duplicate parameter: %s" name
     | DuplicateVariable name -> 1331, sprintf "Duplicate variable: %s" name
+    | DuplicateCondition name -> 1332, sprintf "Duplicate condition: %s" name
+    | DuplicateHandler -> 1413, "Duplicate handler declared in the same block"
     | UnknownVariable name -> 1193, sprintf "Unknown system variable '%s'" name
+    | UnknownCondition name -> 1319, sprintf "Undefined CONDITION: %s" name
+    | InvalidSqlState state -> 1407, sprintf "Bad SQLSTATE: '%s'" state
     | RedefiningLabel name -> 1309, sprintf "Redefining label %s" name
     | UnknownLabel(operation, name) -> 1308, sprintf "%s with no matching label: %s" operation name
 
@@ -68,7 +93,11 @@ let rec sqlStatements =
     | Case(_, branches, otherwise) ->
         (branches |> List.collect (snd >> List.collect sqlStatements))
         @ (otherwise |> Option.defaultValue [] |> List.collect sqlStatements)
+    | DeclareHandler(_, _, body) -> sqlStatements body
     | Declare _
+    | DeclareCondition _
+    | Signal _
+    | Resignal _
     | SetLocal _
     | Leave _
     | Iterate _ -> []
@@ -88,6 +117,10 @@ let rec expressions =
         @ (branches |> List.collect (fun (condition, body) -> condition :: (body |> List.collect expressions)))
         @ (otherwise |> Option.defaultValue [] |> List.collect expressions)
     | Declare declaration -> Option.toList declaration.InitialValue
+    | DeclareHandler(_, _, body) -> expressions body
+    | Signal(_, information)
+    | Resignal(_, information) -> information |> List.map snd
+    | DeclareCondition _ -> []
     | SetLocal(_, value) -> [ value ]
     | Leave _
     | Iterate _ -> []
@@ -98,6 +131,96 @@ let declaredNames statements =
         | Declare declaration -> Some declaration.Name
         | _ -> None)
     |> Set.ofList
+
+let conditionDefinitions inherited statements =
+    statements
+    |> List.fold
+        (fun definitions statement ->
+            match statement with
+            | DeclareCondition(name, value) -> Map.add name value definitions
+            | _ -> definitions)
+        inherited
+
+let handlers statements =
+    statements
+    |> List.choose (function
+        | DeclareHandler(action, conditions, body) -> Some(action, conditions, body)
+        | _ -> None)
+
+let rec resolveCondition definitions =
+    function
+    | NamedCondition name -> definitions |> Map.tryFind name |> Option.bind (resolveCondition definitions)
+    | condition -> Some condition
+
+let private conditionSpecificity (error: SqlState.Error) =
+    function
+    | ErrorCode code when error.Code = code -> Some 3
+    | SqlState state when error.State = state -> Some 2
+    | SqlWarning when error.State.StartsWith("01", StringComparison.Ordinal) -> Some 1
+    | NotFound when error.State.StartsWith("02", StringComparison.Ordinal) -> Some 1
+    | SqlException
+        when not (error.State.StartsWith("00", StringComparison.Ordinal))
+             && not (error.State.StartsWith("01", StringComparison.Ordinal))
+             && not (error.State.StartsWith("02", StringComparison.Ordinal)) ->
+        Some 1
+    | _ -> None
+
+let tryHandler definitions statements error =
+    handlers statements
+    |> List.choose (fun (action, conditions, body) ->
+        conditions
+        |> List.choose (resolveCondition definitions >> Option.bind (conditionSpecificity error))
+        |> List.sortDescending
+        |> List.tryHead
+        |> Option.map (fun specificity -> specificity, action, body))
+    |> List.sortByDescending (fun (specificity, _, _) -> specificity)
+    |> List.tryHead
+    |> Option.map (fun (_, action, body) -> action, body)
+
+let private defaultSignal (state: string) =
+    if state.StartsWith("01", StringComparison.Ordinal) then
+        SqlState.createWithState 1642 state "Unhandled user-defined warning condition"
+    elif state.StartsWith("02", StringComparison.Ordinal) then
+        SqlState.createWithState 1643 state "Unhandled user-defined not found condition"
+    else
+        SqlState.createWithState 1644 state "Unhandled user-defined exception condition"
+
+let signalError
+    (definitions: Map<string, ConditionValue>)
+    (original: SqlState.Error option)
+    (condition: ConditionValue option)
+    (information: (string * Value) list)
+    =
+    let conditionError: Result<SqlState.Error, int * string> =
+        match condition, original with
+        | None, Some error -> Ok error
+        | None, None -> Error(1645, "RESIGNAL when handler not active")
+        | Some condition, _ ->
+            match resolveCondition definitions condition with
+            | Some(SqlState state) -> Ok(defaultSignal state)
+            | Some _ -> Error(1646, "SIGNAL/RESIGNAL can only use a CONDITION defined with SQLSTATE")
+            | None ->
+                match condition with
+                | NamedCondition name -> Error(1319, sprintf "Undefined CONDITION: %s" name)
+                | _ -> Error(1646, "SIGNAL/RESIGNAL can only use a CONDITION defined with SQLSTATE")
+
+    information
+    |> List.fold
+        (fun (state: Result<SqlState.Error, int * string>) (name, value) ->
+            state
+            |> Result.bind (fun (error: SqlState.Error) ->
+                match name, Value.toText value with
+                | _, None -> Error(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name)
+                | "mysql_errno", Some text ->
+                    match Int32.TryParse text with
+                    | true, code when code >= 1 && code <= 65535 -> Ok { error with Code = code }
+                    | _ -> Error(1231, sprintf "Variable 'MYSQL_ERRNO' can't be set to the value of '%s'" text)
+                | "message_text", Some text -> Ok { error with Message = text }
+                | _, Some text -> Ok { error with Information = Map.add name text error.Information }))
+        conditionError
+
+let isWarning (error: SqlState.Error) =
+    error.State.StartsWith("01", StringComparison.Ordinal)
 
 let restoreOuterScope statements (before: Map<string, 'value>) after =
     let shadowed = declaredNames statements
@@ -147,6 +270,14 @@ type private LabelKind =
     | Block
     | Loop
 
+type private ValidationScope =
+    { Names: Set<string>
+      DeclaredVariables: Set<string>
+      Conditions: Map<string, ConditionValue>
+      DeclaredConditions: Set<string>
+      HandlerConditions: Set<ConditionValue>
+      Labels: (string * LabelKind) list }
+
 let private compoundEndBoundaries =
     [ EndIf, "IF"
       EndCase, "CASE"
@@ -170,8 +301,24 @@ let private parameterPattern =
 
 let private labelPattern = @"`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*"
 
-let private triviaPattern =
-    @"(?:\s|/\*[\s\S]*?\*/|#[^\r\n]*(?:\r\n|\r|\n|$)|--(?=\s)[^\r\n]*(?:\r\n|\r|\n|$))*"
+let private triviaAtom =
+    @"(?:\s|/\*(?>[\s\S]*?\*/)|#[^\r\n]*(?:\r\n|\r|\n|$)|--(?=\s)[^\r\n]*(?:\r\n|\r|\n|$))"
+
+let private triviaPattern = sprintf "(?:%s)*" triviaAtom
+let private separatorPattern = sprintf "(?:%s)+" triviaAtom
+
+let private sqlStateValuePattern =
+    sprintf "SQLSTATE%s(?:VALUE%s)?'[0-9A-Za-z]{5}'" separatorPattern separatorPattern
+
+let private declaredConditionValuePattern = sprintf "(?:%s|[0-9]+)" sqlStateValuePattern
+let private signalConditionValuePattern = sprintf "(?:%s|%s)" sqlStateValuePattern labelPattern
+
+let private handlerConditionValuePattern =
+    sprintf
+        "(?:%s|SQLWARNING|NOT%sFOUND|SQLEXCEPTION|[0-9]+|%s)"
+        sqlStateValuePattern
+        separatorPattern
+        labelPattern
 
 let private compoundPattern =
     Regex(
@@ -202,11 +349,111 @@ let private declarationPattern =
 let private assignmentPattern =
     Regex(@"^SET\s+(?<name>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*(?<value>[\s\S]+)$", RegexOptions.IgnoreCase)
 
+let private conditionDeclarationPattern =
+    Regex(
+        sprintf @"^DECLARE%s(?<name>%s)%sCONDITION%sFOR%s(?<condition>%s)$" separatorPattern labelPattern separatorPattern separatorPattern separatorPattern declaredConditionValuePattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private handlerPrefixPattern =
+    Regex(
+        sprintf
+            @"^DECLARE%s(?<action>CONTINUE|EXIT)%sHANDLER%sFOR%s(?<conditions>%s(?:%s,%s%s)*)%s"
+            separatorPattern
+            separatorPattern
+            separatorPattern
+            separatorPattern
+            handlerConditionValuePattern
+            triviaPattern
+            triviaPattern
+            handlerConditionValuePattern
+            separatorPattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private signalPattern =
+    Regex(
+        sprintf @"^SIGNAL%s(?<condition>%s)(?:%sSET%s(?<information>[\s\S]+))?$" separatorPattern signalConditionValuePattern separatorPattern separatorPattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private resignalPattern =
+    Regex(
+        sprintf @"^RESIGNAL(?:%s(?<condition>%s))?(?:%sSET%s(?<information>[\s\S]+))?$" separatorPattern signalConditionValuePattern separatorPattern separatorPattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private signalInformationPattern =
+    Regex(@"^(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?<value>[\s\S]+)$", RegexOptions.IgnoreCase)
+
+let private signalInformationNames =
+    set
+        [ "catalog_name"
+          "class_origin"
+          "column_name"
+          "constraint_catalog"
+          "constraint_name"
+          "constraint_schema"
+          "cursor_name"
+          "message_text"
+          "mysql_errno"
+          "schema_name"
+          "subclass_origin"
+          "table_name" ]
+
+let private leadingTriviaPattern = Regex(sprintf "^%s" triviaPattern)
+
+let private sqlStatePattern =
+    Regex(
+        sprintf "^SQLSTATE%s(?:VALUE%s)?'(?<state>[0-9A-Za-z]{5})'$" separatorPattern separatorPattern,
+        RegexOptions.IgnoreCase
+    )
+
 let private leavePattern = Regex(sprintf @"^LEAVE\s+(?<label>%s)$" labelPattern, RegexOptions.IgnoreCase)
 let private iteratePattern = Regex(sprintf @"^ITERATE\s+(?<label>%s)$" labelPattern, RegexOptions.IgnoreCase)
 
 let private normalizeLabel (label: string) =
     label.Trim('`').Replace("``", "`").ToLowerInvariant()
+
+let private trimLeadingTrivia text = leadingTriviaPattern.Replace(text, "", 1).Trim()
+
+let private parseConditionValue (text: string) =
+    let text = trimLeadingTrivia text
+    let state = sqlStatePattern.Match text
+
+    match text.ToUpperInvariant() with
+    | "SQLWARNING" -> Ok SqlWarning
+    | "NOT FOUND" -> Ok NotFound
+    | "SQLEXCEPTION" -> Ok SqlException
+    | _ when state.Success -> Ok(SqlState(state.Groups.["state"].Value.ToUpperInvariant()))
+    | _ ->
+        match Int32.TryParse text with
+        | true, code -> Ok(ErrorCode code)
+        | _ when Regex.IsMatch(text, sprintf "^(?:%s)$" labelPattern) -> Ok(NamedCondition(normalizeLabel text))
+        | _ -> Error(sprintf "Invalid condition value: %s" text)
+
+let private parseSignalInformation options text =
+    if String.IsNullOrWhiteSpace text then
+        Ok []
+    else
+        Parser.splitTopLevelCommaSeparatedWithOptions options text
+        |> traverse (fun item ->
+            let matched = signalInformationPattern.Match(trimLeadingTrivia item)
+
+            if not matched.Success then
+                Error(sprintf "Invalid condition information item: %s" item)
+            else
+                let name = matched.Groups.["name"].Value.ToLowerInvariant()
+
+                if not (Set.contains name signalInformationNames) then
+                    Error(sprintf "Unknown condition information item: %s" name)
+                else
+                    Parser.parseExpressionWithOptions options matched.Groups.["value"].Value
+                    |> Result.map (fun value -> name, value))
+        |> Result.bind (fun information ->
+            match information |> List.countBy fst |> List.tryFind (fun (_, count) -> count > 1) with
+            | Some(name, _) -> Error(sprintf "Duplicate condition information item '%s'" name)
+            | None -> Ok information)
 
 let private normalizedGroup (name: string) (matched: Match) =
     let group = matched.Groups.[name]
@@ -452,8 +699,10 @@ let private parseWithFallback
 
         and parseStructured label offset =
             let offset = skipTrivia inner offset
+            let handler = handlerPrefixPattern.Match(inner.Substring(offset))
 
             match label with
+            | None when handler.Success -> parseHandler offset handler
             | None when wordAt inner offset "IF" -> parseIf (offset + 2)
             | None when wordAt inner offset "CASE" -> parseCase (offset + 4)
             | _ when wordAt inner offset "WHILE" -> parseWhile label (offset + 5)
@@ -469,6 +718,15 @@ let private parseWithFallback
                 | None ->
                     parseStatement (inner.Substring(offset).Trim())
                     |> Result.map (fun statement -> statement, inner.Length)
+
+        and parseHandler offset (matched: Match) =
+            let action = if matched.Groups.["action"].Value.Equals("EXIT", StringComparison.OrdinalIgnoreCase) then Exit else Continue
+
+            Parser.splitTopLevelCommaSeparatedWithOptions options matched.Groups.["conditions"].Value
+            |> traverse parseConditionValue
+            |> Result.bind (fun conditions ->
+                parseStructured None (offset + matched.Length)
+                |> Result.map (fun (body, finish) -> DeclareHandler(action, conditions, body), finish))
 
         and parseBlock label bodyStart =
             parseClosedBody label bodyStart End "BEGIN is missing END" (fun body -> Block(label, body))
@@ -574,11 +832,18 @@ let private parseWithFallback
 
         and parseStatement text =
             let declaration = declarationPattern.Match text
+            let conditionDeclaration = conditionDeclarationPattern.Match text
             let assignment = assignmentPattern.Match text
             let leave = leavePattern.Match text
             let iterate = iteratePattern.Match text
+            let signal = signalPattern.Match text
+            let resignal = resignalPattern.Match text
 
-            if declaration.Success then
+            if conditionDeclaration.Success then
+                parseConditionValue conditionDeclaration.Groups.["condition"].Value
+                |> Result.map (fun condition ->
+                    DeclareCondition(normalizeLabel conditionDeclaration.Groups.["name"].Value, condition))
+            elif declaration.Success then
                 Parser.parseColumnTypeWithOptions options declaration.Groups.["type"].Value
                 |> Result.bind (fun columnType ->
                     if declaration.Groups.["default"].Success then
@@ -598,6 +863,22 @@ let private parseWithFallback
                 Ok(Leave(normalizeLabel leave.Groups.["label"].Value))
             elif iterate.Success then
                 Ok(Iterate(normalizeLabel iterate.Groups.["label"].Value))
+            elif signal.Success then
+                parseConditionValue signal.Groups.["condition"].Value
+                |> Result.bind (fun condition ->
+                    parseSignalInformation options signal.Groups.["information"].Value
+                    |> Result.map (fun information -> Signal(condition, information)))
+            elif resignal.Success then
+                let condition =
+                    if resignal.Groups.["condition"].Success then
+                        parseConditionValue resignal.Groups.["condition"].Value |> Result.map Some
+                    else
+                        Ok None
+
+                condition
+                |> Result.bind (fun condition ->
+                    parseSignalInformation options resignal.Groups.["information"].Value
+                    |> Result.map (fun information -> Resignal(condition, information)))
             else
                 match Parser.parseStoredStatementWithOptions options text with
                 | Ok statement -> Ok(Sql statement)
@@ -614,7 +895,9 @@ let private parseWithFallback
                 if statements.IsEmpty then
                     Error "Body cannot be empty"
                 else
-                    Ok(match rootLabel with Some label -> [ Block(Some label, statements) ] | None -> statements))
+                    match rootLabel with
+                    | Some label -> Ok [ Block(Some label, statements) ]
+                    | None -> Ok statements)
     else
         match Parser.parseStoredStatementWithOptions options body with
         | Ok statement -> Ok [ Sql statement ]
@@ -643,48 +926,114 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
         | Some name when labels |> List.exists (fun (active, _) -> active = name) -> Error(RedefiningLabel name)
         | Some name -> Ok((name, kind) :: labels)
 
-    let rec validateStatements names declared labels =
+    let validSqlState (state: string) =
+        state.Length = 5
+        && not (state.StartsWith("00", StringComparison.Ordinal))
+        && state |> Seq.forall Char.IsLetterOrDigit
+
+    let resolve scope condition =
+        match condition with
+        | SqlState state when not (validSqlState state) -> Error(InvalidSqlState state)
+        | NamedCondition name ->
+            match Map.tryFind name scope.Conditions with
+            | None -> Error(UnknownCondition name)
+            | Some condition ->
+                match condition with
+                | SqlState state when not (validSqlState state) -> Error(InvalidSqlState state)
+                | resolved -> Ok resolved
+        | resolved -> Ok resolved
+
+    let rec validateStatements scope =
         function
-        | [] -> Ok(names, declared)
+        | [] -> Ok scope
         | Sql _ :: rest
-        | TextSql _ :: rest -> validateStatements names declared labels rest
-        | Declare declaration :: _ when Set.contains declaration.Name declared ->
+        | TextSql _ :: rest -> validateStatements scope rest
+        | Declare declaration :: _ when Set.contains declaration.Name scope.DeclaredVariables ->
             Error(DuplicateVariable declaration.Name)
         | Declare declaration :: rest ->
             validateStatements
-                (Set.add declaration.Name names)
-                (Set.add declaration.Name declared)
-                labels
+                { scope with
+                    Names = Set.add declaration.Name scope.Names
+                    DeclaredVariables = Set.add declaration.Name scope.DeclaredVariables }
                 rest
-        | SetLocal(name, _) :: _ when not (Set.contains name names) -> Error(UnknownVariable name)
-        | SetLocal _ :: rest -> validateStatements names declared labels rest
+        | DeclareCondition(name, _) :: _ when Set.contains name scope.DeclaredConditions ->
+            Error(DuplicateCondition name)
+        | DeclareCondition(name, condition) :: rest ->
+            resolve scope condition
+            |> Result.bind (fun condition ->
+                match condition with
+                | ErrorCode _
+                | SqlState _ ->
+                    validateStatements
+                        { scope with
+                            Conditions = Map.add name condition scope.Conditions
+                            DeclaredConditions = Set.add name scope.DeclaredConditions }
+                        rest
+                | _ -> Error(UnknownCondition name))
+        | DeclareHandler(action, conditions, body) :: rest ->
+            conditions
+            |> traverse (resolve scope)
+            |> Result.bind (fun resolved ->
+                if resolved |> List.exists (fun condition -> Set.contains condition scope.HandlerConditions) then
+                    Error DuplicateHandler
+                else
+                    validateStatements scope [ body ]
+                    |> Result.bind (fun _ ->
+                        validateStatements
+                            { scope with
+                                HandlerConditions = Set.union scope.HandlerConditions (Set.ofList resolved) }
+                            rest))
+        | SetLocal(name, _) :: _ when not (Set.contains name scope.Names) -> Error(UnknownVariable name)
+        | SetLocal _ :: rest -> validateStatements scope rest
         | If(_, whenTrue, whenFalse) :: rest ->
-            validateStatements names declared labels whenTrue
-            |> Result.bind (fun _ -> validateStatements names declared labels whenFalse)
-            |> Result.bind (fun _ -> validateStatements names declared labels rest)
+            validateStatements scope whenTrue
+            |> Result.bind (fun _ -> validateStatements scope whenFalse)
+            |> Result.bind (fun _ -> validateStatements scope rest)
         | Case(_, branches, otherwise) :: rest ->
             branches
-            |> traverse (snd >> validateStatements names declared labels)
-            |> Result.bind (fun _ -> validateStatements names declared labels (otherwise |> Option.defaultValue []))
-            |> Result.bind (fun _ -> validateStatements names declared labels rest)
+            |> traverse (snd >> validateStatements scope)
+            |> Result.bind (fun _ -> validateStatements scope (otherwise |> Option.defaultValue []))
+            |> Result.bind (fun _ -> validateStatements scope rest)
         | Block(label, body) :: rest ->
-            addLabel label LabelKind.Block labels
-            |> Result.bind (fun nestedLabels -> validateStatements names Set.empty nestedLabels body)
-            |> Result.bind (fun _ -> validateStatements names declared labels rest)
+            addLabel label LabelKind.Block scope.Labels
+            |> Result.bind (fun labels ->
+                validateStatements
+                    { scope with
+                        DeclaredVariables = Set.empty
+                        DeclaredConditions = Set.empty
+                        HandlerConditions = Set.empty
+                        Labels = labels }
+                    body)
+            |> Result.bind (fun _ -> validateStatements scope rest)
         | While(label, _, body) :: rest
         | Repeat(label, body, _) :: rest
         | Loop(label, body) :: rest ->
-            addLabel label LabelKind.Loop labels
-            |> Result.bind (fun nestedLabels -> validateStatements names Set.empty nestedLabels body)
-            |> Result.bind (fun _ -> validateStatements names declared labels rest)
-        | Leave label :: _ when labels |> List.exists (fun (name, _) -> name = label) |> not ->
+            addLabel label LabelKind.Loop scope.Labels
+            |> Result.bind (fun labels -> validateStatements { scope with Labels = labels } body)
+            |> Result.bind (fun _ -> validateStatements scope rest)
+        | Signal(condition, _) :: rest ->
+            resolve scope condition |> Result.bind (fun _ -> validateStatements scope rest)
+        | Resignal(condition, _) :: rest ->
+            condition
+            |> Option.map (resolve scope)
+            |> Option.defaultValue (Ok(ErrorCode 0))
+            |> Result.bind (fun _ -> validateStatements scope rest)
+        | Leave label :: _ when scope.Labels |> List.exists (fun (name, _) -> name = label) |> not ->
             Error(UnknownLabel("LEAVE", label))
         | Iterate label :: _
-            when labels |> List.exists (fun (name, kind) -> name = label && kind = LabelKind.Loop) |> not ->
+            when scope.Labels |> List.exists (fun (name, kind) -> name = label && kind = LabelKind.Loop) |> not ->
             Error(UnknownLabel("ITERATE", label))
         | Leave _ :: rest
-        | Iterate _ :: rest -> validateStatements names declared labels rest
+        | Iterate _ :: rest -> validateStatements scope rest
 
     addParameters Set.empty parameters
-    |> Result.bind (fun names -> validateStatements names names [] statements)
+    |> Result.bind (fun names ->
+        validateStatements
+            { Names = names
+              DeclaredVariables = names
+              Conditions = Map.empty
+              DeclaredConditions = Set.empty
+              HandlerConditions = Set.empty
+              Labels = [] }
+            statements)
     |> Result.map ignore

@@ -11,7 +11,9 @@ type Level =
 type Condition =
     { Level: Level
       Code: int
-      Message: string }
+      State: string
+      Message: string
+      Information: Map<string, string> }
 
 type DivisionByZeroPolicy =
     | Silent = 0
@@ -28,13 +30,38 @@ let record (condition: Condition) : unit =
     active.Value |> Option.iter (fun conditions -> conditions.Add condition)
 
 let warning code message =
-    record { Level = Warning; Code = code; Message = message }
+    record
+        { Level = Warning
+          Code = code
+          State = SqlState.forCode code
+          Message = message
+          Information = Map.empty }
 
 let error code message =
-    record { Level = Error; Code = code; Message = message }
+    record
+        { Level = Error
+          Code = code
+          State = SqlState.forCode code
+          Message = message
+          Information = Map.empty }
 
 let note code message =
-    record { Level = Note; Code = code; Message = message }
+    record
+        { Level = Note
+          Code = code
+          State = SqlState.forCode code
+          Message = message
+          Information = Map.empty }
+
+let fromErrorWithLevel level (error: SqlState.Error) =
+    { Level = level
+      Code = error.Code
+      State = error.State
+      Message = error.Message
+      Information = error.Information }
+
+let fromError error = fromErrorWithLevel Error error
+let fromWarning error = fromErrorWithLevel Warning error
 
 let divisionByZero () : Result<unit, int * string> =
     let code = 1365

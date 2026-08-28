@@ -26,6 +26,7 @@ let ResultSet(columns, rows) = Rows(columns, rows)
 let Affected affectedRows = RowCount affectedRows
 let Err(code, message) = Failure(SqlState.create code message)
 let ErrState(code, state, message) = Failure(SqlState.createWithState code state message)
+let ErrInfo error = Failure error
 let MultipleResults results = ResultCollection results
 
 let (|ResultSet|Affected|Err|MultipleResults|) =
@@ -12003,6 +12004,11 @@ let private beforeInsertTriggers (store: Store) (db: string) (table: string) =
 
 type private TriggerStatement = StoredProgram.Statement
 
+type private TriggerRoutineScope =
+    { Conditions: Map<string, StoredProgram.ConditionValue>
+      Statements: StoredProgram.Statement list
+      ActiveError: SqlState.Error option }
+
 let private triggerDmlStatements = StoredProgram.sqlStatements
 let private triggerConditions = StoredProgram.expressions
 
@@ -12472,20 +12478,29 @@ let rec executeAs
 
                             let complete result = result, StoredProgram.Flow.Complete
 
-                            let rec runStatements statements =
+                            let rec runStatements scope statements =
                                 match statements with
                                 | [] -> complete (Affected 0UL)
                                 | statement :: rest ->
-                                    match runStatement statement with
-                                    | (Err _ as error), _ -> complete error
-                                    | _, StoredProgram.Flow.Complete -> runStatements rest
+                                    match runStatement scope statement with
+                                    | (Err _ as result), _ ->
+                                        match errorInfo result with
+                                        | Some error -> handleCondition scope rest error
+                                        | None -> complete result
+                                    | _, StoredProgram.Flow.Complete -> runStatements scope rest
                                     | result, flow -> result, flow
 
-                            and runStatement =
+                            and runStatement scope =
                                 function
                                 | StoredProgram.Sql statement -> runDml statement |> complete
                                 | StoredProgram.TextSql _ ->
                                     Err(1235, "Text-only statements are not supported in triggers") |> complete
+                                | StoredProgram.DeclareCondition _
+                                | StoredProgram.DeclareHandler _ -> complete (Affected 0UL)
+                                | StoredProgram.Signal(condition, information) ->
+                                    evaluateSignal scope None (Some condition) information
+                                | StoredProgram.Resignal(condition, information) ->
+                                    evaluateSignal scope scope.ActiveError condition information
                                 | StoredProgram.Declare declaration ->
                                     match declaration.InitialValue with
                                     | None ->
@@ -12505,29 +12520,36 @@ let rec executeAs
                                         complete (Affected 0UL)
                                 | StoredProgram.Block(label, body) ->
                                     let before = locals.Value
-                                    let result, flow = runStatements body
+                                    let blockScope =
+                                        { Conditions = StoredProgram.conditionDefinitions scope.Conditions body
+                                          Statements = body
+                                          ActiveError = scope.ActiveError }
+
+                                    let result, flow = runStatements blockScope body
                                     locals.Value <- StoredProgram.restoreOuterScope body before locals.Value
 
                                     match flow, label with
                                     | StoredProgram.Flow.Leave target, Some label when target = label ->
                                         result, StoredProgram.Flow.Complete
+                                    | StoredProgram.Flow.ExitHandler, _ -> result, StoredProgram.Flow.Complete
                                     | _ -> result, flow
                                 | StoredProgram.If(condition, whenTrue, whenFalse) ->
                                     let context = localContext ()
 
                                     match evalExpr context condition with
                                     | Error(code, message) -> complete (Err(code, message))
-                                    | Ok value when truthy value = Some true -> runStatements whenTrue
-                                    | Ok _ -> runStatements whenFalse
+                                    | Ok value when truthy value = Some true -> runStatements scope whenTrue
+                                    | Ok _ -> runStatements scope whenFalse
                                 | StoredProgram.Case(selector, branches, otherwise) ->
                                     let branchSelector = StoredProgram.caseBranchIndexExpression selector branches
 
                                     match evalExpr (localContext ()) branchSelector with
                                     | Error(code, message) -> complete (Err(code, message))
-                                    | Ok(VInt index) when index >= 0L -> branches |> List.item (int index) |> snd |> runStatements
+                                    | Ok(VInt index) when index >= 0L ->
+                                        branches |> List.item (int index) |> snd |> runStatements scope
                                     | Ok _ ->
                                         match otherwise with
-                                        | Some body -> runStatements body
+                                        | Some body -> runStatements scope body
                                         | None -> complete (Err(1339, "Case not found for CASE statement"))
                                 | StoredProgram.While(label, condition, body) ->
                                     let rec iterate () =
@@ -12537,7 +12559,7 @@ let rec executeAs
                                         | Error(code, message) -> complete (Err(code, message))
                                         | Ok value when truthy value <> Some true -> complete (Affected 0UL)
                                         | Ok _ ->
-                                            match runStatements body with
+                                            match runStatements scope body with
                                             | (Err _ as error), _ -> complete error
                                             | result, StoredProgram.Flow.Leave target when label = Some target ->
                                                 result, StoredProgram.Flow.Complete
@@ -12550,7 +12572,7 @@ let rec executeAs
                                     let rec iterate () =
                                         Storage.queryCancellation.Value.ThrowIfCancellationRequested()
 
-                                        match runStatements body with
+                                        match runStatements scope body with
                                         | (Err _ as error), _ -> complete error
                                         | result, StoredProgram.Flow.Leave target when label = Some target ->
                                             result, StoredProgram.Flow.Complete
@@ -12567,7 +12589,7 @@ let rec executeAs
                                     let rec iterate () =
                                         Storage.queryCancellation.Value.ThrowIfCancellationRequested()
 
-                                        match runStatements body with
+                                        match runStatements scope body with
                                         | (Err _ as error), _ -> complete error
                                         | result, StoredProgram.Flow.Leave target when label = Some target ->
                                             result, StoredProgram.Flow.Complete
@@ -12579,7 +12601,45 @@ let rec executeAs
                                 | StoredProgram.Leave label -> Affected 0UL, StoredProgram.Flow.Leave label
                                 | StoredProgram.Iterate label -> Affected 0UL, StoredProgram.Flow.Iterate label
 
-                            runStatements statements |> fst)
+                            and evaluateSignal scope original condition information =
+                                let evaluated =
+                                    information
+                                    |> traverse (fun (name, expression) ->
+                                        evalExpr (localContext ()) expression |> Result.map (fun value -> name, value))
+
+                                match evaluated with
+                                | Error(code, message) -> complete (Err(code, message))
+                                | Ok information ->
+                                    match StoredProgram.signalError scope.Conditions original condition information with
+                                    | Error(code, message) -> complete (Err(code, message))
+                                    | Ok error -> handleCondition scope [] error
+
+                            and handleCondition scope rest error =
+                                match StoredProgram.tryHandler scope.Conditions scope.Statements error with
+                                | None when StoredProgram.isWarning error ->
+                                    Diagnostics.record (Diagnostics.fromWarning error)
+                                    runStatements scope rest
+                                | None -> complete (ErrInfo error)
+                                | Some(action, body) ->
+                                    let handlerScope =
+                                        { scope with
+                                            Statements = []
+                                            ActiveError = Some error }
+
+                                    match runStatement handlerScope body with
+                                    | (Err _ as result), _ -> complete result
+                                    | result, StoredProgram.Flow.Complete ->
+                                        match action with
+                                        | StoredProgram.HandlerAction.Continue -> runStatements scope rest
+                                        | StoredProgram.HandlerAction.Exit -> result, StoredProgram.Flow.ExitHandler
+                                    | result, flow -> result, flow
+
+                            let scope =
+                                { Conditions = StoredProgram.conditionDefinitions Map.empty statements
+                                  Statements = statements
+                                  ActiveError = None }
+
+                            runStatements scope statements |> fst)
 
                 try
                     rows

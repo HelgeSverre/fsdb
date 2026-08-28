@@ -210,8 +210,9 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
 
 `REPLACE` fires BEFORE INSERT, each conflicting row's DELETE pair, and AFTER
 INSERT in row order; every phase rolls back together on failure. Remaining
-trigger gaps are CASE/loop control flow, handlers, SIGNAL, dynamic SQL, and
-multi-table DML firing. The full MySQL surface is documented under
+trigger gaps are cursors, dynamic SQL, and multi-table DML firing. Compound
+bodies support CASE and labeled loops, scoped conditions, handlers, and
+SIGNAL/RESIGNAL. The full MySQL surface is documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
 ## Check constraints
