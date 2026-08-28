@@ -3025,7 +3025,7 @@ let tests =
                       "routine characteristics do not expose body delimiters"
               | Error error -> failtestf "unexpected split error: %s" error
 
-          testCase "top-level comma splitting preserves nested and commented commas"
+          testCase "top-level SQL scanning preserves nested and commented tokens"
           <| fun _ ->
               let text = "a INT, label VARCHAR(10), calculated DECIMAL(8, 2) /* retained, comment */, note TEXT"
 
@@ -3036,6 +3036,17 @@ let tests =
                     "calculated DECIMAL(8, 2) /* retained, comment */"
                     "note TEXT" ]
                   "only top-level commas split the list"
+
+              Expect.equal
+                  (trySplitTopLevelKeywordWithOptions
+                      defaultOptions
+                      "DO"
+                      "EVERY 1 DAY COMMENT 'DO is text' /* DO is a comment */ DO INSERT INTO log VALUES (CONCAT('DO', 1))")
+                  (Some(
+                      "EVERY 1 DAY COMMENT 'DO is text' /* DO is a comment */",
+                      "INSERT INTO log VALUES (CONCAT('DO', 1))"
+                  ))
+                  "only a top-level keyword splits the text"
 
           testCase "stored programs parse typed parameters and local declarations"
           <| fun _ ->

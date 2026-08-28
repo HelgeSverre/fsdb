@@ -35,29 +35,19 @@ let defaultOptions: ParserOptions =
       RealAsFloat = false
       NoBackslashEscapes = false }
 
-let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : string list =
-    let parts = ResizeArray<string>()
-    let mutable start = 0
+let inline private visitTopLevelCharactersWithOptions
+    (options: ParserOptions)
+    (text: string)
+    ([<InlineIfLambda>] visit: int -> bool)
+    : unit =
     let mutable index = 0
     let mutable depth = 0
     let mutable quote = None
     let mutable blockComment = false
     let mutable lineComment = false
+    let mutable running = true
 
-    let addPart finish =
-        let mutable first = start
-        let mutable last = finish - 1
-
-        while first <= last && Char.IsWhiteSpace text.[first] do
-            first <- first + 1
-
-        while last >= first && Char.IsWhiteSpace text.[last] do
-            last <- last - 1
-
-        if first <= last then
-            parts.Add(text.Substring(first, last - first + 1))
-
-    while index < text.Length do
+    while running && index < text.Length do
         if blockComment then
             if text.[index] = '*' && index + 1 < text.Length && text.[index + 1] = '/' then
                 blockComment <- false
@@ -102,14 +92,65 @@ let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: strin
             | None when text.[index] = ')' ->
                 depth <- max 0 (depth - 1)
                 index <- index + 1
-            | None when text.[index] = ',' && depth = 0 ->
-                addPart index
-                start <- index + 1
+            | None when depth = 0 ->
+                running <- visit index
                 index <- index + 1
             | None -> index <- index + 1
 
+let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : string list =
+    let parts = ResizeArray<string>()
+    let mutable start = 0
+
+    let addPart finish =
+        let mutable first = start
+        let mutable last = finish - 1
+
+        while first <= last && Char.IsWhiteSpace text.[first] do
+            first <- first + 1
+
+        while last >= first && Char.IsWhiteSpace text.[last] do
+            last <- last - 1
+
+        if first <= last then
+            parts.Add(text.Substring(first, last - first + 1))
+
+    visitTopLevelCharactersWithOptions options text (fun index ->
+        if text.[index] = ',' then
+            addPart index
+            start <- index + 1
+
+        true)
+
     addPart text.Length
     List.ofSeq parts
+
+let trySplitTopLevelKeywordWithOptions
+    (options: ParserOptions)
+    (keyword: string)
+    (text: string)
+    : (string * string) option =
+    if String.IsNullOrEmpty keyword then
+        invalidArg (nameof keyword) "Keyword must not be empty."
+
+    let identifierCharacter value = Char.IsLetterOrDigit value || value = '_' || value = '$'
+    let mutable found = None
+
+    visitTopLevelCharactersWithOptions options text (fun index ->
+        let afterIndex = index + keyword.Length
+        let matches =
+            (index = 0 || not (identifierCharacter text.[index - 1]))
+            && afterIndex <= text.Length
+            && (afterIndex = text.Length || not (identifierCharacter text.[afterIndex]))
+            && text.AsSpan(index, keyword.Length).Equals(keyword.AsSpan(), StringComparison.OrdinalIgnoreCase)
+
+        if matches then
+            found <- Some index
+
+        not matches)
+
+    found
+    |> Option.map (fun index ->
+        text.Substring(0, index).Trim(), text.Substring(index + keyword.Length).Trim())
 
 let private currentOptions = System.Threading.AsyncLocal<ParserOptions>()
 let private storedProgramSyntax = System.Threading.AsyncLocal<bool>()
