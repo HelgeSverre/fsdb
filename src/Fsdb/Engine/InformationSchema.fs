@@ -657,6 +657,8 @@ let private keyColumnUsageRows (catalog: Catalog) : Value[] list =
         let fkRows =
             t.ForeignKeys
             |> List.collect (fun fk ->
+                let referencedSchema = fk.RefDatabase |> Option.defaultValue dbName
+
                 fk.Columns
                 |> List.mapi (fun i colName ->
                     let refCol = fk.RefColumns |> List.tryItem i |> Option.defaultValue ""
@@ -670,7 +672,7 @@ let private keyColumnUsageRows (catalog: Catalog) : Value[] list =
                        vs colName
                        vi (i + 1)
                        vi (i + 1)
-                       vs dbName
+                       vs referencedSchema
                        vs fk.RefTable
                        vs refCol |]))
 
@@ -694,11 +696,13 @@ let private referentialConstraintsRows (catalog: Catalog) : Value[] list =
     |> List.collect (fun (dbName, t) ->
         t.ForeignKeys
         |> List.map (fun fk ->
+            let referencedSchema = fk.RefDatabase |> Option.defaultValue dbName
+
             [| vs "def"
                vs dbName
                vs fk.Name
                vs "def"
-               vs dbName
+               vs referencedSchema
                vs "PRIMARY"
                vs "NONE"
                // MySQL's actual default when a `FOREIGN KEY` declares no
@@ -2025,12 +2029,16 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
         |> List.map (fun fk ->
             let onDelete = fk.OnDelete |> Option.map (sprintf " ON DELETE %s") |> Option.defaultValue ""
             let onUpdate = fk.OnUpdate |> Option.map (sprintf " ON UPDATE %s") |> Option.defaultValue ""
+            let referencedTable =
+                match fk.RefDatabase with
+                | Some database -> sprintf "%s.%s" (backtick database) (backtick fk.RefTable)
+                | None -> backtick fk.RefTable
 
             sprintf
                 "CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s%s"
                 (backtick fk.Name)
                 (backtickCols fk.Columns)
-                (backtick fk.RefTable)
+                referencedTable
                 (backtickCols fk.RefColumns)
                 onDelete
                 onUpdate)

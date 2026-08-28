@@ -183,7 +183,8 @@ Working: composite PK/UNIQUE with collation-aware key encoding and MySQL
 NULL-uniqueness semantics, incremental index maintenance, FK enforcement with
 MATCH SIMPLE parent probes through unique indexes, ON DELETE CASCADE/SET
 NULL/RESTRICT with cycle-safe recursion, ON UPDATE cascade on update/upsert
-paths, session foreign_key_checks gate, named CHECK constraints with
+paths, qualified cross-database targets with atomic catalog-wide referential
+actions, session foreign_key_checks gate, named CHECK constraints with
 ENFORCED/NOT ENFORCED and ALTER ADD validation, ENUM/SET membership,
 ADD UNIQUE over colliding data fails 1062 rather than corrupting, mixed
 ascending/descending B-tree ordering, and invisible indexes that remain
@@ -194,7 +195,6 @@ maintained for constraints while staying out of ordinary plans.
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, prefix-key candidates with full residual checks, matching physical inner-join keys, direct literal SELECT/UPDATE/DELETE ranges, compatible grouping, and bounded composite index ordering; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; outer joins and unconstrained ordering remain scans | high (scale) | divergence |
 | Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | DDL, persistence, size validation, SHOW, INFORMATION_SCHEMA, UNIQUE enforcement, and equality/range probes for SELECT/DML/inner joins use character- or byte-prefix keys with complete residual checks; full-value ordering still sorts | low | divergence |
 | Expression indexes | functional key parts participate in physical access and uniqueness | `LOWER(column)` indexes maintain physical equality buckets for matching SELECT/DML predicates and enforce uniqueness; other non-unique expressions retain DDL, persistence, and metadata but use scan fallback, while other unique expressions are refused | low | divergence/refusal |
-| Cross-database FKs | supported | `Ast.ForeignKeyDef.RefTable` carries no database qualifier; cross-database references are invisible/unenforceable | low | divergence |
 | AUTO_INCREMENT | counter persists across restart via redo | burned ids survive rollback (InnoDB-like), but the counter rebuild after crash depends on replayed row events; ALTER can only move it forward | low | divergence |
 
 ## 6. Charsets and collations
@@ -223,7 +223,7 @@ indexed point/range UPDATE and DELETE statements, incremental unique-index
 validation, unique-key claims for literal VALUES inserts/upserts, merged-result FK revalidation,
 savepoints with MySQL establishment-order semantics,
 autocommit implicit transactions, read-only transactions never blocking
-writers, per-database sharding so cross-database writers never contend,
+writers, per-database sharding for databases not linked by qualified foreign keys,
 4,096-stripe row ownership, and InnoDB-style burned AUTO_INCREMENT on rollback.
 `SERIALIZABLE` uses conservative whole-catalog validation for writing
 transactions, preventing write skew while keeping read-only transactions
@@ -236,7 +236,7 @@ lock-free.
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes, while literal VALUES inserts/upserts claim supplied unique keys and existing duplicate rows; generated/default keys, INSERT SELECT, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
-| Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 1.06x | medium | partial |
+| Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize their catalog-wide referential actions; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 1.06x | medium | partial |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 
 ## 8. Persistence and durability

@@ -540,6 +540,41 @@ let tests =
               | ResultSet(_, [ [ Some "CASCADE"; Some "posts"; Some "users" ] ]) -> ()
               | other -> failtestf "expected the referential constraint row, got %A" other
 
+          testCase "qualified foreign keys expose their referenced schema"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE DATABASE parent_db" |> ignore
+              run store "CREATE DATABASE child_db" |> ignore
+              run store "CREATE TABLE parent_db.parents (id INT PRIMARY KEY)" |> ignore
+
+              run
+                  store
+                  "CREATE TABLE child_db.children (parent_id INT, CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent_db.parents (id) ON DELETE CASCADE)"
+              |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT constraint_schema, table_schema, referenced_table_schema, referenced_table_name FROM information_schema.key_column_usage WHERE constraint_schema = 'child_db' AND constraint_name = 'fk_parent'"
+              with
+              | ResultSet(_, [ [ Some "child_db"; Some "child_db"; Some "parent_db"; Some "parents" ] ]) -> ()
+              | other -> failtestf "expected qualified key metadata, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT constraint_schema, unique_constraint_schema, table_name, referenced_table_name FROM information_schema.referential_constraints WHERE constraint_schema = 'child_db' AND constraint_name = 'fk_parent'"
+              with
+              | ResultSet(_, [ [ Some "child_db"; Some "parent_db"; Some "children"; Some "parents" ] ]) -> ()
+              | other -> failtestf "expected qualified constraint metadata, got %A" other
+
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE child_db.children" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "REFERENCES `parent_db`.`parents` (`id`)" "qualified reference"
+              | other -> failtestf "expected qualified SHOW CREATE TABLE, got %A" other
+
           testCase "TABLE_CONSTRAINTS has one row per PRIMARY KEY/UNIQUE/FOREIGN KEY, and none for a plain index"
           <| fun _ ->
               let store = setup ()

@@ -352,6 +352,10 @@ type Store =
       mutable PendingEvents: ResizeArray<CommitEvent> option
       /// Serializes catalog membership and serializable publication.
       Lock: obj
+      /// DML shares this lock; schema changes take it exclusively so a
+      /// foreign-key definition cannot appear between relationship lookup
+      /// and publication.
+      ReferentialSchemaLock: ReaderWriterLockSlim
       /// Orders durable enqueue and observer delivery without covering fsync.
       CommitLock: obj
       /// Indexed updates coordinate stable row identities before reading
@@ -399,7 +403,11 @@ let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> un
             lock store.CommitLock (fun () ->
                 let action =
                     match store.Durability.Sink with
-                    | Some sink -> sink.Enqueue events
+                    | Some sink ->
+                        match events with
+                        | [] -> ignore
+                        | [ event ] -> sink.Enqueue [ event ]
+                        | events -> sink.Enqueue [ TransactionCommitted events ]
                     | None -> ignore
 
                 let error =
@@ -449,6 +457,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       // Nested statement snapshots inherit the outer transaction's buffering.
       PendingEvents = if collectsCommitEvents store then Some(ResizeArray()) else None
       Lock = obj ()
+      ReferentialSchemaLock = store.ReferentialSchemaLock
       CommitLock = store.CommitLock
       RowLocks = store.RowLocks
       KeyLocks = store.KeyLocks
@@ -589,6 +598,27 @@ let normalizeTableName (name: string) = name.ToLowerInvariant()
 let private lockNamespaceKey (databaseName: string) (tableName: string) =
     databaseName.ToLowerInvariant() + "\u0000" + normalizeTableName tableName
 
+let private catalogHasQualifiedForeignKeys (catalog: Catalog) =
+    catalog
+    |> Seq.exists (fun (KeyValue(_, database)) ->
+        database
+        |> Seq.exists (fun (KeyValue(_, table)) ->
+            table.ForeignKeys |> List.exists (fun foreignKey -> foreignKey.RefDatabase.IsSome)))
+
+let private withReferentialSchemaLock (schemaChange: bool) (store: Store) body =
+    if schemaChange then
+        store.ReferentialSchemaLock.EnterWriteLock()
+    else
+        store.ReferentialSchemaLock.EnterReadLock()
+
+    try
+        body ()
+    finally
+        if schemaChange then
+            store.ReferentialSchemaLock.ExitWriteLock()
+        else
+            store.ReferentialSchemaLock.ExitReadLock()
+
 /// `CREATE DATABASE name` errors 1007 when the name exists. The store lock
 /// coordinates catalog membership with SERIALIZABLE snapshot validation;
 /// row writes remain sharded by database.
@@ -596,12 +626,13 @@ let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> 
     let slot = ref Map.empty
 
     let published =
-        lock store.Lock (fun () ->
-            lock slot (fun () ->
-                if store.Databases.TryAdd(dbName, slot) then
-                    Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false)) ])
-                else
-                    Error(DatabaseExists dbName)))
+        withReferentialSchemaLock true store (fun () ->
+            lock store.Lock (fun () ->
+                lock slot (fun () ->
+                    if store.Databases.TryAdd(dbName, slot) then
+                        Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false)) ])
+                    else
+                        Error(DatabaseExists dbName))))
 
     published |> Result.map (fun acknowledge -> acknowledge ())
 
@@ -611,14 +642,54 @@ let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
         Error(SystemSchemaAccess "mysql")
     else
         let published =
-            lock store.Lock (fun () ->
-                match store.Databases.TryGetValue dbName with
-                | false, _ -> Error(NoSuchDatabase dbName)
-                | true, slot ->
-                    lock slot (fun () ->
-                        match store.Databases.TryRemove dbName with
-                        | true, _ -> Ok(prepareEvents store [ SchemaChanged(dbName, DropDatabase(dbName, false)) ])
-                        | false, _ -> Error(NoSuchDatabase dbName)))
+            withReferentialSchemaLock true store (fun () ->
+              lock store.Lock (fun () ->
+                let slots =
+                    store.Databases
+                    |> Seq.map (fun entry -> entry.Key, entry.Value)
+                    |> Seq.sortBy fst
+                    |> List.ofSeq
+
+                let rec withSlots remaining body =
+                    match remaining with
+                    | [] -> body ()
+                    | (_, slot) :: tail -> lock slot (fun () -> withSlots tail body)
+
+                withSlots slots (fun () ->
+                    match store.Databases.TryGetValue dbName with
+                    | false, _ -> Error(NoSuchDatabase dbName)
+                    | true, _ ->
+                        let incomingReference =
+                            slots
+                            |> List.tryPick (fun (childDatabase, slot) ->
+                                if String.Equals(childDatabase, dbName, StringComparison.OrdinalIgnoreCase) then
+                                    None
+                                else
+                                    slot.Value
+                                    |> Seq.tryPick (fun (KeyValue(_, childTable)) ->
+                                        childTable.ForeignKeys
+                                        |> List.tryPick (fun foreignKey ->
+                                            foreignKey.RefDatabase
+                                            |> Option.filter (fun parentDatabase ->
+                                                String.Equals(parentDatabase, dbName, StringComparison.OrdinalIgnoreCase))
+                                            |> Option.map (fun _ -> childTable, foreignKey))))
+
+                        match incomingReference with
+                        | Some(childTable, foreignKey) when store.ForeignKeyChecks ->
+                            Error(
+                                ExpressionError(
+                                    3730,
+                                    sprintf
+                                        "Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'."
+                                        foreignKey.RefTable
+                                        foreignKey.Name
+                                        childTable.OriginalName
+                                )
+                            )
+                        | _ ->
+                            match store.Databases.TryRemove dbName with
+                            | true, _ -> Ok(prepareEvents store [ SchemaChanged(dbName, DropDatabase(dbName, false)) ])
+                            | false, _ -> Error(NoSuchDatabase dbName))))
 
         published |> Result.map (fun acknowledge -> acknowledge ())
 
@@ -688,6 +759,90 @@ let private withDatabasePublishing
 
 let private withDatabase store dbName f =
     withDatabasePublishing store dbName (fun _ -> []) f
+
+let private tryCatalogDatabaseEntry (databaseName: string) (catalog: Catalog) =
+    catalog
+    |> Map.tryFind databaseName
+    |> Option.map (fun database -> databaseName, database)
+    |> Option.orElseWith (fun () ->
+        catalog
+        |> Map.toSeq
+        |> Seq.tryFind (fun (name, _) -> String.Equals(name, databaseName, StringComparison.OrdinalIgnoreCase)))
+
+let private tryCatalogDatabase databaseName catalog =
+    tryCatalogDatabaseEntry databaseName catalog |> Option.map snd
+
+let private catalogDatabaseName databaseName catalog =
+    tryCatalogDatabaseEntry databaseName catalog
+    |> Option.map fst
+    |> Option.defaultValue databaseName
+
+let private setCatalogDatabase databaseName database catalog =
+    match tryCatalogDatabaseEntry databaseName catalog with
+    | Some(actualName, _) -> Map.add actualName database catalog
+    | None -> Map.add databaseName database catalog
+
+/// Qualified foreign keys couple otherwise independent database slots. Their
+/// statements lock and publish the catalog as one unit so parent validation
+/// and referential actions observe the same committed roots.
+let private withReferentialCatalogPublishing
+    (store: Store)
+    (dbName: string)
+    (schemaChange: bool)
+    (eventsOf: 'a -> CommitEvent list)
+    (operation: Catalog -> Database -> Result<Catalog * 'a, StorageError>)
+    : Result<'a, StorageError> =
+    let publish () =
+        let catalog = store.Catalog
+
+        if not schemaChange && not (catalogHasQualifiedForeignKeys catalog) then
+            withDatabasePublishing store dbName eventsOf (fun database ->
+                operation (setCatalogDatabase dbName database catalog) database
+                |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result))
+        else
+            let published =
+                lock store.Lock (fun () ->
+                    let slots =
+                        store.Databases
+                        |> Seq.map (fun entry -> entry.Key, entry.Value)
+                        |> Seq.sortBy fst
+                        |> List.ofSeq
+
+                    let rec withSlots remaining body =
+                        match remaining with
+                        | [] -> body ()
+                        | (_, slot) :: tail -> lock slot (fun () -> withSlots tail body)
+
+                    withSlots slots (fun () ->
+                        let attached =
+                            slots
+                            |> List.forall (fun (name, slot) ->
+                                match store.Databases.TryGetValue name with
+                                | true, current -> obj.ReferenceEquals(current, slot)
+                                | false, _ -> false)
+
+                        if not attached then
+                            raise (LockWaitTimeout dbName)
+                        else
+                            let currentCatalog = slots |> List.map (fun (name, slot) -> name, slot.Value) |> Map.ofList
+
+                            match tryCatalogDatabase dbName currentCatalog with
+                            | None -> Error(NoSuchDatabase dbName)
+                            | Some database ->
+                                operation currentCatalog database
+                                |> Result.map (fun (updatedCatalog, result) ->
+                                    for name, slot in slots do
+                                        slot.Value <- Map.find name updatedCatalog
+
+                                    result, prepareResultEvents store eventsOf result)))
+
+            match published with
+            | Error error -> Error error
+            | Ok(result, acknowledge) ->
+                acknowledge ()
+                Ok result
+
+    withReferentialSchemaLock schemaChange store publish
 
 /// Holds the named database cells in lexical order while `action` prepares
 /// and publishes a schema change. DML already uses these cells for its short
@@ -2237,24 +2392,27 @@ let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
 
     for KeyValue(_, table) in db do
         for foreignKey in table.ForeignKeys do
-            match Map.tryFind (normalizeTableName foreignKey.RefTable) db with
-            | None -> conflict ()
-            | Some parent ->
-                match foreignKey.Columns |> traverse (resolveColumn table.Columns), foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
-                | Ok childIndices, Ok parentIndices ->
-                    for row in table.RowsArray do
-                        let childKey = childIndices |> List.map (fun index -> row.[index])
+            match foreignKey.RefDatabase with
+            | Some _ -> ()
+            | None ->
+                match Map.tryFind (normalizeTableName foreignKey.RefTable) db with
+                | None -> conflict ()
+                | Some parent ->
+                    match foreignKey.Columns |> traverse (resolveColumn table.Columns), foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
+                    | Ok childIndices, Ok parentIndices ->
+                        for row in table.RowsArray do
+                            let childKey = childIndices |> List.map (fun index -> row.[index])
 
-                        if childKey |> List.forall ((<>) VNull) then
-                            let parentExists =
-                                parent.RowsArray
-                                |> Seq.exists (fun parentRow ->
-                                    let parentKey = parentIndices |> List.map (fun index -> parentRow.[index])
-                                    List.forall2 (fun left right -> compare left right = 0) childKey parentKey)
+                            if childKey |> List.forall ((<>) VNull) then
+                                let parentExists =
+                                    parent.RowsArray
+                                    |> Seq.exists (fun parentRow ->
+                                        let parentKey = parentIndices |> List.map (fun index -> parentRow.[index])
+                                        List.forall2 (fun left right -> compare left right = 0) childKey parentKey)
 
-                            if not parentExists then
-                                conflict ()
-                | _ -> conflict ()
+                                if not parentExists then
+                                    conflict ()
+                    | _ -> conflict ()
 
 let private withWriteLocksFor
     (timeout: TimeSpan)
@@ -2683,6 +2841,7 @@ let create () : Store =
       Durability = { Sink = None }
       PendingEvents = None
       Lock = obj ()
+      ReferentialSchemaLock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion)
       CommitLock = obj ()
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
@@ -3295,7 +3454,85 @@ let tryEqualityLookup
 /// blocking every write — `information_schema` can still show the stale FK,
 /// same as MySQL leaves a dangling constraint visible after `DROP TABLE ...
 /// FOREIGN_KEY_CHECKS=0`.
-let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Value[]) (fk: ForeignKeyDef) : Result<unit, StorageError> =
+let private foreignKeyDatabase childDatabase (foreignKey: ForeignKeyDef) =
+    foreignKey.RefDatabase |> Option.defaultValue childDatabase
+
+[<Struct>]
+type private TableAddress =
+    { Database: string
+      Table: string }
+
+let private tableAddress (database: string) table =
+    { Database = database.ToLowerInvariant()
+      Table = normalizeTableName table }
+
+let private referencedTableAddress childDatabase foreignKey =
+    tableAddress (foreignKeyDatabase childDatabase foreignKey) foreignKey.RefTable
+
+let private tryCatalogTable address (catalog: Catalog) =
+    catalog
+    |> tryCatalogDatabase address.Database
+    |> Option.bind (Map.tryFind address.Table)
+
+let private setCatalogTable address table (catalog: Catalog) =
+    catalog
+    |> tryCatalogDatabase address.Database
+    |> Option.map (Map.add address.Table table)
+    |> Option.map (fun database -> setCatalogDatabase address.Database database catalog)
+    |> Option.defaultValue catalog
+
+let private referencingForeignKeys (catalog: Catalog) (parent: TableAddress) : (TableAddress * ForeignKeyDef) list =
+    catalog
+    |> Map.toList
+    |> List.collect (fun (childDatabase, database) ->
+        database
+        |> Map.toList
+        |> List.collect (fun (childTable, table) ->
+            table.ForeignKeys
+            |> List.choose (fun foreignKey ->
+                if referencedTableAddress childDatabase foreignKey = parent then
+                    Some(tableAddress childDatabase childTable, foreignKey)
+                else
+                    None)))
+
+let private retargetForeignKeys (oldParent: TableAddress) (newTableName: string) (catalog: Catalog) =
+    catalog
+    |> Map.map (fun childDatabase database ->
+        database
+        |> Map.map (fun _ table ->
+            let referencesParent foreignKey =
+                referencedTableAddress childDatabase foreignKey = oldParent
+
+            if table.ForeignKeys |> List.exists referencesParent |> not then
+                table
+            else
+                { table with
+                    ForeignKeys =
+                        table.ForeignKeys
+                        |> List.map (fun foreignKey ->
+                            if referencesParent foreignKey then
+                                { foreignKey with RefTable = newTableName }
+                            else
+                                foreignKey) }))
+
+let private tryForeignKeyParent (catalog: Catalog) (childDatabase: string) (childDb: Database) (foreignKey: ForeignKeyDef) =
+    let parentDatabase = foreignKeyDatabase childDatabase foreignKey
+
+    if String.Equals(parentDatabase, childDatabase, StringComparison.OrdinalIgnoreCase) then
+        Map.tryFind (normalizeTableName foreignKey.RefTable) childDb
+    else
+        catalog
+        |> tryCatalogDatabase parentDatabase
+        |> Option.bind (Map.tryFind (normalizeTableName foreignKey.RefTable))
+
+let private checkFkParent
+    (catalog: Catalog)
+    (childDatabase: string)
+    (childDb: Database)
+    (childColumns: ColumnDef list)
+    (row: Value[])
+    (fk: ForeignKeyDef)
+    : Result<unit, StorageError> =
     match fk.Columns |> traverse (resolveColumn childColumns) with
     | Error _ -> Ok()
     | Ok idxs ->
@@ -3304,7 +3541,7 @@ let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Va
         if values |> List.exists ((=) VNull) then
             Ok()
         else
-            match Map.tryFind (normalizeTableName fk.RefTable) db with
+            match tryForeignKeyParent catalog childDatabase childDb fk with
             | None -> Ok()
             | Some parent ->
                 match fk.RefColumns |> traverse (resolveColumn parent.Columns) with
@@ -3329,8 +3566,15 @@ let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Va
 
                     if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
 
-let private checkFkParents (db: Database) (childColumns: ColumnDef list) (fks: ForeignKeyDef list) (row: Value[]) : Result<unit, StorageError> =
-    fks |> traverse (checkFkParent db childColumns row) |> Result.map ignore
+let private checkFkParents
+    (catalog: Catalog)
+    (childDatabase: string)
+    (childDb: Database)
+    (childColumns: ColumnDef list)
+    (fks: ForeignKeyDef list)
+    (row: Value[])
+    : Result<unit, StorageError> =
+    fks |> traverse (checkFkParent catalog childDatabase childDb childColumns row) |> Result.map ignore
 
 /// As `withDatabase`, one level deeper: look up `tableName` within the
 /// database too, and re-key the updated table back under its normalized
@@ -3536,7 +3780,9 @@ let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Resu
                 | None -> Ok()
 
 let private validateForeignKeyDefinition
-    (checkForeignKeys: bool)
+    (store: Store)
+    (catalog: Catalog)
+    (databaseName: string)
     (db: Database)
     (tableName: string)
     (childColumns: ColumnDef list)
@@ -3582,15 +3828,21 @@ let private validateForeignKeyDefinition
             )
         )
     | None, true, _ ->
+        let parentDatabase = foreignKeyDatabase databaseName foreignKey
         let parent =
-            if equal tableName foreignKey.RefTable then
+            if equal databaseName parentDatabase && equal tableName foreignKey.RefTable then
                 Some(childColumns, childIndexes)
-            else
+            elif equal databaseName parentDatabase then
                 Map.tryFind (normalizeTableName foreignKey.RefTable) db
+                |> Option.map (fun table -> table.Columns, table.Indexes)
+            else
+                catalog
+                |> tryCatalogDatabase parentDatabase
+                |> Option.bind (Map.tryFind (normalizeTableName foreignKey.RefTable))
                 |> Option.map (fun table -> table.Columns, table.Indexes)
 
         match parent with
-        | None when not checkForeignKeys -> Ok()
+        | None when not store.ForeignKeyChecks -> Ok()
         | None -> Error(ExpressionError(1824, sprintf "Failed to open the referenced table '%s'" foreignKey.RefTable))
         | Some(parentColumns, parentIndexes) ->
             match foreignKey.RefColumns |> List.tryFind (fun name -> findColumn name parentColumns |> Option.isNone) with
@@ -3605,7 +3857,7 @@ let private validateForeignKeyDefinition
                             foreignKey.RefTable
                     )
                 )
-            | None when not checkForeignKeys -> Ok()
+            | None when not store.ForeignKeyChecks -> Ok()
             | None ->
                 let sameColumns left right = List.forall2 equal left right
 
@@ -3692,25 +3944,25 @@ let createTableSeeded
             columns
             |> traverse (normalizeDefault (temporalCoercionMode store))
             |> Result.bind (fun columns ->
-                withDatabasePublishing store dbName createEvent (fun db ->
+                let createInCatalog catalog db =
                     let key = normalizeTableName tableName
 
                     match columns |> traverse validateColumnType with
-                    | Error e -> Error e
+                    | Error error -> Error error
                     | Ok _ ->
                         match checkVectorKeyColumns columns indexes, checkGeometryKeyColumns columns indexes, checkIndexLengths columns indexes with
-                        | Error e, _, _
-                        | _, Error e, _
-                        | _, _, Error e -> Error e
+                        | Error error, _, _
+                        | _, Error error, _
+                        | _, _, Error error -> Error error
                         | Ok(), Ok(), Ok() ->
                             if Map.containsKey key db then
                                 Error(TableExists tableName)
                             else
-                                match foreignKeys |> traverse (validateForeignKeyDefinition store.ForeignKeyChecks db tableName columns indexes) with
-                                | Error e -> Error e
+                                match foreignKeys |> traverse (validateForeignKeyDefinition store catalog dbName db tableName columns indexes) with
+                                | Error error -> Error error
                                 | Ok _ ->
-                                    match indexes |> List.tryPick (fun ix -> match checkFullTextColumns columns ix with Error e -> Some e | Ok() -> None) with
-                                    | Some e -> Error e
+                                    match indexes |> List.tryPick (fun index -> match checkFullTextColumns columns index with Error error -> Some error | Ok() -> None) with
+                                    | Some error -> Error error
                                     | None ->
                                         let createTime = DateTime.Now
 
@@ -3730,7 +3982,15 @@ let createTableSeeded
                                               SecondaryOrder = Map.empty
                                               FullTextIndexes = Map.empty }
 
-                                        Ok(Map.add key (reindexTable table) db, (createTime, columns)))))
+                                        let database = Map.add key (reindexTable table) db
+                                        Ok(setCatalogDatabase dbName database catalog, (createTime, columns))
+
+                withReferentialCatalogPublishing
+                    store
+                    dbName
+                    true
+                    createEvent
+                    createInCatalog))
 
     result |> Result.map ignore
 
@@ -3763,32 +4023,110 @@ let private virtualWriteGuard (store: Store) (dbName: string) (tableName: string
     else
         Ok()
 
-let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    withDatabasePublishing
-        store
-        dbName
-        (fun () -> [ SchemaChanged(dbName, DropTable([ tableName ], false)) ])
-        (fun db ->
-            let key = normalizeTableName tableName
+let dropTables
+    (store: Store)
+    (ifExists: bool)
+    (targets: (string * string) list)
+    : Result<(string * string) list, StorageError> =
+    match targets with
+    | [] -> Ok []
+    | (firstDatabase, _) :: _ ->
+        let events dropped =
+            dropped
+            |> List.groupBy fst
+            |> List.map (fun (database, entries) ->
+                SchemaChanged(database, DropTable(entries |> List.map snd, false)))
 
-            match virtualWriteGuard store dbName tableName with
-            | Error e -> Error e
-            | Ok() when Map.containsKey key db -> Ok(Map.remove key db, ())
-            | Ok() -> Error(NoSuchTable tableName))
+        withReferentialCatalogPublishing
+            store
+            firstDatabase
+            true
+            events
+            (fun catalog _ ->
+                let distinctTargets =
+                    targets
+                    |> List.distinctBy (fun (database, table) -> tableAddress database table)
+
+                distinctTargets
+                |> traverse (fun (database, table) ->
+                    virtualWriteGuard store database table
+                    |> Result.bind (fun () ->
+                        let address = tableAddress database table
+
+                        match tryCatalogTable address catalog with
+                        | Some _ -> Ok(database, table, address)
+                        | None when ifExists -> Ok(database, table, address)
+                        | None -> Error(NoSuchTable table)))
+                |> Result.bind (fun resolved ->
+                    let existing =
+                        resolved
+                        |> List.filter (fun (_, _, address) -> tryCatalogTable address catalog |> Option.isSome)
+
+                    let droppedAddresses = existing |> List.map (fun (_, _, address) -> address) |> Set.ofList
+
+                    let incomingReference =
+                        existing
+                        |> List.tryPick (fun (_, table, address) ->
+                            referencingForeignKeys catalog address
+                            |> List.tryFind (fun (childAddress, _) -> not (Set.contains childAddress droppedAddresses))
+                            |> Option.map (fun (childAddress, foreignKey) -> table, childAddress, foreignKey))
+
+                    match incomingReference with
+                    | Some(table, childAddress, foreignKey) when store.ForeignKeyChecks ->
+                        Error(
+                            ExpressionError(
+                                3730,
+                                sprintf
+                                    "Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'."
+                                    table
+                                    foreignKey.Name
+                                    childAddress.Table
+                            )
+                        )
+                    | _ ->
+                        let updatedCatalog =
+                            existing
+                            |> List.fold (fun state (_, _, address) ->
+                                match tryCatalogDatabase address.Database state with
+                                | Some database -> state |> setCatalogDatabase address.Database (Map.remove address.Table database)
+                                | None -> state) catalog
+
+                        let dropped = existing |> List.map (fun (database, table, _) -> database, table)
+                        Ok(updatedCatalog, dropped)))
+
+let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
+    dropTables store false [ dbName, tableName ] |> Result.map ignore
 
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
     // MySQL implements TRUNCATE as drop-and-recreate, so CREATE_TIME resets.
-    withDatabasePublishing
+    withReferentialCatalogPublishing
         store
         dbName
+        true
         (fun createTime -> [ SchemaChangedAt(dbName, Truncate tableName, createTime) ])
-        (fun db ->
+        (fun catalog db ->
+            let address = tableAddress dbName tableName
+
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable db tableName)
-            |> Result.map (fun table ->
-                let createTime = DateTime.Now
-                let table = reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
-                Map.add (normalizeTableName tableName) table db, createTime))
+            |> Result.bind (fun table ->
+                match referencingForeignKeys catalog address |> List.tryFind (fst >> (<>) address) with
+                | Some(childAddress, foreignKey) when store.ForeignKeyChecks ->
+                    Error(
+                        ExpressionError(
+                            1701,
+                            sprintf
+                                "Cannot truncate a table referenced in a foreign key constraint (`%s`.`%s`, CONSTRAINT `%s`)"
+                                childAddress.Database
+                                childAddress.Table
+                                foreignKey.Name
+                        )
+                    )
+                | _ ->
+                    let createTime = DateTime.Now
+                    let table = reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
+                    let database = Map.add address.Table table db
+                    Ok(setCatalogDatabase address.Database database catalog, createTime)))
     |> Result.map ignore
 
 /// Removes column index `idx` from every row — used by `DropColumn`, since
@@ -4371,11 +4709,12 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
-    withDatabasePublishing
+    withReferentialCatalogPublishing
         store
         dbName
+        true
         (fun () -> [ SchemaChanged(dbName, AlterTable(tableName, actions)) ])
-        (fun db ->
+        (fun catalog db ->
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
@@ -4387,7 +4726,18 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                         let validation =
                             match action with
                             | AddForeignKey foreignKey ->
-                                validateForeignKeyDefinition store.ForeignKeyChecks db tbl.OriginalName tbl.Columns tbl.Indexes foreignKey
+                                validateForeignKeyDefinition store catalog dbName db tbl.OriginalName tbl.Columns tbl.Indexes foreignKey
+                                |> Result.bind (fun () ->
+                                    if store.ForeignKeyChecks then
+                                        tbl.RowsArray
+                                        |> Seq.map (fun row -> checkFkParent catalog dbName db tbl.Columns row foreignKey)
+                                        |> Seq.tryPick (function
+                                            | Error error -> Some error
+                                            | Ok() -> None)
+                                        |> Option.map Error
+                                        |> Option.defaultValue (Ok())
+                                    else
+                                        Ok())
                             | _ -> Ok()
 
                         validation
@@ -4415,27 +4765,30 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 // Column positions/count may have shifted (`ADD`/`DROP`/
                 // `MODIFY COLUMN`), so a full rebuild rather than an
                 // incremental patch — ALTER isn't a hot path.
-                |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey (reindexTable finalTable), ())))
+                |> Result.map (fun (finalKey, finalTable) ->
+                    let database = Map.remove origKey db |> Map.add finalKey (reindexTable finalTable)
+                    let updatedCatalog = setCatalogDatabase dbName database catalog
+
+                    if finalKey = origKey then
+                        updatedCatalog, ()
+                    else
+                        retargetForeignKeys (tableAddress dbName origKey) finalTable.OriginalName updatedCatalog, ())))
 
 let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
     alterTable store dbName oldName [ RenameTo newName ]
 
-/// `RENAME TABLE a TO b, c TO d` — every pair inside one catalog swap and one
-/// WAL event, because MySQL's RENAME TABLE is atomic across its pairs and
-/// per-pair `alterTable` calls are not: N events mean a crash can replay half
-/// a rename, leaving `a` renamed and `c` untouched.
-/// Atomicity is per database. A cross-database rename still emits one
-/// event per database, since each database is its own catalog cell — spanning
-/// them would need a lock above the per-database one.
+/// `RENAME TABLE a TO b, c TO d` publishes every pair in one catalog swap and
+/// retargets foreign keys that reference a renamed table.
 let renameTables (store: Store) (dbName: string) (pairs: (string * string) list) : Result<unit, StorageError> =
-    withDatabasePublishing
+    withReferentialCatalogPublishing
         store
         dbName
+        true
         (fun () -> [ SchemaChanged(dbName, RenameTable pairs) ])
-        (fun db ->
+        (fun catalog db ->
             let step acc (oldName, newName) =
                 acc
-                |> Result.bind (fun db ->
+                |> Result.bind (fun (catalog, db) ->
                     virtualWriteGuard store dbName oldName
                     |> Result.bind (fun () -> tryGetTable db oldName)
                     |> Result.bind (fun table ->
@@ -4443,8 +4796,15 @@ let renameTables (store: Store) (dbName: string) (pairs: (string * string) list)
                         |> Result.map (fun (table', newKey) ->
                             let origKey = normalizeTableName oldName
                             let key = newKey |> Option.defaultValue origKey
-                            db |> Map.remove origKey |> Map.add key (reindexTable table'))))
-            pairs |> List.fold step (Ok db) |> Result.map (fun db' -> db', ()))
+                            let database = db |> Map.remove origKey |> Map.add key (reindexTable table')
+                            let updatedCatalog =
+                                catalog
+                                |> setCatalogDatabase dbName database
+                                |> retargetForeignKeys (tableAddress dbName origKey) table'.OriginalName
+
+                            updatedCatalog, tryCatalogDatabase dbName updatedCatalog |> Option.get)))
+
+            pairs |> List.fold step (Ok(catalog, db)) |> Result.map (fun (catalog, _) -> catalog, ()))
 
 /// One column's value for one row being inserted, threaded through
 /// `processRow`'s fold: the column's final coerced value, the updated
@@ -4633,6 +4993,9 @@ type InsertOutcome =
       IgnoredErrors: StorageError list }
 
 let private insertCore
+    (store: Store)
+    (catalog: Catalog)
+    (dbName: string)
     (checkFks: bool)
     (mode: TemporalCoercionMode)
     (generateAutoOnZero: bool)
@@ -4686,12 +5049,14 @@ let private insertCore
             |> List.choose (fun foreignKey ->
                 match
                     foreignKey.Columns |> traverse (resolveColumn table.Columns),
-                    db |> Map.tryFind (normalizeTableName foreignKey.RefTable)
+                    tryForeignKeyParent catalog dbName db foreignKey
                 with
                 | Ok childIndices, Some parent ->
                     match foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
                     | Ok parentIndices ->
-                        let isSelf = normalizeTableName foreignKey.RefTable = tableKey
+                        let isSelf =
+                            String.Equals(foreignKeyDatabase dbName foreignKey, dbName, StringComparison.OrdinalIgnoreCase)
+                            && normalizeTableName foreignKey.RefTable = tableKey
                         let selfParentIndices = if isSelf then Some parentIndices else None
 
                         let source =
@@ -4710,7 +5075,8 @@ let private insertCore
     let hasUnacceleratedSelfForeignKey =
         table.ForeignKeys
         |> List.exists (fun foreignKey ->
-            normalizeTableName foreignKey.RefTable = tableKey
+            String.Equals(foreignKeyDatabase dbName foreignKey, dbName, StringComparison.OrdinalIgnoreCase)
+            && normalizeTableName foreignKey.RefTable = tableKey
             && not (foreignKeyLookups |> Map.containsKey foreignKey.Name))
 
     let rows = table.RowsArray.ToBuilder()
@@ -4776,7 +5142,7 @@ let private insertCore
                                         | None -> Ok()
                                         | Some key when parentKeySourceContains key parentKeys -> Ok()
                                         | Some _ -> Error(ForeignKeyParentMissing foreignKey.Name)
-                                    | None -> checkFkParent dbView table.Columns candidate foreignKey
+                                    | None -> checkFkParent catalog dbName dbView table.Columns candidate foreignKey
 
                                 table.ForeignKeys
                                 |> traverse checkOneForeignKey
@@ -4846,18 +5212,22 @@ let private insertRowsPreparedCore
     let key = normalizeTableName tableName
 
     let publish () =
-        withDatabasePublishing
+        withReferentialCatalogPublishing
             store
             dbName
+            false
             (fun (_, _, _, (rows: Value[] list), _) ->
                 if rows.IsEmpty then [] else [ RowsInserted(dbName, tableName, rows) ])
-            (fun db ->
+            (fun catalog db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable db tableName)
                 |> Result.bind (fun table ->
                     resolveInsertColumns table columns
                     |> Result.bind (fun indices ->
                         insertCore
+                            store
+                            catalog
+                            dbName
                             store.ForeignKeyChecks
                             (temporalCoercionMode store)
                             (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
@@ -4866,7 +5236,8 @@ let private insertRowsPreparedCore
                             key
                             rowsIn
                             indices
-                            prepare)))
+                            prepare
+                        |> Result.map (fun (database, result) -> setCatalogDatabase dbName database catalog, result))))
 
     let result =
         match tryInsertLockTargets store dbName tableName columns rowsIn with
@@ -4913,11 +5284,12 @@ let internal insertPreparedCandidate
     : Result<InsertOutcome, StorageError> =
     let tableKey = normalizeTableName tableName
 
-    withDatabasePublishing
+    withReferentialCatalogPublishing
         store
         dbName
+        false
         (fun candidate -> [ RowsInserted(dbName, tableName, [ candidate ]) ])
-        (fun db ->
+        (fun catalog db ->
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
@@ -4961,10 +5333,10 @@ let internal insertPreparedCandidate
 
                     let candidateDatabase = Map.add tableKey candidateTable db
 
-                    checkFkParents candidateDatabase table.Columns table.ForeignKeys prepared.Values
+                    checkFkParents catalog dbName candidateDatabase table.Columns table.ForeignKeys prepared.Values
                     |> Result.map (fun () ->
                         let updated = publishRows table candidateTable
-                        Map.add tableKey updated db, prepared.Values)))
+                        setCatalogDatabase dbName (Map.add tableKey updated db) catalog, prepared.Values)))
     |> Result.map (fun candidate ->
         let generatedId, lastInsertId =
             match prepared.AssignedAutoId with
@@ -5003,17 +5375,12 @@ let insertRowsIgnorePrepared
     : Result<InsertOutcome, StorageError> =
     insertRowsPreparedCore true prepare store dbName tableName columns rowsIn
 
-/// Every `(childTableKey, fk)` in `db` whose `fk.RefTable` is `parentKey` —
-/// every foreign key elsewhere in the database that a delete from
-/// `parentKey` needs to check. Same-database only: `Ast.ForeignKeyDef`
-/// carries no database qualifier, so a cross-database FK (rare even in
-/// MySQL, and not something Laravel migrations emit) isn't found here.
-let private referencingForeignKeys (db: Database) (parentKey: string) : (string * ForeignKeyDef) list =
+let private referencingForeignKeysInDatabase (db: Database) (parentKey: string) : (string * ForeignKeyDef) list =
     db
     |> Map.toList
     |> List.collect (fun (childKey, childTbl) ->
         childTbl.ForeignKeys
-        |> List.filter (fun fk -> normalizeTableName fk.RefTable = parentKey)
+        |> List.filter (fun fk -> fk.RefDatabase.IsNone && normalizeTableName fk.RefTable = parentKey)
         |> List.map (fun fk -> childKey, fk))
 
 /// Whether rewriting `tableKey`'s `oldRow` into `newRow` would orphan a
@@ -5036,15 +5403,15 @@ let private referencingForeignKeys (db: Database) (parentKey: string) : (string 
 /// a no-op, same as `cascadeDelete`.
 let rec private cascadeUpdateVisited
     (checkFks: bool)
-    (db: Database)
-    (visited: Map<string, Value[] list>)
-    (changes: Map<string, (Value[] * Value[]) list>)
-    (tableKey: string)
+    (catalog: Catalog)
+    (visited: Map<TableAddress, Value[] list>)
+    (changes: Map<TableAddress, (Value[] * Value[]) list>)
+    (parent: TableAddress)
     (parentColumns: ColumnDef list)
     (oldRow: Value[])
     (newRow: Value[])
-    : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
-    cascadeUpdateVisitedFrom checkFks db visited changes (Set.singleton tableKey) tableKey parentColumns oldRow newRow
+    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, (Value[] * Value[]) list>, StorageError> =
+    cascadeUpdateVisitedFrom checkFks catalog visited changes (Set.singleton parent) parent parentColumns oldRow newRow
 
 /// `cascadeUpdateVisited`'s actual body, with `path` — every table on the
 /// current cascade chain, root included — threaded through the recursion.
@@ -5053,37 +5420,37 @@ let rec private cascadeUpdateVisited
 /// or through intermediate tables.
 and private cascadeUpdateVisitedFrom
     (checkFks: bool)
-    (db: Database)
-    (visited: Map<string, Value[] list>)
-    (changes: Map<string, (Value[] * Value[]) list>)
-    (path: Set<string>)
-    (tableKey: string)
+    (catalog: Catalog)
+    (visited: Map<TableAddress, Value[] list>)
+    (changes: Map<TableAddress, (Value[] * Value[]) list>)
+    (path: Set<TableAddress>)
+    (parent: TableAddress)
     (parentColumns: ColumnDef list)
     (oldRow: Value[])
     (newRow: Value[])
-    : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
+    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, (Value[] * Value[]) list>, StorageError> =
     if not checkFks then
-        Ok(db, visited, changes)
+        Ok(catalog, visited, changes)
     else
-        let checkOne acc (childKey: string, fk: ForeignKeyDef) =
+        let checkOne acc (childAddress: TableAddress, fk: ForeignKeyDef) =
             acc
-            |> Result.bind (fun (d, visited, changes) ->
+            |> Result.bind (fun (currentCatalog, visited, changes) ->
                 match fk.RefColumns |> traverse (resolveColumn parentColumns) with
-                | Error _ -> Ok(d, visited, changes) // stale FK metadata — see `checkFkParents`'s note.
+                | Error _ -> Ok(currentCatalog, visited, changes) // stale FK metadata — see `checkFkParents`'s note.
                 | Ok refIdxs ->
                     let oldKey = refIdxs |> List.map (fun i -> oldRow.[i])
                     let newKey = refIdxs |> List.map (fun i -> newRow.[i])
 
                     if oldKey = newKey || oldKey |> List.exists ((=) VNull) then
-                        Ok(d, visited, changes)
+                        Ok(currentCatalog, visited, changes)
                     else
-                        match Map.tryFind childKey d with
-                        | None -> Ok(d, visited, changes)
+                        match tryCatalogTable childAddress currentCatalog with
+                        | None -> Ok(currentCatalog, visited, changes)
                         | Some childTbl ->
                             match fk.Columns |> traverse (resolveColumn childTbl.Columns) with
-                            | Error _ -> Ok(d, visited, changes)
+                            | Error _ -> Ok(currentCatalog, visited, changes)
                             | Ok childIdxs ->
-                                let alreadyVisited = visited |> Map.tryFind childKey |> Option.defaultValue []
+                                let alreadyVisited = visited |> Map.tryFind childAddress |> Option.defaultValue []
 
                                 let isChild (row: Value[]) =
                                     let key = childIdxs |> List.map (fun i -> row.[i])
@@ -5095,18 +5462,18 @@ and private cascadeUpdateVisitedFrom
                                 let matching = childTbl.RowsArray |> Seq.filter isChild |> List.ofSeq
 
                                 if matching.IsEmpty then
-                                    Ok(d, visited, changes)
+                                    Ok(currentCatalog, visited, changes)
                                 // A cascade looping back into a table already on the cascade
                                 // path fails 1451, matching MySQL 8.4. A loop back into the
                                 // root would also land in a `Database` copy the caller's own
                                 // final `Map.add` silently clobbers, corrupting referential
                                 // integrity and desyncing the WAL from memory.
-                                elif Set.contains childKey path then
+                                elif Set.contains childAddress path then
                                     Error(ForeignKeyRestrict fk.Name)
                                 else
                                     match fk.OnUpdate |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
                                     | Some "CASCADE" ->
-                                        let visited' = visited |> Map.add childKey (alreadyVisited @ matching)
+                                        let visited' = visited |> Map.add childAddress (alreadyVisited @ matching)
                                         let childGroups = uniqueKeyGroups childTbl
                                         let secondaryGroups = secondaryKeyGroups childTbl
                                         let rows = childTbl.RowsArray.ToBuilder()
@@ -5125,17 +5492,17 @@ and private cascadeUpdateVisitedFrom
                                                         changes, index, secondaryIndex, secondaryOrder)
                                                 ([], childTbl.UniqueIndex, childTbl.SecondaryIndex, childTbl.SecondaryOrder)
 
-                                        let child = publishRows childTbl { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
-                                        let d' = Map.add childKey child d
-                                        let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
+                                        let updatedChild = publishRows childTbl { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
+                                        let updatedCatalog = setCatalogTable childAddress updatedChild currentCatalog
+                                        let changes' = changes |> Map.add childAddress ((changes |> Map.tryFind childAddress |> Option.defaultValue []) @ List.rev rowChanges)
 
                                         List.rev rowChanges
                                         |> List.fold
                                             (fun acc (oldC, newC) ->
                                                 acc
-                                                |> Result.bind (fun (d, visited, changes) ->
-                                                    cascadeUpdateVisitedFrom checkFks d visited changes (Set.add childKey path) childKey childTbl.Columns oldC newC))
-                                            (Ok(d', visited', changes'))
+                                                |> Result.bind (fun (catalog, visited, changes) ->
+                                                    cascadeUpdateVisitedFrom checkFks catalog visited changes (Set.add childAddress path) childAddress childTbl.Columns oldC newC))
+                                            (Ok(updatedCatalog, visited', changes'))
                                     | Some "SET NULL" ->
                                         match childIdxs |> List.tryFind (fun i -> not childTbl.Columns.[i].Nullable) with
                                         | Some i -> Error(NotNullViolation childTbl.Columns.[i].Name)
@@ -5158,14 +5525,14 @@ and private cascadeUpdateVisitedFrom
                                                             changes, index, secondaryIndex, secondaryOrder)
                                                     ([], childTbl.UniqueIndex, childTbl.SecondaryIndex, childTbl.SecondaryOrder)
 
-                                            let child = publishRows childTbl { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
-                                            let d' = Map.add childKey child d
-                                            let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
+                                            let updatedChild = publishRows childTbl { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
+                                            let updatedCatalog = setCatalogTable childAddress updatedChild currentCatalog
+                                            let changes' = changes |> Map.add childAddress ((changes |> Map.tryFind childAddress |> Option.defaultValue []) @ List.rev rowChanges)
 
-                                            Ok(d', visited |> Map.add childKey (alreadyVisited @ matching), changes')
+                                            Ok(updatedCatalog, visited |> Map.add childAddress (alreadyVisited @ matching), changes')
                                     | _ -> Error(ForeignKeyRestrict fk.Name))
 
-        referencingForeignKeys db tableKey |> List.fold checkOne (Ok(db, visited, changes))
+        referencingForeignKeys catalog parent |> List.fold checkOne (Ok(catalog, visited, changes))
 
 /// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
 /// row that collides with an existing row on any unique key or the primary
@@ -5214,14 +5581,14 @@ and upsertRowsWithOrdinal
 
         let eventsOf
             ((_, _, _, (inserted: Value[] list), (updated: (Value[] * Value[]) list)),
-             (cascaded: Map<string, (Value[] * Value[]) list>),
-             (db: Database))
+             (cascaded: Map<TableAddress, (Value[] * Value[]) list>),
+             (catalog: Catalog))
             =
-            let originalNameOf tableKey =
-                db
-                |> Map.tryFind tableKey
+            let originalNameOf address =
+                catalog
+                |> tryCatalogTable address
                 |> Option.map (fun table -> table.OriginalName)
-                |> Option.defaultValue tableKey
+                |> Option.defaultValue address.Table
 
             [ if not inserted.IsEmpty then
                   RowsInserted(dbName, tableName, inserted)
@@ -5229,16 +5596,16 @@ and upsertRowsWithOrdinal
               if not updated.IsEmpty then
                   RowsUpdated(dbName, tableName, updated)
 
-              for KeyValue(tableKey, changes) in cascaded do
+              for KeyValue(address, changes) in cascaded do
                   if not changes.IsEmpty then
-                      RowsUpdated(dbName, originalNameOf tableKey, changes) ]
+                      RowsUpdated(catalogDatabaseName address.Database catalog, originalNameOf address, changes) ]
 
         let publish () =
-            withDatabasePublishing store dbName eventsOf (fun db ->
+            withReferentialCatalogPublishing store dbName false eventsOf (fun catalog db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable db tableName)
-                |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn prepare applyUpdate foundRows)
-                |> Result.map (fun (db', cascaded, summary) -> db', (summary, cascaded, db)))
+                |> Result.bind (fun table -> upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate foundRows)
+                |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
 
         let result =
             match tryInsertLockTargets store dbName tableName columns rowsIn with
@@ -5246,7 +5613,7 @@ and upsertRowsWithOrdinal
             | _ -> publish ()
 
         match result with
-        | Ok((lastId, generatedId, affected, inserted, updated), cascaded, db) ->
+        | Ok((lastId, generatedId, affected, inserted, updated), _, _) ->
             Ok {
                 LastInsertId = lastId
                 GeneratedId = generatedId
@@ -5265,7 +5632,8 @@ and upsertRowsWithOrdinal
 /// `upsertRows` to report as their own `RowsUpdated` events.
 and private upsertRowsInTable
     (store: Store)
-    (db: Database)
+    (dbName: string)
+    (catalog: Catalog)
     (key: string)
     (table: Table)
     (columns: string list option)
@@ -5273,7 +5641,7 @@ and private upsertRowsInTable
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
-    : Result<Database * Map<string, (Value[] * Value[]) list> * (int64 * int64 option * int * Value[] list * (Value[] * Value[]) list), StorageError> =
+    : Result<Catalog * Map<TableAddress, (Value[] * Value[]) list> * (int64 * int64 option * int * Value[] list * (Value[] * Value[]) list), StorageError> =
                 let checkFks = store.ForeignKeyChecks
 
                 let indices =
@@ -5310,9 +5678,9 @@ and private upsertRowsInTable
                                   index: Map<string, Map<string, RowId>>,
                                   secondaryIndex: Map<string, Map<string, Set<RowId>>>,
                                   secondaryOrder: SecondaryOrder,
-                                  cascadeDb: Database,
-                                  visited: Map<string, Value[] list>,
-                                  cascaded: Map<string, (Value[] * Value[]) list>) ->
+                                  cascadeCatalog: Catalog,
+                                  visited: Map<TableAddress, Value[] list>,
+                                  cascaded: Map<TableAddress, (Value[] * Value[]) list>) ->
                                 if List.length rowValues <> List.length idxs then
                                     Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
                                 else
@@ -5369,11 +5737,22 @@ and private upsertRowsInTable
                                                     // child (parent-side) — or, per `ON UPDATE`,
                                                     // cascades/blanks that child instead.
                                                     (if checkFks then
-                                                         checkFkParents cascadeDb table.Columns table.ForeignKeys applied
-                                                         |> Result.bind (fun () -> cascadeUpdateVisited true cascadeDb visited cascaded key table.Columns existing applied)
+                                                         let currentDatabase = tryCatalogDatabase dbName cascadeCatalog |> Option.get
+
+                                                         checkFkParents cascadeCatalog dbName currentDatabase table.Columns table.ForeignKeys applied
+                                                         |> Result.bind (fun () ->
+                                                             cascadeUpdateVisited
+                                                                 true
+                                                                 cascadeCatalog
+                                                                 visited
+                                                                 cascaded
+                                                                 (tableAddress dbName key)
+                                                                 table.Columns
+                                                                 existing
+                                                                 applied)
                                                      else
-                                                         Ok(cascadeDb, visited, cascaded))
-                                                    |> Result.map (fun (cascadeDb', visited', cascaded') ->
+                                                         Ok(cascadeCatalog, visited, cascaded))
+                                                    |> Result.map (fun (cascadeCatalog', visited', cascaded') ->
                                                         rows.[pos] <- applied
 
                                                         // MySQL's `ON DUPLICATE KEY UPDATE`
@@ -5407,7 +5786,7 @@ and private upsertRowsInTable
                                                         index,
                                                         secondaryIndex,
                                                         secondaryOrder,
-                                                        cascadeDb',
+                                                        cascadeCatalog',
                                                         visited',
                                                         cascaded'))
                                             | candidate, None ->
@@ -5416,7 +5795,8 @@ and private upsertRowsInTable
                                                 // didn't collide with anything, so it's really
                                                 // an insert.
                                                 (if checkFks then
-                                                     checkFkParents cascadeDb table.Columns table.ForeignKeys candidate
+                                                     let currentDatabase = tryCatalogDatabase dbName cascadeCatalog |> Option.get
+                                                     checkFkParents cascadeCatalog dbName currentDatabase table.Columns table.ForeignKeys candidate
                                                  else
                                                      Ok())
                                                 |> Result.map (fun () ->
@@ -5442,18 +5822,18 @@ and private upsertRowsInTable
                                                     index,
                                                     secondaryIndex,
                                                     secondaryOrder,
-                                                    cascadeDb,
+                                                    cascadeCatalog,
                                                     visited,
                                                     cascaded))))
 
                     rowsIn
                     |> List.indexed
-                    |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, db, Map.empty, Map.empty))
-                    |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, secondaryIndex, secondaryOrder, cascadeDb, _visited, cascaded) ->
+                    |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, catalog, Map.empty, Map.empty))
+                    |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, secondaryIndex, secondaryOrder, cascadeCatalog, _visited, cascaded) ->
                         let finalRows = rows.DrainToImmutable()
 
                         let updatedTable = publishRows table { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
-                        Map.add key updatedTable cascadeDb,
+                        setCatalogTable (tableAddress dbName key) updatedTable cascadeCatalog,
                         cascaded,
                         (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated)))
 
@@ -5484,17 +5864,17 @@ and private upsertRowsInTable
 /// process.
 let rec private cascadeDeleteVisited
     (checkFks: bool)
-    (db: Database)
-    (visited: Map<string, Value[] list>)
-    (blanked: Map<string, (Value[] * Value[]) list>)
-    (tableKey: string)
+    (catalog: Catalog)
+    (visited: Map<TableAddress, Value[] list>)
+    (blanked: Map<TableAddress, (Value[] * Value[]) list>)
+    (address: TableAddress)
     (toDelete: Value[] list)
-    : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
-    let alreadyVisited = visited |> Map.tryFind tableKey |> Option.defaultValue []
+    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, (Value[] * Value[]) list>, StorageError> =
+    let alreadyVisited = visited |> Map.tryFind address |> Option.defaultValue []
     let toDelete = toDelete |> List.filter (fun row -> not (alreadyVisited |> List.exists ((=) row)))
 
-    let removeFrom (d: Database) =
-        let t = Map.find tableKey d
+    let removeFrom currentCatalog =
+        let t = tryCatalogTable address currentCatalog |> Option.get
         let rows = t.RowsArray.ToBuilder()
         let uniqueGroups = uniqueKeyGroups t
         let secondaryGroups = secondaryKeyGroups t
@@ -5512,26 +5892,26 @@ let rec private cascadeDeleteVisited
                 (t.UniqueIndex, t.SecondaryIndex, t.SecondaryOrder, toDelete)
 
         let updated = publishRows t { t with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
-        Map.add tableKey updated d
+        setCatalogTable address updated currentCatalog
 
     if toDelete.IsEmpty then
-        Ok(db, visited, blanked)
+        Ok(catalog, visited, blanked)
     else
-        let visited = visited |> Map.add tableKey (alreadyVisited @ toDelete)
+        let visited = visited |> Map.add address (alreadyVisited @ toDelete)
 
         if not checkFks then
-            Ok(removeFrom db, visited, blanked)
+            Ok(removeFrom catalog, visited, blanked)
         else
-            let table = Map.find tableKey db
+            let table = tryCatalogTable address catalog |> Option.get
 
-            let applyChild acc (childKey: string, fk: ForeignKeyDef) =
+            let applyChild acc (childAddress: TableAddress, fk: ForeignKeyDef) =
                 acc
-                |> Result.bind (fun (d, visited, blanked) ->
-                    let childTbl = Map.find childKey d
+                |> Result.bind (fun (currentCatalog, visited, blanked) ->
+                    let childTbl = tryCatalogTable childAddress currentCatalog |> Option.get
 
                     match fk.Columns |> traverse (resolveColumn childTbl.Columns), fk.RefColumns |> traverse (resolveColumn table.Columns) with
                     | Error _, _
-                    | _, Error _ -> Ok(d, visited, blanked) // stale FK metadata — see `checkFkParents`'s note.
+                    | _, Error _ -> Ok(currentCatalog, visited, blanked) // stale FK metadata — see `checkFkParents`'s note.
                     | Ok childIdxs, Ok refIdxs ->
                         let parentKeys = toDelete |> List.map (fun row -> refIdxs |> List.map (fun i -> row.[i]))
 
@@ -5544,10 +5924,10 @@ let rec private cascadeDeleteVisited
                         let matching = childTbl.RowsArray |> Seq.filter isChild |> List.ofSeq
 
                         if matching.IsEmpty then
-                            Ok(d, visited, blanked)
+                            Ok(currentCatalog, visited, blanked)
                         else
                             match fk.OnDelete |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
-                            | Some "CASCADE" -> cascadeDeleteVisited checkFks d visited blanked childKey matching
+                            | Some "CASCADE" -> cascadeDeleteVisited checkFks currentCatalog visited blanked childAddress matching
                             | Some "SET NULL" ->
                                 match childIdxs |> List.tryFind (fun i -> not childTbl.Columns.[i].Nullable) with
                                 | Some i -> Error(NotNullViolation childTbl.Columns.[i].Name)
@@ -5579,15 +5959,15 @@ let rec private cascadeDeleteVisited
 
                                     let blanked =
                                         blanked
-                                        |> Map.add childKey ((blanked |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev changes)
+                                        |> Map.add childAddress ((blanked |> Map.tryFind childAddress |> Option.defaultValue []) @ List.rev changes)
 
                                     let child = publishRows childTbl { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
-                                    Ok(Map.add childKey child d, visited, blanked)
+                                    Ok(setCatalogTable childAddress child currentCatalog, visited, blanked)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
-            referencingForeignKeys db tableKey
-            |> List.fold applyChild (Ok(db, visited, blanked))
-            |> Result.map (fun (d, visited, blanked) -> removeFrom d, visited, blanked)
+            referencingForeignKeys catalog address
+            |> List.fold applyChild (Ok(catalog, visited, blanked))
+            |> Result.map (fun (updatedCatalog, visited, blanked) -> removeFrom updatedCatalog, visited, blanked)
 
 /// As `cascadeDeleteVisited`, seeded with empty `visited`/`blanked` — its
 /// second return value is every row actually removed, by table key,
@@ -5598,11 +5978,11 @@ let rec private cascadeDeleteVisited
 /// `UPDATE` would.
 let private cascadeDelete
     (checkFks: bool)
-    (db: Database)
-    (tableKey: string)
+    (catalog: Catalog)
+    (address: TableAddress)
     (toDelete: Value[] list)
-    : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
-    cascadeDeleteVisited checkFks db Map.empty Map.empty tableKey toDelete
+    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, (Value[] * Value[]) list>, StorageError> =
+    cascadeDeleteVisited checkFks catalog Map.empty Map.empty address toDelete
 
 /// `REPLACE` inserts each candidate after deleting every row that conflicts
 /// with it on a primary or unique key. A candidate can therefore affect more
@@ -5618,46 +5998,47 @@ let replaceRows
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
     let key = normalizeTableName tableName
+    let address = tableAddress dbName key
 
     let result =
-        withDatabasePublishing store dbName snd (fun initialDb ->
+        withReferentialCatalogPublishing store dbName false snd (fun initialCatalog initialDb ->
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable initialDb tableName)
             |> Result.bind (fun initialTable ->
                 resolveInsertColumns initialTable columns
                 |> Result.bind (fun idxs ->
-                    let originalNameOf tableKey =
-                        initialDb
-                        |> Map.tryFind tableKey
+                    let originalNameOf tableAddress =
+                        initialCatalog
+                        |> tryCatalogTable tableAddress
                         |> Option.map (fun table -> table.OriginalName)
-                        |> Option.defaultValue tableKey
+                        |> Option.defaultValue tableAddress.Table
 
                     let commitEvents
-                        (removed: Map<string, Value[] list>)
-                        (blanked: Map<string, (Value[] * Value[]) list>)
+                        (removed: Map<TableAddress, Value[] list>)
+                        (blanked: Map<TableAddress, (Value[] * Value[]) list>)
                         (writeEvent: CommitEvent option)
                         =
                         let cascades =
-                            [ for KeyValue(tableKey, rows) in removed do
+                            [ for KeyValue(tableAddress, rows) in removed do
                                   if not rows.IsEmpty then
-                                      RowsDeleted(dbName, originalNameOf tableKey, rows)
+                                      RowsDeleted(catalogDatabaseName tableAddress.Database initialCatalog, originalNameOf tableAddress, rows)
 
-                              for KeyValue(tableKey, changes) in blanked do
+                              for KeyValue(tableAddress, changes) in blanked do
                                   if not changes.IsEmpty then
-                                      RowsUpdated(dbName, originalNameOf tableKey, changes) ]
+                                      RowsUpdated(catalogDatabaseName tableAddress.Database initialCatalog, originalNameOf tableAddress, changes) ]
 
                         cascades @ Option.toList writeEvent
 
                     let step acc rowValues =
                         acc
-                        |> Result.bind (fun (db,
+                        |> Result.bind (fun (catalog,
                                              nextAutoId,
                                              firstAuto,
                                              lastExplicit,
                                              affected,
                                              inserted,
                                              events) ->
-                            let table = Map.find key db
+                            let table = tryCatalogTable address catalog |> Option.get
 
                             if List.length rowValues <> List.length idxs then
                                 Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
@@ -5695,7 +6076,7 @@ let replaceRows
 
                                         let optimizedConflict =
                                             match conflicts with
-                                            | [ rowId, existing ] when (referencingForeignKeys db key).IsEmpty -> Some(rowId, existing)
+                                            | [ rowId, existing ] when (referencingForeignKeys catalog address).IsEmpty -> Some(rowId, existing)
                                             | _ -> None
 
                                         let deletedMatches =
@@ -5705,9 +6086,9 @@ let replaceRows
 
                                         let deletedConflicts = deletedMatches |> List.map snd
 
-                                        cascadeDelete store.ForeignKeyChecks db key deletedConflicts
-                                        |> Result.bind (fun (deletedDb, removed, blanked) ->
-                                            let target = Map.find key deletedDb
+                                        cascadeDelete store.ForeignKeyChecks catalog address deletedConflicts
+                                        |> Result.bind (fun (deletedCatalog, removed, blanked) ->
+                                            let target = tryCatalogTable address deletedCatalog |> Option.get
                                             let target', writeEvent, weight =
                                                 match optimizedConflict with
                                                 | Some(rowId, existing) ->
@@ -5755,10 +6136,11 @@ let replaceRows
                                                     Some(RowsInserted(dbName, tableName, [ candidate ])),
                                                     deletedConflicts.Length + 1
 
-                                            let db' = Map.add key target' deletedDb
+                                            let updatedCatalog = setCatalogTable address target' deletedCatalog
 
                                             (if store.ForeignKeyChecks then
-                                                 checkFkParents db' target.Columns target.ForeignKeys candidate
+                                                 let currentDatabase = tryCatalogDatabase address.Database updatedCatalog |> Option.get
+                                                 checkFkParents updatedCatalog dbName currentDatabase target.Columns target.ForeignKeys candidate
                                              else
                                                  Ok())
                                             |> Result.map (fun () ->
@@ -5768,7 +6150,7 @@ let replaceRows
                                                     | Some(false, value) -> firstAuto, Some value
                                                     | None -> firstAuto, lastExplicit
 
-                                                db',
+                                                updatedCatalog,
                                                 nextAutoId',
                                                 firstAuto',
                                                 lastExplicit',
@@ -5779,8 +6161,8 @@ let replaceRows
                     rowsIn
                     |> foldWithCancellation
                         step
-                        (Ok(initialDb, initialTable.NextAutoId, None, None, 0, [], []))
-                    |> Result.map (fun (db, _, firstAuto, lastExplicit, affected, inserted, events) ->
+                        (Ok(initialCatalog, initialTable.NextAutoId, None, None, 0, [], []))
+                    |> Result.map (fun (catalog, _, firstAuto, lastExplicit, affected, inserted, events) ->
                         let outcome =
                             { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
                               GeneratedId = firstAuto
@@ -5788,7 +6170,7 @@ let replaceRows
                               InsertedRows = List.rev inserted
                               IgnoredErrors = [] }
 
-                        db, (outcome, events)))))
+                        catalog, (outcome, events)))))
 
     match result with
     | Ok(outcome, _) -> Ok outcome
@@ -5813,27 +6195,28 @@ let private deleteRowsCore
     : Result<int, StorageError> =
     let eventsOf
         (_,
-         (db: Database),
-         (removed: Map<string, Value[] list>),
-         (blanked: Map<string, (Value[] * Value[]) list>))
+         (catalog: Catalog),
+         (removed: Map<TableAddress, Value[] list>),
+         (blanked: Map<TableAddress, (Value[] * Value[]) list>))
         =
-        let originalNameOf tableKey =
-            db
-            |> Map.tryFind tableKey
+        let originalNameOf address =
+            catalog
+            |> tryCatalogTable address
             |> Option.map (fun table -> table.OriginalName)
-            |> Option.defaultValue tableKey
+            |> Option.defaultValue address.Table
 
-        [ for KeyValue(tableKey, rows) in removed do
+        [ for KeyValue(address, rows) in removed do
               if not rows.IsEmpty then
-                  RowsDeleted(dbName, originalNameOf tableKey, rows)
+                  RowsDeleted(catalogDatabaseName address.Database catalog, originalNameOf address, rows)
 
-          for KeyValue(tableKey, changes) in blanked do
+          for KeyValue(address, changes) in blanked do
               if not changes.IsEmpty then
-                  RowsUpdated(dbName, originalNameOf tableKey, changes) ]
+                  RowsUpdated(catalogDatabaseName address.Database catalog, originalNameOf address, changes) ]
 
     let apply =
-        withDatabasePublishing store dbName eventsOf (fun db ->
+        withReferentialCatalogPublishing store dbName false eventsOf (fun catalog db ->
             let key = normalizeTableName tableName
+            let address = tableAddress dbName key
 
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable db tableName)
@@ -5852,8 +6235,8 @@ let private deleteRowsCore
                 |> Result.bind (fun flagged ->
                     let toDelete = flagged |> List.filter fst |> List.map snd
 
-                    cascadeDelete store.ForeignKeyChecks db key toDelete
-                    |> Result.map (fun (db', removed, blanked) -> db', (toDelete.Length, db, removed, blanked)))))
+                    cascadeDelete store.ForeignKeyChecks catalog address toDelete
+                    |> Result.map (fun (catalog', removed, blanked) -> catalog', (toDelete.Length, catalog, removed, blanked)))))
 
     let result =
         match candidates with
@@ -5884,6 +6267,44 @@ let deleteRowsCandidates
     : Result<int, StorageError> =
     deleteRowsCore store dbName tableName (Some candidates) predicate
 
+let private validateCatalogForeignKeys (baseCatalog: Catalog) (catalog: Catalog) : unit =
+    let conflict database = raise (LockWaitTimeout database)
+
+    let changed address =
+        match tryCatalogTable address baseCatalog, tryCatalogTable address catalog with
+        | Some before, Some after -> not (obj.ReferenceEquals(before, after))
+        | None, None -> false
+        | _ -> true
+
+    for KeyValue(databaseName, database) in catalog do
+        for KeyValue(tableName, table) in database do
+            for foreignKey in table.ForeignKeys do
+                let childAddress = tableAddress databaseName tableName
+                let parentAddress = referencedTableAddress databaseName foreignKey
+
+                if changed childAddress || changed parentAddress then
+                    match tryCatalogTable parentAddress catalog with
+                    | None -> conflict databaseName
+                    | Some parent ->
+                        match
+                            foreignKey.Columns |> traverse (resolveColumn table.Columns),
+                            foreignKey.RefColumns |> traverse (resolveColumn parent.Columns)
+                        with
+                        | Ok childIndices, Ok parentIndices when childIndices.Length = parentIndices.Length ->
+                            for row in table.RowsArray do
+                                let childKey = childIndices |> List.map (fun index -> row.[index])
+
+                                if childKey |> List.forall ((<>) VNull) then
+                                    let parentExists =
+                                        parent.RowsArray
+                                        |> Seq.exists (fun parentRow ->
+                                            let parentKey = parentIndices |> List.map (fun index -> parentRow.[index])
+                                            List.forall2 (fun childValue parentValue -> compare childValue parentValue = 0) childKey parentKey)
+
+                                    if not parentExists then
+                                        conflict databaseName
+                        | _ -> conflict databaseName
+
 let private canMergePointUpdate tableKey rowIds (baseDb: Database) (batchDb: Database) (liveDb: Database) =
     let unchangedOtherTables =
         Set.union (keysOf baseDb) (keysOf batchDb)
@@ -5900,7 +6321,7 @@ let private canMergePointUpdate tableKey rowIds (baseDb: Database) (batchDb: Dat
             [ for foreignKey in baseTable.ForeignKeys do
                   yield! foreignKey.Columns
 
-              for _, foreignKey in referencingForeignKeys liveDb tableKey do
+              for _, foreignKey in referencingForeignKeysInDatabase liveDb tableKey do
                   yield! foreignKey.RefColumns ]
             |> List.map (resolveColumn baseTable.Columns)
 
@@ -6027,7 +6448,7 @@ let private mergeDatabaseSlot (timeout: TimeSpan) (dbName: string) (slot: Databa
 /// Merges a private statement or transaction snapshot into the live catalog.
 /// Rows changed from the same base row conflict; disjoint row changes combine
 /// under the database slot lock without a transaction-wide gate.
-let mergeCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
+let private mergeCatalogIntoWithTimeoutCore (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
     let dbKeys = Set.union (keysOf baseCatalog) (keysOf batchCatalog)
 
     for dbName in dbKeys do
@@ -6045,6 +6466,13 @@ let mergeCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog:
             let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
             mergeDatabaseSlot timeout dbName slot baseDb batchDb
 
+    if store.ForeignKeyChecks && catalogHasQualifiedForeignKeys batchCatalog then
+        validateCatalogForeignKeys baseCatalog store.Catalog
+
+let mergeCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
+    withReferentialSchemaLock false store (fun () ->
+        mergeCatalogIntoWithTimeoutCore timeout store baseCatalog batchCatalog)
+
 let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
     mergeCatalogIntoWithTimeout (Fsdb.Limits.lockWaitTimeout ()) store baseCatalog batchCatalog
 
@@ -6055,13 +6483,14 @@ let private commitCatalogIntoWith
     (baseCatalog: Catalog)
     (snapshot: Store)
     : unit =
-    match store.PendingEvents with
-    | Some _ ->
-        mergeCatalogIntoWithTimeout timeout store baseCatalog snapshot.Catalog
-        prepareTransactionEvents store snapshot |> fun acknowledge -> acknowledge ()
-    | None ->
-        let batchCatalog = snapshot.Catalog
+    let batchCatalog = snapshot.Catalog
+    let validateWholeSnapshot = validateWholeSnapshot || catalogHasQualifiedForeignKeys batchCatalog
 
+    match store.PendingEvents, validateWholeSnapshot with
+    | Some _, false ->
+        mergeCatalogIntoWithTimeoutCore timeout store baseCatalog snapshot.Catalog
+        prepareTransactionEvents store snapshot |> fun acknowledge -> acknowledge ()
+    | _ ->
         let changedKeys =
             Set.union (keysOf baseCatalog) (keysOf batchCatalog)
             |> Set.filter (fun dbName ->
@@ -6122,6 +6551,9 @@ let private commitCatalogIntoWith
                             | Some baseDb when not (obj.ReferenceEquals(slot.Value, baseDb)) -> raise (LockWaitTimeout dbName)
                             | _ -> ()
 
+                        if store.ForeignKeyChecks then
+                            validateCatalogForeignKeys baseCatalog batchCatalog
+
                     for dbName in changedKeys do
                         match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
                         | Some baseDb, None ->
@@ -6151,16 +6583,20 @@ let private commitCatalogIntoWith
             acknowledge ()
 
 let commitCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    commitCatalogIntoWith timeout false store baseCatalog snapshot
+    withReferentialSchemaLock true store (fun () ->
+        commitCatalogIntoWith timeout false store baseCatalog snapshot)
 
 let commitCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false store baseCatalog snapshot
+    withReferentialSchemaLock true store (fun () ->
+        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false store baseCatalog snapshot)
 
 let commitSerializableCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    commitCatalogIntoWith timeout true store baseCatalog snapshot
+    withReferentialSchemaLock true store (fun () ->
+        commitCatalogIntoWith timeout true store baseCatalog snapshot)
 
 let commitSerializableCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    commitSerializableCatalogIntoWithTimeout (Fsdb.Limits.lockWaitTimeout ()) store baseCatalog snapshot
+    withReferentialSchemaLock true store (fun () ->
+        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) true store baseCatalog snapshot)
 
 let private withPointUpdateDatabase
     (store: Store)
@@ -6244,24 +6680,25 @@ let updateRows
     : Result<int, StorageError> =
     let eventsOf
         ((changes: (Value[] * Value[]) list),
-         (cascaded: Map<string, (Value[] * Value[]) list>),
-         (db: Database))
+         (cascaded: Map<TableAddress, (Value[] * Value[]) list>),
+         (catalog: Catalog))
         =
-        let originalNameOf tableKey =
-            db
-            |> Map.tryFind tableKey
+        let originalNameOf address =
+            catalog
+            |> tryCatalogTable address
             |> Option.map (fun table -> table.OriginalName)
-            |> Option.defaultValue tableKey
+            |> Option.defaultValue address.Table
 
         [ if not changes.IsEmpty then
               RowsUpdated(dbName, tableName, changes)
 
-          for KeyValue(tableKey, updates) in cascaded do
+          for KeyValue(address, updates) in cascaded do
               if not updates.IsEmpty then
-                  RowsUpdated(dbName, originalNameOf tableKey, updates) ]
+                  RowsUpdated(catalogDatabaseName address.Database catalog, originalNameOf address, updates) ]
 
-    let apply candidateRows db =
+    let apply candidateRows catalog db =
         let key = normalizeTableName tableName
+        let address = tableAddress dbName key
 
         virtualWriteGuard store dbName tableName
         |> Result.bind (fun () -> tryGetTable db tableName)
@@ -6280,21 +6717,21 @@ let updateRows
                           index: Map<string, Map<string, RowId>>,
                           secondaryIndex: Map<string, Map<string, Set<RowId>>>,
                           secondaryOrder: SecondaryOrder,
-                          cascadeDb: Database,
-                          visited: Map<string, Value[] list>,
-                          cascaded: Map<string, (Value[] * Value[]) list>) ->
+                          cascadeCatalog: Catalog,
+                          visited: Map<TableAddress, Value[] list>,
+                          cascaded: Map<TableAddress, (Value[] * Value[]) list>) ->
                             let rowId =
                                 match builder.TryFind rowId with
                                 | Some current when obj.ReferenceEquals(current, row) -> Some rowId
                                 | _ -> None
 
                             match rowId with
-                            | None -> Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeDb, visited, cascaded)
+                            | None -> Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, visited, cascaded)
                             | Some rowId ->
                                 predicate row
                                 |> Result.bind (fun keep ->
                                     if not keep then
-                                        Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeDb, visited, cascaded)
+                                        Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, visited, cascaded)
                                     else
                                         updater row
                                         |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
@@ -6322,32 +6759,35 @@ let updateRows
                                                 // any child row this rewrite would otherwise
                                                 // orphan; anything else fails 1451.
                                                 (if checkFks then
-                                                     checkFkParents cascadeDb table.Columns table.ForeignKeys newRow
-                                                     |> Result.bind (fun () -> cascadeUpdateVisited true cascadeDb visited cascaded key table.Columns row newRow)
+                                                     let currentDatabase = tryCatalogDatabase address.Database cascadeCatalog |> Option.get
+
+                                                     checkFkParents cascadeCatalog dbName currentDatabase table.Columns table.ForeignKeys newRow
+                                                     |> Result.bind (fun () ->
+                                                         cascadeUpdateVisited true cascadeCatalog visited cascaded address table.Columns row newRow)
                                                  else
-                                                     Ok(cascadeDb, visited, cascaded))
-                                                |> Result.map (fun (cascadeDb', visited', cascaded') ->
+                                                     Ok(cascadeCatalog, visited, cascaded))
+                                                |> Result.map (fun (cascadeCatalog', visited', cascaded') ->
                                                     let index, secondaryIndex, secondaryOrder = reindexRow table.Columns uniqueGroups secondaryGroups (Some(rowId, row)) (Some(rowId, newRow)) index secondaryIndex secondaryOrder
-                                                    newRow, index, secondaryIndex, secondaryOrder, cascadeDb', visited', cascaded'))
-                                        |> Result.map (fun (newRow, index', secondaryIndex', secondaryOrder', cascadeDb', visited', cascaded') ->
+                                                    newRow, index, secondaryIndex, secondaryOrder, cascadeCatalog', visited', cascaded'))
+                                        |> Result.map (fun (newRow, index', secondaryIndex', secondaryOrder', cascadeCatalog', visited', cascaded') ->
                                             builder.[rowId] <- newRow
-                                            (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', secondaryIndex', secondaryOrder', cascadeDb', visited', cascaded')))
+                                            (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', secondaryIndex', secondaryOrder', cascadeCatalog', visited', cascaded')))
 
             candidateRows
             |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
-            |> foldWithCancellation step (Ok([], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, db, Map.empty, Map.empty))
-            |> Result.map (fun (changesRev, index, secondaryIndex, secondaryOrder, cascadeDb, _visited, cascaded) ->
+            |> foldWithCancellation step (Ok([], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, catalog, Map.empty, Map.empty))
+            |> Result.map (fun (changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, _visited, cascaded) ->
                 let updated = publishRows table { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
-                Map.add key updated cascadeDb, (List.rev changesRev, cascaded, db)))
+                setCatalogTable address updated cascadeCatalog, (List.rev changesRev, cascaded, catalog)))
 
     let result =
-        match candidates with
-        | None -> withDatabasePublishing store dbName eventsOf (apply None)
-        | Some rows ->
+        match candidates, catalogHasQualifiedForeignKeys store.Catalog with
+        | None, _ -> withReferentialCatalogPublishing store dbName false eventsOf (apply None)
+        | Some rows, true ->
             let rowIds = rows |> List.map fst
 
             withRowLocks store dbName tableName rowIds (fun () ->
-                let operation db =
+                withReferentialCatalogPublishing store dbName false eventsOf (fun catalog db ->
                     let refreshed =
                         db
                         |> Map.tryFind (normalizeTableName tableName)
@@ -6357,7 +6797,24 @@ let updateRows
                             |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
                         |> Option.defaultValue []
 
-                    apply (Some refreshed) db
+                    apply (Some refreshed) catalog db))
+        | Some rows, false ->
+            let rowIds = rows |> List.map fst
+
+            withRowLocks store dbName tableName rowIds (fun () ->
+                let operation db =
+                    let catalog = setCatalogDatabase dbName db store.Catalog
+                    let refreshed =
+                        db
+                        |> Map.tryFind (normalizeTableName tableName)
+                        |> Option.map (fun table ->
+                            rowIds
+                            |> List.distinct
+                            |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
+                        |> Option.defaultValue []
+
+                    apply (Some refreshed) catalog db
+                    |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result)
 
                 withPointUpdateDatabase store dbName tableName rowIds eventsOf operation)
 

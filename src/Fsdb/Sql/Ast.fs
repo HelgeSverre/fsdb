@@ -378,15 +378,14 @@ and IndexDef =
         this.KeyColumns
         |> List.choose (fun column -> if column.Name = "" then None else Some column.Name)
 
-/// A `CONSTRAINT name FOREIGN KEY (cols) REFERENCES tbl (cols) [ON DELETE
+/// A `CONSTRAINT name FOREIGN KEY (cols) REFERENCES [db.]tbl (cols) [ON DELETE
 /// ...] [ON UPDATE ...]` — enforced (insert/update-time parent check,
 /// `CASCADE`/`SET NULL`/`RESTRICT` on both `ON DELETE` and `ON UPDATE`) by
 /// `Storage`'s `checkFkParents`/`cascadeDeleteVisited`/`cascadeUpdateVisited`.
-/// `RefTable` carries no database qualifier, so a cross-database FK remains
-/// invisible to the referencing-side checks.
 and ForeignKeyDef =
     { Name: string
       Columns: string list
+      RefDatabase: string option
       RefTable: string
       RefColumns: string list
       OnDelete: string option

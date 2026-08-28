@@ -2292,16 +2292,23 @@ let private constraintName: Parser<string option, unit> =
     opt (keyword "CONSTRAINT" >>. opt identifier) |>> Option.flatten
 
 let private foreignKeyItem: Parser<ForeignKeyDef, unit> =
+    let referencedTable =
+        identifier .>>. opt (sym "." >>. qualifiedIdentifier)
+        |>> function
+            | database, Some table -> Some database, table
+            | table, None -> None, table
+
     (constraintName .>> keyword "FOREIGN" .>> keyword "KEY"
      .>>. opt (notFollowedBy (pchar '(') >>. identifier)
      .>>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
      .>> keyword "REFERENCES"
-     .>>. identifier
+     .>>. referencedTable
      .>>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
      .>>. foreignKeyRefOptions)
-    |>> fun (((((constraintName, keyName), cols), refTable), refCols), (onDelete, onUpdate)) ->
+    |>> fun (((((constraintName, keyName), cols), (refDatabase, refTable)), refCols), (onDelete, onUpdate)) ->
         { Name = constraintName |> Option.orElse keyName |> Option.defaultValue (sprintf "%s_%s_foreign" refTable (List.head cols))
           Columns = cols
+          RefDatabase = refDatabase
           RefTable = refTable
           RefColumns = refCols
           OnDelete = onDelete

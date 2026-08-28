@@ -1202,7 +1202,7 @@ let tests =
                   "c"
                   [ idCol "id"; { (idCol "pid") with PrimaryKey = false } ]
                   []
-                  [ { Name = "fkc"; Columns = [ "pid" ]; RefTable = "p"; RefColumns = [ "id" ]; OnDelete = None; OnUpdate = None } ]
+                  [ { Name = "fkc"; Columns = [ "pid" ]; RefDatabase = None; RefTable = "p"; RefColumns = [ "id" ]; OnDelete = None; OnUpdate = None } ]
                   None
                   None
               |> ignore
@@ -1367,6 +1367,45 @@ let tests =
               let _, altered = handle session "ALTER TABLE ordered_primary ALTER INDEX ix_body VISIBLE"
               Expect.equal altered (Affected 0UL) "visibility altered"
               assertOrder (load dir) true "WAL retains altered visibility"
+
+          testCase "qualified foreign keys survive WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let mutable session = Fsdb.Session.create 1 store
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+
+                  match result with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> ()
+
+              execute "CREATE DATABASE parent_db"
+              execute "CREATE DATABASE child_db"
+              execute "CREATE TABLE parent_db.parents (id INT PRIMARY KEY)"
+              execute "CREATE TABLE child_db.children (id INT PRIMARY KEY, parent_id INT, CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parent_db.parents (id) ON DELETE CASCADE)"
+              execute "INSERT INTO parent_db.parents VALUES (1)"
+              execute "INSERT INTO child_db.children VALUES (10, 1)"
+
+              let assertReference (recovered: Store) message =
+                  let foreignKey = recovered.Catalog.["child_db"].["children"].ForeignKeys |> List.exactlyOne
+                  Expect.equal foreignKey.RefDatabase (Some "parent_db") message
+                  Expect.equal foreignKey.RefTable "parents" "referenced table"
+
+              assertReference (load dir) "WAL reference"
+              snapshotNow dir store
+              assertReference (load dir) "snapshot reference"
+
+              match deleteRows store "parent_db" "parents" (fun _ -> Ok true) with
+              | Ok 1 -> ()
+              | other -> failtestf "expected durable cascade, got %A" other
+
+              let recovered = load dir
+              Expect.isEmpty (rowsOf recovered "parent_db" "parents") "parent delete survives recovery"
+              Expect.isEmpty (rowsOf recovered "child_db" "children") "cascade survives recovery"
 
           testCase "a column comment survives a restart"
           <| fun _ ->

@@ -13427,30 +13427,23 @@ let rec executeAs
     | DropTable(names, ifExists) ->
         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
-        let dropOne name =
-            let db, name = splitQualified dbName name
+        let targets = names |> List.map (splitQualified dbName)
 
-            match dropTable snapshot db name with
-            | Ok() ->
-                let removeTriggers =
-                    deleteRows
-                        snapshot
-                        "mysql"
-                        "triggers"
-                        (fun row ->
-                            let text i = toText row.[i] |> Option.defaultValue ""
+        let removeStoredObjects (db, name) =
+            deleteRows
+                snapshot
+                "mysql"
+                "triggers"
+                (fun row ->
+                    let text i = toText row.[i] |> Option.defaultValue ""
 
-                            Ok(
-                                System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
-                                && System.String.Equals(text 2, normalizeTableName name, System.StringComparison.OrdinalIgnoreCase)
-                            ))
+                    Ok(
+                        System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
+                        && System.String.Equals(text 2, normalizeTableName name, System.StringComparison.OrdinalIgnoreCase)
+                    ))
+            |> Result.bind (fun _ -> removeStoredChecks snapshot db name |> Result.map ignore)
 
-                removeTriggers
-                |> Result.bind (fun _ -> removeStoredChecks snapshot db name |> Result.map ignore)
-            | Error(NoSuchTable _) when ifExists -> Ok()
-            | Error e -> Error e
-
-        match names |> traverse dropOne with
+        match dropTables snapshot ifExists targets |> Result.bind (traverse removeStoredObjects) with
         | Ok _ ->
             Storage.commitCatalogInto store baseCatalog snapshot
             ids, Affected 0UL

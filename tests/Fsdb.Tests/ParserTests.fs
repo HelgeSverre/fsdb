@@ -1338,6 +1338,7 @@ let tests =
                         { Indexes = []
                           ForeignKeys = [ { Name = "posts_user_id_foreign";
                                 Columns = [ "user_id" ];
+                                RefDatabase = None;
                                 RefTable = "users";
                                 RefColumns = [ "id" ];
                                 OnDelete = Some "CASCADE";
@@ -1355,6 +1356,15 @@ let tests =
                           Checks = []
                           IfNotExists = false } -> ()
                     | other -> failtestf "expected a synthesized FK name, got %A" other
+
+                testCase "foreign keys retain a referenced database qualifier"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE child (parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent_db.parents (id))" with
+                    | CreateTable { ForeignKeys = [ foreignKey ] } ->
+                        Expect.equal foreignKey.RefDatabase (Some "parent_db") "referenced database"
+                        Expect.equal foreignKey.RefTable "parents" "referenced table"
+                        Expect.equal foreignKey.RefColumns [ "id" ] "referenced columns"
+                    | other -> failtestf "expected a qualified foreign-key target, got %A" other
 
                 testCase "a bare CONSTRAINT with no symbol name before FOREIGN KEY still parses"
                 <| fun _ ->
@@ -2043,7 +2053,7 @@ let tests =
                     with
                     | AlterTable(
                         "posts",
-                        [ AddForeignKey { Name = "fk1"; Columns = [ "user_id" ]; RefTable = "users"; RefColumns = [ "id" ] }
+                        [ AddForeignKey { Name = "fk1"; Columns = [ "user_id" ]; RefDatabase = None; RefTable = "users"; RefColumns = [ "id" ] }
                           DropForeignKey "fk_old" ]) -> ()
                     | other -> failtestf "expected add/drop foreign key actions, got %A" other
 
@@ -2058,6 +2068,7 @@ let tests =
                         [ AddForeignKey
                               { Name = "fk.theme.preview_media_id"
                                 Columns = [ "preview_media_id" ]
+                                RefDatabase = None
                                 RefTable = "media"
                                 RefColumns = [ "id" ]
                                 OnDelete = Some "SET NULL"

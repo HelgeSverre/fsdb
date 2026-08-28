@@ -1111,6 +1111,7 @@ let tests =
                     let fk =
                         { Name = "fk_dept"
                           Columns = [ "dept_id" ]
+                          RefDatabase = None
                           RefTable = "departments"
                           RefColumns = [ "id" ]
                           OnDelete = None
@@ -1900,7 +1901,7 @@ let tests =
                     createTable store defaultDatabase "other" [ { (col "id" (TInt false) false) with PrimaryKey = true } ] [] [] None None |> ignore
 
                     let fk =
-                        { Name = "fk_x"; Columns = [ "id" ]; RefTable = "other"; RefColumns = [ "id" ]; OnDelete = None; OnUpdate = None }
+                        { Name = "fk_x"; Columns = [ "id" ]; RefDatabase = None; RefTable = "other"; RefColumns = [ "id" ]; OnDelete = None; OnUpdate = None }
 
                     match alterTable store defaultDatabase "users" [ AddForeignKey fk ] with
                     | Ok() -> ()
@@ -2060,6 +2061,7 @@ let tests =
                     let fk =
                         { Name = "fk_dept"
                           Columns = [ "dept_id" ]
+                          RefDatabase = None
                           RefTable = "departments"
                           RefColumns = [ "id" ]
                           OnDelete = onDelete
@@ -2081,6 +2083,282 @@ let tests =
 
                     store
 
+                let withCrossDatabaseForeignKey onDelete onUpdate =
+                    let store = create ()
+                    createDatabase store "parent_db" |> ignore
+                    createDatabase store "child_db" |> ignore
+                    createTable store "parent_db" "parents" [ idCol ] [] [] None None |> ignore
+
+                    let foreignKey =
+                        { Name = "fk_cross_parent"
+                          Columns = [ "parent_id" ]
+                          RefDatabase = Some "parent_db"
+                          RefTable = "parents"
+                          RefColumns = [ "id" ]
+                          OnDelete = onDelete
+                          OnUpdate = onUpdate }
+
+                    createTable
+                        store
+                        "child_db"
+                        "children"
+                        [ idCol; col "parent_id" (TInt false) true ]
+                        []
+                        [ foreignKey ]
+                        None
+                        None
+                    |> ignore
+
+                    store
+
+                testCase "qualified foreign keys enforce parents and cascade across databases"
+                <| fun _ ->
+                    let store = withCrossDatabaseForeignKey (Some "CASCADE") (Some "CASCADE")
+
+                    match insertRows store "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] with
+                    | Error(ForeignKeyParentMissing "fk_cross_parent") -> ()
+                    | other -> failtestf "expected missing cross-database parent, got %A" other
+
+                    insertRows store "parent_db" "parents" None [ [ VInt 1L ] ] |> ignore
+                    insertRows store "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] |> ignore
+
+                    match
+                        updateRows
+                            store
+                            "parent_db"
+                            "parents"
+                            None
+                            (fun row -> Ok(row.[0] = VInt 1L))
+                            (fun _ -> Ok [| VInt 2L |])
+                    with
+                    | Ok 1 -> ()
+                    | other -> failtestf "expected one updated parent, got %A" other
+
+                    match scan store "child_db" "children" with
+                    | Ok(_, rows) -> Expect.equal (rows |> Seq.map (fun row -> row.[1]) |> List.ofSeq) [ VInt 2L ] "updated child key"
+                    | Error error -> failtestf "expected children, got %A" error
+
+                    match deleteRows store "parent_db" "parents" (fun row -> Ok(row.[0] = VInt 2L)) with
+                    | Ok 1 -> ()
+                    | other -> failtestf "expected one deleted parent, got %A" other
+
+                    match scan store "child_db" "children" with
+                    | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "deleted child row"
+                    | Error error -> failtestf "expected children, got %A" error
+
+                testCase "qualified foreign-key restrictions leave both databases unchanged"
+                <| fun _ ->
+                    let store = withCrossDatabaseForeignKey None None
+                    insertRows store "parent_db" "parents" None [ [ VInt 1L ] ] |> ignore
+                    insertRows store "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] |> ignore
+
+                    match deleteRows store "parent_db" "parents" (fun _ -> Ok true) with
+                    | Error(ForeignKeyRestrict "fk_cross_parent") -> ()
+                    | other -> failtestf "expected cross-database restriction, got %A" other
+
+                    let rowCount database table =
+                        match scan store database table with
+                        | Ok(_, rows) -> Seq.length rows
+                        | Error error -> failtestf "expected %s.%s, got %A" database table error
+
+                    Expect.equal (rowCount "parent_db" "parents") 1 "parent row"
+                    Expect.equal (rowCount "child_db" "children") 1 "child row"
+
+                testCase "qualified cascades apply to upserts and replace"
+                <| fun _ ->
+                    let upsertStore = withCrossDatabaseForeignKey (Some "CASCADE") (Some "CASCADE")
+                    insertRows upsertStore "parent_db" "parents" None [ [ VInt 1L ] ] |> ignore
+                    insertRows upsertStore "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] |> ignore
+
+                    let updateParent (_: Value[]) (_: Value[]) = Ok [| VInt 2L |]
+
+                    match upsertRows upsertStore "parent_db" "parents" None [ [ VInt 1L ] ] prepareRow updateParent false with
+                    | Ok { Affected = 2 } -> ()
+                    | other -> failtestf "expected parent upsert, got %A" other
+
+                    match scan upsertStore "child_db" "children" with
+                    | Ok(_, rows) -> Expect.equal (rows |> Seq.map (fun row -> row.[1]) |> List.ofSeq) [ VInt 2L ] "upsert cascade"
+                    | Error error -> failtestf "expected upsert child, got %A" error
+
+                    let replaceStore = withCrossDatabaseForeignKey (Some "CASCADE") None
+                    insertRows replaceStore "parent_db" "parents" None [ [ VInt 1L ] ] |> ignore
+                    insertRows replaceStore "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] |> ignore
+
+                    match replaceRows replaceStore "parent_db" "parents" None [ [ VInt 1L ] ] prepareRow with
+                    | Ok { Affected = 2 } -> ()
+                    | other -> failtestf "expected parent replace, got %A" other
+
+                    match scan replaceStore "child_db" "children" with
+                    | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "replace delete cascade"
+                    | Error error -> failtestf "expected replace child, got %A" error
+
+                testCase "qualified foreign keys reject a stale transaction snapshot"
+                <| fun _ ->
+                    let store = withCrossDatabaseForeignKey (Some "CASCADE") None
+                    insertRows store "parent_db" "parents" None [ [ VInt 1L ] ] |> ignore
+                    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+                    insertRows snapshot "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] |> ignore
+                    deleteRows store "parent_db" "parents" (fun _ -> Ok true) |> ignore
+
+                    Expect.throwsT<LockWaitTimeout>
+                        (fun () -> commitCatalogInto store baseCatalog snapshot)
+                        "the parent root changed before the child commit"
+
+                    match scan store "child_db" "children" with
+                    | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "failed transaction stays private"
+                    | Error error -> failtestf "expected live children, got %A" error
+
+                testCase "ALTER TABLE adds a qualified foreign key"
+                <| fun _ ->
+                    let store = create ()
+                    createDatabase store "parent_db" |> ignore
+                    createDatabase store "child_db" |> ignore
+                    createTable store "parent_db" "parents" [ idCol ] [] [] None None |> ignore
+                    createTable store "child_db" "children" [ idCol; col "parent_id" (TInt false) true ] [] [] None None |> ignore
+
+                    let foreignKey =
+                        { Name = "fk_cross_parent"
+                          Columns = [ "parent_id" ]
+                          RefDatabase = Some "parent_db"
+                          RefTable = "parents"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = None }
+
+                    match alterTable store "child_db" "children" [ AddForeignKey foreignKey ] with
+                    | Ok() -> ()
+                    | Error error -> failtestf "expected ALTER TABLE to succeed, got %A" error
+
+                    match insertRows store "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] with
+                    | Error(ForeignKeyParentMissing "fk_cross_parent") -> ()
+                    | other -> failtestf "expected the altered constraint to be enforced, got %A" other
+
+                testCase "ALTER TABLE rejects existing rows without a qualified parent"
+                <| fun _ ->
+                    let store = create ()
+                    createDatabase store "parent_db" |> ignore
+                    createDatabase store "child_db" |> ignore
+                    createTable store "parent_db" "parents" [ idCol ] [] [] None None |> ignore
+                    createTable store "child_db" "children" [ idCol; col "parent_id" (TInt false) true ] [] [] None None |> ignore
+                    insertRows store "child_db" "children" None [ [ VInt 10L; VInt 99L ] ] |> ignore
+
+                    let foreignKey =
+                        { Name = "fk_cross_parent"
+                          Columns = [ "parent_id" ]
+                          RefDatabase = Some "parent_db"
+                          RefTable = "parents"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = None }
+
+                    match alterTable store "child_db" "children" [ AddForeignKey foreignKey ] with
+                    | Error(ForeignKeyParentMissing "fk_cross_parent") -> ()
+                    | other -> failtestf "expected the existing orphan to reject ALTER TABLE, got %A" other
+
+                    Expect.isEmpty store.Catalog.["child_db"].["children"].ForeignKeys "failed constraint stays private"
+
+                testCase "qualified references protect parent DDL"
+                <| fun _ ->
+                    let store = withCrossDatabaseForeignKey None None
+
+                    match dropTable store "parent_db" "parents" with
+                    | Error(ExpressionError(3730, _)) -> ()
+                    | other -> failtestf "expected DROP TABLE to be restricted, got %A" other
+
+                    match truncate store "parent_db" "parents" with
+                    | Error(ExpressionError(1701, _)) -> ()
+                    | other -> failtestf "expected TRUNCATE to be restricted, got %A" other
+
+                    match dropDatabase store "parent_db" with
+                    | Error(ExpressionError(3730, _)) -> ()
+                    | other -> failtestf "expected DROP DATABASE to be restricted, got %A" other
+
+                    dropTable store "child_db" "children" |> ignore
+
+                    match dropTable store "parent_db" "parents" with
+                    | Ok() -> ()
+                    | Error error -> failtestf "expected the unreferenced parent to drop, got %A" error
+
+                testCase "renaming a qualified parent retargets the foreign key"
+                <| fun _ ->
+                    let store = withCrossDatabaseForeignKey (Some "CASCADE") None
+                    insertRows store "parent_db" "parents" None [ [ VInt 1L ] ] |> ignore
+                    insertRows store "child_db" "children" None [ [ VInt 10L; VInt 1L ] ] |> ignore
+
+                    renameTable store "parent_db" "parents" "renamed_parents"
+                    |> Result.defaultWith (failtestf "expected the parent rename to succeed, got %A")
+
+                    let foreignKey = store.Catalog.["child_db"].["children"].ForeignKeys |> List.exactlyOne
+                    Expect.equal foreignKey.RefTable "renamed_parents" "referenced table"
+
+                    deleteRows store "parent_db" "renamed_parents" (fun _ -> Ok true)
+                    |> Result.defaultWith (failtestf "expected the renamed parent delete to succeed, got %A")
+                    |> ignore
+
+                    match scan store "child_db" "children" with
+                    | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "cascade follows renamed parent"
+                    | Error error -> failtestf "expected children, got %A" error
+
+                testCase "a batch drop may include a qualified child and parent"
+                <| fun _ ->
+                    let store = withCrossDatabaseForeignKey None None
+
+                    match dropTables store false [ "parent_db", "parents"; "child_db", "children" ] with
+                    | Ok dropped ->
+                        Expect.equal
+                            (Set.ofList dropped)
+                            (Set.ofList [ "parent_db", "parents"; "child_db", "children" ])
+                            "both tables dropped"
+                    | Error error -> failtestf "expected the related tables to drop atomically, got %A" error
+
+                testCase "qualified database names resolve case-insensitively without changing catalog keys"
+                <| fun _ ->
+                    let store = create ()
+                    createDatabase store "Parent_DB" |> ignore
+                    createDatabase store "Child_DB" |> ignore
+                    createTable store "Parent_DB" "parents" [ idCol ] [] [] None None |> ignore
+
+                    let foreignKey =
+                        { Name = "fk_cross_parent"
+                          Columns = [ "parent_id" ]
+                          RefDatabase = Some "PARENT_db"
+                          RefTable = "parents"
+                          RefColumns = [ "id" ]
+                          OnDelete = Some "CASCADE"
+                          OnUpdate = None }
+
+                    createTable
+                        store
+                        "Child_DB"
+                        "children"
+                        [ idCol; col "parent_id" (TInt false) true ]
+                        []
+                        [ foreignKey ]
+                        None
+                        None
+                    |> ignore
+
+                    insertRows store "Parent_DB" "parents" None [ [ VInt 1L ] ] |> ignore
+                    insertRows store "Child_DB" "children" None [ [ VInt 10L; VInt 1L ] ] |> ignore
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit.Add events.Add
+                    deleteRows store "Parent_DB" "parents" (fun _ -> Ok true) |> ignore
+
+                    Expect.isTrue (store.Catalog |> Map.containsKey "Parent_DB") "parent key spelling"
+                    Expect.isTrue (store.Catalog |> Map.containsKey "Child_DB") "child key spelling"
+                    Expect.isFalse (store.Catalog |> Map.containsKey "parent_db") "no duplicate parent key"
+
+                    Expect.isTrue
+                        (events
+                         |> Seq.exists (function
+                             | RowsDeleted("Child_DB", "children", _) -> true
+                             | _ -> false))
+                        "cascade events retain the catalog's database spelling"
+
+                    match scan store "Child_DB" "children" with
+                    | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "case-insensitive cascade"
+                    | Error error -> failtestf "expected children, got %A" error
+
                 testCase "CREATE rejects SET NULL on a NOT NULL child column"
                 <| fun _ ->
                     let store = create ()
@@ -2089,6 +2367,7 @@ let tests =
                     let foreignKey =
                         { Name = "fk_parent"
                           Columns = [ "parent_id" ]
+                          RefDatabase = None
                           RefTable = "parents"
                           RefColumns = [ "id" ]
                           OnDelete = Some "SET NULL"
@@ -2120,6 +2399,7 @@ let tests =
                     let foreignKey =
                         { Name = "fk_parent"
                           Columns = [ "parent_id" ]
+                          RefDatabase = None
                           RefTable = "parents"
                           RefColumns = [ "id" ]
                           OnDelete = None
@@ -2170,6 +2450,7 @@ let tests =
                            [ idCol ],
                            { Name = "fk_child_missing"
                              Columns = [ "missing" ]
+                             RefDatabase = None
                              RefTable = "parents"
                              RefColumns = [ "id" ]
                              OnDelete = None
@@ -2179,6 +2460,7 @@ let tests =
                            [ idCol ],
                            { Name = "fk_parent_missing"
                              Columns = [ "id" ]
+                             RefDatabase = None
                              RefTable = "parents"
                              RefColumns = [ "missing" ]
                              OnDelete = None
@@ -2189,6 +2471,7 @@ let tests =
                            [ idCol ],
                            { Name = "fk_arity"
                              Columns = [ "id" ]
+                             RefDatabase = None
                              RefTable = "parents"
                              RefColumns = [ "id"; "other" ]
                              OnDelete = None
@@ -2364,6 +2647,7 @@ let tests =
                     let projFk =
                         { Name = "fk_owner"
                           Columns = [ "owner_id" ]
+                          RefDatabase = None
                           RefTable = "employees"
                           RefColumns = [ "id" ]
                           OnDelete = Some "CASCADE"
@@ -2397,6 +2681,7 @@ let tests =
                     let selfFk =
                         { Name = "fk_node"
                           Columns = [ "parent_id" ]
+                          RefDatabase = None
                           RefTable = "node"
                           RefColumns = [ "id" ]
                           OnDelete = Some "CASCADE"
@@ -2450,6 +2735,7 @@ let tests =
                     let selfFk =
                         { Name = "fk_node"
                           Columns = [ "parent_id" ]
+                          RefDatabase = None
                           RefTable = "node"
                           RefColumns = [ "id" ]
                           OnDelete = None
@@ -2499,6 +2785,7 @@ let tests =
                     let fk =
                         { Name = "fk_dept"
                           Columns = [ "dept_id" ]
+                          RefDatabase = None
                           RefTable = "departments"
                           RefColumns = [ "id" ]
                           OnDelete = None
@@ -2580,6 +2867,7 @@ let tests =
                     let fk =
                         { Name = "fk_parent"
                           Columns = [ "parent_id" ]
+                          RefDatabase = None
                           RefTable = "cat"
                           RefColumns = [ "id" ]
                           OnDelete = None
@@ -2611,6 +2899,7 @@ let tests =
                     let fkAB =
                         { Name = "fk_a_b"
                           Columns = [ "bid" ]
+                          RefDatabase = None
                           RefTable = "b"
                           RefColumns = [ "id" ]
                           OnDelete = None
@@ -2619,6 +2908,7 @@ let tests =
                     let fkBA =
                         { Name = "fk_b_a"
                           Columns = [ "id" ]
+                          RefDatabase = None
                           RefTable = "a"
                           RefColumns = [ "id" ]
                           OnDelete = None
@@ -2668,6 +2958,7 @@ let tests =
                     let fkBA =
                         { Name = "fk_b_a"
                           Columns = [ "k" ]
+                          RefDatabase = None
                           RefTable = "a"
                           RefColumns = [ "id" ]
                           OnDelete = None
@@ -2676,6 +2967,7 @@ let tests =
                     let fkBB =
                         { Name = "fk_b_b"
                           Columns = [ "pk" ]
+                          RefDatabase = None
                           RefTable = "b"
                           RefColumns = [ "k" ]
                           OnDelete = None

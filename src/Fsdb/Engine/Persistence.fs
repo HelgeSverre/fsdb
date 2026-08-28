@@ -531,17 +531,36 @@ let private decodeIndexDef (r: #IReader) : IndexDef =
       Kind = (if readBool r then FullTextIndex else BTree) }
 
 let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
+    let referencedTable =
+        match fk.RefDatabase with
+        | Some database -> "\u0000Q:" + database + "\u0000" + fk.RefTable
+        | None -> fk.RefTable
+
     writeStr w fk.Name
     writeStrList w fk.Columns
-    writeStr w fk.RefTable
+    writeStr w referencedTable
     writeStrList w fk.RefColumns
     writeOptStr w fk.OnDelete
     writeOptStr w fk.OnUpdate
 
 let private decodeForeignKeyDef (r: #IReader) : ForeignKeyDef =
-    { Name = readStr r
-      Columns = readStrList r
-      RefTable = readStr r
+    let name = readStr r
+    let columns = readStrList r
+    let encodedTable = readStr r
+    let refDatabase, refTable =
+        if encodedTable.StartsWith("\u0000Q:", StringComparison.Ordinal) then
+            let qualified = encodedTable.Substring 3
+
+            match qualified.IndexOf '\u0000' with
+            | separator when separator >= 0 -> Some(qualified.Substring(0, separator)), qualified.Substring(separator + 1)
+            | _ -> None, encodedTable
+        else
+            None, encodedTable
+
+    { Name = name
+      Columns = columns
+      RefDatabase = refDatabase
+      RefTable = refTable
       RefColumns = readStrList r
       OnDelete = readOptStr r
       OnUpdate = readOptStr r }

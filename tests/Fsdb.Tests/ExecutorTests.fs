@@ -2331,6 +2331,40 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected the old row's child to be cascaded away, got %A" other
 
+                testCase "qualified foreign-key actions execute through SQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE DATABASE parent_db" |> ignore
+                    runDefault store "CREATE DATABASE child_db" |> ignore
+                    runDefault store "CREATE TABLE parent_db.parents (id INT PRIMARY KEY)" |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE child_db.children (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent_db.parents(id) ON UPDATE CASCADE ON DELETE CASCADE)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO parent_db.parents VALUES (1)" |> ignore
+                    runDefault store "INSERT INTO child_db.children VALUES (10, 1)" |> ignore
+                    Expect.equal
+                        (runDefault store "ALTER TABLE parent_db.parents RENAME TO renamed_parents")
+                        (Affected 0UL)
+                        "parent rename"
+
+                    Expect.equal (runDefault store "UPDATE parent_db.renamed_parents SET id = 2 WHERE id = 1") (Affected 1UL) "parent update"
+
+                    match runDefault store "SELECT parent_id FROM child_db.children" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected the qualified update cascade, got %A" other
+
+                    Expect.equal (runDefault store "DELETE FROM parent_db.renamed_parents WHERE id = 2") (Affected 1UL) "parent delete"
+
+                    match runDefault store "SELECT COUNT(*) FROM child_db.children" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the qualified delete cascade, got %A" other
+
+                    runDefault store "DROP TABLE parent_db.renamed_parents, child_db.children"
+                    |> Expect.equal <| Affected 0UL <| "related tables drop together"
+
                 testCase "a later candidate error rolls back earlier replacements"
                 <| fun _ ->
                     let store = newStore ()
