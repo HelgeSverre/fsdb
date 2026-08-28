@@ -970,7 +970,13 @@ let private applyConnectionEncoding (session: Session) charset (collation: Colla
 let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
 let private globalOnlyLimitVariables =
-    Set.ofList [ "max_allowed_packet"; "max_connections"; "max_prepared_stmt_count"; "net_write_timeout"; "local_infile" ]
+    Set.ofList
+        [ "event_scheduler"
+          "local_infile"
+          "max_allowed_packet"
+          "max_connections"
+          "max_prepared_stmt_count"
+          "net_write_timeout" ]
 
 let private normalizeIsolationLevel (raw: string) : string =
     Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
@@ -1067,6 +1073,12 @@ let private parseSetFragment
                         match Functions.tryTimeLocale value with
                         | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
                         | None -> Error(Err(1649, sprintf "Unknown locale: '%s'" value))
+                    | Ok(value, sideEffects) when name = "event_scheduler" ->
+                        match value |> toText |> Option.map (_.Trim().ToUpperInvariant()) with
+                        | Some("1" | "ON") -> Ok(SetVarAction(name, Some "ON", isGlobal), sideEffects)
+                        | Some("0" | "OFF") -> Ok(SetVarAction(name, Some "OFF", isGlobal), sideEffects)
+                        | Some value -> Error(Err(1231, sprintf "Variable 'event_scheduler' can't be set to the value of '%s'" value))
+                        | None -> Error(Err(1231, "Variable 'event_scheduler' can't be set to the value of 'NULL'"))
                     | Ok(VNull, sideEffects) when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None, isGlobal), sideEffects)
                     | Ok(VNull, _) -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
                     | Ok(value, sideEffects) -> Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
@@ -2677,6 +2689,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             | None -> session, Err(1539, sprintf "Unknown event '%s'" name)
             | Some event ->
                 let definer = accountRefOf event.Definer
+                let schedule =
+                    SystemCatalog.Event.timing event
+                    |> Option.map Event.scheduleText
+                    |> Option.defaultValue event.Schedule
+
                 let status =
                     match event.Status with
                     | Event.Status.Enabled -> "ENABLE"
@@ -2706,7 +2723,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                         (definer.Name.Replace("`", "``"))
                         (definer.Host.Replace("`", "``"))
                         (name.Replace("`", "``"))
-                        event.Schedule
+                        schedule
                         event.OnCompletion
                         status
                         comment
@@ -3082,15 +3099,18 @@ let private routineValidationError error =
     let code, message = StoredProgram.validationError error
     Err(code, message)
 
-let private parseRoutineDefinition options parameters body =
-    let isSupportedText sql =
-        (tryProbe sql (sql.TrimStart().ToUpperInvariant()) |> Option.isSome)
-        || (tryTextPreparedCommand sql |> Result.exists Option.isSome)
-        || (match tryTextRoutineCommand sql with
-            | Some(CallProcedure _) -> true
-            | _ -> false)
+let private isSupportedStoredProgramText sql =
+    (tryProbe sql (sql.TrimStart().ToUpperInvariant()) |> Option.isSome)
+    || (tryTextPreparedCommand sql |> Result.exists Option.isSome)
+    || (match tryTextRoutineCommand sql with
+        | Some(CallProcedure _) -> true
+        | _ -> false)
 
-    match StoredProgram.parseParameters options parameters, StoredProgram.parseRoutine options isSupportedText body with
+let private parseRoutineDefinition options parameters body =
+    match
+        StoredProgram.parseParameters options parameters,
+        StoredProgram.parseRoutine options isSupportedStoredProgramText body
+    with
     | Ok parsedParameters, Ok statements ->
         StoredProgram.validate parsedParameters statements
         |> Result.mapError routineValidationError
@@ -3927,8 +3947,80 @@ let private runTextDiagnostics session (diagnostics: StoredProgram.DiagnosticsSt
                     | Ok variables -> { next with UserVariables = variables }, Affected 0UL
 
 let private validEventBody options (body: string) =
-    let upper = body.Trim().ToUpperInvariant()
-    Parser.parseWithOptions options body |> Result.isOk || tryProbe body upper |> Option.isSome
+    match StoredProgram.parseRoutine options isSupportedStoredProgramText body with
+    | Ok statements -> StoredProgram.validate [] statements |> Result.isOk
+    | Error _ -> false
+
+let private evaluateEventTiming (session: Session) options (schedule: string) =
+    let statementTime = Functions.truncateToSecond DateTime.Now
+    let currentTimeFunctions = set [ "CURRENT_TIMESTAMP"; "LOCALTIME"; "LOCALTIMESTAMP"; "NOW" ]
+
+    let stabilizeCurrentTime =
+        Expression.rewrite (function
+            | FuncCall(name, _) when currentTimeFunctions.Contains(name.ToUpperInvariant()) ->
+                Some(Lit(VDateTime statementTime))
+            | _ -> None)
+
+    let evaluate current expression =
+        match Parser.parseExpressionWithOptions options expression with
+        | Error _ -> current, Error(syntaxError expression)
+        | Ok parsed ->
+            let next, result = evaluateRoutineExpression current (stabilizeCurrentTime parsed)
+            next, result |> Result.mapError id
+
+    let evaluateDateTime current expression error =
+        let next, result = evaluate current expression
+
+        next,
+        result
+        |> Result.bind (fun value ->
+            Functions.tryDateTimeValue value
+            |> Option.map (Functions.truncateToSecond >> Ok)
+            |> Option.defaultValue (Error error))
+
+    match Event.tryParseSchedule options schedule with
+    | None -> session, Error(syntaxError schedule)
+    | Some(Event.ScheduleSpec.At expression) ->
+        let error = Err(1525, sprintf "Incorrect AT value: '%s'" expression)
+        let next, evaluated = evaluateDateTime session expression error
+        next, evaluated |> Result.map Event.Timing.OneTime
+    | Some(Event.ScheduleSpec.Every(valueExpression, field, startsExpression, endsExpression)) ->
+        let next, intervalValue = evaluate session valueExpression
+
+        match intervalValue |> Result.bind (toText >> Option.map Ok >> Option.defaultValue (Error(Err(1542, "INTERVAL is either not positive or too big")))) with
+        | Error error -> next, Error error
+        | Ok intervalValue ->
+            let next, starts =
+                match startsExpression with
+                | None -> next, Ok statementTime
+                | Some expression ->
+                    evaluateDateTime
+                        next
+                        expression
+                        (Err(1543, "ENDS is either invalid or before STARTS"))
+
+            match starts with
+            | Error error -> next, Error error
+            | Ok starts ->
+                let next, ends =
+                    match endsExpression with
+                    | None -> next, Ok None
+                    | Some expression ->
+                        let next, result =
+                            evaluateDateTime
+                                next
+                                expression
+                                (Err(1543, "ENDS is either invalid or before STARTS"))
+
+                        next, result |> Result.map Some
+
+                match ends with
+                | Error error -> next, Error error
+                | Ok(Some ends) when ends < starts -> next, Error(Err(1543, "ENDS is either invalid or before STARTS"))
+                | Ok ends ->
+                    match Event.tryRecurringTiming intervalValue field starts ends with
+                    | Some timing -> next, Ok timing
+                    | None -> next, Error(Err(1542, "INTERVAL is either not positive or too big"))
 
 let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
 let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
@@ -4570,52 +4662,82 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 match authorize database, resolveDefiner creation.Definer with
                 | Error(code, message), _ -> session, Err(code, message)
                 | _, Error(code, message) -> session, Err(code, message)
-                | Ok(), Ok _ when exists && creation.IfNotExists ->
-                    Diagnostics.note 1537 (sprintf "Event '%s' already exists" name)
-                    session, Affected 0UL
-                | Ok(), Ok _ when exists ->
-                    session, Err(1537, sprintf "Event '%s' already exists" name)
                 | Ok(), Ok definer ->
-                    if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
-                        Diagnostics.note
-                            1449
-                            (sprintf "The user specified as a definer ('%s'@'%s') does not exist" definer.Name definer.Host)
+                    let next, timing = evaluateEventTiming session parserOptions creation.Schedule
 
-                    let created = DateTime.Now
-                    let sqlMode, timeZone, characterSetClient, collationConnection, databaseCollation = executionContext ()
+                    match timing with
+                    | Error result -> next, result
+                    | Ok _ when exists && creation.IfNotExists ->
+                        Diagnostics.note 1537 (sprintf "Event '%s' already exists" name)
+                        next, Affected 0UL
+                    | Ok _ when exists -> next, Err(1537, sprintf "Event '%s' already exists" name)
+                    | Ok timing ->
+                        let now = Functions.truncateToSecond DateTime.Now
+                        let status, discard =
+                            match timing with
+                            | Event.Timing.OneTime executeAt when executeAt < now && creation.OnCompletion = "NOT PRESERVE" ->
+                                Diagnostics.note
+                                    1588
+                                    "Event execution time is in the past and ON COMPLETION NOT PRESERVE is set. The event was dropped immediately after creation."
 
-                    match
-                        Storage.insertRows
-                            session.Store
-                            "mysql"
-                            "events"
-                            (Some
-                                [ "event_schema"; "event_name"; "schedule_definition"; "event_definition"; "created"
-                                  "definer"; "status"; "on_completion"; "event_comment"; "last_altered"; "last_executed"
-                                  "sql_mode"; "time_zone"; "character_set_client"; "collation_connection"
-                                  "database_collation"; "originator" ])
-                            [ [ VString database
-                                VString name
-                                VString creation.Schedule
-                                VString creation.Body
-                                VDateTime created
-                                VString(Auth.formatAccount definer)
-                                (creation.Status |> Event.statusText |> VString)
-                                VString creation.OnCompletion
-                                VString creation.Comment
-                                VDateTime created
-                                VNull
-                                VString sqlMode
-                                VString timeZone
-                                VString characterSetClient
-                                VString collationConnection
-                                VString databaseCollation
-                                VUInt 1UL ] ]
-                    with
-                    | Ok _ -> session, Affected 0UL
-                    | Error error ->
-                        let code, message = Storage.toMySqlError error
-                        session, Err(code, message)
+                                creation.Status, true
+                            | Event.Timing.OneTime executeAt when executeAt < now ->
+                                Diagnostics.note 1544 "Event execution time is in the past. Event has been disabled"
+                                Event.Status.Disabled, false
+                            | _ -> creation.Status, false
+
+                        if discard then
+                            next, Affected 0UL
+                        else
+                            if Auth.tryUserRowForAccount next.Store definer |> Option.isNone then
+                                Diagnostics.note
+                                    1449
+                                    (sprintf "The user specified as a definer ('%s'@'%s') does not exist" definer.Name definer.Host)
+
+                            let created = DateTime.Now
+                            let sqlMode, timeZone, characterSetClient, collationConnection, databaseCollation = executionContext ()
+                            let executeAt, intervalValue, intervalField, starts, ends = Event.timingFields timing
+                            let dateValue = Option.map VDateTime >> Option.defaultValue VNull
+                            let textValue = Option.map VString >> Option.defaultValue VNull
+
+                            match
+                                Storage.insertRows
+                                    next.Store
+                                    "mysql"
+                                    "events"
+                                    (Some
+                                        [ "event_schema"; "event_name"; "schedule_definition"; "event_definition"; "created"
+                                          "definer"; "status"; "on_completion"; "event_comment"; "last_altered"; "last_executed"
+                                          "sql_mode"; "time_zone"; "character_set_client"; "collation_connection"
+                                          "database_collation"; "originator"; "execute_at"; "interval_value"; "interval_field"
+                                          "starts"; "ends" ])
+                                    [ [ VString database
+                                        VString name
+                                        VString creation.Schedule
+                                        VString creation.Body
+                                        VDateTime created
+                                        VString(Auth.formatAccount definer)
+                                        (status |> Event.statusText |> VString)
+                                        VString creation.OnCompletion
+                                        VString creation.Comment
+                                        VDateTime created
+                                        VNull
+                                        VString sqlMode
+                                        VString timeZone
+                                        VString characterSetClient
+                                        VString collationConnection
+                                        VString databaseCollation
+                                        VUInt 1UL
+                                        dateValue executeAt
+                                        textValue intervalValue
+                                        textValue intervalField
+                                        dateValue starts
+                                        dateValue ends ] ]
+                            with
+                            | Ok _ -> next, Affected 0UL
+                            | Error error ->
+                                let code, message = Storage.toMySqlError error
+                                next, Err(code, message)
         | Event.Alter alteration ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) alteration.Name
             let renamedDatabase, renamedName =
@@ -4623,7 +4745,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 |> Option.map (splitQualified database)
                 |> Option.defaultValue (database, name)
 
-            let exists = eventEntries session |> List.exists (SystemCatalog.Event.matches database name)
+            let existing = eventEntries session |> List.tryFind (SystemCatalog.Event.matches database name)
             let targetExists =
                 not (sameEvent database name renamedDatabase renamedName)
                 && (eventEntries session |> List.exists (SystemCatalog.Event.matches renamedDatabase renamedName))
@@ -4633,57 +4755,97 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 Storage.databaseExists (Session.currentStore session) renamedDatabase,
                 authorize database,
                 (if sameEvent database name renamedDatabase renamedName then Ok() else authorize renamedDatabase),
-                resolveDefiner alteration.Definer
+                resolveDefiner alteration.Definer,
+                existing
             with
-            | false, _, _, _, _ -> session, Err(1049, sprintf "Unknown database '%s'" database)
-            | _, false, _, _, _ -> session, Err(1049, sprintf "Unknown database '%s'" renamedDatabase)
-            | _, _, Error(code, message), _, _
-            | _, _, _, Error(code, message), _
-            | _, _, _, _, Error(code, message) -> session, Err(code, message)
-            | _ when not exists -> session, Err(1539, sprintf "Unknown event '%s'" name)
+            | false, _, _, _, _, _ -> session, Err(1049, sprintf "Unknown database '%s'" database)
+            | _, false, _, _, _, _ -> session, Err(1049, sprintf "Unknown database '%s'" renamedDatabase)
+            | _, _, Error(code, message), _, _, _
+            | _, _, _, Error(code, message), _, _
+            | _, _, _, _, Error(code, message), _ -> session, Err(code, message)
+            | _, _, _, _, _, None -> session, Err(1539, sprintf "Unknown event '%s'" name)
             | _ when targetExists -> session, Err(1537, sprintf "Event '%s' already exists" renamedName)
             | _ when alteration.Comment |> Option.exists (fun comment -> comment.EnumerateRunes() |> Seq.length > 2048) ->
                 session, Err(3507, "Failed to update events dictionary object.")
-            | _, _, _, _, Ok definer ->
-                if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
-                    Diagnostics.note
-                        1449
-                        (sprintf "The user specified as a definer ('%s'@'%s') does not exist" definer.Name definer.Host)
+            | _, _, _, _, Ok definer, Some current ->
+                let next, timing =
+                    match alteration.Schedule with
+                    | None -> session, Ok None
+                    | Some schedule ->
+                        let next, result = evaluateEventTiming session parserOptions schedule
+                        next, result |> Result.map Some
 
-                let sqlMode, timeZone, characterSetClient, collationConnection, databaseCollation = executionContext ()
+                match timing with
+                | Error result -> next, result
+                | Ok timing ->
+                    let effectiveTiming = timing |> Option.orElseWith (fun () -> SystemCatalog.Event.timing current)
+                    let effectiveCompletion = alteration.OnCompletion |> Option.defaultValue current.OnCompletion
+                    let now = Functions.truncateToSecond DateTime.Now
 
-                let update (row: Value[]) =
-                    let updated = Array.copy row
-                    updated.[0] <- VString renamedDatabase
-                    updated.[1] <- VString renamedName
-                    alteration.Schedule |> Option.iter (fun value -> updated.[2] <- VString value)
-                    alteration.Body |> Option.iter (fun value -> updated.[3] <- VString value)
-                    updated.[5] <- VString(Auth.formatAccount definer)
-                    alteration.Status
-                    |> Option.iter (Event.statusText >> VString >> fun value -> updated.[6] <- value)
-                    alteration.OnCompletion |> Option.iter (fun value -> updated.[7] <- VString value)
-                    alteration.Comment |> Option.iter (fun value -> updated.[8] <- VString value)
-                    updated.[9] <- VDateTime DateTime.Now
-                    updated.[11] <- VString sqlMode
-                    updated.[12] <- VString timeZone
-                    updated.[13] <- VString characterSetClient
-                    updated.[14] <- VString collationConnection
-                    updated.[15] <- VString databaseCollation
-                    Ok updated
+                    match effectiveTiming with
+                    | Some(Event.Timing.OneTime executeAt) when executeAt < now && effectiveCompletion = "NOT PRESERVE" ->
+                        next,
+                        Err(
+                            1589,
+                            "Event execution time is in the past and ON COMPLETION NOT PRESERVE is set. The event was not changed. Specify a time in the future."
+                        )
+                    | _ ->
+                        let status =
+                            match effectiveTiming with
+                            | Some(Event.Timing.OneTime executeAt) when executeAt < now ->
+                                Diagnostics.note 1544 "Event execution time is in the past. Event has been disabled"
+                                Some Event.Status.Disabled
+                            | _ -> alteration.Status
 
-                match
-                    Storage.updateRows
-                        session.Store
-                        "mysql"
-                        "events"
-                        None
-                        (SystemCatalog.Event.rowMatches database name >> Ok)
-                        update
-                with
-                | Ok _ -> session, Affected 0UL
-                | Error error ->
-                    let code, message = Storage.toMySqlError error
-                    session, Err(code, message)
+                        if Auth.tryUserRowForAccount next.Store definer |> Option.isNone then
+                            Diagnostics.note
+                                1449
+                                (sprintf "The user specified as a definer ('%s'@'%s') does not exist" definer.Name definer.Host)
+
+                        let sqlMode, timeZone, characterSetClient, collationConnection, databaseCollation = executionContext ()
+
+                        let update (row: Value[]) =
+                            let updated = Array.copy row
+                            updated.[0] <- VString renamedDatabase
+                            updated.[1] <- VString renamedName
+                            alteration.Schedule |> Option.iter (fun value -> updated.[2] <- VString value)
+                            alteration.Body |> Option.iter (fun value -> updated.[3] <- VString value)
+                            updated.[5] <- VString(Auth.formatAccount definer)
+                            status |> Option.iter (Event.statusText >> VString >> fun value -> updated.[6] <- value)
+                            alteration.OnCompletion |> Option.iter (fun value -> updated.[7] <- VString value)
+                            alteration.Comment |> Option.iter (fun value -> updated.[8] <- VString value)
+                            updated.[9] <- VDateTime DateTime.Now
+                            updated.[11] <- VString sqlMode
+                            updated.[12] <- VString timeZone
+                            updated.[13] <- VString characterSetClient
+                            updated.[14] <- VString collationConnection
+                            updated.[15] <- VString databaseCollation
+
+                            timing
+                            |> Option.iter (fun value ->
+                                let executeAt, intervalValue, intervalField, starts, ends = Event.timingFields value
+                                updated.[10] <- VNull
+                                updated.[17] <- executeAt |> Option.map VDateTime |> Option.defaultValue VNull
+                                updated.[18] <- intervalValue |> Option.map VString |> Option.defaultValue VNull
+                                updated.[19] <- intervalField |> Option.map VString |> Option.defaultValue VNull
+                                updated.[20] <- starts |> Option.map VDateTime |> Option.defaultValue VNull
+                                updated.[21] <- ends |> Option.map VDateTime |> Option.defaultValue VNull)
+
+                            Ok updated
+
+                        match
+                            Storage.updateRows
+                                next.Store
+                                "mysql"
+                                "events"
+                                None
+                                (SystemCatalog.Event.rowMatches database name >> Ok)
+                                update
+                        with
+                        | Ok _ -> next, Affected 0UL
+                        | Error error ->
+                            let code, message = Storage.toMySqlError error
+                            next, Err(code, message)
         | Event.Drop(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let exists = eventEntries session |> List.exists (SystemCatalog.Event.matches database name)
@@ -4837,6 +4999,31 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
             abortTransaction session |> ignore
             reraise ()
         | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
+
+let executeEventBody (session: Session) (body: string) : Session * QueryResult =
+    let options = parserOptionsForSession session
+
+    match StoredProgram.parseRoutine options isSupportedStoredProgramText body with
+    | Error _ -> session, syntaxError body
+    | Ok statements ->
+        withStoredFunctionRegistry session (fun current ->
+            let outcome =
+                runRoutineStatements
+                    (Session.currentStore current)
+                    executeParsed
+                    dispatch
+                    current
+                    Map.empty
+                    statements
+
+            let result =
+                match outcome.Results, outcome.Error with
+                | [], Some error -> error
+                | results, Some error -> MultipleResults(results @ [ error, [] ])
+                | [], None -> Affected outcome.AffectedRows
+                | results, None -> MultipleResults(results @ [ Affected outcome.AffectedRows, [] ])
+
+            rollbackSession outcome.Session, result)
 
 /// Parses and authorizes a LOCAL INFILE command before the server asks the
 /// client to send bytes. The file name is never resolved by the server.

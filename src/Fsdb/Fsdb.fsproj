@@ -45,6 +45,7 @@
     <Compile Include="Wire/Session.fs" />
     <Compile Include="Wire/PreparedMetadata.fs" />
     <Compile Include="Wire/QueryHandler.fs" />
+    <Compile Include="Engine/EventScheduler.fs" />
     <Compile Include="Wire/Server.fs" />
     <Compile Include="Db.fs" />
     <Compile Include="Program.fs" />

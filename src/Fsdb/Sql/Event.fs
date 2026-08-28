@@ -163,6 +163,21 @@ let timingFields = function
     | Timing.Recurring(intervalValue, intervalField, _, _, starts, ends) ->
         None, Some intervalValue, Some intervalField, Some starts, ends
 
+let scheduleText = function
+    | Timing.OneTime executeAt -> sprintf "AT '%s'" (executeAt.ToString("yyyy-MM-dd HH:mm:ss"))
+    | Timing.Recurring(intervalValue, intervalField, _, _, starts, ends) ->
+        let ending =
+            ends
+            |> Option.map (fun value -> sprintf " ENDS '%s'" (value.ToString("yyyy-MM-dd HH:mm:ss")))
+            |> Option.defaultValue ""
+
+        sprintf
+            "EVERY %s %s STARTS '%s'%s"
+            intervalValue
+            intervalField
+            (starts.ToString("yyyy-MM-dd HH:mm:ss"))
+            ending
+
 let tryRecurringTiming
     (intervalValue: string)
     (intervalField: string)
@@ -245,9 +260,7 @@ let dueOccurrence (now: DateTime) (lastExecuted: DateTime option) = function
 
 let isFinalOccurrence (due: DateTime) = function
     | Timing.OneTime _ -> true
-    | Timing.Recurring(_, _, amount, unit, _, Some ending) ->
-        Fsdb.Functions.tryAddInterval due amount unit
-        |> Option.forall (fun next -> next > ending)
+    | (Timing.Recurring(_, _, _, _, _, Some ending) as timing) -> dueOccurrence ending (Some due) timing |> Option.isNone
     | Timing.Recurring _ -> false
 
 let private tryCreate options validBody sql =

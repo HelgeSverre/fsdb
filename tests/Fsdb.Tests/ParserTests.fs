@@ -3082,6 +3082,20 @@ let tests =
                       (Fsdb.Sql.Event.isFinalOccurrence (starts.AddSeconds 8.0) timing)
                       "the occurrence before ENDS is final"
 
+                  Expect.equal
+                      (Fsdb.Sql.Event.dueOccurrence (ends.AddSeconds 2.0) None timing)
+                      None
+                      "an event whose schedule elapsed while disabled does not catch up"
+
+              let monthEnd = System.DateTime(2024, 1, 31, 12, 0, 0)
+
+              match Fsdb.Sql.Event.tryRecurringTiming "1" "MONTH" monthEnd (Some(System.DateTime(2024, 3, 30, 12, 0, 0))) with
+              | Some timing ->
+                  Expect.isTrue
+                      (Fsdb.Sql.Event.isFinalOccurrence (System.DateTime(2024, 2, 29, 12, 0, 0)) timing)
+                      "calendar finality keeps the original monthly anchor"
+              | None -> failtest "expected a monthly schedule"
+
           testCase "stored programs parse typed parameters and local declarations"
           <| fun _ ->
               match Fsdb.StoredProgram.parseParameters defaultOptions "IN n INT, OUT label VARCHAR(10), INOUT amount DECIMAL(8, 2)" with

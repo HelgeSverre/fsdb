@@ -2000,7 +2000,7 @@ let private dateTimeFormats =
 /// text (first against MySQL's own common formats, then .NET's general
 /// parser as a fallback) — `None` rather than an error for anything that
 /// doesn't look like a date.
-let private asDateTime (v: Value) : DateTime option =
+let tryDateTimeValue (v: Value) : DateTime option =
     match v with
     | VDateTime dt -> Some dt
     | VDate d -> Some(d.ToDateTime TimeOnly.MinValue)
@@ -2016,7 +2016,7 @@ let private asDateTime (v: Value) : DateTime option =
                 | true, dt -> Some dt
                 | false, _ -> None
 
-let private asDateOnly (v: Value) : DateOnly option = asDateTime v |> Option.map DateOnly.FromDateTime
+let private asDateOnly (v: Value) : DateOnly option = tryDateTimeValue v |> Option.map DateOnly.FromDateTime
 
 let private dateOnlyUnits = set [ "DAY"; "WEEK"; "MONTH"; "QUARTER"; "YEAR" ]
 
@@ -2157,11 +2157,11 @@ let private applyDateInterval (sign: float) (dateV: Value) (dt: DateTime) (amoun
 let private dateAddCore (sign: float) : Scalar =
     function
     | [ dateV; intervalV ] when not (anyNull [ dateV; intervalV ]) ->
-        match asDateTime dateV, tryIntervalArgument intervalV with
+        match tryDateTimeValue dateV, tryIntervalArgument intervalV with
         | Some dt, Some(n, unit) -> applyDateInterval sign dateV dt n unit
         | _ -> VNull
     | [ dateV; amtV; VString unit ] when not (anyNull [ dateV; amtV ]) ->
-        match asDateTime dateV with
+        match tryDateTimeValue dateV with
         | Some dt -> applyDateInterval sign dateV dt (toDouble amtV) unit
         | None -> VNull
     | _ -> VNull
@@ -2182,7 +2182,7 @@ let private timestampAddFn: Scalar =
 let private addSubDateCore (sign: float) : Scalar =
     function
     | [ dateV; amtV ] when not (anyNull [ dateV; amtV ]) ->
-        match asDateTime dateV with
+        match tryDateTimeValue dateV with
         | None -> VNull
         | Some dt ->
             match tryIntervalArgument amtV with
@@ -2206,7 +2206,7 @@ let isIntervalValue (v: Value) : bool =
 /// when `dateV` isn't a recognizable date/time, so the caller can fall back
 /// to `Value.add`/`Value.sub` and get MySQL's usual type-error/NULL there.
 let tryDateIntervalBinOp (sign: float) (dateV: Value) (intervalV: Value) : Value option =
-    match tryIntervalArgument intervalV, asDateTime dateV with
+    match tryIntervalArgument intervalV, tryDateTimeValue dateV with
     | Some(n, unit), Some dt -> Some(applyDateInterval sign dateV dt n unit)
     // A real `INTERVAL n unit` operand never degrades into numeric addition:
     // MySQL answers NULL when the left side isn't a date ('abc' + INTERVAL 1
@@ -2346,7 +2346,7 @@ let private dateFormatParts =
             Some(partsOfDateTime (DateTime.Today.AddTicks(timeTicks value)))
         with :? ArgumentOutOfRangeException ->
             None
-    | value -> asDateTime value |> Option.map partsOfDateTime
+    | value -> tryDateTimeValue value |> Option.map partsOfDateTime
 
 let private zeroPadded width (value: int64) =
     if value < 0L then
@@ -2473,19 +2473,19 @@ let private timeFn: Scalar =
     | [ v ] when not (anyNull [ v ]) ->
         match toText v |> Option.bind tryParseTimeInputTicks with
         | Some ticks -> VTime(timeValueOrClamp (roundTimeTicksToFsp 6 ticks))
-        | None -> asDateTime v |> Option.map (fun value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)) |> Option.defaultValue VNull
+        | None -> tryDateTimeValue v |> Option.map (fun value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private datePartFn (f: DateTime -> int) : Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (f >> int64 >> VInt) |> Option.defaultValue VNull
+    | [ v ] when not (anyNull [ v ]) -> tryDateTimeValue v |> Option.map (f >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private zeroAwareDatePart (fromZero: ZeroDate -> int) (fromDateTime: DateTime -> int) : Scalar =
     function
     | [ VZeroDate date ] -> VInt(int64 (fromZero date))
     | [ VZeroDateTime dateTime ] -> VInt(int64 (fromZero (zeroDateOfDateTime dateTime)))
-    | [ value ] when not (anyNull [ value ]) -> asDateTime value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
+    | [ value ] when not (anyNull [ value ]) -> tryDateTimeValue value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private timeParts (value: TimeValue) =
@@ -2518,13 +2518,13 @@ let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromTime: TimeVal
     | [ VZeroDate _ ] -> VInt 0L
     | [ VZeroDateTime dateTime ] -> VInt(int64 (fromZero dateTime))
     | [ VTime value ] -> VInt(int64 (fromTime value))
-    | [ value ] when not (anyNull [ value ]) -> asDateTime value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
+    | [ value ] when not (anyNull [ value ]) -> tryDateTimeValue value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
 let internal dayNameFn (locale: TemporalLocale.Names) : Scalar =
     function
     | [ v ] when not (anyNull [ v ]) ->
-        asDateTime v
+        tryDateTimeValue v
         |> Option.map (fun date -> VString(locale.Days.[(int date.DayOfWeek + 6) % 7]))
         |> Option.defaultValue VNull
     | _ -> VNull
@@ -2532,7 +2532,7 @@ let internal dayNameFn (locale: TemporalLocale.Names) : Scalar =
 let internal monthNameFn (locale: TemporalLocale.Names) : Scalar =
     function
     | [ v ] when not (anyNull [ v ]) ->
-        asDateTime v
+        tryDateTimeValue v
         |> Option.map (fun date -> VString(locale.Months.[date.Month - 1]))
         |> Option.defaultValue VNull
     | _ -> VNull
@@ -2546,7 +2546,7 @@ let private weekFn: Scalar =
 
 let private weekdayFn: Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun d -> VInt(int64 ((int d.DayOfWeek + 6) % 7))) |> Option.defaultValue VNull
+    | [ v ] when not (anyNull [ v ]) -> tryDateTimeValue v |> Option.map (fun d -> VInt(int64 ((int d.DayOfWeek + 6) % 7))) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private weekOfYearFn: Scalar =
@@ -2586,9 +2586,9 @@ let private timeResult ticks = VTime(timeValueOrClamp ticks)
 /// TIME value to that datetime.
 let private timestampFn: Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map VDateTime |> Option.defaultValue VNull
+    | [ v ] when not (anyNull [ v ]) -> tryDateTimeValue v |> Option.map VDateTime |> Option.defaultValue VNull
     | [ date; time ] when not (anyNull [ date; time ]) ->
-        match asDateTime date, tryTimeTicks time with
+        match tryDateTimeValue date, tryTimeTicks time with
         | Some value, Some ticks ->
             try
                 VDateTime(value.AddTicks ticks)
@@ -2606,7 +2606,7 @@ let private addTimeFn (direction: int64) : Scalar =
             match tryTimeTicks value with
             | Some valueTicks -> timeResult (valueTicks + direction * intervalTicks)
             | None ->
-                match asDateTime value with
+                match tryDateTimeValue value with
                 | Some dateTime ->
                     try
                         VDateTime(dateTime.AddTicks(direction * intervalTicks))
@@ -2621,7 +2621,7 @@ let private timeDiffFn: Scalar =
         match tryTimeTicks left, tryTimeTicks right with
         | Some leftTicks, Some rightTicks -> timeResult (leftTicks - rightTicks)
         | None, None ->
-            match asDateTime left, asDateTime right with
+            match tryDateTimeValue left, tryDateTimeValue right with
             | Some leftDate, Some rightDate -> timeResult ((leftDate - rightDate).Ticks)
             | _ -> VNull
         | _ -> VNull
@@ -2808,7 +2808,7 @@ let private unixEpoch = DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
 let private unixTimestampFn: Scalar =
     function
     | [] -> VInt(int64 (DateTime.Now - unixEpoch).TotalSeconds)
-    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun dt -> VInt(int64 (dt - unixEpoch).TotalSeconds)) |> Option.defaultValue VNull
+    | [ v ] when not (anyNull [ v ]) -> tryDateTimeValue v |> Option.map (fun dt -> VInt(int64 (dt - unixEpoch).TotalSeconds)) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private fromUnixSeconds (ts: Value) : DateTime option =
@@ -2833,7 +2833,7 @@ let internal fromUnixTimeFn (locale: TemporalLocale.Names) : Scalar =
 let private timestampDiffFn: Scalar =
     function
     | [ u; a; b ] when not (anyNull [ u; a; b ]) ->
-        match toText u, asDateTime a, asDateTime b with
+        match toText u, tryDateTimeValue a, tryDateTimeValue b with
         | Some unit, Some da, Some db ->
             let span = db - da
 
@@ -2943,7 +2943,7 @@ let private extractFn: Scalar =
                 | result -> result
             | _ -> VNull
         | Some unit, value ->
-            asDateTime value
+            tryDateTimeValue value
             |> Option.map (fun dateTime ->
                 let microseconds = int ((dateTime.Ticks % 10_000_000L) / 10L)
                 extract unit dateTime.Year dateTime.Month dateTime.Day dateTime.Hour dateTime.Minute dateTime.Second microseconds)
@@ -2964,7 +2964,7 @@ let private lastDayFn: Scalar =
     | [ VZeroDate date ] -> lastDayZeroDate date
     | [ VZeroDateTime dateTime ] -> lastDayZeroDate (zeroDateOfDateTime dateTime)
     | [ v ] when not (anyNull [ v ]) ->
-        asDateTime v
+        tryDateTimeValue v
         |> Option.map (fun dt -> VDate(DateOnly(dt.Year, dt.Month, DateTime.DaysInMonth(dt.Year, dt.Month))))
         |> Option.defaultValue VNull
     | _ -> VNull
@@ -3050,7 +3050,7 @@ let private convertTzFn: Scalar =
 
     function
     | [ dt; f; t ] when not (anyNull [ dt; f; t ]) ->
-        match asDateTime dt, conversionZone (req f), conversionZone (req t) with
+        match tryDateTimeValue dt, conversionZone (req f), conversionZone (req t) with
         | Some d, Some fromZone, Some toZone ->
             let utc =
                 try

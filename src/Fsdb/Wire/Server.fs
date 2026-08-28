@@ -1978,6 +1978,7 @@ let serveWithOptions
     (customFunctions: Functions.Registry)
     : Async<unit> =
     validateTransportOptions options
+    use _scheduler = EventScheduler.acquire store customFunctions
 
     let rejectAtCapacity (client: TcpClient) =
         async {

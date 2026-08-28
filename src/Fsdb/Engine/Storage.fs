@@ -2529,7 +2529,12 @@ let mysqlEventsColumns: ColumnDef list =
       sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCharacterSetClient))
       sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCollationConnection))
       sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyDatabaseCollation))
-      sysCol "originator" (TBigInt true) false (Some(VUInt 1UL)) ]
+      sysCol "originator" (TBigInt true) false (Some(VUInt 1UL))
+      sysCol "execute_at" (TDateTime 0) true None
+      sysCol "interval_value" TText true None
+      sysCol "interval_field" (TChar 32) true None
+      sysCol "starts" (TDateTime 0) true None
+      sysCol "ends" (TDateTime 0) true None ]
 
 /// Row-backed CHECK definitions. Keeping these beside views/triggers avoids
 /// changing the binary Table snapshot layout: ordinary row WAL events carry

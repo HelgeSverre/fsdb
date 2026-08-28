@@ -208,7 +208,12 @@ module Event =
           CharacterSetClient: string
           CollationConnection: string
           DatabaseCollation: string
-          Originator: int64 }
+          Originator: int64
+          ExecuteAt: DateTime option
+          IntervalValue: string option
+          IntervalField: string option
+          Starts: DateTime option
+          Ends: DateTime option }
 
     let tryRead (row: Value[]) : Entry option =
         readCompleteRow 7
@@ -229,8 +234,19 @@ module Event =
                   CharacterSetClient = textOr StoredExecutionContext.legacyCharacterSetClient 13 row
                   CollationConnection = textOr StoredExecutionContext.legacyCollationConnection 14 row
                   DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 15 row
-                  Originator = int64At 1L 16 row })
+                  Originator = int64At 1L 16 row
+                  ExecuteAt = dateTimeAt 17 row
+                  IntervalValue = Array.tryItem 18 row |> Option.bind toText
+                  IntervalField = Array.tryItem 19 row |> Option.bind toText
+                  Starts = dateTimeAt 20 row
+                  Ends = dateTimeAt 21 row })
             row
+
+    let timing (entry: Entry) =
+        match entry.ExecuteAt, entry.IntervalValue, entry.IntervalField, entry.Starts with
+        | Some executeAt, _, _, _ -> Some(Fsdb.Sql.Event.Timing.OneTime executeAt)
+        | _, Some value, Some field, Some starts -> Fsdb.Sql.Event.tryRecurringTiming value field starts entry.Ends
+        | _ -> None
 
     let matches schema name (entry: Entry) =
         sameIdentity schema name entry.Schema entry.Name

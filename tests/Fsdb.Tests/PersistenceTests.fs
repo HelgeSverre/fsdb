@@ -1016,6 +1016,42 @@ let tests =
                   Expect.stringContains ddl "COMMENT 'durable'" "snapshotted event metadata recovered"
               | other -> failtestf "expected snapshotted event metadata, got %A" other
 
+          testCase "scheduled events execute after WAL recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  match handle session sql with
+                  | next, Affected _ -> next
+                  | _, result -> failtestf "expected %s to succeed, got %A" sql result
+
+              let session = apply session "CREATE TABLE recovered_event_log (value INT)"
+
+              let _ =
+                  apply
+                      session
+                      "CREATE EVENT recovered_event ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 SECOND ON COMPLETION PRESERVE DO INSERT INTO recovered_event_log VALUES (1)"
+
+              let recovered = load dir
+              use scheduler = Fsdb.EventScheduler.acquire recovered Fsdb.Functions.empty
+              let timer = System.Diagnostics.Stopwatch.StartNew()
+
+              while timer.Elapsed < TimeSpan.FromSeconds 4.0 && TestSupport.Sql.rows recovered "SELECT value FROM recovered_event_log" = [] do
+                  System.Threading.Thread.Sleep 25
+
+              Expect.equal
+                  (TestSupport.Sql.rows recovered "SELECT value FROM recovered_event_log")
+                  [ [ Some "1" ] ]
+                  "recovered event body"
+
+              Expect.equal
+                  (TestSupport.Sql.rows recovered "SELECT status,last_executed IS NOT NULL FROM mysql.events WHERE event_name='recovered_event'")
+                  [ [ Some "DISABLED"; Some "1" ] ]
+                  "recovered event completion"
+
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->
               let dir = tempDataDir ()

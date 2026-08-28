@@ -1304,30 +1304,25 @@ let private eventsColumns =
       strCol "DATABASE_COLLATION" ]
 
 let private eventsRows (catalog: Catalog) =
-    let recurringSchedule =
-        Regex(
-            @"^EVERY\s+(?<value>.+?)\s+(?<field>YEAR_MONTH|DAY_HOUR|DAY_MINUTE|DAY_SECOND|HOUR_MINUTE|HOUR_SECOND|MINUTE_SECOND|YEAR|QUARTER|MONTH|WEEK|DAY|HOUR|MINUTE|SECOND)(?:\s|$)",
-            RegexOptions.IgnoreCase
-        )
-
     mysqlTable catalog "events"
     |> Option.map (fun table ->
         table.RowsArray
         |> Seq.choose SystemCatalog.Event.tryRead
         |> Seq.map (fun event ->
-            let recurring = recurringSchedule.Match event.Schedule
             let eventType, intervalValue, intervalField =
-                if recurring.Success then
-                    vs "RECURRING", vs recurring.Groups.["value"].Value, vs (recurring.Groups.["field"].Value.ToUpperInvariant())
-                else
-                    vs "ONE TIME", VNull, VNull
+                match event.IntervalValue, event.IntervalField with
+                | Some value, Some field -> vs "RECURRING", vs value, vs field
+                | _ -> vs "ONE TIME", VNull, VNull
 
             let created = event.Created |> Option.map VDateTime |> Option.defaultValue VNull
             let lastAltered = event.LastAltered |> Option.map VDateTime |> Option.defaultValue VNull
             let lastExecuted = event.LastExecuted |> Option.map VDateTime |> Option.defaultValue VNull
 
             [| vs "def"; vs event.Schema; vs event.Name; vs event.Definer; vs event.TimeZone; vs "SQL"; vs event.Definition
-               eventType; VNull; intervalValue; intervalField; vs event.SqlMode; VNull; VNull
+               eventType; event.ExecuteAt |> Option.map VDateTime |> Option.defaultValue VNull
+               intervalValue; intervalField; vs event.SqlMode
+               event.Starts |> Option.map VDateTime |> Option.defaultValue VNull
+               event.Ends |> Option.map VDateTime |> Option.defaultValue VNull
                vs (Fsdb.Sql.Event.statusText event.Status); vs event.OnCompletion; created; lastAltered; lastExecuted
                vs event.Comment; VInt event.Originator; vs event.CharacterSetClient; vs event.CollationConnection
                vs event.DatabaseCollation |])

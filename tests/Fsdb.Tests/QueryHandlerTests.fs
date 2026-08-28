@@ -2912,7 +2912,7 @@ let tests =
 
               match handle session "SHOW CREATE EVENT tomorrow" |> snd with
               | ResultSet(_, [ [ Some "tomorrow"; _; _; Some ddl; _; _; _ ] ]) ->
-                  Expect.stringContains ddl "ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY" "stored schedule"
+                  Expect.stringContains ddl "ON SCHEDULE AT '" "evaluated one-time schedule"
               | other -> failtestf "expected create event, got %A" other
 
               let session, recurring =
@@ -2922,20 +2922,48 @@ let tests =
               match
                   handle
                       session
-                      "SELECT event_type, interval_value, interval_field FROM information_schema.events WHERE event_schema = 'fsdb' AND event_name = 'daily'"
+                      "SELECT event_type, interval_value, interval_field, starts IS NOT NULL, ends IS NULL FROM information_schema.events WHERE event_schema = 'fsdb' AND event_name = 'daily'"
                   |> snd
               with
-              | ResultSet(_, [ [ Some "RECURRING"; Some "1"; Some "DAY" ] ]) -> ()
+              | ResultSet(_, [ [ Some "RECURRING"; Some "1"; Some "DAY"; Some "1"; Some "1" ] ]) -> ()
               | other -> failtestf "expected recurring event metadata, got %A" other
 
               match
                   handle
                       session
-                      "SELECT event_name FROM information_schema.events WHERE event_schema = 'fsdb' AND event_name = 'tomorrow'"
+                      "SELECT event_name,execute_at IS NOT NULL,starts IS NULL FROM information_schema.events WHERE event_schema = 'fsdb' AND event_name = 'tomorrow'"
                   |> snd
               with
-              | ResultSet(_, [ [ Some "tomorrow" ] ]) -> ()
+              | ResultSet(_, [ [ Some "tomorrow"; Some "1"; Some "1" ] ]) -> ()
               | other -> failtestf "expected information_schema event, got %A" other
+
+              match handle session "CREATE EVENT invalid_interval ON SCHEDULE EVERY 0 SECOND DO SELECT 1" |> snd with
+              | Err(1542, "INTERVAL is either not positive or too big") -> ()
+              | other -> failtestf "expected invalid interval rejection, got %A" other
+
+              match
+                  handle
+                      session
+                      "CREATE EVENT invalid_end ON SCHEDULE EVERY 1 SECOND STARTS CURRENT_TIMESTAMP + INTERVAL 2 SECOND ENDS CURRENT_TIMESTAMP + INTERVAL 1 SECOND DO SELECT 1"
+                  |> snd
+              with
+              | Err(1543, "ENDS is either invalid or before STARTS") -> ()
+              | other -> failtestf "expected invalid end rejection, got %A" other
+
+              let session, past =
+                  handle
+                      session
+                      "CREATE EVENT past_event ON SCHEDULE AT CURRENT_TIMESTAMP - INTERVAL 1 SECOND DO SELECT 1"
+
+              Expect.equal past (Affected 0UL) "past event declaration"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ _; Some "1588"; _ ] ]) -> ()
+              | other -> failtestf "expected past-event note, got %A" other
+
+              match handle session "SHOW CREATE EVENT past_event" |> snd with
+              | Err(1539, _) -> ()
+              | other -> failtestf "expected past event to be discarded, got %A" other
 
               match handle session "SELECT COUNT(*) FROM event_log" |> snd with
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
@@ -2950,12 +2978,153 @@ let tests =
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected no events after drop, got %A" other
 
+          testCase "event scheduler executes due events as their definers"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              use scheduler = Fsdb.EventScheduler.acquire store Fsdb.Functions.empty
+
+              let apply session sql =
+                  match handle session sql with
+                  | next, Affected _ -> next
+                  | _, result -> failtestf "expected %s to succeed, got %A" sql result
+
+              let session = apply session "CREATE TABLE event_log (label VARCHAR(20), actor VARCHAR(100))"
+              let session = apply session "CREATE TABLE event_state (id INT PRIMARY KEY, value INT)"
+              let session = apply session "CREATE TABLE event_identity (login_user VARCHAR(100), current_user_name VARCHAR(100))"
+              let session = apply session "INSERT INTO event_state VALUES (1,1)"
+              let session = apply session "CREATE USER event_runner"
+              let session = apply session "GRANT INSERT ON fsdb.event_log TO event_runner"
+              let session = apply session "GRANT INSERT ON fsdb.event_identity TO event_runner"
+              let session = apply session "SET GLOBAL event_scheduler=OFF"
+
+              let session =
+                  apply
+                      session
+                      "CREATE DEFINER=event_runner EVENT once_run ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 SECOND DO INSERT INTO event_log VALUES ('once', CURRENT_USER())"
+
+              let session =
+                  apply
+                      session
+                      "CREATE EVENT compound_run ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 SECOND DO BEGIN INSERT INTO event_log VALUES ('compound-a', CURRENT_USER()); INSERT INTO event_log VALUES ('compound-b', CURRENT_USER()); END"
+
+              let session =
+                  apply
+                      session
+                      "CREATE EVENT kept_run ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 SECOND ON COMPLETION PRESERVE DO INSERT INTO event_log VALUES ('kept', CURRENT_USER())"
+
+              let session =
+                  apply
+                      session
+                      "CREATE EVENT recurring_run ON SCHEDULE EVERY 1 SECOND STARTS CURRENT_TIMESTAMP + INTERVAL 2 SECOND ENDS CURRENT_TIMESTAMP + INTERVAL 3 SECOND ON COMPLETION PRESERVE DO INSERT INTO event_log VALUES ('recurring', CURRENT_USER())"
+
+              let session =
+                  apply
+                      session
+                      "CREATE EVENT disabled_run ON SCHEDULE EVERY 1 SECOND DISABLE DO INSERT INTO event_log VALUES ('disabled', CURRENT_USER())"
+
+              let session =
+                  apply
+                      session
+                      "CREATE EVENT tx_rollback ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 SECOND DO BEGIN START TRANSACTION; UPDATE event_state SET value=99 WHERE id=1; END"
+
+              let session =
+                  apply
+                      session
+                      "CREATE DEFINER=event_runner EVENT identity_run ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 SECOND DO INSERT INTO event_identity VALUES (USER(),CURRENT_USER())"
+
+              System.Threading.Thread.Sleep 2200
+              Expect.equal (TestSupport.Sql.rows store "SELECT label FROM event_log") [] "disabled scheduler"
+              let session = apply session "SET GLOBAL event_scheduler=ON"
+              let timer = System.Diagnostics.Stopwatch.StartNew()
+
+              let waitingForEvents () =
+                  TestSupport.Sql.rows store "SELECT COUNT(*) FROM event_log" <> [ [ Some "6" ] ]
+                  || TestSupport.Sql.rows store "SELECT COUNT(*) FROM mysql.events WHERE event_name='tx_rollback'" <> [ [ Some "0" ] ]
+                  || TestSupport.Sql.rows store "SELECT COUNT(*) FROM event_identity" <> [ [ Some "1" ] ]
+
+              while timer.Elapsed < TimeSpan.FromSeconds 5.0 && waitingForEvents () do
+                  System.Threading.Thread.Sleep 25
+
+              Expect.equal
+                  (TestSupport.Sql.rows store "SELECT label,actor FROM event_log ORDER BY label,actor")
+                  [ [ Some "compound-a"; Some "root@%" ]
+                    [ Some "compound-b"; Some "root@%" ]
+                    [ Some "kept"; Some "root@%" ]
+                    [ Some "once"; Some "event_runner@%" ]
+                    [ Some "recurring"; Some "root@%" ]
+                    [ Some "recurring"; Some "root@%" ] ]
+                  "scheduled bodies and definer identity"
+
+              Expect.equal
+                  (TestSupport.Sql.rows store "SELECT login_user,current_user_name FROM event_identity")
+                  [ [ Some "event_scheduler@localhost"; Some "event_runner@%" ] ]
+                  "scheduler login and definer identities"
+
+              Expect.equal
+                  (TestSupport.Sql.rows store "SELECT value FROM event_state")
+                  [ [ Some "1" ] ]
+                  "unfinished event transactions roll back"
+
+              let session = apply session "SET SESSION innodb_lock_wait_timeout=1"
+              let session = apply session "UPDATE event_state SET value=2 WHERE id=1"
+              Expect.equal (TestSupport.Sql.rows store "SELECT value FROM event_state") [ [ Some "2" ] ] "transaction lock released"
+
+              match
+                  handle
+                      session
+                      "SELECT event_name,status,last_executed IS NOT NULL,COALESCE(last_executed > execute_at,0) FROM information_schema.events WHERE event_name IN ('kept_run','recurring_run','disabled_run') ORDER BY event_name"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "disabled_run"; Some "DISABLED"; Some "0"; Some "0" ]
+                    [ Some "kept_run"; Some "DISABLED"; Some "1"; Some "1" ]
+                    [ Some "recurring_run"; Some "DISABLED"; Some "1"; Some "0" ] ]
+                ) -> ()
+              | other -> failtestf "expected completion metadata, got %A" other
+
+              match handle session "SHOW CREATE EVENT once_run" |> snd with
+              | Err(1539, _) -> ()
+              | other -> failtestf "expected one-time event removal, got %A" other
+
           testCase "ALTER EVENT changes schedule, status, name, schema, and body"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store
               let session, _ = handle session "CREATE TABLE event_log (value INT)"
               let session, _ = handle session "CREATE DATABASE event_archive"
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE EVENT past_alter ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 HOUR DO SELECT 1"
+
+              match handle session "ALTER EVENT past_alter ON SCHEDULE AT CURRENT_TIMESTAMP - INTERVAL 1 SECOND" |> snd with
+              | Err(1589, _) -> ()
+              | other -> failtestf "expected past non-preserved ALTER rejection, got %A" other
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE EVENT kept_past_alter ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 HOUR ON COMPLETION PRESERVE DO SELECT 1"
+
+              let session, result =
+                  handle session "ALTER EVENT kept_past_alter ON SCHEDULE AT CURRENT_TIMESTAMP - INTERVAL 1 SECOND"
+
+              Expect.equal result (Affected 0UL) "past preserved ALTER"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ _; Some "1544"; _ ] ]) -> ()
+              | other -> failtestf "expected past preserved ALTER note, got %A" other
+
+              Expect.equal
+                  (TestSupport.Sql.rows store "SELECT status FROM mysql.events WHERE event_name='kept_past_alter'")
+                  [ [ Some "DISABLED" ] ]
+                  "past preserved ALTER status"
+
+              let session, _ = handle session "DROP EVENT past_alter"
+              let session, _ = handle session "DROP EVENT kept_past_alter"
               let session, _ =
                   handle
                       session
@@ -4172,6 +4341,37 @@ let tests =
               match handle session "SELECT @@GLOBAL.max_heap_table_size" |> snd with
               | ResultSet(_, [ [ Some "500" ] ]) -> ()
               | other -> failtestf "expected @@GLOBAL.max_heap_table_size = 500, got %A" other
+
+          testCase "event_scheduler is a validated global switch"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              match handle session "SELECT @@GLOBAL.event_scheduler" |> snd with
+              | ResultSet(_, [ [ Some "ON" ] ]) -> ()
+              | other -> failtestf "expected enabled scheduler default, got %A" other
+
+              match handle session "SET SESSION event_scheduler=OFF" |> snd with
+              | Err(1229, "Variable 'event_scheduler' is a GLOBAL variable and should be set with SET GLOBAL") -> ()
+              | other -> failtestf "expected global-only error, got %A" other
+
+              let session, _ = handle session "CREATE USER event_operator"
+              let operator = { create 2 store with User = "event_operator" }
+
+              match handle operator "SET GLOBAL event_scheduler=OFF" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected scheduler privilege error, got %A" other
+
+              match handle session "SET GLOBAL event_scheduler=0" with
+              | session, Affected 0UL ->
+                  match handle session "SELECT @@GLOBAL.event_scheduler" |> snd with
+                  | ResultSet(_, [ [ Some "OFF" ] ]) -> ()
+                  | other -> failtestf "expected disabled scheduler value, got %A" other
+              | _, other -> failtestf "expected scheduler assignment, got %A" other
+
+              match handle session "SET GLOBAL event_scheduler=DISABLED" |> snd with
+              | Err(1231, "Variable 'event_scheduler' can't be set to the value of 'DISABLED'") -> ()
+              | other -> failtestf "expected scheduler value validation, got %A" other
 
           testCase "a new session inherits a SET GLOBAL made before it connected"
           <| fun _ ->

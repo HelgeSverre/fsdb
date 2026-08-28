@@ -53,6 +53,7 @@ let defaultVariables: Map<string, string option> =
           "query_cache_type", "OFF"
           "block_encryption_mode", "aes-128-ecb"
           "default_storage_engine", "InnoDB"
+          "event_scheduler", "ON"
           "innodb_buffer_pool_size", "134217728"
           "innodb_file_per_table", "ON"
           "read_only", "OFF"

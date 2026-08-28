@@ -1,7 +1,7 @@
 # MySQL 8.4 feature gaps
 
 A map of where fsdb diverges from or lacks MySQL 8.4 functionality. Oracle for
-every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-25, based on a
+every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-28, based on a
 full static exploration of `src/Fsdb/` plus the documented records
 (`docs/compatibility.md`, `torture/findings/`, `torture/support/known-gaps.json`,
 `benchmarks/results/`) and the adversarial parser, wire, privilege, logging,
@@ -40,7 +40,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound condition-handling bodies | Complex views, procedure calls, and multi-table DML firing |
-| Routines & events | Typed procedures and read-only stored functions with nested calls, compound variables, cursors, condition handlers, diagnostics, loops, and persisted metadata | Data-changing stored functions and event scheduling |
+| Routines & events | Typed procedures, read-only stored functions, and persisted definer-context event scheduling | Data-changing stored functions and procedure calls from triggers |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
 | Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
@@ -67,7 +67,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Statement family | Impact | Class |
 |---|---|---|
 | Procedures support typed `IN`/`OUT`/`INOUT` parameters, nested calls with local output targets, scoped variables, read-only cursors, dynamic `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE`, compound control flow, condition handlers, `SIGNAL`/`RESIGNAL`, `GET CURRENT/STACKED DIAGNOSTICS`, and multi-result CALL. Stored functions support typed parameters/results, read-only cursors, handlers, control flow, nested calls, SQL SECURITY, prepared invocation, and metadata; data-changing statements and procedure calls from functions remain refused | medium | divergence/refusal |
-| Event declarations, alteration, security metadata, completion policy, comments, and replica-disabled status are supported; the scheduler thread remains absent | medium | refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
 | `LOCK TABLES…READ/WRITE` and `UNLOCK TABLES` are accepted without mutual exclusion or access restriction; `HANDLER` and XA transactions remain absent | low | divergence/refusal |
@@ -330,13 +329,13 @@ prepared execution, SHOW metadata, and WAL/snapshot catalog persistence.
 Their creation-time SQL mode, client charset, and connection collation are
 restored while each body runs. One-time and recurring event declarations
 support CREATE/DROP, schedule/status/body/name alteration, SHOW CREATE EVENT,
-SHOW EVENTS, and persisted EVENTS metadata. CREATE ROUTINE,
+SHOW EVENTS, persisted EVENTS metadata, and definer-context execution of
+one-time and recurring schedules. CREATE ROUTINE,
 ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, diagnostics, and the statement forms permitted in each routine kind | procedures cover typed parameters, nested calls, local OUT/INOUT targets, dynamic SQL, sequential statements, and multi-result CALL; functions cover typed scalar returns, nested calls, handlers, cursors, and read-only SQL, but data-changing statements and procedure calls from functions remain refused | medium | refusal |
-| Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and schedule metadata persist, but no event is scheduled or executed | medium | refusal |
 
 ## 11. Full-text search
 
@@ -479,8 +478,8 @@ VECTOR type and function family (a MySQL 9 forward-port, absent from 8.4 —
 purely additive); live statistics values instead of ANALYZE-stale estimates;
 ICU CLDR collation tailoring; SUPER required for foreign KILL; honest
 advertising of enforced limits (wal_rotate knobs unreported rather than
-fabricated); declaration-only events rather than a scheduler; and an explicitly
-trusted data directory whose CRCs detect corruption rather than authenticate a
+fabricated); and an explicitly trusted data directory whose CRCs detect
+corruption rather than authenticate a
 hostile local writer.
 
 ## 17. Historical records with resolved entries
