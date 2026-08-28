@@ -300,7 +300,8 @@ type SqlModeSettings =
       OnlyFullGroupBy: bool
       NoAutoValueOnZero: bool
       ErrorForDivisionByZero: bool
-      TimeTruncateFractional: bool }
+      TimeTruncateFractional: bool
+      PadCharToFullLength: bool }
 
 let defaultSqlModeSettings: SqlModeSettings =
     { Strict = true
@@ -309,7 +310,8 @@ let defaultSqlModeSettings: SqlModeSettings =
       OnlyFullGroupBy = true
       NoAutoValueOnZero = false
       ErrorForDivisionByZero = true
-      TimeTruncateFractional = false }
+      TimeTruncateFractional = false
+      PadCharToFullLength = false }
 
 /// Shared catalog state plus session-local coercion and transaction settings.
 /// Session clones share reference-typed synchronization fields but copy the

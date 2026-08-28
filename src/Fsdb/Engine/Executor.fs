@@ -1589,13 +1589,38 @@ let private contextFactory
           Outer = outer
           Clause = FieldList }
 
+let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
+    ctx.Qualifiers
+    |> Map.toSeq
+    |> Seq.tryPick (fun (_, (columns, offset)) ->
+        let relative = index - offset
+        if relative >= 0 && relative < columns.Length then Some columns.[relative] else None)
+
+let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : Value =
+    match store.SqlMode.PadCharToFullLength, column.Type, value with
+    | true, TChar length, VString text ->
+        let padding = length - (text.EnumerateRunes() |> Seq.length)
+
+        if padding > 0 then
+            VString(text + System.String(' ', padding))
+        else
+            value
+    | _ -> value
+
+let private storedValuesMatchReadValues (store: Store) =
+    not store.SqlMode.PadCharToFullLength
+
 /// Resolves a bare column against `ctx`, falling back to
 /// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`. Two or
 /// more matches (a `JOIN` of tables that share a column name) is error 1052,
 /// not a silent pick of whichever one `columnIndexOf` happened to see last.
 let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, EvalError> =
     match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
-    | Some [ i ] -> Ok ctx.Row.[i]
+    | Some [ i ] ->
+        tryColumnDefAt ctx i
+        |> Option.map (fun column -> readColumnValue ctx.Store column ctx.Row.[i])
+        |> Option.defaultValue ctx.Row.[i]
+        |> Ok
     | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause))
     | Some [] | None ->
         match ctx.Outer with
@@ -1616,29 +1641,19 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
         match row with
         | Some row ->
             match images.Columns |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
-            | Some index -> Ok row.[index]
+            | Some index -> Ok(readColumnValue ctx.Store images.Columns.[index] row.[index])
             | None -> Error(unknownColumn (sprintf "%s.%s" table col))
         | None -> Error(unknownColumn (sprintf "%s.%s" table col))
     | _ ->
         match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
         | Some(cols, offset) ->
             match cols |> List.tryFindIndex (fun c -> System.String.Equals(c.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
-            | Some idx -> Ok ctx.Row.[offset + idx]
+            | Some idx -> Ok(readColumnValue ctx.Store cols.[idx] ctx.Row.[offset + idx])
             | None -> Error(unknownColumn (sprintf "%s.%s" table col))
         | None ->
             match ctx.Outer with
             | Some parent -> resolveQualifiedCol parent table col
             | None -> Error(unknownColumn (sprintf "%s.%s" table col))
-
-/// Finds the declared column occupying one flattened row position. A JOIN
-/// can expose the same physical range under more than one qualifier, but
-/// every matching range carries the same ColumnDef, so the first is enough.
-let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
-    ctx.Qualifiers
-    |> Map.toSeq
-    |> Seq.tryPick (fun (_, (columns, offset)) ->
-        let relative = index - offset
-        if relative >= 0 && relative < columns.Length then Some columns.[relative] else None)
 
 /// Recovers the declared column behind a bare/qualified expression without
 /// changing expression evaluation itself. This type context is needed only
@@ -2344,7 +2359,8 @@ let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : V
 /// `Star None` case still means).
 let rec private resolveStarQualifier (ctx: EvalContext) (qualifier: string) : Result<(string * Value) list, EvalError> =
     match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
-    | Some(cols, offset) -> Ok(cols |> List.mapi (fun i c -> c.Name, ctx.Row.[offset + i]))
+    | Some(cols, offset) ->
+        Ok(cols |> List.mapi (fun i column -> column.Name, readColumnValue ctx.Store column ctx.Row.[offset + i]))
     | None ->
         match ctx.Outer with
         | Some parent -> resolveStarQualifier parent qualifier
@@ -2475,14 +2491,15 @@ let private rowsMatchKeyClasses (classes: bool list) (keyIndices: int list) (row
 /// `NULL = anything` is never true, so a `NULL`-keyed row can never join
 /// and is simply never added to (or looked up in) the hash bucket, the same
 /// way it would silently fail every `Eq` check in the nested loop.
+let private equiKeyBy (keyIndices: int[]) (valueAt: int -> Value) : Value[] option =
+    let key = keyIndices |> Array.map valueAt
+    if key |> Array.contains VNull then None else Some key
+
 let private equiKeyOf (keyIndices: int[]) (row: Value[]) : Value[] option =
-    match keyIndices with
-    | [| i |] ->
-        let v = row.[i]
-        if v = VNull then None else Some [| v |]
-    | _ ->
-        let key = keyIndices |> Array.map (fun i -> row.[i])
-        if key |> Array.exists (fun v -> v = VNull) then None else Some key
+    equiKeyBy keyIndices (fun index -> row.[index])
+
+let private readEquiKeyOf (store: Store) (columns: ColumnDef list) (keyIndices: int[]) (row: Value[]) : Value[] option =
+    equiKeyBy keyIndices (fun index -> readColumnValue store columns.[index] row.[index])
 
 /// `Dictionary<Value[], _>` key comparer for SQL equality keys. It must
 /// agree with expression equality (the resolved collation for strings,
@@ -5329,7 +5346,8 @@ and private tryIndexedInnerProbe
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
     | InnerJoin, [], Some table, _ :: _
-        when equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex]) ->
+        when storedValuesMatchReadValues store
+             && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         let rightNames = equiKeys |> List.map (fun (_, rightIndex) -> rightColumns.[rightIndex].Name)
 
         Storage.tryEqualityIndexForColumns table rightNames
@@ -5497,7 +5515,10 @@ and private applyJsonTableJoin
                 if usingKeys.IsEmpty then
                     true
                 else
-                    match equiKeyOf leftKeyIndices left, equiKeyOf rightKeyIndices right with
+                    match
+                        readEquiKeyOf store combinedColumnsSoFar leftKeyIndices left,
+                        readEquiKeyOf store joinColumns rightKeyIndices right
+                    with
                     | Some leftKey, Some rightKey -> keyComparer.Equals(leftKey, rightKey)
                     | _ -> false
 
@@ -5784,7 +5805,8 @@ and private applyResolvedJoin
             let indexedInnerProbe = tryIndexedInnerProbe store join combinedColumnsSoFar joinColumns physicalTable equiKeys
 
             let hashEligible =
-                indexedInnerProbe.IsNone
+                storedValuesMatchReadValues store
+                && indexedInnerProbe.IsNone
                 && not equiKeys.IsEmpty
                 && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                 && keyClasses |> List.forall Option.isSome
@@ -6033,7 +6055,8 @@ and private applyMutationJoin
                 let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
 
                 let hashEligible =
-                    not equiKeys.IsEmpty
+                    storedValuesMatchReadValues store
+                    && not equiKeys.IsEmpty
                     && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                     && keyClasses |> List.forall Option.isSome
                     && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) leftFlatRows
@@ -6947,34 +6970,37 @@ and private rangeLookupBounds (scope: RangeColumnScope) (tref: TableRef) (whereE
               Upper = upper })
 
 and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : EqualityAccessPlan option =
-    let tableDb = tref.Database |> Option.defaultValue dbName
-    let equalities = pointLookupEqualities tref whereExpr
+    if not (storedValuesMatchReadValues store) then
+        None
+    else
+        let tableDb = tref.Database |> Option.defaultValue dbName
+        let equalities = pointLookupEqualities tref whereExpr
 
-    let composite =
-        Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
-        |> Option.map (fun lookup ->
-            { KeyName = lookup.IndexName
-              ColumnIndices = lookup.ColumnIndices
-              Columns = lookup.LookupColumns
-              Unique = lookup.Unique
-              Rows = lookup.LookupRows })
+        let composite =
+            Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
+            |> Option.map (fun lookup ->
+                { KeyName = lookup.IndexName
+                  ColumnIndices = lookup.ColumnIndices
+                  Columns = lookup.LookupColumns
+                  Unique = lookup.Unique
+                  Rows = lookup.LookupRows })
 
-    composite
-    |> Option.orElseWith (fun () ->
-        equalities
-        |> List.tryPick (fun (name, value) ->
-            match
-                Storage.tryEqualityKeyProbe store tableDb tref.Table name value,
-                Storage.tryEqualityLookup store tableDb tref.Table name value
-            with
-            | Some(_, keyName, columnIndex, unique), Some(columns, rows) ->
-                Some
-                    { KeyName = keyName
-                      ColumnIndices = [ columnIndex ]
-                      Columns = columns
-                      Unique = unique
-                      Rows = rows }
-            | _ -> None))
+        composite
+        |> Option.orElseWith (fun () ->
+            equalities
+            |> List.tryPick (fun (name, value) ->
+                match
+                    Storage.tryEqualityKeyProbe store tableDb tref.Table name value,
+                    Storage.tryEqualityLookup store tableDb tref.Table name value
+                with
+                | Some(_, keyName, columnIndex, unique), Some(columns, rows) ->
+                    Some
+                        { KeyName = keyName
+                          ColumnIndices = [ columnIndex ]
+                          Columns = columns
+                          Unique = unique
+                          Rows = rows }
+                | _ -> None))
 
 and private tryEqualityLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
@@ -7013,7 +7039,7 @@ and private tryCorrelatedEqualityLookup
             lookup.FindRows value
             |> Option.map (fun rows -> lookup.TableColumns, rows))
 
-    outer
+    (if storedValuesMatchReadValues store then outer else None)
     |> Option.bind (fun context ->
         whereExpr
         |> Option.toList
@@ -7041,7 +7067,7 @@ and private tryCorrelatedEqualityLookup
 and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    rangeLookupBounds BareOrQualifiedRange tref whereExpr
+    (if storedValuesMatchReadValues store then rangeLookupBounds BareOrQualifiedRange tref whereExpr else [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun (_, _, columns, rows) -> columns, rows))
@@ -7049,7 +7075,7 @@ and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whe
 and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    rangeLookupBounds QualifiedRange tref whereExpr
+    (if storedValuesMatchReadValues store then rangeLookupBounds QualifiedRange tref whereExpr else [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun (_, _, columns, rows) -> columns, rows))
@@ -7098,7 +7124,7 @@ and private tryIndexOrder
         && not (select.Projections |> List.exists (fst >> containsAggregate registry))
         && not (select.Projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not))
 
-    if not canStream then
+    if not (storedValuesMatchReadValues store) || not canStream then
         None
     else
         directOrderColumns tref select
@@ -7563,7 +7589,7 @@ and private runUnionStmtWithOuter
 /// *` expands to every column of the row.
 and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: Projection) : Result<(string * Value) list, EvalError> =
     match proj with
-    | Star None, _ -> Ok(columns |> List.mapi (fun i c -> c.Name, ctx.Row.[i]))
+    | Star None, _ -> Ok(columns |> List.mapi (fun i column -> column.Name, readColumnValue ctx.Store column ctx.Row.[i]))
     | Star(Some qualifier), _ -> resolveStarQualifier ctx qualifier
     | expr, aliasOpt ->
         evalExpr ctx expr

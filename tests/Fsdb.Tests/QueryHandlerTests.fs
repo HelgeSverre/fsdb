@@ -926,6 +926,63 @@ let tests =
               | ResultSet(_, [ [ Some "0" ]; [ Some "1" ] ]) -> ()
               | other -> failtestf "expected an ignored explicit zero not to consume an id, got %A" other
 
+          testCase "PAD_CHAR_TO_FULL_LENGTH exposes padded CHAR values"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let defaultSession = create 1 store
+              let paddedSession, _ = handle (create 2 store) "SET sql_mode = 'PAD_CHAR_TO_FULL_LENGTH'"
+              let defaultSession, _ = handle defaultSession "CREATE TABLE chars (c CHAR(5), indexed CHAR(5), unicode CHAR(3), INDEX ix_indexed (indexed))"
+              let defaultSession, _ = handle defaultSession "INSERT INTO chars VALUES ('a', 'a', 'é')"
+
+              match handle defaultSession "SELECT CONCAT('[', c, ']'), LENGTH(c), HEX(c), c = 'a' FROM chars" |> snd with
+              | ResultSet(_, [ [ Some "[a]"; Some "1"; Some "61"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected default CHAR retrieval to trim padding, got %A" other
+
+              match
+                  handle
+                      paddedSession
+                      "SELECT CONCAT('[', c, ']'), LENGTH(c), HEX(c), c = 'a', c = 'a    ', HEX(CONCAT(c, 'x')) FROM chars"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "[a    ]"; Some "5"; Some "6120202020"; Some "0"; Some "1"; Some "612020202078" ] ]) -> ()
+              | other -> failtestf "expected padded CHAR expression semantics, got %A" other
+
+              match handle paddedSession "SELECT indexed FROM chars WHERE indexed = 'a    '" |> snd with
+              | ResultSet(_, [ [ Some "a    " ] ]) -> ()
+              | other -> failtestf "expected a padded indexed predicate to retain its row, got %A" other
+
+              match handle paddedSession "SELECT indexed FROM chars WHERE indexed = 'a'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected unpadded comparison to differ in padded mode, got %A" other
+
+              match handle paddedSession "SELECT HEX(unicode), LENGTH(unicode), CHAR_LENGTH(unicode) FROM chars" |> snd with
+              | ResultSet(_, [ [ Some "C3A92020"; Some "4"; Some "3" ] ]) -> ()
+              | other -> failtestf "expected CHAR padding to count Unicode scalars, got %A" other
+
+              match handle paddedSession "SELECT CAST('a' AS CHAR(5)), HEX(CAST('a' AS CHAR(5)))" |> snd with
+              | ResultSet(_, [ [ Some "a"; Some "61" ] ]) -> ()
+              | other -> failtestf "expected CHAR casts to remain unpadded, got %A" other
+
+              let defaultSession, _ = handle defaultSession "CREATE TABLE char_left (c CHAR(2))"
+              let defaultSession, _ = handle defaultSession "CREATE TABLE char_right (c CHAR(3), INDEX ix_char_right (c))"
+              let defaultSession, _ = handle defaultSession "INSERT INTO char_left VALUES ('a')"
+              let defaultSession, _ = handle defaultSession "INSERT INTO char_right VALUES ('a')"
+              let defaultSession, _ = handle defaultSession "CREATE TABLE char_json (c CHAR(3))"
+              handle defaultSession "INSERT INTO char_json VALUES ('a')" |> ignore
+
+              match handle paddedSession "SELECT COUNT(*) FROM char_left JOIN char_right ON char_left.c = char_right.c" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected different CHAR widths not to match in padded joins, got %A" other
+
+              match
+                  handle
+                      paddedSession
+                      "SELECT COUNT(*) FROM char_json JOIN JSON_TABLE('[\"a\"]', '$[*]' COLUMNS(c VARCHAR(3) PATH '$')) jt USING(c)"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected JSON_TABLE USING to compare padded CHAR values, got %A" other
+
           testCase "NO_UNSIGNED_SUBTRACTION produces signed integer results"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
