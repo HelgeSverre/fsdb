@@ -476,8 +476,8 @@ let private registryFor (session: Session) : Functions.Registry =
     let loginUser = if session.LoginUser = "" then session.User else session.LoginUser
 
     registry
-    |> Functions.registerScalar "AES_ENCRYPT" (Functions.aesEncrypt blockEncryptionMode)
-    |> Functions.registerScalar "AES_DECRYPT" (Functions.aesDecrypt blockEncryptionMode)
+    |> Functions.registerTextScalar "AES_ENCRYPT" (fun index -> index < 2) (Functions.aesEncrypt blockEncryptionMode)
+    |> Functions.registerTextScalar "AES_DECRYPT" (fun index -> index < 2) (Functions.aesDecrypt blockEncryptionMode)
     |> Functions.registerScalar "DATE_FORMAT" (Functions.dateFormatFn timeLocale)
     |> Functions.registerScalar "DAYNAME" (Functions.dayNameFn timeLocale)
     |> Functions.registerScalar "MONTHNAME" (Functions.monthNameFn timeLocale)

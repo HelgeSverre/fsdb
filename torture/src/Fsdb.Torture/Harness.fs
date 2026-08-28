@@ -970,6 +970,12 @@ module ScenarioProbes =
                "SELECT (0.1 + 0.2 = 0.3) AS decimal_exact, (0.1e0 + 0.2e0 = 0.3e0) AS double_inexact, ROUND(0.1e0 + 0.2e0 - 0.3e0, 20) AS double_residue, COUNT(*) AS gt_count FROM scalar_matrix WHERE exact_value > approximate_value"
                "double_formatting_and_scaling",
                "SELECT id, ROUND(approximate_value, 6) AS rounded, ROUND(approximate_value * 2, 6) AS doubled, ROUND(approximate_value / 4, 8) AS quartered, FORMAT(approximate_value, 2) AS formatted, ROUND(CAST(approximate_value AS DECIMAL(20,4)), 4) AS as_decimal FROM scalar_matrix ORDER BY id LIMIT 12"
+               "numeric_display_direct",
+               "SELECT id, padded_integer, padded_decimal, padded_float FROM scalar_matrix ORDER BY id LIMIT 16"
+               "numeric_display_text_contexts",
+               "SELECT id, CONCAT('[', padded_integer, ']') AS concatenated, CAST(padded_decimal AS CHAR) AS decimal_text, LENGTH(padded_float) AS float_length, HEX(UNHEX(padded_integer)) AS unhexed, CRC32(padded_integer) AS checksum FROM scalar_matrix ORDER BY id LIMIT 16"
+               "numeric_display_expression_loss",
+               "SELECT id, padded_integer + 0 AS arithmetic, MAX(padded_decimal) OVER () AS aggregate_value, JSON_ARRAY(padded_float) AS json_value FROM scalar_matrix ORDER BY id LIMIT 16"
 
                // Implicit coercion, NO PAD trailing spaces, and the
                // case/accent-insensitive default collation.

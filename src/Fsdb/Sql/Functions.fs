@@ -88,6 +88,7 @@ type Aggregate = Value list -> Value
 type Registry =
     { Scalars: Map<string, Scalar>
       ScalarMetadata: Map<string, ColumnMetadata>
+      TextArguments: Map<string, int -> bool>
       Aggregates: Map<string, Aggregate>
       /// Rich (`QueryContext`-aware) registrations, kept separate from
       /// `Scalars` so builtins and plain `registerScalar` users never pay
@@ -100,6 +101,7 @@ type Registry =
 let empty: Registry =
     { Scalars = Map.empty
       ScalarMetadata = Map.empty
+      TextArguments = Map.empty
       Aggregates = Map.empty
       Extensions = Map.empty }
 
@@ -108,14 +110,21 @@ let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
 
     { registry with
         Scalars = Map.add name fn registry.Scalars
-        ScalarMetadata = Map.remove name registry.ScalarMetadata }
+        ScalarMetadata = Map.remove name registry.ScalarMetadata
+        TextArguments = Map.remove name registry.TextArguments }
 
 let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
     let name = name.ToUpperInvariant()
 
     { registry with
         Scalars = Map.add name fn registry.Scalars
-        ScalarMetadata = Map.add name metadata registry.ScalarMetadata }
+        ScalarMetadata = Map.add name metadata registry.ScalarMetadata
+        TextArguments = Map.remove name registry.TextArguments }
+
+let internal registerTextScalar (name: string) (textArgument: int -> bool) (fn: Scalar) (registry: Registry) : Registry =
+    let name = name.ToUpperInvariant()
+    let registry = registerScalar name fn registry
+    { registry with TextArguments = Map.add name textArgument registry.TextArguments }
 
 let registerAggregate (name: string) (fn: Aggregate) (registry: Registry) : Registry =
     { registry with Aggregates = Map.add (name.ToUpperInvariant()) fn registry.Aggregates }
@@ -128,6 +137,11 @@ let lookup (name: string) (registry: Registry) : Scalar option =
 
 let lookupScalarMetadata (name: string) (registry: Registry) : ColumnMetadata option =
     Map.tryFind (name.ToUpperInvariant()) registry.ScalarMetadata
+
+let internal isTextArgument (name: string) index (registry: Registry) =
+    registry.TextArguments
+    |> Map.tryFind (name.ToUpperInvariant())
+    |> Option.exists (fun predicate -> predicate index)
 
 let lookupAggregate (name: string) (registry: Registry) : Aggregate option =
     Map.tryFind (name.ToUpperInvariant()) registry.Aggregates
@@ -3368,10 +3382,12 @@ let private unhexFn: Scalar =
     | [ v ] when not (anyNull [ v ]) ->
         let s = req v
 
-        if s.Length % 2 <> 0 || not (s |> Seq.forall Uri.IsHexDigit) then
+        if not (s |> Seq.forall Uri.IsHexDigit) then
             VNull
         else
-            [| for i in 0 .. 2 .. s.Length - 1 -> Convert.ToByte(s.Substring(i, 2), 16) |]
+            let digits = if s.Length % 2 = 0 then s else "0" + s
+
+            [| for i in 0 .. 2 .. digits.Length - 1 -> Convert.ToByte(digits.Substring(i, 2), 16) |]
             |> VBytes
     | _ -> VNull
 
@@ -5409,17 +5425,22 @@ let private mbrPredicateFn functionName predicate: Scalar =
         | Some _, Some _ -> VInt(if predicate first second then 1L else 0L)
     | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" (functionName.ToLowerInvariant())))
 
+let private everyArgument _ = true
+let private firstArgument index = index = 0
+let private arguments positions index = Set.contains index positions
+let private argumentsAfter position index = index > position
+
 let builtins: Registry =
     empty
     |> registerScalar "NOW" nowFn
     |> registerScalar "CURRENT_TIMESTAMP" nowFn
-    |> registerScalar "CONCAT" concatFn
-    |> registerScalar "UPPER" (textMap VBytes (fun s -> s.ToUpperInvariant()))
-    |> registerScalar "LOWER" (textMap VBytes (fun s -> s.ToLowerInvariant()))
-    |> registerScalar "LENGTH" lengthFn
-    |> registerScalar "OCTET_LENGTH" lengthFn
-    |> registerScalar "BIT_LENGTH" bitLengthFn
-    |> registerScalar "CHAR_LENGTH" charLengthFn
+    |> registerTextScalar "CONCAT" everyArgument concatFn
+    |> registerTextScalar "UPPER" firstArgument (textMap VBytes (fun s -> s.ToUpperInvariant()))
+    |> registerTextScalar "LOWER" firstArgument (textMap VBytes (fun s -> s.ToLowerInvariant()))
+    |> registerTextScalar "LENGTH" firstArgument lengthFn
+    |> registerTextScalar "OCTET_LENGTH" firstArgument lengthFn
+    |> registerTextScalar "BIT_LENGTH" firstArgument bitLengthFn
+    |> registerTextScalar "CHAR_LENGTH" firstArgument charLengthFn
     |> registerScalar "COALESCE" coalesceFn
     |> registerScalar "IFNULL" ifNullFn
     |> registerScalar "IF" ifFn
@@ -5509,7 +5530,7 @@ let builtins: Registry =
     |> registerScalar "INTERVAL" intervalFn
     |> registerScalar "DATEDIFF" dateDiffFn
     |> registerScalar "DATE_FORMAT" (dateFormatFn defaultTimeLocale)
-    |> registerScalar "CONVERT" convertFn
+    |> registerTextScalar "CONVERT" firstArgument convertFn
     |> registerScalar "DATE" dateFn
     |> registerScalar "TIME" timeFn
     |> registerScalar "TIMESTAMP" timestampFn
@@ -5560,53 +5581,53 @@ let builtins: Registry =
     |> registerScalar "CONVERT_TZ" convertTzFn
     |> registerScalar "STR_TO_DATE" strToDateFn
     // Strings
-    |> registerScalar "SUBSTRING" substringFn
-    |> registerScalar "SUBSTR" substringFn
-    |> registerScalar "MID" substringFn
-    |> registerScalar "LOCATE" locateFn
-    |> registerScalar "INSTR" instrFn
-    |> registerScalar "POSITION" locateFn
-    |> registerScalar "REPLACE" replaceFn
-    |> registerScalar "TRIM" (textMap (trimRaw true true) (fun s -> s.Trim()))
-    |> registerScalar "TRIM_BOTH" (trimSubstring true true)
-    |> registerScalar "TRIM_LEADING" (trimSubstring true false)
-    |> registerScalar "TRIM_TRAILING" (trimSubstring false true)
-    |> registerScalar "LTRIM" (textMap (trimRaw true false) (fun s -> s.TrimStart()))
-    |> registerScalar "RTRIM" (textMap (trimRaw false true) (fun s -> s.TrimEnd()))
-    |> registerScalar "LPAD" (padFn true)
-    |> registerScalar "RPAD" (padFn false)
-    |> registerScalar "LEFT" leftFn
-    |> registerScalar "RIGHT" rightFn
-    |> registerScalar "REVERSE" (textMap (Array.rev >> VBytes) (fun s -> String(Array.rev (s.ToCharArray()))))
-    |> registerScalar "REPEAT" repeatFn
+    |> registerTextScalar "SUBSTRING" firstArgument substringFn
+    |> registerTextScalar "SUBSTR" firstArgument substringFn
+    |> registerTextScalar "MID" firstArgument substringFn
+    |> registerTextScalar "LOCATE" (arguments (set [ 0; 1 ])) locateFn
+    |> registerTextScalar "INSTR" everyArgument instrFn
+    |> registerTextScalar "POSITION" everyArgument locateFn
+    |> registerTextScalar "REPLACE" everyArgument replaceFn
+    |> registerTextScalar "TRIM" firstArgument (textMap (trimRaw true true) (fun s -> s.Trim()))
+    |> registerTextScalar "TRIM_BOTH" everyArgument (trimSubstring true true)
+    |> registerTextScalar "TRIM_LEADING" everyArgument (trimSubstring true false)
+    |> registerTextScalar "TRIM_TRAILING" everyArgument (trimSubstring false true)
+    |> registerTextScalar "LTRIM" firstArgument (textMap (trimRaw true false) (fun s -> s.TrimStart()))
+    |> registerTextScalar "RTRIM" firstArgument (textMap (trimRaw false true) (fun s -> s.TrimEnd()))
+    |> registerTextScalar "LPAD" (arguments (set [ 0; 2 ])) (padFn true)
+    |> registerTextScalar "RPAD" (arguments (set [ 0; 2 ])) (padFn false)
+    |> registerTextScalar "LEFT" firstArgument leftFn
+    |> registerTextScalar "RIGHT" firstArgument rightFn
+    |> registerTextScalar "REVERSE" firstArgument (textMap (Array.rev >> VBytes) (fun s -> String(Array.rev (s.ToCharArray()))))
+    |> registerTextScalar "REPEAT" firstArgument repeatFn
     |> registerScalar "SPACE" spaceFn
-    |> registerScalar "ASCII" asciiFn
-    |> registerScalar "ORD" ordFn
+    |> registerTextScalar "ASCII" firstArgument asciiFn
+    |> registerTextScalar "ORD" firstArgument ordFn
     |> registerScalar "CHAR" charFn
     |> registerScalar "HEX" hexFn
-    |> registerScalar "UNHEX" unhexFn
-    |> registerScalar "AES_ENCRYPT" (aesEncrypt "aes-128-ecb")
-    |> registerScalar "AES_DECRYPT" (aesDecrypt "aes-128-ecb")
-    |> registerScalar "MD5" md5Fn
-    |> registerScalar "SHA1" sha1Fn
-    |> registerScalar "SHA" sha1Fn
-    |> registerScalar "SHA2" sha2Fn
+    |> registerTextScalar "UNHEX" firstArgument unhexFn
+    |> registerTextScalar "AES_ENCRYPT" (arguments (set [ 0; 1 ])) (aesEncrypt "aes-128-ecb")
+    |> registerTextScalar "AES_DECRYPT" (arguments (set [ 0; 1 ])) (aesDecrypt "aes-128-ecb")
+    |> registerTextScalar "MD5" firstArgument md5Fn
+    |> registerTextScalar "SHA1" firstArgument sha1Fn
+    |> registerTextScalar "SHA" firstArgument sha1Fn
+    |> registerTextScalar "SHA2" firstArgument sha2Fn
     |> registerScalar "FORMAT" formatFn
-    |> registerScalar "SUBSTRING_INDEX" substringIndexFn
-    |> registerScalar "CONCAT_WS" concatWsFn
-    |> registerScalar "ELT" eltFn
-    |> registerScalar "EXPORT_SET" exportSetFn
-    |> registerScalar "MAKE_SET" makeSetFn
+    |> registerTextScalar "SUBSTRING_INDEX" (arguments (set [ 0; 1 ])) substringIndexFn
+    |> registerTextScalar "CONCAT_WS" everyArgument concatWsFn
+    |> registerTextScalar "ELT" (argumentsAfter 0) eltFn
+    |> registerTextScalar "EXPORT_SET" (arguments (set [ 1; 2; 3 ])) exportSetFn
+    |> registerTextScalar "MAKE_SET" (argumentsAfter 0) makeSetFn
     |> registerScalar "FIELD" fieldFn
-    |> registerScalar "FIND_IN_SET" findInSetFn
-    |> registerScalar "QUOTE" quoteFn
-    |> registerScalar "STRCMP" strcmpFn
-    |> registerScalar "SOUNDEX" soundexFn
-    |> registerScalar "TO_BASE64" toBase64Fn
-    |> registerScalar "FROM_BASE64" fromBase64Fn
-    |> registerScalar "COMPRESS" compressFn
-    |> registerScalar "UNCOMPRESS" uncompressFn
-    |> registerScalar "UNCOMPRESSED_LENGTH" uncompressedLengthFn
+    |> registerTextScalar "FIND_IN_SET" everyArgument findInSetFn
+    |> registerTextScalar "QUOTE" firstArgument quoteFn
+    |> registerTextScalar "STRCMP" everyArgument strcmpFn
+    |> registerTextScalar "SOUNDEX" firstArgument soundexFn
+    |> registerTextScalar "TO_BASE64" firstArgument toBase64Fn
+    |> registerTextScalar "FROM_BASE64" firstArgument fromBase64Fn
+    |> registerTextScalar "COMPRESS" firstArgument compressFn
+    |> registerTextScalar "UNCOMPRESS" firstArgument uncompressFn
+    |> registerTextScalar "UNCOMPRESSED_LENGTH" firstArgument uncompressedLengthFn
     |> registerScalar "RANDOM_BYTES" randomBytesFn
     |> registerScalar "UUID_SHORT" uuidShortFn
     |> registerScalar "NAME_CONST" nameConstFn
@@ -5655,7 +5676,7 @@ let builtins: Registry =
     |> registerScalar "BITWISE_SHIFT_LEFT" (bitwiseShift (fun value count -> value <<< count))
     |> registerScalar "BITWISE_SHIFT_RIGHT" (bitwiseShift (fun value count -> value >>> count))
     |> registerScalar "OCT" octFn
-    |> registerScalar "CRC32" crc32Fn
+    |> registerTextScalar "CRC32" firstArgument crc32Fn
     |> registerScalar "UUID" uuidFn
     |> registerScalar "UUID_TO_BIN" uuidToBinFn
     |> registerScalar "BIN_TO_UUID" binToUuidFn

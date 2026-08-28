@@ -142,6 +142,40 @@ let columnTypeText (ty: ColumnType) : string =
     // implicit 2048, the way MySQL 9 echoes it back.
     | TVector dim -> sprintf "vector(%d)" dim
 
+let columnTypeTextOfColumn (column: ColumnDef) : string =
+    match column.Type, column.NumericDisplay with
+    | (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _), Some { Width = Some width; ZeroFill = true } ->
+        let name =
+            match column.Type with
+            | TTinyInt _ -> "tinyint"
+            | TSmallInt _ -> "smallint"
+            | TMediumInt _ -> "mediumint"
+            | TInt _ -> "int"
+            | _ -> "bigint"
+
+        sprintf "%s(%d) unsigned zerofill" name width
+    | TDecimal(precision, scale, _), Some { ZeroFill = true } ->
+        sprintf "decimal(%d,%d) unsigned zerofill" precision scale
+    | (TFloat _ | TDouble _), Some display ->
+        let name =
+            match column.Type with
+            | TFloat _ -> "float"
+            | _ -> "double"
+
+        let unsigned =
+            match column.Type with
+            | TFloat true
+            | TDouble true -> " unsigned"
+            | _ -> ""
+
+        let size =
+            match display.Width, display.Decimals with
+            | Some width, Some decimals -> sprintf "(%d,%d)" width decimals
+            | _ -> ""
+
+        name + size + (if display.ZeroFill then " unsigned zerofill" else unsigned)
+    | _ -> columnTypeText column.Type
+
 /// `character_maximum_length` — only meaningful for the string-ish types;
 /// MySQL's fixed per-type ceilings for the `TEXT`/`BLOB` family (`TINYTEXT`
 /// = 255, `TEXT` = 65535, ...), the declared length for `CHAR`/`VARCHAR`.
@@ -494,7 +528,7 @@ let private columnRowWith (privileges: string) (dbName: string) (tableName: stri
        (datetimePrecision c.Type |> Option.map VInt |> Option.defaultValue VNull)
        (if isStringy c.Type then vs (c.Charset |> Option.defaultValue "utf8mb4") else VNull)
        (if isStringy c.Type then vs (c.Collation |> Option.defaultValue "utf8mb4_0900_ai_ci") else VNull)
-       vs (columnTypeText c.Type)
+       vs (columnTypeTextOfColumn c)
        vs key
        vs (extraText c)
        vs privileges
@@ -1881,7 +1915,7 @@ let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool
                 cols
                 |> List.map (fun (c: ColumnDef) ->
                     [ Some c.Name
-                      Some(columnTypeText c.Type)
+                      Some(columnTypeTextOfColumn c)
                       // The column's declared/inherited collation —
                       // matching `information_schema.columns.collation_name`
                       // (`columnsRows` above).
@@ -1898,7 +1932,7 @@ let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool
             let rows =
                 cols
                 |> List.map (fun (c: ColumnDef) ->
-                    [ Some c.Name; Some(columnTypeText c.Type); Some(isNullable c); Some(keyOf c); defaultCol c; Some(extra c) ])
+                    [ Some c.Name; Some(columnTypeTextOfColumn c); Some(isNullable c); Some(keyOf c); defaultCol c; Some(extra c) ])
 
             [ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows)
 
@@ -1983,7 +2017,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                 | None, None -> []
                 | cs, col -> [ sprintf "CHARACTER SET %s" (cs |> Option.defaultValue "utf8mb4"); sprintf "COLLATE %s" (col |> Option.defaultValue "utf8mb4_0900_ai_ci") ]
 
-        [ backtick c.Name; columnTypeText c.Type ]
+        [ backtick c.Name; columnTypeTextOfColumn c ]
         @ charsetCollate
         @ [ generatedPart; notNull; defaultPart; onUpdatePart; extra; if c.Comment = "" then "" else sprintf "COMMENT '%s'" (showCreateString c.Comment) ]
         |> List.filter ((<>) "")

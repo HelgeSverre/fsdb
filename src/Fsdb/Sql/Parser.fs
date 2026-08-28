@@ -848,13 +848,28 @@ let private columnTypeWithDisplay: Parser<ColumnType * NumericDisplay option, un
               keywordParser
               >>. opt numericWidth
               .>>. numericTail
-              |>> fun (size, tail) ->
-                  let width, decimals = size |> Option.map fst, size |> Option.bind snd
-                  makeType tail.Unsigned, numericDisplay width decimals tail.ZeroFill size.IsSome
+              >>= fun (size, tail) ->
+                  match size with
+                  | Some(_, None) -> fail "DOUBLE and REAL require both display width and decimals"
+                  | _ ->
+                      let width, decimals = size |> Option.map fst, size |> Option.bind snd
+                      preturn (makeType tail.Unsigned, numericDisplay width decimals tail.ZeroFill size.IsSome)
 
           floatingType (keyword "REAL") (fun unsigned -> if currentOptions.Value.RealAsFloat then TFloat unsigned else TDouble unsigned)
           floatingType (keyword "DOUBLE" >>. optional (keyword "PRECISION")) TDouble
-          floatingType (keyword "FLOAT") TFloat
+          keyword "FLOAT"
+          >>. opt numericWidth
+          .>>. numericTail
+          >>= fun (size, tail) ->
+              match size with
+              | Some(precision, None) when precision <= 24 ->
+                  preturn (TFloat tail.Unsigned, numericDisplay None None tail.ZeroFill false)
+              | Some(precision, None) when precision <= 53 ->
+                  preturn (TDouble tail.Unsigned, numericDisplay None None tail.ZeroFill false)
+              | Some(_, None) -> fail "FLOAT precision must be between 0 and 53"
+              | Some(width, Some decimals) ->
+                  preturn (TFloat tail.Unsigned, numericDisplay (Some width) (Some decimals) tail.ZeroFill true)
+              | None -> preturn (TFloat tail.Unsigned, numericDisplay None None tail.ZeroFill false)
           keyword "DATETIME" >>. optFsp |>> (fun fsp -> TDateTime fsp, None)
           keyword "TIMESTAMP" >>. optFsp |>> (fun fsp -> TTimestamp fsp, None)
           keyword "DATE" >>% (TDate, None)

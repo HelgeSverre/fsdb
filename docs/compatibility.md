@@ -146,6 +146,8 @@ fsdb supports stored queries broadly and a narrow writable subset:
   COLUMNS`, and `SHOW TABLE STATUS`. This path reads the stored definition
   without running it, so empty and nondeterministic views have the same
   metadata shape as populated views.
+- Numeric display widths and `ZEROFILL` survive direct view projections;
+  computed expressions and unions discard them as MySQL does.
 
 Single-table views and nested views over that shape accept `UPDATE` and
 `DELETE`, including predicates over computed projections. Direct physical

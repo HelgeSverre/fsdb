@@ -1838,6 +1838,7 @@ let tests =
                           // UNHEX produces raw bytes (VBytes), not text — MySQL
                           // treats its result as a binary string.
                           Expect.equal (call "UNHEX" [ VString "4142" ]) (VBytes [| 0x41uy; 0x42uy |]) "unhex"
+                          Expect.equal (call "UNHEX" [ VString "123" ]) (VBytes [| 0x01uy; 0x23uy |]) "odd-length unhex"
 
                       testCase "LENGTH counts UTF-8 bytes; CHAR_LENGTH counts code points"
                       <| fun _ ->

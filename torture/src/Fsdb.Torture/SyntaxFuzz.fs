@@ -122,6 +122,7 @@ module SyntaxFuzz =
            "partition_growth", "ALTER TABLE syntax_partitioned ADD PARTITION PARTITIONS 1"
            "spatial_buffer", "SELECT ST_AsText(ST_Buffer(ST_PointFromText('POINT(0 0)'), 1))"
            "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix
+           "numeric_display", sprintf "CREATE TABLE syntax_display_%s (i INT(7) ZEROFILL, d DECIMAL(7,2) ZEROFILL, f FLOAT(8,2) ZEROFILL)" suffix
            "bit_type", sprintf "CREATE TABLE syntax_bit_%s (b BIT(64) DEFAULT b'1')" suffix |]
 
     let private fixtures =
@@ -162,6 +163,7 @@ module SyntaxFuzz =
         | "view_check_option" -> Some(sprintf "DROP VIEW syntax_view_%s" suffix)
         | "ordered_compound_trigger" -> Some(sprintf "DROP TRIGGER syntax_after_%s" suffix)
         | "column_comment" -> Some(sprintf "DROP TABLE syntax_comment_%s" suffix)
+        | "numeric_display" -> Some(sprintf "DROP TABLE syntax_display_%s" suffix)
         | "bit_type" -> Some(sprintf "DROP TABLE syntax_bit_%s" suffix)
         | "functional_default" -> Some(sprintf "DROP TABLE syntax_default_%s" suffix)
         | "partitioned_table" -> Some(sprintf "DROP TABLE syntax_partition_%s" suffix)

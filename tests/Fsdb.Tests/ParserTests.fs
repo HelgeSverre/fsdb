@@ -1466,7 +1466,7 @@ let tests =
                 <| fun _ ->
                     match
                         parseOk
-                            "CREATE TABLE t (a INT(7) ZEROFILL, b SMALLINT ZEROFILL, c FLOAT(8,2) ZEROFILL, d DECIMAL(7,2) ZEROFILL, e INT(3))"
+                            "CREATE TABLE t (a INT(7) ZEROFILL, b SMALLINT ZEROFILL, c FLOAT(8,2) ZEROFILL, d DECIMAL(7,2) ZEROFILL, e INT(3), f FLOAT(8), g FLOAT(30))"
                     with
                     | CreateTable { Columns = columns } ->
                         Expect.equal
@@ -1475,9 +1475,14 @@ let tests =
                               TSmallInt true, Some { Width = Some 5; Decimals = None; ZeroFill = true }
                               TFloat true, Some { Width = Some 8; Decimals = Some 2; ZeroFill = true }
                               TDecimal(7, 2, true), Some { Width = None; Decimals = None; ZeroFill = true }
-                              TInt false, Some { Width = Some 3; Decimals = None; ZeroFill = false } ]
+                              TInt false, Some { Width = Some 3; Decimals = None; ZeroFill = false }
+                              TFloat false, None
+                              TDouble false, None ]
                             "numeric display attributes"
                     | other -> failtestf "expected numeric display attributes, got %A" other
+
+                    Expect.isError (parse "CREATE TABLE t (a DOUBLE(8))") "DOUBLE needs M,D"
+                    Expect.isError (parse "CREATE TABLE t (a REAL(8))") "REAL needs M,D"
 
                 testCase "COMMENT / CHARACTER SET / COLLATE column modifiers are accepted and ignored"
                 <| fun _ ->

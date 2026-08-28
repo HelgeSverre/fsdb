@@ -28,6 +28,9 @@ tables:
         - { name: signed_big, type: bigint, nullable: false }
         - { name: exact_value, type: "decimal(30,10)", nullable: false }
         - { name: approximate_value, type: double, nullable: false }
+        - { name: padded_integer, type: "int(7) zerofill", nullable: false }
+        - { name: padded_decimal, type: "decimal(7,2) zerofill", nullable: false }
+        - { name: padded_float, type: "float(8,2) zerofill", nullable: false }
         - { name: fixed_code, type: "char(8)", nullable: false }
         - { name: short_text, type: "varchar(255)", nullable: false }
         - { name: long_text, type: text, nullable: false }
@@ -48,6 +51,9 @@ tables:
       signed_big: { generator: { kind: integer, min: -9000000000000000, max: 9000000000000000 } }
       exact_value: { generator: { kind: decimal, min: -999999999.9999999999, max: 999999999.9999999999, scale: 10 } }
       approximate_value: { generator: { kind: decimal, min: -1000000, max: 1000000, scale: 6 } }
+      padded_integer: { generator: { kind: integer, min: 0, max: 9999999 } }
+      padded_decimal: { generator: { kind: decimal, min: 0, max: 99999.99, scale: 2 } }
+      padded_float: { generator: { kind: decimal, min: 0, max: 99999.99, scale: 2 } }
       fixed_code: { generator: { kind: pattern, mask: "??##**##" } }
       short_text:
         generator:

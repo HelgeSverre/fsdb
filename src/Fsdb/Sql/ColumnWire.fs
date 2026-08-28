@@ -73,7 +73,7 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
             Flags = SetFlag }
     | TDecimal(precision, scale, unsigned) ->
         { columnMetadata TypeNewDecimal with
-            ColumnLength = uint32 (precision + 2)
+            ColumnLength = uint32 (precision + (if scale > 0 then 1 else 0) + (if unsigned then 0 else 1))
             Decimals = byte scale
             Flags = if unsigned then UnsignedFlag else 0us }
         |> numeric
@@ -114,6 +114,15 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
 
 let metadataOfColumn (column: ColumnDef) : ColumnMetadata =
     let metadata = metadataOfType column.Type
+
+    let metadata =
+        match column.NumericDisplay with
+        | None -> metadata
+        | Some display ->
+            { metadata with
+                ColumnLength = display.Width |> Option.map uint32 |> Option.defaultValue metadata.ColumnLength
+                Decimals = display.Decimals |> Option.map byte |> Option.defaultValue metadata.Decimals
+                Flags = metadata.Flags ||| (if display.ZeroFill then ZeroFillFlag else 0us) }
 
     let wireCollation =
         if isTextual column.Type then

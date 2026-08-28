@@ -2084,15 +2084,34 @@ let rec private columnsForQualifier (ctx: EvalContext) (qualifier: string) : Col
     | Some(columns, _) -> columns
     | None -> ctx.Outer |> Option.map (fun outer -> columnsForQualifier outer qualifier) |> Option.defaultValue []
 
-/// The declared fsp list must mirror projection expansion because `VDateTime`
-/// alone does not retain its declared display precision.
-let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : int option list =
+type private OutputColumnFormat =
+    { Fsp: int option
+      Column: ColumnDef option }
+
+let private outputFormatOfColumn column =
+    { Fsp = fspOfType column.Type
+      Column = Some column }
+
+let private displayColumnForExpr ctx =
+    function
+    | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
+        tryColumnDefForExpr ctx argument
+    | expression -> tryColumnDefForExpr ctx expression
+
+let private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : OutputColumnFormat list =
     projections
     |> List.collect (fun proj ->
         match proj with
-        | Star None, _ -> columns |> List.map (fun c -> fspOfType c.Type)
-        | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map (fun c -> fspOfType c.Type)
-        | expr, _ -> [ fspOfExpr ctx expr ])
+        | Star None, _ -> columns |> List.map outputFormatOfColumn
+        | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map outputFormatOfColumn
+        | expr, _ ->
+            [ { Fsp = fspOfExpr ctx expr
+                Column = displayColumnForExpr ctx expr } ])
+
+/// The declared fsp list must mirror projection expansion because `VDateTime`
+/// alone does not retain its declared display precision.
+let private outputColumnFsps ctx columns projections =
+    outputColumnFormats ctx columns projections |> List.map _.Fsp
 
 type private OutputColumnSource =
     { Qualifier: string
@@ -2267,17 +2286,56 @@ let private applyWireOverrides (overrides: ColumnMetadata option list) (types: C
     else
         types
 
-/// Renders a projection's `(name, Value)` output columns to the resultset's
-/// `string option list`, honoring each column's declared fsp (`fsps`, from
-/// `outputColumnFsps`) — a temporal column shows exactly its fsp digits, and
-/// everything else falls back to `Value.toText`. Falls back wholesale if the
-/// two lists somehow disagree in length (they shouldn't — both come from the
-/// same projection expansion), rather than throwing from `List.map2`.
-let private renderOutputCols (fsps: int option list) (outputCols: (string * Value) list) : string option list =
-    if List.length fsps = List.length outputCols then
-        List.map2 (fun fspOpt (_, v) -> match fspOpt with Some fsp -> Value.toTextFsp fsp v | None -> Value.toText v) fsps outputCols
+let private padNumeric width (text: string) =
+    if text.Length >= width then
+        text
+    elif text.StartsWith("-", System.StringComparison.Ordinal) then
+        "-" + text.Substring(1).PadLeft(width - 1, '0')
     else
-        outputCols |> List.map (snd >> toText)
+        text.PadLeft(width, '0')
+
+let private renderOutputValue format value =
+    let text =
+        match format.Column |> Option.bind _.NumericDisplay, value with
+        | Some display, VDouble number ->
+            match display.Decimals with
+            | Some decimals -> Some(number.ToString("F" + string decimals, System.Globalization.CultureInfo.InvariantCulture))
+            | None -> Value.toText value
+        | Some _, VDecimal number ->
+            match format.Column |> Option.map _.Type with
+            | Some(TDecimal(_, scale, _)) -> Some(number.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
+            | _ -> Value.toText value
+        | _ ->
+            match format.Fsp with
+            | Some fsp -> Value.toTextFsp fsp value
+            | None -> Value.toText value
+
+    match format.Column |> Option.bind _.NumericDisplay, text with
+    | Some({ ZeroFill = true } as display), Some rendered ->
+        let width =
+            match display.Width, format.Column |> Option.map _.Type with
+            | Some width, _ -> width
+            | None, Some(TDecimal(precision, scale, _)) -> precision + (if scale > 0 then 1 else 0)
+            | None, Some(TFloat _) -> 12
+            | None, Some(TDouble _) -> 22
+            | _ -> rendered.Length
+
+        Some(padNumeric width rendered)
+    | _ -> text
+
+let private renderOutputCols (formats: OutputColumnFormat list) (outputCols: (string * Value) list) : string option list =
+    if List.length formats = List.length outputCols then
+        List.map2 (fun format (_, value) -> renderOutputValue format value) formats outputCols
+    else
+        outputCols |> List.map (snd >> Value.toText)
+
+let private displayValueForText (ctx: EvalContext) expression value =
+    match displayColumnForExpr ctx expression with
+    | Some column when column.NumericDisplay |> Option.exists _.ZeroFill ->
+        renderOutputValue (outputFormatOfColumn column) value
+        |> Option.map VString
+        |> Option.defaultValue VNull
+    | _ -> value
 
 let private collationOfColumn (ctx: EvalContext) (column: ColumnDef) : Collation.Collation option =
     match column.Type with
@@ -3602,6 +3660,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.bind (fun ve ->
             eval p
             |> Result.bind (fun vp ->
+                let ve = displayValueForText ctx e ve
+                let vp = displayValueForText ctx p vp
+
                 match tryRawBytes ve, tryRawBytes vp with
                 | Some _, _
                 | _, Some _ -> Ok(Collation.tryFind "utf8mb4_bin" |> Option.defaultValue Collation.defaultCollation)
@@ -3619,6 +3680,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.bind (fun ve ->
             eval p
             |> Result.bind (fun vp ->
+                let ve = displayValueForText ctx e ve
+                let vp = displayValueForText ctx p vp
                 regexCollation ctx "regexp_like" e ve p vp
                 |> Result.bind (fun collation -> regexpOp (Some collation) ve vp)))
     | In((Row _ as e), xs)
@@ -3880,6 +3943,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.bind (fun subject ->
             eval patternExpr
             |> Result.bind (fun pattern ->
+                let subject = displayValueForText ctx subjectExpr subject
+                let pattern = displayValueForText ctx patternExpr pattern
+
                 rest
                 |> traverse eval
                 |> Result.bind (fun values ->
@@ -3906,6 +3972,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             |> traverse eval
             |> Result.bind (fun values ->
                 try
+                    let values =
+                        List.zip args values
+                        |> List.mapi (fun index (expression, value) ->
+                            if Functions.isTextArgument name index ctx.Registry then
+                                displayValueForText ctx expression value
+                            else
+                                value)
+
                     let invoke () = fn values
 
                     match registryAccount ctx.Registry with
@@ -3917,6 +3991,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // `expr COLLATE name` evaluates as its inner expression — the tag
     // only steers which collation comparisons resolve under.
     | Collate(e, _) -> eval e
+    | Cast(e, ((TChar _ | TVarchar _ | TBinary _ | TVarBinary _) as ty))
+        when tryColumnDefForExpr ctx e |> Option.bind _.NumericDisplay |> Option.exists _.ZeroFill ->
+        eval e
+        |> Result.bind (fun value -> eval (Cast(Lit(displayValueForText ctx e value), ty)))
     // MySQL doesn't support CAST-ing to VECTOR (STRING_TO_VECTOR is the
     // sanctioned conversion), and quietly blob-coercing here would mint
     // wrong-dimension vectors that only fail much later, at INSERT time.
@@ -5201,6 +5279,7 @@ and private resolveFromSubquery
                             |> Option.map (fun source ->
                                 { derived with
                                     Type = source.Type
+                                    NumericDisplay = source.NumericDisplay
                                     Collation = source.Collation
                                     Charset = source.Charset })
                             |> Option.defaultValue derived)
@@ -8773,13 +8852,13 @@ and private runGroupedSelect
                     // one (`MAX(dt)`) has no resolvable column type and falls
                     // back to `toText`.
                     let groupCtx = ctxFor (probeRow columns)
-                    let groupFsps = outputColumnFsps groupCtx columns select.Projections
+                    let groupFormats = outputColumnFormats groupCtx columns select.Projections
                     let groupWireOverrides =
                         outputColumnWireOverridesFor select.Rollup groupCtx columns select
 
                     let paired =
                         sorted
-                        |> List.map (fun (proj, _, _) -> renderOutputCols groupFsps proj, proj |> List.map snd |> Array.ofList)
+                        |> List.map (fun (proj, _, _) -> renderOutputCols groupFormats proj, proj |> List.map snd |> Array.ofList)
 
                     let dedupedPaired = if select.Distinct then paired |> List.distinctBy fst else paired
 
@@ -10043,11 +10122,11 @@ and private runSelect
     // context — a temporal column renders exactly its fsp digits (see
     // `renderOutputCols`), independent of row values, so it's stable across
     // every row this select emits.
-    let outputFsps = outputColumnFsps (ctxFor (probeRow columns)) columns projections
+    let outputFormats = outputColumnFormats (ctxFor (probeRow columns)) columns projections
     let outputWireOverrides = outputColumnWireOverrides (ctxFor (probeRow columns)) columns select
 
     let pairOf (outputCols: (string * Value) list) : string option list * Value[] =
-        renderOutputCols outputFsps outputCols, outputCols |> List.map snd |> Array.ofList
+        renderOutputCols outputFormats outputCols, outputCols |> List.map snd |> Array.ofList
 
     let probe = probeRow columns
 
@@ -12390,6 +12469,25 @@ let private storeTriggerDefinition
                 |> Result.map (fun _ ->
                     Storage.commitCatalogInto store baseCatalog snapshot))
 
+let private reportNumericDisplayWarnings columns =
+    for column in columns do
+        match column.NumericDisplay with
+        | Some display ->
+            if display.ZeroFill then
+                Diagnostics.warning
+                    1681
+                    "The ZEROFILL attribute is deprecated and will be removed in a future release. Use the LPAD function to zero-pad numbers, or store the formatted numbers in a CHAR column."
+
+            match column.Type, display.Width, display.Decimals with
+            | (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _), Some _, _ ->
+                Diagnostics.warning 1681 "Integer display width is deprecated and will be removed in a future release."
+            | (TFloat _ | TDouble _), Some _, Some _ ->
+                Diagnostics.warning
+                    1681
+                    "Specifying number of digits for floating point data types is deprecated and will be removed in a future release."
+            | _ -> ()
+        | None -> ()
+
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
 let rec executeAs
@@ -13427,6 +13525,7 @@ let rec executeAs
                     match created with
                     | Ok() ->
                         Storage.commitCatalogInto store baseCatalog snapshot
+                        reportNumericDisplayWarnings table.Columns
                         ids, Affected 0UL
                     | Error(TableExists _) when table.IfNotExists -> ids, Affected 0UL
                     | Error e -> ids, storageErr e
@@ -13739,6 +13838,7 @@ let rec executeAs
             match altered with
             | Ok() ->
                 Storage.commitCatalogInto store baseCatalog snapshot
+                reportNumericDisplayWarnings addedColumns
                 ids, Affected 0UL
             | Error e -> ids, storageErr e
 

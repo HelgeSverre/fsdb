@@ -164,7 +164,8 @@ rounding by default and truncation under `TIME_TRUNCATE_FRACTIONAL`, all-zero
 and partial-zero dates with sql_mode
 enforcement, YEAR, JSON, per-column charset/collation,
 wire-faithful column metadata (`ColumnWire.metadataOfType`), `BIT(1)`–`BIT(64)`
-fields with binary literals and defaults, per-row functional defaults with
+fields with binary literals and defaults, deprecated numeric display widths
+and `ZEROFILL` formatting/metadata, per-row functional defaults with
 column references, utf8mb3-normalized table and column comments, and OGC WKB geometry values
 (`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
 accessors).
@@ -173,7 +174,6 @@ accessors).
 |---|---|---|---|---|
 | Spatial indexes and operations | R-tree indexes, overlays, general buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar point `ST_Buffer`, `ST_Distance`, `ST_Envelope`, topology predicates, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | `Executor.recomputeGeneratedColumns` materializes both at write time; no read-path recompute | low | divergence |
-| ZEROFILL/display width | zero-fill formatting, width in metadata | not tracked beyond static wire lengths; `ColumnWire.metadataOfType` never sets ZEROFILL | low | divergence |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
@@ -391,7 +391,7 @@ generic state-change tracker when enabled.
 | Unimplemented COM_* | CHANGE_USER | returns ERR 1047 (`Server.fs`) | low | refusal |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateHandshake` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | direct physical COM_QUERY/COM_STMT_PREPARE columns and COM_FIELD_LIST report source names; declared expressions and text-probed resultsets report their effective MySQL collation ids; view, derived, and UNION source names remain empty | low | partial |
-| Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | numeric, temporal, required-default, primary/unique key-part, and implicit YEAR ZEROFILL flags are reported; non-unique secondary membership and an explicit ZEROFILL declaration are not represented in `ColumnDef` | low | divergence |
+| Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | numeric, temporal, required-default, primary/unique key-part, explicit numeric ZEROFILL, and implicit YEAR ZEROFILL flags are reported; non-unique secondary membership is still absent | low | divergence |
 | Prepared metadata | STMT_PREPARE_OK carries result columns and typed parameter definitions | result columns, schema/operator/DML contexts, and common numeric, temporal, JSON, and spatial built-in arguments are derived statically without evaluating the statement; less-common overloaded built-ins and registered extensions without declared signatures remain generic VAR_STRING | low | divergence |
 | Reprepare | automatic reprepare on metadata change | prepared ASTs resolve tables, columns, views, and result metadata from the live schema on each execution, yielding the same observable schema-change behavior without recompiling SQL text | low | aligned for supported syntax |
 | System variables | hundreds live | ~30 known; most others inert or absent; time_zone static strings with no conversion | medium | divergence |

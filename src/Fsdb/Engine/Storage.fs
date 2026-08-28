@@ -1326,7 +1326,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                     Ok(VBit(width, maxValue))
 
-            let finish value =
+            let finish (value: uint64) =
                 if value <= maxValue then
                     Ok(VBit(width, value))
                 else
@@ -1381,6 +1381,17 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             | _ -> numericFallback None (fun () -> VInt 0L)
         | TDouble unsigned
         | TFloat unsigned ->
+            let finish (value: float) =
+                let rounded =
+                    col.NumericDisplay
+                    |> Option.bind _.Decimals
+                    |> Option.map (fun decimals -> Math.Round(value, decimals, MidpointRounding.AwayFromZero))
+                    |> Option.defaultValue value
+
+                match col.Type with
+                | TFloat _ -> float32 rounded |> float |> VDouble |> Ok
+                | _ -> VDouble rounded |> Ok
+
             let unsignedUnderflow () =
                 if strict then
                     outOfRange ()
@@ -1390,17 +1401,17 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
 
             match v with
             | VDouble d when unsigned && d < 0.0 -> unsignedUnderflow ()
-            | VDouble d -> Ok(VDouble d)
+            | VDouble d -> finish d
             | VInt i when unsigned && i < 0L -> unsignedUnderflow ()
-            | VInt i -> Ok(VDouble(float i))
-            | VUInt u -> Ok(VDouble(float u))
-            | VBit(_, value) -> Ok(VDouble(float value))
+            | VInt i -> finish (float i)
+            | VUInt u -> finish (float u)
+            | VBit(_, value) -> finish (float value)
             | VDecimal d when unsigned && d < 0M -> unsignedUnderflow ()
-            | VDecimal d -> Ok(VDouble(float d))
+            | VDecimal d -> finish (float d)
             | VString s ->
                 match parseNumeric s with
                 | Some d when unsigned && d < 0.0 -> unsignedUnderflow ()
-                | Some d -> Ok(VDouble d)
+                | Some d -> finish d
                 | None -> numericFallback None (fun () -> VDouble 0.0)
             | _ -> numericFallback None (fun () -> VDouble 0.0)
         | TDecimal(_, scale, unsigned) ->
@@ -3601,9 +3612,23 @@ let private withTable
 let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
     let maxVarcharLength = 65535 / Collation.maxBytesPerCharacter c.Charset
 
-    if c.OnUpdateCurrentTimestamp && not (supportsCurrentTimestamp c) then
+    let displayError =
+        match c.Type, c.NumericDisplay with
+        | _, Some { Width = Some width } when width > 255 ->
+            Some(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 255)" c.Name))
+        | (TFloat _ | TDouble _), Some { Width = Some width } when width < 1 ->
+            Some(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 255)" c.Name))
+        | (TFloat _ | TDouble _), Some { Decimals = Some decimals } when decimals > 30 ->
+            Some(ExpressionError(1425, sprintf "Too big scale %d specified for column '%s'. Maximum is 30." decimals c.Name))
+        | (TFloat _ | TDouble _), Some { Width = Some width; Decimals = Some decimals } when decimals > width ->
+            Some(ExpressionError(1427, sprintf "For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '%s')." c.Name))
+        | _ -> None
+
+    match displayError with
+    | Some error -> Error error
+    | None when c.OnUpdateCurrentTimestamp && not (supportsCurrentTimestamp c) ->
         Error(ExpressionError(1294, sprintf "Invalid ON UPDATE clause for '%s' column" c.Name))
-    else
+    | None ->
         match c.Type with
         | TChar length when length < 1 || length > 255 ->
             Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 255); use BLOB or TEXT instead" c.Name))

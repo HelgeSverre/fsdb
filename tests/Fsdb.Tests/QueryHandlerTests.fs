@@ -93,6 +93,123 @@ let tests =
                   | metadata -> failtestf "expected five metadata records, got %A" metadata
               | _, other -> failtestf "expected a resultset, got %A" other
 
+          testCase "numeric display attributes shape text values and wire metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE TABLE displayed (a INT(7) ZEROFILL DEFAULT 12, b FLOAT(8,2) ZEROFILL, c DECIMAL(7,2) ZEROFILL, d INT(3))"
+
+              match created with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected displayed table creation, got %A" other
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, warnings) ->
+                  Expect.equal
+                      (warnings |> List.map (List.item 1))
+                      [ Some "1681"; Some "1681"; Some "1681"; Some "1681"; Some "1681"; Some "1681" ]
+                      "deprecation warnings"
+              | other -> failtestf "expected display warnings, got %A" other
+
+              let session, _ = handle session "INSERT INTO displayed VALUES (12, 1.236, 1.2, 12)"
+
+              match
+                  handle
+                      session
+                      "SELECT a, b, c, d, CONCAT(a), LENGTH(a), HEX(a), a + 0, a LIKE '0%', a REGEXP '^0', CAST(a AS CHAR), DEFAULT(a) FROM displayed"
+              with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.equal
+                      row
+                      [ Some "0000012"; Some "00001.24"; Some "00001.20"; Some "12"; Some "0000012"; Some "7"; Some "C"; Some "12"; Some "1"; Some "1"; Some "0000012"; Some "0000012" ]
+                      "displayed values"
+
+                  match session.LastResultColumnMetadata with
+                  | a :: b :: c :: d :: _ ->
+                      Expect.equal (a.ColumnLength, b.ColumnLength, c.ColumnLength, d.ColumnLength) (7u, 8u, 8u, 3u) "declared widths"
+                      Expect.equal (b.Decimals, c.Decimals) (2uy, 2uy) "declared decimals"
+
+                      for metadata in [ a; b; c ] do
+                          Expect.isTrue (metadata.Flags &&& UnsignedFlag <> 0us) "ZEROFILL is unsigned"
+                          Expect.isTrue (metadata.Flags &&& ZeroFillFlag <> 0us) "ZEROFILL flag"
+
+                      Expect.isFalse (d.Flags &&& ZeroFillFlag <> 0us) "plain width has no ZEROFILL flag"
+                  | metadata -> failtestf "expected twelve result columns, got %A" metadata
+              | _, other -> failtestf "expected displayed row, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT LEFT(a,2), RIGHT(a,2), SUBSTRING(a,2,2), UPPER(a), MD5(a), SHA2(a,256), QUOTE(a), ASCII(a), ORD(a), LOCATE('12',a), REPLACE(a,'0','x'), LPAD(a,9,'x'), HEX(UNHEX(a)), CRC32(a), HEX(AES_ENCRYPT(a,'k')) = HEX(AES_ENCRYPT('0000012','k')) FROM displayed"
+                  |> snd
+              with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal
+                      row
+                      [ Some "00"
+                        Some "12"
+                        Some "00"
+                        Some "0000012"
+                        Some "65b65395a835bcf1beebf4ba53f18dc2"
+                        Some "6aee6249240c5098671d3de5d4520f4edb8ff67b150f7f99ae3e1f20927ae8eb"
+                        Some "'0000012'"
+                        Some "48"
+                        Some "48"
+                        Some "6"
+                        Some "xxxxx12"
+                        Some "xx0000012"
+                        Some "00000012"
+                        Some "1251905028"
+                        Some "1" ]
+                      "string contexts consume the displayed form"
+              | other -> failtestf "expected displayed string coercions, got %A" other
+
+              match handle session "SELECT JSON_ARRAY(b) FROM displayed" |> snd with
+              | ResultSet(_, [ [ Some json ] ]) ->
+                  Expect.equal json "[1.2400000095367432]" "FLOAT retains its single-precision stored value"
+              | other -> failtestf "expected numeric JSON value, got %A" other
+
+              match handle session "SHOW COLUMNS FROM displayed" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (List.item 1))
+                      [ Some "int(7) unsigned zerofill"
+                        Some "float(8,2) unsigned zerofill"
+                        Some "decimal(7,2) unsigned zerofill"
+                        Some "int" ]
+                      "canonical column types"
+              | other -> failtestf "expected displayed columns, got %A" other
+
+              match handle session "SHOW CREATE TABLE displayed" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`a` int(7) unsigned zerofill" "integer declaration"
+                  Expect.stringContains ddl "`b` float(8,2) unsigned zerofill" "floating declaration"
+              | other -> failtestf "expected displayed DDL, got %A" other
+
+              let session, _ = handle session "CREATE VIEW displayed_view AS SELECT a, a + 0 AS plain FROM displayed"
+
+              for query, expected in
+                  [ "SELECT a FROM (SELECT a FROM displayed) AS derived", Some "0000012"
+                    "SELECT a FROM displayed_view", Some "0000012"
+                    "SELECT plain FROM displayed_view", Some "12"
+                    "SELECT a FROM displayed GROUP BY a", Some "0000012"
+                    "SELECT DISTINCT a FROM displayed", Some "0000012"
+                    "SELECT a FROM displayed UNION ALL SELECT a FROM displayed", Some "12" ] do
+                  match handle session query |> snd with
+                  | ResultSet(_, rows) -> Expect.isTrue (rows |> List.forall (fun row -> row.Head = expected)) query
+                  | other -> failtestf "expected displayed projection for %s, got %A" query other
+
+              match handle session "CREATE TABLE too_wide (a INT(256))" |> snd with
+              | Err(1439, message) -> Expect.stringContains message "max = 255" "display width limit"
+              | other -> failtestf "expected display-width rejection, got %A" other
+
+              match handle session "CREATE TABLE bad_float (a FLOAT(8,9))" |> snd with
+              | Err(1427, _) -> ()
+              | other -> failtestf "expected floating display rejection, got %A" other
+
           testCase "TIME functions retain scale through DECIMAL and CHAR casts"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

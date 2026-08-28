@@ -163,7 +163,6 @@ let tests =
                     let column =
                         { Name = "parent_id"
                           Type = "bigint"
-                          NumericDisplay = None
                           Nullable = false
                           Key = "MUL"
                           DefaultValue = "null"
