@@ -63,6 +63,13 @@ let fromErrorWithLevel level (error: SqlState.Error) =
 let fromError error = fromErrorWithLevel Error error
 let fromWarning error = fromErrorWithLevel Warning error
 
+let invalidConditionNumber =
+    { Level = Error
+      Code = 1758
+      State = SqlState.forCode 1758
+      Message = "Invalid condition number"
+      Information = Map.empty }
+
 let divisionByZero () : Result<unit, int * string> =
     let code = 1365
     let message = "Division by 0"

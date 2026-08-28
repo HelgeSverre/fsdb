@@ -1871,6 +1871,167 @@ let tests =
               | ResultSet(_, [ [ Some "12"; Some "12"; Some "3"; Some "12" ] ]) -> ()
               | other -> failtestf "expected handled condition results, got %A" other
 
+          testCase "stored handlers expose current and stacked diagnostics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let definition =
+                  """CREATE PROCEDURE inspect_diagnostics(
+                        OUT current_count INT,
+                        OUT current_rows BIGINT,
+                        OUT current_after_set INT,
+                        OUT returned_state VARCHAR(5),
+                        OUT returned_code INT,
+                        OUT returned_message VARCHAR(64),
+                        OUT returned_table VARCHAR(64),
+                        OUT returned_column VARCHAR(64))
+                      BEGIN
+                        DECLARE changed INT DEFAULT 0;
+                        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                        BEGIN
+                          GET CURRENT DIAGNOSTICS current_count = NUMBER, current_rows = ROW_COUNT;
+                          SET changed = 1;
+                          GET CURRENT DIAGNOSTICS current_after_set = NUMBER;
+                          GET STACKED DIAGNOSTICS CONDITION 1
+                            returned_state = RETURNED_SQLSTATE,
+                            returned_code = MYSQL_ERRNO,
+                            returned_message = MESSAGE_TEXT,
+                            returned_table = TABLE_NAME,
+                            returned_column = COLUMN_NAME,
+                            @direct_code = MYSQL_ERRNO;
+                        END;
+                        SIGNAL SQLSTATE '45006'
+                          SET MYSQL_ERRNO = 60006,
+                              MESSAGE_TEXT = 'diagnostic',
+                              TABLE_NAME = 'things',
+                              COLUMN_NAME = 'value';
+                      END"""
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created diagnostics procedure"
+
+              let session, called =
+                  handle
+                      session
+                      "CALL inspect_diagnostics(@current_count, @current_rows, @current_after_set, @returned_state, @returned_code, @returned_message, @returned_table, @returned_column)"
+
+              Expect.equal called (Affected 0UL) "called diagnostics procedure"
+
+              match
+                  handle
+                      session
+                      "SELECT @current_count, @current_rows, @current_after_set, @returned_state, @returned_code, @returned_message, @returned_table, @returned_column, @direct_code"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "1"; Some "-1"; Some "0"; Some "45006"; Some "60006"; Some "diagnostic"; Some "things"; Some "value"; Some "60006" ] ]) -> ()
+              | other -> failtestf "expected current and stacked diagnostics, got %A" other
+
+          testCase "native and user conditions expose MySQL diagnostic origins"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE diagnostics_origin (value INT NOT NULL)"
+
+              let definition =
+                  """CREATE PROCEDURE diagnostic_origins(
+                        OUT native_class VARCHAR(16),
+                        OUT native_subclass VARCHAR(16),
+                        OUT user_class VARCHAR(16),
+                        OUT user_subclass VARCHAR(16))
+                      BEGIN
+                        BEGIN
+                          DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                            GET STACKED DIAGNOSTICS CONDITION 1
+                              native_class = CLASS_ORIGIN,
+                              native_subclass = SUBCLASS_ORIGIN;
+                          INSERT INTO diagnostics_origin VALUES (NULL);
+                        END;
+                        BEGIN
+                          DECLARE CONTINUE HANDLER FOR SQLSTATE '45007'
+                            GET STACKED DIAGNOSTICS CONDITION 1
+                              user_class = CLASS_ORIGIN,
+                              user_subclass = SUBCLASS_ORIGIN;
+                          SIGNAL SQLSTATE '45007';
+                        END;
+                      END"""
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created origin procedure"
+
+              let session, called =
+                  handle
+                      session
+                      "CALL diagnostic_origins(@native_class, @native_subclass, @user_class, @user_subclass)"
+
+              Expect.equal called (Affected 0UL) "called origin procedure"
+
+              match handle session "SELECT @native_class, @native_subclass, @user_class, @user_subclass" |> snd with
+              | ResultSet(_, [ [ Some "ISO 9075"; Some "ISO 9075"; Some ""; Some "" ] ]) -> ()
+              | other -> failtestf "expected diagnostic origins, got %A" other
+
+          testCase "stacked diagnostics retain every condition from the failing statement"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, mode = handle session "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+              Expect.equal mode (Affected 0UL) "enabled non-strict conversions"
+
+              let session, table =
+                  handle session "CREATE TABLE diagnostics_values (id INT PRIMARY KEY)"
+
+              Expect.equal table (Affected 0UL) "created diagnostics table"
+
+              let session, seed = handle session "INSERT INTO diagnostics_values VALUES (0)"
+              Expect.equal seed (Affected 1UL) "seeded duplicate key"
+
+              let definition =
+                  """CREATE PROCEDURE multiple_diagnostics(
+                        OUT condition_count INT,
+                        OUT first_code INT,
+                        OUT second_code INT)
+                      BEGIN
+                        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                        BEGIN
+                          GET STACKED DIAGNOSTICS condition_count = NUMBER;
+                          GET STACKED DIAGNOSTICS CONDITION 1 first_code = MYSQL_ERRNO;
+                          GET STACKED DIAGNOSTICS CONDITION 2 second_code = MYSQL_ERRNO;
+                        END;
+                        INSERT INTO diagnostics_values VALUES ('abc'), (0);
+                      END"""
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created multiple-condition procedure"
+
+              let session, called =
+                  handle session "CALL multiple_diagnostics(@condition_count, @first_code, @second_code)"
+
+              Expect.equal called (Affected 0UL) "handled the failing statement"
+
+              match handle session "SELECT @condition_count, @first_code, @second_code" |> snd with
+              | ResultSet(_, [ [ Some "2"; Some "1366"; Some "1062" ] ]) -> ()
+              | other -> failtestf "expected both stacked conditions, got %A" other
+
+          testCase "stored handlers catch scalar function errors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let definition =
+                  """CREATE PROCEDURE scalar_diagnostic(OUT returned_code INT)
+                      BEGIN
+                        DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                          GET STACKED DIAGNOSTICS CONDITION 1 returned_code = MYSQL_ERRNO;
+                        SELECT RANDOM_BYTES(-1);
+                      END"""
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created scalar diagnostic procedure"
+
+              let session, called = handle session "CALL scalar_diagnostic(@returned_code)"
+              Expect.equal called (Affected 0UL) "handled scalar function error"
+
+              match handle session "SELECT @returned_code" |> snd with
+              | ResultSet(_, [ [ Some "1690" ] ]) -> ()
+              | other -> failtestf "expected the scalar error diagnostic, got %A" other
+
           testCase "SIGNAL preserves named conditions and RESIGNAL diagnostics"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

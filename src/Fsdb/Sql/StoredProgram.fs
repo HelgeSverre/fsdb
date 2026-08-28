@@ -22,6 +22,39 @@ type HandlerAction =
     | Continue
     | Exit
 
+type DiagnosticsArea =
+    | Current
+    | Stacked
+
+type DiagnosticsTarget =
+    | LocalVariable of string
+    | UserVariable of UserVariableRef
+
+type DiagnosticsItem =
+    | Number
+    | RowCount
+    | ClassOrigin
+    | SubclassOrigin
+    | ReturnedSqlState
+    | MessageText
+    | MySqlErrorNumber
+    | ConstraintCatalog
+    | ConstraintSchema
+    | ConstraintName
+    | CatalogName
+    | SchemaName
+    | TableName
+    | ColumnName
+    | CursorName
+
+type DiagnosticsRequest =
+    | StatementInformation of (DiagnosticsTarget * DiagnosticsItem) list
+    | ConditionInformation of conditionNumber: Expr * assignments: (DiagnosticsTarget * DiagnosticsItem) list
+
+type DiagnosticsStatement =
+    { Area: DiagnosticsArea
+      Request: DiagnosticsRequest }
+
 type Statement =
     | Sql of Ast.Statement
     | TextSql of string
@@ -38,6 +71,7 @@ type Statement =
     | DeclareHandler of action: HandlerAction * conditions: ConditionValue list * body: Statement
     | Signal of condition: ConditionValue * information: (string * Expr) list
     | Resignal of condition: ConditionValue option * information: (string * Expr) list
+    | GetDiagnostics of DiagnosticsStatement
     | SetLocal of name: string * value: Expr
 
 [<RequireQualifiedAccess>]
@@ -65,6 +99,7 @@ type ValidationError =
     | UnknownVariable of name: string
     | UnknownCondition of name: string
     | InvalidSqlState of state: string
+    | InvalidUserVariable of message: string
     | RedefiningLabel of name: string
     | UnknownLabel of operation: string * name: string
 
@@ -77,6 +112,7 @@ let validationError =
     | UnknownVariable name -> 1193, sprintf "Unknown system variable '%s'" name
     | UnknownCondition name -> 1319, sprintf "Undefined CONDITION: %s" name
     | InvalidSqlState state -> 1407, sprintf "Bad SQLSTATE: '%s'" state
+    | InvalidUserVariable message -> 3061, message
     | RedefiningLabel name -> 1309, sprintf "Redefining label %s" name
     | UnknownLabel(operation, name) -> 1308, sprintf "%s with no matching label: %s" operation name
 
@@ -96,6 +132,7 @@ let rec sqlStatements =
     | DeclareHandler(_, _, body) -> sqlStatements body
     | Declare _
     | DeclareCondition _
+    | GetDiagnostics _
     | Signal _
     | Resignal _
     | SetLocal _
@@ -120,6 +157,8 @@ let rec expressions =
     | DeclareHandler(_, _, body) -> expressions body
     | Signal(_, information)
     | Resignal(_, information) -> information |> List.map snd
+    | GetDiagnostics { Request = ConditionInformation(conditionNumber, _) } -> [ conditionNumber ]
+    | GetDiagnostics _ -> []
     | DeclareCondition _ -> []
     | SetLocal(_, value) -> [ value ]
     | Leave _
@@ -178,12 +217,19 @@ let tryHandler definitions statements error =
     |> Option.map (fun (_, action, body) -> action, body)
 
 let private defaultSignal (state: string) =
-    if state.StartsWith("01", StringComparison.Ordinal) then
-        SqlState.createWithState 1642 state "Unhandled user-defined warning condition"
-    elif state.StartsWith("02", StringComparison.Ordinal) then
-        SqlState.createWithState 1643 state "Unhandled user-defined not found condition"
-    else
-        SqlState.createWithState 1644 state "Unhandled user-defined exception condition"
+    let error =
+        if state.StartsWith("01", StringComparison.Ordinal) then
+            SqlState.createWithState 1642 state "Unhandled user-defined warning condition"
+        elif state.StartsWith("02", StringComparison.Ordinal) then
+            SqlState.createWithState 1643 state "Unhandled user-defined not found condition"
+        else
+            SqlState.createWithState 1644 state "Unhandled user-defined exception condition"
+
+    { error with
+        Information =
+            error.Information
+            |> Map.add "class_origin" ""
+            |> Map.add "subclass_origin" "" }
 
 let signalError
     (definitions: Map<string, ConditionValue>)
@@ -221,6 +267,115 @@ let signalError
 
 let isWarning (error: SqlState.Error) =
     error.State.StartsWith("01", StringComparison.Ordinal)
+
+type DiagnosticsSnapshot =
+    { Conditions: Diagnostics.Condition list
+      RowCount: int64 }
+
+let diagnosticsForError current (error: SqlState.Error) =
+    let condition =
+        if isWarning error then
+            Diagnostics.fromWarning error
+        else
+            Diagnostics.fromError error
+
+    let alreadyCurrent =
+        current.Conditions
+        |> List.tryLast
+        |> Option.exists (fun existing ->
+            existing.Code = condition.Code
+            && existing.State = condition.State
+            && existing.Message = condition.Message)
+
+    if alreadyCurrent then
+        current
+    else
+        { Conditions = [ condition ]
+          RowCount = if isWarning error then 0L else -1L }
+
+let statementDiagnosticsValue snapshot =
+    function
+    | Number -> Some(VInt(int64 snapshot.Conditions.Length))
+    | RowCount -> Some(VInt snapshot.RowCount)
+    | _ -> None
+
+let conditionDiagnosticsValue (condition: Diagnostics.Condition) =
+    let origin name =
+        condition.Information
+        |> Map.tryFind name
+        |> Option.defaultWith (fun () ->
+            if condition.State.StartsWith("HY", StringComparison.Ordinal) then "MySQL" else "ISO 9075")
+
+    function
+    | ClassOrigin -> VString(origin "class_origin")
+    | SubclassOrigin -> VString(origin "subclass_origin")
+    | ReturnedSqlState -> VString condition.State
+    | MessageText -> VString condition.Message
+    | MySqlErrorNumber -> VInt(int64 condition.Code)
+    | ConstraintCatalog -> VString(Map.tryFind "constraint_catalog" condition.Information |> Option.defaultValue "")
+    | ConstraintSchema -> VString(Map.tryFind "constraint_schema" condition.Information |> Option.defaultValue "")
+    | ConstraintName -> VString(Map.tryFind "constraint_name" condition.Information |> Option.defaultValue "")
+    | CatalogName -> VString(Map.tryFind "catalog_name" condition.Information |> Option.defaultValue "")
+    | SchemaName -> VString(Map.tryFind "schema_name" condition.Information |> Option.defaultValue "")
+    | TableName -> VString(Map.tryFind "table_name" condition.Information |> Option.defaultValue "")
+    | ColumnName -> VString(Map.tryFind "column_name" condition.Information |> Option.defaultValue "")
+    | CursorName -> VString(Map.tryFind "cursor_name" condition.Information |> Option.defaultValue "")
+    | Number
+    | RowCount -> VNull
+
+let tryConditionDiagnostics number snapshot =
+    if number < 1 || number > snapshot.Conditions.Length then
+        None
+    else
+        Some(List.item (number - 1) snapshot.Conditions)
+
+let tryDiagnosticsConditionNumber value =
+    let fromDecimal number =
+        if number = Decimal.Truncate number && number >= 1M && number <= decimal Int32.MaxValue then
+            Some(int number)
+        else
+            None
+
+    let fromBinary bytes =
+        let beyondMaximum = uint64 Int32.MaxValue + 1UL
+
+        bytes
+        |> Array.fold (fun value byte -> min beyondMaximum (value * 256UL + uint64 byte)) 0UL
+        |> fun number -> if number <= uint64 Int32.MaxValue then Some(int number) else None
+
+    match value with
+    | VInt number -> fromDecimal (decimal number)
+    | VUInt number when number <= uint64 Int32.MaxValue -> Some(int number)
+    | VDecimal number -> fromDecimal number
+    | VDouble number when Double.IsFinite number && number = Math.Truncate number ->
+        if number >= 1.0 && number <= float Int32.MaxValue then Some(int number) else None
+    | VBit(_, number) when number <= uint64 Int32.MaxValue -> Some(int number)
+    | VBytes bytes -> fromBinary bytes
+    | VString text ->
+        match
+            Decimal.TryParse(
+                text,
+                Globalization.NumberStyles.Number ||| Globalization.NumberStyles.AllowExponent,
+                Globalization.CultureInfo.InvariantCulture
+            )
+        with
+        | true, number -> fromDecimal number
+        | _ -> None
+    | _ -> None
+
+let diagnosticsAssignments snapshot request conditionNumber =
+    match request with
+    | StatementInformation assignments ->
+        assignments
+        |> List.choose (fun (target, item) ->
+            statementDiagnosticsValue snapshot item |> Option.map (fun value -> target, value))
+        |> Some
+    | ConditionInformation(_, assignments) ->
+        conditionNumber
+        |> Option.bind (fun number -> tryConditionDiagnostics number snapshot)
+        |> Option.map (fun condition ->
+            assignments
+            |> List.map (fun (target, item) -> target, conditionDiagnosticsValue condition item))
 
 let restoreOuterScope statements (before: Map<string, 'value>) after =
     let shadowed = declaredNames statements
@@ -383,6 +538,53 @@ let private resignalPattern =
         RegexOptions.IgnoreCase
     )
 
+let private quotedUserVariablePattern =
+    @"(?:`(?:``|[^`])+`|'(?:''|\\.|[^'])*'|""(?:""""|\\.|[^""])*""|[A-Za-z0-9_.$]+)"
+
+let private diagnosticsTargetPattern =
+    sprintf "(?:@%s|%s)" quotedUserVariablePattern labelPattern
+
+let private conditionNumberPattern =
+    let numeric = @"(?:0[xX][0-9A-Fa-f]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"
+    let text = @"(?:_[A-Za-z0-9_]+)?'(?:''|\\.|[^'])*'"
+
+    sprintf
+        "(?:@@(?:GLOBAL\\.|SESSION\\.)?[A-Za-z_][A-Za-z0-9_$]*|@%s|%s|%s|%s)"
+        quotedUserVariablePattern
+        labelPattern
+        numeric
+        text
+
+let private diagnosticsPattern =
+    Regex(
+        sprintf
+            @"^GET%s(?:(?<area>CURRENT|STACKED)%s)?DIAGNOSTICS%s(?<request>[\s\S]+)$"
+            separatorPattern
+            separatorPattern
+            separatorPattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private diagnosticsConditionPattern =
+    Regex(
+        sprintf
+            @"^CONDITION%s(?<number>%s)%s(?<assignments>[\s\S]+)$"
+            separatorPattern
+            conditionNumberPattern
+            separatorPattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private diagnosticsAssignmentPattern =
+    Regex(
+        sprintf
+            @"^(?<target>%s)%s=%s(?<item>[A-Za-z_]+)$"
+            diagnosticsTargetPattern
+            triviaPattern
+            triviaPattern,
+        RegexOptions.IgnoreCase
+    )
+
 let private signalInformationPattern =
     Regex(@"^(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?<value>[\s\S]+)$", RegexOptions.IgnoreCase)
 
@@ -454,6 +656,84 @@ let private parseSignalInformation options text =
             match information |> List.countBy fst |> List.tryFind (fun (_, count) -> count > 1) with
             | Some(name, _) -> Error(sprintf "Duplicate condition information item '%s'" name)
             | None -> Ok information)
+
+let private parseDiagnosticsTarget (text: string) =
+    let text = trimLeadingTrivia text
+
+    if text.StartsWith('@') then
+        Parser.parseUserVariableTarget text |> Result.map UserVariable
+    elif Regex.IsMatch(text, sprintf "^(?:%s)$" labelPattern) then
+        Ok(LocalVariable(normalizeLabel text))
+    else
+        Error(sprintf "Invalid diagnostics target: %s" text)
+
+let private parseDiagnosticsItem (text: string) =
+    match text.ToUpperInvariant() with
+    | "NUMBER" -> Ok Number
+    | "ROW_COUNT" -> Ok RowCount
+    | "CLASS_ORIGIN" -> Ok ClassOrigin
+    | "SUBCLASS_ORIGIN" -> Ok SubclassOrigin
+    | "RETURNED_SQLSTATE" -> Ok ReturnedSqlState
+    | "MESSAGE_TEXT" -> Ok MessageText
+    | "MYSQL_ERRNO" -> Ok MySqlErrorNumber
+    | "CONSTRAINT_CATALOG" -> Ok ConstraintCatalog
+    | "CONSTRAINT_SCHEMA" -> Ok ConstraintSchema
+    | "CONSTRAINT_NAME" -> Ok ConstraintName
+    | "CATALOG_NAME" -> Ok CatalogName
+    | "SCHEMA_NAME" -> Ok SchemaName
+    | "TABLE_NAME" -> Ok TableName
+    | "COLUMN_NAME" -> Ok ColumnName
+    | "CURSOR_NAME" -> Ok CursorName
+    | _ -> Error(sprintf "Unknown diagnostics item: %s" text)
+
+let private parseDiagnosticsAssignments options text =
+    Parser.splitTopLevelCommaSeparatedWithOptions options text
+    |> traverse (fun assignment ->
+        let matched = diagnosticsAssignmentPattern.Match(trimLeadingTrivia assignment)
+
+        if not matched.Success then
+            Error(sprintf "Invalid diagnostics assignment: %s" assignment)
+        else
+            parseDiagnosticsTarget matched.Groups.["target"].Value
+            |> Result.bind (fun target ->
+                parseDiagnosticsItem matched.Groups.["item"].Value
+                |> Result.map (fun item -> target, item)))
+
+let parseDiagnostics options (text: string) =
+    let matched = diagnosticsPattern.Match(text.Trim())
+
+    if not matched.Success then
+        Ok None
+    else
+        let area =
+            if matched.Groups.["area"].Value.Equals("STACKED", StringComparison.OrdinalIgnoreCase) then
+                Stacked
+            else
+                Current
+
+        let request = trimLeadingTrivia matched.Groups.["request"].Value
+        let condition = diagnosticsConditionPattern.Match request
+
+        if condition.Success then
+            Parser.parseExpressionWithOptions options condition.Groups.["number"].Value
+            |> Result.bind (fun conditionNumber ->
+                parseDiagnosticsAssignments options condition.Groups.["assignments"].Value
+                |> Result.bind (fun assignments ->
+                    if assignments |> List.exists (snd >> function Number | RowCount -> true | _ -> false) then
+                        Error "Statement diagnostics items are not valid in CONDITION"
+                    else
+                        Ok(
+                            Some
+                                { Area = area
+                                  Request = ConditionInformation(conditionNumber, assignments) }
+                        )))
+        else
+            parseDiagnosticsAssignments options request
+            |> Result.bind (fun assignments ->
+                if assignments |> List.forall (snd >> function Number | RowCount -> true | _ -> false) then
+                    Ok(Some { Area = area; Request = StatementInformation assignments })
+                else
+                    Error "Condition diagnostics items require CONDITION")
 
 let private normalizedGroup (name: string) (matched: Match) =
     let group = matched.Groups.[name]
@@ -839,11 +1119,14 @@ let private parseWithFallback
             let signal = signalPattern.Match text
             let resignal = resignalPattern.Match text
 
-            if conditionDeclaration.Success then
+            match parseDiagnostics options text with
+            | Error error -> Error error
+            | Ok(Some diagnostics) -> Ok(GetDiagnostics diagnostics)
+            | Ok None when conditionDeclaration.Success ->
                 parseConditionValue conditionDeclaration.Groups.["condition"].Value
                 |> Result.map (fun condition ->
                     DeclareCondition(normalizeLabel conditionDeclaration.Groups.["name"].Value, condition))
-            elif declaration.Success then
+            | Ok None when declaration.Success ->
                 Parser.parseColumnTypeWithOptions options declaration.Groups.["type"].Value
                 |> Result.bind (fun columnType ->
                     if declaration.Groups.["default"].Success then
@@ -856,19 +1139,19 @@ let private parseWithFallback
                             { Name = declaration.Groups.["name"].Value.ToLowerInvariant()
                               ColumnType = columnType
                               InitialValue = initialValue }))
-            elif assignment.Success then
+            | Ok None when assignment.Success ->
                 Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
                 |> Result.map (fun value -> SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))
-            elif leave.Success then
+            | Ok None when leave.Success ->
                 Ok(Leave(normalizeLabel leave.Groups.["label"].Value))
-            elif iterate.Success then
+            | Ok None when iterate.Success ->
                 Ok(Iterate(normalizeLabel iterate.Groups.["label"].Value))
-            elif signal.Success then
+            | Ok None when signal.Success ->
                 parseConditionValue signal.Groups.["condition"].Value
                 |> Result.bind (fun condition ->
                     parseSignalInformation options signal.Groups.["information"].Value
                     |> Result.map (fun information -> Signal(condition, information)))
-            elif resignal.Success then
+            | Ok None when resignal.Success ->
                 let condition =
                     if resignal.Groups.["condition"].Success then
                         parseConditionValue resignal.Groups.["condition"].Value |> Result.map Some
@@ -879,7 +1162,7 @@ let private parseWithFallback
                 |> Result.bind (fun condition ->
                     parseSignalInformation options resignal.Groups.["information"].Value
                     |> Result.map (fun information -> Resignal(condition, information)))
-            else
+            | Ok None ->
                 match Parser.parseStoredStatementWithOptions options text with
                 | Ok statement -> Ok(Sql statement)
                 | Error _ when isSupportedText text -> Ok(TextSql text)
@@ -985,6 +1268,22 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
                             rest))
         | SetLocal(name, _) :: _ when not (Set.contains name scope.Names) -> Error(UnknownVariable name)
         | SetLocal _ :: rest -> validateStatements scope rest
+        | GetDiagnostics diagnostics :: rest ->
+            let assignments =
+                match diagnostics.Request with
+                | StatementInformation assignments
+                | ConditionInformation(_, assignments) -> assignments
+
+            assignments
+            |> traverse (fun (target, _) ->
+                match target with
+                | LocalVariable name when not (Set.contains name scope.Names) -> Error(UnknownVariable name)
+                | UserVariable variable ->
+                    match UserVariableRef.validationError variable with
+                    | Some message -> Error(InvalidUserVariable message)
+                    | None -> Ok()
+                | LocalVariable _ -> Ok())
+            |> Result.bind (fun _ -> validateStatements scope rest)
         | If(_, whenTrue, whenFalse) :: rest ->
             validateStatements scope whenTrue
             |> Result.bind (fun _ -> validateStatements scope whenFalse)

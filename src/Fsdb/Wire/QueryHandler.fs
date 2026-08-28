@@ -3046,7 +3046,15 @@ type private RoutineRun =
 type private RoutineScope =
     { Conditions: Map<string, StoredProgram.ConditionValue>
       Statements: StoredProgram.Statement list
-      ActiveError: SqlState.Error option }
+      ActiveError: SqlState.Error option
+      StackedDiagnostics: StoredProgram.DiagnosticsSnapshot option }
+
+let private executionErrorResult =
+    function
+    | Value.UnsignedOutOfRange -> Some(Err(1690, "BIGINT UNSIGNED value is out of range"))
+    | Value.SignedOutOfRange -> Some(Err(1690, "BIGINT value is out of range"))
+    | Functions.SqlError(code, message) -> Some(Err(code, message))
+    | _ -> None
 
 let private runRoutineStatements
     (store: Store)
@@ -3058,6 +3066,48 @@ let private runRoutineStatements
     =
     let evaluate locals current expression =
         Executor.withRoutineVariables locals (fun () -> evaluateRoutineExpression current expression)
+
+    let currentDiagnostics: StoredProgram.DiagnosticsSnapshot ref =
+        ref
+            { Conditions = []
+              RowCount = 0L }
+    let propagatedConditions = ResizeArray<Diagnostics.Condition>()
+
+    let updateDiagnostics generated result =
+        let conditions =
+            match Executor.errorInfo result with
+            | Some error -> generated @ [ Diagnostics.fromError error ]
+            | None -> generated
+
+        let rowCount =
+            match result with
+            | Affected count -> int64 count
+            | ResultSet _
+            | Err _
+            | MultipleResults _ -> -1L
+
+        currentDiagnostics.Value <-
+            { Conditions = conditions
+              RowCount = rowCount }
+
+    let executeWithDiagnostics current execute =
+        let execute () =
+            try
+                execute ()
+            with error ->
+                match executionErrorResult error with
+                | Some result -> current, result
+                | None -> reraise ()
+
+        let (next, result), generated = Diagnostics.capture execute
+        updateDiagnostics generated result
+        generated |> List.iter propagatedConditions.Add
+        next, result
+
+    let clearDiagnostics () =
+        currentDiagnostics.Value <-
+            { Conditions = []
+              RowCount = 0L }
 
     let evaluateSignalInformation locals current information =
         let rec loop current values =
@@ -3100,10 +3150,12 @@ let private runRoutineStatements
         | statement :: rest ->
             match statement with
             | StoredProgram.Sql sql ->
-                Executor.withRoutineVariables locals (fun () -> executeSql current sql)
+                executeWithDiagnostics current (fun () ->
+                    Executor.withRoutineVariables locals (fun () -> executeSql current sql))
                 ||> continueAfterSql scope locals results affectedRows rest
             | StoredProgram.TextSql sql ->
-                Executor.withRoutineVariables locals (fun () -> executeText current sql)
+                executeWithDiagnostics current (fun () ->
+                    Executor.withRoutineVariables locals (fun () -> executeText current sql))
                 ||> continueAfterSql scope locals results affectedRows rest
             | StoredProgram.Declare declaration ->
                 let next, evaluated =
@@ -3122,6 +3174,8 @@ let private runRoutineStatements
                     run scope next locals results affectedRows rest
             | StoredProgram.DeclareCondition _
             | StoredProgram.DeclareHandler _ -> run scope current locals results affectedRows rest
+            | StoredProgram.GetDiagnostics diagnostics ->
+                runDiagnostics scope diagnostics current locals results affectedRows rest
             | StoredProgram.Signal(condition, information) ->
                 runSignal scope None (Some condition) information current locals results affectedRows rest
             | StoredProgram.Resignal(condition, information) ->
@@ -3144,6 +3198,7 @@ let private runRoutineStatements
                     | Error error -> handleQueryResult scope next locals results affectedRows rest error
                     | Ok value ->
                         let locals = Map.add localName { local with Value = value } locals
+                        clearDiagnostics ()
                         run scope next locals results affectedRows rest
             | StoredProgram.If(condition, whenTrue, whenFalse) ->
                 let next, evaluated = evaluate locals current condition
@@ -3157,7 +3212,8 @@ let private runRoutineStatements
                 let blockScope =
                     { Conditions = StoredProgram.conditionDefinitions scope.Conditions body
                       Statements = body
-                      ActiveError = scope.ActiveError }
+                      ActiveError = scope.ActiveError
+                      StackedDiagnostics = scope.StackedDiagnostics }
 
                 let blockRun = run blockScope current locals [] 0UL body
                 let flow =
@@ -3304,17 +3360,87 @@ let private runRoutineStatements
                 handleCondition scope next locals results affectedRows rest (SqlState.create code message)
             | Ok error -> handleCondition scope next locals results affectedRows rest error
 
+    and runDiagnostics scope diagnostics current locals results affectedRows rest =
+        let snapshot =
+            match diagnostics.Area with
+            | StoredProgram.Current -> Ok currentDiagnostics.Value
+            | StoredProgram.Stacked ->
+                match scope.StackedDiagnostics with
+                | Some snapshot -> Ok snapshot
+                | None -> Error(ErrState(3004, "0Z002", "GET STACKED DIAGNOSTICS when handler not active"))
+
+        match snapshot with
+        | Error result -> handleQueryResult scope current locals results affectedRows rest result
+        | Ok snapshot ->
+            let next, conditionNumber =
+                match diagnostics.Request with
+                | StoredProgram.ConditionInformation(expression, _) ->
+                    let next, evaluated = evaluate locals current expression
+                    next, evaluated |> Result.map StoredProgram.tryDiagnosticsConditionNumber
+                | StoredProgram.StatementInformation _ -> current, Ok None
+
+            match conditionNumber with
+            | Error result -> handleQueryResult scope next locals results affectedRows rest result
+            | Ok conditionNumber ->
+                match StoredProgram.diagnosticsAssignments snapshot diagnostics.Request conditionNumber with
+                | None ->
+                    currentDiagnostics.Value <-
+                        { Conditions = [ Diagnostics.invalidConditionNumber ]
+                          RowCount = -1L }
+
+                    run scope next locals results affectedRows rest
+                | Some assignments ->
+                    applyDiagnosticsAssignments next locals assignments
+                    |> function
+                        | Error result -> handleQueryResult scope next locals results affectedRows rest result
+                        | Ok(next, locals) -> run scope next locals results affectedRows rest
+
+    and applyDiagnosticsAssignments
+        (current: Session)
+        (locals: Map<string, Executor.RoutineVariable>)
+        assignments
+        =
+        let rec apply (current: Session) locals =
+            function
+            | [] -> Ok(current, locals)
+            | (StoredProgram.LocalVariable name, value) :: rest ->
+                match Map.tryFind name locals with
+                | None -> Error(Err(1327, sprintf "Undeclared variable: %s" name))
+                | Some local ->
+                    match coerceRoutineValue store local.Column value with
+                    | Error result -> Error result
+                    | Ok value ->
+                        apply current (Map.add name { local with Value = value } locals) rest
+            | (StoredProgram.UserVariable variable, value) :: rest ->
+                match UserVariableRef.validationError variable with
+                | Some message -> Error(Err(3061, message))
+                | None
+                    when not (Map.containsKey variable.Name current.UserVariables)
+                         && current.UserVariables.Count >= maxUserVariables ->
+                    Error(Err(1105, "Too many user-defined variables"))
+                | None ->
+                    let current =
+                        { current with
+                            UserVariables = Map.add variable.Name value current.UserVariables }
+
+                    apply current locals rest
+
+        apply current locals assignments
+
     and handleCondition scope current locals results affectedRows rest error =
+        currentDiagnostics.Value <- StoredProgram.diagnosticsForError currentDiagnostics.Value error
+
         match StoredProgram.tryHandler scope.Conditions scope.Statements error with
         | None when StoredProgram.isWarning error ->
-            Diagnostics.record (Diagnostics.fromWarning error)
+            propagatedConditions.Add(Diagnostics.fromWarning error)
             run scope current locals results affectedRows rest
         | None -> failed current locals results affectedRows (ErrInfo error)
         | Some(action, body) ->
             let handlerScope =
                 { scope with
                     Statements = []
-                    ActiveError = Some error }
+                    ActiveError = Some error
+                    StackedDiagnostics = Some currentDiagnostics.Value }
 
             let handled = run handlerScope current locals [] 0UL [ body ]
             let results = List.rev handled.Results @ results
@@ -3333,9 +3459,15 @@ let private runRoutineStatements
     let scope =
         { Conditions = StoredProgram.conditionDefinitions Map.empty statements
           Statements = statements
-          ActiveError = None }
+          ActiveError = None
+          StackedDiagnostics = None }
 
-    run scope initial initialLocals [] 0UL statements
+    let outcome = run scope initial initialLocals [] 0UL statements
+
+    if outcome.Error.IsNone then
+        propagatedConditions |> Seq.iter Diagnostics.record
+
+    outcome
 
 let private routineExecutionSettings (routine: SystemCatalog.Routine.Entry) : ExecutionSettings =
     { SqlModeText = routine.SqlMode
@@ -3385,6 +3517,44 @@ type private TextEventCommand =
     | CreateEvent of name: string * schedule: string * body: string
     | DropEvent of name: string * ifExists: bool
 
+let private invalidDiagnosticsCondition session =
+    { session with Diagnostics = [ Diagnostics.invalidConditionNumber ] }, Affected 0UL
+
+let private runTextDiagnostics session (diagnostics: StoredProgram.DiagnosticsStatement) =
+    match diagnostics.Area with
+    | StoredProgram.Stacked ->
+        session, ErrState(3004, "0Z002", "GET STACKED DIAGNOSTICS when handler not active")
+    | StoredProgram.Current ->
+        let snapshot: StoredProgram.DiagnosticsSnapshot =
+            { Conditions = session.Diagnostics
+              RowCount = session.LastRowCount }
+
+        let next, conditionNumber =
+            match diagnostics.Request with
+            | StoredProgram.ConditionInformation(expression, _) ->
+                let next, result = evaluateRoutineExpression session expression
+                next, result |> Result.map StoredProgram.tryDiagnosticsConditionNumber
+            | StoredProgram.StatementInformation _ -> session, Ok None
+
+        match conditionNumber with
+        | Error result -> next, result
+        | Ok conditionNumber ->
+            match StoredProgram.diagnosticsAssignments snapshot diagnostics.Request conditionNumber with
+            | None -> invalidDiagnosticsCondition next
+            | Some assignments ->
+                assignments
+                |> traverse (fun (target, value) ->
+                    match target with
+                    | StoredProgram.UserVariable variable ->
+                        match UserVariableRef.validationError variable with
+                        | Some message -> Error(Err(3061, message))
+                        | None -> Ok(variable.Name, value)
+                    | StoredProgram.LocalVariable name -> Error(Err(1327, sprintf "Undeclared variable: %s" name)))
+                |> Result.bind (applyRoutineOutputs next.UserVariables)
+                |> function
+                    | Error result -> next, result
+                    | Ok variables -> { next with UserVariables = variables }, Affected 0UL
+
 let private createEventRe =
     Regex(
         @"^\s*CREATE\s+EVENT\s+(?<name>\S+)\s+ON\s+SCHEDULE\s+(?<schedule>.+?)\s+DO\s+(?<body>.+)$",
@@ -3405,6 +3575,9 @@ let private tryTextEventCommand (sql: string) =
     else
         None
 
+let private normalizeDispatchedSql parserOptions rawSql =
+    (Parser.stripVersionCommentsWithOptions parserOptions rawSql).Trim().TrimEnd(';').Trim()
+
 /// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
 /// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
 /// no `Placeholder` survives and the statement executes through the ordinary
@@ -3413,7 +3586,11 @@ let private tryTextEventCommand (sql: string) =
 /// the `_` pass-through since MySQL never accepts a `?` there.
 let rec private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
     let parserOptions = parserOptionsForSession session
-    let sql = (Parser.stripVersionCommentsWithOptions parserOptions rawSql).Trim().TrimEnd(';').Trim()
+    let sql = normalizeDispatchedSql parserOptions rawSql
+
+    dispatchNormalized session rawSql parserOptions sql
+
+and private dispatchNormalized session rawSql parserOptions sql =
 
     // A mysqldump preamble/postamble is a run of `/*!NNNNN ... */;` lines;
     // once the version comment above strips down to nothing (or this was a
@@ -3735,30 +3912,34 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
     if Parser.isBlank sql then
         session, Affected 0UL
     else
-        match tryTextEventCommand sql with
-        | Some command -> runTextEvent command
-        | None ->
-            match tryTextRoutineCommand sql with
-            | Some command -> runTextRoutine command
+        match StoredProgram.parseDiagnostics parserOptions sql with
+        | Error _ -> session, syntaxError sql
+        | Ok(Some diagnostics) -> runTextDiagnostics session diagnostics
+        | Ok None ->
+            match tryTextEventCommand sql with
+            | Some command -> runTextEvent command
             | None ->
-                match tryTextPreparedCommand sql with
-                | Error result -> session, result
-                | Ok(Some command) -> runTextPrepared command
-                | Ok None when not (placeholderPositionsWithOptions parserOptions sql |> List.isEmpty) ->
-                    // A `?` outside a string/comment is a bind parameter, only
-                    // legal via COM_STMT_PREPARE. Rejecting it here also keeps
-                    // unreachable placeholders out of persisted expressions.
-                    session, syntaxError sql
-                | Ok None ->
-                    let upper = sql.ToUpperInvariant()
+                match tryTextRoutineCommand sql with
+                | Some command -> runTextRoutine command
+                | None ->
+                    match tryTextPreparedCommand sql with
+                    | Error result -> session, result
+                    | Ok(Some command) -> runTextPrepared command
+                    | Ok None when not (placeholderPositionsWithOptions parserOptions sql |> List.isEmpty) ->
+                        // A `?` outside a string/comment is a bind parameter, only
+                        // legal via COM_STMT_PREPARE. Rejecting it here also keeps
+                        // unreachable placeholders out of persisted expressions.
+                        session, syntaxError sql
+                    | Ok None ->
+                        let upper = sql.ToUpperInvariant()
 
-                    match tryProbe sql upper with
-                    | Some probe ->
-                        // Probe results contain rendered strings rather than
-                        // values from which descriptors can be inferred.
-                        let session, result = runProbe session sql probe
-                        { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
-                    | None -> executeStatement session sql rawSql
+                        match tryProbe sql upper with
+                        | Some probe ->
+                            // Probe results contain rendered strings rather than
+                            // values from which descriptors can be inferred.
+                            let session, result = runProbe session sql probe
+                            { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
+                        | None -> executeStatement session sql rawSql
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and
@@ -3814,17 +3995,20 @@ let private recoverExecutionError (session: Session) (description: string) (erro
         Log.diagnostic "fsdb: EXN %s -- %s" ex.Message description
         abortTransaction session, Err(1105, "Internal error")
 
-let private preservesDiagnostics (sql: string) : bool =
+let private preservesDiagnostics parserOptions (sql: string) =
     let upper = sql.Trim().ToUpperInvariant()
 
-    match tryProbe sql upper with
-    | Some(ShowConditions _ | ShowMessageCount _) -> true
+    match StoredProgram.parseDiagnostics parserOptions sql with
+    | Ok(Some _) -> true
     | _ ->
-        Regex.IsMatch(
-            sql,
-            @"^\s*SELECT\s+@@(?:SESSION\.)?(?:WARNING_COUNT|ERROR_COUNT)(?:\s+AS\s+\w+)?\s*$",
-            RegexOptions.IgnoreCase
-        )
+        match tryProbe sql upper with
+        | Some(ShowConditions _ | ShowMessageCount _) -> true
+        | _ ->
+            Regex.IsMatch(
+                sql,
+                @"^\s*SELECT\s+@@(?:SESSION\.)?(?:WARNING_COUNT|ERROR_COUNT)(?:\s+AS\s+\w+)?\s*$",
+                RegexOptions.IgnoreCase
+            )
 
 let private recordDiagnostics
     (session: Session)
@@ -3844,10 +4028,12 @@ let private recordDiagnostics
 
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
+    let parserOptions = parserOptionsForSession session
+    let sql = normalizeDispatchedSql parserOptions rawSql
 
-    recordDiagnostics session (preservesDiagnostics rawSql) (fun () ->
+    recordDiagnostics session (preservesDiagnostics parserOptions sql) (fun () ->
         try
-            let result = dispatch session rawSql
+            let result = dispatchNormalized session rawSql parserOptions sql
 
             match terminalResult (snd result) with
             | TerminalError(code, msg) ->

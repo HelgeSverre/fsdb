@@ -45,6 +45,67 @@ let tests =
               | ResultSet([ "Level"; "Code"; "Message" ], []) -> ()
               | other -> failtestf "expected an empty errors resultset, got %A" other
 
+          testCase "GET CURRENT DIAGNOSTICS assigns statement and condition information"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE diagnostics_row (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO diagnostics_row VALUES (1)"
+
+              let session, result =
+                  handle session "GET CURRENT DIAGNOSTICS @condition_count = NUMBER, @affected = ROW_COUNT;"
+
+              Expect.equal result (Affected 0UL) "statement diagnostics"
+
+              match handle session "SELECT @condition_count, @affected" |> snd with
+              | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected statement diagnostics, got %A" other
+
+              let session, _ = handle session "SET @kept = 41"
+              let session, result = handle session "GET CURRENT DIAGNOSTICS CONDITION 2 @kept = MESSAGE_TEXT"
+
+              Expect.equal result (Affected 0UL) "invalid condition number succeeds"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1758 ] "invalid condition becomes current"
+              Expect.equal (session.Diagnostics |> List.map _.State) [ "35000" ] "invalid condition SQLSTATE"
+
+              let session, _ =
+                  handle
+                      session
+                      "GET CURRENT DIAGNOSTICS CONDITION 1 @diagnostic_code = MYSQL_ERRNO, @diagnostic_message = MESSAGE_TEXT"
+
+              let session, _ =
+                  handle session "GET CURRENT DIAGNOSTICS CONDITION 0x1 @hex_code = MYSQL_ERRNO"
+
+              let session, _ =
+                  handle session "GET CURRENT DIAGNOSTICS CONDITION 1e0 @exponent_code = MYSQL_ERRNO"
+
+              let session, _ =
+                  handle session "GET CURRENT DIAGNOSTICS CONDITION '1' @text_code = MYSQL_ERRNO"
+
+              match
+                  handle
+                      session
+                      "SELECT @kept, @diagnostic_code, @diagnostic_message, @hex_code, @exponent_code, @text_code"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "41"
+                      Some "1758"
+                      Some "Invalid condition number"
+                      Some "1758"
+                      Some "1758"
+                      Some "1758" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected condition diagnostics, got %A" other
+
+              match handle session "GET STACKED DIAGNOSTICS @condition_count = NUMBER" |> snd |> errorInfo with
+              | Some error ->
+                  Expect.equal error.Code 3004 "stacked error code"
+                  Expect.equal error.State "0Z002" "stacked SQLSTATE"
+                  Expect.equal error.Message "GET STACKED DIAGNOSTICS when handler not active" "stacked error text"
+              | None -> failtest "expected GET STACKED DIAGNOSTICS to fail outside a handler"
+
           testCase "INSERT IGNORE records warnings until the next ordinary statement"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

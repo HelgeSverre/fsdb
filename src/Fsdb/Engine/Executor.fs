@@ -12007,7 +12007,8 @@ type private TriggerStatement = StoredProgram.Statement
 type private TriggerRoutineScope =
     { Conditions: Map<string, StoredProgram.ConditionValue>
       Statements: StoredProgram.Statement list
-      ActiveError: SqlState.Error option }
+      ActiveError: SqlState.Error option
+      StackedDiagnostics: StoredProgram.DiagnosticsSnapshot option }
 
 let private triggerDmlStatements = StoredProgram.sqlStatements
 let private triggerConditions = StoredProgram.expressions
@@ -12428,6 +12429,10 @@ let rec executeAs
                 let runBody (oldRow: Value[] option) (newRow: Value[] option) (statements: TriggerStatement list, account: Auth.Account) : QueryResult =
                     let definerRegistry = registryForDefiner account shadowed
                     let locals = ref Map.empty<string, Value>
+                    let currentDiagnostics: StoredProgram.DiagnosticsSnapshot ref =
+                        ref
+                            { Conditions = []
+                              RowCount = 0L }
 
                     let localContext () =
                         let bindings = locals.Value |> Map.toList
@@ -12478,11 +12483,35 @@ let rec executeAs
 
                             let complete result = result, StoredProgram.Flow.Complete
 
+                            let updateDiagnostics generated result =
+                                let conditions =
+                                    match errorInfo result with
+                                    | Some error -> generated @ [ Diagnostics.fromError error ]
+                                    | None -> generated
+
+                                currentDiagnostics.Value <-
+                                    { Conditions = conditions
+                                      RowCount =
+                                        match result with
+                                        | Affected count -> int64 count
+                                        | _ -> -1L }
+
+                                generated |> List.iter Diagnostics.record
+
                             let rec runStatements scope statements =
                                 match statements with
                                 | [] -> complete (Affected 0UL)
                                 | statement :: rest ->
-                                    match runStatement scope statement with
+                                    let result, generated =
+                                        match statement with
+                                        | StoredProgram.GetDiagnostics _ -> runStatement scope statement, []
+                                        | _ -> Diagnostics.capture (fun () -> runStatement scope statement)
+
+                                    match statement with
+                                    | StoredProgram.GetDiagnostics _ -> ()
+                                    | _ -> updateDiagnostics generated (fst result)
+
+                                    match result with
                                     | (Err _ as result), _ ->
                                         match errorInfo result with
                                         | Some error -> handleCondition scope rest error
@@ -12501,6 +12530,7 @@ let rec executeAs
                                     evaluateSignal scope None (Some condition) information
                                 | StoredProgram.Resignal(condition, information) ->
                                     evaluateSignal scope scope.ActiveError condition information
+                                | StoredProgram.GetDiagnostics diagnostics -> runDiagnostics scope diagnostics
                                 | StoredProgram.Declare declaration ->
                                     match declaration.InitialValue with
                                     | None ->
@@ -12523,7 +12553,8 @@ let rec executeAs
                                     let blockScope =
                                         { Conditions = StoredProgram.conditionDefinitions scope.Conditions body
                                           Statements = body
-                                          ActiveError = scope.ActiveError }
+                                          ActiveError = scope.ActiveError
+                                          StackedDiagnostics = scope.StackedDiagnostics }
 
                                     let result, flow = runStatements blockScope body
                                     locals.Value <- StoredProgram.restoreOuterScope body before locals.Value
@@ -12614,7 +12645,71 @@ let rec executeAs
                                     | Error(code, message) -> complete (Err(code, message))
                                     | Ok error -> handleCondition scope [] error
 
+                            and runDiagnostics scope diagnostics =
+                                let snapshot =
+                                    match diagnostics.Area with
+                                    | StoredProgram.Current -> Ok currentDiagnostics.Value
+                                    | StoredProgram.Stacked ->
+                                        match scope.StackedDiagnostics with
+                                        | Some snapshot -> Ok snapshot
+                                        | None ->
+                                            Error(ErrState(3004, "0Z002", "GET STACKED DIAGNOSTICS when handler not active"))
+
+                                snapshot
+                                |> Result.bind (fun snapshot ->
+                                    let conditionNumber =
+                                        match diagnostics.Request with
+                                        | StoredProgram.ConditionInformation(expression, _) ->
+                                            evalExpr (localContext ()) expression
+                                            |> Result.mapError Err
+                                            |> Result.map StoredProgram.tryDiagnosticsConditionNumber
+                                        | StoredProgram.StatementInformation _ -> Ok None
+
+                                    conditionNumber
+                                    |> Result.bind (fun conditionNumber ->
+                                        match
+                                            StoredProgram.diagnosticsAssignments
+                                                snapshot
+                                                diagnostics.Request
+                                                conditionNumber
+                                        with
+                                        | None ->
+                                            currentDiagnostics.Value <-
+                                                { Conditions = [ Diagnostics.invalidConditionNumber ]
+                                                  RowCount = -1L }
+
+                                            Ok()
+                                        | Some assignments -> applyDiagnosticsAssignments assignments))
+                                |> function
+                                    | Ok() -> complete (Affected 0UL)
+                                    | Error result -> complete result
+
+                            and applyDiagnosticsAssignments assignments =
+                                let rec apply =
+                                    function
+                                    | [] -> Ok()
+                                    | (StoredProgram.LocalVariable name, value) :: rest ->
+                                        locals.Value <- Map.add name value locals.Value
+                                        apply rest
+                                    | (StoredProgram.UserVariable variable, value) :: rest ->
+                                        match currentVariableContext () with
+                                        | None -> Error(Err(1105, "User-variable context is unavailable"))
+                                        | Some bindings
+                                            when not (Map.containsKey variable.Name bindings.UserVariables.Value)
+                                                 && bindings.UserVariables.Value.Count >= bindings.MaxUserVariables ->
+                                            Error(Err(1105, "Too many user-defined variables"))
+                                        | Some bindings ->
+                                            bindings.UserVariables.Value <-
+                                                Map.add variable.Name value bindings.UserVariables.Value
+
+                                            apply rest
+
+                                apply assignments
+
                             and handleCondition scope rest error =
+                                currentDiagnostics.Value <-
+                                    StoredProgram.diagnosticsForError currentDiagnostics.Value error
+
                                 match StoredProgram.tryHandler scope.Conditions scope.Statements error with
                                 | None when StoredProgram.isWarning error ->
                                     Diagnostics.record (Diagnostics.fromWarning error)
@@ -12624,7 +12719,8 @@ let rec executeAs
                                     let handlerScope =
                                         { scope with
                                             Statements = []
-                                            ActiveError = Some error }
+                                            ActiveError = Some error
+                                            StackedDiagnostics = Some currentDiagnostics.Value }
 
                                     match runStatement handlerScope body with
                                     | (Err _ as result), _ -> complete result
@@ -12637,7 +12733,8 @@ let rec executeAs
                             let scope =
                                 { Conditions = StoredProgram.conditionDefinitions Map.empty statements
                                   Statements = statements
-                                  ActiveError = None }
+                                  ActiveError = None
+                                  StackedDiagnostics = None }
 
                             runStatements scope statements |> fst)
 

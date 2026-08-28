@@ -3107,6 +3107,41 @@ let tests =
                   ()
               | other -> failtestf "unexpected condition program: %A" other
 
+          testCase "stored diagnostics syntax accepts comments as token separators"
+          <| fun _ ->
+              let body =
+                  "BEGIN DECLARE condition_number INT DEFAULT 1; DECLARE state_name VARCHAR(5); GET/* area */CURRENT/* diagnostics */DIAGNOSTICS/* condition */CONDITION/* number */condition_number state_name/* assign */=/* item */RETURNED_SQLSTATE, @'error code' = MYSQL_ERRNO; END"
+
+              match Fsdb.StoredProgram.parse defaultOptions body with
+              | Ok
+                  [ Fsdb.StoredProgram.Declare _
+                    Fsdb.StoredProgram.Declare _
+                    Fsdb.StoredProgram.GetDiagnostics diagnostics ] ->
+                  Expect.equal diagnostics.Area Fsdb.StoredProgram.Current "diagnostics area"
+
+                  match diagnostics.Request with
+                  | Fsdb.StoredProgram.ConditionInformation(
+                      Col "condition_number",
+                      [ (Fsdb.StoredProgram.LocalVariable "state_name", Fsdb.StoredProgram.ReturnedSqlState)
+                        (Fsdb.StoredProgram.UserVariable variable, Fsdb.StoredProgram.MySqlErrorNumber) ]
+                    ) ->
+                      Expect.equal variable.Name "error code" "quoted target name"
+                  | request -> failtestf "unexpected diagnostics request: %A" request
+              | other -> failtestf "unexpected diagnostics program: %A" other
+
+              for invalid in
+                  [ "GET DIAGNOSTICS value = MESSAGE_TEXT"
+                    "GET DIAGNOSTICS CONDITION 1 value = NUMBER"
+                    "GET DIAGNOSTICS CONDITION -1 value = MYSQL_ERRNO"
+                    "GET DIAGNOSTICS CONDITION (1) value = MYSQL_ERRNO" ] do
+                  match Fsdb.StoredProgram.parseDiagnostics defaultOptions invalid with
+                  | Error _ -> ()
+                  | Ok diagnostics -> failtestf "expected diagnostics grammar rejection, got %A" diagnostics
+
+              match Fsdb.StoredProgram.parseDiagnostics defaultOptions "GET DIAGNOSTICS CONDITION 1.0 @code = MYSQL_ERRNO" with
+              | Ok(Some _) -> ()
+              | other -> failtestf "expected decimal condition number, got %A" other
+
           testCase "statement batches reject unterminated literals"
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with

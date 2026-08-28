@@ -27,6 +27,7 @@ let forCode =
     | 1264
     | 1690 -> "22003"
     | 1265 -> "01000"
+    | 1758 -> "35000"
     | _ -> "HY000"
 
 let create code message =

@@ -4205,3 +4205,8 @@ let parseUserVariableSetAssignment (sql: string) : Result<UserVariableRef * stri
     match run (ws >>. assignment .>> eof) sql with
     | Success(result, _, _) -> Result.Ok result
     | Failure(message, _, _) -> Result.Error message
+
+let parseUserVariableTarget (sql: string) : Result<UserVariableRef, string> =
+    match run (ws >>. userVariableTarget .>> eof) sql with
+    | Success(result, _, _) -> Result.Ok result
+    | Failure(message, _, _) -> Result.Error message

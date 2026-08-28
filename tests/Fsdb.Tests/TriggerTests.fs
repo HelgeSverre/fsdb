@@ -151,6 +151,29 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (1)") "fire handled trigger"
               Expect.equal (rows store "SELECT n FROM t") [ [ Some "12" ] ] "handler resumes trigger body"
 
+          testCase "trigger handlers can inspect stacked diagnostics"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault
+                      store
+                      """CREATE TRIGGER inspect_error BEFORE INSERT ON t FOR EACH ROW
+                          BEGIN
+                            DECLARE diagnostic_code INT DEFAULT 0;
+                            DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                            BEGIN
+                              GET STACKED DIAGNOSTICS CONDITION 1 diagnostic_code = MYSQL_ERRNO;
+                              SET NEW.n = diagnostic_code;
+                            END;
+                            SIGNAL SQLSTATE '45011' SET MYSQL_ERRNO = 60011;
+                          END""")
+                  "create diagnostics trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (1)") "fire diagnostics trigger"
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "60011" ] ] "handler receives the raised code"
+
           testCase "trigger blocks retain declared values from scalar subqueries"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
