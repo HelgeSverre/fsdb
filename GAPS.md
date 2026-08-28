@@ -165,7 +165,7 @@ and partial-zero dates with sql_mode
 enforcement, YEAR, JSON, per-column charset/collation,
 wire-faithful column metadata (`ColumnWire.metadataOfType`), `BIT(1)`–`BIT(64)`
 fields with binary literals and defaults, per-row functional defaults with
-column references, and OGC WKB geometry values
+column references, utf8mb3-normalized table and column comments, and OGC WKB geometry values
 (`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
 accessors).
 
@@ -173,7 +173,6 @@ accessors).
 |---|---|---|---|---|
 | Spatial indexes and operations | R-tree indexes, overlays, general buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar point `ST_Buffer`, `ST_Distance`, `ST_Envelope`, topology predicates, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | `Executor.recomputeGeneratedColumns` materializes both at write time; no read-path recompute | low | divergence |
-| Column-comment character sets | converted through the table/column charset; utf8mb3 stores non-BMP text as `?` | raw .NET text, without charset conversion | low | divergence |
 | ZEROFILL/display width | zero-fill formatting, width in metadata | not tracked beyond static wire lengths; `ColumnWire.metadataOfType` never sets ZEROFILL | low | divergence |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 

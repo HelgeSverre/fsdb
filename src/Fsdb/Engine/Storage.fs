@@ -3904,6 +3904,30 @@ let private normalizePrimaryKeyNullability (columns: ColumnDef list) =
         else
             column)
 
+let private normalizeMetadataComment (comment: string) =
+    let normalized =
+        comment.EnumerateRunes()
+        |> Seq.map (fun rune -> if rune.Value <= 0xFFFF then rune.ToString() else "?")
+        |> String.concat ""
+
+    if normalized <> comment then
+        let bytes = Encoding.UTF8.GetBytes comment
+
+        let preview =
+            bytes
+            |> Seq.truncate 6
+            |> Seq.map (fun value ->
+                if value >= 0x20uy && value <= 0x7Euy then
+                    string (char value)
+                else
+                    sprintf "\\x%02X" value)
+            |> String.concat ""
+            |> fun text -> if bytes.Length > 6 then text + "..." else text
+
+        Diagnostics.warning 1300 (sprintf "Cannot convert string '%s' from utf8mb4 to utf8mb3" preview)
+
+    normalized
+
 let private validateTableComment (tableName: string) (comment: string) =
     if comment.EnumerateRunes() |> Seq.length > 2048 then
         Error(ExpressionError(1628, sprintf "Comment for table '%s' is too long (max = 2048)" tableName))
@@ -3923,7 +3947,12 @@ let createTableSeeded
     (tableComment: string option)
     : Result<unit, StorageError> =
     ensureDatabase store dbName
-    let columns = normalizePrimaryKeyNullability columns
+    let columns =
+        columns
+        |> List.map (fun column -> { column with Comment = normalizeMetadataComment column.Comment })
+        |> normalizePrimaryKeyNullability
+
+    let tableComment = tableComment |> Option.map normalizeMetadataComment
 
     let createEvent (createTime, columns) =
         let statement =
@@ -4275,6 +4304,14 @@ let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: IndexKeyGr
 /// for `RenameTo`, the new key it should be re-filed under in the database
 /// map (`None` means "same key").
 let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
+    let action =
+        match action with
+        | AddColumn(column, position) -> AddColumn({ column with Comment = normalizeMetadataComment column.Comment }, position)
+        | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeMetadataComment column.Comment }, position)
+        | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeMetadataComment column.Comment }, position)
+        | SetTableComment comment -> SetTableComment(normalizeMetadataComment comment)
+        | action -> action
+
     let strict = mode.Strict
     // MODIFY/CHANGE re-coerce every existing row into the new definition —
     // MySQL's copy-alter semantics. `coerceValue` gives temporal fsp

@@ -180,6 +180,51 @@ let tests =
               | ResultSet(_, [ [ Some "created metadata" ] ]) -> ()
               | other -> failtestf "expected the CREATE TABLE comment, got %A" other
 
+          testCase "table and column comments use MySQL's utf8mb3 metadata charset"
+          <| fun _ ->
+              let store = setup ()
+              let session = Fsdb.Session.create 1 store
+
+              let session, created =
+                  Fsdb.QueryHandler.handle
+                      session
+                      "CREATE TABLE metadata_comments (id INT COMMENT 'x😀y') COMMENT='a😀b'"
+
+              Expect.equal created (Affected 0UL) "table created"
+
+              match Fsdb.QueryHandler.handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, warnings) ->
+                  Expect.equal (warnings |> List.map (fun row -> row.[1])) [ Some "1300"; Some "1300" ] "conversion warnings"
+              | other -> failtestf "expected conversion warnings, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT c.column_comment, t.table_comment FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema = c.table_schema AND t.table_name = c.table_name WHERE c.table_schema = 'fsdb' AND c.table_name = 'metadata_comments'"
+              with
+              | ResultSet(_, [ [ Some "x?y"; Some "a?b" ] ]) -> ()
+              | other -> failtestf "expected normalized comments, got %A" other
+
+              let session, altered =
+                  Fsdb.QueryHandler.handle
+                      session
+                      "ALTER TABLE metadata_comments MODIFY COLUMN id INT COMMENT 'm😀n', COMMENT='t😀u'"
+
+              Expect.equal altered (Affected 0UL) "comments altered"
+
+              match Fsdb.QueryHandler.handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, warnings) ->
+                  Expect.equal (warnings |> List.map (fun row -> row.[1])) [ Some "1300"; Some "1300" ] "alter warnings"
+              | other -> failtestf "expected ALTER conversion warnings, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT c.column_comment, t.table_comment FROM information_schema.columns c JOIN information_schema.tables t ON t.table_schema = c.table_schema AND t.table_name = c.table_name WHERE c.table_schema = 'fsdb' AND c.table_name = 'metadata_comments'"
+              with
+              | ResultSet(_, [ [ Some "m?n"; Some "t?u" ] ]) -> ()
+              | other -> failtestf "expected normalized ALTER comments, got %A" other
+
           testCase "BIT defaults render as MySQL bit literals"
           <| fun _ ->
               let store = setup ()
