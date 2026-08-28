@@ -319,6 +319,14 @@ type TransactionLockContext =
     { Owner: int64
       HeldStripes: Collections.Generic.HashSet<RowLockStripe> }
 
+type AccountResourceUsage =
+    { Gate: obj
+      mutable WindowStartedUtc: DateTime
+      mutable Questions: uint64
+      mutable Updates: uint64
+      mutable Connections: uint64
+      mutable ActiveConnections: uint32 }
+
 let private rowLockStripeCount = 4096
 
 let private createRowLockStripe () =
@@ -364,6 +372,9 @@ type Store =
       RowLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
       /// A separate namespace prevents key hashes from aliasing held rows.
       KeyLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
+      /// Ephemeral per-account counters are shared by every session and
+      /// transaction snapshot, but deliberately reset on server restart.
+      AccountResources: ConcurrentDictionary<string, AccountResourceUsage>
       RowLockSequence: int64 array
       TransactionLocks: TransactionLockContext option }
 
@@ -460,6 +471,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       CommitLock = store.CommitLock
       RowLocks = store.RowLocks
       KeyLocks = store.KeyLocks
+      AccountResources = store.AccountResources
       RowLockSequence = store.RowLockSequence
       TransactionLocks = store.TransactionLocks }
 
@@ -2852,6 +2864,7 @@ let create () : Store =
       CommitLock = obj ()
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
+      AccountResources = ConcurrentDictionary()
       RowLockSequence = [| 0L |]
       TransactionLocks = None }
 

@@ -3740,18 +3740,89 @@ let private accountTlsRequirement: Parser<AccountTlsRequirement, unit> =
     keyword "REQUIRE"
     >>. choice [ keyword "NONE" >>% RequireNone; keyword "SSL" >>% RequireSsl; keyword "X509" >>% RequireX509 ]
 
+type private AccountResourceLimit =
+    | QueriesPerHour of uint32
+    | UpdatesPerHour of uint32
+    | ConnectionsPerHour of uint32
+    | UserConnections of uint32
+
+let private accountResourceValue: Parser<uint32, unit> =
+    (puint64 .>> ws)
+    >>= fun value ->
+        if value <= uint64 UInt32.MaxValue then
+            preturn (uint32 value)
+        else
+            fail "an account resource limit must fit UNSIGNED INT"
+
+let private accountResourceLimit: Parser<AccountResourceLimit, unit> =
+    choice
+        [ keyword "MAX_QUERIES_PER_HOUR" >>. accountResourceValue |>> QueriesPerHour
+          keyword "MAX_UPDATES_PER_HOUR" >>. accountResourceValue |>> UpdatesPerHour
+          keyword "MAX_CONNECTIONS_PER_HOUR" >>. accountResourceValue |>> ConnectionsPerHour
+          keyword "MAX_USER_CONNECTIONS" >>. accountResourceValue |>> UserConnections ]
+
+let private accountResourceLimits: Parser<AccountResourceLimits, unit> =
+    keyword "WITH"
+    >>. many1 accountResourceLimit
+    |>> List.fold
+            (fun limits resource ->
+                match resource with
+                | QueriesPerHour value -> { limits with MaxQueriesPerHour = Some value }
+                | UpdatesPerHour value -> { limits with MaxUpdatesPerHour = Some value }
+                | ConnectionsPerHour value -> { limits with MaxConnectionsPerHour = Some value }
+                | UserConnections value -> { limits with MaxUserConnections = Some value })
+            AccountOptions.empty.ResourceLimits
+
+let private passwordExpiration: Parser<PasswordExpiration, unit> =
+    let lifetime =
+        keyword "INTERVAL"
+        >>. (puint32 .>> ws)
+        .>> keyword "DAY"
+        >>= fun days ->
+            if days > 0u && days <= uint32 UInt16.MaxValue then
+                preturn (ExpirePasswordAfterDays(uint16 days))
+            else
+                fail "a password lifetime must be between 1 and 65535 days"
+
+    keyword "PASSWORD"
+    >>. keyword "EXPIRE"
+    >>. choice
+            [ keyword "DEFAULT" >>% ExpirePasswordByDefault
+              keyword "NEVER" >>% NeverExpirePassword
+              attempt lifetime
+              preturn ExpirePassword ]
+
+let private accountLock: Parser<bool, unit> =
+    keyword "ACCOUNT"
+    >>. ((keyword "LOCK" >>% true) <|> (keyword "UNLOCK" >>% false))
+
+let private accountOptions: Parser<AccountOptions, unit> =
+    opt accountTlsRequirement
+    .>>. opt accountResourceLimits
+    .>>. opt passwordExpiration
+    .>>. opt accountLock
+    |>> fun (((tls, resources), expiration), locked) ->
+        { TlsRequirement = tls
+          ResourceLimits = Option.defaultValue AccountOptions.empty.ResourceLimits resources
+          PasswordExpiration = expiration
+          Locked = locked }
+
+let private hasAccountOptions (options: AccountOptions) =
+    options.TlsRequirement.IsSome
+    || options.PasswordExpiration.IsSome
+    || options.Locked.IsSome
+    || options.ResourceLimits <> AccountOptions.empty.ResourceLimits
+
 let private createUserStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. sepBy1 (userRef .>>. opt identifiedBy) (sym ",")
-     .>>. opt accountTlsRequirement
-     .>>. opt ((keyword "ACCOUNT" >>. keyword "LOCK" >>% true) <|> (keyword "ACCOUNT" >>. keyword "UNLOCK" >>% false)))
-    |>> fun (((ifNotExists, users), tlsRequirement), locked) ->
+     .>>. accountOptions)
+    |>> fun ((ifNotExists, users), options) ->
         CreateUser(
             users |> List.map (fun ((n, h), pw) -> n, h, pw),
             ifNotExists,
-            Option.defaultValue false locked,
-            Option.defaultValue RequireNone tlsRequirement
+            options
         )
 
 let private dropUserStmt: Parser<Statement, unit> =
@@ -3769,8 +3840,13 @@ let private alterUserStmt: Parser<Statement, unit> =
     (keyword "ALTER" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. userRef
-     .>>. identifiedBy)
-    |>> fun ((ifExists, (name, host)), pw) -> AlterUser(name, host, pw, ifExists)
+     .>>. opt identifiedBy
+     .>>. accountOptions)
+    >>= fun (((ifExists, (name, host)), password), options) ->
+        if password.IsSome || hasAccountOptions options then
+            preturn (AlterUser(name, host, password, ifExists, options))
+        else
+            fail "ALTER USER requires an account option"
 
 let private createRoleStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "ROLE"

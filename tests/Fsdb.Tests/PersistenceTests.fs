@@ -903,7 +903,17 @@ let tests =
               let store = load dir
               attach dir store
 
-              Fsdb.Auth.createUserWithTlsRequirement store "alice" "%" (Some "pw1") RequireSsl |> ignore
+              let options =
+                  { AccountOptions.empty with
+                      TlsRequirement = Some RequireSsl
+                      ResourceLimits =
+                        { AccountOptions.empty.ResourceLimits with
+                            MaxQueriesPerHour = Some 11u
+                            MaxUserConnections = Some 2u }
+                      PasswordExpiration = Some(ExpirePasswordAfterDays 30us)
+                      Locked = Some true }
+
+              Fsdb.Auth.createUserWithOptions store "alice" "%" (Some "pw1") options |> ignore
               Fsdb.Auth.createUser store "alice" "localhost" (Some "local") |> ignore
               Fsdb.Auth.createUser store "bob" "%" None |> ignore
               Fsdb.Auth.setPassword store "alice" "%" "pw2" |> ignore
@@ -918,6 +928,14 @@ let tests =
                       (Fsdb.Auth.nativePasswordHash "pw2")
                       "replayed alice with her updated hash"
                   Expect.equal (Fsdb.Auth.accountTlsRequirement cols row) RequireSsl "replayed TLS requirement"
+                  Expect.isTrue (Fsdb.Auth.isAccountLocked cols row) "replayed account lock"
+                  let limits = Fsdb.Auth.accountLimits cols row
+                  Expect.equal limits.MaxQuestions 11u "replayed query limit"
+                  Expect.equal limits.MaxUserConnections 2u "replayed connection limit"
+
+                  match Fsdb.Auth.renderCreateUserForAccount reloaded (Fsdb.Auth.account "alice" "%") with
+                  | Ok(_, ddl) -> Expect.stringContains ddl "PASSWORD EXPIRE INTERVAL 30 DAY" "replayed password lifetime"
+                  | Error error -> failtestf "expected SHOW CREATE USER state, got %A" error
               | None -> failtest "expected alice to survive the reload"
 
               match Fsdb.Auth.tryUserRowForAccount reloaded (Fsdb.Auth.account "alice" "localhost") with

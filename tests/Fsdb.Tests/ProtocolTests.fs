@@ -44,6 +44,9 @@ let tests =
               let payload = buildHandshakeV10 1 (Array.create 20 1uy)
               let text = Text.Encoding.ASCII.GetString payload
               Expect.stringContains text "mysql_native_password" "auth plugin name present"
+              Expect.isTrue
+                  (ServerCapabilities &&& ClientCanHandleExpiredPasswords <> 0u)
+                  "clients may request password-expiry sandbox handling"
 
           testCase "OK payload starts with 0x00 header"
           <| fun _ ->

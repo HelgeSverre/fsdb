@@ -37,7 +37,9 @@ Port 3307 avoids a real MySQL on 3306 (`--port` overrides). A `root` account
 with all privileges and no password exists out of the box; accounts, `GRANT`s,
 and passwords are managed with the usual `CREATE USER` / `GRANT` / `SET
 PASSWORD` statements (mysql_native_password, verified at the handshake — a
-passwordless account accepts only an empty password, same as MySQL).
+passwordless account accepts only an empty password, same as MySQL). Account
+locks, TLS requirements, explicit password expiry, and per-account resource
+limits are enforced as well.
 
 First queries:
 

@@ -268,6 +268,243 @@ let tests =
               Expect.isFalse (transportAllowed "x509_user" true false) "X509 requires a client certificate"
               Expect.isTrue (transportAllowed "x509_user" true true) "X509 accepts an encrypted certificate transport"
 
+          testCase "CREATE and ALTER USER persist resource, expiry, TLS, and lock options"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+
+              let root, created =
+                  handle
+                      root
+                      "CREATE USER policy REQUIRE SSL WITH MAX_QUERIES_PER_HOUR 60 MAX_UPDATES_PER_HOUR 20 MAX_CONNECTIONS_PER_HOUR 10 MAX_USER_CONNECTIONS 3 PASSWORD EXPIRE INTERVAL 180 DAY ACCOUNT LOCK"
+
+              Expect.equal created (Affected 0UL) "account created"
+
+              match
+                  handle
+                      root
+                      "SELECT ssl_type,max_questions,max_updates,max_connections,max_user_connections,password_expired,password_lifetime,account_locked FROM mysql.user WHERE User='policy'"
+                  |> snd
+              with
+              | ResultSet(_, [ values ]) ->
+                  Expect.equal
+                      values
+                      [ Some "ANY"; Some "60"; Some "20"; Some "10"; Some "3"; Some "N"; Some "180"; Some "Y" ]
+                      "mysql.user values"
+              | other -> failtestf "expected account policy row, got %A" other
+
+              match Fsdb.Auth.tryUserRow store "policy" with
+              | Some(columns, row) ->
+                  let changed =
+                      List.zip columns (Array.toList row)
+                      |> List.pick (fun (column, value) ->
+                          match column.Name, value with
+                          | "password_last_changed", VDateTime timestamp -> Some timestamp
+                          | _ -> None)
+
+                  Expect.isFalse (Fsdb.Auth.isPasswordExpiredAt changed columns row) "fresh lifetime"
+                  Expect.isTrue (Fsdb.Auth.isPasswordExpiredAt (changed.AddDays 180.0) columns row) "lifetime boundary"
+              | None -> failtest "expected policy account"
+
+              let root, altered =
+                  handle root "ALTER USER policy WITH MAX_QUERIES_PER_HOUR 7 PASSWORD EXPIRE NEVER ACCOUNT UNLOCK"
+
+              Expect.equal altered (Affected 0UL) "account altered"
+
+              match handle root "SHOW CREATE USER policy" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) ->
+                  Expect.stringContains ddl "REQUIRE SSL" "unmentioned TLS requirement survives"
+                  Expect.stringContains ddl "MAX_QUERIES_PER_HOUR 7" "changed query limit"
+                  Expect.stringContains ddl "MAX_UPDATES_PER_HOUR 20" "unmentioned update limit survives"
+                  Expect.stringContains ddl "PASSWORD EXPIRE NEVER" "password lifetime"
+                  Expect.stringContains ddl "ACCOUNT UNLOCK" "account state"
+              | other -> failtestf "expected SHOW CREATE USER, got %A" other
+
+          testCase "account statement and connection limits reject and reset with MySQL 1226"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE TABLE limited_rows(id INT)"
+              let root, _ = handle root "CREATE USER query_limited WITH MAX_QUERIES_PER_HOUR 2"
+              let root, _ = handle root "CREATE USER update_limited WITH MAX_UPDATES_PER_HOUR 1"
+              let root, _ = handle root "GRANT INSERT ON fsdb.limited_rows TO update_limited"
+              let root, _ = handle root "CREATE USER password_limited WITH MAX_UPDATES_PER_HOUR 1"
+              let root, _ = handle root "GRANT INSERT ON fsdb.limited_rows TO password_limited"
+              let root, _ = handle root "CREATE USER denied_limited WITH MAX_UPDATES_PER_HOUR 1"
+              let root, _ = handle root "CREATE USER hourly_limited WITH MAX_CONNECTIONS_PER_HOUR 1"
+              let _, _ = handle root "CREATE USER active_limited WITH MAX_USER_CONNECTIONS 1"
+
+              let querySession = { create 2 store with User = "query_limited" }
+              let querySession, first = handle querySession "SELECT 1"
+              let querySession, second = handle querySession "SELECT 2"
+              let _, third = handle querySession "SELECT 3"
+              Expect.isTrue (match first with ResultSet _ -> true | _ -> false) "first query"
+              Expect.isTrue (match second with ResultSet _ -> true | _ -> false) "second query"
+
+              match third with
+              | Err(1226, message) -> Expect.stringContains message "max_questions" "query limit name"
+              | other -> failtestf "expected max_questions 1226, got %A" other
+
+              let root, flushed = handle root "FLUSH USER_RESOURCES"
+              Expect.equal flushed (Affected 0UL) "resource counters flushed"
+
+              match handle querySession "SELECT 3" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected query after FLUSH USER_RESOURCES, got %A" other
+
+              let updateSession = { create 3 store with User = "update_limited" }
+              let updateSession, firstInsert = handle updateSession "INSERT INTO limited_rows VALUES(1)"
+              let _, secondInsert = handle updateSession "INSERT INTO limited_rows VALUES(2)"
+              Expect.equal firstInsert (Affected 1UL) "first update"
+
+              match secondInsert with
+              | Err(1226, message) -> Expect.stringContains message "max_updates" "update limit name"
+              | other -> failtestf "expected max_updates 1226, got %A" other
+
+              let root, reset = handle root "ALTER USER update_limited WITH MAX_UPDATES_PER_HOUR 1"
+              Expect.equal reset (Affected 0UL) "ALTER resets counters"
+              Expect.equal (handle updateSession "INSERT INTO limited_rows VALUES(2)" |> snd) (Affected 1UL) "update after reset"
+
+              let passwordSession = { create 4 store with User = "password_limited" }
+              let passwordSession, passwordChanged = handle passwordSession "SET PASSWORD = ''"
+              Expect.equal passwordChanged (Affected 0UL) "password change consumes an update"
+
+              match handle passwordSession "INSERT INTO limited_rows VALUES(3)" |> snd with
+              | Err(1226, message) -> Expect.stringContains message "max_updates" "password update limit name"
+              | other -> failtestf "expected password change to consume max_updates, got %A" other
+
+              let deniedSession = { create 5 store with User = "denied_limited" }
+
+              match handle deniedSession "INSERT INTO limited_rows VALUES(4)" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected unprivileged update to be denied, got %A" other
+
+              let root, granted = handle root "GRANT INSERT ON fsdb.limited_rows TO denied_limited"
+              Expect.equal granted (Affected 0UL) "insert granted"
+              Expect.equal (handle deniedSession "INSERT INTO limited_rows VALUES(4)" |> snd) (Affected 1UL) "denial did not consume update"
+
+              let hourly = Fsdb.Auth.account "hourly_limited" "%"
+              use firstHourly = Fsdb.Auth.tryAcquireAccountConnection store hourly |> Result.defaultWith (failtestf "%A")
+
+              match Fsdb.Auth.tryAcquireAccountConnection store hourly with
+              | Error(1226, message) -> Expect.stringContains message "max_connections_per_hour" "hourly limit name"
+              | other -> failtestf "expected hourly connection 1226, got %A" other
+
+              let active = Fsdb.Auth.account "active_limited" "%"
+              let firstActive = Fsdb.Auth.tryAcquireAccountConnection store active |> Result.defaultWith (failtestf "%A")
+
+              match Fsdb.Auth.tryAcquireAccountConnection store active with
+              | Error(1226, message) -> Expect.stringContains message "max_user_connections" "active limit name"
+              | other -> failtestf "expected active connection 1226, got %A" other
+
+              firstActive.Dispose()
+              use _secondActive = Fsdb.Auth.tryAcquireAccountConnection store active |> Result.defaultWith (failtestf "%A")
+              ()
+
+          testCase "expired-password sessions are restricted until their own password is reset"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let _, created = handle root "CREATE USER expired PASSWORD EXPIRE"
+              Expect.equal created (Affected 0UL) "expired account created"
+
+              let expired =
+                  { create 2 store with
+                      User = "expired"
+                      PasswordExpired = true }
+
+              match handle expired "SELECT 1" |> snd with
+              | Err(1820, message) -> Expect.stringContains message "reset your password" "sandbox denial"
+              | other -> failtestf "expected password sandbox 1820, got %A" other
+
+              let active, reset = handle expired "SET PASSWORD = 'new-secret'"
+              Expect.equal reset (Affected 0UL) "password reset"
+              Expect.isFalse active.PasswordExpired "sandbox cleared"
+
+              match handle active "SELECT 1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected normal access after reset, got %A" other
+
+              match Fsdb.Auth.tryUserRow store "expired" with
+              | Some(columns, row) -> Expect.isFalse (Fsdb.Auth.isPasswordExpired columns row) "catalog expiry cleared"
+              | None -> failtest "expected expired account"
+
+          testCase "hourly account counters reset one hour after their window starts"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let account = Fsdb.Auth.account "rolling_limit" "%"
+              let options =
+                  { AccountOptions.empty with
+                      ResourceLimits =
+                        { AccountOptions.empty.ResourceLimits with
+                            MaxQueriesPerHour = Some 1u
+                            MaxConnectionsPerHour = Some 1u } }
+
+              Fsdb.Auth.createUserWithOptions store account.Name account.Host None options
+              |> Result.defaultWith (failtestf "%A")
+
+              let started = DateTime(2026, 8, 28, 12, 0, 0, DateTimeKind.Utc)
+              Expect.isOk (Fsdb.Auth.tryConsumeAccountStatementAt store account false started) "first question"
+              Expect.isError (Fsdb.Auth.tryConsumeAccountStatementAt store account false started) "question limit"
+              Expect.isOk
+                  (Fsdb.Auth.tryConsumeAccountStatementAt store account false (started.AddHours 1.0))
+                  "next question window"
+
+              use first =
+                  Fsdb.Auth.tryAcquireAccountConnectionAt store account (started.AddHours 2.0)
+                  |> Result.defaultWith (failtestf "%A")
+
+              Expect.isError
+                  (Fsdb.Auth.tryAcquireAccountConnectionAt store account (started.AddHours 2.0))
+                  "connection limit"
+              use _next =
+                  Fsdb.Auth.tryAcquireAccountConnectionAt store account (started.AddHours 3.0)
+                  |> Result.defaultWith (failtestf "%A")
+
+              ()
+
+          testCase "update limits cover text DDL and SQL-prepared DML without charging procedure bodies"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE TABLE account_updates(id INT)"
+              let root, _ = handle root "CREATE USER prepared_limited WITH MAX_UPDATES_PER_HOUR 1"
+              let root, _ = handle root "GRANT INSERT ON fsdb.account_updates TO prepared_limited"
+              let root, _ = handle root "CREATE USER routine_ddl_limited WITH MAX_UPDATES_PER_HOUR 1"
+              let root, _ = handle root "GRANT CREATE ROUTINE,CREATE ON fsdb.* TO routine_ddl_limited"
+              let root, _ = handle root "CREATE PROCEDURE counted_call(IN n INT) BEGIN INSERT INTO account_updates VALUES(n); END"
+              let root, _ = handle root "CREATE USER call_limited WITH MAX_UPDATES_PER_HOUR 1"
+              let _, _ = handle root "GRANT EXECUTE ON fsdb.* TO call_limited"
+
+              let preparedSession = { create 2 store with User = "prepared_limited" }
+              let preparedSession, prepared = handle preparedSession "PREPARE add_row FROM 'INSERT INTO account_updates VALUES(?)'"
+              Expect.equal prepared (Affected 0UL) "statement prepared"
+              let preparedSession, _ = handle preparedSession "SET @id = 1"
+              let preparedSession, inserted = handle preparedSession "EXECUTE add_row USING @id"
+              Expect.equal inserted (Affected 1UL) "prepared insert"
+
+              match handle preparedSession "EXECUTE add_row USING @id" |> snd with
+              | Err(1226, message) -> Expect.stringContains message "max_updates" "prepared update limit"
+              | other -> failtestf "expected prepared update limit, got %A" other
+
+              let routineSession = { create 3 store with User = "routine_ddl_limited" }
+              let routineSession, created = handle routineSession "CREATE PROCEDURE resource_counted() SELECT 1"
+              Expect.equal created (Affected 0UL) "routine DDL"
+
+              match handle routineSession "CREATE TABLE resource_counted_table(id INT)" |> snd with
+              | Err(1226, message) -> Expect.stringContains message "max_updates" "routine DDL update limit"
+              | other -> failtestf "expected routine DDL update limit, got %A" other
+
+              let callSession = { create 4 store with User = "call_limited" }
+              let callSession, firstCall = handle callSession "CALL counted_call(2)"
+              let _, secondCall = handle callSession "CALL counted_call(3)"
+              Expect.isFalse (match firstCall with Err(1226, _) -> true | _ -> false) "first call is not charged"
+              Expect.isFalse (match secondCall with Err(1226, _) -> true | _ -> false) "second call is not charged"
+
+              match handle root "SELECT GROUP_CONCAT(id ORDER BY id) FROM account_updates" |> snd with
+              | ResultSet(_, [ [ Some "1,2,3" ] ]) -> ()
+              | other -> failtestf "expected prepared and procedure rows, got %A" other
+
           testCase "roles are locked accounts and retain role-specific duplicate semantics"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

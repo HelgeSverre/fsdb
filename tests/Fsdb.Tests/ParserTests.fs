@@ -2847,33 +2847,82 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE USER 'bob'@'%' IDENTIFIED BY 's3cret'")
-                        (CreateUser([ "bob", "%", Some "s3cret" ], false, false, RequireNone))
+                        (CreateUser([ "bob", "%", Some "s3cret" ], false, AccountOptions.empty))
                         "quoted with password"
 
                     Expect.equal
                         (parseOk "CREATE USER IF NOT EXISTS bob")
-                        (CreateUser([ "bob", "%", None ], true, false, RequireNone))
+                        (CreateUser([ "bob", "%", None ], true, AccountOptions.empty))
                         "bare name defaults host to %"
 
                     Expect.equal
                         (parseOk "CREATE USER 'a'@'localhost', 'b'@'%' IDENTIFIED BY 'pw'")
-                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false, false, RequireNone))
+                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false, AccountOptions.empty))
                         "per-account password in a list"
 
                     Expect.equal
                         (parseOk "CREATE USER locked ACCOUNT LOCK")
-                        (CreateUser([ "locked", "%", None ], false, true, RequireNone))
+                        (CreateUser([ "locked", "%", None ], false, { AccountOptions.empty with Locked = Some true }))
                         "account state"
 
                     Expect.equal
                         (parseOk "CREATE USER secure REQUIRE SSL")
-                        (CreateUser([ "secure", "%", None ], false, false, RequireSsl))
+                        (CreateUser(
+                            [ "secure", "%", None ],
+                            false,
+                            { AccountOptions.empty with TlsRequirement = Some RequireSsl }
+                        ))
                         "SSL requirement"
 
                     Expect.equal
                         (parseOk "CREATE USER certified REQUIRE X509 ACCOUNT LOCK")
-                        (CreateUser([ "certified", "%", None ], false, true, RequireX509))
+                        (CreateUser(
+                            [ "certified", "%", None ],
+                            false,
+                            { AccountOptions.empty with
+                                TlsRequirement = Some RequireX509
+                                Locked = Some true }
+                        ))
                         "X509 requirement"
+
+                testCase "CREATE and ALTER USER parse resource and password-expiry options"
+                <| fun _ ->
+                    let resources =
+                        { MaxQueriesPerHour = Some 60u
+                          MaxUpdatesPerHour = Some 20u
+                          MaxConnectionsPerHour = Some 10u
+                          MaxUserConnections = Some 3u }
+
+                    let options =
+                        { TlsRequirement = Some RequireSsl
+                          ResourceLimits = resources
+                          PasswordExpiration = Some(ExpirePasswordAfterDays 180us)
+                          Locked = Some true }
+
+                    Expect.equal
+                        (parseOk
+                            "CREATE USER app REQUIRE SSL WITH MAX_QUERIES_PER_HOUR 60 MAX_UPDATES_PER_HOUR 20 MAX_CONNECTIONS_PER_HOUR 10 MAX_USER_CONNECTIONS 3 PASSWORD EXPIRE INTERVAL 180 DAY ACCOUNT LOCK")
+                        (CreateUser([ "app", "%", None ], false, options))
+                        "create options"
+
+                    Expect.equal
+                        (parseOk "ALTER USER IF EXISTS app WITH MAX_QUERIES_PER_HOUR 0 PASSWORD EXPIRE NEVER ACCOUNT UNLOCK")
+                        (AlterUser(
+                            "app",
+                            "%",
+                            None,
+                            true,
+                            { AccountOptions.empty with
+                                ResourceLimits = { AccountOptions.empty.ResourceLimits with MaxQueriesPerHour = Some 0u }
+                                PasswordExpiration = Some NeverExpirePassword
+                                Locked = Some false }
+                        ))
+                        "alter options"
+
+                    Expect.isError (parse "ALTER USER app") "an empty alteration is rejected"
+                    Expect.isError (parse "CREATE USER app PASSWORD EXPIRE INTERVAL 0 DAY") "zero lifetime"
+                    Expect.isError (parse "CREATE USER app PASSWORD EXPIRE INTERVAL 65536 DAY") "oversized lifetime"
+                    Expect.isError (parse "CREATE USER app WITH MAX_QUERIES_PER_HOUR 4294967296") "oversized resource limit"
 
                 testCase "CREATE ROLE and DROP ROLE parse account lists"
                 <| fun _ ->
@@ -2925,7 +2974,7 @@ let tests =
 
                     Expect.equal
                         (parseOk "ALTER USER 'bob'@'%' IDENTIFIED BY 'newpw'")
-                        (AlterUser("bob", "%", "newpw", false))
+                        (AlterUser("bob", "%", Some "newpw", false, AccountOptions.empty))
                         "alter password"
 
                     Expect.equal

@@ -679,6 +679,35 @@ type AccountTlsRequirement =
     | RequireSsl
     | RequireX509
 
+type AccountResourceLimits =
+    { MaxQueriesPerHour: uint32 option
+      MaxUpdatesPerHour: uint32 option
+      MaxConnectionsPerHour: uint32 option
+      MaxUserConnections: uint32 option }
+
+type PasswordExpiration =
+    | ExpirePassword
+    | ExpirePasswordByDefault
+    | NeverExpirePassword
+    | ExpirePasswordAfterDays of uint16
+
+type AccountOptions =
+    { TlsRequirement: AccountTlsRequirement option
+      ResourceLimits: AccountResourceLimits
+      PasswordExpiration: PasswordExpiration option
+      Locked: bool option }
+
+module AccountOptions =
+    let empty =
+        { TlsRequirement = None
+          ResourceLimits =
+            { MaxQueriesPerHour = None
+              MaxUpdatesPerHour = None
+              MaxConnectionsPerHour = None
+              MaxUserConnections = None }
+          PasswordExpiration = None
+          Locked = None }
+
 type ExplainFormat =
     | ExplainTraditional
     | ExplainJson
@@ -752,19 +781,16 @@ type Statement =
     | Update of UpdateStmt
     | Delete of DeleteStmt
     | Truncate of table: string
-    /// `CREATE USER [IF NOT EXISTS] 'name'@'host' [IDENTIFIED BY 'pw'], ...
-    /// [REQUIRE NONE|SSL|X509] [ACCOUNT LOCK|UNLOCK]`; host defaults to `%`.
+    /// `CREATE USER [IF NOT EXISTS] 'name'@'host' [IDENTIFIED BY 'pw'], ...`
+    /// with account requirements shared by every account in the statement.
     | CreateUser of
         users: (string * string * string option) list *
         ifNotExists: bool *
-        locked: bool *
-        tlsRequirement: AccountTlsRequirement
+        options: AccountOptions
     /// `DROP USER [IF EXISTS] 'name'@'host', ...`
     | DropUser of users: (string * string) list * ifExists: bool
     | RenameUser of users: ((string * string) * (string * string)) list
-    /// `ALTER USER [IF EXISTS] 'name'@'host' IDENTIFIED BY 'pw'` — the one
-    /// supported alteration (password change).
-    | AlterUser of name: string * host: string * password: string * ifExists: bool
+    | AlterUser of name: string * host: string * password: string option * ifExists: bool * options: AccountOptions
     | CreateRole of users: (string * string) list * ifNotExists: bool
     | DropRole of users: (string * string) list * ifExists: bool
     /// `GRANT privs ON level TO users [WITH GRANT OPTION]` — `privs` are the

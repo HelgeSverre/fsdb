@@ -685,6 +685,125 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "expired-password capability enters the password-reset sandbox"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let root = Fsdb.Session.create 1 store
+                  let _, created = Fsdb.QueryHandler.handle root "CREATE USER expired_wire PASSWORD EXPIRE"
+                  Expect.equal created (Affected 0UL) "expired account created"
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+
+                  let connect capabilities =
+                      async {
+                          let client = new Net.Sockets.TcpClient()
+                          do! client.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                          let stream = client.GetStream()
+                          let! greeting = readPacketAsync stream
+
+                          do!
+                              writePacketAsync
+                                  stream
+                                  { SeqId = greeting.Value.SeqId + 1uy
+                                    Payload = passwordlessHandshakeResponse capabilities "expired_wire" }
+                              |> Async.Ignore
+
+                          let! response = readPacketAsync stream
+                          return client, (stream :> IO.Stream), response.Value
+                      }
+
+                  let! deniedClient, _, denied = connect ClientProtocol41
+                  use deniedClient = deniedClient
+                  Expect.equal denied.Payload.[0] 0xffuy "incapable client is rejected"
+                  Expect.equal (Reader(denied.Payload.[1..]).ReadInt16LE()) 1862 "expired-password handshake error"
+
+                  let capabilities = ClientProtocol41 ||| ClientCanHandleExpiredPasswords
+                  let! capableClient, stream, accepted = connect capabilities
+                  use capableClient = capableClient
+                  Expect.equal accepted.Payload.[0] 0uy "capable client authenticates"
+
+                  let query (sql: string) =
+                      async {
+                          let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          let! response = readPacketAsync stream
+                          return response.Value
+                      }
+
+                  let! restricted = query "SELECT 1"
+                  Expect.equal restricted.Payload.[0] 0xffuy "ordinary statement is sandboxed"
+                  Expect.equal (Reader(restricted.Payload.[1..]).ReadInt16LE()) 1820 "sandbox error"
+
+                  let! reset = query "ALTER USER USER() IDENTIFIED BY 'new-secret'"
+                  Expect.equal reset.Payload.[0] 0uy "own password reset succeeds"
+                  let! selected = query "SELECT 1"
+                  Expect.equal selected.Payload.[0] 1uy "ordinary result starts after reset"
+              }
+              |> Async.RunSynchronously
+
+          testCase "connection resource limits are enforced by the handshake"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let root = Fsdb.Session.create 1 store
+                  let root, _ = Fsdb.QueryHandler.handle root "CREATE USER hourly_wire WITH MAX_CONNECTIONS_PER_HOUR 1"
+                  let _, _ = Fsdb.QueryHandler.handle root "CREATE USER active_wire WITH MAX_USER_CONNECTIONS 1"
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+
+                  let connect username =
+                      async {
+                          let client = new Net.Sockets.TcpClient()
+                          do! client.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                          let stream = client.GetStream()
+                          let! greeting = readPacketAsync stream
+
+                          do!
+                              writePacketAsync
+                                  stream
+                                  { SeqId = greeting.Value.SeqId + 1uy
+                                    Payload = passwordlessHandshakeResponse ClientProtocol41 username }
+                              |> Async.Ignore
+
+                          let! response = readPacketAsync stream
+                          return client, (stream :> IO.Stream), response.Value
+                      }
+
+                  let! hourlyFirst, _, accepted = connect "hourly_wire"
+                  Expect.equal accepted.Payload.[0] 0uy "first hourly connection"
+                  hourlyFirst.Dispose()
+
+                  let! hourlySecond, _, rejected = connect "hourly_wire"
+                  use hourlySecond = hourlySecond
+                  Expect.equal rejected.Payload.[0] 0xffuy "second hourly connection rejected"
+                  Expect.equal (Reader(rejected.Payload.[1..]).ReadInt16LE()) 1226 "hourly resource error"
+
+                  let! activeFirst, activeStream, activeAccepted = connect "active_wire"
+                  Expect.equal activeAccepted.Payload.[0] 0uy "first active connection"
+                  let! activeSecond, _, activeRejected = connect "active_wire"
+                  use activeSecond = activeSecond
+                  Expect.equal activeRejected.Payload.[0] 0xffuy "second active connection rejected"
+                  Expect.equal (Reader(activeRejected.Payload.[1..]).ReadInt16LE()) 1226 "active resource error"
+                  do! writePacketAsync activeStream { SeqId = 0uy; Payload = [| 0x01uy |] } |> Async.Ignore
+                  activeFirst.Dispose()
+
+                  let rec reconnect attempts =
+                      async {
+                          let! client, stream, response = connect "active_wire"
+
+                          if response.Payload.[0] = 0uy || attempts = 0 then
+                              return client, response
+                          else
+                              client.Dispose()
+                              do! Async.Sleep 10
+                              return! reconnect (attempts - 1)
+                      }
+
+                  let! activeThird, activeReopened = reconnect 20
+                  use activeThird = activeThird
+                  Expect.equal activeReopened.Payload.[0] 0uy "released active slot can reconnect"
+              }
+              |> Async.RunSynchronously
+
           testCase "PROCESSLIST shows the live connection and KILL CONNECTION tears a victim down"
           <| fun _ ->
               async {

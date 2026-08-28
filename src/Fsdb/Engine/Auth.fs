@@ -229,6 +229,15 @@ let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string
         | v -> Value.toText v |> Option.defaultValue ""
     | Error _ -> ""
 
+let private userColumnValue (cols: ColumnDef list) (row: Value[]) (name: string) =
+    resolveColumn cols name |> Result.toOption |> Option.map (fun index -> row.[index])
+
+let private userColumnUInt32 (cols: ColumnDef list) (row: Value[]) (name: string) =
+    match userColumnValue cols row name with
+    | Some(VInt value) when value > 0L -> uint32 (min value (int64 UInt32.MaxValue))
+    | Some(VUInt value) when value > 0UL -> uint32 (min value (uint64 UInt32.MaxValue))
+    | _ -> 0u
+
 /// The stored password hash for a user row — `""` means no password is set.
 let storedPasswordHash (cols: ColumnDef list) (row: Value[]) : string = userColumnText cols row "authentication_string"
 
@@ -248,6 +257,155 @@ let transportSatisfiesAccount (transport: TransportSecurity) (cols: ColumnDef li
     | RequireNone -> true
     | RequireSsl -> transport.Encrypted
     | RequireX509 -> transport.Encrypted && transport.ClientCertificateValidated
+
+type AccountLimits =
+    { MaxQuestions: uint32
+      MaxUpdates: uint32
+      MaxConnectionsPerHour: uint32
+      MaxUserConnections: uint32 }
+
+let accountLimits (cols: ColumnDef list) (row: Value[]) =
+    { MaxQuestions = userColumnUInt32 cols row "max_questions"
+      MaxUpdates = userColumnUInt32 cols row "max_updates"
+      MaxConnectionsPerHour = userColumnUInt32 cols row "max_connections"
+      MaxUserConnections = userColumnUInt32 cols row "max_user_connections" }
+
+let tryAccountLimits (store: Store) (account: Account) =
+    tryUserRowForAccount store account
+    |> Option.map (fun (columns, row) -> accountLimits columns row)
+
+let isPasswordExpiredAt (now: DateTime) (cols: ColumnDef list) (row: Value[]) =
+    if userColumnText cols row "password_expired" = "Y" then
+        true
+    else
+        match userColumnValue cols row "password_lifetime", userColumnValue cols row "password_last_changed" with
+        | Some(VInt days), Some(VDateTime changed) when days > 0L -> changed.AddDays(float days) <= now
+        | Some(VUInt days), Some(VDateTime changed) when days > 0UL -> changed.AddDays(float days) <= now
+        | _ -> false
+
+let isPasswordExpired cols row = isPasswordExpiredAt DateTime.Now cols row
+
+let private accountResourceKey (account: Account) =
+    account.Name + "\u0000" + account.Host.ToUpperInvariant()
+
+let private resourceUsageAt (store: Store) (account: Account) (now: DateTime) =
+    store.AccountResources.GetOrAdd(
+        accountResourceKey account,
+        fun _ ->
+            { Gate = obj ()
+              WindowStartedUtc = now
+              Questions = 0UL
+              Updates = 0UL
+              Connections = 0UL
+              ActiveConnections = 0u }
+    )
+
+let private resetExpiredWindow (now: DateTime) (usage: AccountResourceUsage) =
+    if now - usage.WindowStartedUtc >= TimeSpan.FromHours 1.0 then
+        usage.WindowStartedUtc <- now
+        usage.Questions <- 0UL
+        usage.Updates <- 0UL
+        usage.Connections <- 0UL
+
+let private clearHourlyUsage now (usage: AccountResourceUsage) =
+    usage.WindowStartedUtc <- now
+    usage.Questions <- 0UL
+    usage.Updates <- 0UL
+    usage.Connections <- 0UL
+
+let resetAccountResources (store: Store) (account: Account) =
+    match store.AccountResources.TryGetValue(accountResourceKey account) with
+    | true, usage -> lock usage.Gate (fun () -> clearHourlyUsage DateTime.UtcNow usage)
+    | false, _ -> ()
+
+let resetAllAccountResources (store: Store) =
+    let now = DateTime.UtcNow
+
+    for usage in store.AccountResources.Values do
+        lock usage.Gate (fun () -> clearHourlyUsage now usage)
+
+let private resourceExceeded account resource limit =
+    Error(
+        1226,
+        sprintf "User '%s' has exceeded the '%s' resource (current value: %u)" account.Name resource limit
+    )
+
+type private AccountConnectionLease(usage: AccountResourceUsage) =
+    let mutable disposed = false
+
+    interface IDisposable with
+        member _.Dispose() =
+            lock usage.Gate (fun () ->
+                if not disposed then
+                    disposed <- true
+
+                    if usage.ActiveConnections > 0u then
+                        usage.ActiveConnections <- usage.ActiveConnections - 1u)
+
+let tryAcquireAccountConnectionAt
+    (store: Store)
+    (account: Account)
+    (now: DateTime)
+    : Result<IDisposable, int * string> =
+    match tryUserRowForAccount store account with
+    | None -> Error(1396, sprintf "Operation CONNECT failed for '%s'@'%s'" account.Name account.Host)
+    | Some(cols, row) ->
+        let limits = accountLimits cols row
+        let usage = resourceUsageAt store account now
+
+        lock usage.Gate (fun () ->
+            resetExpiredWindow now usage
+
+            if limits.MaxConnectionsPerHour > 0u && usage.Connections >= uint64 limits.MaxConnectionsPerHour then
+                resourceExceeded account "max_connections_per_hour" limits.MaxConnectionsPerHour
+            elif limits.MaxUserConnections > 0u && usage.ActiveConnections >= limits.MaxUserConnections then
+                resourceExceeded account "max_user_connections" limits.MaxUserConnections
+            else
+                usage.Connections <- usage.Connections + 1UL
+                usage.ActiveConnections <- usage.ActiveConnections + 1u
+                Ok(new AccountConnectionLease(usage) :> IDisposable))
+
+let tryAcquireAccountConnection store account =
+    tryAcquireAccountConnectionAt store account DateTime.UtcNow
+
+let tryConsumeAccountStatementWithLimitsAt
+    (store: Store)
+    (account: Account)
+    (limits: AccountLimits option)
+    (isUpdate: bool)
+    (now: DateTime)
+    : Result<unit, int * string> =
+    match limits with
+    | None -> Ok()
+    | Some limits ->
+        if limits.MaxQuestions = 0u && (not isUpdate || limits.MaxUpdates = 0u) then
+            Ok()
+        else
+            let usage = resourceUsageAt store account now
+
+            lock usage.Gate (fun () ->
+                resetExpiredWindow now usage
+
+                if limits.MaxQuestions > 0u && usage.Questions >= uint64 limits.MaxQuestions then
+                    resourceExceeded account "max_questions" limits.MaxQuestions
+                elif isUpdate && limits.MaxUpdates > 0u && usage.Updates >= uint64 limits.MaxUpdates then
+                    resourceExceeded account "max_updates" limits.MaxUpdates
+                else
+                    usage.Questions <- usage.Questions + 1UL
+
+                    if isUpdate then
+                        usage.Updates <- usage.Updates + 1UL
+
+                    Ok())
+
+let tryConsumeAccountStatementWithLimits store account limits isUpdate =
+    tryConsumeAccountStatementWithLimitsAt store account limits isUpdate DateTime.UtcNow
+
+let tryConsumeAccountStatementAt store account isUpdate now =
+    tryConsumeAccountStatementWithLimitsAt store account (tryAccountLimits store account) isUpdate now
+
+let tryConsumeAccountStatement store account isUpdate =
+    tryConsumeAccountStatementAt store account isUpdate DateTime.UtcNow
 
 // ---------------------------------------------------------------------------
 // The static privilege vocabulary: SQL name ↔ mysql.user column, plus where
@@ -317,12 +475,27 @@ let private privBySql (sql: string) : PrivDef option =
 let private operationFailed (op: string) (name: string) (host: string) =
     Error(1396, sprintf "Operation %s failed for '%s'@'%s'" op name host)
 
-let createUserWithTlsRequirement
+let private sslType = function
+    | RequireNone -> ""
+    | RequireSsl -> "ANY"
+    | RequireX509 -> "X509"
+
+let private initialPasswordExpiration = function
+    | Some ExpirePassword -> VString "Y", VNull
+    | Some NeverExpirePassword -> VString "N", VInt 0L
+    | Some(ExpirePasswordAfterDays days) -> VString "N", VInt(int64 days)
+    | Some ExpirePasswordByDefault
+    | None -> VString "N", VNull
+
+let private resourceLimitValue value =
+    VInt(int64 (Option.defaultValue 0u value))
+
+let createUserWithOptions
     (store: Store)
     (name: string)
     (host: string)
     (password: string option)
-    (tlsRequirement: AccountTlsRequirement)
+    (options: AccountOptions)
     : Result<unit, int * string> =
     let wanted = account name host
 
@@ -330,22 +503,55 @@ let createUserWithTlsRequirement
         operationFailed "CREATE USER" name host
     else
         let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
-        let sslType =
-            match tlsRequirement with
-            | RequireNone -> ""
-            | RequireSsl -> "ANY"
-            | RequireX509 -> "X509"
+        let expired, lifetime = initialPasswordExpiration options.PasswordExpiration
 
-        match
-            insertRows
-                store
-                "mysql"
-                "user"
-                (Some [ "Host"; "User"; "plugin"; "authentication_string"; "ssl_type" ])
-                [ [ VString wanted.Host; VString name; VString "mysql_native_password"; VString hash; VString sslType ] ]
-        with
+        let columns =
+            [ "Host"
+              "User"
+              "plugin"
+              "authentication_string"
+              "ssl_type"
+              "max_questions"
+              "max_updates"
+              "max_connections"
+              "max_user_connections"
+              "password_expired"
+              "password_last_changed"
+              "password_lifetime"
+              "account_locked" ]
+
+        let values =
+            [ VString wanted.Host
+              VString name
+              VString "mysql_native_password"
+              VString hash
+              VString(options.TlsRequirement |> Option.defaultValue RequireNone |> sslType)
+              resourceLimitValue options.ResourceLimits.MaxQueriesPerHour
+              resourceLimitValue options.ResourceLimits.MaxUpdatesPerHour
+              resourceLimitValue options.ResourceLimits.MaxConnectionsPerHour
+              resourceLimitValue options.ResourceLimits.MaxUserConnections
+              expired
+              VDateTime(Functions.truncateToSecond DateTime.Now)
+              lifetime
+              VString(if Option.defaultValue false options.Locked then "Y" else "N") ]
+
+        match insertRows store "mysql" "user" (Some columns) [ values ] with
         | Ok _ -> Ok()
-        | Error e -> Error(toMySqlError e)
+        | Error error -> Error(toMySqlError error)
+
+let createUserWithTlsRequirement
+    (store: Store)
+    (name: string)
+    (host: string)
+    (password: string option)
+    (tlsRequirement: AccountTlsRequirement)
+    : Result<unit, int * string> =
+    createUserWithOptions
+        store
+        name
+        host
+        password
+        { AccountOptions.empty with TlsRequirement = Some tlsRequirement }
 
 /// `CREATE USER 'name'@'host' [IDENTIFIED BY 'pw']` — one account.
 let createUser (store: Store) (name: string) (host: string) (password: string option) : Result<unit, int * string> =
@@ -368,6 +574,7 @@ let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * s
         deleteWhere "tables_priv"
         deleteWhere "columns_priv"
         deleteWhere "global_grants"
+        store.AccountResources.TryRemove(accountResourceKey (account name host)) |> ignore
         Ok()
 
 let renameUser
@@ -406,7 +613,10 @@ let renameUser
 
         [ "user"; "db"; "tables_priv"; "columns_priv"; "global_grants" ]
         |> traverse renameRows
-        |> Result.map ignore
+        |> Result.map (fun _ ->
+            match store.AccountResources.TryRemove(accountResourceKey oldAccount) with
+            | true, usage -> store.AccountResources.[accountResourceKey newAccount] <- usage
+            | false, _ -> ())
 
 /// Rewrites the columns named in `changes` on every mysql.`table` row
 /// matching `matches` — the one shared row-mutation shape grant/revoke/
@@ -443,28 +653,73 @@ let private updateSystemRows
 let private matchUserRow (wanted: Account) (cols: ColumnDef list) (row: Value[]) =
     rowAccount cols row |> Option.exists (sameAccount wanted)
 
+let private accountOptionChanges (options: AccountOptions) =
+    let limits = options.ResourceLimits
+
+    [ options.TlsRequirement |> Option.map (fun requirement -> "ssl_type", VString(sslType requirement))
+      limits.MaxQueriesPerHour |> Option.map (fun value -> "max_questions", VInt(int64 value))
+      limits.MaxUpdatesPerHour |> Option.map (fun value -> "max_updates", VInt(int64 value))
+      limits.MaxConnectionsPerHour |> Option.map (fun value -> "max_connections", VInt(int64 value))
+      limits.MaxUserConnections |> Option.map (fun value -> "max_user_connections", VInt(int64 value))
+      options.Locked |> Option.map (fun locked -> "account_locked", VString(if locked then "Y" else "N")) ]
+    |> List.choose id
+    |> fun changes ->
+        match options.PasswordExpiration with
+        | Some ExpirePassword -> ("password_expired", VString "Y") :: changes
+        | Some ExpirePasswordByDefault -> ("password_lifetime", VNull) :: changes
+        | Some NeverExpirePassword -> ("password_lifetime", VInt 0L) :: changes
+        | Some(ExpirePasswordAfterDays days) -> ("password_lifetime", VInt(int64 days)) :: changes
+        | None -> changes
+
+let private hasResourceLimitChanges (limits: AccountResourceLimits) =
+    limits.MaxQueriesPerHour.IsSome
+    || limits.MaxUpdatesPerHour.IsSome
+    || limits.MaxConnectionsPerHour.IsSome
+    || limits.MaxUserConnections.IsSome
+
+let alterUser
+    (store: Store)
+    (name: string)
+    (host: string)
+    (password: string option)
+    (options: AccountOptions)
+    : Result<unit, int * string> =
+    let wanted = account name host
+
+    if (tryUserRowForAccount store wanted).IsNone then
+        operationFailed "ALTER USER" name host
+    else
+        let changes =
+            match password with
+            | None -> accountOptionChanges options
+            | Some password ->
+                [ "authentication_string", VString(if password = "" then "" else nativePasswordHash password)
+                  "password_expired", VString "N"
+                  "password_last_changed", VDateTime(Functions.truncateToSecond DateTime.Now) ]
+                @ accountOptionChanges options
+
+        let updated =
+            if changes.IsEmpty then
+                Ok 0
+            else
+                updateSystemRows store "user" (matchUserRow wanted) changes
+
+        updated
+        |> Result.map (fun _ ->
+            if hasResourceLimitChanges options.ResourceLimits then
+                resetAccountResources store wanted)
+
+let alterUserOptions (store: Store) (name: string) (host: string) (options: AccountOptions) : Result<unit, int * string> =
+    alterUser store name host None options
+
 /// `ALTER USER ... IDENTIFIED BY 'pw'` / `SET PASSWORD [FOR user] = 'pw'` —
 /// rewrites the stored hash (empty password clears it back to
 /// accept-anything).
 let setPassword (store: Store) (name: string) (host: string) (password: string) : Result<unit, int * string> =
-    let wanted = account name host
-
-    if (tryUserRowForAccount store wanted).IsNone then
-        operationFailed "ALTER USER" name host
-    else
-        let hash = if password = "" then "" else nativePasswordHash password
-
-        updateSystemRows store "user" (matchUserRow wanted) [ "authentication_string", VString hash ]
-        |> Result.map ignore
+    alterUser store name host (Some password) AccountOptions.empty
 
 let setAccountLocked (store: Store) (name: string) (host: string) (locked: bool) : Result<unit, int * string> =
-    let wanted = account name host
-
-    if (tryUserRowForAccount store wanted).IsNone then
-        operationFailed "ALTER USER" name host
-    else
-        updateSystemRows store "user" (matchUserRow wanted) [ "account_locked", VString(if locked then "Y" else "N") ]
-        |> Result.map ignore
+    alterUserOptions store name host { AccountOptions.empty with Locked = Some locked }
 
 let isAccountLocked (cols: ColumnDef list) (row: Value[]) = userColumnText cols row "account_locked" = "Y"
 
@@ -1147,16 +1402,38 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
             | RequireNone -> "NONE"
             | RequireSsl -> "SSL"
             | RequireX509 -> "X509"
+        let limits = accountLimits cols row
+        let resources =
+            [ "MAX_QUERIES_PER_HOUR", limits.MaxQuestions
+              "MAX_UPDATES_PER_HOUR", limits.MaxUpdates
+              "MAX_CONNECTIONS_PER_HOUR", limits.MaxConnectionsPerHour
+              "MAX_USER_CONNECTIONS", limits.MaxUserConnections ]
+            |> List.choose (fun (label, value) -> if value = 0u then None else Some(sprintf "%s %u" label value))
+            |> function
+                | [] -> ""
+                | values -> " WITH " + String.concat " " values
+        let passwordExpiration =
+            if userColumnText cols row "password_expired" = "Y" then
+                "PASSWORD EXPIRE"
+            else
+                match userColumnValue cols row "password_lifetime" with
+                | Some(VInt 0L)
+                | Some(VUInt 0UL) -> "PASSWORD EXPIRE NEVER"
+                | Some(VInt days) when days > 0L -> sprintf "PASSWORD EXPIRE INTERVAL %d DAY" days
+                | Some(VUInt days) when days > 0UL -> sprintf "PASSWORD EXPIRE INTERVAL %d DAY" days
+                | _ -> "PASSWORD EXPIRE DEFAULT"
         let account = sprintf "`%s`@`%s`" (name.Replace("`", "``")) (host.Replace("`", "``"))
 
         Ok(
             sprintf "CREATE USER for %s@%s" name host,
             sprintf
-                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE %s PASSWORD EXPIRE DEFAULT ACCOUNT %s PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT"
+                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE %s%s %s ACCOUNT %s PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT"
                 account
                 plugin
                 hash
                 tlsRequirement
+                resources
+                passwordExpiration
                 accountState
         )
 

@@ -935,7 +935,7 @@ let private authSwitchPayload (authData: byte[]) : byte[] =
 /// empty stored hash (no password set) accepts only an *empty* offered
 /// password, exactly like real MySQL — offering one is `1045 (using
 /// password: YES)`. Writes the 1045 ERR itself on denial and returns `None`; returns
-/// `Some(seqId, account)` on success — `firstSeq + 1` more when an
+/// `Some(seqId, account, passwordExpired)` on success — `firstSeq + 1` more when an
 /// AuthSwitch round trip happened.
 let private authenticateHandshake
     (client: TcpClient)
@@ -948,7 +948,7 @@ let private authenticateHandshake
     (encryptedTransport: bool)
     (clientCertificate: bool)
     (firstSeq: byte)
-    : Async<(byte * Auth.Account) option> =
+    : Async<(byte * Auth.Account * bool) option> =
     async {
         let deny (seqId: byte) (usingPassword: bool) =
             async {
@@ -961,6 +961,20 @@ let private authenticateHandshake
 
                 do! writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities 1045 msg } |> Async.Ignore
                 return None
+            }
+
+        let accept seqId selected cols row =
+            async {
+                let expired = Auth.isPasswordExpired cols row
+
+                if expired && capabilities &&& ClientCanHandleExpiredPasswords = 0u then
+                    let message =
+                        "Your password has expired. To log in you must change it using a client that supports expired passwords."
+
+                    do! writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities 1862 message } |> Async.Ignore
+                    return None
+                else
+                    return Some(seqId, selected, expired)
             }
 
         match clientHost |> Option.bind (Auth.resolveAccount store resp.Username) with
@@ -991,11 +1005,11 @@ let private authenticateHandshake
                 // (every auth plugin sends a zero-length response for an
                 // empty password, so no AuthSwitch round trip is needed).
                 if resp.AuthResponse.Length = 0 then
-                    return Some(firstSeq, selected)
+                    return! accept firstSeq selected cols row
                 else
                     return! deny firstSeq true
             elif Auth.verifyNative stored authData resp.AuthResponse then
-                return Some(firstSeq, selected)
+                return! accept firstSeq selected cols row
             elif resp.ClientPlugin = Some "mysql_native_password" then
                 // Right plugin, wrong password — no switch will fix it.
                 return! deny firstSeq (resp.AuthResponse.Length > 0)
@@ -1008,7 +1022,7 @@ let private authenticateHandshake
                 match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
                 | None -> return None // client gave up; nothing to reply to
                 | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
-                    return Some(switchResp.SeqId + 1uy, selected)
+                    return! accept (switchResp.SeqId + 1uy) selected cols row
                 | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
     }
 
@@ -1109,6 +1123,11 @@ let private handleConnection
         // for the "packet too large" ERR reply if that happens beforehand.
         let mutable capabilities = offeredCapabilities
         let mutable activeSession: Session option = None
+        let mutable accountLease: IDisposable option = None
+
+        let releaseAccountLease () =
+            accountLease |> Option.iter _.Dispose()
+            accountLease <- None
 
         try
             let authData = randomAuthPluginData ()
@@ -1170,7 +1189,7 @@ let private handleConnection
                 // Authenticate before any session state exists; on denial the
                 // 1045 is already written and the command loop below never
                 // runs (see the guard on `do! loop session` at the bottom).
-                let! authOkSeq =
+                let! authenticated =
                     if options.RequireSecureTransport && tlsVersion.IsNone then
                         async {
                             do!
@@ -1200,13 +1219,32 @@ let private handleConnection
                             tlsVersion.IsSome
                             validatedClientCertificate
                             (handshakeResp.SeqId + 1uy)
+                let! authOkSeq =
+                    async {
+                        match authenticated with
+                        | None -> return None
+                        | Some(seqId, selected, expired) ->
+                            match Auth.tryAcquireAccountConnection store selected with
+                            | Ok lease ->
+                                accountLease <- Some lease
+                                return Some(seqId, selected, expired)
+                            | Error(code, message) ->
+                                do! writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities code message } |> Async.Ignore
+                                return None
+                    }
                 let mutable databaseAccepted = false
-                let selectedAccount = authOkSeq |> Option.map snd |> Option.defaultValue (Auth.account resp.Username "%")
+                let selectedAccount =
+                    authOkSeq
+                    |> Option.map (fun (_, account, _) -> account)
+                    |> Option.defaultValue (Auth.account resp.Username "%")
+
+                let passwordExpired = authOkSeq |> Option.exists (fun (_, _, expired) -> expired)
 
                 let session =
                     { Session.create connectionId store with
                         User = selectedAccount.Name
                         AccountHost = selectedAccount.Host
+                        PasswordExpired = passwordExpired
                         LoginUser = resp.Username
                         ClientHost = displayHost
                         Database = resp.Database
@@ -1233,7 +1271,7 @@ let private handleConnection
 
                 match authOkSeq with
                 | None -> () // denied: the 1045 is already written, no OK
-                | Some(okSeq, _) ->
+                | Some(okSeq, _, _) ->
                     let databaseAllowed =
                         match resp.Database with
                         | None -> Ok()
@@ -1969,6 +2007,7 @@ let private handleConnection
                                     { Session.create session.ConnectionId session.Store with
                                         User = session.User
                                         AccountHost = session.AccountHost
+                                        PasswordExpired = session.PasswordExpired
                                         LoginUser = session.LoginUser
                                         ClientHost = session.ClientHost
                                         Database = session.Database
@@ -2028,11 +2067,13 @@ let private handleConnection
                 |> Async.Ignore
         | error ->
             closeTls ()
+            releaseAccountLease ()
             InformationSchema.unregisterProcess (int64 connectionId)
             activeSession |> Option.iter QueryHandler.closeSession
             return raise error
 
         closeTls ()
+        releaseAccountLease ()
         InformationSchema.unregisterProcess (int64 connectionId)
         activeSession |> Option.iter QueryHandler.closeSession
     }

@@ -296,6 +296,9 @@ shapes, oracle-verified). `CREATE USER` / `DROP USER` / `ALTER USER` /
 `SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
 path; passwords are mysql_native_password hashes verified at the handshake
 (with an AuthSwitchRequest for clients that answer with caching_sha2 first);
+account locks, TLS requirements, explicit password lifetimes, the
+expired-password reset sandbox, and per-hour/per-connection resource limits
+are enforced;
 statements are privilege-checked at global, database, and table scope with
 MySQL's 1045/1142/1044/1227 error shapes. `SHOW GRANTS [FOR user]`,
 `SHOW PRIVILEGES` (8.4's 73 rows), `information_schema.USER_PRIVILEGES`, and
@@ -313,8 +316,9 @@ Deliberate divergences (each marked `ponytail:` at its code site):
   and CTEs. Text-probed account, process, database, and table metadata forms
   carry scoped checks; SET, USE, and server-wide SHOW forms remain outside
   the common privilege gate.
-- No roles, dynamic privileges, column-level privileges, proxy users, or
-  password expiry — the columns exist in the table shapes but stay at their
-  defaults. Eight of MySQL's 38 `mysql.*` tables exist, including fsdb's
-  row-backed `check_constraints`, `triggers`, and `views` catalogs.
+- Named role activation/inheritance, dynamic privileges, column-level
+  privileges, proxy users, auth-plugin selection, password history/reuse/current
+  policy, and a mutable global default password lifetime are absent. Eleven of
+  MySQL's roughly 38 `mysql.*` tables exist, including fsdb's row-backed
+  constraint, trigger, view, routine, function, and event catalogs.
 - `SHOW GRANTS` omits root's dynamic-privilege and PROXY lines.

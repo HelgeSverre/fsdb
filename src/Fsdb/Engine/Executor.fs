@@ -14246,12 +14246,11 @@ let rec executeAs
                     Storage.commitCatalogInto store baseCatalog snapshot
                     ids, Affected 0UL
 
-    | CreateUser(users, ifNotExists, locked, tlsRequirement) ->
+    | CreateUser(users, ifNotExists, options) ->
         let createOne (name, host, password) =
-            match Auth.createUserWithTlsRequirement store name host password tlsRequirement with
+            match Auth.createUserWithOptions store name host password options with
             | Error(1396, _) when ifNotExists -> Ok()
-            | Ok() -> Auth.setAccountLocked store name host locked
-            | error -> error
+            | result -> result
 
         match users |> traverse createOne with
         | Ok _ -> ids, Affected 0UL
@@ -14298,8 +14297,8 @@ let rec executeAs
         | Ok _ -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 
-    | AlterUser(name, host, password, ifExists) ->
-        match Auth.setPassword store name host password with
+    | AlterUser(name, host, password, ifExists, options) ->
+        match Auth.alterUser store name host password options with
         | Ok() -> ids, Affected 0UL
         | Error(1396, _) when ifExists -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)

@@ -43,7 +43,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Routines & events | Typed procedures, read-only stored functions, and persisted definer-context event scheduling | Data-changing stored functions and procedure calls from triggers |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
-| Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
+| Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, expiry sandboxes, resource caps, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
 | Metadata | 23 INFORMATION_SCHEMA views, 11 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
@@ -75,7 +75,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `CREATE/DROP ROLE` are backed by locked `mysql.user` accounts and `SET ROLE NONE` clears the empty active-role set; other `SET ROLE`, `SET DEFAULT ROLE`, role grants/inheritance, dynamic privileges (`BACKUP_ADMIN`…), and `GRANT PROXY` remain absent | medium | divergence/refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
-| `CREATE USER … ACCOUNT LOCK/UNLOCK` and `REQUIRE SSL` are enforced; `REQUIRE X509` is retained but cannot authenticate without client-certificate transport, while auth-plugin selection, resource limits, `PASSWORD EXPIRE`, and `ALTER USER` beyond password change remain absent | medium | refusal |
+| `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`, per-account query/update/connection limits, explicit password lifetimes, and the expired-password reset sandbox. `REQUIRE X509` is retained but cannot authenticate without client-certificate transport; auth-plugin selection, issuer/subject/cipher requirements, password history/reuse/current policy, and a mutable global default lifetime remain absent | medium | refusal |
 
 ### SELECT-level syntax gaps
 
@@ -400,7 +400,8 @@ generic state-change tracker when enabled.
 
 Working: mysql.user with MySQL 8.4's exact 51-column order, root bootstrap,
 SHA1-double password hashing with constant-time compare, CREATE/DROP/ALTER
-USER with account lock and TLS requirements, SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
+USER with account lock, TLS requirements, explicit password expiry, and resource limits,
+SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
 level-shaped denials (1045/1044/1142), GRANT OPTION checked at target level,
 fail-closed unknown privileges, DROP USER cleanup across grant tables,
 privilege collection recursing through subqueries/derived tables/CTEs,
@@ -415,7 +416,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 | Roles | CREATE ROLE, SET ROLE, role grants, mandatory roles | CREATE/DROP ROLE persist locked accounts and `SET ROLE NONE` succeeds; activation of named roles, grants, inheritance, and mandatory roles are absent | medium | divergence/refusal |
 | Dynamic privileges | BACKUP_ADMIN, CONNECTION_ADMIN, … | vocabulary absent from GRANT parsing | low | refusal |
 | Column-level privileges | mysql.columns_priv enforced | table exists, never consulted | low | divergence |
-| Account lock/expiry/resource limits | enforced | account locks are enforced; expiry and resource limits are not | low | divergence |
+| Advanced account policy | auth-plugin selection, password history/reuse/current policy, and global default lifetime | explicit expiry/lifetimes and resource limits are enforced; advanced policy clauses remain absent | low | refusal |
 | Proxy users | supported | absent | low | refusal |
 | SHOW GRANTS completeness | includes dynamic-privilege and PROXY lines | `Auth.renderGrantsForAccount` omits them | low | divergence |
 | System-table coverage | ~38 mysql.* tables | `Storage.mysqlSystemDatabase` provides the account/grant, trigger/view/constraint, routine, and event catalogs used by supported features | low | divergence |
@@ -453,8 +454,8 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | The 76-case corpus passes 72 cases against native MySQL 8.4.11. Typed/compound procedures and CALL now match; the four intentional findings are account requirements, READ UNCOMMITTED, and partition selection/maintenance. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-28 |
-| Depth-three syntax stress | Three 10,000-mutation seeds over the earlier corpus produced no crash, timeout, protocol fault, or invariant failure. The current baseline-only rerun closes both procedure differences; remaining differences cluster in the four declared feature gaps and executable-comment/error-contract edges. Fuzz-found incomplete procedure blocks and reserved row, partition, and window-function aliases reject with 1064 | compatibility differences retained; procedure baselines verified 2026-08-28 |
+| Executable gap baselines | The 79-case corpus passes 76 cases against native MySQL 8.4.11. Account requirements, typed/compound procedures, and CALL now match; the three intentional findings are READ UNCOMMITTED and partition selection/maintenance. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-28 |
+| Depth-three syntax stress | Three 10,000-mutation seeds over the earlier corpus produced no crash, timeout, protocol fault, or invariant failure. The current baseline-only rerun closes both procedure differences and the account-requirements baseline; remaining differences cluster in the three declared feature gaps and executable-comment/error-contract edges. Fuzz-found incomplete procedure blocks and reserved row, partition, and window-function aliases reject with 1064 | compatibility differences retained; baseline inventory verified 2026-08-28 |
 | Same-row transaction contention | The original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts. Row-delta publication removed whole-table copy/reindex work. A 64x200 campaign then completed all 12,800 prepared transactions with exact parity and zero failures. After unique-key claims landed, a separate 32x100 hot-account campaign matched all 3,200 MySQL outcomes with zero failures; fsdb reached 267 tx/s at p99 373 ms versus MySQL's 132 tx/s at p99 871 ms on the same host | correctness resolved; constant-factor and higher-contention performance open |
 | Multi-database scaling | Single-capture snapshots, deferred transaction catalogs, and per-database lock namespaces prevent cross-database conflicts. A 12-database, 19,200-transaction campaign preserved every database independently with no cross-database bleed; wall time was 0.38x the serial projection against a 0.80 ceiling | correctness and scaling threshold resolved 2026-08-27 |
 | Crash/restart durability | Concurrent two-table transactions were interrupted by 80 forced process crashes across four 16-worker campaigns. Recovery retained every acknowledged commit, exposed no partial transaction, invented no row, and preserved identical state through graceful snapshot restarts; the latest 20-restart campaign retained all 1,939 acknowledged operations and resolved 320 ambiguous operations consistently | resolved 2026-08-27; broader snapshot-rotation volume remains useful stress coverage |

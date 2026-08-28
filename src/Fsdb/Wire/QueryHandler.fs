@@ -1250,8 +1250,25 @@ let private accountRefOf (userRef: string) =
     let host = if at < 0 then "%" else unquote userRef[(at + 1) ..]
     Auth.account name host
 
+let private requestedDefinerAccount session = function
+    | None -> accountOf session
+    | Some(value: string) when Regex.IsMatch(value, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) -> accountOf session
+    | Some(value: string) -> accountRefOf value
+
+let private canUseRequestedDefiner session requested =
+    let definer = requestedDefinerAccount session requested
+
+    Auth.sameAccount definer (accountOf session)
+    || Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
+
 let private setPasswordRe =
     Regex(@"^SET\s+PASSWORD\s*(?:FOR\s+([^=\s]+)\s*)?=\s*'([^']*)'\s*;?$", RegexOptions.IgnoreCase)
+
+let private alterCurrentUserPasswordRe =
+    Regex(
+        @"^ALTER\s+USER\s+(?:USER|CURRENT_USER)\s*\(\s*\)\s+IDENTIFIED\s+BY\s+'([^']*)'\s*;?$",
+        RegexOptions.IgnoreCase
+    )
 
 /// `SHOW GRANTS [FOR 'user'@'host' | FOR CURRENT_USER[()]]`.
 let private showGrantsRe = Regex(@"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?\s*;?$", RegexOptions.IgnoreCase)
@@ -1259,6 +1276,7 @@ let private showGrantsRe = Regex(@"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?\s*;?$", Reg
 /// `FLUSH [LOCAL] PRIVILEGES` — a no-op OK: privilege reads always hit the
 /// live mysql.* rows, there's no cache to flush.
 let private flushPrivilegesRe = Regex(@"^FLUSH\s+(?:LOCAL\s+)?PRIVILEGES\s*;?$", RegexOptions.IgnoreCase)
+let private flushUserResourcesRe = Regex(@"^FLUSH\s+USER_RESOURCES\s*;?$", RegexOptions.IgnoreCase)
 let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreCase)
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
@@ -1565,6 +1583,10 @@ let private divisionByZeroPolicy (store: Store) (statement: Statement) =
     else
         Diagnostics.DivisionByZeroPolicy.Warn
 
+let private requiredPrivilegesForStatement session store dbName = function
+    | AlterUser(name, host, Some _, _, _) when Auth.sameAccount (Auth.account name host) (accountOf session) -> []
+    | statement -> Auth.requiredPrivilegesInStore store dbName statement
+
 let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
     match stmt with
     | Select _
@@ -1582,15 +1604,16 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
     let execute session =
         let store = Session.currentStore session
+        let requiredPrivileges = requiredPrivilegesForStatement session store dbName stmt
 
         // Privilege enforcement — the one gate every parsed statement goes
         // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
         let access =
             match session.Tx, stmt with
             | Some tx, (Select _ | Union _ | Explain _ | ChecksumTables _) when tx.ReadOnly ->
-                Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store dbName stmt)
+                Auth.checkForAccount store (accountOf session) requiredPrivileges
             | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
-            | _ -> Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store dbName stmt)
+            | _ -> Auth.checkForAccount store (accountOf session) requiredPrivileges
 
         match access with
         | Error(code, msg) -> session, Err(code, msg)
@@ -2092,6 +2115,7 @@ type private Probe =
     | ShowCreateProgram of kind: string * name: string
     | ShowPrivileges
     | FlushPrivileges
+    | FlushUserResources
     | FlushStatus
     | FlushTables
     | FlushLogs
@@ -2123,6 +2147,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(SetCharacterSet((setCharacterSet.Match sql).Groups.[1].Value))
     elif setRoleNone.IsMatch sql then
         Some SetRoleNone
+    elif alterCurrentUserPasswordRe.IsMatch sql then
+        Some(SetPassword(None, (alterCurrentUserPasswordRe.Match sql).Groups.[1].Value))
     elif setPasswordRe.IsMatch sql then
         let m = setPasswordRe.Match sql
         Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
@@ -2190,6 +2216,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(ShowGrants(if m.Groups.[1].Success then Some m.Groups.[1].Value else None))
     elif flushPrivilegesRe.IsMatch sql then
         Some FlushPrivileges
+    elif flushUserResourcesRe.IsMatch sql then
+        Some FlushUserResources
     elif flushStatusRe.IsMatch sql then
         Some FlushStatus
     elif flushTablesRe.IsMatch sql then
@@ -2328,7 +2356,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let required = if Auth.sameAccount wanted (accountOf session) then [] else [ "CREATE USER", Auth.Global ]
 
         match Auth.checkForAccount store (accountOf session) required |> Result.bind (fun () -> Auth.setPassword store wanted.Name wanted.Host password) with
-        | Ok() -> session, Affected 0UL
+        | Ok() -> { session with PasswordExpired = false }, Affected 0UL
         | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql
     | RollbackTo name -> rollbackToSavepoint name session
@@ -2818,6 +2846,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         else
             session, Err(1305, sprintf "%s %s does not exist" kind name)
     | FlushPrivileges -> session, Affected 0UL
+    | FlushUserResources ->
+        match Auth.checkForAccount session.Store (accountOf session) [ "RELOAD", Auth.Global ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() ->
+            Auth.resetAllAccountResources session.Store
+            session, Affected 0UL
     | FlushStatus ->
         InformationSchema.resetQuestions ()
         InformationSchema.resetCommandCounts ()
@@ -4313,16 +4347,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
         match command with
         | CreateProcedure(qualifiedName, parameters, securityType, body, requestedDefiner) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-
-            let definer =
-                match requestedDefiner with
-                | None -> accountOf session
-                | Some value when Regex.IsMatch(value, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) -> accountOf session
-                | Some value -> accountRefOf value
-
-            let mayChooseDefiner =
-                Auth.sameAccount definer (accountOf session)
-                || Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
+            let definer = requestedDefinerAccount session requestedDefiner
+            let mayChooseDefiner = canUseRequestedDefiner session requestedDefiner
 
             match authorize "CREATE ROUTINE" database with
             | Error(code, message) -> session, Err(code, message)
@@ -4369,16 +4395,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         session, Err(code, message)
         | CreateFunction(qualifiedName, ifNotExists, parameters, returnType, characteristics, body, requestedDefiner) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-
-            let definer =
-                match requestedDefiner with
-                | None -> accountOf session
-                | Some value when Regex.IsMatch(value, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) -> accountOf session
-                | Some value -> accountRefOf value
-
-            let mayChooseDefiner =
-                Auth.sameAccount definer (accountOf session)
-                || Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
+            let definer = requestedDefinerAccount session requestedDefiner
+            let mayChooseDefiner = canUseRequestedDefiner session requestedDefiner
 
             match Storage.databaseExists (Session.currentStore session) database, authorize "CREATE ROUTINE" database with
             | false, _ -> session, Err(1049, sprintf "Unknown database '%s'" database)
@@ -4622,16 +4640,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
             Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ]
 
         let resolveDefiner (requested: string option) =
-            let definer =
-                match requested with
-                | None -> accountOf session
-                | Some value when Regex.IsMatch(value, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) -> accountOf session
-                | Some value -> accountRefOf value
+            let definer = requestedDefinerAccount session requested
 
-            if
-                Auth.sameAccount definer (accountOf session)
-                || Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
-            then
+            if canUseRequestedDefiner session requested then
                 Ok definer
             else
                 Error(
@@ -4984,25 +4995,189 @@ let private recordDiagnostics
     let session = if preserve then session else { session with Diagnostics = generated }
     recordResult (session, result)
 
+let private countsAsAccountUpdate = function
+    | CreateDatabase _
+    | DropDatabase _
+    | AlterDatabase _
+    | CreateTable _
+    | CreateTableLike _
+    | CreateTableAs _
+    | DropTable _
+    | AlterTable _
+    | RenameTable _
+    | CreateIndex _
+    | DropIndexStmt _
+    | Insert _
+    | InsertSelect _
+    | Replace _
+    | ReplaceSelect _
+    | ReplaceSet _
+    | Update _
+    | Delete _
+    | Truncate _
+    | CreateUser _
+    | DropUser _
+    | RenameUser _
+    | AlterUser _
+    | CreateRole _
+    | DropRole _
+    | Grant _
+    | Revoke _
+    | CreateTrigger _
+    | SetTriggerNew _
+    | DropTrigger _
+    | CreateView _
+    | DropView _ -> true
+    | Select _
+    | Do _
+    | Union _
+    | ChecksumTables _
+    | Explain _ -> false
+
+type private AccountStatement =
+    | ProbedAccountStatement of Probe
+    | ParsedAccountStatement of Statement
+    | TextAccountUpdate of authorized: bool
+    | UnknownAccountStatement
+
+let private textRoutineUpdateAuthorization session = function
+    | CallProcedure _ -> None
+    | CreateProcedure(qualifiedName, _, _, _, requestedDefiner)
+    | CreateFunction(qualifiedName, _, _, _, _, _, requestedDefiner) ->
+        let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+        Auth.checkForAccount session.Store (accountOf session) [ "CREATE ROUTINE", Auth.OnDb database ]
+        |> Result.map (fun () -> canUseRequestedDefiner session requestedDefiner)
+        |> Result.defaultValue false
+        |> Some
+    | DropProcedure(qualifiedName, _)
+    | DropFunction(qualifiedName, _) ->
+        let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+        Auth.checkForAccount session.Store (accountOf session) [ "ALTER ROUTINE", Auth.OnDb database ]
+        |> Result.isOk
+        |> Some
+
+let private textEventUpdateIsAuthorized session = function
+    | Event.Create creation ->
+        let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) creation.Name
+
+        Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ]
+        |> Result.map (fun () -> canUseRequestedDefiner session creation.Definer)
+        |> Result.defaultValue false
+    | Event.Alter alteration ->
+        let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) alteration.Name
+
+        Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ]
+        |> Result.map (fun () -> canUseRequestedDefiner session alteration.Definer)
+        |> Result.defaultValue false
+    | Event.Drop(qualifiedName, _) ->
+        let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+        Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] |> Result.isOk
+
+let rec private parsedAccountStatement session parserOptions depth sql =
+    match tryProbe sql (sql.ToUpperInvariant()) with
+    | Some probe -> ProbedAccountStatement probe
+    | None ->
+        match parseStatement parserOptions sql with
+        | Ok statement -> ParsedAccountStatement statement
+        | Error _ ->
+            match Event.tryCommand parserOptions (validEventBody parserOptions) sql with
+            | Some command -> TextAccountUpdate(textEventUpdateIsAuthorized session command)
+            | None ->
+                match tryTextRoutineCommand sql with
+                | Some command ->
+                    command
+                    |> textRoutineUpdateAuthorization session
+                    |> Option.map TextAccountUpdate
+                    |> Option.defaultValue UnknownAccountStatement
+                | None when depth > 0 ->
+                    match tryTextPreparedCommand sql with
+                    | Ok(Some(ExecuteText(name, _))) ->
+                        match session.TextStatements |> Map.tryFind name with
+                        | Some { Ast = Some statement } -> ParsedAccountStatement statement
+                        | Some statement -> parsedAccountStatement session parserOptions (depth - 1) statement.Sql
+                        | None -> UnknownAccountStatement
+                    | _ -> UnknownAccountStatement
+                | None -> UnknownAccountStatement
+
+let private resetsOwnPassword session = function
+    | ProbedAccountStatement(SetPassword(user, _)) ->
+        user
+        |> Option.map accountRefOf
+        |> Option.defaultValue (accountOf session)
+        |> Auth.sameAccount (accountOf session)
+    | ParsedAccountStatement(AlterUser(name, host, Some _, _, _)) ->
+        Auth.sameAccount (Auth.account name host) (accountOf session)
+    | _ -> false
+
+let private accountStatementCountsAsUpdate = function
+    | ProbedAccountStatement(SetPassword _) -> true
+    | ParsedAccountStatement statement -> countsAsAccountUpdate statement
+    | TextAccountUpdate _ -> true
+    | _ -> false
+
+let private accountUpdateIsAuthorized session = function
+    | ProbedAccountStatement(SetPassword(user, _)) ->
+        let wanted = user |> Option.map accountRefOf |> Option.defaultValue (accountOf session)
+        let required = if Auth.sameAccount wanted (accountOf session) then [] else [ "CREATE USER", Auth.Global ]
+        Auth.checkForAccount (Session.currentStore session) (accountOf session) required |> Result.isOk
+    | ParsedAccountStatement statement ->
+        let store = Session.currentStore session
+        let database = session.Database |> Option.defaultValue defaultDatabase
+        Auth.checkForAccount store (accountOf session) (requiredPrivilegesForStatement session store database statement)
+        |> Result.isOk
+    | TextAccountUpdate authorized -> authorized
+    | ProbedAccountStatement _ -> false
+    | UnknownAccountStatement -> false
+
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
     let parserOptions = parserOptionsForSession session
     let sql = normalizeDispatchedSql parserOptions rawSql
+    let account = accountOf session
+    let store = Session.currentStore session
+    let limits = Auth.tryAccountLimits store account
+    let inspectStatement = session.PasswordExpired || (limits |> Option.exists (fun value -> value.MaxUpdates > 0u))
+    let accountStatement =
+        if inspectStatement then
+            parsedAccountStatement session parserOptions 1 sql
+        else
+            UnknownAccountStatement
+    let resetsPassword = resetsOwnPassword session accountStatement
+    let countsAsUpdate = accountStatementCountsAsUpdate accountStatement && accountUpdateIsAuthorized session accountStatement
 
     recordDiagnostics session (preservesDiagnostics parserOptions sql) (fun () ->
-        try
-            let result = dispatchNormalized session rawSql parserOptions sql
+        if session.PasswordExpired && not resetsPassword then
+            session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
+        else
+            match
+                Auth.tryConsumeAccountStatementWithLimits
+                    store
+                    account
+                    limits
+                    countsAsUpdate
+            with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() ->
+                try
+                    let executed, result = dispatchNormalized session rawSql parserOptions sql
+                    let executed =
+                        if resetsPassword && terminalErrorInfo result |> Option.isNone then
+                            { executed with PasswordExpired = false }
+                        else
+                            executed
 
-            match terminalResult (snd result) with
-            | TerminalError(code, msg) ->
-                Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
-                result
-            | _ -> result
-        with
-        | :? OperationCanceledException ->
-            abortTransaction session |> ignore
-            reraise ()
-        | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
+                    match terminalResult result with
+                    | TerminalError(code, msg) ->
+                        Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
+                        executed, result
+                    | _ -> executed, result
+                with
+                | :? OperationCanceledException ->
+                    abortTransaction session |> ignore
+                    reraise ()
+                | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
 
 let executeEventBody (session: Session) (body: string) : Session * QueryResult =
     let options = parserOptionsForSession session
@@ -5036,27 +5211,40 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
 
     if not (normalized.StartsWith("LOAD DATA", StringComparison.OrdinalIgnoreCase)) then
         Result.Ok None
+    elif session.PasswordExpired then
+        Result.Error(Err(1820, "You must reset your password using ALTER USER statement before executing this statement."))
     else
-        match Parser.parseLocalLoad sql with
-        | Result.Error _ -> Result.Error(syntaxError sql)
-        | Result.Ok load ->
-            let charset = load.Charset |> Option.map (fun value -> value.ToLowerInvariant())
+        let store = Session.currentStore session
+        let account = accountOf session
 
-            match charset with
-            | Some value when value <> "utf8" && value <> "utf8mb4" ->
-                Result.Error(Err(1235, sprintf "LOAD DATA CHARACTER SET %s is not supported" value))
-            | _ ->
-                let statement =
-                    if load.Replace then
-                        Replace(load.Table, load.Columns, [])
-                    else
-                        Insert(load.Table, load.Columns, [], [], load.Ignore)
+        let prepared =
+            match Parser.parseLocalLoad sql with
+            | Result.Error _ -> Result.Error(syntaxError sql)
+            | Result.Ok load ->
+                match load.Charset |> Option.map _.ToLowerInvariant() with
+                | Some value when value <> "utf8" && value <> "utf8mb4" ->
+                    Result.Error(Err(1235, sprintf "LOAD DATA CHARACTER SET %s is not supported" value))
+                | _ ->
+                    let statement =
+                        if load.Replace then
+                            Replace(load.Table, load.Columns, [])
+                        else
+                            Insert(load.Table, load.Columns, [], [], load.Ignore)
 
-                let dbName = session.Database |> Option.defaultValue defaultDatabase
+                    let database = session.Database |> Option.defaultValue defaultDatabase
 
-                match Auth.checkForAccount (Session.currentStore session) (accountOf session) (Auth.requiredPrivilegesInStore (Session.currentStore session) dbName statement) with
-                | Ok() -> Result.Ok(Some load)
-                | Error(code, message) -> Result.Error(Err(code, message))
+                    match Auth.checkForAccount store account (Auth.requiredPrivilegesInStore store database statement) with
+                    | Ok() -> Result.Ok(Some load)
+                    | Error(code, message) -> Result.Error(Err(code, message))
+
+        let isUpdate =
+            match prepared with
+            | Result.Ok(Some _) -> true
+            | _ -> false
+
+        match Auth.tryConsumeAccountStatementWithLimits store account (Auth.tryAccountLimits store account) isUpdate with
+        | Result.Error(code, message) -> Result.Error(Err(code, message))
+        | Result.Ok() -> prepared
 
 /// Inserts already-decoded LOCAL INFILE rows through the ordinary INSERT or
 /// REPLACE execution path, retaining its coercion, trigger, and transaction
@@ -5101,8 +5289,34 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
     | Some ast ->
         recordDiagnostics session false (fun () ->
             try
-                withStoredFunctionRegistry session (fun current ->
-                    executeParsed current (bindPlaceholders ast values))
+                let statement = bindPlaceholders ast values
+                let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
+
+                if session.PasswordExpired && not resetsPassword then
+                    session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
+                else
+                    let accountStatement = ParsedAccountStatement statement
+                    let account = accountOf session
+                    let store = Session.currentStore session
+
+                    match
+                        Auth.tryConsumeAccountStatementWithLimits
+                            store
+                            account
+                            (Auth.tryAccountLimits store account)
+                            (accountStatementCountsAsUpdate accountStatement
+                             && accountUpdateIsAuthorized session accountStatement)
+                    with
+                    | Error(code, message) -> session, Err(code, message)
+                    | Ok() ->
+                        let executed, result =
+                            withStoredFunctionRegistry session (fun current -> executeParsed current statement)
+
+                        (if resetsPassword && terminalErrorInfo result |> Option.isNone then
+                             { executed with PasswordExpired = false }
+                         else
+                             executed),
+                        result
             with
             | PlaceholderCountMismatch(expected, got) ->
                 session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)

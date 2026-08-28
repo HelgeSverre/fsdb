@@ -140,6 +140,9 @@ type Session =
       User: string
       /// The Host column of the account selected during authentication.
       AccountHost: string
+      /// An authenticated expired credential restricts this connection to
+      /// password-reset statements until one succeeds.
+      PasswordExpired: bool
       /// The username the client supplied in its handshake.
       LoginUser: string
       /// The peer address used for `USER()` and `SESSION_USER()`.
@@ -210,6 +213,7 @@ let create (connectionId: int) (store: Store) : Session =
     { ConnectionId = connectionId
       User = "root"
       AccountHost = "%"
+      PasswordExpired = false
       LoginUser = ""
       ClientHost = "localhost"
       Database = None

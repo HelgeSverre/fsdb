@@ -97,6 +97,7 @@ let ClientMultiStatements = 0x00010000u
 let ClientMultiResults = 0x00020000u
 let ClientPluginAuth = 0x00080000u
 let ClientPluginAuthLenencClientData = 0x00200000u
+let ClientCanHandleExpiredPasswords = 0x00400000u
 let ClientSessionTrack = 0x00800000u
 let ClientDeprecateEof = 0x01000000u
 
@@ -114,6 +115,7 @@ let ServerCapabilities =
     ||| ClientMultiStatements
     ||| ClientMultiResults
     ||| ClientPluginAuth
+    ||| ClientCanHandleExpiredPasswords
     ||| ClientSessionTrack
     ||| ClientDeprecateEof
 
