@@ -1,0 +1,39 @@
+module Fsdb.SqlState
+
+type Error =
+    { Code: int
+      State: string
+      Message: string }
+
+let forCode =
+    function
+    | 1040 -> "08004"
+    | 1047
+    | 1153 -> "08S01"
+    | 1048
+    | 1052
+    | 1062
+    | 1451
+    | 1452 -> "23000"
+    | 1054 -> "42S22"
+    | 1064
+    | 1071
+    | 1074
+    | 1235
+    | 1426
+    | 3948 -> "42000"
+    | 1146 -> "42S02"
+    | 1264
+    | 1690 -> "22003"
+    | 1265 -> "01000"
+    | _ -> "HY000"
+
+let create code message =
+    { Code = code
+      State = forCode code
+      Message = message }
+
+let createWithState code state message =
+    { Code = code
+      State = state
+      Message = message }

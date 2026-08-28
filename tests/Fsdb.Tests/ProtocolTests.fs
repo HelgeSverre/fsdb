@@ -144,6 +144,12 @@ let tests =
               let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
               Expect.equal sqlState "HY000" "sqlstate fallback"
 
+          testCase "ERR payload preserves an explicit SQLSTATE"
+          <| fun _ ->
+              let payload = errPayloadWithState ClientProtocol41 60001 "45001" "raised condition"
+              let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
+              Expect.equal sqlState "45001" "explicit SQLSTATE"
+
           TestSupport.processGlobalCase "packet writes stop after net_write_timeout"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "net_write_timeout", "1" ] (fun () ->

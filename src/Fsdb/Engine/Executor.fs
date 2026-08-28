@@ -16,10 +16,29 @@ open Fsdb.Engine
 /// text-protocol option strings) so `QueryHandler` can hand a parsed
 /// statement straight through without a translation layer of its own.
 type QueryResult =
-    | ResultSet of columns: string list * rows: (string option list) list
-    | Affected of affectedRows: uint64
-    | Err of code: int * message: string
-    | MultipleResults of results: (QueryResult * ColumnMetadata list) list
+    private
+    | Rows of columns: string list * rows: (string option list) list
+    | RowCount of affectedRows: uint64
+    | Failure of SqlState.Error
+    | ResultCollection of results: (QueryResult * ColumnMetadata list) list
+
+let ResultSet(columns, rows) = Rows(columns, rows)
+let Affected affectedRows = RowCount affectedRows
+let Err(code, message) = Failure(SqlState.create code message)
+let ErrState(code, state, message) = Failure(SqlState.createWithState code state message)
+let MultipleResults results = ResultCollection results
+
+let (|ResultSet|Affected|Err|MultipleResults|) =
+    function
+    | Rows(columns, rows) -> ResultSet(columns, rows)
+    | RowCount affectedRows -> Affected affectedRows
+    | Failure error -> Err(error.Code, error.Message)
+    | ResultCollection results -> MultipleResults results
+
+let errorInfo =
+    function
+    | Failure error -> Some error
+    | _ -> None
 
 let private nestedResultsError context =
     Err(1105, sprintf "Multiple resultsets are not valid in %s" context)

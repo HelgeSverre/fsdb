@@ -377,41 +377,23 @@ let okEndOfResultSetPayloadWithWarningsAndSessionState
 /// error as the generic HY000 silently degrades error classification and
 /// retry logic. This grows as new error codes are introduced; anything
 /// unmapped falls back to HY000, matching MySQL's own default.
-let sqlStateForCode (code: int) : string =
-    match code with
-    | 1040 -> "08004" // ER_CON_COUNT_ERROR
-    | 1064 -> "42000" // ER_PARSE_ERROR
-    | 1071 -> "42000" // ER_TOO_LONG_KEY
-    | 1074 -> "42000" // ER_TOO_BIG_FIELDLENGTH
-    | 1146 -> "42S02" // ER_NO_SUCH_TABLE
-    | 1054 -> "42S22" // ER_BAD_FIELD_ERROR
-    | 1047 -> "08S01" // ER_UNKNOWN_COM_ERROR
-    | 1153 -> "08S01" // ER_NET_PACKET_TOO_LARGE
-    | 1048 -> "23000" // ER_BAD_NULL_ERROR
-    | 1052 -> "23000" // ER_NON_UNIQ_ERROR
-    | 1062 -> "23000" // ER_DUP_ENTRY
-    | 1264 -> "22003" // ER_WARN_DATA_OUT_OF_RANGE
-    | 1265 -> "01000" // ER_WARN_DATA_TRUNCATED
-    | 1690 -> "22003" // ER_DATA_OUT_OF_RANGE
-    | 1426 -> "42000" // ER_TOO_BIG_PRECISION
-    | 1235 -> "42000" // ER_NOT_SUPPORTED_YET
-    | 3948 -> "42000" // ER_LOAD_DATA_LOCAL_INFILE_REJECTED
-    | 1451 -> "23000" // ER_ROW_IS_REFERENCED_2
-    | 1452 -> "23000" // ER_NO_REFERENCED_ROW_2
-    | _ -> "HY000"
+let sqlStateForCode = SqlState.forCode
 
-/// Builds an ERR packet payload (header 0xff).
-let errPayload (capabilities: uint32) (code: int) (message: string) : byte[] =
+let errPayloadWithState (capabilities: uint32) (code: int) (state: string) (message: string) : byte[] =
     let w = Writer()
     w.WriteByte 0xffuy
     w.WriteInt16LE code
 
     if capabilities &&& ClientProtocol41 <> 0u then
         w.WriteByte(byte '#')
-        w.WriteBytes(Encoding.ASCII.GetBytes(sqlStateForCode code))
+        w.WriteBytes(Encoding.ASCII.GetBytes state)
 
     w.WriteBytes(Encoding.UTF8.GetBytes message)
     w.ToArray()
+
+/// Builds an ERR packet payload (header 0xff).
+let errPayload (capabilities: uint32) (code: int) (message: string) : byte[] =
+    errPayloadWithState capabilities code (sqlStateForCode code) message
 
 /// Builds an EOF packet payload (header 0xfe). Only used when the client
 /// hasn't negotiated CLIENT_DEPRECATE_EOF.

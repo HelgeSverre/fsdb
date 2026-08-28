@@ -267,7 +267,9 @@ let private resultHeadPayloads
               lastInsertId
               warningCount
               sessionStateChanges ]
-    | Err(code, message) -> [ errPayload capabilities code message ]
+    | Err(code, message) ->
+        let state = result |> Executor.errorInfo |> Option.map _.State |> Option.defaultValue (sqlStateForCode code)
+        [ errPayloadWithState capabilities code state message ]
     | MultipleResults _ -> invalidArg (nameof result) "Nested result collections must be sent through sendResult"
     | ResultSet(columns, _) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
