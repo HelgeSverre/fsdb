@@ -1402,9 +1402,6 @@ let tests =
 
                 testCase "a custom registerScalar function is callable through the same registry"
                 <| fun _ ->
-                    // Proves the extensibility API end to end: a function
-                    // registered exactly the way user code would, resolving
-                    // through the same registry the built-ins use.
                     let store = newStore ()
 
                     let registry =

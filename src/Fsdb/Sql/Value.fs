@@ -1379,13 +1379,8 @@ let decodeValue (r: #IReader) : Value =
 /// The MySQL wire type this value's runtime shape reports as, so a
 /// resultset's column definition can match the value instead of a blanket
 /// VAR_STRING.
-/// This matters for real client drivers: PHP's mysqlnd, in particular,
-/// auto-converts a LONGLONG/DOUBLE/DATE/DATETIME-typed column to a native
-/// int/float/string even over the text protocol, based on this byte —
-/// app code that does `$model->foo_id === $other->id` only gets the
-/// native-int conversion real MySQL gives it if fsdb reports the same
-/// type real MySQL would, instead of leaving every column a string for
-/// the client to coerce.
+/// PHP mysqlnd uses this byte to convert text-protocol LONGLONG, DOUBLE,
+/// DATE, and DATETIME columns to their corresponding native values.
 let mysqlMetadataOf (v: Value) : ColumnMetadata =
     match v with
     // No data to type; NULL round-trips the same regardless of the

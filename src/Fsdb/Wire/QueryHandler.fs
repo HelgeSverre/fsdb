@@ -954,16 +954,32 @@ let private markRoutineVariables names =
 
 let private captureRoutineVariableChanges body =
     let parent = routineVariableChanges.Value
-    routineVariableChanges.Value <- Some Set.empty
 
-    try
-        let result = body ()
-        let changed = routineVariableChanges.Value |> Option.defaultValue Set.empty
-        routineVariableChanges.Value <- parent |> Option.map (Set.union changed)
-        result, changed
-    with _ ->
-        routineVariableChanges.Value <- parent
-        reraise ()
+    let result, changed =
+        DynamicScope.withValue routineVariableChanges (Some Set.empty) (fun () ->
+            let result = body ()
+            result, routineVariableChanges.Value |> Option.defaultValue Set.empty)
+
+    parent
+    |> Option.iter (fun enclosing -> routineVariableChanges.Value <- Some(Set.union enclosing changed))
+
+    result, changed
+
+let private connectionVariableNames =
+    [ "character_set_client"; "character_set_connection"; "character_set_results"; "collation_connection" ]
+
+let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
+    markRoutineVariables connectionVariableNames
+    setConnectionCharset session.Store charset
+    collation |> Option.iter (setConnectionCollation session.Store)
+
+    { session with
+        Variables =
+            session.Variables
+            |> Map.add "character_set_client" (Some charset)
+            |> Map.add "character_set_connection" (Some charset)
+            |> Map.add "character_set_results" (Some charset)
+            |> Map.add "collation_connection" (collation |> Option.map _.Name) }
 
 /// System variables real MySQL accepts an explicit `NULL` for (rather than
 /// the 1231 "can't be set to the value of NULL" every other variable
@@ -1082,9 +1098,6 @@ let private parseSetFragment
 let private applySetAction (session: Session) (action: SetAction) : Session =
     match action with
     | SetNamesAction(charset, collation) ->
-        markRoutineVariables
-            [ "character_set_client"; "character_set_connection"; "character_set_results"; "collation_connection" ]
-
         // `SET NAMES` uses the charset default unless COLLATE is explicit.
         let connectionCollation =
             match collation |> Option.bind Collation.tryFind with
@@ -1099,27 +1112,9 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
                 | "ascii" -> Collation.tryFind "ascii_general_ci"
                 | _ -> None
 
-        setConnectionCharset session.Store charset
-        connectionCollation |> Option.iter (setConnectionCollation session.Store)
-
-        { session with
-            Variables =
-                session.Variables
-                |> Map.add "character_set_client" (Some charset)
-                |> Map.add "character_set_connection" (Some charset)
-                |> Map.add "character_set_results" (Some charset)
-                |> Map.add
-                    "collation_connection"
-                    (connectionCollation |> Option.map (fun c -> c.Name)) }
+        applyConnectionEncoding session charset connectionCollation
     | SetVarAction(name, value, true) ->
-        // `SET GLOBAL`/`SET @@GLOBAL.` writes only the store-wide override —
-        // it never touches this session's own `Variables` (a live session
-        // keeps whatever it already had; only a session created afterwards
-        // picks the new value up, via `Session.create`'s seeding), and none
-        // of the per-connection `Store` side effects below apply either:
-        // `foreign_key_checks`/`sql_mode`/`collation_connection` are
-        // inherently per-session state, not something a GLOBAL write should
-        // reach into this connection's own mutable cells to flip.
+        // Global assignments seed new sessions without changing this one.
         match value with
         | Some value when Limits.isReportableSetting name -> Limits.applySetting name value |> ignore
         | _ -> Session.setGlobalVariable session.Store name value
@@ -1128,10 +1123,7 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
     | SetVarAction(name, value, false) ->
         markRoutineVariables [ name ]
 
-        // Neither `foreign_key_checks` nor `sql_mode` is in
-        // `nullableSystemVars`, so `value` is always `Some` here — but the
-        // type is shared with every other system variable, so this still
-        // has to handle `None`.
+        // The shared action type also carries nullable system variables.
         if name = "foreign_key_checks" then
             value |> Option.iter (fun v -> setForeignKeyChecks session.Store (v.Trim() <> "0"))
 
@@ -2288,9 +2280,6 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         Affected 0UL
     | SetRoleNone -> session, Affected 0UL
     | SetCharacterSet charset ->
-        markRoutineVariables
-            [ "character_set_client"; "character_set_connection"; "character_set_results"; "collation_connection" ]
-
         let charset = charset.ToLowerInvariant()
 
         let collation =
@@ -2306,18 +2295,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match collation with
         | None -> session, Err(1115, sprintf "Unknown character set: '%s'" charset)
         | Some collation ->
-            let next =
-                { session with
-                    Variables =
-                        session.Variables
-                        |> Map.add "character_set_client" (Some charset)
-                        |> Map.add "character_set_results" (Some charset)
-                        |> Map.add "character_set_connection" (Some charset)
-                        |> Map.add "collation_connection" (Some collation) }
-
-            setConnectionCharset next.Store charset
-            Collation.tryFind collation |> Option.iter (setConnectionCollation next.Store)
-            next, Affected 0UL
+            applyConnectionEncoding session charset (Collation.tryFind collation), Affected 0UL
     | SetPassword(userOpt, password) ->
         // No FOR clause selects the session's authenticated account.
         let wanted = userOpt |> Option.map accountRefOf |> Option.defaultValue (accountOf session)

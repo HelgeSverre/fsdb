@@ -2847,13 +2847,8 @@ let private withClause: Parser<CommonTableExpr list, unit> =
                    Body = body })
             (sym ",")
 
-/// A single `SELECT`, redundantly wrapped in one or more parens —
-/// `(SELECT ...)` and `((SELECT ...))` both reduce to the same `SelectStmt`.
-/// This is what lets a `UNION` branch (`selectOrUnionBranches` below, shared
-/// with the top-level `selectOrUnionStmt`) accept MySQL's `(SELECT ...)
-/// UNION (SELECT ...)` form where every branch is individually
-/// parenthesized, rather than just the bare `SELECT ...` this engine already
-/// handled.
+/// Reduces any number of parentheses around one `SELECT` to its `SelectStmt`.
+/// UNION branches and top-level SELECTs share this parser.
 let private parenSelect, parenSelectRef = createParserForwardedToRef<SelectStmt, unit> ()
 parenSelectRef.Value <-
     attempt (sym "(" >>. parenSelect .>> sym ")")
@@ -3883,29 +3878,26 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
 
         output.ToString()
 
-let private withParserOptions (options: ParserOptions) (sql: string) parse =
+let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Result<'value, string> =
+    try
+        if exceedsParenthesisDepthLimit sql then
+            Result.Error "expression nested too deeply"
+        else
+            match run parser sql with
+            | Success(value, _, _) -> Result.Ok value
+            | Failure(message, _, _) -> Result.Error message
+    with ex ->
+        Result.Error ex.Message
+
+let private withParserState (options: ParserOptions) (sql: string) parse =
     DynamicScope.withValue currentOptions options (fun () ->
-        sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse)
+        DynamicScope.withValue placeholderCounterLocal 0 (fun () ->
+            DynamicScope.withValue exprDepth 0 (fun () ->
+                sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse)))
 
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
-    placeholderCounterLocal.Value <- 0
-    exprDepth.Value <- 0
     let full = ws >>. statement .>> opt (sym ";") .>> eof
-
-    // FParsec's ReplyStatus cases shadow Result cases in this module.
-    // Malformed input is kept inside the parser boundary as a syntax error.
-    let parse sql =
-        try
-            if exceedsParenthesisDepthLimit sql then
-                Result.Error "expression nested too deeply"
-            else
-                match run full sql with
-                | Success(stmt, _, _) -> Result.Ok stmt
-                | Failure(msg, _, _) -> Result.Error msg
-        with ex ->
-            Result.Error ex.Message
-
-    withParserOptions options sql parse
+    withParserState options sql (runWithDepthLimit full)
 
 let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
     parseWithOptions { defaultOptions with AnsiQuotes = enabled } sql
@@ -3960,23 +3952,21 @@ let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
 /// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
 /// client-to-server data stream.
 let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
-    try
-        match run (ws >>. localLoadData .>> opt (sym ";") .>> eof) sql with
-        | Success(load, _, _) ->
-            let validSeparator value = value = "" || value.Length = 1
+    let parser = ws >>. localLoadData .>> opt (sym ";") .>> eof
 
-            if
-                validSeparator load.FieldTerminator
-                && validSeparator load.LineTerminator
-                && (load.EnclosedBy |> Option.forall validSeparator)
-                && (load.Escape |> Option.forall validSeparator)
-            then
-                Result.Ok load
-            else
-                Result.Error "LOAD DATA delimiters must be empty or one character"
-        | Failure(message, _, _) -> Result.Error message
-    with ex ->
-        Result.Error ex.Message
+    withParserState defaultOptions sql (runWithDepthLimit parser)
+    |> Result.bind (fun load ->
+        let validSeparator value = value = "" || value.Length = 1
+
+        if
+            validSeparator load.FieldTerminator
+            && validSeparator load.LineTerminator
+            && (load.EnclosedBy |> Option.forall validSeparator)
+            && (load.Escape |> Option.forall validSeparator)
+        then
+            Result.Ok load
+        else
+            Result.Error "LOAD DATA delimiters must be empty or one character")
 
 /// Splits a COM_QUERY batch at statement delimiters outside literals,
 /// comments, and supported compound object bodies. The parser still validates each
@@ -4102,21 +4092,7 @@ let splitStatements (sql: string) : Result<string list, string> =
 /// guards so damaged catalog text fails as a normal schema error rather
 /// than escaping through the query worker.
 let parseExpressionWithOptions (options: ParserOptions) (sql: string) : Result<Expr, string> =
-    placeholderCounterLocal.Value <- 0
-    exprDepth.Value <- 0
-
-    let parse sql =
-        try
-            if exceedsParenthesisDepthLimit sql then
-                Result.Error "expression nested too deeply"
-            else
-                match run (ws >>. expr .>> eof) sql with
-                | Success(expression, _, _) -> Result.Ok expression
-                | Failure(message, _, _) -> Result.Error message
-        with ex ->
-            Result.Error ex.Message
-
-    withParserOptions options sql parse
+    withParserState options sql (runWithDepthLimit (ws >>. expr .>> eof))
 
 let parseExpression (sql: string) : Result<Expr, string> =
     parseExpressionWithOptions defaultOptions sql

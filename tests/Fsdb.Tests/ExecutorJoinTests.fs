@@ -229,9 +229,6 @@ let tests =
 
           testCase "qualified t.* in a JOIN expands only that table's own columns, not every joined column"
           <| fun _ ->
-              // This is the shape of a Laravel `belongsToMany` pivot
-              // query: `SELECT teams.*, team_user.role AS pivot_role
-              // FROM teams JOIN team_user ...`.
               let store = newStore ()
               runDefault store "CREATE TABLE teams (id INT, name VARCHAR(10))" |> ignore
               runDefault store "CREATE TABLE team_user (id INT, team_id INT, role VARCHAR(10))" |> ignore

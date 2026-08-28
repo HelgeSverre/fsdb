@@ -1839,10 +1839,8 @@ let serveWithOptions
                 use stream = client.GetStream()
                 let payload = errPayload ClientProtocol41 1040 "Too many connections"
                 do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
-            // This is a detached best-effort rejection after the server has
-            // already decided not to admit the peer. Any socket/stream fault
-            // (including Async's AggregateException wrapper) is terminal only
-            // for that disposable peer and must not escape onto the thread pool.
+            // Rejection is detached after admission fails. Socket errors belong
+            // to the rejected peer and must not escape onto the thread pool.
             with _ -> ()
         }
 

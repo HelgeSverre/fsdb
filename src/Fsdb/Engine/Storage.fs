@@ -2294,8 +2294,8 @@ let acquireTransactionWriteTargets
 
 // mysql.* uses ordinary stored tables, including DML and persistence paths.
 // Column shapes follow MySQL 8.4.
-// These columns do not preserve charset/collation fidelity (MySQL uses
-// utf8mb3_bin/ascii here) — add if a client diff ever cares.
+// Catalog text columns use the engine defaults rather than MySQL's
+// utf8mb3_bin and ascii catalog collations.
 
 let private sysCol (name: string) (ty: ColumnType) (nullable: bool) (dflt: Value option) : ColumnDef =
     { Name = name
