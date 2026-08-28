@@ -3390,14 +3390,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     match expr with
     | Lit(VZeroDate date) when
         let year, month, day = Temporal.zeroDateParts date
-        (year = 0 && month = 0 && day = 0 && ctx.Store.NoZeroDate)
-        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.NoZeroInDate) ->
+        (year = 0 && month = 0 && day = 0 && ctx.Store.SqlMode.NoZeroDate)
+        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATE value: '%s'" (Temporal.formatZeroDate date))
     | Lit(VZeroDateTime dateTime) when
         let date, _, _, _, _ = Temporal.zeroDateTimeParts dateTime
         let year, month, day = Temporal.zeroDateParts date
-        (year = 0 && month = 0 && day = 0 && ctx.Store.NoZeroDate)
-        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.NoZeroInDate) ->
+        (year = 0 && month = 0 && day = 0 && ctx.Store.SqlMode.NoZeroDate)
+        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | Lit v -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
@@ -3985,7 +3985,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         { Strict = false
                           NoZeroDate = true
                           NoZeroInDate = true
-                          TruncateFractional = ctx.Store.TimeTruncateFractional }
+                          TruncateFractional = ctx.Store.SqlMode.TimeTruncateFractional }
                         castCol
                         v)
             with
@@ -8325,7 +8325,7 @@ and private validateOnlyFullGroupBy
                     (columnLabel position)
             )
 
-    if not store.OnlyFullGroupBy then
+    if not store.SqlMode.OnlyFullGroupBy then
         Ok()
     else
         resolveGroupExprs ()
@@ -10288,7 +10288,7 @@ let private computeGeneratedRow
         |> traverse (fun (col, expr) ->
             evalExpr ctx expr
             |> Result.mapError ExpressionError
-            |> Result.bind (fun v -> coerceValue store.StrictMode col v)
+            |> Result.bind (fun v -> coerceValue store.SqlMode.Strict col v)
             |> Result.map (fun v' ->
                 match resolveColumn columns col.Name with
                 | Ok idx -> row'.[idx] <- v'
@@ -12641,7 +12641,7 @@ let rec executeAs
                                         match evalExpr context expression |> Result.mapError Err with
                                         | Error error -> error
                                         | Ok value ->
-                                            match coerceValue runStore.StrictMode columns.[index] value with
+                                            match coerceValue runStore.SqlMode.Strict columns.[index] value with
                                             | Error error -> storageErr error
                                             | Ok value ->
                                                 row.[index] <- value
@@ -12740,7 +12740,7 @@ let rec executeAs
                     | Some(DExpression expression) ->
                         evalExpr (context result) expression
                         |> Result.mapError ExpressionError
-                        |> Result.bind (coerceValue runStore.StrictMode columns.[index])
+                        |> Result.bind (coerceValue runStore.SqlMode.Strict columns.[index])
                         |> Result.map (fun value -> result.[index] <- value)
                     | _ -> Ok()))
             (Ok())
@@ -13087,7 +13087,7 @@ let rec executeAs
             | ResultSet(names, _), metadata, rows, collations ->
                 let columns = deriveColumns names collations metadata
                 let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-                Storage.setStrictMode snapshot store.StrictMode
+                Storage.setStrictMode snapshot store.SqlMode.Strict
 
                 let created =
                     createTableSeeded snapshot destinationDb destinationName columns [] [] None None None None
@@ -13179,7 +13179,7 @@ let rec executeAs
                     ids, Affected 0UL
                 else
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-                    Storage.setStrictMode snapshot store.StrictMode
+                    Storage.setStrictMode snapshot store.SqlMode.Strict
 
                     let created =
                         createTableSeeded
@@ -13259,7 +13259,7 @@ let rec executeAs
         | None, _, _, Some err -> ids, err
         | None, None, None, None ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-            Storage.setStrictMode snapshot store.StrictMode
+            Storage.setStrictMode snapshot store.SqlMode.Strict
 
             let finalTable =
                 actions
@@ -13540,7 +13540,7 @@ let rec executeAs
             |> List.map (fun (db, entries) -> db, entries |> List.map snd)
 
         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-        Storage.setStrictMode snapshot store.StrictMode
+        Storage.setStrictMode snapshot store.SqlMode.Strict
 
         match groups |> traverse (fun (db, dbPairs) -> renameTables snapshot db dbPairs) with
         | Ok _ ->

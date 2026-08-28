@@ -206,7 +206,7 @@ let create (connectionId: int) (store: Store) : Session =
       Variables = variables
       UserVariables = Map.empty
       // Reference fields stay shared; mutable SQL-mode settings stay per session.
-      Store = { store with StrictMode = store.StrictMode }
+      Store = { store with SqlMode = store.SqlMode }
       TemporaryCatalog = Map.empty
       LastInsertId = 0L
       LastGeneratedId = 0L

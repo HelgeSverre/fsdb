@@ -896,12 +896,16 @@ let private resolveSystemSetRhs
 
 let private applySqlMode (store: Store) (value: string) =
     let modes = parseSqlModes value
-    setStrictMode store (isStrictSqlMode modes)
-    setZeroDateModes store (hasSqlMode modes "NO_ZERO_DATE") (hasSqlMode modes "NO_ZERO_IN_DATE")
-    setOnlyFullGroupBy store (hasSqlMode modes "ONLY_FULL_GROUP_BY")
-    setNoAutoValueOnZero store (hasSqlMode modes "NO_AUTO_VALUE_ON_ZERO")
-    setErrorForDivisionByZero store (hasSqlMode modes "ERROR_FOR_DIVISION_BY_ZERO")
-    setTimeTruncateFractional store (hasSqlMode modes "TIME_TRUNCATE_FRACTIONAL")
+
+    setSqlMode
+        store
+        { Strict = isStrictSqlMode modes
+          NoZeroDate = hasSqlMode modes "NO_ZERO_DATE"
+          NoZeroInDate = hasSqlMode modes "NO_ZERO_IN_DATE"
+          OnlyFullGroupBy = hasSqlMode modes "ONLY_FULL_GROUP_BY"
+          NoAutoValueOnZero = hasSqlMode modes "NO_AUTO_VALUE_ON_ZERO"
+          ErrorForDivisionByZero = hasSqlMode modes "ERROR_FOR_DIVISION_BY_ZERO"
+          TimeTruncateFractional = hasSqlMode modes "TIME_TRUNCATE_FRACTIONAL" }
 
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends
@@ -1106,9 +1110,8 @@ let private parseSetFragment
                 | m when m.Success -> Error(Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value))
                 | _ -> Error(syntaxError sql)
 
-/// Applies one already-parsed `SetAction` to `session`, including the
-/// `Store`-level side effects (`setForeignKeyChecks`/`setStrictMode`)
-/// `foreign_key_checks`/`sql_mode` trigger.
+/// Applies one parsed `SetAction`, including store settings derived from
+/// `foreign_key_checks` and `sql_mode`.
 let private applySetAction (session: Session) (action: SetAction) : Session =
     match action with
     | SetNamesAction(charset, collation) ->
@@ -1578,9 +1581,9 @@ let private ignoresDataChangeErrors =
     | _ -> false
 
 let private divisionByZeroPolicy (store: Store) (statement: Statement) =
-    if not store.ErrorForDivisionByZero then
+    if not store.SqlMode.ErrorForDivisionByZero then
         Diagnostics.DivisionByZeroPolicy.Silent
-    elif store.StrictMode && isDataChangeStatement statement && not (ignoresDataChangeErrors statement) then
+    elif store.SqlMode.Strict && isDataChangeStatement statement && not (ignoresDataChangeErrors statement) then
         Diagnostics.DivisionByZeroPolicy.Fail
     else
         Diagnostics.DivisionByZeroPolicy.Warn
@@ -1620,13 +1623,8 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
         | Error(code, msg) -> session, Err(code, msg)
         | Ok() ->
 
-        // `Store.StrictMode` is store-wide, not per-session (see its doc
-        // comment) — re-derive it from *this* session's own `sql_mode`
-        // right before every statement, so another connection's `SET
-        // SESSION sql_mode = ...` (which only ever touches its own
-        // `Session.Variables`) can't leak into this one's coercion
-        // behavior, and a transaction never runs on the stale StrictMode
-        // its snapshot happened to be seeded with at BEGIN time.
+        // Transaction stores begin with default strictness. Derive the full
+        // mode value from the session before each statement.
         lookupVar session "sql_mode"
         |> Option.flatten
         |> Option.iter (applySqlMode store)

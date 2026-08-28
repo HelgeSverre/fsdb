@@ -293,6 +293,24 @@ let private createRowLockStripe () =
     { SyncRoot = obj ()
       Owner = None }
 
+type SqlModeSettings =
+    { Strict: bool
+      NoZeroDate: bool
+      NoZeroInDate: bool
+      OnlyFullGroupBy: bool
+      NoAutoValueOnZero: bool
+      ErrorForDivisionByZero: bool
+      TimeTruncateFractional: bool }
+
+let defaultSqlModeSettings: SqlModeSettings =
+    { Strict = true
+      NoZeroDate = true
+      NoZeroInDate = true
+      OnlyFullGroupBy = true
+      NoAutoValueOnZero = false
+      ErrorForDivisionByZero = true
+      TimeTruncateFractional = false }
+
 /// Shared catalog state plus session-local coercion and transaction settings.
 /// Session clones share reference-typed synchronization fields but copy the
 /// mutable SQL-mode, FK, and collation values.
@@ -301,13 +319,7 @@ type Store =
       Databases: ConcurrentDictionary<string, Database ref>
       mutable ForeignKeyChecks: bool
       /// Re-derived from the session's sql_mode before each statement.
-      mutable StrictMode: bool
-      mutable NoZeroDate: bool
-      mutable NoZeroInDate: bool
-      mutable OnlyFullGroupBy: bool
-      mutable NoAutoValueOnZero: bool
-      mutable ErrorForDivisionByZero: bool
-      mutable TimeTruncateFractional: bool
+      mutable SqlMode: SqlModeSettings
       /// Applies only when no column or explicit COLLATE supplies precedence.
       mutable ConnectionCollation: Collation.Collation
       /// Lowercase names overlay real tables in the reserved fsdb schema.
@@ -409,13 +421,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
     { Databases = databases
       ForeignKeyChecks = store.ForeignKeyChecks
       // QueryHandler derives the transaction's effective mode before use.
-      StrictMode = true
-      NoZeroDate = store.NoZeroDate
-      NoZeroInDate = store.NoZeroInDate
-      OnlyFullGroupBy = store.OnlyFullGroupBy
-      NoAutoValueOnZero = store.NoAutoValueOnZero
-      ErrorForDivisionByZero = store.ErrorForDivisionByZero
-      TimeTruncateFractional = store.TimeTruncateFractional
+      SqlMode = { store.SqlMode with Strict = true }
       ConnectionCollation = store.ConnectionCollation
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
@@ -495,25 +501,23 @@ let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
 
 let setConnectionCollation (store: Store) (collation: Collation.Collation) : unit = store.ConnectionCollation <- collation
 
+let private updateSqlMode (store: Store) (update: SqlModeSettings -> SqlModeSettings) : unit =
+    lock store.Lock (fun () -> store.SqlMode <- update store.SqlMode)
+
+let setSqlMode (store: Store) (settings: SqlModeSettings) : unit =
+    lock store.Lock (fun () -> store.SqlMode <- settings)
+
 let setStrictMode (store: Store) (strict: bool) : unit =
-    lock store.Lock (fun () -> store.StrictMode <- strict)
+    updateSqlMode store (fun mode -> { mode with Strict = strict })
 
 let setZeroDateModes (store: Store) (noZeroDate: bool) (noZeroInDate: bool) : unit =
-    lock store.Lock (fun () ->
-        store.NoZeroDate <- noZeroDate
-        store.NoZeroInDate <- noZeroInDate)
+    updateSqlMode store (fun mode ->
+        { mode with
+            NoZeroDate = noZeroDate
+            NoZeroInDate = noZeroInDate })
 
 let setOnlyFullGroupBy (store: Store) (enabled: bool) : unit =
-    lock store.Lock (fun () -> store.OnlyFullGroupBy <- enabled)
-
-let setNoAutoValueOnZero (store: Store) (enabled: bool) : unit =
-    lock store.Lock (fun () -> store.NoAutoValueOnZero <- enabled)
-
-let setErrorForDivisionByZero (store: Store) (enabled: bool) : unit =
-    lock store.Lock (fun () -> store.ErrorForDivisionByZero <- enabled)
-
-let setTimeTruncateFractional (store: Store) (enabled: bool) : unit =
-    lock store.Lock (fun () -> store.TimeTruncateFractional <- enabled)
+    updateSqlMode store (fun mode -> { mode with OnlyFullGroupBy = enabled })
 
 /// Table names are keyed case-insensitively by their lowercased form —
 /// public because `Persistence`'s WAL replay looks tables up in `Catalog`
@@ -864,7 +868,7 @@ let private parseDecimal (s: string) : decimal option =
 /// MySQL-style coercion of a value to a column's declared type
 /// (`'12' -> 12` for an INT column); error 1366 when it's not possible and
 /// `strict` (the session's STRICT_TRANS_TABLES/STRICT_ALL_TABLES, see
-/// `Store.StrictMode`) is set — MySQL's actual default. Off (Laravel's
+/// `Store.SqlMode.Strict`) is set — MySQL's actual default. Off (Laravel's
 /// `'strict' => false` connection config, which sends
 /// `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`), an otherwise-rejected
 /// value coerces to MySQL's non-strict fallback instead: 0 for a numeric
@@ -878,10 +882,10 @@ type TemporalCoercionMode =
       TruncateFractional: bool }
 
 let temporalCoercionMode (store: Store) =
-    { Strict = store.StrictMode
-      NoZeroDate = store.NoZeroDate
-      NoZeroInDate = store.NoZeroInDate
-      TruncateFractional = store.TimeTruncateFractional }
+    { Strict = store.SqlMode.Strict
+      NoZeroDate = store.SqlMode.NoZeroDate
+      NoZeroInDate = store.SqlMode.NoZeroInDate
+      TruncateFractional = store.SqlMode.TimeTruncateFractional }
 
 let private adjustTicksToFsp (mode: TemporalCoercionMode) (fsp: int) (ticks: int64) =
     if mode.TruncateFractional then
@@ -2531,13 +2535,7 @@ let create () : Store =
 
     { Databases = databases
       ForeignKeyChecks = true
-      StrictMode = true
-      NoZeroDate = true
-      NoZeroInDate = true
-      OnlyFullGroupBy = true
-      NoAutoValueOnZero = false
-      ErrorForDivisionByZero = true
-      TimeTruncateFractional = false
+      SqlMode = defaultSqlModeSettings
       ConnectionCollation = Collation.defaultCollation
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
@@ -4632,7 +4630,7 @@ let private insertRowsPreparedCore
                         insertCore
                             store.ForeignKeyChecks
                             (temporalCoercionMode store)
-                            (not store.NoAutoValueOnZero)
+                            (not store.SqlMode.NoAutoValueOnZero)
                             ignoreErrors
                             db
                             key
@@ -5018,7 +5016,7 @@ and private upsertRowsInTable
 
                                     processRow
                                         (temporalCoercionMode store)
-                                        (not store.NoAutoValueOnZero)
+                                        (not store.SqlMode.NoAutoValueOnZero)
                                         nextAutoId
                                         rawRow
                                         table.Columns
@@ -5364,7 +5362,7 @@ let replaceRows
 
                                 processRow
                                     (temporalCoercionMode store)
-                                    (not store.NoAutoValueOnZero)
+                                    (not store.SqlMode.NoAutoValueOnZero)
                                     nextAutoId
                                     rawRow
                                     table.Columns

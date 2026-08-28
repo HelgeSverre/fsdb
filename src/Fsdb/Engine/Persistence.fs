@@ -820,10 +820,10 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
         // non-strict re-coercion is the identity; if it ran non-strict, the
         // clamping replays identically. Replaying strict instead would
         // reject (and silently skip) an ALTER that clamped values.
-        let saved = store.StrictMode
-        store.StrictMode <- false
+        let saved = store.SqlMode.Strict
+        setStrictMode store false
         warn "AlterTable" (alterTable store db table actions)
-        store.StrictMode <- saved
+        setStrictMode store saved
     // One catalog swap for the whole event, matching how it was logged (see
     // `Storage.renameTables`) — replaying pair-by-pair would reintroduce the
     // partial rename the single event exists to prevent.
