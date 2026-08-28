@@ -936,6 +936,7 @@ let private truncateRunes (length: int) (text: string) =
 
 let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     let strict = mode.Strict
+    let roundInteger (value: decimal) = Math.Round(value, 0, MidpointRounding.AwayFromZero)
     let fail () =
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
 
@@ -1058,20 +1059,20 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | VInt number -> finish (decimal number)
         | VUInt number -> finish (decimal number)
         | VBit(_, number) -> finish (decimal number)
-        | VDecimal number -> finish (Math.Truncate number)
+        | VDecimal number -> finish (roundInteger number)
         | VDouble number ->
             if Double.IsNaN number then
                 numericFallback (Some "integer") (fun () -> VInt 0L)
             elif number < float lo || number > float hi then
                 if strict then outOfRange () else finish (if number < 0.0 then lo else hi)
             else
-                finish (Math.Truncate(decimal number))
+                finish (roundInteger (decimal number))
         | VString text ->
             match parseDecimal text, parseNumeric text with
-            | Some number, _ -> finish (Math.Truncate number)
+            | Some number, _ -> finish (roundInteger number)
             | None, Some number when number < float lo || number > float hi ->
                 if strict then outOfRange () else finish (if number < 0.0 then lo else hi)
-            | None, Some number -> finish (Math.Truncate(decimal number))
+            | None, Some number -> finish (roundInteger (decimal number))
             | None, None -> numericFallback (Some "integer") (fun () -> VInt 0L)
         | _ -> numericFallback (Some "integer") (fun () -> VInt 0L)
 
@@ -1114,19 +1115,19 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 // `decimal d` itself overflows outside ±7.9e28, so the range
                 // verdict comes from the `double` before any conversion.
                 if d >= 0.0 && d < 1.8446744073709552e19 then
-                    narrow (Math.Truncate(decimal d))
+                    narrow (roundInteger (decimal d))
                 elif strict then
                     outOfRange ()
                 else
                     warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                     Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
-            | VDecimal d -> narrow (Math.Truncate d)
+            | VDecimal d -> narrow (roundInteger d)
             | VString s ->
                 match parseDecimal s, parseNumeric s with
-                | Some d, _ -> narrow (Math.Truncate d)
+                | Some d, _ -> narrow (roundInteger d)
                 | None, Some d ->
                     if d >= 0.0 && d < 1.8446744073709552e19 then
-                        narrow (Math.Truncate(decimal d))
+                        narrow (roundInteger (decimal d))
                     elif strict then
                         outOfRange ()
                     else

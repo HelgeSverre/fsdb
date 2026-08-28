@@ -942,7 +942,7 @@ let tests =
               let users = rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1])
               Expect.equal users [ VString "root" ] "bootstrap root row present"
 
-          testCase "procedure signatures and security survive WAL recovery"
+          testCase "compound procedure signatures and bodies survive WAL recovery"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -954,7 +954,12 @@ let tests =
               let session, result = handle session "SET SESSION sql_mode=''"
               Expect.equal result (Affected 0UL) "set routine sql_mode"
 
-              match handle session "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT 10; END" |> snd with
+              match
+                  handle
+                      session
+                      "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN DECLARE doubled INT DEFAULT num * 2; SELECT doubled; END"
+                  |> snd
+              with
               | Affected 0UL -> ()
               | other -> failtestf "expected procedure creation, got %A" other
 
@@ -965,6 +970,10 @@ let tests =
               | ResultSet(_, [ [ Some "topics"; Some ""; Some ddl; Some "latin1"; Some "latin1_bin"; Some "utf8mb4_0900_ai_ci" ] ]) ->
                   Expect.stringContains ddl "PROCEDURE `topics`(IN num INT) SQL SECURITY INVOKER" "signature recovered"
               | other -> failtestf "expected recovered procedure metadata, got %A" other
+
+              match handle recovered "CALL topics(6)" |> snd with
+              | MultipleResults [ (ResultSet([ "doubled" ], [ [ Some "12" ] ]), _); (Affected 0UL, []) ] -> ()
+              | other -> failtestf "expected recovered compound procedure execution, got %A" other
 
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->

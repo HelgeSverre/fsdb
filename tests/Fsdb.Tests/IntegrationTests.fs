@@ -138,6 +138,46 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "MySqlConnector reads procedure resultsets and OUT parameters"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+
+                  let connectionString =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;AllowUserVariables=True"
+                          server.Port
+
+                  use connection = new MySqlConnector.MySqlConnection(connectionString)
+                  do! connection.OpenAsync() |> Async.AwaitTask
+                  use create = connection.CreateCommand()
+
+                  create.CommandText <-
+                      "CREATE PROCEDURE wire_results(IN a INT, OUT b INT) BEGIN SELECT a AS first_result; SET b = a + 1; SELECT b AS second_result; END"
+
+                  let! _ = create.ExecuteNonQueryAsync() |> Async.AwaitTask
+                  use call = connection.CreateCommand()
+                  call.CommandText <- "CALL wire_results(4, @output)"
+                  use! reader = call.ExecuteReaderAsync() |> Async.AwaitTask
+                  let! first = reader.ReadAsync() |> Async.AwaitTask
+                  Expect.isTrue first "first result row"
+                  Expect.equal (reader.GetInt32 0) 4 "first result value"
+                  let! hasSecond = reader.NextResultAsync() |> Async.AwaitTask
+                  Expect.isTrue hasSecond "second resultset"
+                  let! second = reader.ReadAsync() |> Async.AwaitTask
+                  Expect.isTrue second "second result row"
+                  Expect.equal (reader.GetInt32 0) 5 "second result value"
+                  let! hasThird = reader.NextResultAsync() |> Async.AwaitTask
+                  Expect.isFalse hasThird "final OK is not exposed as a resultset"
+                  do! reader.CloseAsync() |> Async.AwaitTask
+
+                  use output = connection.CreateCommand()
+                  output.CommandText <- "SELECT @output"
+                  let! value = output.ExecuteScalarAsync() |> Async.AwaitTask
+                  Expect.equal (Convert.ToInt32 value) 5 "OUT parameter value"
+              }
+              |> Async.RunSynchronously
+
           testCase "DDL clears the wire transaction status"
           <| fun _ ->
               async {

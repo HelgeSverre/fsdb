@@ -260,6 +260,7 @@ let private resultHeadPayloads
     match result with
     | Affected affectedRows -> [ okPayloadWithWarnings capabilities statusFlags affectedRows lastInsertId warningCount ]
     | Err(code, message) -> [ errPayload capabilities code message ]
+    | MultipleResults _ -> invalidArg (nameof result) "Nested result collections must be sent through sendResult"
     | ResultSet(columns, _) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
@@ -276,7 +277,7 @@ let private resultHeadPayloads
 /// one `WriteAsync` per ~64 KiB instead of one per row packet — so a large
 /// result set neither pays a syscall per row nor holds every row's bytes at
 /// once. Column count/defs/EOF stay ordinary packets.
-let private sendResult
+let rec private sendResult
     (stream: IO.Stream)
     (capabilities: uint32)
     (startSeq: byte)
@@ -288,15 +289,53 @@ let private sendResult
     (result: Executor.QueryResult)
     : Async<byte> =
     async {
-        let metadata =
-            match result with
-            | ResultSet(columns, rows) -> resultMetadata columns rows columnMetadata
-            | _ -> []
-
-        let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId warningCount metadata result)
-
         match result with
-        | ResultSet(_, rows) ->
+        | MultipleResults [] ->
+            return!
+                sendResult
+                    stream
+                    capabilities
+                    startSeq
+                    statusFlags
+                    lastInsertId
+                    warningCount
+                    []
+                    rowEncoder
+                    (Affected 0UL)
+        | MultipleResults results ->
+            let rec sendParts seqId =
+                function
+                | [] -> async { return seqId }
+                | (part, metadata) :: remaining ->
+                    async {
+                        let partStatus =
+                            if remaining.IsEmpty then statusFlags else statusFlags ||| StatusMoreResultsExists
+
+                        let! nextSeqId =
+                            sendResult
+                                stream
+                                capabilities
+                                seqId
+                                partStatus
+                                lastInsertId
+                                warningCount
+                                metadata
+                                rowEncoder
+                                part
+
+                        return! sendParts nextSeqId remaining
+                    }
+
+            return! sendParts startSeq results
+        | ResultSet(columns, rows) ->
+            let metadata = resultMetadata columns rows columnMetadata
+
+            let! seqId =
+                sendPayloads
+                    stream
+                    startSeq
+                    (resultHeadPayloads capabilities statusFlags lastInsertId warningCount metadata result)
+
             let! seqId = sendRows stream seqId metadata rowEncoder rows
 
             let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
@@ -310,7 +349,12 @@ let private sendResult
                        else
                            eofPayloadWithWarnings capabilities statusFlags warningCount) ]
             return nextSeqId
-        | _ -> return seqId
+        | _ ->
+            return!
+                sendPayloads
+                    stream
+                    startSeq
+                    (resultHeadPayloads capabilities statusFlags lastInsertId warningCount [] result)
     }
 
 let private sendCursorHead

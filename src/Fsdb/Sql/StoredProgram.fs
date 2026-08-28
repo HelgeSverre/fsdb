@@ -11,6 +11,7 @@ type Declaration =
 
 type Statement =
     | Sql of Ast.Statement
+    | TextSql of string
     | If of condition: Expr * whenTrue: Statement list * whenFalse: Statement list
     | Declare of Declaration
     | SetLocal of name: string * value: Expr
@@ -25,9 +26,15 @@ type Parameter =
       ColumnType: ColumnType
       Mode: ParameterMode }
 
+type ValidationError =
+    | DuplicateParameter of name: string
+    | DuplicateVariable of name: string
+    | UnknownVariable of name: string
+
 let rec sqlStatements =
     function
     | Sql statement -> [ statement ]
+    | TextSql _ -> []
     | If(_, whenTrue, whenFalse) ->
         (whenTrue @ whenFalse) |> List.collect sqlStatements
     | Declare _
@@ -35,7 +42,8 @@ let rec sqlStatements =
 
 let rec expressions =
     function
-    | Sql _ -> []
+    | Sql _
+    | TextSql _ -> []
     | If(condition, whenTrue, whenFalse) ->
         condition :: ((whenTrue @ whenFalse) |> List.collect expressions)
     | Declare declaration -> Option.toList declaration.InitialValue
@@ -206,7 +214,18 @@ let parseParameters (options: Parser.ParserOptions) (text: string) : Result<Para
     else
         Parser.splitTopLevelCommaSeparatedWithOptions options text |> traverse parseOne
 
-let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
+let parseArguments (options: Parser.ParserOptions) (text: string) : Result<Expr list, string> =
+    if String.IsNullOrWhiteSpace text then
+        Ok []
+    else
+        Parser.splitTopLevelCommaSeparatedWithOptions options text
+        |> traverse (Parser.parseExpressionWithOptions options)
+
+let private parseWithFallback
+    (options: Parser.ParserOptions)
+    (isSupportedText: string -> bool)
+    (body: string)
+    : Result<Statement list, string> =
     let compound = compoundPattern.Match body
 
     if compound.Success then
@@ -288,9 +307,51 @@ let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list
                 Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
                 |> Result.map (fun value -> SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))
             else
-                Parser.parseWithOptions options text |> Result.map Sql
+                match Parser.parseStoredStatementWithOptions options text with
+                | Ok statement -> Ok(Sql statement)
+                | Error _ when isSupportedText text -> Ok(TextSql text)
+                | Error error -> Error error
 
         parseStatements 0 Set.empty []
         |> Result.bind (fun (statements, _, _) -> if statements.IsEmpty then Error "Body cannot be empty" else Ok statements)
     else
-        Parser.parseWithOptions options body |> Result.map (Sql >> List.singleton)
+        match Parser.parseStoredStatementWithOptions options body with
+        | Ok statement -> Ok [ Sql statement ]
+        | Error _
+            when not (body.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase))
+                 && isSupportedText body ->
+            Ok [ TextSql body ]
+        | Error error -> Error error
+
+let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
+    parseWithFallback options (fun _ -> false) body
+
+let parseRoutine (options: Parser.ParserOptions) isSupportedText body =
+    parseWithFallback options isSupportedText body
+
+let validate (parameters: Parameter list) (statements: Statement list) : Result<unit, ValidationError> =
+    let rec addParameters names =
+        function
+        | [] -> Ok names
+        | parameter :: rest when Set.contains parameter.Name names -> Error(DuplicateParameter parameter.Name)
+        | parameter :: rest -> addParameters (Set.add parameter.Name names) rest
+
+    let rec validateStatements names =
+        function
+        | [] -> Ok names
+        | Sql _ :: rest
+        | TextSql _ :: rest -> validateStatements names rest
+        | Declare declaration :: _ when Set.contains declaration.Name names ->
+            Error(DuplicateVariable declaration.Name)
+        | Declare declaration :: rest ->
+            validateStatements (Set.add declaration.Name names) rest
+        | SetLocal(name, _) :: _ when not (Set.contains name names) -> Error(UnknownVariable name)
+        | SetLocal _ :: rest -> validateStatements names rest
+        | If(_, whenTrue, whenFalse) :: rest ->
+            validateStatements names whenTrue
+            |> Result.bind (fun _ -> validateStatements names whenFalse)
+            |> Result.bind (fun _ -> validateStatements names rest)
+
+    addParameters Set.empty parameters
+    |> Result.bind (fun names -> validateStatements names statements)
+    |> Result.map ignore

@@ -534,6 +534,16 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "integer columns round fractional numeric inputs away from zero"
+                <| fun _ ->
+                    let signed = col "signed_value" (TInt false) true
+                    let unsigned = col "unsigned_value" (TBigInt true) true
+
+                    Expect.equal (coerceValue true signed (VDecimal 2.5m)) (Ok(VInt 3L)) "positive decimal"
+                    Expect.equal (coerceValue true signed (VDouble -2.5)) (Ok(VInt -3L)) "negative double"
+                    Expect.equal (coerceValue true signed (VString "4.5")) (Ok(VInt 5L)) "numeric string"
+                    Expect.equal (coerceValue true unsigned (VDecimal 6.5m)) (Ok(VUInt 7UL)) "unsigned decimal"
+
                 testCase "a non-numeric string into an INT column returns error 1366"
                 <| fun _ ->
                     let store = withUsersTable ()

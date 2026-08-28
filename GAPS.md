@@ -40,7 +40,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
-| Routines & events | Single-statement procedure declarations, zero-parameter execution, and one-time event declarations | Parameterized and compound stored programs plus event scheduling |
+| Routines & events | Typed IN/OUT/INOUT procedures with compound DECLARE/SET/IF bodies, multi-result CALL, and one-time event declarations | Stored functions, cursors, handlers, loops, and event scheduling |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, and multi-result batches | No session-state tracking |
 | Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
@@ -313,19 +313,20 @@ trigger is created.
 
 ## 10. Stored routines, events, schedulers
 
-Working: procedure declarations retain an optional simple `IN` parameter,
-`SQL SECURITY`, and one parsed statement body, optionally wrapped in
-`BEGIN…END`. Zero-parameter procedures support CREATE/DROP/CALL, SHOW CREATE
-PROCEDURE, SHOW PROCEDURE STATUS, and persisted ROUTINES metadata. DEFINER
-and INVOKER bodies use the corresponding account, routine schema, and captured
-SQL mode, client charset, and connection collation. One-time
+Working: procedures support typed `IN`, `OUT`, and `INOUT` parameters,
+`DECLARE`/`SET`, nested `IF`/`ELSEIF`/`ELSE`, sequential SQL statements,
+routine variables in expressions and `LIMIT`, and multiple resultsets with
+the protocol's final OK result. CREATE/DROP/CALL, SHOW CREATE PROCEDURE, SHOW
+PROCEDURE STATUS, and persisted ROUTINES metadata are covered. DEFINER and
+INVOKER bodies use the corresponding account, routine schema, and captured SQL
+mode, client charset, and connection collation. One-time
 and recurring event declarations support CREATE/DROP, SHOW
 CREATE EVENT, SHOW EVENTS, and persisted EVENTS metadata. CREATE ROUTINE,
 ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Routine language | parameters, functions, compound bodies, local variables, handlers, cursors, control flow, dynamic SQL | one simple `IN` parameter is retained for introspection, but only zero-parameter procedures execute; bodies contain one statement directly or inside `BEGIN…END` | medium | refusal |
+| Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, and dynamic SQL | typed procedure parameters, local variables, nested IF branches, sequential statements, and multi-result CALL are covered; stored functions, handlers, cursors, loops, CASE, SIGNAL/RESIGNAL, and dynamic SQL remain absent | medium | refusal |
 | Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and schedule metadata persist, but no event is scheduled or executed | medium | refusal |
 | Event alteration | ALTER EVENT schedule/status/body/rename | absent | low | refusal |
 
@@ -443,8 +444,8 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | The corpus grew from 62 to 70 MySQL-accepted baselines. A native MySQL 8.4.11 rerun passed 64 and reproduced exactly the six intentional findings: procedure parameters/bodies, account requirements, READ UNCOMMITTED, and partition selection/maintenance. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-25 |
-| Depth-three syntax stress | Three 10,000-mutation seeds plus 70 baselines produced no crash, timeout, protocol fault, or invariant failure. The 97–117 differences per seed cluster in the six declared feature gaps and executable-comment/error-contract edges. Fuzz-found incomplete procedure blocks and reserved row, partition, and window-function aliases now reject with 1064 | compatibility differences retained; parser fixes verified 2026-08-27 |
+| Executable gap baselines | The 76-case corpus passes 72 cases against native MySQL 8.4.11. Typed/compound procedures and CALL now match; the four intentional findings are account requirements, READ UNCOMMITTED, and partition selection/maintenance. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-28 |
+| Depth-three syntax stress | Three 10,000-mutation seeds over the earlier corpus produced no crash, timeout, protocol fault, or invariant failure. The current baseline-only rerun closes both procedure differences; remaining differences cluster in the four declared feature gaps and executable-comment/error-contract edges. Fuzz-found incomplete procedure blocks and reserved row, partition, and window-function aliases reject with 1064 | compatibility differences retained; procedure baselines verified 2026-08-28 |
 | Same-row transaction contention | The original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts. Row-delta publication removed whole-table copy/reindex work. A 64x200 campaign then completed all 12,800 prepared transactions with exact parity and zero failures. After unique-key claims landed, a separate 32x100 hot-account campaign matched all 3,200 MySQL outcomes with zero failures; fsdb reached 267 tx/s at p99 373 ms versus MySQL's 132 tx/s at p99 871 ms on the same host | correctness resolved; constant-factor and higher-contention performance open |
 | Multi-database scaling | Single-capture snapshots, deferred transaction catalogs, and per-database lock namespaces prevent cross-database conflicts. A 12-database, 19,200-transaction campaign preserved every database independently with no cross-database bleed; wall time was 0.38x the serial projection against a 0.80 ceiling | correctness and scaling threshold resolved 2026-08-27 |
 | Crash/restart durability | Concurrent two-table transactions were interrupted by 80 forced process crashes across four 16-worker campaigns. Recovery retained every acknowledged commit, exposed no partial transaction, invented no row, and preserved identical state through graceful snapshot restarts; the latest 20-restart campaign retained all 1,939 acknowledged operations and resolved 320 ambiguous operations consistently | resolved 2026-08-27; broader snapshot-rotation volume remains useful stress coverage |
@@ -506,8 +507,9 @@ implementation effort:
    DELETE statements wait and rebase, but deadlock victim selection, dirty
    reads, and the remaining transaction write shapes are not implemented.
 3. Complex join-derived updatable views and the remaining stored-program control
-   language inside trigger bodies. Ordered multi-trigger slots, local values,
-   nested conditional branches, and sequential compound DML bodies are covered.
+   language. Procedures and triggers cover typed locals, nested conditional
+   branches, and sequential statements; loops, handlers, cursors, CASE, SIGNAL,
+   and dynamic SQL remain absent.
 4. Spatial indexes, overlay/buffer operations, and geographic SRS behavior.
    The common planar topology family includes equality and convex hull.
 5. Replication, logging, broad engine counters, and the remaining metadata

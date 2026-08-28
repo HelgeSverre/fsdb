@@ -200,6 +200,53 @@ let tests =
                   Expect.equal (second.ReadInt16LE() &&& StatusMoreResultsExists) 0 "last result clears MORE_RESULTS" }
               |> Async.RunSynchronously
 
+          testCase "procedure result collections carry MORE_RESULTS through the final OK"
+          <| fun _ ->
+              async {
+                  use stream = new IO.MemoryStream()
+                  let capabilities = ClientProtocol41 ||| ClientDeprecateEof
+
+                  let result =
+                      MultipleResults
+                          [ ResultSet([ "first" ], [ [ Some "1" ] ]), []
+                            ResultSet([ "second" ], [ [ Some "2" ] ]), []
+                            Affected 0UL, [] ]
+
+                  let! _ =
+                      Fsdb.Server.sendQueryResultAndNextSeq
+                          stream
+                          capabilities
+                          1uy
+                          StatusAutocommit
+                          0UL
+                          0
+                          []
+                          result
+
+                  stream.Position <- 0L
+                  let! packets = readAllPackets stream
+                  Expect.sequenceEqual (packets |> List.map _.SeqId) [ 1uy .. byte packets.Length ] "sequence ids"
+
+                  let statuses =
+                      packets
+                      |> List.choose (fun packet ->
+                          if
+                              packet.Payload.Length > 0
+                              && (packet.Payload.[0] = 0uy || packet.Payload.[0] = 0xfeuy)
+                          then
+                              let reader = Reader(packet.Payload.[1..])
+                              reader.ReadLenEncInt() |> ignore
+                              reader.ReadLenEncInt() |> ignore
+                              Some(reader.ReadInt16LE())
+                          else
+                              None)
+
+                  Expect.equal statuses.Length 3 "two result terminators and one final OK"
+                  Expect.all (statuses |> List.take 2) (fun status -> status &&& StatusMoreResultsExists <> 0) "non-final results"
+                  Expect.equal (statuses.[2] &&& StatusMoreResultsExists) 0 "final result"
+              }
+              |> Async.RunSynchronously
+
           // Synchronous packet faults must retain their protocol exception type.
           testCase "readPacketWithTimeoutMs surfaces PacketTooLargeException unwrapped, not as AggregateException"
           <| fun _ ->

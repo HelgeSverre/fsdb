@@ -69,6 +69,22 @@ let private completeResultMetadata (session: Session) (result: QueryResult) (met
                 CollationId = collationId }
     | _ -> metadata
 
+type private TerminalResult =
+    | TerminalAffected of uint64
+    | TerminalResultSet of string option list list
+    | TerminalError of int * string
+
+let rec private terminalResult =
+    function
+    | MultipleResults results ->
+        results
+        |> List.tryLast
+        |> Option.map (fst >> terminalResult)
+        |> Option.defaultValue (TerminalAffected 0UL)
+    | Affected count -> TerminalAffected count
+    | ResultSet(_, rows) -> TerminalResultSet rows
+    | Err(code, message) -> TerminalError(code, message)
+
 /// Finds every top-level `?` placeholder in `sql` — one that isn't inside a
 /// `'...'`/`"..."` string literal, a `` `...` `` backtick identifier, or a
 /// `-- `/`#`/`/* ... */` comment — and returns its char offset, in order.
@@ -2870,24 +2886,216 @@ let private tryTextRoutineCommand (sql: string) =
     else
         None
 
-let private routineParameterRe =
-    Regex(
-        @"^\s*(?:IN\s+)?(?:`(?:``|[^`])+`|[A-Za-z_$][A-Za-z0-9_$]*)\s+[A-Za-z]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?(?:\s+UNSIGNED)?\s*$",
-        RegexOptions.IgnoreCase
-    )
+let private routineValidationError =
+    function
+    | StoredProgram.DuplicateParameter name -> Err(1330, sprintf "Duplicate parameter: %s" name)
+    | StoredProgram.DuplicateVariable name -> Err(1331, sprintf "Duplicate variable: %s" name)
+    | StoredProgram.UnknownVariable name -> Err(1193, sprintf "Unknown system variable '%s'" name)
 
-let private routineStatement (body: string) =
-    let trimmed = body.Trim()
+let private parseRoutineDefinition options parameters body =
+    let isSupportedText sql =
+        tryProbe sql (sql.TrimStart().ToUpperInvariant()) |> Option.isSome
 
-    if trimmed.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase) then
-        if trimmed.EndsWith("END", StringComparison.OrdinalIgnoreCase) then
-            let statement = trimmed.Substring(5, trimmed.Length - 8).Trim().TrimEnd(';').Trim()
+    match StoredProgram.parseParameters options parameters, StoredProgram.parseRoutine options isSupportedText body with
+    | Ok parsedParameters, Ok statements ->
+        StoredProgram.validate parsedParameters statements
+        |> Result.mapError routineValidationError
+        |> Result.map (fun () -> parsedParameters, statements)
+    | Error _, _ -> Error(syntaxError parameters)
+    | _, Error _ -> Error(syntaxError body)
 
-            if statement.Contains(';') then None else Some statement
-        else
-            None
-    else
-        Some trimmed
+let private routineColumn name columnType =
+    { Name = name
+      Type = columnType
+      Nullable = true
+      Default = None
+      AutoIncrement = false
+      PrimaryKey = false
+      Unique = false
+      OnUpdateCurrentTimestamp = false
+      Generated = None
+      Comment = ""
+      Collation = None
+      Charset = None }
+
+let private coerceRoutineValue (store: Store) column value =
+    Storage.coerceValue store.ExecutionSettings.SqlMode.Strict column value
+    |> Result.mapError (Storage.toMySqlError >> Err)
+
+let private evaluateRoutineExpression (session: Session) expression =
+    let variables = expressionVariables session
+    let store = Session.currentStore session
+    let database = session.Database |> Option.defaultValue defaultDatabase
+
+    let result =
+        Executor.withVariableContext variables (fun () ->
+            Executor.evaluateExpression store (registryFor session) database expression)
+
+    { session with UserVariables = variables.UserVariables.Value }, result
+
+let private bindRoutineArguments
+    database
+    name
+    (session: Session)
+    (parameters: StoredProgram.Parameter list)
+    (arguments: Expr list)
+    =
+    let rec loop
+        current
+        index
+        (values: (StoredProgram.Parameter * Value) list)
+        (outputs: (StoredProgram.Parameter * UserVariableRef) list)
+        (parameters: StoredProgram.Parameter list)
+        (arguments: Expr list)
+        =
+        match parameters, arguments with
+        | [], [] -> Ok(current, List.rev values, List.rev outputs)
+        | parameter :: parameterRest, argument :: argumentRest ->
+            match parameter.Mode with
+            | StoredProgram.In ->
+                let next, evaluated = evaluateRoutineExpression current argument
+
+                evaluated
+                |> Result.bind (fun value ->
+                    loop next (index + 1) ((parameter, value) :: values) outputs parameterRest argumentRest)
+            | StoredProgram.Out
+            | StoredProgram.InOut ->
+                match argument with
+                | UserVariable target ->
+                    match UserVariableRef.validationError target with
+                    | Some message -> Error(Err(3061, message))
+                    | None ->
+                        let value =
+                            if parameter.Mode = StoredProgram.Out then
+                                VNull
+                            else
+                                current.UserVariables |> Map.tryFind target.Name |> Option.defaultValue VNull
+
+                        loop
+                            current
+                            (index + 1)
+                            ((parameter, value) :: values)
+                            ((parameter, target) :: outputs)
+                            parameterRest
+                            argumentRest
+                | _ ->
+                    Error(
+                        Err(
+                            1414,
+                            sprintf
+                                "OUT or INOUT argument %d for routine %s.%s is not a variable or NEW pseudo-variable in BEFORE trigger"
+                                index
+                                database
+                                name
+                        )
+                    )
+        | _ -> Error(Err(1318, sprintf "Incorrect number of arguments for PROCEDURE %s.%s" database name))
+
+    loop session 1 [] [] parameters arguments
+
+let private applyRoutineOutputs variables outputs =
+    outputs
+    |> List.fold
+        (fun state (name, value) ->
+            state
+            |> Result.bind (fun current ->
+                if Map.containsKey name current || current.Count < maxUserVariables then
+                    Ok(Map.add name value current)
+                else
+                    Error(Err(1105, "Too many user-defined variables"))))
+        (Ok variables)
+
+type private RoutineRun =
+    { Session: Session
+      Locals: Map<string, Executor.RoutineVariable>
+      Results: (QueryResult * ColumnMetadata list) list
+      AffectedRows: uint64
+      Error: QueryResult option }
+
+let private runRoutineStatements
+    (store: Store)
+    (executeSql: Session -> Ast.Statement -> Session * QueryResult)
+    (executeText: Session -> string -> Session * QueryResult)
+    (initial: Session)
+    (initialLocals: Map<string, Executor.RoutineVariable>)
+    (statements: StoredProgram.Statement list)
+    =
+    let evaluate locals current expression =
+        Executor.withRoutineVariables locals (fun () -> evaluateRoutineExpression current expression)
+
+    let failed session locals results affectedRows error =
+        { Session = session
+          Locals = locals
+          Results = List.rev results
+          AffectedRows = affectedRows
+          Error = Some error }
+
+    let rec run current locals results affectedRows =
+        function
+        | [] ->
+            { Session = current
+              Locals = locals
+              Results = List.rev results
+              AffectedRows = affectedRows
+              Error = None }
+        | statement :: rest ->
+            match statement with
+            | StoredProgram.Sql sql ->
+                Executor.withRoutineVariables locals (fun () -> executeSql current sql)
+                ||> continueAfterSql locals results affectedRows rest
+            | StoredProgram.TextSql sql ->
+                Executor.withRoutineVariables locals (fun () -> executeText current sql)
+                ||> continueAfterSql locals results affectedRows rest
+            | StoredProgram.Declare declaration ->
+                let next, evaluated =
+                    match declaration.InitialValue with
+                    | Some expression -> evaluate locals current expression
+                    | None -> current, Ok VNull
+
+                let column = routineColumn declaration.Name declaration.ColumnType
+
+                match evaluated |> Result.bind (coerceRoutineValue store column) with
+                | Error error -> failed next locals results affectedRows error
+                | Ok value ->
+                    let locals =
+                        Map.add declaration.Name { Executor.RoutineVariable.Column = column; Value = value } locals
+
+                    run next locals results affectedRows rest
+            | StoredProgram.SetLocal(localName, expression) ->
+                match Map.tryFind localName locals with
+                | None -> failed current locals results affectedRows (Err(1193, sprintf "Unknown system variable '%s'" localName))
+                | Some local ->
+                    let next, evaluated = evaluate locals current expression
+
+                    match evaluated |> Result.bind (coerceRoutineValue store local.Column) with
+                    | Error error -> failed next locals results affectedRows error
+                    | Ok value ->
+                        let locals = Map.add localName { local with Value = value } locals
+                        run next locals results affectedRows rest
+            | StoredProgram.If(condition, whenTrue, whenFalse) ->
+                let next, evaluated = evaluate locals current condition
+
+                match evaluated with
+                | Error error -> failed next locals results affectedRows error
+                | Ok value ->
+                    let branch = if Value.truthy value = Some true then whenTrue else whenFalse
+                    let branchRun = run next locals [] 0UL branch
+                    let results = List.rev branchRun.Results @ results
+                    let affectedRows = affectedRows + branchRun.AffectedRows
+
+                    match branchRun.Error with
+                    | Some error -> failed branchRun.Session branchRun.Locals results affectedRows error
+                    | None -> run branchRun.Session branchRun.Locals results affectedRows rest
+
+    and continueAfterSql locals results affectedRows rest next result =
+        match result with
+        | Err _ -> failed next locals results affectedRows result
+        | ResultSet _ -> run next locals ((result, next.LastResultColumnMetadata) :: results) affectedRows rest
+        | Affected count -> run next locals results (affectedRows + count) rest
+        | MultipleResults _ ->
+            failed next locals results affectedRows (Err(1105, "Nested routine result collections are not supported"))
+
+    run initial initialLocals [] 0UL statements
 
 let private routineExecutionSettings (routine: SystemCatalog.Routine.Entry) : ExecutionSettings =
     { SqlModeText = routine.SqlMode
@@ -3063,21 +3271,12 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
                 Err(1227, "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation")
             | Ok() when routineEntries () |> List.exists (SystemCatalog.Routine.matches database name) ->
                 session, Err(1304, sprintf "PROCEDURE %s already exists" name)
-            | Ok() when parameters <> "" && not (routineParameterRe.IsMatch parameters) -> session, syntaxError parameters
             | Ok() ->
-                let statement = routineStatement body
-                let invalidBody =
-                    match statement with
-                    | None -> true
-                    | Some _ when parameters <> "" -> false
-                    | Some sql ->
-                        let upper = sql.ToUpperInvariant()
-                        let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
-                        Parser.parseWithOptions options sql |> Result.isError && tryProbe sql upper |> Option.isNone
+                let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
 
-                if invalidBody then
-                    session, syntaxError body
-                else
+                match parseRoutineDefinition options parameters body with
+                | Error error -> session, error
+                | Ok _ ->
                     if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
                         Diagnostics.note
                             1449
@@ -3116,52 +3315,118 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             | Some routine ->
                 match authorize "EXECUTE" database with
                 | Error(code, message) -> session, Err(code, message)
-                | Ok() when routine.Parameters <> "" ->
-                    session, Err(1235, "Executing parameterized stored procedures is not supported")
-                | Ok() when arguments <> "" ->
-                    session, Err(1318, sprintf "Incorrect number of arguments for PROCEDURE %s; expected 0" name)
                 | Ok() ->
-                    let executionAccount =
-                        if routine.SecurityType.Equals("INVOKER", StringComparison.OrdinalIgnoreCase) then
-                            Ok(accountOf session)
-                        else
-                            match Auth.tryParseAccount routine.Definer with
-                            | Some account when Auth.tryUserRowForAccount session.Store account |> Option.isSome -> Ok account
-                            | _ -> Error(Err(1449, sprintf "The user specified as a definer ('%s') does not exist" routine.Definer))
+                    let callerOptions = parserOptionsForSession session
+                    let routineOptions = SqlMode.parserOptionsFor routine.SqlMode
 
-                    match executionAccount, routineStatement routine.Definition with
+                    match
+                        parseRoutineDefinition routineOptions routine.Parameters routine.Definition,
+                        StoredProgram.parseArguments callerOptions arguments
+                    with
                     | Error error, _ -> session, error
-                    | _, None -> session, Err(1235, "Compound stored procedure bodies are not supported")
-                    | Ok account, Some statement ->
-                        let executionStore = Session.currentStore session
-                        let originalSettings = Storage.executionSettings executionStore
-                        let capturedSettings = routineExecutionSettings routine
-                        let executionSession =
-                            { session with
-                                User = account.Name
-                                AccountHost = account.Host
-                                Database = Some routine.Schema
-                                Variables = routineVariables routine session.Variables }
+                    | _, Error _ -> session, syntaxError arguments
+                    | Ok(parameters, statements), Ok callArguments when parameters.Length <> callArguments.Length ->
+                        session,
+                        Err(
+                            1318,
+                            sprintf
+                                "Incorrect number of arguments for PROCEDURE %s.%s; expected %d, got %d"
+                                database
+                                name
+                                parameters.Length
+                                callArguments.Length
+                        )
+                    | Ok(parameters, statements), Ok callArguments ->
+                        let executionAccount =
+                            if routine.SecurityType.Equals("INVOKER", StringComparison.OrdinalIgnoreCase) then
+                                Ok(accountOf session)
+                            else
+                                match Auth.tryParseAccount routine.Definer with
+                                | Some account when Auth.tryUserRowForAccount session.Store account |> Option.isSome -> Ok account
+                                | _ -> Error(Err(1449, sprintf "The user specified as a definer ('%s') does not exist" routine.Definer))
 
-                        let mutable resultingSettings = capturedSettings
+                        match executionAccount, bindRoutineArguments database name session parameters callArguments with
+                        | Error error, _
+                        | _, Error error -> session, error
+                        | Ok account, Ok(callerSession, parameterValues, outputs) ->
+                            let executionStore = Session.currentStore callerSession
+                            let originalSettings = Storage.executionSettings executionStore
+                            let capturedSettings = routineExecutionSettings routine
+                            let executionSession =
+                                { callerSession with
+                                    User = account.Name
+                                    AccountHost = account.Host
+                                    Database = Some routine.Schema
+                                    Variables = routineVariables routine callerSession.Variables }
 
-                        let (executed, result), changed =
-                            Storage.withExecutionSettings executionStore capturedSettings (fun () ->
-                                let outcome, changed =
-                                    captureRoutineVariableChanges (fun () -> dispatch executionSession statement)
+                            let mutable resultingSettings = capturedSettings
 
-                                resultingSettings <- Storage.executionSettings executionStore
-                                outcome, changed)
+                            let executeBody () =
+                                let initializeVariable ((parameter: StoredProgram.Parameter), value) =
+                                    let column = routineColumn parameter.Name parameter.ColumnType
 
-                        mergeRoutineExecutionSettings originalSettings changed resultingSettings
-                        |> Storage.setExecutionSettings executionStore
+                                    coerceRoutineValue executionStore column value
+                                    |> Result.map (fun value -> parameter.Name, { Executor.RoutineVariable.Column = column; Value = value })
 
-                        { executed with
-                            User = session.User
-                            AccountHost = session.AccountHost
-                            Database = session.Database
-                            Variables = restoreRoutineVariables session.Variables changed executed.Variables },
-                        result
+                                match parameterValues |> traverse initializeVariable with
+                                | Error error -> executionSession, error
+                                | Ok initialized ->
+                                    let locals = Map.ofList initialized
+
+                                    let run =
+                                        runRoutineStatements
+                                            executionStore
+                                            executeParsed
+                                            dispatch
+                                            executionSession
+                                            locals
+                                            statements
+
+                                    let executed = run.Session
+                                    let results = run.Results
+                                    let affectedRows = run.AffectedRows
+
+                                    let outputValues =
+                                        outputs
+                                        |> List.choose (fun (parameter, target) ->
+                                            run.Locals
+                                            |> Map.tryFind parameter.Name
+                                            |> Option.map (fun local -> target.Name, local.Value))
+
+                                    let updatedVariables =
+                                        match run.Error with
+                                        | Some error -> Error error
+                                        | None -> applyRoutineOutputs executed.UserVariables outputValues
+
+                                    let result =
+                                        match results, updatedVariables with
+                                        | [], Error error -> error
+                                        | results, Error error -> MultipleResults(results @ [ error, [] ])
+                                        | [], Ok _ -> Affected affectedRows
+                                        | results, Ok _ -> MultipleResults(results @ [ Affected affectedRows, [] ])
+
+                                    let executed =
+                                        match updatedVariables with
+                                        | Error _ -> executed
+                                        | Ok variables -> { executed with UserVariables = variables }
+
+                                    executed, result
+
+                            let (executed, result), changed =
+                                Storage.withExecutionSettings executionStore capturedSettings (fun () ->
+                                    let outcome, changed = captureRoutineVariableChanges executeBody
+                                    resultingSettings <- Storage.executionSettings executionStore
+                                    outcome, changed)
+
+                            mergeRoutineExecutionSettings originalSettings changed resultingSettings
+                            |> Storage.setExecutionSettings executionStore
+
+                            { executed with
+                                User = session.User
+                                AccountHost = session.AccountHost
+                                Database = session.Database
+                                Variables = restoreRoutineVariables session.Variables changed executed.Variables },
+                            result
         | DropProcedure(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)
@@ -3268,18 +3533,18 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
 /// optimistic commit conflict; both are retryable 1205 errors.
 let private recordResult ((session, result): Session * QueryResult) : Session * QueryResult =
     let session =
-        match result with
-        | Affected count ->
+        match terminalResult result with
+        | TerminalAffected count ->
             { session with
                 LastRowCount = int64 count
                 FoundRows = 0UL
                 PendingFoundRows = None }
-        | ResultSet(_, rows) ->
+        | TerminalResultSet rows ->
             { session with
                 LastRowCount = -1L
                 FoundRows = session.PendingFoundRows |> Option.defaultValue (uint64 rows.Length)
                 PendingFoundRows = None }
-        | Err _ -> { session with LastRowCount = -1L; PendingFoundRows = None }
+        | TerminalError _ -> { session with LastRowCount = -1L; PendingFoundRows = None }
 
     session, result
 
@@ -3330,8 +3595,9 @@ let private recordDiagnostics
     let (session, result), generated = Diagnostics.capture execute
 
     let generated =
-        match result with
-        | Err(code, message) -> generated @ [ { Diagnostics.Level = Diagnostics.Error; Code = code; Message = message } ]
+        match terminalResult result with
+        | TerminalError(code, message) ->
+            generated @ [ { Diagnostics.Level = Diagnostics.Error; Code = code; Message = message } ]
         | _ -> generated
 
     let session = if preserve then session else { session with Diagnostics = generated }
@@ -3340,11 +3606,13 @@ let private recordDiagnostics
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     recordDiagnostics session (preservesDiagnostics rawSql) (fun () ->
         try
-            match dispatch session rawSql with
-            | _, Err(code, msg) as result ->
+            let result = dispatch session rawSql
+
+            match terminalResult (snd result) with
+            | TerminalError(code, msg) ->
                 Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
                 result
-            | result -> result
+            | _ -> result
         with
         | :? OperationCanceledException ->
             abortTransaction session |> ignore

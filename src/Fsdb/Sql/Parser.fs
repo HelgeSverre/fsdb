@@ -112,6 +112,7 @@ let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: strin
     List.ofSeq parts
 
 let private currentOptions = System.Threading.AsyncLocal<ParserOptions>()
+let private storedProgramSyntax = System.Threading.AsyncLocal<bool>()
 
 let private whenOption
     (enabled: ParserOptions -> bool)
@@ -2866,11 +2867,21 @@ let private orderKey: Parser<OrderKey, unit> =
     (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc)))
     |>> fun (e, dir) -> (e, dir |> Option.defaultValue Asc)
 
-/// LIMIT/OFFSET literals and prepared-statement markers remain expressions
-/// until binding. Literal counts are clamped to the engine's in-memory row
-/// ceiling while preserving MySQL's unsigned 64-bit syntax.
+/// LIMIT/OFFSET values remain expressions until binding. Ordinary statements
+/// accept literals and prepared-statement markers; stored programs also accept
+/// local variables. Literal counts are clamped to the in-memory row ceiling
+/// while preserving MySQL's unsigned 64-bit syntax.
 let private limitTok: Parser<Expr, unit> =
-    (puint64 .>> ws |>> fun n -> Lit(VInt(int64 (min n (uint64 Int32.MaxValue))))) <|> placeholderAtom
+    let localVariable =
+        fun stream ->
+            if storedProgramSyntax.Value then
+                (identifier |>> Col) stream
+            else
+                (fail "stored program variable") stream
+
+    (puint64 .>> ws |>> fun n -> Lit(VInt(int64 (min n (uint64 Int32.MaxValue)))))
+    <|> placeholderAtom
+    <|> localVariable
 
 /// `LIMIT n`, `LIMIT n OFFSET m`, and the MySQL-specific `LIMIT m, n` (which
 /// means offset `m`, count `n` — the arguments are in the opposite order
@@ -3974,6 +3985,9 @@ let private withParserState (options: ParserOptions) (sql: string) parse =
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     let full = ws >>. statement .>> opt (sym ";") .>> eof
     withParserState options sql (runWithDepthLimit full)
+
+let parseStoredStatementWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
+    DynamicScope.withValue storedProgramSyntax true (fun () -> parseWithOptions options sql)
 
 let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
     parseWithOptions { defaultOptions with AnsiQuotes = enabled } sql

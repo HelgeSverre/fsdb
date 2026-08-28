@@ -2566,8 +2566,8 @@ let tests =
                     let store = newStore ()
 
                     match runDefault store "SELECT CAST('42' AS UNSIGNED), CAST(3.9 AS SIGNED)" with
-                    | ResultSet(_, [ [ Some "42"; Some "3" ] ]) -> ()
-                    | other -> failtestf "expected 42/3, got %A" other
+                    | ResultSet(_, [ [ Some "42"; Some "4" ] ]) -> ()
+                    | other -> failtestf "expected 42/4, got %A" other
 
                 testCase "CAST(x AS CHAR) stringifies"
                 <| fun _ ->

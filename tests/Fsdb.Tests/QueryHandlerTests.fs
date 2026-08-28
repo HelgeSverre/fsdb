@@ -10,6 +10,11 @@ open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
+let private (|ProcedureResult|_|) =
+    function
+    | MultipleResults [ (ResultSet(columns, rows), _); (Affected _, []) ] -> Some(columns, rows)
+    | _ -> None
+
 let tests =
     testList
         "QueryHandler"
@@ -1601,7 +1606,7 @@ let tests =
               Expect.equal result (Affected 0UL) "created"
 
               match handle session "CALL answer()" with
-              | session, ResultSet([ "value" ], [ [ Some "42" ] ]) ->
+              | session, ProcedureResult([ "value" ], [ [ Some "42" ] ]) ->
                   match handle session "SHOW PROCEDURE STATUS" |> snd with
                   | ResultSet(_, [ row ]) ->
                       Expect.equal row.[0] (Some "fsdb") "routine schema"
@@ -1628,6 +1633,11 @@ let tests =
           testCase "procedure declarations preserve one parameter and SQL SECURITY"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT 10 LIMIT num" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected routine-only LIMIT variables, got %A" other
+
               let session, result =
                   handle session "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT 10 LIMIT num; END"
 
@@ -1639,8 +1649,8 @@ let tests =
               | other -> failtestf "expected parameterized procedure metadata, got %A" other
 
               match handle session "CALL topics(1)" |> snd with
-              | Err(1235, _) -> ()
-              | other -> failtestf "expected explicit parameterized execution refusal, got %A" other
+              | ProcedureResult([ "10" ], [ [ Some "10" ] ]) -> ()
+              | other -> failtestf "expected parameterized procedure result, got %A" other
 
           testCase "single-statement procedure blocks persist and execute"
           <| fun _ ->
@@ -1655,12 +1665,84 @@ let tests =
               Expect.equal result (Affected 0UL) "created"
 
               match handle session "CALL first_post()" |> snd with
-              | ResultSet([ "id" ], [ [ Some "42" ] ]) -> ()
+              | ProcedureResult([ "id" ], [ [ Some "42" ] ]) -> ()
               | other -> failtestf "expected procedure result, got %A" other
 
               match handle session "CALL `first_post`" |> snd with
-              | ResultSet([ "id" ], [ [ Some "42" ] ]) -> ()
+              | ProcedureResult([ "id" ], [ [ Some "42" ] ]) -> ()
               | other -> failtestf "expected unparenthesized procedure result, got %A" other
+
+          testCase "parameterized compound procedures execute typed locals and multiple resultsets"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE routine_log (n INT)"
+
+              let definition =
+                  "CREATE PROCEDURE calculate(IN n INT, IN label VARCHAR(10)) BEGIN DECLARE x INT DEFAULT n + 1; SELECT n, label, x; IF n > 1 THEN SET x = x + 10; INSERT INTO routine_log VALUES (x); ELSEIF n = 1 THEN INSERT INTO routine_log VALUES (100); ELSE INSERT INTO routine_log VALUES (0); END IF; SELECT x AS final_x; END"
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created"
+
+              match handle session "CALL calculate(2.7, 12345)" with
+              | session,
+                MultipleResults
+                    [ (ResultSet([ "n"; "label"; "x" ], [ [ Some "3"; Some "12345"; Some "4" ] ]), firstMetadata)
+                      (ResultSet([ "final_x" ], [ [ Some "14" ] ]), finalMetadata)
+                      (Affected 1UL, []) ] ->
+                  Expect.equal firstMetadata.Length 3 "first result metadata"
+                  Expect.equal finalMetadata.Length 1 "second result metadata"
+
+                  match handle session "SELECT n FROM routine_log" |> snd with
+                  | ResultSet(_, [ [ Some "14" ] ]) -> ()
+                  | other -> failtestf "expected routine write, got %A" other
+              | _, other -> failtestf "expected compound routine results, got %A" other
+
+          testCase "OUT and INOUT procedure parameters write typed user variables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE PROCEDURE adjust(IN a INT, OUT b INT, INOUT c INT) BEGIN SELECT a, b, c; SET b = a + 1; SET c = c + a; END"
+
+              Expect.equal created (Affected 0UL) "created"
+              let session, _ = handle session "SET @b = 99, @c = 5"
+
+              match handle session "CALL adjust(3, @b, @c)" with
+              | session,
+                MultipleResults
+                    [ (ResultSet([ "a"; "b"; "c" ], [ [ Some "3"; None; Some "5" ] ]), _)
+                      (Affected 0UL, []) ] ->
+                  Expect.equal session.UserVariables.["b"] (VInt 4L) "OUT value"
+                  Expect.equal session.UserVariables.["c"] (VInt 8L) "INOUT value"
+              | _, other -> failtestf "expected OUT result, got %A" other
+
+              match handle session "CALL adjust(3, 4, @c)" |> snd with
+              | Err(1414, _) -> ()
+              | other -> failtestf "expected OUT target error, got %A" other
+
+              let fullVariables = seq { for index in 1..65536 -> sprintf "v%d" index, VInt(int64 index) } |> Map.ofSeq
+              let capped = { session with UserVariables = fullVariables }
+
+              match handle capped "CALL adjust(3, @overflow, @v1)" with
+              | unchanged, MultipleResults [ (ResultSet _, _); (Err(1105, "Too many user-defined variables"), []) ] ->
+                  Expect.equal unchanged.UserVariables fullVariables "failed OUT assignment is atomic"
+              | _, other -> failtestf "expected OUT variable cap error, got %A" other
+
+          testCase "procedure declarations validate argument counts and local targets"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created = handle session "CREATE PROCEDURE one(IN value INT) SELECT value"
+              Expect.equal created (Affected 0UL) "created"
+
+              match handle session "CALL one()" |> snd with
+              | Err(1318, message) -> Expect.stringContains message "expected 1" "argument count"
+              | other -> failtestf "expected argument-count error, got %A" other
+
+              match handle session "CREATE PROCEDURE invalid_local() BEGIN SET missing = 1; END" |> snd with
+              | Err(1193, message) -> Expect.stringContains message "missing" "local name"
+              | other -> failtestf "expected unknown-local error, got %A" other
 
           testCase "procedure SQL SECURITY selects the execution account"
           <| fun _ ->
@@ -1704,7 +1786,7 @@ let tests =
                       ClientHost = "localhost" }
 
               match handle caller "CALL definer_probe()" |> snd with
-              | ResultSet(_, [ [ Some "owner@%"; Some "caller@localhost"; Some "fsdb"; Some "9" ] ]) -> ()
+              | ProcedureResult(_, [ [ Some "owner@%"; Some "caller@localhost"; Some "fsdb"; Some "9" ] ]) -> ()
               | other -> failtestf "expected definer execution identity and privileges, got %A" other
 
               match handle root "SHOW CREATE PROCEDURE definer_probe" |> snd with
@@ -1713,7 +1795,7 @@ let tests =
               | other -> failtestf "expected explicit-definer DDL, got %A" other
 
               match handle caller "CALL invoker_probe()" |> snd with
-              | ResultSet(_, [ [ Some "caller@%"; Some "caller@localhost"; Some "fsdb" ] ]) -> ()
+              | ProcedureResult(_, [ [ Some "caller@%"; Some "caller@localhost"; Some "fsdb" ] ]) -> ()
               | other -> failtestf "expected invoker execution identity, got %A" other
 
               match handle caller "CALL invoker_secret()" |> snd with
@@ -1783,7 +1865,17 @@ let tests =
               let session = apply session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
 
               match handle session "CALL context_probe()" with
-              | next, ResultSet(_, [ [ Some ""; Some "latin1"; Some "latin1"; Some "utf8mb4"; Some "latin1_bin"; Some "fsdb"; Some "0" ] ]) ->
+              | next,
+                ProcedureResult(
+                    _,
+                    [ [ Some ""
+                        Some "latin1"
+                        Some "latin1"
+                        Some "utf8mb4"
+                        Some "latin1_bin"
+                        Some "fsdb"
+                        Some "0" ] ]
+                ) ->
                   match handle next "SELECT @@session.sql_mode, @@character_set_client, @@collation_connection" |> snd with
                   | ResultSet(_, [ [ Some "STRICT_TRANS_TABLES"; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci" ] ]) -> ()
                   | other -> failtestf "expected caller context restoration, got %A" other
@@ -1794,7 +1886,7 @@ let tests =
               Expect.equal (TestSupport.Sql.rows store "SELECT n FROM procedure_log") [ [ Some "0" ] ] "captured lax coercion"
 
               match handle session "CALL quoted_probe()" |> snd with
-              | ResultSet([ "n" ], [ [ Some "7" ] ]) -> ()
+              | ProcedureResult([ "n" ], [ [ Some "7" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES parsing from routine creation, got %A" other
 
               let session = apply session "CREATE PROCEDURE strict_insert() INSERT INTO procedure_log VALUES ('not an integer')"

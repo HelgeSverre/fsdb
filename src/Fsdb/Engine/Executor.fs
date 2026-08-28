@@ -19,6 +19,12 @@ type QueryResult =
     | ResultSet of columns: string list * rows: (string option list) list
     | Affected of affectedRows: uint64
     | Err of code: int * message: string
+    | MultipleResults of results: (QueryResult * ColumnMetadata list) list
+
+let private nestedResultsError context =
+    Err(1105, sprintf "Multiple resultsets are not valid in %s" context)
+
+let private nestedSubqueryResultsError = 1105, "Multiple resultsets are not valid in a subquery"
 
 /// An expression-evaluation failure: a MySQL error code and message, the
 /// same shape `Storage.toMySqlError` produces, so both error sources funnel
@@ -29,6 +35,10 @@ type VariableContext =
     { UserVariables: Map<string, Value> ref
       ReadSystemVariable: string -> string -> Result<Value option, int * string>
       MaxUserVariables: int }
+
+type RoutineVariable =
+    { Column: ColumnDef
+      Value: Value }
 
 type private TriggerRowScope =
     { Columns: ColumnDef list
@@ -138,6 +148,7 @@ let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
+let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
@@ -145,7 +156,14 @@ let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>(
 let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
     DynamicScope.withValue variableContext (Some variables) body
 
+let withRoutineVariables (variables: Map<string, RoutineVariable>) (body: unit -> 'a) : 'a =
+    DynamicScope.withValue routineVariables (Some variables) body
+
 let private currentVariableContext () = variableContext.Value
+
+let private tryRoutineVariable (name: string) =
+    routineVariables.Value
+    |> Option.bind (Map.tryFind (name.ToLowerInvariant()))
 
 let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
     DynamicScope.withValue suppressVariableAssignments true body
@@ -1569,17 +1587,20 @@ let private storedValuesMatchReadValues (store: Store) =
 /// more matches (a `JOIN` of tables that share a column name) is error 1052,
 /// not a silent pick of whichever one `columnIndexOf` happened to see last.
 let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, EvalError> =
-    match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
-    | Some [ i ] ->
-        tryColumnDefAt ctx i
-        |> Option.map (fun column -> readColumnValue ctx.Store column ctx.Row.[i])
-        |> Option.defaultValue ctx.Row.[i]
-        |> Ok
-    | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause))
-    | Some [] | None ->
-        match ctx.Outer with
-        | Some parent -> resolveCol { parent with Clause = ctx.Clause } name
-        | None -> Error(unknownColumn name)
+    match tryRoutineVariable name with
+    | Some variable -> Ok variable.Value
+    | None ->
+        match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
+        | Some [ i ] ->
+            tryColumnDefAt ctx i
+            |> Option.map (fun column -> readColumnValue ctx.Store column ctx.Row.[i])
+            |> Option.defaultValue ctx.Row.[i]
+            |> Ok
+        | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause))
+        | Some [] | None ->
+            match ctx.Outer with
+            | Some parent -> resolveCol { parent with Clause = ctx.Clause } name
+            | None -> Error(unknownColumn name)
 
 /// The `QualifiedCol` counterpart of `resolveCol` — same outer-context
 /// fallback, checked against `ctx.Qualifiers` instead of `ctx.ColumnIndex`.
@@ -1616,11 +1637,14 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
 let rec private tryColumnDefForExpr (ctx: EvalContext) (expr: Expr) : ColumnDef option =
     match expr with
     | Col name ->
-        match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
-        | Some [ index ] -> tryColumnDefAt ctx index
-        | Some(_ :: _ :: _)
-        | Some [] -> None
-        | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
+        match tryRoutineVariable name with
+        | Some variable -> Some variable.Column
+        | None ->
+            match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
+            | Some [ index ] -> tryColumnDefAt ctx index
+            | Some(_ :: _ :: _)
+            | Some [] -> None
+            | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
     | QualifiedCol(table, col) ->
         match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
         | Some(columns, _) ->
@@ -3597,6 +3621,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             match subquery.Result with
             | Err(code, message) -> Error(code, message)
             | Affected _ -> Ok VNull
+            | MultipleResults _ -> Error nestedSubqueryResultsError
             | ResultSet(_, _) ->
                 subquery.Rows
                 |> traverse (fun row ->
@@ -3624,6 +3649,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             match subquery.Result with
             | Err(code, message) -> Error(code, message)
             | Affected _ -> Ok VNull
+            | MultipleResults _ -> Error nestedSubqueryResultsError
             | ResultSet(columns, _) when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _) ->
                 let rightOperand = subqueryProjectionOperand ctx select
@@ -3650,6 +3676,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             match subquery.Result with
             | Err(code, message) -> Error(code, message)
             | Affected _ -> Ok VNull
+            | MultipleResults _ -> Error nestedSubqueryResultsError
             | ResultSet(columns, _) when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _) ->
                 let rightOperand = subqueryProjectionOperand ctx select
@@ -3977,6 +4004,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // `DELETE` (the parser's `selectStmtRecord` only builds `SelectStmt`
         // records, nothing else reaches here), so `Affected` can't occur.
         | Affected _ -> Ok VNull
+        | MultipleResults _ -> Error nestedSubqueryResultsError
     | Subquery select ->
         // Reads the subquery's own typed `Value`, not a `VString` re-wrap
         // of its text resultset — a bare-text round trip would make e.g.
@@ -3987,6 +4015,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         match subquery.Result, subquery.Rows with
         | Err(code, message), _ -> Error(code, message)
         | Affected _, _ -> Ok VNull
+        | MultipleResults _, _ -> Error nestedSubqueryResultsError
         | ResultSet(cols, _), _ when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
         | ResultSet(_, []), _ -> Ok VNull
         | ResultSet(_, [ _ ]), [ row ] -> Ok(row |> Array.tryHead |> Option.defaultValue VNull)
@@ -4004,6 +4033,7 @@ and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, 
         match subquery.Result, subquery.Rows with
         | Err(code, message), _ -> Error(code, message)
         | Affected _, _ -> Ok(RowValues [])
+        | MultipleResults _, _ -> Error nestedSubqueryResultsError
         | ResultSet(columns, _), [] -> Ok(subqueryRowOperand ctx select (Array.create columns.Length VNull))
         | ResultSet(_, [ _ ]), [ row ] -> Ok(subqueryRowOperand ctx select row)
         | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
@@ -5119,6 +5149,7 @@ and private resolveFromSubquery
             Ok(columns, typedRows)
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
+        | MultipleResults _ -> Error(nestedResultsError "a derived table")
 
 /// The qualifier a `FROM`/`JOIN` source's columns resolve `qualifier.col`
 /// against: a real table's alias (or its own name), or a derived table's
@@ -5376,12 +5407,14 @@ and private applyLateralJoin
                 | ResultSet(names, _), metadata, typedRows ->
                     Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata, typedRows)
                 | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
+                | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
             | UnionSelect(first, rest, orderBy, limit, offset) ->
                 match runUnionStmtWithOuter store registry dbName first rest orderBy limit offset bodyOuter with
                 | Err(code, message), _, _ -> Error(Err(code, message))
                 | ResultSet(names, _), metadata, typedRows ->
                     Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata, typedRows)
                 | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
+                | MultipleResults _, _, _ -> Error(nestedResultsError "a LATERAL derived table")
 
         // The body still has to name its columns even when there is no left
         // row to run it against — a metadata-only pass with no outer context
@@ -6701,6 +6734,7 @@ and private tryIntegerSemiJoin
                     match materialized.Result with
                     | Err(code, message) -> Error(Err(code, message))
                     | Affected _ -> Ok None
+                    | MultipleResults _ -> Error(nestedResultsError "an IN subquery")
                     | ResultSet(columns, _) when columns.Length <> 1 -> Error(Err(1241, "Operand should contain 1 column(s)"))
                     | ResultSet(_, _) ->
                         let values = materialized.Rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
@@ -7146,6 +7180,10 @@ and private rowCount =
     | Lit(VInt count) -> int (min (int64 System.Int32.MaxValue) (max 0L count))
     | Lit(VUInt count) -> int (min (uint64 System.Int32.MaxValue) count)
     | Lit value -> int (min (float System.Int32.MaxValue) (max 0.0 (Value.toDouble value)))
+    | Col name ->
+        match tryRoutineVariable name with
+        | Some variable -> rowCount (Lit variable.Value)
+        | None -> raise (SqlError(1210, "Incorrect arguments to LIMIT"))
     | _ -> raise (SqlError(1210, "Incorrect arguments to LIMIT"))
 
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
@@ -7315,6 +7353,7 @@ and private runUnionStmtWithOuter
             match runBranch select with
             | Err(code, message), _, _ -> Error(Err(code, message))
             | Affected _, _, _ -> Error(Err(1064, "UNION branch did not return a resultset"))
+            | MultipleResults _, _, _ -> Error(nestedResultsError "a UNION branch")
             | ResultSet(branchCols, _), _, _ when List.length branchCols <> List.length cols ->
                 Error(Err(1222, "The used SELECT statements have a different number of columns"))
             | ResultSet(branchCols, branchRows), branchTypes, branchTyped ->
@@ -7336,6 +7375,7 @@ and private runUnionStmtWithOuter
     match runSelectStmt store registry dbName first None with
     | Err(code, message), _, _ -> Err(code, message), [], []
     | Affected _, _, _ -> Err(1064, "UNION branch did not return a resultset"), [], []
+    | MultipleResults _, _, _ -> nestedResultsError "a UNION branch", [], []
     | ResultSet(firstCols, firstRows), firstTypes, firstTyped ->
         let firstCollations = selectColumnCollations store registry dbName first firstCols
         let firstFsps = selectColumnFsps store registry dbName first firstCols
@@ -12423,6 +12463,7 @@ let rec executeAs
                             and runStatement =
                                 function
                                 | StoredProgram.Sql statement -> runDml statement
+                                | StoredProgram.TextSql _ -> Err(1235, "Text-only statements are not supported in triggers")
                                 | StoredProgram.Declare declaration ->
                                     match declaration.InitialValue with
                                     | None ->
@@ -13904,6 +13945,7 @@ let rec executeAs
                 match selectResult with
                 | Err(code, message) -> ids, Err(code, message)
                 | Affected _ -> ids, Err(1064, "INSERT ... SELECT source did not return a resultset")
+                | MultipleResults _ -> ids, nestedResultsError "an INSERT ... SELECT source"
                 | ResultSet _ ->
                     let hiddenCount = sourceReferences.Length
 
@@ -13990,6 +14032,7 @@ let rec executeAs
         match selectResult with
         | Err(code, message) -> ids, Err(code, message)
         | Affected _ -> ids, Err(1064, "REPLACE ... SELECT source did not return a resultset")
+        | MultipleResults _ -> ids, nestedResultsError "a REPLACE ... SELECT source"
         | ResultSet(_, rows) ->
             let rowsValues = rows |> List.map (List.map (function Some value -> VString value | None -> VNull))
             let cols = if columns.IsEmpty then None else Some columns

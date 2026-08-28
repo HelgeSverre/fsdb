@@ -100,7 +100,10 @@ module SyntaxFuzz =
            "stored_procedure", sprintf "CREATE PROCEDURE syntax_proc_%s() SELECT 1" suffix
            "procedure_parameter", sprintf "CREATE PROCEDURE syntax_proc_param_%s(IN value INT) SELECT value" suffix
            "procedure_compound",
-           sprintf "CREATE PROCEDURE syntax_proc_body_%s() BEGIN SET @syntax_first = 1; SET @syntax_second = 2; END" suffix
+           sprintf
+               "CREATE PROCEDURE syntax_proc_body_%s(IN value INT, OUT doubled INT) BEGIN DECLARE local_value INT DEFAULT value + 1; SET doubled = local_value * 2; SELECT local_value, doubled; END"
+               suffix
+           "procedure_call", "CALL syntax_callable(3, @syntax_output)"
            "scheduled_event",
            sprintf "CREATE EVENT syntax_event_%s ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY DO INSERT INTO syntax_log VALUES (999)" suffix
            "recurring_event",
@@ -148,6 +151,7 @@ module SyntaxFuzz =
            "CREATE VIEW syntax_union_join AS SELECT t.id, t.n, x.marker FROM syntax_target AS t JOIN syntax_union_component AS x ON x.id = t.id"
            "CREATE TABLE syntax_partitioned (id INT) PARTITION BY HASH(id) PARTITIONS 2"
            "INSERT INTO syntax_partitioned VALUES (1), (2), (3)"
+           "CREATE PROCEDURE syntax_callable(IN value INT, OUT doubled INT) BEGIN DECLARE local_value INT DEFAULT value + 1; SET doubled = local_value * 2; SELECT local_value, doubled; END"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]
 
     let private cleanupStatement feature suffix =

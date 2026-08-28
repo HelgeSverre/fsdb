@@ -144,10 +144,8 @@ let rec llmComplete (ctx: QueryContext) (args: Value list) : Value =
 
 /// Prints a result set as aligned columns; fails loudly on errors so the
 /// demo can't silently show garbage.
-let query (conn: Db.Connection) (sql: string) =
-    printfn "> %s" sql
-
-    match conn.Query sql with
+let rec private printResult =
+    function
     | Executor.ResultSet(cols, rows) ->
         let cells = List.map (List.map (Option.defaultValue "NULL")) rows
         let widths = cols |> List.mapi (fun i c -> cells |> List.fold (fun w r -> max w r[i].Length) c.Length)
@@ -156,6 +154,11 @@ let query (conn: Db.Connection) (sql: string) =
         for row in cells do printfn "%s" (line row)
     | Executor.Affected n -> printfn "OK, %d rows affected" n
     | Executor.Err(code, msg) -> failwithf "query failed (%d): %s" code msg
+    | Executor.MultipleResults results -> results |> List.iter (fst >> printResult)
+
+let query (conn: Db.Connection) (sql: string) =
+    printfn "> %s" sql
+    conn.Query sql |> printResult
 
     printfn ""
 
