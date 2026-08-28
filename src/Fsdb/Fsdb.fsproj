@@ -26,6 +26,7 @@
     <Compile Include="Sql/Expression.fs" />
     <Compile Include="Sql/ColumnWire.fs" />
     <Compile Include="Sql/Parser.fs" />
+    <Compile Include="Sql/SqlMode.fs" />
     <Compile Include="Sql/Functions.fs" />
     <Compile Include="Engine/SystemCatalog.fs" />
     <Compile Include="Engine/PagedVector.fs" />

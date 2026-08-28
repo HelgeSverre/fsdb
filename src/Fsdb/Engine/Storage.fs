@@ -13,6 +13,8 @@ open System.Threading
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Temporal
+open Fsdb.Sql
+open Fsdb.Engine
 
 /// Raised when an optimistic transaction merge finds a row or schema that
 /// changed after the transaction snapshot was taken. `QueryHandler` reports
@@ -293,25 +295,11 @@ let private createRowLockStripe () =
     { SyncRoot = obj ()
       Owner = None }
 
-type SqlModeSettings =
-    { Strict: bool
-      NoZeroDate: bool
-      NoZeroInDate: bool
-      OnlyFullGroupBy: bool
-      NoAutoValueOnZero: bool
-      ErrorForDivisionByZero: bool
-      TimeTruncateFractional: bool
-      PadCharToFullLength: bool }
-
-let defaultSqlModeSettings: SqlModeSettings =
-    { Strict = true
-      NoZeroDate = true
-      NoZeroInDate = true
-      OnlyFullGroupBy = true
-      NoAutoValueOnZero = false
-      ErrorForDivisionByZero = true
-      TimeTruncateFractional = false
-      PadCharToFullLength = false }
+type ExecutionSettings =
+    { SqlModeText: string
+      SqlMode: SqlMode.Settings
+      ConnectionCharset: string
+      ConnectionCollation: Collation.Collation }
 
 /// Shared catalog state plus session-local coercion and transaction settings.
 /// Session clones share reference-typed synchronization fields but copy the
@@ -320,10 +308,8 @@ type Store =
     { /// Each mutable cell is the lock and publication point for one database.
       Databases: ConcurrentDictionary<string, Database ref>
       mutable ForeignKeyChecks: bool
-      /// Re-derived from the session's sql_mode before each statement.
-      mutable SqlMode: SqlModeSettings
-      /// Applies only when no column or explicit COLLATE supplies precedence.
-      mutable ConnectionCollation: Collation.Collation
+      /// Re-derived from session variables before each statement.
+      mutable ExecutionSettings: ExecutionSettings
       /// Lowercase names overlay real tables in the reserved fsdb schema.
       mutable VirtualTables: Map<string, Functions.VirtualTable>
       /// Synchronous ordered subscribers run after catalog publication.
@@ -423,8 +409,9 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
     { Databases = databases
       ForeignKeyChecks = store.ForeignKeyChecks
       // QueryHandler derives the transaction's effective mode before use.
-      SqlMode = { store.SqlMode with Strict = true }
-      ConnectionCollation = store.ConnectionCollation
+      ExecutionSettings =
+        { store.ExecutionSettings with
+            SqlMode = { store.ExecutionSettings.SqlMode with Strict = true } }
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
       Durability = store.Durability
@@ -501,25 +488,63 @@ let private prepareTransactionEvents (store: Store) (snapshot: Store) : unit -> 
 let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
 
-let setConnectionCollation (store: Store) (collation: Collation.Collation) : unit = store.ConnectionCollation <- collation
+let setConnectionCharset (store: Store) (charset: string) : unit =
+    store.ExecutionSettings <-
+        { store.ExecutionSettings with
+            ConnectionCharset = charset }
 
-let private updateSqlMode (store: Store) (update: SqlModeSettings -> SqlModeSettings) : unit =
-    lock store.Lock (fun () -> store.SqlMode <- update store.SqlMode)
+let setConnectionCollation (store: Store) (collation: Collation.Collation) : unit =
+    store.ExecutionSettings <-
+        { store.ExecutionSettings with
+            ConnectionCollation = collation }
 
-let setSqlMode (store: Store) (settings: SqlModeSettings) : unit =
-    lock store.Lock (fun () -> store.SqlMode <- settings)
+let executionSettings (store: Store) : ExecutionSettings = store.ExecutionSettings
+
+let withExecutionSettings (store: Store) (settings: ExecutionSettings) (body: unit -> 'result) : 'result =
+    let previous = store.ExecutionSettings
+    store.ExecutionSettings <- settings
+
+    try
+        body ()
+    finally
+        store.ExecutionSettings <- previous
+
+let private updateSqlMode (store: Store) (name: string) (active: bool) (update: SqlMode.Settings -> SqlMode.Settings) : unit =
+    lock store.Lock (fun () ->
+        let settings = store.ExecutionSettings
+
+        store.ExecutionSettings <-
+            { settings with
+                SqlMode = update settings.SqlMode
+                SqlModeText = SqlMode.withMode name active settings.SqlModeText })
+
+let setSqlMode (store: Store) (value: string) : unit =
+    lock store.Lock (fun () ->
+        store.ExecutionSettings <-
+            { store.ExecutionSettings with
+                SqlMode = SqlMode.settingsFor value
+                SqlModeText = value })
 
 let setStrictMode (store: Store) (strict: bool) : unit =
-    updateSqlMode store (fun mode -> { mode with Strict = strict })
+    updateSqlMode store "STRICT_TRANS_TABLES" strict (fun mode -> { mode with Strict = strict })
 
 let setZeroDateModes (store: Store) (noZeroDate: bool) (noZeroInDate: bool) : unit =
-    updateSqlMode store (fun mode ->
-        { mode with
-            NoZeroDate = noZeroDate
-            NoZeroInDate = noZeroInDate })
+    lock store.Lock (fun () ->
+        let settings = store.ExecutionSettings
+
+        store.ExecutionSettings <-
+            { settings with
+                SqlMode =
+                    { settings.SqlMode with
+                        NoZeroDate = noZeroDate
+                        NoZeroInDate = noZeroInDate }
+                SqlModeText =
+                    settings.SqlModeText
+                    |> SqlMode.withMode "NO_ZERO_DATE" noZeroDate
+                    |> SqlMode.withMode "NO_ZERO_IN_DATE" noZeroInDate })
 
 let setOnlyFullGroupBy (store: Store) (enabled: bool) : unit =
-    updateSqlMode store (fun mode -> { mode with OnlyFullGroupBy = enabled })
+    updateSqlMode store "ONLY_FULL_GROUP_BY" enabled (fun mode -> { mode with OnlyFullGroupBy = enabled })
 
 /// Table names are keyed case-insensitively by their lowercased form —
 /// public because `Persistence`'s WAL replay looks tables up in `Catalog`
@@ -884,10 +909,10 @@ type TemporalCoercionMode =
       TruncateFractional: bool }
 
 let temporalCoercionMode (store: Store) =
-    { Strict = store.SqlMode.Strict
-      NoZeroDate = store.SqlMode.NoZeroDate
-      NoZeroInDate = store.SqlMode.NoZeroInDate
-      TruncateFractional = store.SqlMode.TimeTruncateFractional }
+    { Strict = store.ExecutionSettings.SqlMode.Strict
+      NoZeroDate = store.ExecutionSettings.SqlMode.NoZeroDate
+      NoZeroInDate = store.ExecutionSettings.SqlMode.NoZeroInDate
+      TruncateFractional = store.ExecutionSettings.SqlMode.TimeTruncateFractional }
 
 let private adjustTicksToFsp (mode: TemporalCoercionMode) (fsp: int) (ticks: int64) =
     if mode.TruncateFractional then
@@ -2432,10 +2457,13 @@ let mysqlTriggersColumns: ColumnDef list =
       // The account a body runs as (`user@%`, MySQL's CHAR(93) width) —
       // bodies are privilege-checked against this at fire time, not against
       // the inserting session, so a trigger can't lend its invoker the
-      // definer's reach. Appended last so the fixed cell positions every
-      // existing reader uses stay put.
+      // definer's reach.
       sysCol "definer" (TChar 93) false (Some(VString ""))
-      sysCol "action_order" (TInt false) false (Some(VInt 1L)) ]
+      sysCol "action_order" (TInt false) false (Some(VInt 1L))
+      sysCol "sql_mode" TText false (Some(VString SystemCatalog.Trigger.legacySqlMode))
+      sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCharacterSetClient))
+      sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCollationConnection))
+      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyDatabaseCollation)) ]
 
 /// `mysql.views` — fsdb's row-backed view catalog. Definitions are stored as
 /// SQL text and resolved through the ordinary SELECT executor, so the rows
@@ -2538,8 +2566,11 @@ let create () : Store =
 
     { Databases = databases
       ForeignKeyChecks = true
-      SqlMode = defaultSqlModeSettings
-      ConnectionCollation = Collation.defaultCollation
+      ExecutionSettings =
+        { SqlMode = SqlMode.defaultSettings
+          SqlModeText = SqlMode.defaultText
+          ConnectionCharset = "utf8mb4"
+          ConnectionCollation = Collation.defaultCollation }
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
       Durability = { Sink = None }
@@ -4393,7 +4424,7 @@ let internal prepareInsertCandidate
 
                 processRow
                     (temporalCoercionMode store)
-                    (not store.SqlMode.NoAutoValueOnZero)
+                    (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
                     table.NextAutoId
                     raw
                     table.Columns
@@ -4691,7 +4722,7 @@ let private insertRowsPreparedCore
                         insertCore
                             store.ForeignKeyChecks
                             (temporalCoercionMode store)
-                            (not store.SqlMode.NoAutoValueOnZero)
+                            (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
                             ignoreErrors
                             db
                             key
@@ -5152,7 +5183,7 @@ and private upsertRowsInTable
 
                                     processRow
                                         (temporalCoercionMode store)
-                                        (not store.SqlMode.NoAutoValueOnZero)
+                                        (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
                                         nextAutoId
                                         rawRow
                                         table.Columns
@@ -5498,7 +5529,7 @@ let replaceRows
 
                                 processRow
                                     (temporalCoercionMode store)
-                                    (not store.SqlMode.NoAutoValueOnZero)
+                                    (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
                                     nextAutoId
                                     rawRow
                                     table.Columns

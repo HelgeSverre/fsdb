@@ -1201,6 +1201,12 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected literal comparisons under ai_ci again, got %A" other
 
+              let session, _ = handle session "SET NAMES latin1"
+
+              match handle session "SELECT @@collation_connection" |> snd with
+              | ResultSet(_, [ [ Some "latin1_swedish_ci" ] ]) -> ()
+              | other -> failtestf "expected the latin1 default collation, got %A" other
+
               // binary's byte-wise comparisons map to utf8mb4_bin
               let session, _ = handle session "SET NAMES binary"
 

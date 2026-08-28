@@ -298,8 +298,10 @@ FOLLOWS/PRECEDES, and `BEGIN ... END` sequences of DML, local declarations and
 assignments, nested IF/ELSEIF/ELSE branches, and SET NEW statements;
 statement atomicity and 1442 cycle/self-write detection,
 definer-based privilege checks per fire, lifecycle maintenance, and SHOW
-TRIGGERS/I_S.TRIGGERS metadata. Generated row-image columns and illegal
-OLD/NEW images are rejected when the trigger is created.
+TRIGGERS/I_S.TRIGGERS metadata. The creation-time SQL mode, client charset,
+and connection collation are stored and restored while each body runs.
+Generated row-image columns and illegal OLD/NEW images are rejected when the
+trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -308,7 +310,6 @@ OLD/NEW images are rejected when the trigger is created.
 | VIEW_DEFINITION rendering | fully-qualified canonical expression text | SHOW CREATE VIEW renders the stored declaration envelope, but its SELECT body and I_S.VIEWS.VIEW_DEFINITION retain the user's original text | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table INSERT/UPDATE/DELETE/REPLACE fire their row timings atomically; multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
 | Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML, local DECLARE/SET, scalar-subquery assignment, nested IF/ELSEIF/ELSE, and SET NEW are covered; CASE, loops, handlers, SIGNAL, and dynamic SQL remain absent | medium | refusal |
-| Per-trigger sql_mode/charset capture | stored and applied | `InformationSchema.triggerSqlMode` and the charset fields are server constants | low | divergence |
 
 ## 10. Stored routines, events, schedulers
 

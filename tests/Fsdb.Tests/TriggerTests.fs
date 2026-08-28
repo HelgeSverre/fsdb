@@ -20,6 +20,11 @@ let private setup (store: Store) =
     expectOk (runDefault store "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, n INT)") "create t"
     expectOk (runDefault store "CREATE TABLE log (id INT AUTO_INCREMENT PRIMARY KEY, n INT)") "create log"
 
+let private step session sql =
+    let next, result = handle session sql
+    expectOk result sql
+    next
+
 /// MySQL 8.4.11's exact 1442 text (write-probed on the disposable server).
 let private text1442 (table: string) =
     sprintf
@@ -728,11 +733,6 @@ let tests =
               let store = Fsdb.Storage.create ()
               let session = Fsdb.Session.create 1 store
 
-              let step session sql =
-                  let session, result = handle session sql
-                  expectOk result sql
-                  session
-
               let session = step session "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, n INT)"
               let session = step session "CREATE TABLE log (id INT AUTO_INCREMENT PRIMARY KEY, n INT)"
               let session = step session "CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)"
@@ -781,15 +781,123 @@ let tests =
                   [ [ Some "7" ]; [ Some "107" ]; [ Some "8" ]; [ Some "108" ]; [ Some "9" ] ]
                   "the triggers survived the restart and fired again"
 
-          testCase "SHOW TRIGGERS renders the mysql.triggers row in MySQL's probed shape"
+          testCase "triggers execute with their captured sql_mode"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = Fsdb.Session.create 1 store
 
-              let step session sql =
-                  let session, result = handle session sql
-                  expectOk result sql
-                  session
+              let session = step session "CREATE TABLE lax_source (n INT)"
+              let session = step session "CREATE TABLE lax_log (n INT)"
+              let session = step session "SET SESSION sql_mode=''"
+
+              let session =
+                  step
+                      session
+                      "CREATE TRIGGER lax_trigger AFTER INSERT ON lax_source FOR EACH ROW INSERT INTO lax_log VALUES ('not an integer')"
+
+              let session = step session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+              let session = step session "INSERT INTO lax_source VALUES (1)"
+              Expect.equal (rows store "SELECT n FROM lax_log") [ [ Some "0" ] ] "the creation mode controls coercion"
+
+              let session = step session "CREATE TABLE strict_source (n INT)"
+              let session = step session "CREATE TABLE strict_log (n INT)"
+
+              let session =
+                  step
+                      session
+                      "CREATE TRIGGER strict_trigger AFTER INSERT ON strict_source FOR EACH ROW INSERT INTO strict_log VALUES ('not an integer')"
+
+              let session = step session "SET SESSION sql_mode=''"
+
+              match handle session "INSERT INTO strict_source VALUES (1)" |> snd with
+              | Err(1366, _) -> ()
+              | other -> failtestf "expected the captured strict mode to reject the trigger write, got %A" other
+
+              Expect.equal (rows store "SELECT n FROM strict_source") [] "the source insert remains atomic"
+              Expect.equal (rows store "SELECT n FROM strict_log") [] "the failed body leaves no effects"
+
+          testCase "triggers retain their parser and collation context"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+
+              let session = step session "CREATE TABLE context_source (n INT)"
+              let session = step session "CREATE TABLE metadata_source (n INT)"
+              let session = step session "CREATE TABLE comparison_log (same_value INT)"
+              let session = step session "CREATE TABLE quoted_log (n INT)"
+              let session = step session "SET SESSION collation_connection='utf8mb4_bin'"
+
+              let session =
+                  step
+                      session
+                      "CREATE TRIGGER comparison_trigger AFTER INSERT ON context_source FOR EACH ROW INSERT INTO comparison_log VALUES ('A' = 'a')"
+
+              let session = step session "SET SESSION sql_mode='ANSI_QUOTES'"
+
+              let session =
+                  step
+                      session
+                      "CREATE TRIGGER quoted_trigger AFTER INSERT ON context_source FOR EACH ROW INSERT INTO quoted_log VALUES (NEW.\"n\")"
+
+              let session = step session "SET NAMES latin1 COLLATE latin1_swedish_ci"
+              let session = step session "SET SESSION sql_mode=''"
+
+              let session =
+                  step
+                      session
+                      "CREATE TRIGGER metadata_trigger AFTER INSERT ON metadata_source FOR EACH ROW INSERT INTO comparison_log VALUES (1)"
+
+              match handle session "SHOW CREATE TRIGGER metadata_trigger" |> snd with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal (List.item 1 row) (Some "") "sql_mode"
+                  Expect.equal (List.item 3 row) (Some "latin1") "character_set_client"
+                  Expect.equal (List.item 4 row) (Some "latin1_swedish_ci") "collation_connection"
+                  Expect.equal (List.item 5 row) (Some "utf8mb4_0900_ai_ci") "database collation"
+              | other -> failtestf "expected captured trigger metadata, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT SQL_MODE, CHARACTER_SET_CLIENT, COLLATION_CONNECTION, DATABASE_COLLATION FROM information_schema.TRIGGERS WHERE TRIGGER_NAME = 'metadata_trigger'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some ""; Some "latin1"; Some "latin1_swedish_ci"; Some "utf8mb4_0900_ai_ci" ] ]) -> ()
+              | other -> failtestf "expected matching information_schema trigger metadata, got %A" other
+
+              let session = step session "SET SESSION collation_connection='utf8mb4_0900_ai_ci'"
+              let session = step session "SET SESSION sql_mode=''"
+              let _ = step session "INSERT INTO context_source VALUES (7)"
+
+              Expect.equal (rows store "SELECT same_value FROM comparison_log") [ [ Some "0" ] ] "the binary collation is retained"
+              Expect.equal (rows store "SELECT n FROM quoted_log") [ [ Some "7" ] ] "ANSI_QUOTES is retained"
+
+          testCase "trigger execution context survives WAL recovery"
+          <| fun _ ->
+              let dir = TestSupport.directory "trigger-context"
+              let store = Fsdb.Storage.create ()
+              Fsdb.Persistence.attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let session = step session "CREATE TABLE context_source (n INT)"
+              let session = step session "CREATE TABLE context_log (n INT)"
+              let session = step session "SET SESSION sql_mode=''"
+
+              let _ =
+                  step
+                      session
+                      "CREATE TRIGGER context_trigger AFTER INSERT ON context_source FOR EACH ROW INSERT INTO context_log VALUES ('not an integer')"
+
+              let reloaded = Fsdb.Persistence.load dir
+              let session = Fsdb.Session.create 2 reloaded
+              let session = step session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+              let _ = step session "INSERT INTO context_source VALUES (1)"
+
+              Expect.equal (rows reloaded "SELECT n FROM context_log") [ [ Some "0" ] ] "the recovered trigger remains non-strict"
+
+          testCase "SHOW TRIGGERS renders the mysql.triggers row in MySQL's probed shape"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
 
               let session = step session "CREATE TABLE t (id INT, n INT)"
               let session = step session "CREATE TABLE log (n INT)"
@@ -809,17 +917,17 @@ let tests =
                   Expect.equal (List.item 3 row) (Some "INSERT INTO log(n) VALUES (NEW.n)") "Statement is the raw body"
                   Expect.equal (List.item 4 row) (Some "AFTER") "Timing"
                   Expect.isSome (List.item 5 row) "Created present"
+                  Expect.equal (List.item 6 row) (Some Fsdb.Sql.SqlMode.defaultText) "sql_mode"
+                  Expect.equal (List.item 7 row) (Some "root@%") "Definer"
+                  Expect.equal (List.item 8 row) (Some "utf8mb4") "character_set_client"
+                  Expect.equal (List.item 9 row) (Some "utf8mb4_0900_ai_ci") "collation_connection"
+                  Expect.equal (List.item 10 row) (Some "utf8mb4_0900_ai_ci") "Database Collation"
               | other -> failtestf "expected one SHOW TRIGGERS row, got %A" other
 
           testCase "SHOW CREATE TRIGGER renders a reusable definition"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = Fsdb.Session.create 1 store
-
-              let step session sql =
-                  let next, result = handle session sql
-                  expectOk result sql
-                  next
 
               let session = step session "CREATE TABLE t (id INT, n INT)"
               let session = step session "CREATE TABLE log (n INT)"
@@ -838,6 +946,10 @@ let tests =
                       (List.item 2 row)
                       (Some "CREATE DEFINER=`root`@`%` TRIGGER `trg` AFTER INSERT ON `t` FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)")
                       "trigger definition"
+                  Expect.equal (List.item 1 row) (Some Fsdb.Sql.SqlMode.defaultText) "sql_mode"
+                  Expect.equal (List.item 3 row) (Some "utf8mb4") "character_set_client"
+                  Expect.equal (List.item 4 row) (Some "utf8mb4_0900_ai_ci") "collation_connection"
+                  Expect.equal (List.item 5 row) (Some "utf8mb4_0900_ai_ci") "Database Collation"
                   Expect.isSome (List.item 6 row) "creation time"
               | other -> failtestf "expected one SHOW CREATE TRIGGER row, got %A" other
 

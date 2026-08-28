@@ -39,6 +39,11 @@ let private readCompleteRow requiredValues read (row: Value[]) =
     if row.Length < requiredValues then None else Some(read row)
 
 module Trigger =
+    let legacySqlMode = "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
+    let legacyCharacterSetClient = "utf8mb4"
+    let legacyCollationConnection = "utf8mb4_0900_ai_ci"
+    let legacyDatabaseCollation = "utf8mb4_0900_ai_ci"
+
     type Entry =
         { Name: string
           Schema: string
@@ -48,7 +53,11 @@ module Trigger =
           Body: string
           Created: DateTime option
           Definer: string
-          Order: int64 }
+          Order: int64
+          SqlMode: string
+          CharacterSetClient: string
+          CollationConnection: string
+          DatabaseCollation: string }
 
     let actionOrder row = int64At 1L 8 row
 
@@ -63,7 +72,11 @@ module Trigger =
                   Body = textAt 5 row
                   Created = dateTimeAt 6 row
                   Definer = textAt 7 row
-                  Order = actionOrder row })
+                  Order = actionOrder row
+                  SqlMode = textOr legacySqlMode 9 row
+                  CharacterSetClient = textOr legacyCharacterSetClient 10 row
+                  CollationConnection = textOr legacyCollationConnection 11 row
+                  DatabaseCollation = textOr legacyDatabaseCollation 12 row })
             row
 
     let withTable table row = withValue 2 (VString table) row

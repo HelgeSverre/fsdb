@@ -62,6 +62,15 @@ let tests =
                         Expect.equal trigger.Name "audit" "name"
                         Expect.equal trigger.Table "users" "table"
                         Expect.equal trigger.Order 4L "order"
+                        Expect.equal trigger.SqlMode SystemCatalog.Trigger.legacySqlMode "legacy sql_mode"
+                        Expect.equal
+                            trigger.CharacterSetClient
+                            SystemCatalog.Trigger.legacyCharacterSetClient
+                            "legacy character set"
+                        Expect.equal
+                            trigger.CollationConnection
+                            SystemCatalog.Trigger.legacyCollationConnection
+                            "legacy connection collation"
                     | None -> failtest "expected trigger row"
 
                 testCase "typed check rows reject missing required fields"

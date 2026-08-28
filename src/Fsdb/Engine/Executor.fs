@@ -211,7 +211,19 @@ type private StoredTrigger =
     { Name: string
       Body: string
       Definer: string
-      Order: int64 }
+      Order: int64
+      SqlMode: string
+      CharacterSetClient: string
+      CollationConnection: string }
+
+let private triggerExecutionSettings (trigger: StoredTrigger) : ExecutionSettings =
+    { SqlModeText = trigger.SqlMode
+      SqlMode = SqlMode.settingsFor trigger.SqlMode
+      ConnectionCharset = trigger.CharacterSetClient
+      ConnectionCollation =
+        trigger.CollationConnection
+        |> Collation.tryFind
+        |> Option.defaultValue Collation.defaultCollation }
 
 type private StoredCheck = SystemCatalog.Check.Entry
 
@@ -1539,7 +1551,7 @@ let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
         if relative >= 0 && relative < columns.Length then Some columns.[relative] else None)
 
 let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : Value =
-    match store.SqlMode.PadCharToFullLength, column.Type, value with
+    match store.ExecutionSettings.SqlMode.PadCharToFullLength, column.Type, value with
     | true, TChar length, VString text ->
         let padding = length - (text.EnumerateRunes() |> Seq.length)
 
@@ -1550,7 +1562,7 @@ let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : 
     | _ -> value
 
 let private storedValuesMatchReadValues (store: Store) =
-    not store.SqlMode.PadCharToFullLength
+    not store.ExecutionSettings.SqlMode.PadCharToFullLength
 
 /// Resolves a bare column against `ctx`, falling back to
 /// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`. Two or
@@ -1818,7 +1830,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             { Value.columnMetadata TypeVarString with
                 ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text)
                 Flags = NotNullFlag
-                CollationId = metadataCollationId ctx.Store.ConnectionCollation.Name }
+                CollationId = metadataCollationId ctx.Store.ExecutionSettings.ConnectionCollation.Name }
     | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
     | Lit(VDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
@@ -2209,7 +2221,7 @@ let private collationOfColumn (ctx: EvalContext) (column: ColumnDef) : Collation
             // synthetic derived column falls back to the connection default.
             column.Collation
             |> Option.bind Collation.tryFind
-            |> Option.orElseWith (fun () -> Some ctx.Store.ConnectionCollation)
+            |> Option.orElseWith (fun () -> Some ctx.Store.ExecutionSettings.ConnectionCollation)
     | _ -> None
 
 /// The collation a comparison involving `expr` resolves under: an
@@ -2245,13 +2257,18 @@ let private coercibilityOfExpr = function
 /// `expr COLLATE`, then a string column's own collation, then the
 /// connection collation (literals) — the same resolution comparisons use.
 let private keyCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation =
-    resolvedCollation ctx expr |> Option.defaultValue ctx.Store.ConnectionCollation
+    resolvedCollation ctx expr |> Option.defaultValue ctx.Store.ExecutionSettings.ConnectionCollation
 
 let private regexCollation (ctx: EvalContext) (functionName: string) (subjectExpr: Expr) (subject: Value) (patternExpr: Expr) (pattern: Value) : Result<Collation.Collation, EvalError> =
     let subjectRaw = tryRawBytes subject |> Option.isSome
     let patternRaw = tryRawBytes pattern |> Option.isSome
-    let subjectCollation = resolvedCollation ctx subjectExpr |> Option.defaultValue ctx.Store.ConnectionCollation
-    let patternCollation = resolvedCollation ctx patternExpr |> Option.defaultValue ctx.Store.ConnectionCollation
+    let subjectCollation =
+        resolvedCollation ctx subjectExpr
+        |> Option.defaultValue ctx.Store.ExecutionSettings.ConnectionCollation
+
+    let patternCollation =
+        resolvedCollation ctx patternExpr
+        |> Option.defaultValue ctx.Store.ExecutionSettings.ConnectionCollation
 
     match subjectRaw, patternRaw with
     | true, true -> Ok(Collation.tryFind "utf8mb4_bin" |> Option.defaultValue Collation.defaultCollation)
@@ -2821,7 +2838,7 @@ let private collationOperand
     : CollationOperand =
     let collation =
         resolvedComparisonCollation ctx expression column
-        |> Option.defaultValue ctx.Store.ConnectionCollation
+        |> Option.defaultValue ctx.Store.ExecutionSettings.ConnectionCollation
 
     let coercibility =
         match expression, column with
@@ -3349,14 +3366,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     match expr with
     | Lit(VZeroDate date) when
         let year, month, day = Temporal.zeroDateParts date
-        (year = 0 && month = 0 && day = 0 && ctx.Store.SqlMode.NoZeroDate)
-        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.SqlMode.NoZeroInDate) ->
+        (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
+        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATE value: '%s'" (Temporal.formatZeroDate date))
     | Lit(VZeroDateTime dateTime) when
         let date, _, _, _, _ = Temporal.zeroDateTimeParts dateTime
         let year, month, day = Temporal.zeroDateParts date
-        (year = 0 && month = 0 && day = 0 && ctx.Store.SqlMode.NoZeroDate)
-        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.SqlMode.NoZeroInDate) ->
+        (year = 0 && month = 0 && day = 0 && ctx.Store.ExecutionSettings.SqlMode.NoZeroDate)
+        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.ExecutionSettings.SqlMode.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | Lit v -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
@@ -3944,7 +3961,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         { Strict = false
                           NoZeroDate = true
                           NoZeroInDate = true
-                          TruncateFractional = ctx.Store.SqlMode.TimeTruncateFractional }
+                          TruncateFractional = ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional }
                         castCol
                         v)
             with
@@ -8294,7 +8311,7 @@ and private validateOnlyFullGroupBy
                     (columnLabel position)
             )
 
-    if not store.SqlMode.OnlyFullGroupBy then
+    if not store.ExecutionSettings.SqlMode.OnlyFullGroupBy then
         Ok()
     else
         resolveGroupExprs ()
@@ -8731,7 +8748,7 @@ and private runGroupedWindowSelect
         let groupedColumns =
             deriveColumns
                 leafNames
-                (List.replicate leafNames.Length store.ConnectionCollation)
+                (List.replicate leafNames.Length store.ExecutionSettings.ConnectionCollation)
                 groupedMetadata
 
         // Each projection keeps the column name it would have had before the
@@ -9416,7 +9433,9 @@ and private runWindowedSelect
 
                     metadataOfExpr (ctxFor [||]) wf
                     |> Option.map (fun metadata ->
-                        let column = deriveColumns [ name ] [ store.ConnectionCollation ] [ metadata ] |> List.head
+                        let column =
+                            deriveColumns [ name ] [ store.ExecutionSettings.ConnectionCollation ] [ metadata ]
+                            |> List.head
                         { column with Nullable = nullable })
                     |> Option.defaultValue (syntheticColumn name (TBigInt false) nullable))
 
@@ -10257,7 +10276,7 @@ let private computeGeneratedRow
         |> traverse (fun (col, expr) ->
             evalExpr ctx expr
             |> Result.mapError ExpressionError
-            |> Result.bind (fun v -> coerceValue store.SqlMode.Strict col v)
+            |> Result.bind (fun v -> coerceValue store.ExecutionSettings.SqlMode.Strict col v)
             |> Result.map (fun v' ->
                 match resolveColumn columns col.Name with
                 | Ok idx -> row'.[idx] <- v'
@@ -11865,7 +11884,7 @@ let private triggerChain = new System.Threading.ThreadLocal<(string * string) li
 
 /// MySQL 8.4.11's exact 1442 text (write-probed on the disposable server):
 /// fired when a trigger body writes a table the invoking statement chain is
-/// already writing — and, here, also when the chain depth exceeds the cap.
+/// already writing.
 let private err1442 (table: string) : QueryResult =
     Err(
         1442,
@@ -11910,7 +11929,10 @@ let private triggersFor
             { Name = trigger.Name
               Body = trigger.Body
               Definer = trigger.Definer
-              Order = trigger.Order })
+              Order = trigger.Order
+              SqlMode = trigger.SqlMode
+              CharacterSetClient = trigger.CharacterSetClient
+              CollationConnection = trigger.CollationConnection })
         |> Seq.sortBy (fun trigger -> trigger.Order)
         |> List.ofSeq
 
@@ -12063,7 +12085,7 @@ let private findTriggerBoundary boundaries (text: string) start =
 
     found
 
-let private parseTriggerBody (body: string) : Result<TriggerStatement list, string> =
+let private parseTriggerBody (options: Parser.ParserOptions) (body: string) : Result<TriggerStatement list, string> =
     let compound = Regex.Match(body, @"^\s*BEGIN\b(?<body>[\s\S]*)\bEND\s*$", RegexOptions.IgnoreCase)
 
     if compound.Success then
@@ -12131,15 +12153,15 @@ let private parseTriggerBody (body: string) : Result<TriggerStatement list, stri
             if declaration.Success then
                 Ok(TriggerDeclare(declaration.Groups.["name"].Value.ToLowerInvariant()))
             elif assignment.Success then
-                Parser.parseExpression assignment.Groups.["value"].Value
+                Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
                 |> Result.map (fun value -> TriggerSetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))
             else
-                Parser.parse text |> Result.map TriggerDml
+                Parser.parseWithOptions options text |> Result.map TriggerDml
 
         parseStatements 0 Set.empty []
         |> Result.bind (fun (statements, _, _) -> if statements.IsEmpty then Error "Trigger body cannot be empty" else Ok statements)
     else
-        Parser.parse body |> Result.map (TriggerDml >> List.singleton)
+        Parser.parseWithOptions options body |> Result.map (TriggerDml >> List.singleton)
 
 /// Every database an INSERT into `dbName.tableName` can reach through its
 /// AFTER INSERT triggers, following the chain transitively.
@@ -12183,7 +12205,7 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
             afterInsertTriggers store db table
             |> List.fold
                 (fun (seen, databases) trigger ->
-                    match parseTriggerBody trigger.Body with
+                    match parseTriggerBody (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
                     | Ok statements ->
                         statements
                         |> List.collect (bodyTargets db)
@@ -12438,7 +12460,8 @@ let private storeTriggerDefinition
                         "triggers"
                         (Some
                             [ "trigger_name"; "trigger_schema"; "event_table"; "action_timing"; "event_manipulation"
-                              "action_statement"; "created"; "definer"; "action_order" ])
+                              "action_statement"; "created"; "definer"; "action_order"; "sql_mode"
+                              "character_set_client"; "collation_connection"; "database_collation" ])
                         [ [ VString name
                             VString db
                             VString(normalizeTableName table)
@@ -12447,7 +12470,11 @@ let private storeTriggerDefinition
                             VString body
                             VDateTime System.DateTime.Now
                             VString(Auth.formatAccount account)
-                            VInt insertionOrder ] ])
+                            VInt insertionOrder
+                            VString store.ExecutionSettings.SqlModeText
+                            VString store.ExecutionSettings.ConnectionCharset
+                            VString store.ExecutionSettings.ConnectionCollation.Name
+                            VString Collation.defaultCollation.Name ] ])
                 |> Result.mapError storageErr
                 |> Result.map (fun _ ->
                     Storage.commitCatalogInto store baseCatalog snapshot))
@@ -12492,7 +12519,7 @@ let rec executeAs
             // body executes. A body targeting a table the invoking chain is
             // already writing fires nothing at all.
             let checkBody trigger =
-                match parseTriggerBody trigger.Body with
+                match parseTriggerBody (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
                 | Result.Ok bodyStatements ->
                     let dmlStatements = bodyStatements |> List.collect triggerDmlStatements
@@ -12516,7 +12543,7 @@ let rec executeAs
                                 dmlStatements |> traverse (checkStoredDefiner runStore trigger.Definer db)
 
                             match Auth.tryParseAccount trigger.Definer, privileges with
-                            | Some account, Result.Ok _ -> Result.Ok(bodyStatements, account)
+                            | Some account, Result.Ok _ -> Result.Ok(trigger, bodyStatements, account)
                             | _, Result.Error(code, msg) -> Result.Error(Err(code, msg))
                             | None, Result.Ok _ ->
                                 Result.Error(Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name))
@@ -12573,7 +12600,7 @@ let rec executeAs
                                         match evalExpr context expression |> Result.mapError Err with
                                         | Error error -> error
                                         | Ok value ->
-                                            match coerceValue runStore.SqlMode.Strict columns.[index] value with
+                                            match coerceValue runStore.ExecutionSettings.SqlMode.Strict columns.[index] value with
                                             | Error error -> storageErr error
                                             | Ok value ->
                                                 row.[index] <- value
@@ -12620,10 +12647,11 @@ let rec executeAs
                     rows
                     |> List.tryPick (fun (oldRow, newRow) ->
                         bodies
-                        |> List.tryPick (fun body ->
-                            match runBody oldRow newRow body with
-                            | Err _ as e -> Some e
-                            | _ -> None))
+                        |> List.tryPick (fun (trigger, statements, account) ->
+                            Storage.withExecutionSettings runStore (triggerExecutionSettings trigger) (fun () ->
+                                match runBody oldRow newRow (statements, account) with
+                                | Err _ as e -> Some e
+                                | _ -> None)))
                 finally
                     triggerChain.Value <- chain
 
@@ -12672,7 +12700,7 @@ let rec executeAs
                     | Some(DExpression expression) ->
                         evalExpr (context result) expression
                         |> Result.mapError ExpressionError
-                        |> Result.bind (coerceValue runStore.SqlMode.Strict columns.[index])
+                        |> Result.bind (coerceValue runStore.ExecutionSettings.SqlMode.Strict columns.[index])
                         |> Result.map (fun value -> result.[index] <- value)
                     | _ -> Ok()))
             (Ok())
@@ -13088,7 +13116,7 @@ let rec executeAs
             | ResultSet(names, _), metadata, rows, collations ->
                 let columns = deriveColumns names collations metadata
                 let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-                Storage.setStrictMode snapshot store.SqlMode.Strict
+                Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
                 let created =
                     createTableSeeded snapshot destinationDb destinationName columns [] [] None None None None
@@ -13180,7 +13208,7 @@ let rec executeAs
                     ids, Affected 0UL
                 else
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-                    Storage.setStrictMode snapshot store.SqlMode.Strict
+                    Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
                     let created =
                         createTableSeeded
@@ -13260,7 +13288,7 @@ let rec executeAs
         | None, _, _, Some err -> ids, err
         | None, None, None, None ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-            Storage.setStrictMode snapshot store.SqlMode.Strict
+            Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
             let finalTable =
                 actions
@@ -13541,7 +13569,7 @@ let rec executeAs
             |> List.map (fun (db, entries) -> db, entries |> List.map snd)
 
         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-        Storage.setStrictMode snapshot store.SqlMode.Strict
+        Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
         match groups |> traverse (fun (db, dbPairs) -> renameTables snapshot db dbPairs) with
         | Ok _ ->
@@ -13870,7 +13898,7 @@ let rec executeAs
         match scan store db table with
         | Error e -> ids, storageErr e
         | Ok(columns, _) ->
-            match parseTriggerBody body with
+            match parseTriggerBody (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText) body with
             | Result.Error msg -> ids, Err(1064, sprintf "Trigger body has a syntax error: %s" msg)
             | Result.Ok bodyStatements ->
                 match bodyStatements |> traverse (validateTriggerStatement registry timing event columns) with

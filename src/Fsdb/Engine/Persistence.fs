@@ -820,7 +820,7 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
         // non-strict re-coercion is the identity; if it ran non-strict, the
         // clamping replays identically. Replaying strict instead would
         // reject (and silently skip) an ALTER that clamped values.
-        let saved = store.SqlMode.Strict
+        let saved = store.ExecutionSettings.SqlMode.Strict
         setStrictMode store false
         warn "AlterTable" (alterTable store db table actions)
         setStrictMode store saved

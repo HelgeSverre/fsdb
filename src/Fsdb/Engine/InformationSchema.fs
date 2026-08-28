@@ -1201,12 +1201,6 @@ let private triggerCatalogRows (catalog: Catalog) : SystemCatalog.Trigger.Entry 
         |> List.ofSeq)
     |> Option.defaultValue []
 
-// The sql_mode/charset constants every trigger row renders — fsdb doesn't
-// capture those per trigger; values match the server's own advertised
-// defaults (charset/collation as write-probed on MySQL 8.4.11). The definer
-// is per-trigger and comes from the catalog row.
-let private triggerSqlMode = "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
-
 let private triggerCreatedText (trigger: SystemCatalog.Trigger.Entry) =
     trigger.Created
     |> Option.bind (VDateTime >> Value.toTextFsp 2)
@@ -1225,8 +1219,8 @@ let private triggersRows (catalog: Catalog) : Value[] list =
 
         [| vs "def"; vs trigger.Schema; vs trigger.Name; vs trigger.Event; vs "def"; vs trigger.Schema; vs trigger.Table
            VInt trigger.Order; VNull; vs trigger.Body; vs "ROW"; vs trigger.Timing; VNull; VNull; oldRow; newRow
-           triggerCreatedValue trigger; vs triggerSqlMode; vs trigger.Definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"
-           vs "utf8mb4_0900_ai_ci" |])
+           triggerCreatedValue trigger; vs trigger.SqlMode; vs trigger.Definer; vs trigger.CharacterSetClient
+           vs trigger.CollationConnection; vs trigger.DatabaseCollation |])
 
 let private eventsColumns =
     [ strCol "EVENT_CATALOG"
@@ -2080,8 +2074,8 @@ let showCreateTrigger (catalog: Catalog) (dbName: string) (triggerName: string) 
             Ok(
                 [ "Trigger"; "sql_mode"; "SQL Original Statement"; "character_set_client"; "collation_connection"
                   "Database Collation"; "Created" ],
-                [ [ Some trigger.Name; Some triggerSqlMode; Some ddl; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
-                    Some "utf8mb4_0900_ai_ci"; Some(triggerCreatedText trigger) ] ]
+                [ [ Some trigger.Name; Some trigger.SqlMode; Some ddl; Some trigger.CharacterSetClient
+                    Some trigger.CollationConnection; Some trigger.DatabaseCollation; Some(triggerCreatedText trigger) ] ]
             )
 
 /// `SHOW INDEX|INDEXES|KEYS FROM t [FROM db]` — one row per index column,
@@ -2317,8 +2311,8 @@ let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
             |> List.filter (fun trigger -> String.Equals(trigger.Schema, dbName, StringComparison.OrdinalIgnoreCase))
             |> List.map (fun trigger ->
                 [ Some trigger.Name; Some trigger.Event; Some trigger.Table; Some trigger.Body; Some trigger.Timing
-                  Some(triggerCreatedText trigger); Some triggerSqlMode; Some trigger.Definer; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
-                  Some "utf8mb4_0900_ai_ci" ])
+                  Some(triggerCreatedText trigger); Some trigger.SqlMode; Some trigger.Definer
+                  Some trigger.CharacterSetClient; Some trigger.CollationConnection; Some trigger.DatabaseCollation ])
 
         Ok(
             [ "Trigger"; "Event"; "Table"; "Statement"; "Timing"; "Created"; "sql_mode"; "Definer"

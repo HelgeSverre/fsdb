@@ -9,6 +9,7 @@ open Fsdb.Diagnostics
 open Fsdb.Protocol
 open Fsdb.Storage
 open Fsdb.Value
+open Fsdb.Sql
 
 /// Session defaults not backed by a live Limits setting.
 let defaultVariables: Map<string, string option> =
@@ -16,7 +17,7 @@ let defaultVariables: Map<string, string option> =
         [ "version", ServerVersion
           "version_comment", "fsdb"
           "version_compile_os", "osx"
-          "sql_mode", "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
+          "sql_mode", SqlMode.defaultText
           "character_set_client", "utf8mb4"
           "character_set_connection", "utf8mb4"
           "character_set_results", "utf8mb4"
@@ -206,7 +207,7 @@ let create (connectionId: int) (store: Store) : Session =
       Variables = variables
       UserVariables = Map.empty
       // Reference fields stay shared; mutable SQL-mode settings stay per session.
-      Store = { store with SqlMode = store.SqlMode }
+      Store = { store with ExecutionSettings = store.ExecutionSettings }
       TemporaryCatalog = Map.empty
       LastInsertId = 0L
       LastGeneratedId = 0L

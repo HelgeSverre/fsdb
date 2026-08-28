@@ -13,6 +13,7 @@ open Fsdb.Ast
 open Fsdb.Session
 open Fsdb.Storage
 open Fsdb.InformationSchema
+open Fsdb.Sql
 
 /// The wire-facing result shape is `Executor.QueryResult` itself — both the
 /// parser-driven path and the text-probe special cases below construct the
@@ -810,46 +811,11 @@ let private literalSetRhs (options: Parser.ParserOptions) (rhs: string) : Value 
     else
         None
 
-let private traditionalSqlModes =
-    set
-        [ "STRICT_TRANS_TABLES"
-          "STRICT_ALL_TABLES"
-          "NO_ZERO_IN_DATE"
-          "NO_ZERO_DATE"
-          "ERROR_FOR_DIVISION_BY_ZERO"
-          "NO_ENGINE_SUBSTITUTION" ]
-
-let private parseSqlModes (value: string) =
-    value.Split(',')
-    |> Seq.map (fun mode -> mode.Trim().ToUpperInvariant())
-    |> Set.ofSeq
-
-let private hasSqlMode (modes: Set<string>) (name: string) =
-    let requested = name.ToUpperInvariant()
-    modes.Contains requested || modes.Contains "TRADITIONAL" && traditionalSqlModes.Contains requested
-
-let private isStrictSqlMode modes =
-    hasSqlMode modes "STRICT_TRANS_TABLES" || hasSqlMode modes "STRICT_ALL_TABLES"
-
-let private parserOptionsForModes modes =
-    let ansi = hasSqlMode modes "ANSI"
-    let enabled mode = ansi || hasSqlMode modes mode
-
-    { Parser.defaultOptions with
-        AnsiQuotes = enabled "ANSI_QUOTES"
-        IgnoreSpace = enabled "IGNORE_SPACE"
-        PipesAsConcat = enabled "PIPES_AS_CONCAT"
-        HighNotPrecedence = hasSqlMode modes "HIGH_NOT_PRECEDENCE"
-        NoUnsignedSubtraction = hasSqlMode modes "NO_UNSIGNED_SUBTRACTION"
-        RealAsFloat = enabled "REAL_AS_FLOAT"
-        NoBackslashEscapes = hasSqlMode modes "NO_BACKSLASH_ESCAPES" }
-
 let private parserOptionsForSession (session: Session) =
     lookupVar session "sql_mode"
     |> Option.flatten
     |> Option.defaultValue ""
-    |> parseSqlModes
-    |> parserOptionsForModes
+    |> SqlMode.parserOptionsFor
 
 /// Evaluates a `SET` user-variable right-hand side through the ordinary
 /// expression grammar. A private variable map preserves SET's all-or-
@@ -887,20 +853,6 @@ let private resolveSystemSetRhs
     | None when bareSetIdentifier.IsMatch(rhs.Trim()) -> Ok(VString(rhs.Trim()), userVariables)
     | None ->
         resolveUserSetRhs session userVariables sql rhs
-
-let private applySqlMode (store: Store) (value: string) =
-    let modes = parseSqlModes value
-
-    setSqlMode
-        store
-        { Strict = isStrictSqlMode modes
-          NoZeroDate = hasSqlMode modes "NO_ZERO_DATE"
-          NoZeroInDate = hasSqlMode modes "NO_ZERO_IN_DATE"
-          OnlyFullGroupBy = hasSqlMode modes "ONLY_FULL_GROUP_BY"
-          NoAutoValueOnZero = hasSqlMode modes "NO_AUTO_VALUE_ON_ZERO"
-          ErrorForDivisionByZero = hasSqlMode modes "ERROR_FOR_DIVISION_BY_ZERO"
-          TimeTruncateFractional = hasSqlMode modes "TIME_TRUNCATE_FRACTIONAL"
-          PadCharToFullLength = hasSqlMode modes "PAD_CHAR_TO_FULL_LENGTH" }
 
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends
@@ -1110,25 +1062,21 @@ let private parseSetFragment
 let private applySetAction (session: Session) (action: SetAction) : Session =
     match action with
     | SetNamesAction(charset, collation) ->
-        // `SET NAMES x` also drives `collation_connection` in MySQL — the
-        // charset's default collation, or the explicit `COLLATE` when
-        // written (Laravel's connector sends `SET NAMES utf8mb4 COLLATE
-        // utf8mb4_unicode_ci`). latin1/ascii's real defaults
-        // (latin1_swedish_ci/ascii_general_ci) aren't registered; the
-        // server default ai_ci stands in, the same approximation column
-        // charsets use. `binary` compares byte-wise, i.e. utf8mb4_bin.
+        // `SET NAMES` uses the charset default unless COLLATE is explicit.
         let connectionCollation =
             match collation |> Option.bind Collation.tryFind with
             | Some col -> Some col
             | None ->
                 match charset.ToLowerInvariant() with
                 | "binary" -> Collation.tryFind "utf8mb4_bin"
-                | "utf8mb4"
+                | "utf8mb4" -> Some Collation.defaultCollation
                 | "utf8"
-                | "latin1"
-                | "ascii" -> Some Collation.defaultCollation
+                | "utf8mb3" -> Collation.tryFind "utf8mb3_general_ci"
+                | "latin1" -> Collation.tryFind "latin1_swedish_ci"
+                | "ascii" -> Collation.tryFind "ascii_general_ci"
                 | _ -> None
 
+        setConnectionCharset session.Store charset
         connectionCollation |> Option.iter (setConnectionCollation session.Store)
 
         { session with
@@ -1163,7 +1111,10 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
             value |> Option.iter (fun v -> setForeignKeyChecks session.Store (v.Trim() <> "0"))
 
         if name = "sql_mode" then
-            value |> Option.iter (applySqlMode session.Store)
+            value |> Option.iter (setSqlMode session.Store)
+
+        if name = "character_set_client" then
+            value |> Option.iter (setConnectionCharset session.Store)
 
         if name = "collation_connection" then
             value
@@ -1576,9 +1527,9 @@ let private ignoresDataChangeErrors =
     | _ -> false
 
 let private divisionByZeroPolicy (store: Store) (statement: Statement) =
-    if not store.SqlMode.ErrorForDivisionByZero then
+    if not store.ExecutionSettings.SqlMode.ErrorForDivisionByZero then
         Diagnostics.DivisionByZeroPolicy.Silent
-    elif store.SqlMode.Strict && isDataChangeStatement statement && not (ignoresDataChangeErrors statement) then
+    elif store.ExecutionSettings.SqlMode.Strict && isDataChangeStatement statement && not (ignoresDataChangeErrors statement) then
         Diagnostics.DivisionByZeroPolicy.Fail
     else
         Diagnostics.DivisionByZeroPolicy.Warn
@@ -1618,7 +1569,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
         // mode value from the session before each statement.
         lookupVar session "sql_mode"
         |> Option.flatten
-        |> Option.iter (applySqlMode store)
+        |> Option.iter (setSqlMode store)
 
         let registry = registryFor session
 
@@ -2327,14 +2278,18 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match collation with
         | None -> session, Err(1115, sprintf "Unknown character set: '%s'" charset)
         | Some collation ->
-            { session with
-                Variables =
-                    session.Variables
-                    |> Map.add "character_set_client" (Some charset)
-                    |> Map.add "character_set_results" (Some charset)
-                    |> Map.add "character_set_connection" (Some charset)
-                    |> Map.add "collation_connection" (Some collation) },
-            Affected 0UL
+            let next =
+                { session with
+                    Variables =
+                        session.Variables
+                        |> Map.add "character_set_client" (Some charset)
+                        |> Map.add "character_set_results" (Some charset)
+                        |> Map.add "character_set_connection" (Some charset)
+                        |> Map.add "collation_connection" (Some collation) }
+
+            setConnectionCharset next.Store charset
+            Collation.tryFind collation |> Option.iter (setConnectionCollation next.Store)
+            next, Affected 0UL
     | SetPassword(userOpt, password) ->
         // No FOR clause selects the session's authenticated account.
         let wanted = userOpt |> Option.map accountRefOf |> Option.defaultValue (accountOf session)
