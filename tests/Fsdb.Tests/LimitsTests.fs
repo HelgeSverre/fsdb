@@ -308,7 +308,7 @@ let tests =
           // limit beats the compiled-in default.
           testCase "a configured limit is what SHOW VARIABLES reports, and a session SET still shadows it"
           <| fun _ ->
-              withSettings [ "wait_timeout", "77"; "max_connections", "42" ] (fun () ->
+              withSettings [ "wait_timeout", "77"; "net_read_timeout", "31"; "max_connections", "42" ] (fun () ->
                   let session = create 1 (Fsdb.Storage.create ())
 
                   match handle session "SELECT @@wait_timeout" |> snd with
@@ -327,7 +327,22 @@ let tests =
 
                   match handle session "SELECT @@GLOBAL.wait_timeout" |> snd with
                   | ResultSet(_, [ [ Some "77" ] ]) -> ()
-                  | other -> failtestf "expected GLOBAL to still read the configured limit, got %A" other)
+                  | other -> failtestf "expected GLOBAL to still read the configured limit, got %A" other
+
+                  match handle session "SELECT @@net_read_timeout" |> snd with
+                  | ResultSet(_, [ [ Some "31" ] ]) -> ()
+                  | other -> failtestf "expected the configured read timeout, got %A" other
+
+                  let session, setReadTimeout = handle session "SET SESSION net_read_timeout = 9"
+                  Expect.equal setReadTimeout (Affected 0UL) "the read timeout is session-settable"
+
+                  match handle session "SELECT @@net_read_timeout, @@GLOBAL.net_read_timeout" |> snd with
+                  | ResultSet(_, [ [ Some "9"; Some "31" ] ]) -> ()
+                  | other -> failtestf "expected distinct session and global read timeouts, got %A" other
+
+                  match handle session "SET SESSION net_read_timeout = 0" |> snd with
+                  | Err(1232, _) -> ()
+                  | other -> failtestf "expected an out-of-range session timeout to fail, got %A" other)
 
           testCase "SET GLOBAL applies live limits and rejects an invalid batch atomically"
           <| fun _ ->

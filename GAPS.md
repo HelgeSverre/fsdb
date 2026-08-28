@@ -443,7 +443,6 @@ live Limits reporting.
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
-| net_read_timeout | configurable | does not exist | low | divergence |
 
 ## 15. Differential-testing findings and reruns (torture harness)
 

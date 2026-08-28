@@ -20,7 +20,7 @@ let frame (p: Packet) : byte[] =
     w.WriteBytes p.Payload
     w.ToArray()
 
-/// Chunk size for `readExactAsync`'s read loop — deliberately far smaller
+/// Chunk size for the packet read loop — deliberately far smaller
 /// than a packet's declared length can be (up to 16 MiB). A client that
 /// sends a 4-byte header declaring a huge length and then no payload (or a
 /// slow trickle) must not make the server allocate that whole length
@@ -29,7 +29,7 @@ let frame (p: Packet) : byte[] =
 /// really received.
 let private readChunkSize = 64 * 1024
 
-let private readExactAsync (stream: Stream) (n: int) : Async<byte[] option> =
+let private readExactWithAsync (readSome: byte[] -> int -> int -> Async<int>) (n: int) : Async<byte[] option> =
     async {
         if n = 0 then
             return Some [||]
@@ -40,7 +40,7 @@ let private readExactAsync (stream: Stream) (n: int) : Async<byte[] option> =
             let mutable eof = false
 
             while remaining > 0 && not eof do
-                let! read = stream.ReadAsync(buf, 0, min remaining buf.Length) |> Async.AwaitTask
+                let! read = readSome buf 0 (min remaining buf.Length)
 
                 if read = 0 then
                     eof <- true
@@ -50,6 +50,9 @@ let private readExactAsync (stream: Stream) (n: int) : Async<byte[] option> =
 
             return if eof then None else Some(ms.ToArray())
     }
+
+let private streamReader (stream: Stream) buffer offset count =
+    stream.ReadAsync(buffer, offset, count) |> Async.AwaitTask
 
 /// The largest payload a single packet header can declare (2^24 - 1). A
 /// payload of exactly this many bytes means "more packets follow" on the
@@ -65,19 +68,22 @@ exception PacketTooLargeException of size: int
 /// Reads one physical MySQL packet without interpreting a max-sized payload
 /// as a continuation. LOCAL INFILE uses empty physical packets as its upload
 /// terminator, unlike command packets which are reassembled below.
-let readPhysicalPacketAsync (stream: Stream) : Async<Packet option> =
+let internal readPhysicalPacketWithReaderAsync (readSome: byte[] -> int -> int -> Async<int>) : Async<Packet option> =
     async {
-        match! readExactAsync stream 4 with
+        match! readExactWithAsync readSome 4 with
         | None -> return None
         | Some header ->
             let r = Reader(header)
             let len = r.ReadInt24LE()
             let seqId = r.ReadByte()
 
-            match! readExactAsync stream len with
+            match! readExactWithAsync readSome len with
             | None -> return None
             | Some payload -> return Some { SeqId = seqId; Payload = payload }
     }
+
+let readPhysicalPacketAsync (stream: Stream) : Async<Packet option> =
+    readPhysicalPacketWithReaderAsync (streamReader stream)
 
 /// Reads one logical packet from a stream, or None on clean disconnect.
 /// Reassembles packets split across the wire per the MySQL protocol: a
@@ -89,10 +95,10 @@ let readPhysicalPacketAsync (stream: Stream) : Async<Packet option> =
 /// response seq id as `packet.SeqId + 1uy` need that last id, not the
 /// first, or their reply's seq id collides with a fragment the client
 /// already sent.
-let readPacketAsync (stream: Stream) : Async<Packet option> =
+let internal readPacketWithReaderAsync (readSome: byte[] -> int -> int -> Async<int>) : Async<Packet option> =
     let rec loop (acc: byte[]) : Async<Packet option> =
         async {
-            match! readPhysicalPacketAsync stream with
+            match! readPhysicalPacketWithReaderAsync readSome with
             | None -> return None
             | Some packet ->
                 let acc = Array.append acc packet.Payload
@@ -107,6 +113,9 @@ let readPacketAsync (stream: Stream) : Async<Packet option> =
         }
 
     loop [||]
+
+let readPacketAsync (stream: Stream) : Async<Packet option> =
+    readPacketWithReaderAsync (streamReader stream)
 
 /// Writes one logical packet to a stream, splitting the payload into
 /// maxPacketPayload-byte chunks with incrementing sequence ids if it's too

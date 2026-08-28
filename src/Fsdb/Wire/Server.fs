@@ -19,7 +19,22 @@ open Fsdb.Storage
 open Fsdb.Value
 open Fsdb.Executor
 
-type private CountingStream(inner: IO.Stream, metrics: TransportMetrics) =
+/// Carries byte progress across raw, TLS, and compressed buffering boundaries.
+type private ReadProgress() =
+    let signal = new SemaphoreSlim(0, Int32.MaxValue)
+
+    member _.Notify() = signal.Release() |> ignore
+
+    member _.Drain() =
+        while signal.Wait 0 do
+            ()
+
+    member _.WaitAsync(cancellationToken: CancellationToken) = signal.WaitAsync cancellationToken
+
+    interface IDisposable with
+        member _.Dispose() = signal.Dispose()
+
+type private CountingStream(inner: IO.Stream, metrics: TransportMetrics, progress: ReadProgress) =
     inherit IO.Stream()
 
     override _.CanRead = inner.CanRead
@@ -37,12 +52,14 @@ type private CountingStream(inner: IO.Stream, metrics: TransportMetrics) =
     override _.Read(buffer, offset, count) =
         let read = inner.Read(buffer, offset, count)
         metrics.BytesReceived <- metrics.BytesReceived + int64 read
+        if read > 0 then progress.Notify()
         read
 
     override _.ReadAsync(buffer, offset, count, cancellationToken) =
         task {
             let! read = inner.ReadAsync(buffer, offset, count, cancellationToken)
             metrics.BytesReceived <- metrics.BytesReceived + int64 read
+            if read > 0 then progress.Notify()
             return read
         }
 
@@ -50,6 +67,7 @@ type private CountingStream(inner: IO.Stream, metrics: TransportMetrics) =
         Threading.Tasks.ValueTask<int>(task {
             let! read = inner.ReadAsync(buffer, cancellationToken)
             metrics.BytesReceived <- metrics.BytesReceived + int64 read
+            if read > 0 then progress.Notify()
             return read
         })
 
@@ -664,11 +682,11 @@ let private disconnectPollIntervalMs = 50
 /// ReadAsync ignores Socket.ReceiveTimeout and cooperative cancellation.
 /// Closing the client forces a timed-out read to unblock.
 let private readWithTimeoutMs
-    (read: IO.Stream -> Async<Packet option>)
+    (read: IO.Stream -> Async<'T option>)
     (timeoutMs: int)
     (client: TcpClient)
     (stream: IO.Stream)
-    : Async<Packet option> =
+    : Async<'T option> =
     async {
         let readTask = Async.StartAsTask(read stream)
         // Cancel the losing timer so active connections do not accumulate delays.
@@ -700,6 +718,72 @@ let private readWithTimeoutMs
 let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
     readWithTimeoutMs readPacketAsync timeoutMs client stream
 
+let private readWithProgressTimeoutMs
+    (read: Async<'T option>)
+    (idleTimeoutMs: int)
+    (transferTimeoutMs: int)
+    (client: TcpClient)
+    (progress: ReadProgress)
+    : Async<'T option> =
+    async {
+        progress.Drain()
+        let readTask = Async.StartAsTask read
+
+        let rec wait (timeoutMs: int) =
+            async {
+                use roundCts = new CancellationTokenSource()
+                let progressTask = progress.WaitAsync roundCts.Token
+                let timeoutTask = Threading.Tasks.Task.Delay(timeoutMs, roundCts.Token)
+
+                let! winner =
+                    Threading.Tasks.Task.WhenAny(readTask :> Threading.Tasks.Task, progressTask, timeoutTask)
+                    |> Async.AwaitTask
+
+                roundCts.Cancel()
+
+                if obj.ReferenceEquals(winner, readTask) then
+                    try
+                        return! Async.AwaitTask readTask
+                    with :? AggregateException as agg when agg.InnerExceptions.Count = 1 ->
+                        return raise (agg.InnerExceptions.[0])
+                elif obj.ReferenceEquals(winner, progressTask) then
+                    return! wait transferTimeoutMs
+                else
+                    client.Close()
+
+                    try
+                        let! _ = Async.AwaitTask readTask
+                        ()
+                    with _ ->
+                        ()
+
+                    return None
+            }
+
+        return! wait idleTimeoutMs
+    }
+
+let private readSomeWithProgress (stream: IO.Stream) (progress: ReadProgress) buffer offset count =
+    async {
+        let! count = stream.ReadAsync(buffer, offset, count) |> Async.AwaitTask
+        if count > 0 then progress.Notify()
+        return count
+    }
+
+let private readPacketWithTimeoutsMs
+    (idleTimeoutMs: int)
+    (readTimeoutMs: int)
+    (client: TcpClient)
+    (stream: IO.Stream)
+    (progress: ReadProgress)
+    : Async<Packet option> =
+    readWithProgressTimeoutMs
+        (readPacketWithReaderAsync (readSomeWithProgress stream progress))
+        idleTimeoutMs
+        readTimeoutMs
+        client
+        progress
+
 /// Converts the MySQL seconds-valued timeout without wrapping the `int`
 /// milliseconds accepted by `Task.Delay`. Values beyond that API's range
 /// use its longest finite delay instead of breaking every connection before
@@ -710,12 +794,38 @@ let timeoutMilliseconds (timeoutSeconds: int) : int =
 let private readPacketWithTimeoutSeconds (timeoutSeconds: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
     readPacketWithTimeoutMs (timeoutMilliseconds timeoutSeconds) client stream
 
-let private readPhysicalPacketWithTimeoutSeconds (timeoutSeconds: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
-    readWithTimeoutMs readPhysicalPacketAsync (timeoutMilliseconds timeoutSeconds) client stream
+let private readPacketWithTimeoutsSeconds
+    (idleTimeoutSeconds: int)
+    (readTimeoutSeconds: int)
+    (client: TcpClient)
+    (stream: IO.Stream)
+    (progress: ReadProgress)
+    : Async<Packet option> =
+    readPacketWithTimeoutsMs
+        (timeoutMilliseconds idleTimeoutSeconds)
+        (timeoutMilliseconds readTimeoutSeconds)
+        client
+        stream
+        progress
+
+let private readPhysicalPacketWithTimeoutSeconds
+    (timeoutSeconds: int)
+    (client: TcpClient)
+    (stream: IO.Stream)
+    (progress: ReadProgress)
+    : Async<Packet option> =
+    let timeoutMs = timeoutMilliseconds timeoutSeconds
+    readWithProgressTimeoutMs
+        (readPhysicalPacketWithReaderAsync (readSomeWithProgress stream progress))
+        timeoutMs
+        timeoutMs
+        client
+        progress
 
 let private receiveLocalData
     (client: TcpClient)
     (stream: IO.Stream)
+    (progress: ReadProgress)
     (timeoutSeconds: int)
     (startSeqId: byte)
     : Async<Result<byte[] * byte, (int * string) * byte>> =
@@ -726,7 +836,7 @@ let private receiveLocalData
         let mutable error: (int * string) option = None
 
         while not finished do
-            match! readPhysicalPacketWithTimeoutSeconds timeoutSeconds client stream with
+            match! readPhysicalPacketWithTimeoutSeconds timeoutSeconds client stream progress with
             | None ->
                 finished <- true
                 error <- Some(2013, "Lost connection to client during LOAD DATA LOCAL INFILE")
@@ -748,13 +858,16 @@ let private receiveLocalData
         | None -> return Result.Ok(bytes.ToArray(), expectedSeqId)
     }
 
-let private sessionWaitTimeout (session: Session) =
-    match session.Variables |> Map.tryFind "wait_timeout" |> Option.flatten with
+let private sessionTimeout (name: string) (fallback: int) (session: Session) =
+    match session.Variables |> Map.tryFind name |> Option.flatten with
     | Some value ->
         match Int32.TryParse value with
         | true, seconds -> seconds
-        | _ -> Limits.waitTimeoutSeconds
-    | None -> Limits.waitTimeoutSeconds
+        | _ -> fallback
+    | None -> fallback
+
+let private sessionWaitTimeout = sessionTimeout "wait_timeout" Limits.waitTimeoutSeconds
+let private sessionNetReadTimeout = sessionTimeout "net_read_timeout" Limits.netReadTimeoutSeconds
 
 /// Polls `client`'s socket while a query runs, cancelling `queryCts` the
 /// moment the peer is gone — the only way to notice a disconnect while
@@ -945,7 +1058,8 @@ let private handleConnection
             { BytesReceived = 0L
               BytesSent = 0L }
 
-        let countedStream = new CountingStream(networkStream, metrics)
+        use readProgress = new ReadProgress()
+        let countedStream = new CountingStream(networkStream, metrics, readProgress)
         let mutable stream: IO.Stream = countedStream
         let mutable tlsStream: SslStream option = None
         let mutable compressedStream: CompressedStream option = None
@@ -1168,7 +1282,14 @@ let private handleConnection
                         activeSession <- Some session
                         compressedStream |> Option.iter (fun compressed -> compressed.BeginCommand())
 
-                        match! readPacketWithTimeoutSeconds (sessionWaitTimeout session) client stream with
+                        match!
+                            readPacketWithTimeoutsSeconds
+                                (sessionWaitTimeout session)
+                                (sessionNetReadTimeout session)
+                                client
+                                stream
+                                readProgress
+                        with
                         | None -> ()
                         | Some cmdPacket ->
                             let seqId = cmdPacket.SeqId + 1uy
@@ -1315,7 +1436,7 @@ let private handleConnection
                                                                 let! uploadSeqId =
                                                                     writePacketAsync stream { SeqId = seqId; Payload = localInfileRequestPayload load.FileName }
 
-                                                                match! receiveLocalData client stream (sessionWaitTimeout session) uploadSeqId with
+                                                                match! receiveLocalData client stream readProgress (sessionNetReadTimeout session) uploadSeqId with
                                                                 | Result.Error((code, _), _) when code = 2013 || code = 1156 ->
                                                                     client.Close()
                                                                     return None

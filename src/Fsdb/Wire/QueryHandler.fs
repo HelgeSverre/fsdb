@@ -273,6 +273,7 @@ let private numericSystemVariables =
           "max_connections"
           "max_heap_table_size"
           "max_prepared_stmt_count"
+          "net_read_timeout"
           "net_write_timeout"
           "performance_schema"
           "query_cache_size"
@@ -1162,6 +1163,8 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | SetVarAction(name, _, false) when globalOnlyLimitVariables.Contains name ->
         Error(Err(1229, sprintf "Variable '%s' is a GLOBAL variable and should be set with SET GLOBAL" name))
+    | SetVarAction(name, Some value, false) when Limits.isReportableSetting name ->
+        Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | _ -> Ok()
 
 /// Applies every assignment only after the whole `SET` parses; MySQL leaves

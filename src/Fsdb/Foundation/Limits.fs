@@ -49,6 +49,10 @@ let mutable maxPreparedStmtCount = 16382
 /// application a connection the server closed hours earlier.
 let mutable waitTimeoutSeconds = 300
 
+/// Once a client starts a packet, bounds every pause before more bytes arrive.
+/// Idle connections remain governed separately by `wait_timeout`.
+let mutable netReadTimeoutSeconds = 30
+
 /// Maximum time a socket write may remain blocked by a client that stopped
 /// reading while keeping its connection open.
 let mutable netWriteTimeoutSeconds = 60
@@ -133,6 +137,12 @@ let private knobs =
         Max = 31536000L
         Set = fun v -> waitTimeoutSeconds <- int v
         Get = fun () -> int64 waitTimeoutSeconds
+        Reportable = true }
+      { Name = "net_read_timeout"
+        Min = 1L
+        Max = 31536000L
+        Set = fun v -> netReadTimeoutSeconds <- int v
+        Get = fun () -> int64 netReadTimeoutSeconds
         Reportable = true }
       { Name = "net_write_timeout"
         Min = 1L

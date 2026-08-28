@@ -2618,6 +2618,52 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "net_read_timeout applies after a command starts, not while the connection is idle"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+
+                  for compressed in [ false; true ] do
+                      let capabilities = ClientProtocol41 ||| if compressed then ClientCompress else 0u
+                      let! client, rawStream = connectRawAsWithCapabilities server.Port "root" capabilities
+                      use client = client
+
+                      let compressedStream =
+                          if compressed then
+                              Some(new Fsdb.Compression.CompressedStream(rawStream, true))
+                          else
+                              None
+
+                      let stream = compressedStream |> Option.map (fun stream -> stream :> IO.Stream) |> Option.defaultValue rawStream
+                      let beginCommand () = compressedStream |> Option.iter _.BeginCommand()
+
+                      try
+                          let setTimeout =
+                              Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SET SESSION net_read_timeout = 1")
+
+                          beginCommand ()
+                          let! _ = writePacketAsync stream { SeqId = 0uy; Payload = setTimeout }
+                          let! setReply = readPacketAsync stream
+                          Expect.equal setReply.Value.Payload.[0] 0x00uy "the session timeout is accepted"
+
+                          beginCommand ()
+                          do! Async.Sleep 1200
+                          let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x0euy |] }
+                          let! pingReply = readPacketAsync stream
+                          Expect.equal pingReply.Value.Payload.[0] 0x00uy "idle time still follows wait_timeout"
+
+                          beginCommand ()
+                          do! rawStream.WriteAsync([| 1uy |], 0, 1) |> Async.AwaitTask
+
+                          let buffer = Array.zeroCreate<byte> 1
+                          use deadline = new Threading.CancellationTokenSource(TimeSpan.FromSeconds 5.0)
+                          let! read = rawStream.ReadAsync(buffer, 0, buffer.Length, deadline.Token) |> Async.AwaitTask
+                          Expect.equal read 0 "a stalled partial packet closes the connection"
+                      finally
+                          compressedStream |> Option.iter _.Dispose()
+              }
+              |> Async.RunSynchronously
+
           testCase "COM_STATISTICS reports live server counters"
           <| fun _ ->
               async {

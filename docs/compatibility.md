@@ -248,7 +248,7 @@ through `SHOW WARNINGS`; the OK/EOF warning count reports the same conditions.
 
 The tunables an operator would plausibly change live in `Fsdb.Limits` and are
 set from the standard server option files or an explicit `--defaults-file`:
-`max_allowed_packet`, `max_connections`, `wait_timeout`,
+`max_allowed_packet`, `max_connections`, `wait_timeout`, `net_read_timeout`,
 `innodb_lock_wait_timeout`, `cte_max_recursion_depth`, plus fsdb's own WAL
 rotation thresholds.
 
@@ -280,9 +280,11 @@ Two deliberate divergences from stock MySQL:
 
 `SET GLOBAL` updates the live limits used by later accepts, packet reads,
 idle waits, transaction conflict waits, and recursive CTEs. Session-scoped
-`wait_timeout`, `innodb_lock_wait_timeout`, and `cte_max_recursion_depth` are
-honoured; process-wide `max_connections` and `max_allowed_packet` reject a
-session-scoped `SET`.
+`wait_timeout`, `net_read_timeout`, `innodb_lock_wait_timeout`, and
+`cte_max_recursion_depth` are honoured; process-wide `max_connections` and
+`max_allowed_packet` reject a session-scoped `SET`. An idle command wait uses
+`wait_timeout`; after the first packet byte arrives, every pause in ordinary,
+TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.
 
 ## Users, authentication, and privileges
 
