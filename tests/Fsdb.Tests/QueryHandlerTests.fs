@@ -4727,6 +4727,220 @@ let tests =
               | ResultSet(_, [ [ Some "10" ]; [ Some "22" ] ]) -> ()
               | other -> failtestf "expected the committed second delta, got %A" other
 
+          testCase "locking reads honor NOWAIT and SKIP LOCKED"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE lock_queue (id INT PRIMARY KEY, value INT)"
+              let _, _ = handle setup "INSERT INTO lock_queue VALUES (1, 10),(2, 20),(3, 30)"
+
+              let holder, _ = handle (create 2 store) "BEGIN"
+              let holder, _ = handle holder "SELECT id FROM lock_queue WHERE id = 2 FOR UPDATE"
+              let contender, _ = handle (create 3 store) "BEGIN"
+
+              match handle contender "SELECT id FROM lock_queue WHERE id = 1 FOR UPDATE NOWAIT" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the unselected row to remain available, got %A" other
+
+              match handle contender "SELECT id FROM lock_queue WHERE id = 2 FOR UPDATE NOWAIT" |> snd with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected NOWAIT to reject the held row, got %A" other
+
+              match handle contender "SELECT id FROM lock_queue FOR UPDATE SKIP LOCKED" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected SKIP LOCKED to omit the held row, got %A" other
+
+              let _, _ = handle holder "ROLLBACK"
+
+              match handle contender "SELECT id FROM lock_queue WHERE id = 2 FOR UPDATE NOWAIT" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the transaction to remain usable after NOWAIT, got %A" other
+
+              ()
+
+          testCase "locking reads use the current committed row version"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE current_locks (id INT PRIMARY KEY, value INT)"
+              let _, _ = handle setup "INSERT INTO current_locks VALUES (1, 10)"
+
+              let reader, _ = handle (create 2 store) "BEGIN"
+              let reader, first = handle reader "SELECT value FROM current_locks WHERE id = 1"
+              Expect.equal first (ResultSet([ "value" ], [ [ Some "10" ] ])) "the consistent read establishes the snapshot"
+              let _, _ = handle (create 3 store) "UPDATE current_locks SET value = 77 WHERE id = 1"
+              let reader, locked = handle reader "SELECT value FROM current_locks WHERE id = 1 FOR UPDATE"
+              Expect.equal locked (ResultSet([ "value" ], [ [ Some "77" ] ])) "the locking read uses the current version"
+
+              match handle reader "SELECT value FROM current_locks WHERE id = 1" |> snd with
+              | ResultSet(_, [ [ Some "10" ] ]) -> ()
+              | other -> failtestf "expected the consistent snapshot to remain unchanged, got %A" other
+
+          testCase "shared locking reads coexist and block writers"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE shared_locks (id INT PRIMARY KEY, value INT)"
+              let _, _ = handle setup "INSERT INTO shared_locks VALUES (1, 10)"
+
+              let first, _ = handle (create 2 store) "BEGIN"
+              let first, _ = handle first "SELECT id FROM shared_locks FOR SHARE"
+              let second, _ = handle (create 3 store) "BEGIN"
+
+              match handle second "SELECT id FROM shared_locks FOR SHARE NOWAIT" with
+              | second, ResultSet(_, [ [ Some "1" ] ]) ->
+                  let writer, _ = handle (create 4 store) "BEGIN"
+                  let waiting = System.Threading.Tasks.Task.Run(fun () -> handle writer "UPDATE shared_locks SET value = 11 WHERE id = 1")
+
+                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the shared locks hold the writer"
+                  let _, _ = handle first "ROLLBACK"
+                  let _, _ = handle second "ROLLBACK"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "the writer continues after both readers release"
+
+                  match waiting.Result |> snd with
+                  | Affected 1UL -> ()
+                  | other -> failtestf "expected the waiting update to succeed, got %A" other
+              | _, other -> failtestf "expected compatible shared locks, got %A" other
+
+          testCase "locking read OF targets only the named join source"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE lock_parent (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE TABLE lock_child (id INT PRIMARY KEY, parent_id INT, KEY(parent_id))"
+              let setup, _ = handle setup "INSERT INTO lock_parent VALUES (1)"
+              let _, _ = handle setup "INSERT INTO lock_child VALUES (1, 1)"
+
+              let holder, _ = handle (create 2 store) "BEGIN"
+              let holder, result =
+                  handle
+                      holder
+                      "SELECT p.id,c.id FROM lock_parent p JOIN lock_child c ON c.parent_id=p.id FOR UPDATE OF p"
+
+              match result with
+              | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected the locking join to succeed, got %A" other
+
+              let contender, _ = handle (create 3 store) "BEGIN"
+
+              match handle contender "SELECT id FROM lock_child FOR UPDATE NOWAIT" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the untargeted child row to remain available, got %A" other
+
+              match handle contender "SELECT id FROM lock_parent FOR UPDATE NOWAIT" |> snd with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected the targeted parent row to be locked, got %A" other
+
+              let _, _ = handle holder "ROLLBACK"
+              ()
+
+          testCase "multiple locking clauses preserve source-specific strengths"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE clause_parent (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE TABLE clause_child (id INT PRIMARY KEY, parent_id INT)"
+              let setup, _ = handle setup "INSERT INTO clause_parent VALUES (1)"
+              let _, _ = handle setup "INSERT INTO clause_child VALUES (1, 1)"
+
+              let holder, _ = handle (create 2 store) "BEGIN"
+              let holder, result =
+                  handle
+                      holder
+                      "SELECT p.id,c.id FROM clause_parent p JOIN clause_child c ON c.parent_id=p.id FOR UPDATE OF p FOR SHARE OF c"
+
+              match result with
+              | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected the multi-clause read to succeed, got %A" other
+
+              let contender, _ = handle (create 3 store) "BEGIN"
+
+              match handle contender "SELECT id FROM clause_child FOR SHARE NOWAIT" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the child shared lock to be compatible, got %A" other
+
+              match handle contender "SELECT id FROM clause_parent FOR UPDATE NOWAIT" |> snd with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected the parent update lock to conflict, got %A" other
+
+              match handle contender "SELECT id FROM clause_child FOR UPDATE NOWAIT" |> snd with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected the child shared lock to reject an update lock, got %A" other
+
+              let _, _ = handle holder "ROLLBACK"
+              ()
+
+          testCase "failed multi-source NOWAIT releases statement locks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE lock_first (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE TABLE lock_second (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "INSERT INTO lock_first VALUES (1)"
+              let _, _ = handle setup "INSERT INTO lock_second VALUES (1)"
+
+              let blocker, _ = handle (create 2 store) "BEGIN"
+              let blocker, _ = handle blocker "SELECT id FROM lock_second FOR UPDATE"
+              let contender, _ = handle (create 3 store) "BEGIN"
+
+              match
+                  handle
+                      contender
+                      "SELECT a.id,b.id FROM lock_first a JOIN lock_second b ON b.id=a.id FOR UPDATE OF a,b NOWAIT"
+                  |> snd
+              with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected the second source to reject NOWAIT, got %A" other
+
+              let observer, _ = handle (create 4 store) "BEGIN"
+
+              match handle observer "SELECT id FROM lock_first FOR UPDATE NOWAIT" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the first source lock to roll back with the statement, got %A" other
+
+              let _, _ = handle blocker "ROLLBACK"
+              ()
+
+          testCase "locking clauses validate aliases and do not persist in autocommit"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE lock_validation (id INT PRIMARY KEY, value INT)"
+              let _, _ = handle setup "INSERT INTO lock_validation VALUES (1, 10)"
+              let session, _ = handle (create 2 store) "BEGIN"
+
+              match handle session "SELECT id FROM lock_validation v FOR UPDATE OF missing" |> snd with
+              | Err(3568, _) -> ()
+              | other -> failtestf "expected an unresolved locking alias error, got %A" other
+
+              match handle session "SELECT id FROM lock_validation v FOR UPDATE OF v,v" |> snd with
+              | Err(3569, _) -> ()
+              | other -> failtestf "expected a duplicate locking alias error, got %A" other
+
+              match handle (create 3 store) "SELECT id FROM lock_validation FOR UPDATE" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the autocommit locking read to succeed, got %A" other
+
+              match handle (create 4 store) "UPDATE lock_validation SET value = 11 WHERE id = 1" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected autocommit to release the read lock, got %A" other
+
+          testCase "read-only transactions permit shared but not update locking reads"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE readonly_locks (id INT PRIMARY KEY)"
+              let _, _ = handle setup "INSERT INTO readonly_locks VALUES (1)"
+              let session, _ = handle (create 2 store) "START TRANSACTION READ ONLY"
+
+              match handle session "SELECT id FROM readonly_locks FOR SHARE" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected a shared read lock in the read-only transaction, got %A" other
+
+              match handle session "SELECT id FROM readonly_locks FOR UPDATE" |> snd with
+              | Err(1792, _) -> ()
+              | other -> failtestf "expected an update locking read to be rejected, got %A" other
+
           testCase "ordinary transaction commits do not wait on the store-wide coordination lock"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

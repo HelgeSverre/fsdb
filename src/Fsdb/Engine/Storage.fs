@@ -20,6 +20,7 @@ open Fsdb.Engine
 /// changed after the transaction snapshot was taken. `QueryHandler` reports
 /// it as MySQL error 1205 so callers can retry the transaction.
 exception LockWaitTimeout of dbName: string
+exception LockNowait of dbName: string
 
 /// Storage-layer failures, mapped to MySQL error codes by `toMySqlError`.
 /// `ExpressionError` carries an already-formed MySQL (code, message) pair
@@ -314,7 +315,8 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 
 type RowLockStripe =
     { SyncRoot: obj
-      mutable Owner: int64 option }
+      mutable ExclusiveOwner: int64 option
+      SharedOwners: HashSet<int64> }
 
 type TransactionLockContext =
     { Owner: int64
@@ -332,7 +334,8 @@ let private rowLockStripeCount = 4096
 
 let private createRowLockStripe () =
     { SyncRoot = obj ()
-      Owner = None }
+      ExclusiveOwner = None
+      SharedOwners = HashSet() }
 
 type ExecutionSettings =
     { SqlModeText: string
@@ -515,8 +518,13 @@ let carryTransactionLocks (source: Store) (snapshot: Store) : Store =
 let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<RowLockStripe>) =
     for stripe in stripes do
         lock stripe.SyncRoot (fun () ->
-            if stripe.Owner = Some context.Owner then
-                stripe.Owner <- None
+            let releasedExclusive = stripe.ExclusiveOwner = Some context.Owner
+            let releasedShared = stripe.SharedOwners.Remove context.Owner
+
+            if releasedExclusive then
+                stripe.ExclusiveOwner <- None
+
+            if releasedExclusive || releasedShared then
                 lock context.HeldStripes (fun () -> context.HeldStripes.Remove stripe |> ignore)
                 Threading.Monitor.PulseAll stripe.SyncRoot)
 
@@ -526,6 +534,24 @@ let releaseTransactionLocks (store: Store) : unit =
     | Some context ->
         let stripes = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
         releaseLockStripes context stripes
+
+let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
+    match store.TransactionLocks with
+    | None -> body ()
+    | Some context ->
+        let held = lock context.HeldStripes (fun () -> HashSet<RowLockStripe>(context.HeldStripes, HashIdentity.Reference))
+
+        try
+            body ()
+        with _ ->
+            let acquired =
+                lock context.HeldStripes (fun () ->
+                    context.HeldStripes
+                    |> Seq.filter (held.Contains >> not)
+                    |> Seq.toArray)
+
+            releaseLockStripes context acquired
+            reraise ()
 
 let private prepareTransactionEvents (store: Store) (snapshot: Store) : unit -> unit =
     match snapshot.PendingEvents with
@@ -2435,6 +2461,56 @@ let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
                                     conflict ()
                     | _ -> conflict ()
 
+type private StripeLockMode =
+    | SharedStripe
+    | ExclusiveStripe
+
+type private StripeWaitPolicy =
+    | WaitUntilAvailable
+    | FailIfUnavailable
+    | SkipIfUnavailable
+
+let private acquireStripe
+    (deadline: DateTime)
+    (dbName: string)
+    (context: TransactionLockContext)
+    (mode: StripeLockMode)
+    (waitPolicy: StripeWaitPolicy)
+    (stripe: RowLockStripe)
+    =
+    lock stripe.SyncRoot (fun () ->
+        let available () =
+            match mode with
+            | SharedStripe -> stripe.ExclusiveOwner |> Option.forall ((=) context.Owner)
+            | ExclusiveStripe ->
+                stripe.ExclusiveOwner |> Option.forall ((=) context.Owner)
+                && (stripe.SharedOwners.Count = 0
+                    || (stripe.SharedOwners.Count = 1 && stripe.SharedOwners.Contains context.Owner))
+
+        let rec acquire () =
+            if available () then
+                let newlyHeld =
+                    lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe)
+
+                match mode with
+                | SharedStripe -> stripe.SharedOwners.Add context.Owner |> ignore
+                | ExclusiveStripe -> stripe.ExclusiveOwner <- Some context.Owner
+
+                true, newlyHeld
+            else
+                match waitPolicy with
+                | FailIfUnavailable -> raise (LockNowait dbName)
+                | SkipIfUnavailable -> false, false
+                | WaitUntilAvailable ->
+                    let remaining = deadline - DateTime.UtcNow
+
+                    if remaining <= TimeSpan.Zero || not (Threading.Monitor.Wait(stripe.SyncRoot, remaining)) then
+                        raise (LockWaitTimeout dbName)
+
+                    acquire ()
+
+        acquire ())
+
 let private withWriteLocksFor
     (timeout: TimeSpan)
     (store: Store)
@@ -2480,28 +2556,16 @@ let private withWriteLocksFor
     let deadline = DateTime.UtcNow + timeout
     let claimed = ResizeArray<RowLockStripe>()
 
-    let acquire stripe =
-        lock stripe.SyncRoot (fun () ->
-            let rec waitForOwner () =
-                match stripe.Owner with
-                | None ->
-                    stripe.Owner <- Some context.Owner
-                    lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
-                    claimed.Add stripe
-                | Some owner when owner = context.Owner -> ()
-                | Some _ ->
-                    let remaining = deadline - DateTime.UtcNow
-
-                    if remaining <= TimeSpan.Zero || not (Threading.Monitor.Wait(stripe.SyncRoot, remaining)) then
-                        raise (LockWaitTimeout dbName)
-
-                    waitForOwner ()
-
-            waitForOwner ())
-
     try
         try
-            stripes |> List.iter acquire
+            stripes
+            |> List.iter (fun stripe ->
+                let _, newlyHeld =
+                    acquireStripe deadline dbName context ExclusiveStripe WaitUntilAvailable stripe
+
+                if newlyHeld then
+                    claimed.Add stripe)
+
             body ()
         with _ ->
             if not releaseAfter then
@@ -2530,6 +2594,54 @@ let acquireTransactionWriteTargets
     match store.TransactionLocks with
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
+
+let acquireTransactionReadTargets
+    (timeout: TimeSpan)
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (strength: LockingReadStrength)
+    (wait: LockingReadWait)
+    (rowIds: RowId list)
+    : RowId list =
+    match store.TransactionLocks with
+    | None -> rowIds
+    | Some context ->
+        let tableKey = lockNamespaceKey dbName tableName
+        let rowLocks = store.RowLocks.GetOrAdd(tableKey, (fun _ -> ConcurrentDictionary()))
+
+        let stripeIndex rowId =
+            int64 (RowId.value rowId) % int64 rowLockStripeCount |> int
+
+        let mode =
+            match strength with
+            | ShareLock -> SharedStripe
+            | UpdateLock -> ExclusiveStripe
+
+        let waitPolicy =
+            match wait with
+            | WaitForLocks -> WaitUntilAvailable
+            | NoWait -> FailIfUnavailable
+            | SkipLocked -> SkipIfUnavailable
+
+        let deadline = DateTime.UtcNow + timeout
+        let claimed = ResizeArray<RowLockStripe>()
+
+        try
+            rowIds
+            |> List.groupBy stripeIndex
+            |> List.sortBy fst
+            |> List.collect (fun (index, rows) ->
+                let stripe = rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ()))
+                let acquired, newlyHeld = acquireStripe deadline dbName context mode waitPolicy stripe
+
+                if newlyHeld then
+                    claimed.Add stripe
+
+                if acquired then rows else [])
+        with _ ->
+            releaseLockStripes context claimed
+            reraise ()
 
 // mysql.* uses ordinary stored tables, including DML and persistence paths.
 // Column shapes follow MySQL 8.4.

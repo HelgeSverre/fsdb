@@ -136,6 +136,11 @@ type private MutationSource =
       PhysicalTable: TableRef option
       Columns: ColumnDef list }
 
+type private LockingReadSource =
+    { Qualifier: string
+      Reference: TableRef
+      Table: Table }
+
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
 type private Int64Membership =
@@ -179,6 +184,9 @@ let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVa
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
+let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
+let private lockingReadStore = System.Threading.AsyncLocal<(unit -> Store) option>()
+let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
 
 let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
     DynamicScope.withValue variableContext (Some variables) body
@@ -205,6 +213,13 @@ let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
 
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
     DynamicScope.withValue triggerRowScope (Some scope) body
+
+let private currentLockingReadRows () =
+    DynamicScope.valueOrDefault Map.empty lockingReadRows
+
+let withLockingReadStore (store: unit -> Store) (timeout: System.TimeSpan) (body: unit -> 'a) : 'a =
+    DynamicScope.withValue lockingReadStore (Some store) (fun () ->
+        DynamicScope.withValue lockingReadTimeout (Some timeout) body)
 
 type private StoredView =
     { Name: string
@@ -4352,11 +4367,16 @@ and private resolveTableRef
                     cteScope.Value <- savedCtes
         | None ->
             if tableRef.Partitions.IsEmpty then
-                scanList store tableDb tableRef.Table |> Result.mapError storageErr
+                tryPhysicalTableRef store dbName tableRef
+                |> Result.bind (function
+                    | Some table -> Ok(table.Columns, table.RowsArray |> List.ofSeq)
+                    | None -> scanList store tableDb tableRef.Table |> Result.mapError storageErr)
             else
                 match tableSnapshot store tableDb tableRef.Table with
                 | Error e -> Error(storageErr e)
-                | Ok table ->
+                | Ok unfiltered ->
+                    let table = filterLockingReadTable tableRef unfiltered
+
                     match table.Partitioning with
                     | None -> Error(Err(1747, "PARTITION () clause on non partitioned table"))
                     | Some partitioning ->
@@ -5478,6 +5498,20 @@ and private joinKeyCollationsCompatible
 /// A physical table can retain one immutable root for both an equality probe
 /// and a scan fallback. Views, CTEs, and virtual relations have their own
 /// resolution rules and stay on the ordinary path.
+and private filterLockingReadTable (tableRef: TableRef) (table: Table) =
+    let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table |> fun value -> value.ToLowerInvariant()
+
+    match currentLockingReadRows () |> Map.tryFind qualifier with
+    | None -> table
+    | Some allowed ->
+        let rows = table.RowsArray.ToBuilder()
+
+        for rowId, _ in table.RowsArray.Indexed do
+            if not (Set.contains rowId allowed) then
+                rows.Remove rowId |> ignore
+
+        { table with RowsArray = rows.DrainToImmutable() }
+
 and private tryPhysicalTableRef (store: Store) (dbName: string) (tableRef: TableRef) : Result<Table option, QueryResult> =
     let tableDb = tableRef.Database |> Option.defaultValue dbName
     let cteShadows = tableRef.Database.IsNone && (currentCteScope () |> Map.containsKey (tableRef.Table.ToLowerInvariant()))
@@ -5495,6 +5529,7 @@ and private tryPhysicalTableRef (store: Store) (dbName: string) (tableRef: Table
         Ok None
     else
         Storage.tableSnapshot store tableDb tableRef.Table
+        |> Result.map (filterLockingReadTable tableRef)
         |> Result.map Some
         |> Result.mapError storageErr
 
@@ -6947,6 +6982,90 @@ and private tryIntegerSemiJoin
                             Ok(Some(table.Columns, rows, { select with Where = None })))
     | _ -> Ok None
 
+and private prepareLockingRead
+    (store: Store)
+    (dbName: string)
+    (select: SelectStmt)
+    : Result<Map<string, Set<RowId>>, QueryResult> =
+    let sourceItems =
+        (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+
+    let physicalSource =
+        function
+        | FromTable tableRef ->
+            tryPhysicalTableRef store dbName tableRef
+            |> Result.map (Option.map (fun table ->
+                { Qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+                  Reference = tableRef
+                  Table = table }))
+        | _ -> Ok None
+
+    sourceItems
+    |> traverse physicalSource
+    |> Result.bind (fun resolved ->
+        let sources = resolved |> List.choose id
+
+        let byQualifier =
+            sources
+            |> List.map (fun source -> source.Qualifier.ToLowerInvariant(), source)
+            |> Map.ofList
+
+        let targets =
+            select.Locking
+            |> List.collect (fun locking ->
+                let names =
+                    if locking.Tables.IsEmpty then
+                        sources |> List.map _.Qualifier
+                    else
+                        locking.Tables
+
+                names |> List.map (fun name -> name, locking))
+
+        match
+            targets
+            |> List.tryPick (fun (name, _) ->
+                if Map.containsKey (name.ToLowerInvariant()) byQualifier then None else Some name)
+        with
+        | Some name -> Error(Err(3568, sprintf "Unresolved table name `%s` in locking clause." name))
+        | None ->
+            match
+                targets
+                |> List.countBy (fun (name, _) -> name.ToLowerInvariant())
+                |> List.tryFind (fun (_, count) -> count > 1)
+            with
+            | Some(name, _) -> Error(Err(3569, sprintf "Table `%s` appears in multiple locking clauses." name))
+            | None ->
+                let rowIdsFor (source: LockingReadSource) =
+                    if sources.Length = 1 && select.Joins.IsEmpty then
+                        tryEqualityAccess store dbName source.Reference select.Where
+                        |> Option.map (fun plan -> plan.Rows |> List.map fst)
+                        |> Option.orElseWith (fun () ->
+                            tryRangeLookup store dbName source.Reference select.Where
+                            |> Option.map (fun (_, rows) -> rows |> List.map fst))
+                        |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
+                    else
+                        source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq
+
+                Storage.withTransactionLockCheckpoint store (fun () ->
+                    targets
+                    |> traverse (fun (name, locking) ->
+                        let source = byQualifier.[name.ToLowerInvariant()]
+                        let database = source.Reference.Database |> Option.defaultValue dbName
+                        let rowIds = rowIdsFor source
+
+                        let acquired =
+                            Storage.acquireTransactionReadTargets
+                                (lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ()))
+                                store
+                                database
+                                source.Reference.Table
+                                locking.Strength
+                                locking.Wait
+                                rowIds
+
+                        Ok(source.Qualifier.ToLowerInvariant(), Set.ofList acquired))
+                    |> Result.map Map.ofList))
+
 and private runSelectStmt
     (store: Store)
     (registry: Registry)
@@ -6969,6 +7088,27 @@ and private runSelectStmt
     | Ok None -> runUnmergedSelectStmt store registry dbName select outer
 
 and private runUnmergedSelectStmt
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    (outer: EvalContext option)
+    : QueryResult * ColumnMetadata list * Value[] list =
+    DynamicScope.withValue lockingReadRows Map.empty (fun () ->
+        if select.Locking.IsEmpty then
+            runUnlockedSelectStmt store registry dbName select outer
+        else
+            let initial = lockingReadStore.Value |> Option.map (fun current -> current ()) |> Option.defaultValue store
+
+            match prepareLockingRead initial dbName select with
+            | Error error -> error, [], []
+            | Ok rows ->
+                let current = lockingReadStore.Value |> Option.map (fun refresh -> refresh ()) |> Option.defaultValue initial
+
+                DynamicScope.withValue lockingReadRows rows (fun () ->
+                    runUnlockedSelectStmt current registry dbName select outer))
+
+and private runUnlockedSelectStmt
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -7023,6 +7163,10 @@ and private runUnmergedSelectStmt
                 runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select' outer
 
         match fromItem, select.Joins with
+        | FromTable _, _ when not select.Locking.IsEmpty ->
+            match resolveFromItem store registry dbName fromItem with
+            | Error e -> e, [], []
+            | Ok(columns, rows) -> runResolved columns rows select
         | FromTable tref, [] ->
             match tryIntegerSemiJoin store registry dbName select tref with
             | Error error -> error, [], []
@@ -9910,7 +10054,7 @@ and private runFullTextSelect
                                     |> List.choose (fun rowId -> source.Table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
                                 | None ->
                                     match source.Item with
-                                    | FromTable tableRef when select.Joins.IsEmpty ->
+                                    | FromTable tableRef when select.Joins.IsEmpty && select.Locking.IsEmpty ->
                                         tryEqualityLookup store dbName tableRef select.Where
                                         |> Option.map snd
                                         |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> List.ofSeq)

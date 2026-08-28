@@ -1665,6 +1665,54 @@ let private requiredPrivilegesForStatement session store dbName = function
     | AlterUser(name, host, Some _, _, _) when Auth.sameAccount (Auth.account name host) (accountOf session) -> []
     | statement -> Auth.requiredPrivilegesInStore store dbName statement
 
+let private statementContainsLockingReadWhere predicate statement =
+    let rec bodyContains =
+        function
+        | PlainSelect select -> selectContains select
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            selectContains first
+            || rest |> List.exists (snd >> selectContains)
+            || orderBy |> List.exists (fst >> expressionContains)
+            || limit |> Option.exists expressionContains
+            || offset |> Option.exists expressionContains
+
+    and sourceContains =
+        function
+        | FromSubquery(body, _)
+        | FromLateral(body, _) -> bodyContains body
+        | FromJsonTable(source, _, _, _) -> expressionContains source
+        | FromTable _ -> false
+
+    and expressionContains expression =
+        Expression.collectSubqueries expression |> List.exists selectContains
+
+    and selectContains (select: SelectStmt) =
+        (select.Locking |> List.exists predicate)
+        || (select.Ctes |> List.exists (_.Body >> bodyContains))
+        || (select.From |> Option.exists sourceContains)
+        || (select.Joins |> List.exists (fun join -> sourceContains join.Table || expressionContains join.On))
+        || (select.Projections |> List.exists (fst >> expressionContains))
+        || (select.Where |> Option.exists expressionContains)
+        || (select.GroupBy |> List.exists expressionContains)
+        || (select.Having |> Option.exists expressionContains)
+        || (select.OrderBy |> List.exists (fst >> expressionContains))
+        || (select.Windows
+            |> List.exists (snd >> OverSpec >> Expression.overExpressions >> List.exists expressionContains))
+        || (select.Limit |> Option.exists expressionContains)
+        || (select.Offset |> Option.exists expressionContains)
+
+    match statement with
+    | Select select -> selectContains select
+    | Union(first, rest, orderBy, limit, offset) ->
+        bodyContains (UnionSelect(first, rest, orderBy, limit, offset))
+    | _ -> false
+
+let private statementContainsLockingRead =
+    statementContainsLockingReadWhere (fun _ -> true)
+
+let private statementContainsUpdateLock =
+    statementContainsLockingReadWhere (fun locking -> locking.Strength = UpdateLock)
+
 let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
     match stmt with
     | Select _
@@ -1682,12 +1730,20 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
     let execute session =
         let store = Session.currentStore session
+        let lockingReadView () =
+            match session.Tx with
+            | Some transaction when statementContainsLockingRead stmt ->
+                Some(fun () -> rebaseTransactionSnapshot session transaction |> snd)
+            | _ -> None
+
         let requiredPrivileges = requiredPrivilegesForStatement session store dbName stmt
 
         // Privilege enforcement — the one gate every parsed statement goes
         // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
         let access =
             match session.Tx, stmt with
+            | Some tx, (Select _ | Union _) when tx.ReadOnly && statementContainsUpdateLock stmt ->
+                Error(1792, "Cannot execute statement in a READ ONLY transaction")
             | Some tx, (Select _ | Union _ | Explain _ | ChecksumTables _) when tx.ReadOnly ->
                 Auth.checkForAccount store (accountOf session) requiredPrivileges
             | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
@@ -1796,8 +1852,13 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
                     lastInsertId, lastGeneratedId, result, [], None)
 
+        let evaluateWithLockingView () =
+            match lockingReadView () with
+            | Some current -> Executor.withLockingReadStore current (lockWaitTimeout session) evaluate
+            | None -> evaluate ()
+
         let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
-            Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluate
+            Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView
 
         let columnMetadata = completeResultMetadata session result columnMetadata
 
@@ -5023,6 +5084,9 @@ let private abortTransaction (session: Session) =
 
 let private recoverExecutionError (session: Session) (description: string) (error: exn) : Session * QueryResult =
     match error with
+    | Storage.LockNowait dbName ->
+        Log.diagnostic "fsdb: ERR 3572 lock unavailable on database %s -- %s" dbName description
+        session, Err(3572, "Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.")
     | Storage.LockWaitTimeout dbName ->
         Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- %s" dbName description
         session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
