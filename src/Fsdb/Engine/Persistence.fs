@@ -530,15 +530,28 @@ let private decodeIndexDef (r: #IReader) : IndexDef =
       Visible = visible
       Kind = (if readBool r then FullTextIndex else BTree) }
 
-let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
-    let referencedTable =
-        match fk.RefDatabase with
-        | Some database -> "\u0000Q:" + database + "\u0000" + fk.RefTable
-        | None -> fk.RefTable
+// Qualifiers reuse the legacy table-name field so older snapshots remain readable.
+let private qualifiedForeignKeyPrefix = "\u0000Q:"
 
+let private encodeForeignKeyTarget (fk: ForeignKeyDef) =
+    match fk.RefDatabase with
+    | Some database -> qualifiedForeignKeyPrefix + database + "\u0000" + fk.RefTable
+    | None -> fk.RefTable
+
+let private decodeForeignKeyTarget (encoded: string) =
+    if encoded.StartsWith(qualifiedForeignKeyPrefix, StringComparison.Ordinal) then
+        let qualified = encoded.Substring qualifiedForeignKeyPrefix.Length
+
+        match qualified.IndexOf '\u0000' with
+        | separator when separator >= 0 -> Some(qualified.Substring(0, separator)), qualified.Substring(separator + 1)
+        | _ -> None, encoded
+    else
+        None, encoded
+
+let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
     writeStr w fk.Name
     writeStrList w fk.Columns
-    writeStr w referencedTable
+    writeStr w (encodeForeignKeyTarget fk)
     writeStrList w fk.RefColumns
     writeOptStr w fk.OnDelete
     writeOptStr w fk.OnUpdate
@@ -546,16 +559,7 @@ let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
 let private decodeForeignKeyDef (r: #IReader) : ForeignKeyDef =
     let name = readStr r
     let columns = readStrList r
-    let encodedTable = readStr r
-    let refDatabase, refTable =
-        if encodedTable.StartsWith("\u0000Q:", StringComparison.Ordinal) then
-            let qualified = encodedTable.Substring 3
-
-            match qualified.IndexOf '\u0000' with
-            | separator when separator >= 0 -> Some(qualified.Substring(0, separator)), qualified.Substring(separator + 1)
-            | _ -> None, encodedTable
-        else
-            None, encodedTable
+    let refDatabase, refTable = readStr r |> decodeForeignKeyTarget
 
     { Name = name
       Columns = columns

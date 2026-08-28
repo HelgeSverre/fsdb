@@ -267,9 +267,8 @@ type Catalog = Map<string, Database>
 /// (`SchemaChanged`) is logged logically as the parsed `Statement` instead.
 /// `SchemaChangedAt` additionally retains clocks assigned by CREATE and
 /// TRUNCATE.
-/// `TransactionCommitted` wraps every event a
-/// multi-statement transaction buffered, emitted once at COMMIT — see
-/// `beginTransactionSnapshot`/`commitCatalogInto`.
+/// `TransactionCommitted` keeps transaction and multi-table statement events
+/// indivisible during recovery.
 type CommitEvent =
     | RowsInserted of db: string * table: string * rows: Value[] list
     | RowsUpdated of db: string * table: string * changes: (Value[] * Value[]) list
@@ -605,19 +604,32 @@ let private catalogHasQualifiedForeignKeys (catalog: Catalog) =
         |> Seq.exists (fun (KeyValue(_, table)) ->
             table.ForeignKeys |> List.exists (fun foreignKey -> foreignKey.RefDatabase.IsSome)))
 
-let private withReferentialSchemaLock (schemaChange: bool) (store: Store) body =
-    if schemaChange then
-        store.ReferentialSchemaLock.EnterWriteLock()
-    else
-        store.ReferentialSchemaLock.EnterReadLock()
+type private ReferentialAccess =
+    | SharedAccess
+    | ExclusiveAccess
+
+let private withReferentialSchemaLock access (store: Store) body =
+    match access with
+    | SharedAccess -> store.ReferentialSchemaLock.EnterReadLock()
+    | ExclusiveAccess -> store.ReferentialSchemaLock.EnterWriteLock()
 
     try
         body ()
     finally
-        if schemaChange then
-            store.ReferentialSchemaLock.ExitWriteLock()
-        else
-            store.ReferentialSchemaLock.ExitReadLock()
+        match access with
+        | SharedAccess -> store.ReferentialSchemaLock.ExitReadLock()
+        | ExclusiveAccess -> store.ReferentialSchemaLock.ExitWriteLock()
+
+let private databaseSlots (store: Store) =
+    store.Databases
+    |> Seq.map (fun entry -> entry.Key, entry.Value)
+    |> Seq.sortBy fst
+    |> List.ofSeq
+
+let rec private withLockedDatabaseSlots slots body =
+    match slots with
+    | [] -> body ()
+    | (_, slot) :: tail -> lock slot (fun () -> withLockedDatabaseSlots tail body)
 
 /// `CREATE DATABASE name` errors 1007 when the name exists. The store lock
 /// coordinates catalog membership with SERIALIZABLE snapshot validation;
@@ -626,7 +638,7 @@ let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> 
     let slot = ref Map.empty
 
     let published =
-        withReferentialSchemaLock true store (fun () ->
+        withReferentialSchemaLock ExclusiveAccess store (fun () ->
             lock store.Lock (fun () ->
                 lock slot (fun () ->
                     if store.Databases.TryAdd(dbName, slot) then
@@ -642,54 +654,45 @@ let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
         Error(SystemSchemaAccess "mysql")
     else
         let published =
-            withReferentialSchemaLock true store (fun () ->
-              lock store.Lock (fun () ->
-                let slots =
-                    store.Databases
-                    |> Seq.map (fun entry -> entry.Key, entry.Value)
-                    |> Seq.sortBy fst
-                    |> List.ofSeq
+            withReferentialSchemaLock ExclusiveAccess store (fun () ->
+                lock store.Lock (fun () ->
+                    let slots = databaseSlots store
 
-                let rec withSlots remaining body =
-                    match remaining with
-                    | [] -> body ()
-                    | (_, slot) :: tail -> lock slot (fun () -> withSlots tail body)
+                    withLockedDatabaseSlots slots (fun () ->
+                        match store.Databases.TryGetValue dbName with
+                        | false, _ -> Error(NoSuchDatabase dbName)
+                        | true, _ ->
+                            let incomingReference =
+                                slots
+                                |> List.tryPick (fun (childDatabase, slot) ->
+                                    if String.Equals(childDatabase, dbName, StringComparison.OrdinalIgnoreCase) then
+                                        None
+                                    else
+                                        slot.Value
+                                        |> Seq.tryPick (fun (KeyValue(_, childTable)) ->
+                                            childTable.ForeignKeys
+                                            |> List.tryPick (fun foreignKey ->
+                                                foreignKey.RefDatabase
+                                                |> Option.filter (fun parentDatabase ->
+                                                    String.Equals(parentDatabase, dbName, StringComparison.OrdinalIgnoreCase))
+                                                |> Option.map (fun _ -> childTable, foreignKey))))
 
-                withSlots slots (fun () ->
-                    match store.Databases.TryGetValue dbName with
-                    | false, _ -> Error(NoSuchDatabase dbName)
-                    | true, _ ->
-                        let incomingReference =
-                            slots
-                            |> List.tryPick (fun (childDatabase, slot) ->
-                                if String.Equals(childDatabase, dbName, StringComparison.OrdinalIgnoreCase) then
-                                    None
-                                else
-                                    slot.Value
-                                    |> Seq.tryPick (fun (KeyValue(_, childTable)) ->
-                                        childTable.ForeignKeys
-                                        |> List.tryPick (fun foreignKey ->
-                                            foreignKey.RefDatabase
-                                            |> Option.filter (fun parentDatabase ->
-                                                String.Equals(parentDatabase, dbName, StringComparison.OrdinalIgnoreCase))
-                                            |> Option.map (fun _ -> childTable, foreignKey))))
-
-                        match incomingReference with
-                        | Some(childTable, foreignKey) when store.ForeignKeyChecks ->
-                            Error(
-                                ExpressionError(
-                                    3730,
-                                    sprintf
-                                        "Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'."
-                                        foreignKey.RefTable
-                                        foreignKey.Name
-                                        childTable.OriginalName
+                            match incomingReference with
+                            | Some(childTable, foreignKey) when store.ForeignKeyChecks ->
+                                Error(
+                                    ExpressionError(
+                                        3730,
+                                        sprintf
+                                            "Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'."
+                                            foreignKey.RefTable
+                                            foreignKey.Name
+                                            childTable.OriginalName
+                                    )
                                 )
-                            )
-                        | _ ->
-                            match store.Databases.TryRemove dbName with
-                            | true, _ -> Ok(prepareEvents store [ SchemaChanged(dbName, DropDatabase(dbName, false)) ])
-                            | false, _ -> Error(NoSuchDatabase dbName))))
+                            | _ ->
+                                match store.Databases.TryRemove dbName with
+                                | true, _ -> Ok(prepareEvents store [ SchemaChanged(dbName, DropDatabase(dbName, false)) ])
+                                | false, _ -> Error(NoSuchDatabase dbName))))
 
         published |> Result.map (fun acknowledge -> acknowledge ())
 
@@ -788,32 +791,24 @@ let private setCatalogDatabase databaseName database catalog =
 let private withReferentialCatalogPublishing
     (store: Store)
     (dbName: string)
-    (schemaChange: bool)
+    (access: ReferentialAccess)
     (eventsOf: 'a -> CommitEvent list)
     (operation: Catalog -> Database -> Result<Catalog * 'a, StorageError>)
     : Result<'a, StorageError> =
     let publish () =
         let catalog = store.Catalog
 
-        if not schemaChange && not (catalogHasQualifiedForeignKeys catalog) then
+        match access, catalogHasQualifiedForeignKeys catalog with
+        | SharedAccess, false ->
             withDatabasePublishing store dbName eventsOf (fun database ->
                 operation (setCatalogDatabase dbName database catalog) database
                 |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result))
-        else
+        | _ ->
             let published =
                 lock store.Lock (fun () ->
-                    let slots =
-                        store.Databases
-                        |> Seq.map (fun entry -> entry.Key, entry.Value)
-                        |> Seq.sortBy fst
-                        |> List.ofSeq
+                    let slots = databaseSlots store
 
-                    let rec withSlots remaining body =
-                        match remaining with
-                        | [] -> body ()
-                        | (_, slot) :: tail -> lock slot (fun () -> withSlots tail body)
-
-                    withSlots slots (fun () ->
+                    withLockedDatabaseSlots slots (fun () ->
                         let attached =
                             slots
                             |> List.forall (fun (name, slot) ->
@@ -842,7 +837,7 @@ let private withReferentialCatalogPublishing
                 acknowledge ()
                 Ok result
 
-    withReferentialSchemaLock schemaChange store publish
+    withReferentialSchemaLock access store publish
 
 /// Holds the named database cells in lexical order while `action` prepares
 /// and publishes a schema change. DML already uses these cells for its short
@@ -3475,11 +3470,21 @@ let private tryCatalogTable address (catalog: Catalog) =
     |> Option.bind (Map.tryFind address.Table)
 
 let private setCatalogTable address table (catalog: Catalog) =
-    catalog
-    |> tryCatalogDatabase address.Database
-    |> Option.map (Map.add address.Table table)
-    |> Option.map (fun database -> setCatalogDatabase address.Database database catalog)
-    |> Option.defaultValue catalog
+    match tryCatalogDatabaseEntry address.Database catalog with
+    | Some(databaseName, database) ->
+        catalog |> Map.add databaseName (database |> Map.add address.Table table)
+    | None -> catalog
+
+let private catalogTableIdentity (catalog: Catalog) address =
+    let database = catalogDatabaseName address.Database catalog
+
+    let table =
+        catalog
+        |> tryCatalogTable address
+        |> Option.map _.OriginalName
+        |> Option.defaultValue address.Table
+
+    database, table
 
 let private referencingForeignKeys (catalog: Catalog) (parent: TableAddress) : (TableAddress * ForeignKeyDef) list =
     catalog
@@ -3988,7 +3993,7 @@ let createTableSeeded
                 withReferentialCatalogPublishing
                     store
                     dbName
-                    true
+                    ExclusiveAccess
                     createEvent
                     createInCatalog))
 
@@ -4040,7 +4045,7 @@ let dropTables
         withReferentialCatalogPublishing
             store
             firstDatabase
-            true
+            ExclusiveAccess
             events
             (fun catalog _ ->
                 let distinctTargets =
@@ -4102,7 +4107,7 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
     withReferentialCatalogPublishing
         store
         dbName
-        true
+        ExclusiveAccess
         (fun createTime -> [ SchemaChangedAt(dbName, Truncate tableName, createTime) ])
         (fun catalog db ->
             let address = tableAddress dbName tableName
@@ -4712,7 +4717,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
     withReferentialCatalogPublishing
         store
         dbName
-        true
+        ExclusiveAccess
         (fun () -> [ SchemaChanged(dbName, AlterTable(tableName, actions)) ])
         (fun catalog db ->
             virtualWriteGuard store dbName tableName
@@ -4777,13 +4782,12 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
 let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
     alterTable store dbName oldName [ RenameTo newName ]
 
-/// `RENAME TABLE a TO b, c TO d` publishes every pair in one catalog swap and
-/// retargets foreign keys that reference a renamed table.
+/// Atomically renames a batch and retargets incoming foreign keys.
 let renameTables (store: Store) (dbName: string) (pairs: (string * string) list) : Result<unit, StorageError> =
     withReferentialCatalogPublishing
         store
         dbName
-        true
+        ExclusiveAccess
         (fun () -> [ SchemaChanged(dbName, RenameTable pairs) ])
         (fun catalog db ->
             let step acc (oldName, newName) =
@@ -5215,7 +5219,7 @@ let private insertRowsPreparedCore
         withReferentialCatalogPublishing
             store
             dbName
-            false
+            SharedAccess
             (fun (_, _, _, (rows: Value[] list), _) ->
                 if rows.IsEmpty then [] else [ RowsInserted(dbName, tableName, rows) ])
             (fun catalog db ->
@@ -5287,7 +5291,7 @@ let internal insertPreparedCandidate
     withReferentialCatalogPublishing
         store
         dbName
-        false
+        SharedAccess
         (fun candidate -> [ RowsInserted(dbName, tableName, [ candidate ]) ])
         (fun catalog db ->
             virtualWriteGuard store dbName tableName
@@ -5584,12 +5588,6 @@ and upsertRowsWithOrdinal
              (cascaded: Map<TableAddress, (Value[] * Value[]) list>),
              (catalog: Catalog))
             =
-            let originalNameOf address =
-                catalog
-                |> tryCatalogTable address
-                |> Option.map (fun table -> table.OriginalName)
-                |> Option.defaultValue address.Table
-
             [ if not inserted.IsEmpty then
                   RowsInserted(dbName, tableName, inserted)
 
@@ -5598,10 +5596,11 @@ and upsertRowsWithOrdinal
 
               for KeyValue(address, changes) in cascaded do
                   if not changes.IsEmpty then
-                      RowsUpdated(catalogDatabaseName address.Database catalog, originalNameOf address, changes) ]
+                      let database, table = catalogTableIdentity catalog address
+                      RowsUpdated(database, table, changes) ]
 
         let publish () =
-            withReferentialCatalogPublishing store dbName false eventsOf (fun catalog db ->
+            withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable db tableName)
                 |> Result.bind (fun table -> upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate foundRows)
@@ -6001,18 +6000,12 @@ let replaceRows
     let address = tableAddress dbName key
 
     let result =
-        withReferentialCatalogPublishing store dbName false snd (fun initialCatalog initialDb ->
+        withReferentialCatalogPublishing store dbName SharedAccess snd (fun initialCatalog initialDb ->
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable initialDb tableName)
             |> Result.bind (fun initialTable ->
                 resolveInsertColumns initialTable columns
                 |> Result.bind (fun idxs ->
-                    let originalNameOf tableAddress =
-                        initialCatalog
-                        |> tryCatalogTable tableAddress
-                        |> Option.map (fun table -> table.OriginalName)
-                        |> Option.defaultValue tableAddress.Table
-
                     let commitEvents
                         (removed: Map<TableAddress, Value[] list>)
                         (blanked: Map<TableAddress, (Value[] * Value[]) list>)
@@ -6021,11 +6014,13 @@ let replaceRows
                         let cascades =
                             [ for KeyValue(tableAddress, rows) in removed do
                                   if not rows.IsEmpty then
-                                      RowsDeleted(catalogDatabaseName tableAddress.Database initialCatalog, originalNameOf tableAddress, rows)
+                                      let database, table = catalogTableIdentity initialCatalog tableAddress
+                                      RowsDeleted(database, table, rows)
 
                               for KeyValue(tableAddress, changes) in blanked do
                                   if not changes.IsEmpty then
-                                      RowsUpdated(catalogDatabaseName tableAddress.Database initialCatalog, originalNameOf tableAddress, changes) ]
+                                      let database, table = catalogTableIdentity initialCatalog tableAddress
+                                      RowsUpdated(database, table, changes) ]
 
                         cascades @ Option.toList writeEvent
 
@@ -6199,22 +6194,18 @@ let private deleteRowsCore
          (removed: Map<TableAddress, Value[] list>),
          (blanked: Map<TableAddress, (Value[] * Value[]) list>))
         =
-        let originalNameOf address =
-            catalog
-            |> tryCatalogTable address
-            |> Option.map (fun table -> table.OriginalName)
-            |> Option.defaultValue address.Table
-
         [ for KeyValue(address, rows) in removed do
               if not rows.IsEmpty then
-                  RowsDeleted(catalogDatabaseName address.Database catalog, originalNameOf address, rows)
+                  let database, table = catalogTableIdentity catalog address
+                  RowsDeleted(database, table, rows)
 
           for KeyValue(address, changes) in blanked do
               if not changes.IsEmpty then
-                  RowsUpdated(catalogDatabaseName address.Database catalog, originalNameOf address, changes) ]
+                  let database, table = catalogTableIdentity catalog address
+                  RowsUpdated(database, table, changes) ]
 
     let apply =
-        withReferentialCatalogPublishing store dbName false eventsOf (fun catalog db ->
+        withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
             let key = normalizeTableName tableName
             let address = tableAddress dbName key
 
@@ -6470,7 +6461,7 @@ let private mergeCatalogIntoWithTimeoutCore (timeout: TimeSpan) (store: Store) (
         validateCatalogForeignKeys baseCatalog store.Catalog
 
 let mergeCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
-    withReferentialSchemaLock false store (fun () ->
+    withReferentialSchemaLock SharedAccess store (fun () ->
         mergeCatalogIntoWithTimeoutCore timeout store baseCatalog batchCatalog)
 
 let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
@@ -6583,19 +6574,19 @@ let private commitCatalogIntoWith
             acknowledge ()
 
 let commitCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    withReferentialSchemaLock true store (fun () ->
+    withReferentialSchemaLock ExclusiveAccess store (fun () ->
         commitCatalogIntoWith timeout false store baseCatalog snapshot)
 
 let commitCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    withReferentialSchemaLock true store (fun () ->
+    withReferentialSchemaLock ExclusiveAccess store (fun () ->
         commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false store baseCatalog snapshot)
 
 let commitSerializableCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    withReferentialSchemaLock true store (fun () ->
+    withReferentialSchemaLock ExclusiveAccess store (fun () ->
         commitCatalogIntoWith timeout true store baseCatalog snapshot)
 
 let commitSerializableCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    withReferentialSchemaLock true store (fun () ->
+    withReferentialSchemaLock ExclusiveAccess store (fun () ->
         commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) true store baseCatalog snapshot)
 
 let private withPointUpdateDatabase
@@ -6683,18 +6674,13 @@ let updateRows
          (cascaded: Map<TableAddress, (Value[] * Value[]) list>),
          (catalog: Catalog))
         =
-        let originalNameOf address =
-            catalog
-            |> tryCatalogTable address
-            |> Option.map (fun table -> table.OriginalName)
-            |> Option.defaultValue address.Table
-
         [ if not changes.IsEmpty then
               RowsUpdated(dbName, tableName, changes)
 
           for KeyValue(address, updates) in cascaded do
               if not updates.IsEmpty then
-                  RowsUpdated(catalogDatabaseName address.Database catalog, originalNameOf address, updates) ]
+                  let database, table = catalogTableIdentity catalog address
+                  RowsUpdated(database, table, updates) ]
 
     let apply candidateRows catalog db =
         let key = normalizeTableName tableName
@@ -6782,12 +6768,12 @@ let updateRows
 
     let result =
         match candidates, catalogHasQualifiedForeignKeys store.Catalog with
-        | None, _ -> withReferentialCatalogPublishing store dbName false eventsOf (apply None)
+        | None, _ -> withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None)
         | Some rows, true ->
             let rowIds = rows |> List.map fst
 
             withRowLocks store dbName tableName rowIds (fun () ->
-                withReferentialCatalogPublishing store dbName false eventsOf (fun catalog db ->
+                withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
                     let refreshed =
                         db
                         |> Map.tryFind (normalizeTableName tableName)

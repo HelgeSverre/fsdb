@@ -378,10 +378,6 @@ and IndexDef =
         this.KeyColumns
         |> List.choose (fun column -> if column.Name = "" then None else Some column.Name)
 
-/// A `CONSTRAINT name FOREIGN KEY (cols) REFERENCES [db.]tbl (cols) [ON DELETE
-/// ...] [ON UPDATE ...]` — enforced (insert/update-time parent check,
-/// `CASCADE`/`SET NULL`/`RESTRICT` on both `ON DELETE` and `ON UPDATE`) by
-/// `Storage`'s `checkFkParents`/`cascadeDeleteVisited`/`cascadeUpdateVisited`.
 and ForeignKeyDef =
     { Name: string
       Columns: string list
