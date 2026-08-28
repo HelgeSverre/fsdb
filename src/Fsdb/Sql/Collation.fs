@@ -490,6 +490,15 @@ let charsetOfCollation (name: string) : string =
         | -1 -> lower
         | i -> lower.Substring(0, i)
 
+let maxBytesPerCharacter (charset: string option) =
+    match charset |> Option.map _.ToLowerInvariant() with
+    | Some "ascii"
+    | Some "latin1"
+    | Some "binary" -> 1
+    | Some "utf8"
+    | Some "utf8mb3" -> 3
+    | _ -> 4
+
 /// The engine's one active default — a `Store`-level default today, the
 /// seam a per-session/per-column `COLLATE` resolves against.
 let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry

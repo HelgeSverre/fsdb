@@ -751,16 +751,21 @@ let tests =
               let store = load dir
               attach dir store
               let category = { mkCol "category" (TVarchar 20) with Nullable = false }
-              let index = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Kind = BTree }
-              createTable store defaultDatabase "items" [ mkCol "id" (TInt false); category ] [ index ] [] None None |> ignore
+              let prefixIndex =
+                  { Name = "ix_category_prefix"
+                    KeyColumns = [ { Name = "category"; PrefixLength = Some 3; Transform = None } ]
+                    Unique = false
+                    Kind = BTree }
+              let fullIndex = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Kind = BTree }
+              createTable store defaultDatabase "items" [ mkCol "id" (TInt false); category ] [ prefixIndex; fullIndex ] [] None None |> ignore
               insertRows store defaultDatabase "items" None [ [ VInt 1L; VString "books" ]; [ VInt 2L; VString "books" ]; [ VInt 3L; VString "music" ] ] |> ignore
               snapshotNow dir store
               insertRows store defaultDatabase "items" None [ [ VInt 4L; VString "books" ] ] |> ignore
 
               let reloaded = load dir
               match trySecondaryLookup reloaded defaultDatabase "items" "category" (VString "books") with
-              | Some(_, rows) -> Expect.equal (rows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered buckets preserve row order"
-              | None -> failtest "expected a recovered secondary-index probe"
+              | Some(_, rows) -> Expect.equal (rows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered prefix buckets preserve row order"
+              | None -> failtest "expected a recovered prefix-index probe"
 
               match trySecondaryRangeLookup reloaded defaultDatabase "items" "category" (Some(VString "books", true)) (Some(VString "music", false)) with
               | Some(_, _, _, rows) -> Expect.equal (rows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered ordered entries preserve row order"

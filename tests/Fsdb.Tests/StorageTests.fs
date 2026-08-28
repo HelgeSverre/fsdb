@@ -835,9 +835,49 @@ let tests =
 
                     insertRows store defaultDatabase "prefixed" None [ [ VString "1234567890 foo" ] ] |> ignore
 
+                    match tryUniqueLookup store defaultDatabase "prefixed" "value" (VString "1234567890 foo") with
+                    | Some(_, [ (_, row) ]) -> Expect.equal row.[0] (VString "1234567890 foo") "the prefix key locates its candidate"
+                    | other -> failtestf "expected a prefix-index candidate, got %A" other
+
                     match insertRows store defaultDatabase "prefixed" None [ [ VString "1234567890 bar" ] ] with
                     | Error(DuplicateKey("uq_value", _)) -> ()
                     | other -> failtestf "expected DuplicateKey from the shared prefix, got %A" other
+
+                testCase "a binary prefix index groups candidate bytes"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "binary_prefix"
+                        [ col "id" (TInt false) false; col "value" (TVarBinary 8) false ]
+                        [ { Name = "ix_value"
+                            KeyColumns = [ { Name = "value"; PrefixLength = Some 2; Transform = None } ]
+                            Unique = false
+                            Kind = BTree } ]
+                        []
+                        None
+                        None
+                    |> ignore
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "binary_prefix"
+                        None
+                        [ [ VInt 1L; VBytes [| 0x01uy; 0x02uy; 0x03uy |] ]
+                          [ VInt 2L; VBytes [| 0x01uy; 0x02uy; 0x04uy |] ]
+                          [ VInt 3L; VBytes [| 0x01uy; 0x03uy; 0x03uy |] ] ]
+                    |> ignore
+
+                    match trySecondaryLookup store defaultDatabase "binary_prefix" "value" (VBytes [| 0x01uy; 0x02uy; 0xffuy |]) with
+                    | Some(_, candidates) ->
+                        Expect.equal
+                            (candidates |> List.map (snd >> fun row -> row.[0]))
+                            [ VInt 1L; VInt 2L ]
+                            "only rows sharing the byte prefix are candidates"
+                    | None -> failtest "expected a binary prefix probe"
 
                 testCase "a plain INSERT violating the primary key returns error 1062 for key PRIMARY"
                 <| fun _ ->
@@ -3365,4 +3405,5 @@ let tests =
                                 "single-row UPDATE took %fms at 10k rows and %fms at 50k (ratio %f) — looks quadratic again"
                                 at10k
                                 at50k
-                                ratio) ] ]
+                                ratio) ]
+              |> testSequenced ]

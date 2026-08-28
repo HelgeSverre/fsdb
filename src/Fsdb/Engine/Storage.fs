@@ -1665,11 +1665,8 @@ let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (ro
     |> traverse (fun (column, value) -> coerceAndCheck mode column value)
     |> Result.map Array.ofList
 
-/// The `(keyName, column indices)` groups that must be unique: the primary
-/// key (if any, named `"PRIMARY"` the way MySQL reports it in error 1062,
-/// and treated as one group across however many columns it spans) plus
-/// every `UNIQUE` index, named after itself.
-type private UniqueKeyGroup =
+/// The key projection shared by unique checks and equality buckets.
+type private IndexKeyGroup =
     { Name: string
       Indices: int list
       PrefixLengths: int option list
@@ -1679,7 +1676,7 @@ let private indexesWholeColumns group =
     group.PrefixLengths |> List.forall Option.isNone
     && group.Transforms |> List.forall Option.isNone
 
-let private uniqueKeyGroups (table: Table) : UniqueKeyGroup list =
+let private uniqueKeyGroups (table: Table) : IndexKeyGroup list =
     let primary =
         primaryKeyColumns table
         |> traverse (resolveColumn table.Columns)
@@ -1706,39 +1703,42 @@ let private uniqueKeyGroups (table: Table) : UniqueKeyGroup list =
 
     Option.toList primary @ fromIndexes
 
-type private SecondaryKeyGroup =
+type private OrderedKeyGroup =
     { Name: string
       Indices: int list }
 
-let private secondaryKeyGroups (table: Table) : SecondaryKeyGroup list =
+let private secondaryKeyGroups (table: Table) : IndexKeyGroup list =
     table.Indexes
     |> List.choose (fun index ->
-        match index.Kind, index.Unique, index.KeyColumns |> List.forall (fun column -> column.PrefixLength.IsNone && column.Transform.IsNone) with
+        match index.Kind, index.Unique, index.KeyColumns |> List.forall (fun column -> column.Transform.IsNone) with
         | BTree, false, true ->
-            index.Columns
-            |> traverse (resolveColumn table.Columns)
+            index.KeyColumns
+            |> traverse (fun column ->
+                resolveColumn table.Columns column.Name
+                |> Result.map (fun resolved -> resolved, column.PrefixLength))
             |> Result.toOption
-            |> Option.bind (fun indices ->
-                if indices.IsEmpty then
+            |> Option.bind (fun columns ->
+                if columns.IsEmpty then
                     None
                 else
                     Some
                         { Name = index.Name
-                          Indices = indices })
+                          Indices = columns |> List.map fst
+                          PrefixLengths = columns |> List.map snd
+                          Transforms = List.replicate columns.Length None })
         | _ -> None)
 
-let private orderedKeyGroups (table: Table) : SecondaryKeyGroup list =
-    let unique =
-        uniqueKeyGroups table
-        |> List.choose (fun group ->
-            if indexesWholeColumns group then
-                Some
-                    { Name = group.Name
-                      Indices = group.Indices }
-            else
-                None)
+let private orderedKeyGroups (table: Table) : OrderedKeyGroup list =
+    let ordered group =
+        if indexesWholeColumns group then
+            Some
+                { Name = group.Name
+                  Indices = group.Indices }
+        else
+            None
 
-    unique @ secondaryKeyGroups table
+    (uniqueKeyGroups table |> List.choose ordered)
+    @ (secondaryKeyGroups table |> List.choose ordered)
 
 type private FullTextKeyGroup =
     { Name: string
@@ -1819,11 +1819,9 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
     else
         Some(encodeEqualityKey columns indices row)
 
-let private encodeUniqueKey (columns: ColumnDef list) (group: UniqueKeyGroup) (row: Value[]) : string option =
-    if group.Indices |> List.exists (fun index -> row.[index] = VNull) then
-        None
-    elif indexesWholeColumns group then
-        Some(encodeEqualityKey columns group.Indices row)
+let private encodeIndexKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string =
+    if indexesWholeColumns group then
+        encodeEqualityKey columns group.Indices row
     else
         let keyRow = Array.copy row
 
@@ -1839,7 +1837,13 @@ let private encodeUniqueKey (columns: ColumnDef list) (group: UniqueKeyGroup) (r
             | Some length, VBytes bytes -> keyRow.[index] <- VBytes(Array.truncate length bytes)
             | _ -> ())
 
-        Some(encodeEqualityKey columns group.Indices keyRow)
+        encodeEqualityKey columns group.Indices keyRow
+
+let private encodeUniqueKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string option =
+    if group.Indices |> List.exists (fun index -> row.[index] = VNull) then
+        None
+    else
+        Some(encodeIndexKey columns group row)
 
 type WriteLockTargets =
     { RowIds: RowId list
@@ -1934,7 +1938,7 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
             table.RowsArray.Indexed
             |> Seq.fold
                 (fun buckets (rowId, row) ->
-                    let key = encodeEqualityKey table.Columns group.Indices row
+                    let key = encodeIndexKey table.Columns group row
                     let rows = buckets |> Map.tryFind key |> Option.defaultValue Set.empty
                     Map.add key (Set.add rowId rows) buckets)
                 Map.empty
@@ -2001,8 +2005,8 @@ let private sameTableSchema (left: Table) (right: Table) =
 
 let private reindexRow
     (columns: ColumnDef list)
-    (uniqueGroups: UniqueKeyGroup list)
-    (secondaryGroups: SecondaryKeyGroup list)
+    (uniqueGroups: IndexKeyGroup list)
+    (secondaryGroups: IndexKeyGroup list)
     (removed: (RowId * Value[]) option)
     (added: (RowId * Value[]) option)
     (uniqueIndex: Map<string, Map<string, RowId>>)
@@ -2027,7 +2031,7 @@ let private reindexRow
                 let group =
                     removed
                     |> Option.fold (fun g (rowId, row) ->
-                        let key = encodeEqualityKey columns keyGroup.Indices row
+                        let key = encodeIndexKey columns keyGroup row
                         match Map.tryFind key g with
                         | None -> g
                         | Some rows ->
@@ -2036,23 +2040,24 @@ let private reindexRow
                 let group =
                     added
                     |> Option.fold (fun g (rowId, row) ->
-                        let key = encodeEqualityKey columns keyGroup.Indices row
+                        let key = encodeIndexKey columns keyGroup row
                         let rows = g |> Map.tryFind key |> Option.defaultValue Set.empty
                         Map.add key (Set.add rowId rows) g) group
                 Map.add keyGroup.Name group accIndex)
             secondaryIndex
 
     let secondaryOrder =
+        let ordered group =
+            if indexesWholeColumns group then
+                Some
+                    { Name = group.Name
+                      Indices = group.Indices }
+            else
+                None
+
         let orderedGroups =
-            (uniqueGroups
-             |> List.choose (fun group ->
-                 if indexesWholeColumns group then
-                     Some
-                         { Name = group.Name
-                           Indices = group.Indices }
-                 else
-                     None))
-            @ secondaryGroups
+            (uniqueGroups |> List.choose ordered)
+            @ (secondaryGroups |> List.choose ordered)
 
         orderedGroups
         |> List.fold
@@ -2666,23 +2671,45 @@ let private parentKeySourceAdd (key: string) (source: ParentKeySource) : unit =
 let private tableAt (store: Store) (dbName: string) (tableName: string) : Table option =
     tableSnapshot store dbName tableName |> Result.toOption
 
+type EqualityLookup =
+    { IndexName: string
+      ColumnIndices: int list
+      PrefixLengths: int option list
+      Unique: bool
+      LookupColumns: ColumnDef list
+      LookupRows: (RowId * Value[]) list }
+
+type EqualityIndex =
+    { Name: string
+      ColumnIndices: int list
+      PrefixLengths: int option list
+      Transforms: IndexTransform option list
+      Unique: bool }
+
+let private equalityIndex unique (group: IndexKeyGroup) =
+    { Name = group.Name
+      ColumnIndices = group.Indices
+      PrefixLengths = group.PrefixLengths
+      Transforms = group.Transforms
+      Unique = unique }
+
 /// The equality index a one-column probe can use, independent of a specific
 /// probe value. Unique keys take precedence over ordinary B-tree buckets.
-let tryEqualityIndex (table: Table) (columnName: string) : (string * int * bool) option =
+let tryEqualityIndex (table: Table) (columnName: string) : EqualityIndex option =
     match resolveColumn table.Columns columnName with
     | Error _ -> None
     | Ok index ->
         uniqueKeyGroups table
         |> List.tryPick (fun group ->
-            if group.Indices = [ index ] && indexesWholeColumns group then
-                Some(group.Name, index, true)
+            if group.Indices = [ index ] then
+                Some(equalityIndex true group)
             else
                 None)
         |> Option.orElseWith (fun () ->
             secondaryKeyGroups table
             |> List.tryPick (fun group ->
                 if group.Indices = [ index ] && Map.containsKey group.Name table.SecondaryIndex then
-                    Some(group.Name, index, false)
+                    Some(equalityIndex false group)
                 else
                     None))
 
@@ -2723,216 +2750,13 @@ let tryBuildTransientEqualityLookup (store: Store) (dbName: string) (tableName: 
             { TableColumns = table.Columns
               FindRows = rowsFor }))
 
-let private tryUniqueKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : (string * int) option =
-    tryEqualityIndex table columnName
-    |> Option.bind (fun (name, index, unique) ->
-        if unique then exactProbeValue store table index literal |> Option.map (fun _ -> name, index) else None)
+let private indexKeyGroup (index: EqualityIndex) =
+    { Name = index.Name
+      Indices = index.ColumnIndices
+      PrefixLengths = index.PrefixLengths
+      Transforms = index.Transforms }
 
-let tryUniqueKeyProbe
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (columnName: string)
-    (literal: Value)
-    : (Table * string * int) option =
-    tableAt store dbName tableName
-    |> Option.bind (fun table -> tryUniqueKeyProbeInTable store table columnName literal |> Option.map (fun (name, index) -> table, name, index))
-
-let tryUniqueLookup
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (columnName: string)
-    (literal: Value)
-    : (ColumnDef list * (RowId * Value[]) list) option =
-    tryUniqueKeyProbe store dbName tableName columnName literal
-    |> Option.map (fun (table, groupName, idx) ->
-        // `encodeConstraintKey` indexes its row by the column's absolute
-        // position, so the literal has to sit at `idx` of a full-width row —
-        // a bare `[| literal |]` throws for any key column past position 0.
-        let probeRow = Array.create (List.length table.Columns) VNull
-        probeRow.[idx] <- literal
-
-        let rows =
-            match encodeConstraintKey table.Columns [ idx ] probeRow with
-            | None -> []
-            | Some key ->
-                table.UniqueIndex
-                |> Map.tryFind groupName
-                |> Option.bind (Map.tryFind key)
-                |> Option.map (fun pos -> pos, table.RowsArray.[pos])
-                |> Option.toList
-
-        table.Columns, rows)
-
-/// A one-column ordinary B-tree equality probe after the literal has passed
-/// the same exact-value coercion guard as unique probes.
-let private trySecondaryKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : (string * int) option =
-    tryEqualityIndex table columnName
-    |> Option.bind (fun (name, index, unique) ->
-        if not unique then exactProbeValue store table index literal |> Option.map (fun _ -> name, index) else None)
-
-let trySecondaryKeyProbe
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (columnName: string)
-    (literal: Value)
-    : (Table * string * int) option =
-    tableAt store dbName tableName
-    |> Option.bind (fun table -> trySecondaryKeyProbeInTable store table columnName literal |> Option.map (fun (name, index) -> table, name, index))
-
-/// Candidate rows for a one-column ordinary B-tree equality probe, in stable
-/// row-store scan order.
-let private trySecondaryLookupInTable
-    (store: Store)
-    (table: Table)
-    (columnName: string)
-    (literal: Value)
-    : (ColumnDef list * (RowId * Value[]) list) option =
-    trySecondaryKeyProbeInTable store table columnName literal
-    |> Option.bind (fun (indexName, index) ->
-        match literal with
-        | VNull -> Some(table.Columns, [])
-        | _ ->
-            let probeRow = Array.create (List.length table.Columns) VNull
-            probeRow.[index] <- literal
-            let key = encodeEqualityKey table.Columns [ index ] probeRow
-
-            table.SecondaryIndex
-            |> Map.tryFind indexName
-            |> Option.map (fun buckets ->
-                let rows =
-                    buckets
-                    |> Map.tryFind key
-                    |> Option.defaultValue Set.empty
-                    |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
-                    |> List.ofSeq
-
-                table.Columns, rows))
-
-let trySecondaryLookup
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (columnName: string)
-    (literal: Value)
-    : (ColumnDef list * (RowId * Value[]) list) option =
-    tableAt store dbName tableName
-    |> Option.bind (fun table -> trySecondaryLookupInTable store table columnName literal)
-
-type EqualityLookup =
-    { IndexName: string
-      ColumnIndices: int list
-      Unique: bool
-      LookupColumns: ColumnDef list
-      LookupRows: (RowId * Value[]) list }
-
-type EqualityIndex =
-    { Name: string
-      ColumnIndices: int list
-      Unique: bool }
-
-/// Uses a fully-bound composite key. Residual predicate evaluation remains
-/// responsible for contradictory or repeated equalities.
-let tryCompositeEqualityLookupInTable
-    (store: Store)
-    (table: Table)
-    (equalities: (string * Value) list)
-    : EqualityLookup option =
-    let literalFor index =
-        equalities
-        |> List.tryPick (fun (name, value) ->
-            if System.String.Equals(name, table.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase) then
-                exactProbeValue store table index value
-            else
-                None)
-
-    let probe (name: string, indices: int list, unique: bool) =
-        if List.length indices < 2 then
-            None
-        else
-            indices
-            |> traverse (fun index ->
-                match literalFor index with
-                | Some value -> Ok value
-                | None -> Error())
-            |> Result.toOption
-            |> Option.map (fun values ->
-                let row = Array.create table.Columns.Length VNull
-                List.zip indices values |> List.iter (fun (index, value) -> row.[index] <- value)
-
-                let rows =
-                    if values |> List.contains VNull then
-                        []
-                    elif unique then
-                        encodeConstraintKey table.Columns indices row
-                        |> Option.bind (fun key -> Map.tryFind name table.UniqueIndex |> Option.bind (Map.tryFind key))
-                        |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun value -> rowId, value))
-                        |> Option.toList
-                    else
-                        let key = encodeEqualityKey table.Columns indices row
-
-                        table.SecondaryIndex
-                        |> Map.tryFind name
-                        |> Option.bind (Map.tryFind key)
-                        |> Option.defaultValue Set.empty
-                        |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun value -> rowId, value))
-                        |> List.ofSeq
-
-                { IndexName = name
-                  ColumnIndices = indices
-                  Unique = unique
-                  LookupColumns = table.Columns
-                  LookupRows = rows })
-
-    let unique =
-        uniqueKeyGroups table
-        |> List.choose (fun group ->
-            if indexesWholeColumns group then
-                Some(group.Name, group.Indices, true)
-            else
-                None)
-
-    let secondary =
-        secondaryKeyGroups table
-        |> List.map (fun group -> group.Name, group.Indices, false)
-
-    unique @ secondary |> List.tryPick probe
-
-let tryCompositeEqualityLookup
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (equalities: (string * Value) list)
-    : EqualityLookup option =
-    tableAt store dbName tableName
-    |> Option.bind (fun table -> tryCompositeEqualityLookupInTable store table equalities)
-
-let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : EqualityIndex option =
-    columnNames
-    |> traverse (resolveColumn table.Columns)
-    |> Result.toOption
-    |> Option.bind (fun requested ->
-        let matches (_, (indices: int list), _) =
-            indices.Length = requested.Length && Set.ofList indices = Set.ofList requested
-
-        let unique =
-            uniqueKeyGroups table
-            |> List.choose (fun group ->
-                if indexesWholeColumns group then
-                    Some(group.Name, group.Indices, true)
-                else
-                    None)
-        let secondary = secondaryKeyGroups table |> List.map (fun group -> group.Name, group.Indices, false)
-        unique @ secondary
-        |> List.tryFind matches
-        |> Option.map (fun (name, indices, unique) ->
-            { Name = name
-              ColumnIndices = indices
-              Unique = unique }))
-
-let tryEqualityLookupForIndex
+let private equalityLookupRows
     (store: Store)
     (table: Table)
     (index: EqualityIndex)
@@ -2954,12 +2778,12 @@ let tryEqualityLookupForIndex
             if exactValues |> List.exists (snd >> (=) VNull) then
                 []
             elif index.Unique then
-                encodeConstraintKey table.Columns index.ColumnIndices probeRow
+                encodeUniqueKey table.Columns (indexKeyGroup index) probeRow
                 |> Option.bind (fun key -> table.UniqueIndex |> Map.tryFind index.Name |> Option.bind (Map.tryFind key))
                 |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
                 |> Option.toList
             else
-                let key = encodeEqualityKey table.Columns index.ColumnIndices probeRow
+                let key = encodeIndexKey table.Columns (indexKeyGroup index) probeRow
 
                 table.SecondaryIndex
                 |> Map.tryFind index.Name
@@ -2967,6 +2791,126 @@ let tryEqualityLookupForIndex
                 |> Option.defaultValue Set.empty
                 |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
                 |> List.ofSeq)
+
+let private tryUniqueKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : EqualityIndex option =
+    tryEqualityIndex table columnName
+    |> Option.filter _.Unique
+    |> Option.filter (fun index -> exactProbeValue store table index.ColumnIndices.Head literal |> Option.isSome)
+
+let tryUniqueLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (literal: Value)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table ->
+        tryUniqueKeyProbeInTable store table columnName literal
+        |> Option.bind (fun index ->
+            equalityLookupRows store table index [ literal ]
+            |> Option.map (fun rows -> table.Columns, rows)))
+
+/// A one-column ordinary B-tree equality probe after the literal has passed
+/// the same exact-value coercion guard as unique probes.
+let private trySecondaryKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : EqualityIndex option =
+    tryEqualityIndex table columnName
+    |> Option.filter (not << _.Unique)
+    |> Option.filter (fun index -> exactProbeValue store table index.ColumnIndices.Head literal |> Option.isSome)
+
+/// Candidate rows for a one-column ordinary B-tree equality probe, in stable
+/// row-store scan order.
+let private trySecondaryLookupInTable
+    (store: Store)
+    (table: Table)
+    (columnName: string)
+    (literal: Value)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    trySecondaryKeyProbeInTable store table columnName literal
+    |> Option.bind (fun index ->
+        equalityLookupRows store table index [ literal ]
+        |> Option.map (fun rows -> table.Columns, rows))
+
+let trySecondaryLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (literal: Value)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table -> trySecondaryLookupInTable store table columnName literal)
+
+/// Uses a fully-bound composite key. Residual predicate evaluation remains
+/// responsible for contradictory or repeated equalities.
+let tryCompositeEqualityLookupInTable
+    (store: Store)
+    (table: Table)
+    (equalities: (string * Value) list)
+    : EqualityLookup option =
+    let literalFor index =
+        equalities
+        |> List.tryPick (fun (name, value) ->
+            if System.String.Equals(name, table.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase) then
+                exactProbeValue store table index value
+            else
+                None)
+
+    let probe unique (group: IndexKeyGroup) =
+        if List.length group.Indices < 2 then
+            None
+        else
+            group.Indices
+            |> traverse (fun index ->
+                match literalFor index with
+                | Some value -> Ok value
+                | None -> Error())
+            |> Result.toOption
+            |> Option.bind (fun values ->
+                let index = equalityIndex unique group
+
+                equalityLookupRows store table index values
+                |> Option.map (fun rows ->
+                    { IndexName = group.Name
+                      ColumnIndices = group.Indices
+                      PrefixLengths = group.PrefixLengths
+                      Unique = unique
+                      LookupColumns = table.Columns
+                      LookupRows = rows }))
+
+    (uniqueKeyGroups table |> List.map (fun group -> true, group))
+    @ (secondaryKeyGroups table |> List.map (fun group -> false, group))
+    |> List.tryPick (fun (unique, group) -> probe unique group)
+
+let tryCompositeEqualityLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (equalities: (string * Value) list)
+    : EqualityLookup option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table -> tryCompositeEqualityLookupInTable store table equalities)
+
+let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : EqualityIndex option =
+    columnNames
+    |> traverse (resolveColumn table.Columns)
+    |> Result.toOption
+    |> Option.bind (fun requested ->
+        let matches (_, (group: IndexKeyGroup)) =
+            group.Indices.Length = requested.Length && Set.ofList group.Indices = Set.ofList requested
+
+        (uniqueKeyGroups table |> List.map (fun group -> true, group))
+        @ (secondaryKeyGroups table |> List.map (fun group -> false, group))
+        |> List.tryFind matches
+        |> Option.map (fun (unique, group) -> equalityIndex unique group))
+
+let tryEqualityLookupForIndex
+    (store: Store)
+    (table: Table)
+    (index: EqualityIndex)
+    (values: Value list)
+    : (RowId * Value[]) list option =
+    equalityLookupRows store table index values
 
 let private trySecondaryOrderSliceInTable
     (store: Store)
@@ -2976,8 +2920,16 @@ let private trySecondaryOrderSliceInTable
     (upper: (Value * bool) option)
     (requireBound: bool)
     : SecondaryOrderSlice option =
-    tryEqualityIndex table columnName
-    |> Option.bind (fun (indexName, index, _) ->
+    let orderedIndex =
+        resolveColumn table.Columns columnName
+        |> Result.toOption
+        |> Option.bind (fun index ->
+            orderedKeyGroups table
+            |> List.tryFind (fun group -> group.Indices = [ index ] && Map.containsKey group.Name table.SecondaryOrder)
+            |> Option.map (fun group -> index, group.Name))
+
+    orderedIndex
+    |> Option.bind (fun (index, indexName) ->
         let normalizeBound = function
             | None -> Some None
             | Some(VNull, _) -> None
@@ -3147,12 +3099,12 @@ let tryEqualityKeyProbe
     (tableName: string)
     (columnName: string)
     (literal: Value)
-    : (Table * string * int * bool) option =
+    : (Table * EqualityIndex) option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
         tryEqualityIndex table columnName
-        |> Option.bind (fun (name, index, unique) ->
-            exactProbeValue store table index literal |> Option.map (fun _ -> table, name, index, unique)))
+        |> Option.filter (fun index -> exactProbeValue store table index.ColumnIndices.Head literal |> Option.isSome)
+        |> Option.map (fun index -> table, index))
 
 /// Exact-value coercion keeps an index key equivalent to a stored value;
 /// callers scan when that proof is unavailable.
@@ -3163,26 +3115,9 @@ let tryEqualityLookupInTable
     (literal: Value)
     : (ColumnDef list * (RowId * Value[]) list) option =
     tryEqualityIndex table columnName
-    |> Option.bind (fun (_, _, unique) ->
-        if unique then
-            tryUniqueKeyProbeInTable store table columnName literal
-            |> Option.map (fun (indexName, index) ->
-                let probeRow = Array.create (List.length table.Columns) VNull
-                probeRow.[index] <- literal
-
-                let rows =
-                    match encodeConstraintKey table.Columns [ index ] probeRow with
-                    | None -> []
-                    | Some key ->
-                        table.UniqueIndex
-                        |> Map.tryFind indexName
-                        |> Option.bind (Map.tryFind key)
-                        |> Option.map (fun rowId -> rowId, table.RowsArray.[rowId])
-                        |> Option.toList
-
-                table.Columns, rows)
-        else
-            trySecondaryLookupInTable store table columnName literal)
+    |> Option.bind (fun index ->
+        equalityLookupRows store table index [ literal ]
+        |> Option.map (fun rows -> table.Columns, rows))
 
 let tryEqualityLookup
     (store: Store)
@@ -3257,15 +3192,7 @@ let private withTable
 /// scope for MySQL-compatible errors. Runtime coercion repeats DECIMAL's
 /// bounds because CAST and JSON_TABLE create synthetic column definitions.
 let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
-    let bytesPerCharacter =
-        match c.Charset |> Option.map _.ToLowerInvariant() with
-        | Some "ascii"
-        | Some "latin1" -> 1
-        | Some "utf8mb3"
-        | Some "utf8" -> 3
-        | _ -> 4
-
-    let maxVarcharLength = 65535 / bytesPerCharacter
+    let maxVarcharLength = 65535 / Collation.maxBytesPerCharacter c.Charset
 
     if c.OnUpdateCurrentTimestamp && not (supportsCurrentTimestamp c) then
         Error(ExpressionError(1294, sprintf "Invalid ON UPDATE clause for '%s' column" c.Name))
@@ -3343,18 +3270,10 @@ let private checkGeometryKeyColumns (columns: ColumnDef list) (indexes: IndexDef
             | None -> Ok()
 
 let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
-    let bytesPerCharacter (column: ColumnDef) =
-        match column.Charset |> Option.map _.ToLowerInvariant() with
-        | Some "ascii"
-        | Some "latin1" -> 1
-        | Some "utf8mb3"
-        | Some "utf8" -> 3
-        | _ -> 4
-
     let fullLength column =
         match column.Type with
         | TChar length
-        | TVarchar length -> Some(length * bytesPerCharacter column)
+        | TVarchar length -> Some(length * Collation.maxBytesPerCharacter column.Charset)
         | TBinary length
         | TVarBinary length -> Some length
         | TTinyInt _
@@ -3399,7 +3318,7 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
                         | TTinyText
                         | TText
                         | TMediumText
-                        | TLongText -> bytesPerCharacter definition
+                        | TLongText -> Collation.maxBytesPerCharacter definition.Charset
                         | _ -> 1
 
                     Ok(prefix * multiplier)
@@ -3836,7 +3755,7 @@ let private tryDuplicateConstraintValue (columns: ColumnDef list) (indices: int 
 
     rows |> List.ofSeq |> loop Set.empty
 
-let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: UniqueKeyGroup) (rows: Value[] seq) =
+let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: IndexKeyGroup) (rows: Value[] seq) =
     let rec loop seen remaining =
         match remaining with
         | [] -> None

@@ -83,6 +83,7 @@ type private RangeColumnScope =
 type private EqualityAccessPlan =
     { KeyName: string
       ColumnIndices: int list
+      PrefixLengths: int option list
       Columns: ColumnDef list
       Unique: bool
       Rows: (RowId * Value[]) list }
@@ -98,6 +99,7 @@ type private IndexedJoinPlan =
     { Table: Table
       KeyName: string
       ColumnIndices: int list
+      PrefixLengths: int option list
       Unique: bool
       References: string list
       HasResidual: bool }
@@ -5864,6 +5866,17 @@ and private applyResolvedJoin
 
             match indexedInnerProbe with
             | Some probe ->
+                let exactKey =
+                    probe.Index.PrefixLengths |> List.forall Option.isNone
+                    && probe.Index.Transforms |> List.forall Option.isNone
+
+                let candidateHolds combined =
+                    if exactKey then
+                        residualHolds combined
+                    else
+                        evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
+                        |> Result.map (truthy >> (=) (Some true))
+
                 let candidates =
                     seq {
                         for left in rowsSoFar do
@@ -5878,8 +5891,8 @@ and private applyResolvedJoin
                                 yield Array.append left right
                     }
 
-                match residualConjuncts with
-                | [] -> Ok(newSources, candidates, coalesceNames)
+                match exactKey, residualConjuncts with
+                | true, [] -> Ok(newSources, candidates, coalesceNames)
                 | _ ->
                     candidates
                     |> traverseSeqWithLimit
@@ -5887,7 +5900,7 @@ and private applyResolvedJoin
                             maxJoinCandidateRows,
                             (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
                         ))
-                        (fun combined -> residualHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
+                        (fun combined -> candidateHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
                     |> Result.mapError Err
                     |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
             | None when hashEligible ->
@@ -7026,6 +7039,7 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
             |> Option.map (fun lookup ->
                 { KeyName = lookup.IndexName
                   ColumnIndices = lookup.ColumnIndices
+                  PrefixLengths = lookup.PrefixLengths
                   Columns = lookup.LookupColumns
                   Unique = lookup.Unique
                   Rows = lookup.LookupRows })
@@ -7038,12 +7052,13 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
                     Storage.tryEqualityKeyProbe store tableDb tref.Table name value,
                     Storage.tryEqualityLookup store tableDb tref.Table name value
                 with
-                | Some(_, keyName, columnIndex, unique), Some(columns, rows) ->
+                | Some(_, index), Some(columns, rows) ->
                     Some
-                        { KeyName = keyName
-                          ColumnIndices = [ columnIndex ]
+                        { KeyName = index.Name
+                          ColumnIndices = index.ColumnIndices
+                          PrefixLengths = index.PrefixLengths
                           Columns = columns
-                          Unique = unique
+                          Unique = index.Unique
                           Rows = rows }
                 | _ -> None))
 
@@ -10802,6 +10817,8 @@ let private explainTableStats (store: Store) (registry: Registry) (dbName: strin
 /// adds a 2-byte length prefix, a nullable column adds 1 for the null
 /// flag); `None` for a type MySQL wouldn't report a fixed length on.
 let private explainKeyLen (col: ColumnDef) : int option =
+    let characterBytes = Collation.maxBytesPerCharacter col.Charset
+
     let baseLen =
         match col.Type with
         | TTinyInt _
@@ -10810,8 +10827,8 @@ let private explainKeyLen (col: ColumnDef) : int option =
         | TMediumInt _ -> Some 3
         | TInt _ -> Some 4
         | TBigInt _ -> Some 8
-        | TChar n -> Some(n * 4)
-        | TVarchar n -> Some(n * 4 + 2)
+        | TChar n -> Some(n * characterBytes)
+        | TVarchar n -> Some(n * characterBytes + 2)
         | TBinary n -> Some n
         | TVarBinary n -> Some(n + 2)
         | TFloat _ -> Some 4
@@ -10829,6 +10846,34 @@ let private explainCompositeKeyLen (columns: ColumnDef list) (indices: int list)
     indices
     |> traverse (fun index ->
         match explainKeyLen columns.[index] with
+        | Some length -> Ok length
+        | None -> Error())
+    |> Result.toOption
+    |> Option.map List.sum
+
+let private explainPrefixKeyLen (column: ColumnDef) (prefixLength: int option) =
+    let narrowed =
+        match prefixLength, column.Type with
+        | Some length, TChar _ -> { column with Type = TChar length }
+        | Some length, TVarchar _
+        | Some length, TTinyText
+        | Some length, TText
+        | Some length, TMediumText
+        | Some length, TLongText -> { column with Type = TVarchar length }
+        | Some length, TBinary _ -> { column with Type = TBinary length }
+        | Some length, TVarBinary _
+        | Some length, TTinyBlob
+        | Some length, TBlob
+        | Some length, TMediumBlob
+        | Some length, TLongBlob -> { column with Type = TVarBinary length }
+        | _ -> column
+
+    explainKeyLen narrowed
+
+let private explainIndexKeyLen (columns: ColumnDef list) (indices: int list) (prefixLengths: int option list) =
+    List.zip indices prefixLengths
+    |> traverse (fun (index, prefixLength) ->
+        match explainPrefixKeyLen columns.[index] prefixLength with
         | Some length -> Ok length
         | None -> Error())
     |> Result.toOption
@@ -10900,9 +10945,13 @@ let private indexedJoinExplainPlans
                             { Table = probe.Table
                               KeyName = probe.Index.Name
                               ColumnIndices = probe.Index.ColumnIndices
+                              PrefixLengths = probe.Index.PrefixLengths
                               Unique = probe.Index.Unique
                               References = probe.LeftIndices |> List.map (leftColumnReference leftSources)
-                              HasResidual = not residual.IsEmpty })
+                              HasResidual =
+                                not residual.IsEmpty
+                                || (probe.Index.PrefixLengths |> List.exists Option.isSome)
+                                || (probe.Index.Transforms |> List.exists Option.isSome) })
                     | _ -> None
 
                 let sources' =
@@ -10978,7 +11027,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some(if plan.Unique then "const" else "ref")
-                      Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
+                      Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
                       Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
                       Rows = Some(uint64 plan.Rows.Length)
                       Extra = if plan.Unique then extra |> List.filter ((<>) "Using where") else extra }
@@ -11037,7 +11086,7 @@ let rec private explainJoinBlock
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                           Type = Some(if plan.Unique then "eq_ref" else "ref")
-                          Key = Some(plan.KeyName, explainCompositeKeyLen plan.Table.Columns plan.ColumnIndices)
+                          Key = Some(plan.KeyName, explainIndexKeyLen plan.Table.Columns plan.ColumnIndices plan.PrefixLengths)
                           Ref = Some(String.concat "," plan.References)
                           Rows = Some 1UL
                           Extra =

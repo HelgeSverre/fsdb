@@ -4657,6 +4657,122 @@ let tests =
                         ()
                     | other -> failtestf "expected the plan to follow the first equality probe, got %A" other
 
+                testCase "prefix equality indexes narrow candidates and retain residual semantics"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, label VARCHAR(30), KEY ix_label (label(3)))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, label VARCHAR(30))" |> ignore
+
+                    let values =
+                        [ for id in 1 .. 500 ->
+                              let label = if id = 499 then "Alphabet" elif id = 500 then "Alpine" else sprintf "value-%03d" id
+                              sprintf "(%d, '%s')" id label ]
+                        |> String.concat ", "
+
+                    runDefault store (sprintf "INSERT INTO indexed VALUES %s" values) |> ignore
+                    runDefault store (sprintf "INSERT INTO scanned VALUES %s" values) |> ignore
+
+                    let query table =
+                        run store registry (sprintf "SELECT id FROM %s WHERE label = 'ALPHABET' AND TOUCH(id) = id" table)
+
+                    match query "indexed", query "scanned" with
+                    | ResultSet(_, indexedRows), ResultSet(_, scannedRows) ->
+                        Expect.equal indexedRows scannedRows "the prefix candidate path retains full equality"
+                        Expect.equal indexedRows [ [ Some "499" ] ] "collation folding still applies"
+                    | indexed, scanned -> failtestf "expected resultsets, got %A and %A" indexed scanned
+
+                    Expect.isLessThan calls 510 "the indexed side only evaluates rows sharing the indexed prefix"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE label = 'Alps'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "ref"; Some "ix_label"; Some "ix_label"; Some "15"; Some "const"; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a prefix ref plan with residual filtering, got %A" other
+
+                    runDefault store "CREATE TABLE latin_labels (id INT PRIMARY KEY, label VARCHAR(30) CHARACTER SET latin1, KEY ix_label (label(3)))" |> ignore
+                    runDefault store "INSERT INTO latin_labels VALUES (1, 'abc')" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT id FROM latin_labels WHERE label = 'abc'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "latin_labels"; None; Some "ref"; Some "ix_label"; Some "ix_label"; Some "6"; Some "const"; Some "1"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected the latin1 prefix byte length, got %A" other
+
+                testCase "unique prefix lookups keep the complete equality residual"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, label VARCHAR(30), UNIQUE KEY uq_label (label(3)))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 'Alphabet'), (2, 'Beta')" |> ignore
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM t WHERE label = 'Alphabet'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "an exact value survives the residual"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM t WHERE label = 'Alpine'")
+                        (ResultSet([ "id" ], []))
+                        "a value sharing only the indexed prefix is rejected"
+
+                    match runDefault store "EXPLAIN SELECT id FROM t WHERE label = 'Alpine'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; None; Some "const"; Some "uq_label"; Some "uq_label"; Some "15"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected a unique prefix const plan, got %A" other
+
+                testCase "composite prefix probes survive mutations"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, tenant_id INT, label VARCHAR(30), KEY ix_tenant_label (tenant_id, label(3)))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, tenant_id INT, label VARCHAR(30))" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES (1, 7, 'Alphabet'), (2, 7, 'Alpine'), (3, 8, 'Alphabet'), (4, 7, 'Beta')" table) |> ignore
+
+                    let rows table label =
+                        match runDefault store (sprintf "SELECT id FROM %s WHERE tenant_id = 7 AND label = '%s'" table label) with
+                        | ResultSet(_, result) -> result
+                        | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.equal (rows "indexed" "Alphabet") (rows "scanned" "Alphabet") "composite prefix lookup matches a scan"
+                    Expect.equal (rows "indexed" "Alphabet") [ [ Some "1" ] ] "the full label remains a residual"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE tenant_id = 7 AND label = 'Alphabet'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "ref"; Some "ix_tenant_label"; Some "ix_tenant_label"; Some "20"; Some "const,const"; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a composite prefix plan, got %A" other
+
+                    Expect.equal
+                        (runDefault store "UPDATE indexed SET label = 'Gamma' WHERE tenant_id = 7 AND label = 'Alphabet'")
+                        (Affected 1UL)
+                        "the prefix candidate drives UPDATE"
+
+                    Expect.equal (rows "indexed" "Alphabet") [] "the old prefix bucket loses the row"
+                    Expect.equal (rows "indexed" "Gamma") [ [ Some "1" ] ] "the new prefix bucket gains the row"
+
+                testCase "prefix indexes probe inner joins without weakening equality"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (id INT PRIMARY KEY, label VARCHAR(30))" |> ignore
+                    runDefault store "CREATE TABLE child (id INT PRIMARY KEY, label VARCHAR(30), KEY ix_label (label(3)))" |> ignore
+                    runDefault store "INSERT INTO parent VALUES (1, 'Alphabet'), (2, 'Alps'), (3, 'Beta')" |> ignore
+                    runDefault store "INSERT INTO child VALUES (10, 'Alphabet'), (11, 'Alpine'), (12, 'Beta')" |> ignore
+
+                    match runDefault store "SELECT p.id, c.id FROM parent p JOIN child c ON p.label = c.label ORDER BY p.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "10" ]; [ Some "3"; Some "12" ] ] "the complete join predicate filters prefix collisions"
+                    | other -> failtestf "expected joined rows, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT * FROM parent p JOIN child c ON p.label = c.label" with
+                    | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_label"; Some "ix_label"; Some "15"; Some "p.label"; Some "1"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected an indexed prefix join plan, got %A" other
+
                 testCase "an indexed INNER JOIN preserves NULL and residual ON semantics against a scan twin"
                 <| fun _ ->
                     let store = newStore ()
