@@ -7130,7 +7130,7 @@ and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whe
     (if storedValuesMatchReadValues store then rangeLookupBounds BareOrQualifiedRange tref whereExpr else [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
-        |> Option.map (fun (_, _, columns, rows) -> columns, rows))
+        |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows))
 
 and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
@@ -7138,7 +7138,7 @@ and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: Table
     (if storedValuesMatchReadValues store then rangeLookupBounds QualifiedRange tref whereExpr else [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
-        |> Option.map (fun (_, _, columns, rows) -> columns, rows))
+        |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows))
 
 and private directOrderColumns (tref: TableRef) (select: SelectStmt) : (string list * Direction) option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -11058,17 +11058,20 @@ let rec private explainJoinBlock
                 | None ->
                     rangeLookupBounds BareOrQualifiedRange tref whereOpt
                     |> List.tryPick (fun bounds ->
-                        Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
-                        |> Option.map (fun (keyName, columnIndex, columns, rows) -> keyName, columnIndex, columns, List.length rows))
-                    |> Option.map (fun (keyName, columnIndex, columns, rowCount) ->
+                        Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper)
+                    |> Option.map (fun lookup ->
                         acc.Add
                             { Id = Some id
                               SelectType = selectType
                               Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                               Type = Some "range"
-                              Key = Some(keyName, explainKeyLen columns.[columnIndex])
+                              Key =
+                                Some(
+                                    lookup.RangeIndexName,
+                                    explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
+                                )
                               Ref = None
-                              Rows = Some(uint64 rowCount)
+                              Rows = Some(uint64 lookup.RangeRows.Length)
                               Extra = extra })
                     |> Option.isSome
 

@@ -758,9 +758,12 @@ let tests =
                     Kind = BTree }
               let fullIndex = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Kind = BTree }
               createTable store defaultDatabase "items" [ mkCol "id" (TInt false); category ] [ prefixIndex; fullIndex ] [] None None |> ignore
+              createTable store defaultDatabase "prefix_items" [ mkCol "id" (TInt false); category ] [ prefixIndex ] [] None None |> ignore
               insertRows store defaultDatabase "items" None [ [ VInt 1L; VString "books" ]; [ VInt 2L; VString "books" ]; [ VInt 3L; VString "music" ] ] |> ignore
+              insertRows store defaultDatabase "prefix_items" None [ [ VInt 1L; VString "books" ]; [ VInt 2L; VString "books" ]; [ VInt 3L; VString "music" ] ] |> ignore
               snapshotNow dir store
               insertRows store defaultDatabase "items" None [ [ VInt 4L; VString "books" ] ] |> ignore
+              insertRows store defaultDatabase "prefix_items" None [ [ VInt 4L; VString "books" ] ] |> ignore
 
               let reloaded = load dir
               match trySecondaryLookup reloaded defaultDatabase "items" "category" (VString "books") with
@@ -768,8 +771,12 @@ let tests =
               | None -> failtest "expected a recovered prefix-index probe"
 
               match trySecondaryRangeLookup reloaded defaultDatabase "items" "category" (Some(VString "books", true)) (Some(VString "music", false)) with
-              | Some(_, _, _, rows) -> Expect.equal (rows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered ordered entries preserve row order"
+              | Some lookup -> Expect.equal (lookup.RangeRows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered ordered entries preserve row order"
               | None -> failtest "expected a recovered ordered secondary-index probe"
+
+              match trySecondaryRangeLookup reloaded defaultDatabase "prefix_items" "category" (Some(VString "books", true)) (Some(VString "boz", false)) with
+              | Some lookup -> Expect.equal (lookup.RangeRows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered prefix ranges include matching buckets"
+              | None -> failtest "expected a recovered prefix range probe"
 
           testCase "WAL replay of many single-row UPDATEs against a UNIQUE-indexed table doesn't rebuild the index once per event"
           <| fun _ ->

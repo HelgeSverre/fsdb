@@ -4725,6 +4725,79 @@ let tests =
                         ()
                     | other -> failtestf "expected a unique prefix const plan, got %A" other
 
+                testCase "prefix indexes narrow ranges without replacing full-value filtering or ordering"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, label VARCHAR(30), KEY ix_label (label(3)))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, label VARCHAR(30))" |> ignore
+
+                    let values =
+                        [ for id in 1 .. 500 ->
+                              let label =
+                                  match id with
+                                  | 496 -> "Alps"
+                                  | 497 -> "Alphabet"
+                                  | 498 -> "Alphanumeric"
+                                  | 499 -> "Alpine"
+                                  | 500 -> "Beta"
+                                  | _ -> sprintf "value-%03d" id
+
+                              sprintf "(%d, '%s')" id label ]
+                        |> String.concat ", "
+
+                    runDefault store (sprintf "INSERT INTO indexed VALUES %s" values) |> ignore
+                    runDefault store (sprintf "INSERT INTO scanned VALUES %s" values) |> ignore
+
+                    let query table =
+                        run
+                            store
+                            registry
+                            (sprintf
+                                "SELECT id, label FROM %s WHERE label > 'Alphabet' AND label < 'Alq' AND TOUCH(id) = id ORDER BY label, id"
+                                table)
+
+                    match query "indexed", query "scanned" with
+                    | ResultSet(_, indexedRows), ResultSet(_, scannedRows) ->
+                        Expect.equal indexedRows scannedRows "prefix range candidates agree with a full scan"
+                        Expect.equal
+                            indexedRows
+                            [ [ Some "498"; Some "Alphanumeric" ]
+                              [ Some "499"; Some "Alpine" ]
+                              [ Some "496"; Some "Alps" ] ]
+                            "exclusive bounds retain and filter the shared prefix bucket"
+                    | indexed, scanned -> failtestf "expected resultsets, got %A and %A" indexed scanned
+
+                    Expect.isLessThan calls 510 "only the prefix bucket is evaluated on the indexed side"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE label > 'Alphabet' AND label < 'Alq'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "ix_label"; Some "ix_label"; Some "15"; None; Some "4"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a prefix range plan, got %A" other
+
+                    Expect.equal
+                        (runDefault store "UPDATE indexed SET label = 'Gamma' WHERE label > 'Alphabet' AND label < 'Alq'")
+                        (Affected 3UL)
+                        "prefix range candidates drive UPDATE"
+
+                    match runDefault store "SELECT id, label FROM indexed WHERE label >= 'Alp' ORDER BY label, id LIMIT 4" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "497"; Some "Alphabet" ]
+                              [ Some "500"; Some "Beta" ]
+                              [ Some "496"; Some "Gamma" ]
+                              [ Some "498"; Some "Gamma" ] ]
+                            "ORDER BY and LIMIT use complete values after the mutation"
+                    | other -> failtestf "expected ordered rows, got %A" other
+
                 testCase "composite prefix probes survive mutations"
                 <| fun _ ->
                     let store = newStore ()

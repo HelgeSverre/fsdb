@@ -879,6 +879,22 @@ let tests =
                             "only rows sharing the byte prefix are candidates"
                     | None -> failtest "expected a binary prefix probe"
 
+                    match
+                        trySecondaryRangeLookup
+                            store
+                            defaultDatabase
+                            "binary_prefix"
+                            "value"
+                            (Some(VBytes [| 0x01uy; 0x02uy; 0x03uy |], false))
+                            (Some(VBytes [| 0x01uy; 0x03uy; 0x00uy |], false))
+                    with
+                    | Some lookup ->
+                        Expect.equal
+                            (lookup.RangeRows |> List.map (snd >> fun row -> row.[0]))
+                            [ VInt 1L; VInt 2L; VInt 3L ]
+                            "exclusive bounds retain complete boundary-prefix buckets"
+                    | None -> failtest "expected a binary prefix range"
+
                 testCase "a plain INSERT violating the primary key returns error 1062 for key PRIMARY"
                 <| fun _ ->
                     let store = withUsersTable ()
@@ -1780,7 +1796,7 @@ let tests =
 
                     let entries =
                         match trySecondaryRangeLookup store defaultDatabase "users" "age" (Some(VInt 0L, true)) None with
-                        | Some(_, _, _, rows) -> rows |> List.map (fun (_, row) -> row.[2], row.[0])
+                        | Some lookup -> lookup.RangeRows |> List.map (fun (_, row) -> row.[2], row.[0])
                         | None -> failtest "expected an ordered secondary range lookup"
 
                     Expect.equal entries [ VInt 26L, VInt 2L; VInt 28L, VInt 3L ] "ordered entries reflect the live rows"
@@ -1794,7 +1810,7 @@ let tests =
 
                     let primaryRange =
                         match trySecondaryRangeLookup store defaultDatabase "users" "id" (Some(VInt 2L, true)) None with
-                        | Some(name, _, _, rows) -> name, rows |> List.map (fun (_, row) -> row.[0])
+                        | Some lookup -> lookup.RangeIndexName, lookup.RangeRows |> List.map (fun (_, row) -> row.[0])
                         | None -> failtest "expected an ordered primary-key range lookup"
 
                     Expect.equal primaryRange ("PRIMARY", [ VInt 2L; VInt 3L ]) "primary keys share the ordered access path"

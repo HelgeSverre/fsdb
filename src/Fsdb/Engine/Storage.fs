@@ -158,6 +158,7 @@ type FullTextIndexes = Map<string, FullText.Index<RowId>>
 type private SecondaryOrderSlice =
     { IndexName: string
       ColumnIndices: int list
+      PrefixLengths: int option list
       Entries: ImmutableSortedSet<SecondaryOrderEntry>
       First: int
       AfterLast: int }
@@ -1703,10 +1704,6 @@ let private uniqueKeyGroups (table: Table) : IndexKeyGroup list =
 
     Option.toList primary @ fromIndexes
 
-type private OrderedKeyGroup =
-    { Name: string
-      Indices: int list }
-
 let private secondaryKeyGroups (table: Table) : IndexKeyGroup list =
     table.Indexes
     |> List.choose (fun index ->
@@ -1728,17 +1725,16 @@ let private secondaryKeyGroups (table: Table) : IndexKeyGroup list =
                           Transforms = List.replicate columns.Length None })
         | _ -> None)
 
-let private orderedKeyGroups (table: Table) : OrderedKeyGroup list =
-    let ordered group =
-        if indexesWholeColumns group then
-            Some
-                { Name = group.Name
-                  Indices = group.Indices }
-        else
-            None
+let private supportsRangeAccess group =
+    group.Transforms |> List.forall Option.isNone
+    && (indexesWholeColumns group || group.Indices.Length = 1)
 
-    (uniqueKeyGroups table |> List.choose ordered)
-    @ (secondaryKeyGroups table |> List.choose ordered)
+let private rangeKeyGroups (table: Table) : IndexKeyGroup list =
+    uniqueKeyGroups table @ secondaryKeyGroups table
+    |> List.filter supportsRangeAccess
+
+let private orderedKeyGroups (table: Table) : IndexKeyGroup list =
+    rangeKeyGroups table |> List.filter indexesWholeColumns
 
 type private FullTextKeyGroup =
     { Name: string
@@ -1819,25 +1815,38 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
     else
         Some(encodeEqualityKey columns indices row)
 
+let private projectIndexValue prefixLength transform value =
+    let transformed =
+        match transform, value with
+        | Some Lowercase, VString text -> VString(text.ToLowerInvariant())
+        | _ -> value
+
+    match prefixLength, transformed with
+    | Some length, VString text -> VString(truncateRunes length text |> Option.defaultValue text)
+    | Some length, VBytes bytes -> VBytes(Array.truncate length bytes)
+    | _ -> transformed
+
+let private projectIndexRow (group: IndexKeyGroup) (row: Value[]) =
+    let projected = Array.copy row
+
+    List.zip3 group.Indices group.PrefixLengths group.Transforms
+    |> List.iter (fun (index, prefixLength, transform) ->
+        projected.[index] <- projectIndexValue prefixLength transform projected.[index])
+
+    projected
+
+let private indexValues (group: IndexKeyGroup) (row: Value[]) =
+    if indexesWholeColumns group then
+        group.Indices |> List.map (fun index -> row.[index])
+    else
+        let projected = projectIndexRow group row
+        group.Indices |> List.map (fun index -> projected.[index])
+
 let private encodeIndexKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string =
     if indexesWholeColumns group then
         encodeEqualityKey columns group.Indices row
     else
-        let keyRow = Array.copy row
-
-        List.zip3 group.Indices group.PrefixLengths group.Transforms
-        |> List.iter (fun (index, prefixLength, transform) ->
-            match transform, keyRow.[index] with
-            | Some Lowercase, VString text -> keyRow.[index] <- VString(text.ToLowerInvariant())
-            | _ -> ()
-
-            match prefixLength, keyRow.[index] with
-            | Some length, VString text ->
-                keyRow.[index] <- VString(truncateRunes length text |> Option.defaultValue text)
-            | Some length, VBytes bytes -> keyRow.[index] <- VBytes(Array.truncate length bytes)
-            | _ -> ())
-
-        encodeEqualityKey columns group.Indices keyRow
+        encodeEqualityKey columns group.Indices (projectIndexRow group row)
 
 let private encodeUniqueKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string option =
     if group.Indices |> List.exists (fun index -> row.[index] = VNull) then
@@ -1947,7 +1956,7 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
     |> Map.ofList
 
 let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
-    orderedKeyGroups table
+    rangeKeyGroups table
     |> List.map (fun group ->
         let entries: ImmutableSortedSet<SecondaryOrderEntry> =
             table.RowsArray.Indexed
@@ -1955,7 +1964,7 @@ let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
                 (fun entries (rowId, row) ->
                     entries.Add
                         { CollationNames = group.Indices |> List.map (fun index -> table.Columns.[index].Collation)
-                          Values = group.Indices |> List.map (fun index -> row.[index])
+                          Values = indexValues group row
                           RowId = rowId })
                 ImmutableSortedSet<SecondaryOrderEntry>.Empty
 
@@ -2047,24 +2056,15 @@ let private reindexRow
             secondaryIndex
 
     let secondaryOrder =
-        let ordered group =
-            if indexesWholeColumns group then
-                Some
-                    { Name = group.Name
-                      Indices = group.Indices }
-            else
-                None
-
         let orderedGroups =
-            (uniqueGroups |> List.choose ordered)
-            @ (secondaryGroups |> List.choose ordered)
+            uniqueGroups @ secondaryGroups |> List.filter supportsRangeAccess
 
         orderedGroups
         |> List.fold
             (fun indexes keyGroup ->
                 let entry rowId (row: Value[]) =
                     { CollationNames = keyGroup.Indices |> List.map (fun index -> columns.[index].Collation)
-                      Values = keyGroup.Indices |> List.map (fun index -> row.[index])
+                      Values = indexValues keyGroup row
                       RowId = rowId }
 
                 let entries = Map.find keyGroup.Name indexes
@@ -2924,21 +2924,29 @@ let private trySecondaryOrderSliceInTable
         resolveColumn table.Columns columnName
         |> Result.toOption
         |> Option.bind (fun index ->
-            orderedKeyGroups table
-            |> List.tryFind (fun group -> group.Indices = [ index ] && Map.containsKey group.Name table.SecondaryOrder)
-            |> Option.map (fun group -> index, group.Name))
+            let candidates =
+                (if requireBound then rangeKeyGroups table else orderedKeyGroups table)
+                |> List.filter (fun group -> group.Indices = [ index ] && Map.containsKey group.Name table.SecondaryOrder)
+
+            candidates
+            |> List.tryFind indexesWholeColumns
+            |> Option.orElseWith (fun () -> List.tryHead candidates)
+            |> Option.map (fun group -> index, group))
 
     orderedIndex
-    |> Option.bind (fun (index, indexName) ->
+    |> Option.bind (fun (index, group) ->
         let normalizeBound = function
             | None -> Some None
             | Some(VNull, _) -> None
-            | Some(value, inclusive) -> exactProbeValue store table index value |> Option.map (fun value -> Some(value, inclusive))
+            | Some(value, inclusive) ->
+                exactProbeValue store table index value
+                |> Option.map (projectIndexValue group.PrefixLengths.Head group.Transforms.Head)
+                |> Option.map (fun value -> Some(value, inclusive))
 
         match normalizeBound lower, normalizeBound upper with
         | Some lower, Some upper when not requireBound || lower.IsSome || upper.IsSome ->
             table.SecondaryOrder
-            |> Map.tryFind indexName
+            |> Map.tryFind group.Name
             |> Option.map (fun entries ->
                     let entry value rowId =
                         { CollationNames = [ table.Columns.[index].Collation ]
@@ -2954,21 +2962,33 @@ let private trySecondaryOrderSliceInTable
                     let first =
                         match lower with
                         | None -> if lower.IsSome || upper.IsSome then firstNonNull else 0
+                        | Some(value, _) when group.PrefixLengths.Head.IsSome ->
+                            insertionIndex (entry value (RowId.create Int32.MinValue))
                         | Some(value, true) -> insertionIndex (entry value (RowId.create Int32.MinValue))
                         | Some(value, false) -> insertionIndex (entry value (RowId.create Int32.MaxValue))
 
                     let afterLast =
                         match upper with
                         | None -> entries.Count
+                        | Some(value, _) when group.PrefixLengths.Head.IsSome ->
+                            insertionIndex (entry value (RowId.create Int32.MaxValue))
                         | Some(value, true) -> insertionIndex (entry value (RowId.create Int32.MaxValue))
                         | Some(value, false) -> insertionIndex (entry value (RowId.create Int32.MinValue))
 
-                    { IndexName = indexName
+                    { IndexName = group.Name
                       ColumnIndices = [ index ]
+                      PrefixLengths = group.PrefixLengths
                       Entries = entries
                       First = max 0 first
                       AfterLast = max 0 (min entries.Count afterLast) })
         | _ -> None)
+
+type RangeLookup =
+    { RangeIndexName: string
+      RangeColumnIndex: int
+      RangePrefixLength: int option
+      RangeColumns: ColumnDef list
+      RangeRows: (RowId * Value[]) list }
 
 let private trySecondaryRangeLookupInTable
     (store: Store)
@@ -2976,7 +2996,7 @@ let private trySecondaryRangeLookupInTable
     (columnName: string)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
-    : (string * int * ColumnDef list * (RowId * Value[]) list) option =
+    : RangeLookup option =
     trySecondaryOrderSliceInTable store table columnName lower upper true
     |> Option.bind (fun slice ->
         slice.ColumnIndices
@@ -2990,7 +3010,11 @@ let private trySecondaryRangeLookupInTable
                 |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
                 |> List.ofSeq
 
-            slice.IndexName, columnIndex, table.Columns, rows))
+            { RangeIndexName = slice.IndexName
+              RangeColumnIndex = columnIndex
+              RangePrefixLength = slice.PrefixLengths.Head
+              RangeColumns = table.Columns
+              RangeRows = rows }))
 
 let trySecondaryRangeLookup
     (store: Store)
@@ -2999,7 +3023,7 @@ let trySecondaryRangeLookup
     (columnName: string)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
-    : (string * int * ColumnDef list * (RowId * Value[]) list) option =
+    : RangeLookup option =
     tableAt store dbName tableName
     |> Option.bind (fun table -> trySecondaryRangeLookupInTable store table columnName lower upper)
 
@@ -3079,6 +3103,7 @@ let tryCompositeOrderedLookup
                     let slice =
                         { IndexName = group.Name
                           ColumnIndices = indices
+                          PrefixLengths = group.PrefixLengths
                           Entries = entries
                           First = 0
                           AfterLast = entries.Count }
