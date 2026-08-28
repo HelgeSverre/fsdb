@@ -761,6 +761,25 @@ let tests =
               | ResultSet(_, [ [ Some "posts"; None ]; [ Some "users"; None ] ]) -> ()
               | other -> failtestf "expected NULL-partition rows, got %A" other
 
+              run store "CREATE TABLE partitioned (id INT) PARTITION BY LINEAR HASH(id) PARTITIONS 3" |> ignore
+              run store "INSERT INTO partitioned VALUES (-2),(0),(1),(2),(NULL)" |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT partition_name,partition_ordinal_position,partition_method,partition_expression,table_rows FROM information_schema.partitions WHERE table_schema='fsdb' AND table_name='partitioned' ORDER BY partition_ordinal_position"
+              with
+              | ResultSet(_, [ [ Some "p0"; Some "1"; Some "LINEAR HASH"; Some "`id`"; Some "2" ]
+                               [ Some "p1"; Some "2"; Some "LINEAR HASH"; Some "`id`"; Some "1" ]
+                               [ Some "p2"; Some "3"; Some "LINEAR HASH"; Some "`id`"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected logical HASH partition metadata, got %A" other
+
+              match Fsdb.InformationSchema.showCreateTable store.Catalog defaultDatabase "partitioned" with
+              | Ok(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "PARTITION BY LINEAR HASH (`id`)" "partition method"
+                  Expect.stringContains ddl "PARTITIONS 3" "partition count"
+              | other -> failtestf "expected partitioned SHOW CREATE TABLE, got %A" other
+
           testCase "the TablePlus TABLES x COLLATION_CHARACTER_SET_APPLICABILITY comma join resolves charsets"
           <| fun _ ->
               let store = setup ()

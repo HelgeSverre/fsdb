@@ -44,6 +44,36 @@ let tests =
                     | ResultSet([ "id"; "name" ], [ [ Some "1"; Some "x" ] ]) -> ()
                     | other -> failtestf "expected id/name columns, got %A" other
 
+                testCase "HASH partition selection follows repartitioning"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 2" |> ignore
+                    runDefault store "INSERT INTO p VALUES (-3),(-2),(-1),(0),(1),(2),(3),(NULL)" |> ignore
+
+                    match runDefault store "SELECT id FROM p PARTITION (p0) ORDER BY id IS NULL,id" with
+                    | ResultSet(_, [ [ Some "-2" ]; [ Some "0" ]; [ Some "2" ]; [ None ] ]) -> ()
+                    | other -> failtestf "expected two-way HASH selection, got %A" other
+
+                    runDefault store "ALTER TABLE p ADD PARTITION PARTITIONS 1" |> ignore
+
+                    match runDefault store "SELECT id FROM p PARTITION (p2) ORDER BY id IS NULL,id" with
+                    | ResultSet(_, [ [ Some "-2" ]; [ Some "2" ]; [ None ] ]) -> ()
+                    | other -> failtestf "expected rows to follow the three-way logical partition map, got %A" other
+
+                    runDefault store "ALTER TABLE p COALESCE PARTITION 1" |> ignore
+
+                    match runDefault store "SELECT id FROM p PARTITION (p0) ORDER BY id IS NULL,id" with
+                    | ResultSet(_, [ [ Some "-2" ]; [ Some "0" ]; [ Some "2" ]; [ None ] ]) -> ()
+                    | other -> failtestf "expected coalescing to restore the two-way partition map, got %A" other
+
+                    match runDefault store "SELECT id FROM p PARTITION (missing)" with
+                    | Err(1735, _) -> ()
+                    | other -> failtestf "expected unknown partition error, got %A" other
+
+                    match runDefault store "CREATE TABLE invalid_partition (value VARCHAR(5)) PARTITION BY HASH(value) PARTITIONS 2" with
+                    | Err(1659, _) -> ()
+                    | other -> failtestf "expected string HASH keys to be rejected, got %A" other
+
                 testCase "SELECT without FROM returns a single row"
                 <| fun _ ->
                     let store = newStore ()

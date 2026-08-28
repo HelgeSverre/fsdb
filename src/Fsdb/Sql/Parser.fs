@@ -2388,18 +2388,26 @@ type private TableOption =
     | TableCollate of string
     | TableAutoIncrement of int64
     | TableComment of string
+    | TablePartitioning of HashPartitioning
     | TableOptionIgnored
 
 let private hashPartitionOption: Parser<TableOption, unit> =
     keyword "PARTITION"
     >>. keyword "BY"
-    >>. optional (keyword "LINEAR")
-    >>. keyword "HASH"
-    >>. between (sym "(") (sym ")") expr
-    >>. opt (keyword "PARTITIONS" >>. (puint64 .>> ws))
-    >>= function
-        | Some 0UL -> fail "the number of partitions must be positive"
-        | _ -> preturn TableOptionIgnored
+    >>. (opt (keyword "LINEAR") .>> keyword "HASH")
+    .>>. between (sym "(") (sym ")") expr
+    .>>. opt (keyword "PARTITIONS" >>. (puint64 .>> ws))
+    >>= fun ((linear, expression), count) ->
+        match count |> Option.defaultValue 1UL with
+        | 0UL -> fail "the number of partitions must be positive"
+        | value when value > uint64 UInt32.MaxValue -> fail "the number of partitions is too large"
+        | value ->
+            preturn (
+                TablePartitioning
+                    { Expression = expression
+                      Count = uint32 value
+                      Linear = linear.IsSome }
+            )
 
 /// One table-option tail entry. Options fsdb has no behavior for
 /// (ROW_FORMAT, KEY_BLOCK_SIZE, the STATS_* family) are accepted and
@@ -2440,20 +2448,21 @@ let private tableOption: Parser<TableOption, unit> =
               | None -> fail (sprintf "Unknown collation '%s'" name)
           attempt hashPartitionOption ]
 
-let private tableOptions: Parser<string option * string option * int64 option * string option, unit> =
+let private tableOptions: Parser<string option * string option * int64 option * string option * HashPartitioning option, unit> =
     many (optional (sym ",") >>. tableOption)
     |>> fun opts ->
         opts
         |> List.fold
             // A repeated option's last occurrence wins, same as MySQL.
-            (fun (cs, col, seed, comment) opt ->
+            (fun (cs, col, seed, comment, partitioning) opt ->
                 match opt with
-                | TableCharset c -> Some c, col, seed, comment
-                | TableCollate l -> cs, Some l, seed, comment
-                | TableAutoIncrement n -> cs, col, Some n, comment
-                | TableComment value -> cs, col, seed, Some value
-                | TableOptionIgnored -> cs, col, seed, comment)
-            (None, None, None, None)
+                | TableCharset c -> Some c, col, seed, comment, partitioning
+                | TableCollate l -> cs, Some l, seed, comment, partitioning
+                | TableAutoIncrement n -> cs, col, Some n, comment, partitioning
+                | TableComment value -> cs, col, seed, Some value, partitioning
+                | TablePartitioning value -> cs, col, seed, comment, Some value
+                | TableOptionIgnored -> cs, col, seed, comment, partitioning)
+            (None, None, None, None, None)
 
 let private createTable: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
@@ -2461,7 +2470,7 @@ let private createTable: Parser<Statement, unit> =
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>>. tableOptions)
-    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed, tableComment)) ->
+    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed, tableComment, partitioning)) ->
         let primaryKeyParts = items |> List.collect (function CPrimaryKey columns -> columns | _ -> [])
         let pkNames = primaryKeyParts |> List.map _.Name
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
@@ -2561,7 +2570,8 @@ let private createTable: Parser<Statement, unit> =
               Charset = tableCharset
               Collation = tableCollation
               AutoIncrementSeed = autoIncrementSeed
-              Comment = tableComment }
+              Comment = tableComment
+              Partitioning = partitioning }
 
 let private createTableLike: Parser<Statement, unit> =
     let source = keyword "LIKE" >>. qualifiedTableName
@@ -2779,9 +2789,21 @@ let private alterExecutionOption: Parser<AlterAction list, unit> =
 let private alterTableOption: Parser<AlterAction list, unit> =
     attempt (keyword "ROW_FORMAT" >>. opt (sym "=") >>. identifier) >>% []
 
+let private alterHashPartitions: Parser<AlterAction, unit> =
+    let count =
+        puint64 .>> ws
+        >>= function
+            | 0UL -> fail "at least one partition is required"
+            | value when value > uint64 UInt32.MaxValue -> fail "the number of partitions is too large"
+            | value -> preturn (uint32 value)
+
+    (attempt (keyword "ADD" >>. keyword "PARTITION" >>. keyword "PARTITIONS") >>. count |>> AddHashPartitions)
+    <|> (attempt (keyword "COALESCE" >>. keyword "PARTITION") >>. count |>> CoalesceHashPartitions)
+
 let private alterAction: Parser<AlterAction list, unit> =
     choice
-        [ addForeignKeyAction |>> List.singleton
+        [ alterHashPartitions |>> List.singleton
+          addForeignKeyAction |>> List.singleton
           addCheckAction |>> List.singleton
           addPrimaryKeyAction |>> List.singleton
           addUniqueConstraintAction |>> List.singleton
@@ -3037,12 +3059,13 @@ let private indexHint: Parser<unit, unit> =
 
 let private tableRef: Parser<TableRef, unit> =
     (identifier .>>. opt (sym "." >>. qualifiedIdentifier))
+    .>>. opt (keyword "PARTITION" >>. between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
     .>>. opt ((keyword "AS" >>. identifierWord .>> ws) <|> identifier)
     .>> many indexHint
-    |>> fun ((first, second), alias) ->
+    |>> fun (((first, second), partitions), alias) ->
         match second with
-        | Some table -> { Database = Some first; Table = table; Alias = alias }
-        | None -> { Database = None; Table = first; Alias = alias }
+        | Some table -> { Database = Some first; Table = table; Alias = alias; Partitions = Option.defaultValue [] partitions }
+        | None -> { Database = None; Table = first; Alias = alias; Partitions = Option.defaultValue [] partitions }
 
 let private withClause: Parser<CommonTableExpr list, unit> =
     keyword "WITH" >>. opt (keyword "RECURSIVE")

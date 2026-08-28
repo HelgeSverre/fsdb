@@ -25,7 +25,8 @@ let private createTableSpec name columns =
       Charset = None
       Collation = None
       AutoIncrementSeed = None
-      Comment = None }
+      Comment = None
+      Partitioning = None }
 
 /// Builds a `Select` statement from a flat positional tuple, so every test
 /// below reads as a plain AST comparison instead of a record literal per
@@ -40,7 +41,7 @@ let private mkSelect
           Distinct = false
           CalculateFoundRows = false
           StraightJoin = false
-          From = from |> Option.map (fun t -> FromTable { Database = None; Table = t; Alias = None })
+          From = from |> Option.map (fun t -> FromTable { Database = None; Table = t; Alias = None; Partitions = [] })
           Joins = []
           Where = where
           GroupBy = []
@@ -146,7 +147,7 @@ let tests =
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
-                              From = Some(FromTable { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" })
+                              From = Some(FromTable { Database = Some "information_schema"; Table = "tables"; Alias = Some "t"; Partitions = [] })
                               Joins = []
                               Where = None
                               GroupBy = []
@@ -170,7 +171,7 @@ let tests =
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
-                              From = Some(FromTable { Database = None; Table = "t"; Alias = Some "x" })
+                              From = Some(FromTable { Database = None; Table = "t"; Alias = Some "x"; Partitions = [] })
                               Joins = []
                               Where = None
                               GroupBy = []
@@ -1265,13 +1266,25 @@ let tests =
 
                 testCase "HASH partition declarations are accepted"
                 <| fun _ ->
-                    [ "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 4"
-                      "CREATE TABLE p (id INT) PARTITION BY HASH(id)"
-                      "CREATE TABLE p (id INT) PARTITION BY LINEAR HASH(id) PARTITIONS 4" ]
-                    |> List.iter (fun sql ->
-                        match parseOk sql with
-                        | CreateTable { Name = "p"; Columns = [ { Name = "id" } ] } -> ()
-                        | other -> failtestf "expected a HASH-partitioned table declaration, got %A" other)
+                    match parseOk "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 4" with
+                    | CreateTable { Partitioning = Some { Expression = Col "id"; Count = 4u; Linear = false } } -> ()
+                    | other -> failtestf "expected HASH metadata, got %A" other
+
+                    match parseOk "CREATE TABLE p (id INT) PARTITION BY HASH(id)" with
+                    | CreateTable { Partitioning = Some { Count = 1u } } -> ()
+                    | other -> failtestf "expected one default partition, got %A" other
+
+                    match parseOk "CREATE TABLE p (id INT) PARTITION BY LINEAR HASH(id) PARTITIONS 4" with
+                    | CreateTable { Partitioning = Some { Count = 4u; Linear = true } } -> ()
+                    | other -> failtestf "expected LINEAR HASH metadata, got %A" other
+
+                    match parseOk "SELECT id FROM p PARTITION (p0,p2) AS chosen" with
+                    | Select { From = Some(FromTable { Table = "p"; Alias = Some "chosen"; Partitions = [ "p0"; "p2" ] }) } -> ()
+                    | other -> failtestf "expected selected partitions on the table reference, got %A" other
+
+                    match parseOk "ALTER TABLE p ADD PARTITION PARTITIONS 2, COALESCE PARTITION 1" with
+                    | AlterTable("p", [ AddHashPartitions 2u; CoalesceHashPartitions 1u ]) -> ()
+                    | other -> failtestf "expected HASH partition growth actions, got %A" other
 
                     match parse "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 0" with
                     | Error _ -> ()
@@ -1539,7 +1552,7 @@ let tests =
                         (Delete
                             { Ctes = []
                               Targets = [ "t" ]
-                              From = { Database = Some "app"; Table = "t"; Alias = None }
+                              From = { Database = Some "app"; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
                               Where = None
                               OrderBy = []
@@ -1681,7 +1694,7 @@ let tests =
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
-                              From = Some(FromTable { Database = None; Table = "u"; Alias = None })
+                              From = Some(FromTable { Database = None; Table = "u"; Alias = None; Partitions = [] })
                               Joins = []
                               Where = Some(BinOp(Gt, col "x", Lit(VInt 1L)))
                               GroupBy = []
@@ -1851,7 +1864,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "t"; Alias = None }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
                               Assignments =
                                 [ { Table = None; Column = "a"; Value = Lit(VInt 1L) }
@@ -1868,7 +1881,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "t"; Alias = None }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
                               Where = None
@@ -1883,7 +1896,7 @@ let tests =
                         (Delete
                             { Ctes = []
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
                               OrderBy = []
@@ -1897,7 +1910,7 @@ let tests =
                         (Delete
                             { Ctes = []
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
                               Where = None
                               OrderBy = []
@@ -1911,7 +1924,7 @@ let tests =
                         (Delete
                             { Ctes = []
                               Targets = [ "t" ]
-                              From = { Database = None; Table = "t"; Alias = None }
+                              From = { Database = None; Table = "t"; Alias = None; Partitions = [] }
                               Joins = []
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
                               OrderBy = []
@@ -1925,7 +1938,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "t"; Alias = Some "x" }
+                              From = { Database = None; Table = "t"; Alias = Some "x"; Partitions = [] }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
@@ -1940,7 +1953,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "t"; Alias = Some "x" }
+                              From = { Database = None; Table = "t"; Alias = Some "x"; Partitions = [] }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
                               Where = None
@@ -1955,7 +1968,7 @@ let tests =
                         (Update
                             { Ctes = []
                               Ignore = false
-                              From = { Database = None; Table = "chatbots"; Alias = None }
+                              From = { Database = None; Table = "chatbots"; Alias = None; Partitions = [] }
                               Joins = []
                               Assignments =
                                 [ { Table = None; Column = "restrict_allowed_origins"; Value = Lit(VInt 1L) }

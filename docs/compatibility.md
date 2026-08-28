@@ -218,6 +218,19 @@ SIGNAL/RESIGNAL, and GET CURRENT/STACKED DIAGNOSTICS. The full MySQL surface is
 documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
+## HASH partitioning
+
+`PARTITION BY HASH` and `PARTITION BY LINEAR HASH` retain their expression and
+partition count. Tables expose MySQL-style `p0`…`pN` names through
+`information_schema.PARTITIONS`, `SHOW CREATE TABLE`, and `PARTITION (...)`
+selection. `ALTER TABLE ... ADD PARTITION PARTITIONS n` and `COALESCE
+PARTITION n` update the logical map and redistribute subsequent selections.
+
+All rows still share one immutable row store. Partition selection evaluates
+the hash expression while scanning; it does not provide MySQL's physical
+partition pruning or separate storage. `DROP` and `REORGANIZE PARTITION`
+remain unsupported.
+
 ## Check constraints
 
 `CHECK` constraints follow MySQL 8.4's row semantics: an expression that is

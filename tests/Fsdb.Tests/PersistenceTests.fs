@@ -1540,7 +1540,8 @@ let tests =
                         Charset = None
                         Collation = None
                         AutoIncrementSeed = None
-                        Comment = None }
+                        Comment = None
+                        Partitioning = None }
               File.WriteAllBytes(walPath dir, encodeWalRecord (SchemaChanged(defaultDatabase, statement)))
 
               let reloaded = load dir
@@ -2140,6 +2141,8 @@ let tests =
 
               let session = run session "CREATE DATABASE db2"
               let session = run session "CREATE TABLE p (id INT NOT NULL)"
+              let session = run session "CREATE TABLE hp (id INT) PARTITION BY HASH(id) PARTITIONS 2"
+              let session = run session "ALTER TABLE hp ADD PARTITION PARTITIONS 1"
               let session = run session "ALTER TABLE p ADD PRIMARY KEY (id)"
               let session = run session "INSERT INTO p (id) VALUES (1)"
               let session = run session "CREATE TABLE t (id INT NOT NULL, name VARCHAR(20))"
@@ -2177,6 +2180,16 @@ let tests =
               match scan reloaded "db2" "anything" with
               | Error(NoSuchDatabase _) -> ()
               | other -> failtestf "expected database 'db2' to be gone (DROP DATABASE), got %A" other
+
+              match tableSnapshot reloaded defaultDatabase "hp" with
+              | Ok { Partitioning = Some { Count = 3u; Expression = Col "id" } } -> ()
+              | other -> failtestf "expected HASH partition metadata from the WAL, got %A" other
+
+              snapshotNow dir reloaded
+
+              match tableSnapshot (load dir) defaultDatabase "hp" with
+              | Ok { Partitioning = Some { Count = 3u; Expression = Col "id" } } -> ()
+              | other -> failtestf "expected HASH partition metadata from the snapshot, got %A" other
 
           testCase "withDataDir durability and Db.onCommit CDC coexist on one store"
           <| fun _ ->

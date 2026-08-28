@@ -658,7 +658,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                             |> Option.defaultValue
                                 { Database = Some database
                                   Table = table
-                                  Alias = source.Alias }
+                                  Alias = source.Alias
+                                  Partitions = [] }
 
                         let allowedInsertTargets =
                             underlying
@@ -4350,9 +4351,44 @@ and private resolveTableRef
                     viewStack.Value <- stack
                     cteScope.Value <- savedCtes
         | None ->
-            match scanList store tableDb tableRef.Table with
-            | Error e -> Error(storageErr e)
-            | Ok(columns, rows) -> Ok(columns, rows)
+            if tableRef.Partitions.IsEmpty then
+                scanList store tableDb tableRef.Table |> Result.mapError storageErr
+            else
+                match tableSnapshot store tableDb tableRef.Table with
+                | Error e -> Error(storageErr e)
+                | Ok table ->
+                    match table.Partitioning with
+                    | None -> Error(Err(1747, "PARTITION () clause on non partitioned table"))
+                    | Some partitioning ->
+                        let partitionNames =
+                            [ 0u .. partitioning.Count - 1u ]
+                            |> List.map (fun index -> sprintf "p%d" index, index)
+                            |> Map.ofList
+
+                        let requested =
+                            tableRef.Partitions
+                            |> List.distinctBy _.ToLowerInvariant()
+                            |> List.map (fun name -> name.ToLowerInvariant())
+
+                        match requested |> List.tryFind (fun name -> not (Map.containsKey name partitionNames)) with
+                        | Some name -> Error(Err(1735, sprintf "Unknown partition '%s' in table '%s'" name table.OriginalName))
+                        | None ->
+                            let selected = requested |> List.map (fun name -> partitionNames.[name]) |> Set.ofList
+                            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+                            let columns = table.Columns
+                            let ctxFor = contextFactory store registry tableDb (columnIndexOf columns) (singleQualifier qualifier columns) None
+
+                            let rec selectRows selectedRows remaining =
+                                match remaining with
+                                | [] -> Ok(columns, List.rev selectedRows)
+                                | row :: rest ->
+                                    match evalExpr (ctxFor row) partitioning.Expression with
+                                    | Error(code, message) -> Error(Err(code, message))
+                                    | Ok value when Set.contains (hashPartitionIndex partitioning value) selected ->
+                                        selectRows (row :: selectedRows) rest
+                                    | Ok _ -> selectRows selectedRows rest
+
+                            selectRows [] (List.ofSeq table.RowsArray)
 
 /// Derives query columns from schema and expression metadata without reading
 /// rows or evaluating user expressions.
@@ -4783,7 +4819,7 @@ and private describeQueryColumns
                 | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ])))
 
     (match source with
-     | StoredRelation name -> sourceColumns Set.empty schema Map.empty (FromTable { Database = None; Table = name; Alias = None })
+     | StoredRelation name -> sourceColumns Set.empty schema Map.empty (FromTable { Database = None; Table = name; Alias = None; Partitions = [] })
      | QueryBody body -> describeBody Set.empty schema Map.empty body)
     |> Option.map (List.map _.Column)
 
@@ -6578,7 +6614,8 @@ and private tryMergeDirectView
                     let source =
                         { Database = Some direct.Database
                           Table = direct.Table
-                          Alias = None }
+                          Alias = None
+                          Partitions = [] }
 
                     match tryPhysicalTableRef store direct.Database source with
                     | Error _
@@ -11391,7 +11428,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     /// `INSERT` has no `FROM`), so it needs its own existence check.
     let checkTableExists (table: string) : Result<unit, QueryResult> =
         let db, tname = splitQualified dbName table
-        resolveTableRef store registry dbName { Database = Some db; Table = tname; Alias = None } |> Result.map ignore
+        resolveTableRef store registry dbName { Database = Some db; Table = tname; Alias = None; Partitions = [] } |> Result.map ignore
 
     let checkSelect (select: SelectStmt) : Result<unit, QueryResult> =
         let stopwatch = System.Diagnostics.Stopwatch.StartNew()
@@ -13416,7 +13453,7 @@ let rec executeAs
                 Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
                 let created =
-                    createTableSeeded snapshot destinationDb destinationName columns [] [] None None None None
+                    createTableSeeded snapshot destinationDb destinationName columns [] [] None None None None None
                     |> Result.bind (fun () ->
                         rows
                         |> List.map Array.toList
@@ -13477,7 +13514,8 @@ let rec executeAs
                               Charset = table.TableCharset
                               Collation = table.TableCollation
                               AutoIncrementSeed = None
-                              Comment = if table.TableComment = "" then None else Some table.TableComment })
+                              Comment = if table.TableComment = "" then None else Some table.TableComment
+                              Partitioning = table.Partitioning })
 
     | CreateTable table ->
         let db, name = splitQualified dbName table.Name
@@ -13519,6 +13557,7 @@ let rec executeAs
                             table.Collation
                             table.AutoIncrementSeed
                             table.Comment
+                            table.Partitioning
                         |> Result.bind (fun () -> storeCheckDefinitions snapshot registry db name table.Columns table.Checks)
                         |> Result.bind (fun () -> validateCheckForeignKeys snapshot db name table.ForeignKeys)
 

@@ -215,6 +215,7 @@ type Table =
       TableCharset: string option
       TableCollation: string option
       TableComment: string
+      Partitioning: HashPartitioning option
       /// When the table was created — surfaced as
       /// `information_schema.tables.CREATE_TIME` and retained by both WAL
       /// and snapshot recovery.
@@ -2236,6 +2237,8 @@ let private sameTableSchema (left: Table) (right: Table) =
     && left.ForeignKeys = right.ForeignKeys
     && left.TableCharset = right.TableCharset
     && left.TableCollation = right.TableCollation
+    && left.TableComment = right.TableComment
+    && left.Partitioning = right.Partitioning
     && left.CreateTime = right.CreateTime
 
 let private reindexRow
@@ -2657,6 +2660,7 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
           TableCharset = None
           TableCollation = None
           TableComment = ""
+          Partitioning = None
           CreateTime = DateTime.Now
           UniqueIndex = Map.empty
           SecondaryIndex = Map.empty
@@ -3984,6 +3988,7 @@ let createTableSeeded
     (tableCollation: string option)
     (autoIncrementSeed: int64 option)
     (tableComment: string option)
+    (partitioning: HashPartitioning option)
     : Result<unit, StorageError> =
     ensureDatabase store dbName
     let columns =
@@ -4005,18 +4010,42 @@ let createTableSeeded
                   Charset = tableCharset
                   Collation = tableCollation
                   AutoIncrementSeed = autoIncrementSeed
-                  Comment = tableComment }
+                  Comment = tableComment
+                  Partitioning = partitioning }
 
         [ SchemaChangedAt(dbName, statement, createTime) ]
 
+    let partitioningCheck =
+        match partitioning with
+        | Some value when value.Count = 0u -> Error(ExpressionError(1504, "Number of partitions = 0 is not an allowed value"))
+        | Some value when value.Count > 8192u -> Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
+        | Some { Expression = Col name }
+        | Some { Expression = QualifiedCol(_, name) } ->
+            resolveColumn columns name
+            |> Result.bind (fun index ->
+                match columns.[index].Type with
+                | TBool
+                | TTinyInt _
+                | TSmallInt _
+                | TMediumInt _
+                | TInt _
+                | TBigInt _
+                | TBit _
+                | TYear -> Ok()
+                | _ -> Error(ExpressionError(1659, sprintf "Field '%s' is of a not allowed type for this type of partitioning" name)))
+        | _ -> Ok()
+
     let result =
-        tableComment
-        |> Option.defaultValue ""
-        |> validateTableComment tableName
-        |> Result.bind (fun tableComment ->
-            columns
-            |> traverse (normalizeDefault (temporalCoercionMode store))
-            |> Result.bind (fun columns ->
+        match partitioningCheck with
+        | Error error -> Error error
+        | Ok() ->
+            tableComment
+            |> Option.defaultValue ""
+            |> validateTableComment tableName
+            |> Result.bind (fun tableComment ->
+                columns
+                |> traverse (normalizeDefault (temporalCoercionMode store))
+                |> Result.bind (fun columns ->
                 let createInCatalog catalog db =
                     let key = normalizeTableName tableName
 
@@ -4049,6 +4078,7 @@ let createTableSeeded
                                               TableCharset = tableCharset
                                               TableCollation = tableCollation
                                               TableComment = tableComment
+                                              Partitioning = partitioning
                                               CreateTime = createTime
                                               UniqueIndex = Map.empty
                                               SecondaryIndex = Map.empty
@@ -4078,7 +4108,7 @@ let createTable
     (tableCharset: string option)
     (tableCollation: string option)
     : Result<unit, StorageError> =
-    createTableSeeded store dbName tableName columns indexes foreignKeys tableCharset tableCollation None None
+    createTableSeeded store dbName tableName columns indexes foreignKeys tableCharset tableCollation None None None
 
 /// The docs promise the `fsdb` overlay is read-only, so the engine has to
 /// keep that promise too: without this, a write to a registered name lands
@@ -4782,6 +4812,18 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
     | SetTableComment comment ->
         validateTableComment table.OriginalName comment
         |> Result.map (fun valid -> { table with TableComment = valid }, None)
+    | AddHashPartitions count ->
+        match table.Partitioning with
+        | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
+        | Some partitioning when count > 8192u - partitioning.Count ->
+            Error(ExpressionError(1499, "Too many partitions (including subpartitions) were defined"))
+        | Some partitioning -> Ok({ table with Partitioning = Some { partitioning with Count = partitioning.Count + count } }, None)
+    | CoalesceHashPartitions count ->
+        match table.Partitioning with
+        | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
+        | Some partitioning when count >= partitioning.Count ->
+            Error(ExpressionError(1508, "Cannot remove all partitions, use DROP TABLE instead"))
+        | Some partitioning -> Ok({ table with Partitioning = Some { partitioning with Count = partitioning.Count - count } }, None)
     | SetEngine _ -> Ok(table, None)
     | AddCheck _
     | DropCheck _
@@ -6893,6 +6935,39 @@ let private rowsListCache = System.Runtime.CompilerServices.ConditionalWeakTable
 
 let private rowsList (table: Table) : Value[] list =
     rowsListCache.GetValue(table, fun t -> List.ofSeq t.RowsArray)
+
+let hashPartitionIndex (partitioning: HashPartitioning) (value: Value) : uint32 =
+    let magnitude =
+        match value with
+        | VNull -> Some(1UL <<< 63)
+        | VInt number when number < 0L -> Some(uint64 (-(number + 1L)) + 1UL)
+        | VInt number -> Some(uint64 number)
+        | VUInt number
+        | VBit(_, number) -> Some number
+        | VDecimal number ->
+            let magnitude = Decimal.Truncate(Decimal.Abs number)
+            Some(if magnitude > decimal UInt64.MaxValue then UInt64.MaxValue else uint64 magnitude)
+        | VDouble number when Double.IsFinite number ->
+            let magnitude = Math.Truncate(Math.Abs number)
+            Some(if magnitude > float UInt64.MaxValue then UInt64.MaxValue else uint64 magnitude)
+        | _ -> None
+
+    match magnitude with
+    | None -> partitioning.Count - 1u
+    | Some number when not partitioning.Linear -> uint32 (number % uint64 partitioning.Count)
+    | Some number ->
+        let mutable mask = 1UL
+
+        while mask < uint64 partitioning.Count do
+            mask <- mask <<< 1
+
+        let mutable partition = number &&& (mask - 1UL)
+
+        while partition >= uint64 partitioning.Count do
+            mask <- mask >>> 1
+            partition <- partition &&& (mask - 1UL)
+
+        uint32 partition
 
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads `dbName`'s own slot directly (not

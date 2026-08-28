@@ -1375,8 +1375,6 @@ let private eventsRows (catalog: Catalog) =
         |> List.ofSeq)
     |> Option.defaultValue []
 
-/// One row per user table with NULL partition fields — what real MySQL
-/// emits for every unpartitioned table.
 let private partitionsColumns =
     [ strCol "TABLE_CATALOG"
       strCol "TABLE_SCHEMA"
@@ -1406,32 +1404,57 @@ let private partitionsColumns =
 
 let private partitionsRows (catalog: Catalog) : Value[] list =
     allTables catalog
-    |> List.map (fun (dbName, t) ->
-        [| vs "def"
-           vs dbName
-           vs t.OriginalName
-           VNull
-           VNull
-           VNull
-           VNull
-           VNull
-           VNull
-           VNull
-           VNull
-           VNull
-           vi (t.RowsArray.Length)
-           vi 0
-           vi 16384
-           vi 0
-           vi 0
-           vi 0
-           VDateTime(truncateToSecond t.CreateTime)
-           VNull
-           VNull
-           VNull
-           vs ""
-           vs ""
-           VNull |])
+    |> List.collect (fun (dbName, t) ->
+        let row partitionName ordinal methodName expression rowCount =
+            [| vs "def"
+               vs dbName
+               vs t.OriginalName
+               partitionName
+               VNull
+               ordinal
+               VNull
+               methodName
+               VNull
+               expression
+               VNull
+               VNull
+               vi rowCount
+               vi 0
+               vi 16384
+               vi 0
+               vi 0
+               vi 0
+               VDateTime(truncateToSecond t.CreateTime)
+               VNull
+               VNull
+               VNull
+               vs ""
+               vs ""
+               VNull |]
+
+        match t.Partitioning with
+        | None -> [ row VNull VNull VNull VNull t.RowsArray.Length ]
+        | Some partitioning ->
+            let counts = Array.zeroCreate<int> (int partitioning.Count)
+
+            match partitioning.Expression with
+            | Col name
+            | QualifiedCol(_, name) ->
+                match resolveColumn t.Columns name with
+                | Ok index ->
+                    for stored in t.RowsArray do
+                        let partition = hashPartitionIndex partitioning stored.[index]
+                        counts.[int partition] <- counts.[int partition] + 1
+                | Error _ -> ()
+            | _ -> ()
+
+            [ for index in 0u .. partitioning.Count - 1u ->
+                  row
+                      (vs (sprintf "p%d" index))
+                      (vi (int index + 1))
+                      (vs (if partitioning.Linear then "LINEAR HASH" else "HASH"))
+                      (vs (exprToSql partitioning.Expression))
+                      counts.[int index] ])
 
 // ---------------------------------------------------------------------------
 // Privilege views — projected straight off the `mysql` system schema's rows
@@ -2095,14 +2118,25 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
     let tableComment =
         if t.TableComment = "" then "" else sprintf " COMMENT='%s'" (showCreateString t.TableComment)
 
+    let partitioning =
+        t.Partitioning
+        |> Option.map (fun value ->
+            sprintf
+                "\nPARTITION BY %sHASH (%s)\nPARTITIONS %d"
+                (if value.Linear then "LINEAR " else "")
+                (exprToSql value.Expression)
+                value.Count)
+        |> Option.defaultValue ""
+
     sprintf
-        "CREATE %sTABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s%s"
+        "CREATE %sTABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s%s%s"
         (if temporary then "TEMPORARY " else "")
         (backtick t.OriginalName)
         (String.concat ",\n  " lines)
         tableCharset
         tableCollation
         tableComment
+        partitioning
 
 /// `SHOW CREATE TABLE t`.
 let showCreateTable (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =

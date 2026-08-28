@@ -411,7 +411,8 @@ and Projection = Expr * string option
 and TableRef =
     { Database: string option
       Table: string
-      Alias: string option }
+      Alias: string option
+      Partitions: string list }
 
 /// A derived table's body: a plain `SELECT`, or `(SELECT ...) UNION
 /// (SELECT ...) ...` — MySQL allows a `UNION` directly inside `FROM (...)
@@ -634,6 +635,13 @@ type AlterAction =
     /// `ALTER TABLE t AUTO_INCREMENT = n` — moves the counter forward
     /// (never below what existing rows already require, like InnoDB).
     | SetAutoIncrement of value: int64
+    | AddHashPartitions of count: uint32
+    | CoalesceHashPartitions of count: uint32
+
+type HashPartitioning =
+    { Expression: Expr
+      Count: uint32
+      Linear: bool }
 
 type TriggerTiming =
     | Before
@@ -727,7 +735,8 @@ type CreateTableSpec =
       Collation: string option
       /// The table-option seed restored before any row is inserted.
       AutoIncrementSeed: int64 option
-      Comment: string option }
+      Comment: string option
+      Partitioning: HashPartitioning option }
 
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool

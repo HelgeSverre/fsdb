@@ -18,17 +18,20 @@ let private snapshotFileName = "snapshot.fsdb"
 let private legacySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x31uy |] // "FSN1"
 let private columnCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |] // "FSN2"
 let private tableCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x33uy |] // "FSN3"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x34uy |] // "FSN4"
+let private numericDisplaySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x34uy |] // "FSN4"
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x35uy |] // "FSN5"
 
 type private SnapshotFormat =
     { ColumnComments: bool
       TableComments: bool
-      NumericDisplays: bool }
+      NumericDisplays: bool
+      Partitions: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
       TableComments = false
-      NumericDisplays = false }
+      NumericDisplays = false
+      Partitions = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -36,8 +39,11 @@ let private columnCommentSnapshotFormat =
 let private tableCommentSnapshotFormat =
     { columnCommentSnapshotFormat with TableComments = true }
 
-let private currentSnapshotFormat =
+let private numericDisplaySnapshotFormat =
     { tableCommentSnapshotFormat with NumericDisplays = true }
+
+let private currentSnapshotFormat =
+    { numericDisplaySnapshotFormat with Partitions = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -46,6 +52,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = numericDisplaySnapshotMagic then
+        Some numericDisplaySnapshotFormat
     elif header = tableCommentSnapshotMagic then
         Some tableCommentSnapshotFormat
     elif header = columnCommentSnapshotMagic then
@@ -639,6 +647,24 @@ let private decodeColumnPosition (r: #IReader) : ColumnPosition =
     | 0x02uy -> PositionFirst
     | _ -> PositionAfter(readStr r)
 
+let private encodePartitioning (w: Writer) (partitioning: HashPartitioning option) : unit =
+    match partitioning with
+    | None -> w.WriteByte 0uy
+    | Some value ->
+        w.WriteByte 1uy
+        encodeExpr w value.Expression
+        w.WriteInt32LE(int32 value.Count)
+        writeBool w value.Linear
+
+let private decodePartitioning (r: #IReader) : HashPartitioning option =
+    if r.ReadByte() = 0uy then
+        None
+    else
+        Some
+            { Expression = decodeExpr r
+              Count = uint32 (r.ReadInt32LE())
+              Linear = readBool r }
+
 let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterAction) : unit =
     match a with
     | AddColumn(c, position) -> w.WriteByte 0x01uy; encodeColumnDef format w c; encodeColumnPosition w position
@@ -667,11 +693,15 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | SetTableComment comment when format.TableComments -> w.WriteByte 0x10uy; writeStr w comment
     | DropPrimaryKey -> w.WriteByte 0x11uy
     | SetIndexVisibility(name, visible) -> w.WriteByte 0x12uy; writeStr w name; writeBool w visible
+    | AddHashPartitions count when format.Partitions -> w.WriteByte 0x13uy; w.WriteInt32LE(int32 count)
+    | CoalesceHashPartitions count when format.Partitions -> w.WriteByte 0x14uy; w.WriteInt32LE(int32 count)
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _
     | SetEngine _
     | SetTableComment _ -> failwith "Persistence: unsupported ALTER action reached a SchemaChanged event"
+    | AddHashPartitions _
+    | CoalesceHashPartitions _ -> failwith "Persistence: partition ALTER action requires the current WAL format"
 
 let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterAction =
     match r.ReadByte() with
@@ -695,6 +725,8 @@ let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterActi
     | 0x10uy when format.TableComments -> SetTableComment(readStr r)
     | 0x11uy -> DropPrimaryKey
     | 0x12uy -> SetIndexVisibility(readStr r, readBool r)
+    | 0x13uy when format.Partitions -> AddHashPartitions(uint32 (r.ReadInt32LE()))
+    | 0x14uy when format.Partitions -> CoalesceHashPartitions(uint32 (r.ReadInt32LE()))
     | _ -> AddPrimaryKey(readStrList r |> List.map decodeIndexColumn)
 
 let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) : unit =
@@ -715,6 +747,7 @@ let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) 
         writeOptStr w table.Collation
         writeOptStr w (table.AutoIncrementSeed |> Option.map string)
         writeOptStr w table.Comment
+        if format.Partitions then encodePartitioning w table.Partitioning
     | DropTable(names, ifExists) -> w.WriteByte 0x04uy; writeStrList w names; writeBool w ifExists
     | AlterTable(table, actions) ->
         w.WriteByte 0x05uy
@@ -747,6 +780,7 @@ let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
         let tableCollation = readOptStr r
         let autoIncrementSeed = readOptStr r |> Option.map int64
         let tableComment = if format.TableComments then readOptStr r else None
+        let partitioning = if format.Partitions then decodePartitioning r else None
         CreateTable
             { Name = name
               Columns = columns
@@ -757,7 +791,8 @@ let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
               Charset = tableCharset
               Collation = tableCollation
               AutoIncrementSeed = autoIncrementSeed
-              Comment = tableComment }
+              Comment = tableComment
+              Partitioning = partitioning }
     | 0x04uy -> DropTable(readStrList r, readBool r)
     | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction format r))
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
@@ -777,6 +812,8 @@ let private KindSchemaChangedV3 = 0x09uy
 let private KindSchemaChangedAtV3 = 0x0Auy
 let private KindSchemaChangedV4 = 0x0Buy
 let private KindSchemaChangedAtV4 = 0x0Cuy
+let private KindSchemaChangedV5 = 0x0Duy
+let private KindSchemaChangedAtV5 = 0x0Euy
 
 let private encodeRowBin (w: Writer) (row: Value[]) : unit =
     w.WriteInt32LE row.Length
@@ -815,11 +852,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         for row in rows do
             encodeRowBin w row
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV4
+        w.WriteByte KindSchemaChangedV5
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV4
+        w.WriteByte KindSchemaChangedAtV5
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
@@ -874,8 +911,14 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
         SchemaChangedAt(db, decodeStatement tableCommentSnapshotFormat r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV4 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement currentSnapshotFormat r)
+        SchemaChanged(db, decodeStatement numericDisplaySnapshotFormat r)
     | k when k = KindSchemaChangedAtV4 ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement numericDisplaySnapshotFormat r, DateTime(r.ReadInt64LE()))
+    | k when k = KindSchemaChangedV5 ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement currentSnapshotFormat r)
+    | k when k = KindSchemaChangedAtV5 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement currentSnapshotFormat r, DateTime(r.ReadInt64LE()))
     | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
@@ -918,7 +961,8 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
                 table.Charset
                 table.Collation
                 table.AutoIncrementSeed
-                table.Comment)
+                table.Comment
+                table.Partitioning)
     | DropTable(names, _) -> names |> List.iter (fun n -> warn "DropTable" (dropTable store db n))
     | AlterTable(table, actions) ->
         // Replay non-strict, whatever the store's current mode: MODIFY/
@@ -1014,6 +1058,7 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
     writeOptStr w t.TableCharset
     writeOptStr w t.TableCollation
     writeStr w t.TableComment
+    if format.Partitions then encodePartitioning w t.Partitioning
     w.WriteInt64LE t.CreateTime.Ticks
     w.WriteInt64LE t.NextAutoId
     w.WriteInt32LE t.RowsArray.Length
@@ -1076,6 +1121,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let tableCharset = readOptStr r
     let tableCollation = readOptStr r
     let tableComment = if format.TableComments then readStr r else ""
+    let partitioning = if format.Partitions then decodePartitioning r else None
     let createTime = DateTime(r.ReadInt64LE())
     let nextAutoId = r.ReadInt64LE()
     let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
@@ -1088,6 +1134,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
           TableCharset = tableCharset
           TableCollation = tableCollation
           TableComment = tableComment
+          Partitioning = partitioning
           CreateTime = createTime
           RowsArray = RowStore.ofSeq rows
           NextAutoId = nextAutoId
