@@ -38,11 +38,17 @@ let private sameIdentity schema name actualSchema actualName =
 let private readCompleteRow requiredValues read (row: Value[]) =
     if row.Length < requiredValues then None else Some(read row)
 
-module Trigger =
+module StoredExecutionContext =
     let legacySqlMode = "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
     let legacyCharacterSetClient = "utf8mb4"
     let legacyCollationConnection = "utf8mb4_0900_ai_ci"
     let legacyDatabaseCollation = "utf8mb4_0900_ai_ci"
+
+module Trigger =
+    let legacySqlMode = StoredExecutionContext.legacySqlMode
+    let legacyCharacterSetClient = StoredExecutionContext.legacyCharacterSetClient
+    let legacyCollationConnection = StoredExecutionContext.legacyCollationConnection
+    let legacyDatabaseCollation = StoredExecutionContext.legacyDatabaseCollation
 
     type Entry =
         { Name: string
@@ -116,7 +122,11 @@ module Routine =
           Created: DateTime option
           Definer: string
           Parameters: string
-          SecurityType: string }
+          SecurityType: string
+          SqlMode: string
+          CharacterSetClient: string
+          CollationConnection: string
+          DatabaseCollation: string }
 
     let tryRead (row: Value[]) : Entry option =
         readCompleteRow 5
@@ -127,7 +137,11 @@ module Routine =
                   Created = dateTimeAt 3 row
                   Definer = textAt 4 row
                   Parameters = textAt 5 row
-                  SecurityType = textOr "DEFINER" 6 row })
+                  SecurityType = textOr "DEFINER" 6 row
+                  SqlMode = textOr StoredExecutionContext.legacySqlMode 7 row
+                  CharacterSetClient = textOr StoredExecutionContext.legacyCharacterSetClient 8 row
+                  CollationConnection = textOr StoredExecutionContext.legacyCollationConnection 9 row
+                  DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 10 row })
             row
 
     let matches schema name (entry: Entry) =

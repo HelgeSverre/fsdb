@@ -500,6 +500,9 @@ let setConnectionCollation (store: Store) (collation: Collation.Collation) : uni
 
 let executionSettings (store: Store) : ExecutionSettings = store.ExecutionSettings
 
+let setExecutionSettings (store: Store) (settings: ExecutionSettings) : unit =
+    store.ExecutionSettings <- settings
+
 let withExecutionSettings (store: Store) (settings: ExecutionSettings) (body: unit -> 'result) : 'result =
     let previous = store.ExecutionSettings
     store.ExecutionSettings <- settings
@@ -2460,10 +2463,10 @@ let mysqlTriggersColumns: ColumnDef list =
       // definer's reach.
       sysCol "definer" (TChar 93) false (Some(VString ""))
       sysCol "action_order" (TInt false) false (Some(VInt 1L))
-      sysCol "sql_mode" TText false (Some(VString SystemCatalog.Trigger.legacySqlMode))
-      sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCharacterSetClient))
-      sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCollationConnection))
-      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyDatabaseCollation)) ]
+      sysCol "sql_mode" TText false (Some(VString SystemCatalog.StoredExecutionContext.legacySqlMode))
+      sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCharacterSetClient))
+      sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCollationConnection))
+      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyDatabaseCollation)) ]
 
 /// `mysql.views` — fsdb's row-backed view catalog. Definitions are stored as
 /// SQL text and resolved through the ordinary SELECT executor, so the rows
@@ -2486,7 +2489,11 @@ let mysqlRoutinesColumns: ColumnDef list =
       sysCol "created" (TDateTime 2) false None
       sysCol "definer" (TChar 93) false (Some(VString ""))
       sysCol "parameter_definition" TText false (Some(VString ""))
-      sysCol "security_type" (TChar 7) false (Some(VString "DEFINER")) ]
+      sysCol "security_type" (TChar 7) false (Some(VString "DEFINER"))
+      sysCol "sql_mode" TText false (Some(VString SystemCatalog.Trigger.legacySqlMode))
+      sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCharacterSetClient))
+      sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyCollationConnection))
+      sysCol "database_collation" (TChar 64) false (Some(VString SystemCatalog.Trigger.legacyDatabaseCollation)) ]
 
 let mysqlEventsColumns: ColumnDef list =
     [ keyCol "event_schema" 64

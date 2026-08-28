@@ -1145,9 +1145,9 @@ let private routinesRows (catalog: Catalog) =
 
             [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "PROCEDURE"; vs ""; VNull; VNull
                VNull; VNull; VNull; VNull; VNull; VNull; vs "SQL"; vs routine.Definition; VNull; vs "SQL"; vs "SQL"
-               vs "NO"; vs "CONTAINS SQL"; VNull; vs routine.SecurityType; created; created
-               vs "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
-               vs ""; vs routine.Definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+               vs "NO"; vs "CONTAINS SQL"; VNull; vs routine.SecurityType; created; created; vs routine.SqlMode
+               vs ""; vs routine.Definer; vs routine.CharacterSetClient; vs routine.CollationConnection
+               vs routine.DatabaseCollation |])
         |> List.ofSeq)
     |> Option.defaultValue []
 

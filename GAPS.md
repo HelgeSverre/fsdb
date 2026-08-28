@@ -66,7 +66,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Statement family | Impact | Class |
 |---|---|---|
-| Procedure declarations retain one simple `IN` parameter and `SQL SECURITY`; zero-parameter procedures execute a direct statement or a single statement wrapped in `BEGIN…END`. Parameterized execution, functions, definer-context execution, multi-statement bodies, `DECLARE`, cursors, handlers, and `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
+| Procedure declarations retain one simple `IN` parameter and `SQL SECURITY`; zero-parameter procedures execute a direct statement or a single statement wrapped in `BEGIN…END`. Parameterized execution, functions, multi-statement bodies, `DECLARE`, cursors, handlers, and `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
 | One-time and recurring `CREATE/DROP EVENT` declarations and metadata are supported; ALTER, status changes, definer execution, and the scheduler thread remain absent | low | divergence/refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
@@ -316,7 +316,9 @@ trigger is created.
 Working: procedure declarations retain an optional simple `IN` parameter,
 `SQL SECURITY`, and one parsed statement body, optionally wrapped in
 `BEGIN…END`. Zero-parameter procedures support CREATE/DROP/CALL, SHOW CREATE
-PROCEDURE, SHOW PROCEDURE STATUS, and persisted ROUTINES metadata. One-time
+PROCEDURE, SHOW PROCEDURE STATUS, and persisted ROUTINES metadata. DEFINER
+and INVOKER bodies use the corresponding account, routine schema, and captured
+SQL mode, client charset, and connection collation. One-time
 and recurring event declarations support CREATE/DROP, SHOW
 CREATE EVENT, SHOW EVENTS, and persisted EVENTS metadata. CREATE ROUTINE,
 ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
@@ -324,7 +326,6 @@ ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Routine language | parameters, functions, compound bodies, local variables, handlers, cursors, control flow, dynamic SQL | one simple `IN` parameter is retained for introspection, but only zero-parameter procedures execute; bodies contain one statement directly or inside `BEGIN…END` | medium | refusal |
-| Routine execution context | SQL SECURITY DEFINER/INVOKER and stored sql_mode/charset | procedure body executes with the caller's session context | medium | divergence |
 | Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and schedule metadata persist, but no event is scheduled or executed | medium | refusal |
 | Event alteration | ALTER EVENT schedule/status/body/rename | absent | low | refusal |
 

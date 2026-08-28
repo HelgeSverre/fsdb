@@ -108,6 +108,11 @@ let tests =
                     match SystemCatalog.Routine.tryRead routineRow, SystemCatalog.Event.tryRead eventRow with
                     | Some routine, Some event ->
                         Expect.equal routine.Definition "SELECT 1" "routine definition"
+                        Expect.equal routine.SqlMode SystemCatalog.StoredExecutionContext.legacySqlMode "legacy routine sql_mode"
+                        Expect.equal
+                            routine.CollationConnection
+                            SystemCatalog.StoredExecutionContext.legacyCollationConnection
+                            "legacy routine collation"
                         Expect.equal event.Schedule "EVERY 1 DAY" "event schedule"
                         Expect.isTrue (SystemCatalog.Routine.matches "APP" "REFRESH" routine) "routine identity"
                         Expect.isTrue (SystemCatalog.Event.rowMatches "APP" "NIGHTLY" eventRow) "event row identity"

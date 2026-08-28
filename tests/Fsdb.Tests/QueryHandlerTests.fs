@@ -1652,6 +1652,158 @@ let tests =
               | ResultSet([ "id" ], [ [ Some "42" ] ]) -> ()
               | other -> failtestf "expected unparenthesized procedure result, got %A" other
 
+          testCase "procedure SQL SECURITY selects the execution account"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+
+              let apply session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let root = apply root "CREATE TABLE secret (n INT)"
+              let root = apply root "INSERT INTO secret VALUES (9)"
+              let root = apply root "CREATE USER 'owner'@'%'"
+              let root = apply root "CREATE USER 'caller'@'%'"
+              let root = apply root "CREATE USER 'maker'@'%'"
+              let root = apply root "GRANT SELECT, EXECUTE ON fsdb.* TO 'owner'@'%'"
+              let root = apply root "GRANT EXECUTE ON fsdb.* TO 'caller'@'%'"
+              let root = apply root "GRANT CREATE ROUTINE ON fsdb.* TO 'maker'@'%'"
+
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER='owner'@'%' PROCEDURE definer_probe() SQL SECURITY DEFINER SELECT CURRENT_USER(), USER(), DATABASE(), (SELECT n FROM secret)"
+
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER='owner'@'%' PROCEDURE invoker_probe() SQL SECURITY INVOKER SELECT CURRENT_USER(), USER(), DATABASE()"
+
+              let root =
+                  apply
+                      root
+                      "CREATE DEFINER='owner'@'%' PROCEDURE invoker_secret() SQL SECURITY INVOKER SELECT n FROM secret"
+
+              let caller =
+                  { create 2 store with
+                      User = "caller"
+                      AccountHost = "%"
+                      LoginUser = "caller"
+                      ClientHost = "localhost" }
+
+              match handle caller "CALL definer_probe()" |> snd with
+              | ResultSet(_, [ [ Some "owner@%"; Some "caller@localhost"; Some "fsdb"; Some "9" ] ]) -> ()
+              | other -> failtestf "expected definer execution identity and privileges, got %A" other
+
+              match handle root "SHOW CREATE PROCEDURE definer_probe" |> snd with
+              | ResultSet(_, [ [ _; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "DEFINER=`owner`@`%`" "explicit definer retained"
+              | other -> failtestf "expected explicit-definer DDL, got %A" other
+
+              match handle caller "CALL invoker_probe()" |> snd with
+              | ResultSet(_, [ [ Some "caller@%"; Some "caller@localhost"; Some "fsdb" ] ]) -> ()
+              | other -> failtestf "expected invoker execution identity, got %A" other
+
+              match handle caller "CALL invoker_secret()" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected the invoker's missing SELECT privilege, got %A" other
+
+              match handle caller "CALL invoker_secret()" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected invoker privilege enforcement, got %A" other
+
+              let root = apply root "CREATE DEFINER='missing'@'%' PROCEDURE missing_definer() SELECT 1"
+
+              match handle caller "CALL missing_definer()" |> snd with
+              | Err(1449, _) -> ()
+              | other -> failtestf "expected missing-definer failure, got %A" other
+
+              match handle root "CREATE DEFINER='owner'@'%' PROCEDURE missing_access() SELECT 1" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected privileged explicit definer creation, got %A" other
+
+              let maker =
+                  { create 3 store with
+                      User = "maker"
+                      AccountHost = "%"
+                      LoginUser = "maker"
+                      ClientHost = "localhost" }
+
+              match handle maker "CREATE DEFINER='owner'@'%' PROCEDURE stolen() SELECT 1" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected an explicit-definer privilege error, got %A" other
+
+          testCase "procedures execute with their captured SQL and charset context"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let apply session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let session = apply session "CREATE TABLE procedure_log (n INT)"
+              let session = apply session "CREATE TABLE procedure_source (n INT)"
+              let session = apply session "INSERT INTO procedure_source VALUES (7)"
+              let session = apply session "SET NAMES latin1 COLLATE latin1_bin"
+              let session = apply session "SET SESSION sql_mode=''"
+
+              let session =
+                  apply
+                      session
+                      "CREATE PROCEDURE context_probe() SELECT @@session.sql_mode, @@character_set_client, @@character_set_connection, @@character_set_results, @@collation_connection, DATABASE(), 'A' = 'a'"
+
+              let session = apply session "CREATE PROCEDURE lax_insert() INSERT INTO procedure_log VALUES ('not an integer')"
+
+              match
+                  handle
+                      session
+                      "SELECT SQL_MODE, SECURITY_TYPE, CHARACTER_SET_CLIENT, COLLATION_CONNECTION, DATABASE_COLLATION FROM information_schema.ROUTINES WHERE ROUTINE_NAME = 'context_probe'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some ""; Some "DEFINER"; Some "latin1"; Some "latin1_bin"; Some "utf8mb4_0900_ai_ci" ] ]) -> ()
+              | other -> failtestf "expected captured routine metadata, got %A" other
+
+              let session = apply session "SET SESSION sql_mode='ANSI_QUOTES'"
+              let session = apply session "CREATE PROCEDURE quoted_probe() SELECT \"n\" FROM procedure_source"
+              let session = apply session "SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+              let session = apply session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+
+              match handle session "CALL context_probe()" with
+              | next, ResultSet(_, [ [ Some ""; Some "latin1"; Some "latin1"; Some "utf8mb4"; Some "latin1_bin"; Some "fsdb"; Some "0" ] ]) ->
+                  match handle next "SELECT @@session.sql_mode, @@character_set_client, @@collation_connection" |> snd with
+                  | ResultSet(_, [ [ Some "STRICT_TRANS_TABLES"; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci" ] ]) -> ()
+                  | other -> failtestf "expected caller context restoration, got %A" other
+              | _, other -> failtestf "expected captured routine context, got %A" other
+
+              let session, result = handle session "CALL lax_insert()"
+              Expect.equal result (Affected 1UL) "CALL lax_insert()"
+              Expect.equal (TestSupport.Sql.rows store "SELECT n FROM procedure_log") [ [ Some "0" ] ] "captured lax coercion"
+
+              match handle session "CALL quoted_probe()" |> snd with
+              | ResultSet([ "n" ], [ [ Some "7" ] ]) -> ()
+              | other -> failtestf "expected ANSI_QUOTES parsing from routine creation, got %A" other
+
+              let session = apply session "CREATE PROCEDURE strict_insert() INSERT INTO procedure_log VALUES ('not an integer')"
+              let session = apply session "SET SESSION sql_mode=''"
+
+              match handle session "CALL strict_insert()" |> snd with
+              | Err(1366, _) -> ()
+              | other -> failtestf "expected captured strict coercion, got %A" other
+
+              Expect.equal (TestSupport.Sql.rows store "SELECT n FROM procedure_log") [ [ Some "0" ] ] "strict failure is atomic"
+
+              let session = apply session "CREATE PROCEDURE set_mode() SET SESSION sql_mode=''"
+              let session = apply session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+              let session = apply session "CALL set_mode()"
+
+              match handle session "SELECT @@session.sql_mode" |> snd with
+              | ResultSet(_, [ [ Some "" ] ]) -> ()
+              | other -> failtestf "expected an explicit routine SET to update the caller session, got %A" other
+
           testCase "unterminated procedure blocks are syntax errors"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

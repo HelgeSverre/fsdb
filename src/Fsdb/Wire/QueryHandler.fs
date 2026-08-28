@@ -945,6 +945,26 @@ type private SetAction =
     | SetTransactionIsolationAction of scope: TransactionIsolationScope * isolation: TransactionIsolation
     | SetUserVarAction of name: string * value: Value
 
+let private routineVariableChanges = System.Threading.AsyncLocal<Set<string> option>()
+
+let private markRoutineVariables names =
+    match routineVariableChanges.Value with
+    | Some changed -> routineVariableChanges.Value <- Some(Set.union changed (Set.ofList names))
+    | None -> ()
+
+let private captureRoutineVariableChanges body =
+    let parent = routineVariableChanges.Value
+    routineVariableChanges.Value <- Some Set.empty
+
+    try
+        let result = body ()
+        let changed = routineVariableChanges.Value |> Option.defaultValue Set.empty
+        routineVariableChanges.Value <- parent |> Option.map (Set.union changed)
+        result, changed
+    with _ ->
+        routineVariableChanges.Value <- parent
+        reraise ()
+
 /// System variables real MySQL accepts an explicit `NULL` for (rather than
 /// the 1231 "can't be set to the value of NULL" every other variable
 /// raises) — connector handshakes reset the results charset exactly this
@@ -1062,6 +1082,9 @@ let private parseSetFragment
 let private applySetAction (session: Session) (action: SetAction) : Session =
     match action with
     | SetNamesAction(charset, collation) ->
+        markRoutineVariables
+            [ "character_set_client"; "character_set_connection"; "character_set_results"; "collation_connection" ]
+
         // `SET NAMES` uses the charset default unless COLLATE is explicit.
         let connectionCollation =
             match collation |> Option.bind Collation.tryFind with
@@ -1103,6 +1126,8 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
 
         session
     | SetVarAction(name, value, false) ->
+        markRoutineVariables [ name ]
+
         // Neither `foreign_key_checks` nor `sql_mode` is in
         // `nullableSystemVars`, so `value` is always `Some` here — but the
         // type is shared with every other system variable, so this still
@@ -2263,6 +2288,9 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         Affected 0UL
     | SetRoleNone -> session, Affected 0UL
     | SetCharacterSet charset ->
+        markRoutineVariables
+            [ "character_set_client"; "character_set_connection"; "character_set_results"; "collation_connection" ]
+
         let charset = charset.ToLowerInvariant()
 
         let collation =
@@ -2694,7 +2722,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                 session,
                 ResultSet(
                     [ "Procedure"; "sql_mode"; "Create Procedure"; "character_set_client"; "collation_connection"; "Database Collation" ],
-                    [ [ Some name; Some ""; Some ddl; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "utf8mb4_0900_ai_ci" ] ]
+                    [ [ Some name; Some routine.SqlMode; Some ddl; Some routine.CharacterSetClient
+                        Some routine.CollationConnection; Some routine.DatabaseCollation ] ]
                 )
         else
             session, Err(1305, sprintf "%s %s does not exist" kind name)
@@ -2978,13 +3007,13 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
         Ok None
 
 type private TextRoutineCommand =
-    | CreateProcedure of name: string * parameters: string * securityType: string * body: string
+    | CreateProcedure of name: string * parameters: string * securityType: string * body: string * definer: string option
     | CallProcedure of name: string * arguments: string
     | DropProcedure of name: string * ifExists: bool
 
 let private createProcedureRe =
     Regex(
-        @"^\s*CREATE\s+PROCEDURE\s+(?<name>\S+)\s*\((?<parameters>(?:[^()]|\([^()]*\))*)\)\s+(?:SQL\s+SECURITY\s+(?<security>INVOKER|DEFINER)\s+)?(?<body>.+)$",
+        """^\s*CREATE\s+(?:DEFINER\s*=\s*(?<definer>(?:CURRENT_USER(?:\(\))?|(?:'[^']*'|`[^`]*`|[A-Za-z0-9_$.-]+)(?:\s*@\s*(?:'[^']*'|`[^`]*`|[A-Za-z0-9_$.:/%-]+))?))\s+)?PROCEDURE\s+(?<name>\S+)\s*\((?<parameters>(?:[^()]|\([^()]*\))*)\)\s+(?:SQL\s+SECURITY\s+(?<security>INVOKER|DEFINER)\s+)?(?<body>.+)$""",
         RegexOptions.IgnoreCase ||| RegexOptions.Singleline
     )
 
@@ -3011,7 +3040,8 @@ let private tryTextRoutineCommand (sql: string) =
                 create.Groups.["name"].Value,
                 create.Groups.["parameters"].Value.Trim(),
                 security,
-                create.Groups.["body"].Value
+                create.Groups.["body"].Value,
+                if create.Groups.["definer"].Success then Some(create.Groups.["definer"].Value.Trim()) else None
             )
         )
     elif call.Success then
@@ -3039,6 +3069,50 @@ let private routineStatement (body: string) =
             None
     else
         Some trimmed
+
+let private routineExecutionSettings (routine: SystemCatalog.Routine.Entry) : ExecutionSettings =
+    { SqlModeText = routine.SqlMode
+      SqlMode = SqlMode.settingsFor routine.SqlMode
+      ConnectionCharset = routine.CharacterSetClient
+      ConnectionCollation =
+        routine.CollationConnection
+        |> Collation.tryFind
+        |> Option.defaultValue Collation.defaultCollation }
+
+let private routineVariables (routine: SystemCatalog.Routine.Entry) variables =
+    variables
+    |> Map.add "sql_mode" (Some routine.SqlMode)
+    |> Map.add "character_set_client" (Some routine.CharacterSetClient)
+    |> Map.add "character_set_connection" (Some routine.CharacterSetClient)
+    |> Map.add "collation_connection" (Some routine.CollationConnection)
+
+let private restoreRoutineVariables original changed variables =
+    [ "sql_mode"; "character_set_client"; "character_set_connection"; "collation_connection" ]
+    |> List.fold
+        (fun restored name ->
+            if Set.contains name changed then
+                restored
+            else
+                match Map.tryFind name original with
+                | Some value -> Map.add name value restored
+                | None -> Map.remove name restored)
+        variables
+
+let private mergeRoutineExecutionSettings original changed result =
+    let changedAny names = names |> List.exists (fun name -> Set.contains name changed)
+
+    { SqlModeText = if changedAny [ "sql_mode" ] then result.SqlModeText else original.SqlModeText
+      SqlMode = if changedAny [ "sql_mode" ] then result.SqlMode else original.SqlMode
+      ConnectionCharset =
+        if changedAny [ "character_set_client"; "character_set_connection" ] then
+            result.ConnectionCharset
+        else
+            original.ConnectionCharset
+      ConnectionCollation =
+        if changedAny [ "collation_connection" ] then
+            result.ConnectionCollation
+        else
+            original.ConnectionCollation }
 
 type private TextEventCommand =
     | CreateEvent of name: string * schedule: string * body: string
@@ -3150,11 +3224,24 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             Auth.checkForAccount session.Store (accountOf session) [ privilege, Auth.OnDb database ]
 
         match command with
-        | CreateProcedure(qualifiedName, parameters, securityType, body) ->
+        | CreateProcedure(qualifiedName, parameters, securityType, body, requestedDefiner) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+            let definer =
+                match requestedDefiner with
+                | None -> accountOf session
+                | Some value when Regex.IsMatch(value, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) -> accountOf session
+                | Some value -> accountRefOf value
+
+            let mayChooseDefiner =
+                Auth.sameAccount definer (accountOf session)
+                || Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
 
             match authorize "CREATE ROUTINE" database with
             | Error(code, message) -> session, Err(code, message)
+            | Ok() when not mayChooseDefiner ->
+                session,
+                Err(1227, "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation")
             | Ok() when routineEntries () |> List.exists (SystemCatalog.Routine.matches database name) ->
                 session, Err(1304, sprintf "PROCEDURE %s already exists" name)
             | Ok() when parameters <> "" && not (routineParameterRe.IsMatch parameters) -> session, syntaxError parameters
@@ -3166,26 +3253,37 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
                     | Some _ when parameters <> "" -> false
                     | Some sql ->
                         let upper = sql.ToUpperInvariant()
-                        Parser.parse sql |> Result.isError && tryProbe sql upper |> Option.isNone
+                        let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
+                        Parser.parseWithOptions options sql |> Result.isError && tryProbe sql upper |> Option.isNone
 
                 if invalidBody then
                     session, syntaxError body
                 else
-                    let definer = session.User + "@" + session.AccountHost
+                    if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
+                        Diagnostics.note
+                            1449
+                            (sprintf "The user specified as a definer ('%s'@'%s') does not exist" definer.Name definer.Host)
 
                     match
                         Storage.insertRows
                             session.Store
                             "mysql"
                             "routines"
-                            None
+                            (Some
+                                [ "routine_schema"; "routine_name"; "routine_definition"; "created"; "definer"
+                                  "parameter_definition"; "security_type"; "sql_mode"; "character_set_client"
+                                  "collation_connection"; "database_collation" ])
                             [ [ VString database
                                 VString name
                                 VString body
                                 VDateTime DateTime.Now
-                                VString definer
+                                VString(Auth.formatAccount definer)
                                 VString parameters
-                                VString securityType ] ]
+                                VString securityType
+                                VString session.Store.ExecutionSettings.SqlModeText
+                                VString session.Store.ExecutionSettings.ConnectionCharset
+                                VString session.Store.ExecutionSettings.ConnectionCollation.Name
+                                VString Collation.defaultCollation.Name ] ]
                     with
                     | Ok _ -> session, Affected 0UL
                     | Error error ->
@@ -3204,9 +3302,47 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
                 | Ok() when arguments <> "" ->
                     session, Err(1318, sprintf "Incorrect number of arguments for PROCEDURE %s; expected 0" name)
                 | Ok() ->
-                    match routineStatement routine.Definition with
-                    | Some statement -> dispatch session statement
-                    | None -> session, Err(1235, "Compound stored procedure bodies are not supported")
+                    let executionAccount =
+                        if routine.SecurityType.Equals("INVOKER", StringComparison.OrdinalIgnoreCase) then
+                            Ok(accountOf session)
+                        else
+                            match Auth.tryParseAccount routine.Definer with
+                            | Some account when Auth.tryUserRowForAccount session.Store account |> Option.isSome -> Ok account
+                            | _ -> Error(Err(1449, sprintf "The user specified as a definer ('%s') does not exist" routine.Definer))
+
+                    match executionAccount, routineStatement routine.Definition with
+                    | Error error, _ -> session, error
+                    | _, None -> session, Err(1235, "Compound stored procedure bodies are not supported")
+                    | Ok account, Some statement ->
+                        let executionStore = Session.currentStore session
+                        let originalSettings = Storage.executionSettings executionStore
+                        let capturedSettings = routineExecutionSettings routine
+                        let executionSession =
+                            { session with
+                                User = account.Name
+                                AccountHost = account.Host
+                                Database = Some routine.Schema
+                                Variables = routineVariables routine session.Variables }
+
+                        let mutable resultingSettings = capturedSettings
+
+                        let (executed, result), changed =
+                            Storage.withExecutionSettings executionStore capturedSettings (fun () ->
+                                let outcome, changed =
+                                    captureRoutineVariableChanges (fun () -> dispatch executionSession statement)
+
+                                resultingSettings <- Storage.executionSettings executionStore
+                                outcome, changed)
+
+                        mergeRoutineExecutionSettings originalSettings changed resultingSettings
+                        |> Storage.setExecutionSettings executionStore
+
+                        { executed with
+                            User = session.User
+                            AccountHost = session.AccountHost
+                            Database = session.Database
+                            Variables = restoreRoutineVariables session.Variables changed executed.Variables },
+                        result
         | DropProcedure(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)

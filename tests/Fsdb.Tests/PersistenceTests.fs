@@ -949,6 +949,11 @@ let tests =
               attach dir store
               let session = Fsdb.Session.create 1 store
 
+              let session, result = handle session "SET NAMES latin1 COLLATE latin1_bin"
+              Expect.equal result (Affected 0UL) "set routine charset"
+              let session, result = handle session "SET SESSION sql_mode=''"
+              Expect.equal result (Affected 0UL) "set routine sql_mode"
+
               match handle session "CREATE PROCEDURE topics(IN num INT) SQL SECURITY INVOKER BEGIN SELECT 10; END" |> snd with
               | Affected 0UL -> ()
               | other -> failtestf "expected procedure creation, got %A" other
@@ -957,7 +962,7 @@ let tests =
               let recovered = Fsdb.Session.create 2 reloaded
 
               match handle recovered "SHOW CREATE PROCEDURE topics" |> snd with
-              | ResultSet(_, [ [ Some "topics"; _; Some ddl; _; _; _ ] ]) ->
+              | ResultSet(_, [ [ Some "topics"; Some ""; Some ddl; Some "latin1"; Some "latin1_bin"; Some "utf8mb4_0900_ai_ci" ] ]) ->
                   Expect.stringContains ddl "PROCEDURE `topics`(IN num INT) SQL SECURITY INVOKER" "signature recovered"
               | other -> failtestf "expected recovered procedure metadata, got %A" other
 
