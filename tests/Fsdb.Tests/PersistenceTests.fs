@@ -1774,7 +1774,9 @@ let tests =
                     "CREATE UNIQUE INDEX ix_lower_c ON new_name ((LOWER(c)))"
                     "CREATE INDEX ix_expression ON new_name ((CASE WHEN c = 'x' THEN lower(c) END))"
                     "CREATE INDEX ix_gone ON new_name (id)"
-                    "DROP INDEX ix_gone ON new_name" ] // 0x08
+                    "DROP INDEX ix_gone ON new_name" // 0x08
+                    "CREATE TABLE lookup_names (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_lower_name ((LOWER(name))))"
+                    "INSERT INTO lookup_names VALUES (1, 'Reference'), (2, 'REFERENCE')" ]
                   |> List.fold run session
 
               ignore session
@@ -1804,6 +1806,10 @@ let tests =
               match handle (Fsdb.Session.create 2 reloaded) "INSERT INTO new_name VALUES (2, 'X')" |> snd with
               | Err(1062, _) -> ()
               | other -> failtestf "expected the recovered functional index to reject a duplicate, got %A" other
+
+              match handle (Fsdb.Session.create 3 reloaded) "SELECT id FROM lookup_names WHERE LOWER(name) = 'reference' ORDER BY id" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "the recovered functional bucket returns both rows"
+              | other -> failtestf "expected recovered functional lookup rows, got %A" other
 
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->

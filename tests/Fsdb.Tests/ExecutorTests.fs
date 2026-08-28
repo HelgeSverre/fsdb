@@ -4798,6 +4798,76 @@ let tests =
                             "ORDER BY and LIMIT use complete values after the mutation"
                     | other -> failtestf "expected ordered rows, got %A" other
 
+                testCase "LOWER expression indexes narrow matching predicates only"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, INDEX ix_lower ((LOWER(name))))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin)" |> ignore
+
+                    let values =
+                        [ for id in 1 .. 500 ->
+                              let name =
+                                  match id with
+                                  | 499 -> "Reference"
+                                  | 500 -> "REFERENCE"
+                                  | _ -> sprintf "value-%03d" id
+
+                              sprintf "(%d, '%s')" id name ]
+                        |> String.concat ", "
+
+                    runDefault store (sprintf "INSERT INTO indexed VALUES %s" values) |> ignore
+                    runDefault store (sprintf "INSERT INTO scanned VALUES %s" values) |> ignore
+
+                    let query table expression =
+                        run store registry (sprintf "SELECT id FROM %s WHERE %s AND TOUCH(id) = id ORDER BY id" table expression)
+
+                    match query "indexed" "LOWER(name) = 'reference'", query "scanned" "LOWER(name) = 'reference'" with
+                    | ResultSet(_, indexedRows), ResultSet(_, scannedRows) ->
+                        Expect.equal indexedRows scannedRows "functional candidates agree with a scan"
+                        Expect.equal indexedRows [ [ Some "499" ]; [ Some "500" ] ] "the transformed key preserves both spellings"
+                    | indexed, scanned -> failtestf "expected resultsets, got %A and %A" indexed scanned
+
+                    Expect.isLessThan calls 510 "the functional bucket limits residual evaluation"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE LOWER(name) = 'reference'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "ref"; Some "ix_lower"; Some "ix_lower"; Some "123"; Some "const"; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a functional ref plan, got %A" other
+
+                    calls <- 0
+                    Expect.equal (query "indexed" "name = 'reference'") (ResultSet([ "id" ], [])) "the original binary column remains case-sensitive"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE name = 'reference'" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "ALL") "a raw-column predicate keeps its scan plan"
+                        Expect.equal row.[6] None "the functional key is not reported for the raw column"
+                    | other -> failtestf "expected a scan plan, got %A" other
+
+                    calls <- 0
+
+                    match run store registry "SELECT id FROM indexed WHERE TOUCH(id) = id AND LOWER(name) = 'REFERENCE'" with
+                    | ResultSet(_, rows) -> Expect.equal rows [] "the expression result compares to the literal without transforming it again"
+                    | other -> failtestf "expected an empty transformed lookup, got %A" other
+
+                    Expect.isLessThanOrEqual calls 1 "an impossible transformed key has no row candidates"
+
+                    Expect.equal
+                        (runDefault store "UPDATE indexed SET name = 'Different' WHERE LOWER(name) = 'reference' AND id = 499")
+                        (Affected 1UL)
+                        "functional candidates drive UPDATE"
+
+                    match runDefault store "SELECT id FROM indexed WHERE LOWER(name) = 'reference' ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "500" ] ] "updates move rows between transformed buckets"
+                    | other -> failtestf "expected updated functional rows, got %A" other
+
                 testCase "composite prefix probes survive mutations"
                 <| fun _ ->
                     let store = newStore ()

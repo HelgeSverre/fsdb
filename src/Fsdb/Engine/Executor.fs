@@ -88,6 +88,11 @@ type private EqualityAccessPlan =
       Unique: bool
       Rows: (RowId * Value[]) list }
 
+type private PointEquality =
+    { Column: string
+      Transform: IndexTransform option
+      Value: Value }
+
 type private IndexOrderPlan =
     { KeyName: string
       ColumnIndices: int list
@@ -4737,7 +4742,7 @@ and private tryInformationSchemaNarrow
         match
             pointLookupEqualities tableRef where
             |> List.choose (function
-                | n, VString v -> Some(n, v)
+                | { Column = name; Transform = None; Value = VString value } -> Some(name, value)
                 | _ -> None)
         with
         | [] -> None
@@ -6942,50 +6947,41 @@ and private runUnmergedSelectStmt
             | Error e -> e, [], []
             | Ok(columns, rows) -> runResolved columns rows select
 
-/// A WHERE expression's top-level `AND` chain flattened into its conjuncts
-/// — `a AND b AND c` (any nesting/associativity) yields `[a; b; c]`; any
-/// other shape (an `OR`, a single comparison, ...) is its own one-element
-/// list. `tryPointLookup` uses this to find an indexed equality anywhere
-/// among several ANDed conditions, not just when it's the *whole* WHERE.
+/// Flattens a top-level `AND` chain into conjuncts.
 and private flattenAnd (expr: Expr) : Expr list =
     match expr with
     | BinOp(And, l, r) -> flattenAnd l @ flattenAnd r
     | e -> [ e ]
 
-/// `SELECT`'s single-table, no-`JOIN` `FROM`, narrowed to an equality
-/// index's candidates via `Storage.tryUniqueLookup` or
-/// `Storage.trySecondaryLookup`, when `whereExpr` ANDs
-/// in an equality against an indexed column with a directly-literal value.
-/// Only ever narrows (a superset of what the full WHERE could match) —
-/// `runSelectStmt` still runs the complete, unmodified WHERE/ORDER
-/// BY/LIMIT/GROUP BY pipeline over whatever this returns, so a missed
-/// opportunity here (a composite key, a non-literal operand, a value that
-/// needs real coercion, ...) just falls back to the ordinary full scan,
-/// never a correctness risk.
-///
-/// A qualified equality (`QualifiedCol(q, n)`) only counts when `q` names
-/// *this* FROM table (its alias, or its bare name with no alias) —
-/// otherwise it's an outer query's column reused inside a correlated
-/// subquery (`EXISTS (SELECT ... FROM posts WHERE posts.x = ... AND
-/// users.id = 5)`), and matching it against this table's index would probe
-/// the wrong table's key space entirely. An unqualified `Col n` doesn't
-/// need this check: SQL's own scoping already resolves a bare name to the
-/// innermost table that has it, and the index lookup only succeeds when
-/// `tref.Table` actually has an indexed column called `n` — so a bare name
-/// that (via that same scoping) really means an outer column simply finds
-/// no matching index here and falls back, same as any other miss.
-and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : (string * Value) list =
+/// Literal equalities eligible for a single-table index candidate path.
+and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : PointEquality list =
     match whereExpr with
     | None -> []
     | Some whereExpr ->
         let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
+        let indexedColumn = function
+            | Col name -> Some(name, None)
+            | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                Some(name, None)
+            | FuncCall(name, [ Col column ]) when name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase) ->
+                Some(column, Some Lowercase)
+            | FuncCall(name, [ QualifiedCol(qualifier, column) ])
+                when
+                    name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase)
+                    && System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                Some(column, Some Lowercase)
+            | _ -> None
+
         flattenAnd whereExpr
         |> List.choose (function
-            | BinOp(Eq, Col n, Lit v)
-            | BinOp(Eq, Lit v, Col n) -> Some(n, v)
-            | BinOp(Eq, QualifiedCol(q, n), Lit v)
-            | BinOp(Eq, Lit v, QualifiedCol(q, n)) when System.String.Equals(q, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some(n, v)
+            | BinOp(Eq, indexed, Lit value)
+            | BinOp(Eq, Lit value, indexed) ->
+                indexedColumn indexed
+                |> Option.map (fun (column, transform) ->
+                    { Column = column
+                      Transform = transform
+                      Value = value })
             | _ -> None)
 
 and private rangeLookupBounds (scope: RangeColumnScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
@@ -7033,9 +7029,13 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
     else
         let tableDb = tref.Database |> Option.defaultValue dbName
         let equalities = pointLookupEqualities tref whereExpr
+        let storedEqualities =
+            equalities
+            |> List.choose (fun equality ->
+                if equality.Transform.IsNone then Some(equality.Column, equality.Value) else None)
 
         let composite =
-            Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
+            Storage.tryCompositeEqualityLookup store tableDb tref.Table storedEqualities
             |> Option.map (fun lookup ->
                 { KeyName = lookup.IndexName
                   ColumnIndices = lookup.ColumnIndices
@@ -7047,20 +7047,26 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
         composite
         |> Option.orElseWith (fun () ->
             equalities
-            |> List.tryPick (fun (name, value) ->
-                match
-                    Storage.tryEqualityKeyProbe store tableDb tref.Table name value,
-                    Storage.tryEqualityLookup store tableDb tref.Table name value
-                with
-                | Some(_, index), Some(columns, rows) ->
-                    Some
+            |> List.tryPick (fun equality ->
+                Storage.tryEqualityKeyProbeForTransform
+                    store
+                    tableDb
+                    tref.Table
+                    equality.Column
+                    equality.Transform
+                    equality.Value
+                |> Option.bind (fun (table, index) ->
+                    (if equality.Transform.IsSome then
+                         Storage.tryProjectedEqualityLookupForIndex store table index [ equality.Value ]
+                     else
+                         Storage.tryEqualityLookupForIndex store table index [ equality.Value ])
+                    |> Option.map (fun rows ->
                         { KeyName = index.Name
                           ColumnIndices = index.ColumnIndices
                           PrefixLengths = index.PrefixLengths
-                          Columns = columns
+                          Columns = table.Columns
                           Unique = index.Unique
-                          Rows = rows }
-                | _ -> None))
+                          Rows = rows }))))
 
 and private tryEqualityLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
