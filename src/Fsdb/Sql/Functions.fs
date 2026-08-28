@@ -2024,7 +2024,7 @@ let private dateOnlyUnits = set [ "DAY"; "WEEK"; "MONTH"; "QUARTER"; "YEAR" ]
 /// `DateTime`'s range — MySQL yields NULL for an out-of-range temporal
 /// rather than erroring. `int amount` for the month/year units can itself
 /// overflow, so those are bounds-checked before the conversion.
-let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime option =
+let tryAddInterval (dt: DateTime) (amount: float) (unit: string) : DateTime option =
     let monthsAmount (scale: int) =
         let scaled = amount * float scale
         if Double.IsNaN scaled || abs scaled > 1.0e8 then None else Some(int scaled)
@@ -2050,7 +2050,7 @@ let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime
 /// '1 2:3:4' DAY_SECOND), and a value with fewer components than the unit
 /// names is read as its *rightmost* ones. Each entry is the per-component
 /// multiplier list plus the simple unit the total is expressed in, so
-/// `addInterval` never has to know these exist.
+/// `tryAddInterval` never has to know these exist.
 let private compositeIntervalUnits =
     dict
         [ "YEAR_MONTH", ([ 12.0; 1.0 ], "MONTH")
@@ -2109,17 +2109,22 @@ let private intervalFn: Scalar =
 
 /// Reads the `INTERVAL` encoding above, or tolerates a plain `"N UNIT"`
 /// string (e.g. `DATE_ADD(d, '1 DAY')`) as a fallback shape.
+let tryIntervalParts (amount: string) (unit: string) : (float * string) option =
+    match compositeIntervalUnits.TryGetValue(unit.ToUpperInvariant()) with
+    | true, (weights, simpleUnit) ->
+        parseCompositeInterval weights simpleUnit amount
+        |> Option.map (fun total -> total, simpleUnit)
+    | _ ->
+        match Double.TryParse(amount, NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, value -> Some(value, unit)
+        | false, _ -> None
+
 let tryIntervalArgument (v: Value) : (float * string) option =
     match v with
     | VString s when s.StartsWith intervalMarker ->
         match s.Substring(intervalMarker.Length).Split('\x01') with
         | [| n; u |] ->
-            match compositeIntervalUnits.TryGetValue(u.ToUpperInvariant()) with
-            | true, (weights, simpleUnit) -> parseCompositeInterval weights simpleUnit n |> Option.map (fun total -> total, simpleUnit)
-            | _ ->
-                match Double.TryParse(n, NumberStyles.Float, CultureInfo.InvariantCulture) with
-                | true, d -> Some(d, u)
-                | false, _ -> None
+            tryIntervalParts n u
         | _ -> None
     | VString s ->
         let m = Regex.Match(s.Trim(), @"^(-?\d+(?:\.\d+)?)\s+([A-Za-z]+)$")
@@ -2141,7 +2146,7 @@ let private looksDateOnly (v: Value) : bool =
     | _ -> false
 
 let private applyDateInterval (sign: float) (dateV: Value) (dt: DateTime) (amount: float) (unit: string) : Value =
-    match addInterval dt (sign * amount) unit with
+    match tryAddInterval dt (sign * amount) unit with
     | None -> VNull // out of range — MySQL yields NULL
     | Some result ->
         if looksDateOnly dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then

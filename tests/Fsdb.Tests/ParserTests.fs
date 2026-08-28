@@ -3048,6 +3048,40 @@ let tests =
                   ))
                   "only a top-level keyword splits the text"
 
+          testCase "event schedules retain expressions and calculate due occurrences"
+          <| fun _ ->
+              match
+                  Fsdb.Sql.Event.tryParseSchedule
+                      defaultOptions
+                      "EVERY (1 + 1) SECOND STARTS CURRENT_TIMESTAMP + INTERVAL 1 SECOND ENDS CURRENT_TIMESTAMP + INTERVAL 9 SECOND"
+              with
+              | Some(Fsdb.Sql.Event.ScheduleSpec.Every(value, field, Some starts, Some ends)) ->
+                  Expect.equal value "(1 + 1)" "interval expression"
+                  Expect.equal field "SECOND" "interval field"
+                  Expect.stringContains starts "INTERVAL 1 SECOND" "start expression"
+                  Expect.stringContains ends "INTERVAL 9 SECOND" "end expression"
+              | other -> failtestf "unexpected recurring schedule: %A" other
+
+              let starts = System.DateTime(2026, 8, 28, 12, 0, 0)
+              let ends = starts.AddSeconds 9.0
+
+              match Fsdb.Sql.Event.tryRecurringTiming "2" "SECOND" starts (Some ends) with
+              | None -> failtest "expected a recurring schedule"
+              | Some timing ->
+                  Expect.equal
+                      (Fsdb.Sql.Event.dueOccurrence (starts.AddSeconds 8.9) None timing)
+                      (Some(starts.AddSeconds 8.0))
+                      "missed intervals collapse to the latest due occurrence"
+
+                  Expect.equal
+                      (Fsdb.Sql.Event.dueOccurrence (starts.AddSeconds 8.9) (Some(starts.AddSeconds 8.0)) timing)
+                      None
+                      "an occurrence is claimed once"
+
+                  Expect.isTrue
+                      (Fsdb.Sql.Event.isFinalOccurrence (starts.AddSeconds 8.0) timing)
+                      "the occurrence before ENDS is final"
+
           testCase "stored programs parse typed parameters and local declarations"
           <| fun _ ->
               match Fsdb.StoredProgram.parseParameters defaultOptions "IN n INT, OUT label VARCHAR(10), INOUT amount DECIMAL(8, 2)" with
