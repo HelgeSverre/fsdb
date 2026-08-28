@@ -1,6 +1,4 @@
-/// Turns an `Ast.Statement` into effects against `Storage` and rows out.
-/// The SELECT pipeline is volcano-style over plain `list`s:
-/// scan -> filter -> order -> limit/offset -> project.
+/// Executes SQL statements against Storage and returns typed result rows.
 module Fsdb.Executor
 
 open System.Collections.Generic
@@ -132,21 +130,9 @@ let private freshStatementMemo () =
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
 
-let private currentStatementMemo () =
-    match box statementMemo.Value with
-    | null ->
-        let memo = freshStatementMemo ()
-        statementMemo.Value <- memo
-        memo
-    | _ -> statementMemo.Value
+let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMemo statementMemo
 
-/// The `WITH` bindings visible to the statement currently executing, keyed
-/// by lowercased CTE name — the same dynamic scope as `statementMemo`,
-/// because a CTE is equally visible to the statement's
-/// own FROM, its joins, and every subquery nested anywhere inside it, and
-/// threading a scope parameter through every one of those call sites would
-/// touch far more code than it explains. Pushed and popped around a
-/// statement that carries `Ctes` (see `withCteScope`).
+/// Statement-local materialized CTE bindings, keyed by normalized name.
 let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * Value[] list>>()
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
@@ -156,25 +142,16 @@ let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 
-let private withAsyncLocalValue (slot: System.Threading.AsyncLocal<'a>) (value: 'a) (body: unit -> 'b) : 'b =
-    let saved = slot.Value
-
-    try
-        slot.Value <- value
-        body ()
-    finally
-        slot.Value <- saved
-
 let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
-    withAsyncLocalValue variableContext (Some variables) body
+    DynamicScope.withValue variableContext (Some variables) body
 
 let private currentVariableContext () = variableContext.Value
 
 let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
-    withAsyncLocalValue suppressVariableAssignments true body
+    DynamicScope.withValue suppressVariableAssignments true body
 
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
-    withAsyncLocalValue triggerRowScope (Some scope) body
+    DynamicScope.withValue triggerRowScope (Some scope) body
 
 type private StoredView =
     { Name: string
@@ -245,20 +222,10 @@ type private ColumnDescriptionSource =
     | StoredRelation of string
     | QueryBody of SelectOrUnion
 
-let private currentViewStack () =
-    match box viewStack.Value with
-    | null -> Set.empty
-    | _ -> viewStack.Value
-
-let private storedObjectAccount (definer: string) =
-    if definer = "" then
-        None
-    else
-        let at = definer.LastIndexOf '@'
-        if at < 0 then Some(Auth.account definer "%") else Some(Auth.account definer[.. at - 1] definer[(at + 1) ..])
+let private currentViewStack () = DynamicScope.valueOrDefault Set.empty viewStack
 
 let private checkStoredDefiner (store: Store) (definer: string) (db: string) (statement: Statement) =
-    match storedObjectAccount definer with
+    match Auth.tryParseAccount definer with
     | Some account when Auth.tryUserRowForAccount store account |> Option.isNone ->
         Error(1449, sprintf "The user specified as a definer ('%s') does not exist" definer)
     | Some account -> Auth.checkForAccount store account (Auth.requiredPrivileges db statement)
@@ -266,11 +233,11 @@ let private checkStoredDefiner (store: Store) (definer: string) (db: string) (st
 
 let private registryForDefiner (account: Auth.Account) (registry: Registry) =
     registry
-    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(account.Name + "@" + account.Host))
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(Auth.formatAccount account))
 
 let private registryAccount (registry: Registry) =
     Functions.lookup "CURRENT_USER" registry
-    |> Option.bind (fun currentUser -> currentUser [] |> toText |> Option.bind storedObjectAccount)
+    |> Option.bind (fun currentUser -> currentUser [] |> toText |> Option.bind Auth.tryParseAccount)
 
 let private registryForViewSecurity
     (store: Store)
@@ -289,7 +256,7 @@ let private registryForViewSecurity
     else
         checkStoredDefiner store definer schema statement
         |> Result.bind (fun () ->
-            match storedObjectAccount definer with
+            match Auth.tryParseAccount definer with
             | Some account -> Ok(registryForDefiner account registry)
             | None -> Error(1449, "The user specified as a definer ('') does not exist"))
 
@@ -981,15 +948,13 @@ let private storedChecks (store: Store) (dbName: string) (tableName: string) : S
         |> List.ofSeq
 
 let withCteRecursionDepth (limit: int64) (body: unit -> 'a) : 'a =
-    withAsyncLocalValue cteRecursionDepth (Some limit) body
+    DynamicScope.withValue cteRecursionDepth (Some limit) body
 
 let withGroupConcatMaxLen (limit: int) (body: unit -> 'a) : 'a =
-    withAsyncLocalValue groupConcatMaxLen (Some limit) body
+    DynamicScope.withValue groupConcatMaxLen (Some limit) body
 
 let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
-    match box cteScope.Value with
-    | null -> Map.empty
-    | _ -> cteScope.Value
+    DynamicScope.valueOrDefault Map.empty cteScope
 
 let private unknownColumn (name: string) : EvalError =
     1054, sprintf "Unknown column '%s' in 'field list'" name
@@ -12536,7 +12501,7 @@ let private storeTriggerDefinition
                             VString event
                             VString body
                             VDateTime System.DateTime.Now
-                            VString(account.Name + "@" + account.Host)
+                            VString(Auth.formatAccount account)
                             VInt insertionOrder ] ])
                 |> Result.mapError storageErr
                 |> Result.map (fun _ ->
@@ -12609,7 +12574,7 @@ let rec executeAs
                             let privileges =
                                 dmlStatements |> traverse (checkStoredDefiner runStore trigger.Definer db)
 
-                            match storedObjectAccount trigger.Definer, privileges with
+                            match Auth.tryParseAccount trigger.Definer, privileges with
                             | Some account, Result.Ok _ -> Result.Ok(bodyStatements, account)
                             | _, Result.Error(code, msg) -> Result.Error(Err(code, msg))
                             | None, Result.Ok _ ->
@@ -13002,7 +12967,7 @@ let rec executeAs
 
             match Map.tryFind targetKey view.CheckPredicates with
             | Some predicate ->
-                withAsyncLocalValue
+                DynamicScope.withValue
                     viewCheckScope
                     (Some
                         { Database = target.Database
@@ -13728,7 +13693,7 @@ let rec executeAs
                       Schema = db
                       Definition = viewDefinition
                       Columns = columns
-                      Definer = currentAccount.Name + "@" + currentAccount.Host
+                      Definer = Auth.formatAccount currentAccount
                       CheckOption = checkOption
                       SecurityType = if security = ViewInvoker then "INVOKER" else "DEFINER" }
                     select
@@ -13788,7 +13753,7 @@ let rec executeAs
                                     VString viewDefinition
                                     VString(JsonSerializer.Serialize(columns |> List.toArray))
                                     VDateTime System.DateTime.Now
-                                    VString(currentAccount.Name + "@" + currentAccount.Host)
+                                    VString(Auth.formatAccount currentAccount)
                                     VString checkOption
                                     VString(if security = ViewInvoker then "INVOKER" else "DEFINER") ] ]
                         with

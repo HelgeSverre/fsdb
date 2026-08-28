@@ -882,17 +882,9 @@ let private processes = System.Collections.Concurrent.ConcurrentDictionary<int64
 /// read for the grant views) — the same information hiding real MySQL does.
 let currentViewer = System.Threading.AsyncLocal<(Store * Fsdb.Auth.Account) option>()
 
-/// Runs `f` with the viewer scoped to `store`/`user`, restoring the previous
-/// value afterwards — for probe-path SHOW handlers that build their result
-/// outside the executor (which sets the viewer itself).
-let withViewer (store: Store) (user: Fsdb.Auth.Account) (f: unit -> 'a) : 'a =
-    let previous = currentViewer.Value
-    currentViewer.Value <- Some(store, user)
-
-    try
-        f ()
-    finally
-        currentViewer.Value <- previous
+/// Runs a query with information-schema visibility scoped to one account.
+let withViewer (store: Store) (user: Fsdb.Auth.Account) (body: unit -> 'a) : 'a =
+    DynamicScope.withValue currentViewer (Some(store, user)) body
 
 /// The account a viewer is limited to, or `None` when it may see all rows
 /// (embedded/internal, or it holds `priv`).

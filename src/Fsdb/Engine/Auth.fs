@@ -1,9 +1,4 @@
-/// Account lookup and mysql_native_password verification against the
-/// `mysql.user` system table (see `Storage`'s bootstrap). The rule the
-/// handshake enforces matches real MySQL: an account must exist, a
-/// non-empty stored hash is scramble-verified, and an empty
-/// `authentication_string` (no password set) accepts only an empty offered
-/// password.
+/// Host-qualified accounts, mysql_native_password, and privilege policy.
 module Fsdb.Auth
 
 open System
@@ -49,6 +44,19 @@ let private canonicalHost (host: string) =
     | _ -> host
 
 let account name host = { Name = name; Host = canonicalHost host }
+
+let formatAccount account = account.Name + "@" + account.Host
+
+let internal tryParseAccount (identity: string) =
+    if identity = "" then
+        None
+    else
+        let separator = identity.LastIndexOf '@'
+
+        if separator < 0 then
+            Some(account identity "%")
+        else
+            Some(account identity[.. separator - 1] identity[(separator + 1) ..])
 
 /// Whether two account names identify the same host-qualified account.
 let sameAccount left right =

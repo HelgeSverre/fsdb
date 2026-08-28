@@ -1,10 +1,4 @@
-/// Query dispatcher: a handful of connection-setup forms mysql CLI/PDO send
-/// (`@@vars`, `SET`, `SHOW`) are still matched on trimmed/uppercased query
-/// text, since they're session-variable probes rather than real SQL the
-/// grammar needs to know about. Everything else — including `SELECT 1` and
-/// `SELECT DATABASE()`, which the grammar and function registry already
-/// handle byte-for-byte the same way — goes through
-/// `Parser.parse -> Executor.execute`.
+/// Session-aware command dispatch from SQL text to parser and executor.
 module Fsdb.QueryHandler
 
 open System
@@ -458,7 +452,7 @@ let private registryFor (session: Session) : Functions.Registry =
             VInt(int64 (releaseAllAdvisoryLocks session))
         else
             raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'RELEASE_ALL_LOCKS'")))
-    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@" + session.AccountHost))
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(Auth.formatAccount (accountOf session)))
     |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
     |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
 
@@ -1589,7 +1583,7 @@ let private divisionByZeroPolicy (store: Store) (statement: Statement) =
     else
         Diagnostics.DivisionByZeroPolicy.Warn
 
-let private executeParsedCore (session: Session) (stmt: Statement) : Session * QueryResult =
+let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
     match stmt with
     | Select _
     | Union _ -> InformationSchema.recordCommand InformationSchema.SelectCommand
@@ -1602,10 +1596,6 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
     | Delete _ -> InformationSchema.recordCommand InformationSchema.DeleteCommand
     | _ -> ()
 
-    // A SELECT into information_schema.processlist / the privilege views
-    // scopes its rows to this session's user (unless it holds the revealing
-    // privilege) — see `InformationSchema.currentViewer`.
-    InformationSchema.currentViewer.Value <- Some(session.Store, accountOf session)
     let dbName = session.Database |> Option.defaultValue defaultDatabase
 
     let execute session =
@@ -1763,6 +1753,9 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
 
         executed, result
     | None -> execute session
+
+let private executeParsedCore (session: Session) (stmt: Statement) : Session * QueryResult =
+    InformationSchema.withViewer (Session.currentStore session) (accountOf session) (fun () -> executeParsedStatement session stmt)
 
 type private TemporaryAction =
     | CreateTemporary

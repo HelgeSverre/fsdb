@@ -9,6 +9,7 @@
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Foundation/Log.fs" />
+    <Compile Include="Foundation/DynamicScope.fs" />
     <Compile Include="Foundation/Diagnostics.fs" />
     <Compile Include="Foundation/GroupCommit.fs" />
     <Compile Include="Foundation/OptionFile.fs" />

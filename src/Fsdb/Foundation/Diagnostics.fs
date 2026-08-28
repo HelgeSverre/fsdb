@@ -49,40 +49,17 @@ let divisionByZero () : Result<unit, int * string> =
     | unsupported -> invalidArg (nameof unsupported) "unsupported division-by-zero policy"
 
 let withDivisionByZeroPolicy (policy: DivisionByZeroPolicy) (body: unit -> 'a) : 'a =
-    let previous = divisionByZeroPolicy.Value
-    divisionByZeroPolicy.Value <- policy
-
-    try
-        body ()
-    finally
-        divisionByZeroPolicy.Value <- previous
+    DynamicScope.withValue divisionByZeroPolicy policy body
 
 let currentRowNumber () = rowNumber.Value |> Option.defaultValue 1
 
 let withRowNumber (row: int) (body: unit -> 'a) : 'a =
-    let previous = rowNumber.Value
-    rowNumber.Value <- Some row
-
-    try
-        body ()
-    finally
-        rowNumber.Value <- previous
+    DynamicScope.withValue rowNumber (Some row) body
 
 let capture (body: unit -> 'a) : 'a * Condition list =
-    let previous = active.Value
     let conditions = ResizeArray()
-    active.Value <- Some conditions
-
-    try
-        body (), List.ofSeq conditions
-    finally
-        active.Value <- previous
+    let result = DynamicScope.withValue active (Some conditions) body
+    result, List.ofSeq conditions
 
 let suppress (body: unit -> 'a) : 'a =
-    let previous = active.Value
-    active.Value <- None
-
-    try
-        body ()
-    finally
-        active.Value <- previous
+    DynamicScope.withValue active None body

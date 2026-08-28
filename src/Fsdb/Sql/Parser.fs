@@ -3862,13 +3862,8 @@ let private rewriteSqlForOptions (options: ParserOptions) (sql: string) : string
         output.ToString()
 
 let private withParserOptions (options: ParserOptions) (sql: string) parse =
-    let previous = currentOptions.Value
-    currentOptions.Value <- options
-
-    try
-        sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse
-    finally
-        currentOptions.Value <- previous
+    DynamicScope.withValue currentOptions options (fun () ->
+        sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse)
 
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0

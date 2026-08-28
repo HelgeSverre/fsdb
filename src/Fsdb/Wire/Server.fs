@@ -1,6 +1,4 @@
-/// TCP listener and per-connection command loop: handshake, then
-/// COM_QUERY / COM_STATISTICS / COM_PROCESS_INFO / COM_PING / COM_INIT_DB /
-/// COM_QUIT.
+/// TCP transport, MySQL handshake, and per-connection command dispatch.
 module Fsdb.Server
 
 open System

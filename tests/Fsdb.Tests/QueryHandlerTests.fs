@@ -2047,6 +2047,23 @@ let tests =
               expectEmpty "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'secret'"
               expectEmpty "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'secret'"
 
+          testCase "parsed execution restores the information schema viewer scope"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let outer = Fsdb.Auth.account "outer" "%"
+              let previous = Fsdb.InformationSchema.currentViewer.Value
+
+              Fsdb.InformationSchema.withViewer store outer (fun () ->
+                  let _, result = handle session "SELECT 1"
+                  Expect.equal result (ResultSet([ "1" ], [ [ Some "1" ] ])) "query result"
+
+                  let viewer = Fsdb.InformationSchema.currentViewer.Value |> Option.map snd
+                  Expect.equal viewer (Some outer) "outer viewer restored")
+
+              let restored = Fsdb.InformationSchema.currentViewer.Value |> Option.map snd
+              Expect.equal restored (previous |> Option.map snd) "prior viewer restored after outer scope"
+
           testCase "DROP TRIGGER requires TRIGGER privilege on its subject table"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
