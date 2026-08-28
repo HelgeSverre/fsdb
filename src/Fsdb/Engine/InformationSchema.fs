@@ -4,6 +4,7 @@
 module Fsdb.InformationSchema
 
 open System
+open System.Text.Json
 open System.Text.RegularExpressions
 open Fsdb.Ast
 open Fsdb.Value
@@ -1849,7 +1850,7 @@ let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool
 
             [ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows)
 
-let private backtick (s: string) = "`" + s + "`"
+let private backtick (s: string) = "`" + s.Replace("`", "``") + "`"
 
 let private showCreateString (s: string) =
     s.Replace("\\", "\\\\").Replace("'", "''").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\000", "\\0").Replace("\x1A", "\\Z")
@@ -2016,7 +2017,21 @@ let showCreateTemporaryTable (catalog: Catalog) (dbName: string) (tableName: str
     findTable catalog dbName tableName
     |> Result.map (fun t -> [ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL true catalog dbName t) ] ])
 
-/// `SHOW CREATE VIEW v` for the read-only stored-query subset.
+let private quotedDefiner (definer: string) =
+    let separator = definer.LastIndexOf '@'
+    let user, host =
+        if separator < 0 then definer, "%" else definer[.. separator - 1], definer[(separator + 1) ..]
+
+    sprintf "%s@%s" (backtick user) (backtick host)
+
+let private storedViewColumns (serialized: string) =
+    try
+        match JsonSerializer.Deserialize<string[]>(serialized) with
+        | null -> []
+        | columns -> List.ofArray columns
+    with :? JsonException ->
+        []
+
 let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : ShowResult =
     viewCatalogEntries catalog
     |> List.tryFind (fun view ->
@@ -2031,26 +2046,27 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
                 else
                     sprintf " WITH %s CHECK OPTION" view.CheckOption
 
-            let security =
-                if view.SecurityType.Equals("INVOKER", System.StringComparison.OrdinalIgnoreCase) then
-                    " SQL SECURITY INVOKER"
-                else
-                    ""
+            let security = if view.SecurityType.Equals("INVOKER", System.StringComparison.OrdinalIgnoreCase) then "INVOKER" else "DEFINER"
+
+            let columns =
+                match storedViewColumns view.ColumnNames with
+                | [] -> ""
+                | names -> sprintf " (%s)" (names |> List.map backtick |> String.concat ", ")
+
+            let ddl =
+                sprintf
+                    "CREATE ALGORITHM=UNDEFINED DEFINER=%s SQL SECURITY %s VIEW %s%s AS %s%s"
+                    (quotedDefiner view.Definer)
+                    security
+                    (backtick view.Name)
+                    columns
+                    view.Definition
+                    checkOption
 
             Ok(
                 [ "View"; "Create View"; "character_set_client"; "collation_connection" ],
-                [ [ Some view.Name
-                    Some(sprintf "CREATE%s VIEW `%s` AS %s%s" security view.Name view.Definition checkOption)
-                    Some "utf8mb4"
-                    Some "utf8mb4_0900_ai_ci" ] ]
+                [ [ Some view.Name; Some ddl; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci" ] ]
             )
-
-let private quotedDefiner (definer: string) =
-    let separator = definer.LastIndexOf '@'
-    let user, host =
-        if separator < 0 then definer, "%" else definer[.. separator - 1], definer[(separator + 1) ..]
-
-    sprintf "`%s`@`%s`" (user.Replace("`", "``")) (host.Replace("`", "``"))
 
 /// `SHOW CREATE TRIGGER trigger_name`.
 let showCreateTrigger (catalog: Catalog) (dbName: string) (triggerName: string) : ShowResult =

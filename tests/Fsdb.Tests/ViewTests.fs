@@ -739,7 +739,7 @@ let tests =
               let session = Fsdb.Session.create 1 store
 
               let session, created =
-                  Fsdb.QueryHandler.handle session "CREATE VIEW totals AS SELECT vendor_id, SUM(total) AS total FROM receipts GROUP BY vendor_id"
+                  Fsdb.QueryHandler.handle session "CREATE VIEW totals (vendor, summed) AS SELECT vendor_id, SUM(total) AS total FROM receipts GROUP BY vendor_id"
 
               expectOk created "create through handler"
 
@@ -760,8 +760,19 @@ let tests =
               match Fsdb.QueryHandler.handle session "SHOW CREATE VIEW totals" |> snd with
               | ResultSet(columns, [ row ]) ->
                   Expect.equal columns [ "View"; "Create View"; "character_set_client"; "collation_connection" ] "SHOW columns"
-                  Expect.stringContains (row.[1] |> Option.defaultValue "") "CREATE VIEW `totals` AS" "SHOW statement"
+                  Expect.stringStarts
+                      (row.[1] |> Option.defaultValue "")
+                      "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `totals` (`vendor`, `summed`) AS"
+                      "SHOW statement"
               | other -> failtestf "expected SHOW CREATE VIEW row, got %A" other
+
+              let _, created = Fsdb.QueryHandler.handle session "CREATE VIEW `quoted``view` (`quoted``column`) AS SELECT vendor_id FROM receipts"
+              expectOk created "create quoted view"
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "quoted`view" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) ->
+                  Expect.stringContains ddl "VIEW `quoted``view` (`quoted``column`) AS" "quoted identifiers"
+              | other -> failtestf "expected quoted SHOW CREATE VIEW row, got %A" other
 
           testCase "view projections retain introspection metadata without evaluating rows"
           <| fun _ ->

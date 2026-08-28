@@ -57,7 +57,7 @@ query-scoped CTEs (ordinary and recursive,
 including leading UPDATE/DELETE and branch-local WITH), set
 operations, window functions with numeric and temporal interval frames, GROUP BY WITH ROLLUP + GROUPING,
 DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
-SELECT, TRUNCATE,
+SELECT, session-scoped temporary tables, TRUNCATE,
 RENAME TABLE, EXPLAIN (TRADITIONAL/JSON/ANALYZE). Transaction control, SET, SHOW (~25
 variants), USE, KILL, DESCRIBE are text-probed before the grammar
 (`QueryHandler.dispatch`).
@@ -67,7 +67,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Statement family | Impact | Class |
 |---|---|---|
 | Procedure declarations retain one simple `IN` parameter and `SQL SECURITY`; zero-parameter procedures execute a direct statement or a single statement wrapped in `BEGIN…END`. Parameterized execution, functions, definer-context execution, multi-statement bodies, `DECLARE`, cursors, handlers, and `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
-| Temporary tables are session-scoped and shadow permanent tables; temporary-table DDL is deliberately absent from the WAL | low | divergence |
 | One-time and recurring `CREATE/DROP EVENT` declarations and metadata are supported; ALTER, status changes, definer execution, and the scheduler thread remain absent | low | divergence/refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
@@ -285,7 +284,9 @@ requires every component to be mergeable.
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
-STATUS. Their metadata is derived from the saved query without evaluating it.
+STATUS. SHOW CREATE VIEW reports the algorithm, host-qualified definer,
+security mode, explicit column list, and check option. Metadata is derived
+from the saved query without evaluating it.
 Direct single-table projections with a static predicate merge into the outer
 SELECT so physical equality, range, and ordered-limit paths remain available;
 other view shapes materialize once per statement.
@@ -303,7 +304,7 @@ OLD/NEW images are rejected when the trigger is created.
 |---|---|---|---|---|
 | Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | single-table, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; one mergeable component updates or inserts at a time | medium | refusal |
 | ALGORITHM / explicit DEFINER / ALTER VIEW | supported | SQL SECURITY DEFINER and INVOKER execute with their respective identities; algorithm selection, explicit definers, and alteration remain absent | low | refusal |
-| VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | `InformationSchema.showCreateView` returns raw user text without the wrapper | low | divergence |
+| VIEW_DEFINITION rendering | fully-qualified canonical expression text | SHOW CREATE VIEW renders the stored declaration envelope, but its SELECT body and I_S.VIEWS.VIEW_DEFINITION retain the user's original text | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
 | Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML, local DECLARE/SET, scalar-subquery assignment, nested IF/ELSEIF/ELSE, and SET NEW are covered; CASE, loops, handlers, SIGNAL, and dynamic SQL remain absent | medium | refusal |
 | Trigger recursion cap | cycle detection at runtime | `Executor.fireTriggers` uses a hardcoded depth of 8 | low | divergence |
@@ -362,7 +363,8 @@ RESET with read-only cursors, type reuse, and 1153-on-overflow long-data account
 binary row encodings including µs-precision temporals and 16 MiB multi-packet
 framing, zlib CLIENT_COMPRESS transport, TLS 1.2/1.3 with an optional PEM server certificate and
 require_secure_transport, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_connections/
-max_prepared_stmt_count enforced with honest advertising, mid-query
+max_prepared_stmt_count enforced with honest advertising, COM_SET_OPTION
+multi-statement toggling, mid-query
 disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
@@ -371,7 +373,6 @@ disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 | Compression | CLIENT_COMPRESS/ZSTD | CLIENT_COMPRESS zlib framing is negotiated; Zstandard is not offered | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, one-character field/line separators, `REPLACE`/`IGNORE`, column lists, and header skipping; no server-file loading, `SET`, user variables, or multibyte separators | low | subset |
-| Multi-statement | CLIENT_MULTI_STATEMENTS batching | negotiated COM_QUERY batches, multi-result status flags, and COM_SET_OPTION toggling | low | covered |
 | Session state tracking | CLIENT_SESSION_TRACK info in OK packets | absent | low | refusal |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Unimplemented COM_* | CHANGE_USER | returns ERR 1047 (`Server.fs`) | low | refusal |
