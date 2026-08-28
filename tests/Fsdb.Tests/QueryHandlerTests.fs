@@ -1697,6 +1697,119 @@ let tests =
                   | other -> failtestf "expected routine write, got %A" other
               | _, other -> failtestf "expected compound routine results, got %A" other
 
+          testCase "stored procedures compose CASE and labeled loop control"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let definition =
+                  """CREATE PROCEDURE control_flow(IN n INT, OUT answer INT)
+                      main/*label*/:/*block*/BEGIN
+                        DECLARE i INT DEFAULT 0;
+                        SET answer = 0;
+                        counting/*label*/:/*loop*/WHILE i < n DO
+                          SET i = i + 1;
+                          CASE
+                            WHEN i = 2 THEN ITERATE counting;
+                            WHEN i = 4 THEN LEAVE counting;
+                            ELSE SET answer = answer + i;
+                          END CASE;
+                        END/*loop*/WHILE/*label*/counting;
+                        REPEAT
+                          SET answer = answer + 10;
+                          SET i = i - 1;
+                        UNTIL i = 0 END REPEAT;
+                        single_pass: LOOP
+                          SET answer = answer + 100;
+                          LEAVE single_pass;
+                        END LOOP single_pass;
+                        CASE n
+                          WHEN 3 THEN SET answer = answer + 1000;
+                          ELSE SET answer = answer + 2000;
+                        END CASE;
+                      END/*label*/main"""
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created"
+
+              let session, called = handle session "CALL control_flow(5, @answer)"
+              Expect.equal called (Affected 0UL) "called"
+
+              match handle session "SELECT @answer" |> snd with
+              | ResultSet(_, [ [ Some "2144" ] ]) -> ()
+              | other -> failtestf "expected loop result, got %A" other
+
+              let session, called = handle session "CALL control_flow(3, @answer)"
+              Expect.equal called (Affected 0UL) "called again"
+
+              match handle session "SELECT @answer" |> snd with
+              | ResultSet(_, [ [ Some "1134" ] ]) -> ()
+              | other -> failtestf "expected second loop result, got %A" other
+
+          testCase "stored-program labels and unmatched CASE use MySQL errors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "CREATE PROCEDURE bad_leave() BEGIN LEAVE nowhere; END" |> snd with
+              | Err(1308, "LEAVE with no matching label: nowhere") -> ()
+              | other -> failtestf "expected unmatched-label error, got %A" other
+
+              match
+                  handle
+                      session
+                      "CREATE PROCEDURE duplicate_label() outer_label: BEGIN outer_label: LOOP LEAVE outer_label; END LOOP outer_label; END outer_label"
+                  |> snd
+              with
+              | Err(1309, "Redefining label outer_label") -> ()
+              | other -> failtestf "expected duplicate-label error, got %A" other
+
+              let session, created =
+                  handle session "CREATE PROCEDURE missing_case() BEGIN CASE 1 WHEN 2 THEN SET @selected = 1; END CASE; END"
+
+              Expect.equal created (Affected 0UL) "created missing-case procedure"
+
+              match handle session "CALL missing_case()" |> snd with
+              | Err(1339, "Case not found for CASE statement") -> ()
+              | other -> failtestf "expected CASE-not-found error, got %A" other
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE PROCEDURE leave_block(OUT answer INT) main: BEGIN SET answer = 1; LEAVE main; SET answer = 2; END main"
+
+              Expect.equal created (Affected 0UL) "created labeled block"
+              let session, called = handle session "CALL leave_block(@answer)"
+              Expect.equal called (Affected 0UL) "left block"
+
+              match handle session "SELECT @answer" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected early block exit, got %A" other
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE PROCEDURE local_scope(OUT answer INT) BEGIN DECLARE x INT DEFAULT 1; DECLARE y INT DEFAULT 1; BEGIN DECLARE x INT DEFAULT 2; SET x = 3; SET y = 4; END; SET answer = x * 10 + y; END"
+
+              Expect.equal created (Affected 0UL) "created nested scope"
+              let session, called = handle session "CALL local_scope(@answer)"
+              Expect.equal called (Affected 0UL) "called nested scope"
+
+              match handle session "SELECT @answer" |> snd with
+              | ResultSet(_, [ [ Some "14" ] ]) -> ()
+              | other -> failtestf "expected lexical local scope, got %A" other
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE PROCEDURE nested_case(IN n INT, OUT answer INT) BEGIN CASE CASE n WHEN 1 THEN 10 ELSE 20 END WHEN 10 THEN SET answer = 100; ELSE SET answer = 200; END CASE; END"
+
+              Expect.equal created (Affected 0UL) "created nested CASE"
+              let session, called = handle session "CALL nested_case(1, @answer)"
+              Expect.equal called (Affected 0UL) "called nested CASE"
+
+              match handle session "SELECT @answer" |> snd with
+              | ResultSet(_, [ [ Some "100" ] ]) -> ()
+              | other -> failtestf "expected nested CASE result, got %A" other
+
           testCase "OUT and INOUT procedure parameters write typed user variables"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

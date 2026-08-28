@@ -12451,45 +12451,116 @@ let rec executeAs
                                     with SqlError(code, msg) ->
                                         Err(code, msg)
 
+                            let complete result = result, StoredProgram.Flow.Complete
+
                             let rec runStatements statements =
-                                statements
-                                |> List.fold
-                                    (fun result statement ->
-                                        match result with
-                                        | Err _ -> result
-                                        | _ -> runStatement statement)
-                                    (Affected 0UL)
+                                match statements with
+                                | [] -> complete (Affected 0UL)
+                                | statement :: rest ->
+                                    match runStatement statement with
+                                    | (Err _ as error), _ -> complete error
+                                    | _, StoredProgram.Flow.Complete -> runStatements rest
+                                    | result, flow -> result, flow
 
                             and runStatement =
                                 function
-                                | StoredProgram.Sql statement -> runDml statement
-                                | StoredProgram.TextSql _ -> Err(1235, "Text-only statements are not supported in triggers")
+                                | StoredProgram.Sql statement -> runDml statement |> complete
+                                | StoredProgram.TextSql _ ->
+                                    Err(1235, "Text-only statements are not supported in triggers") |> complete
                                 | StoredProgram.Declare declaration ->
                                     match declaration.InitialValue with
                                     | None ->
                                         locals.Value <- Map.add declaration.Name VNull locals.Value
-                                        Affected 0UL
+                                        complete (Affected 0UL)
                                     | Some expression ->
                                         match evalExpr (localContext ()) expression with
-                                        | Error(code, message) -> Err(code, message)
+                                        | Error(code, message) -> complete (Err(code, message))
                                         | Ok value ->
                                             locals.Value <- Map.add declaration.Name value locals.Value
-                                            Affected 0UL
+                                            complete (Affected 0UL)
                                 | StoredProgram.SetLocal(name, expression) ->
                                     match evalExpr (localContext ()) expression with
-                                    | Error(code, message) -> Err(code, message)
+                                    | Error(code, message) -> complete (Err(code, message))
                                     | Ok value ->
                                         locals.Value <- Map.add name value locals.Value
-                                        Affected 0UL
+                                        complete (Affected 0UL)
+                                | StoredProgram.Block(label, body) ->
+                                    let before = locals.Value
+                                    let result, flow = runStatements body
+                                    locals.Value <- StoredProgram.restoreOuterScope body before locals.Value
+
+                                    match flow, label with
+                                    | StoredProgram.Flow.Leave target, Some label when target = label ->
+                                        result, StoredProgram.Flow.Complete
+                                    | _ -> result, flow
                                 | StoredProgram.If(condition, whenTrue, whenFalse) ->
                                     let context = localContext ()
 
                                     match evalExpr context condition with
-                                    | Error(code, message) -> Err(code, message)
+                                    | Error(code, message) -> complete (Err(code, message))
                                     | Ok value when truthy value = Some true -> runStatements whenTrue
                                     | Ok _ -> runStatements whenFalse
+                                | StoredProgram.Case(selector, branches, otherwise) ->
+                                    let branchSelector = StoredProgram.caseBranchIndexExpression selector branches
 
-                            runStatements statements)
+                                    match evalExpr (localContext ()) branchSelector with
+                                    | Error(code, message) -> complete (Err(code, message))
+                                    | Ok(VInt index) when index >= 0L -> branches |> List.item (int index) |> snd |> runStatements
+                                    | Ok _ ->
+                                        match otherwise with
+                                        | Some body -> runStatements body
+                                        | None -> complete (Err(1339, "Case not found for CASE statement"))
+                                | StoredProgram.While(label, condition, body) ->
+                                    let rec iterate () =
+                                        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+
+                                        match evalExpr (localContext ()) condition with
+                                        | Error(code, message) -> complete (Err(code, message))
+                                        | Ok value when truthy value <> Some true -> complete (Affected 0UL)
+                                        | Ok _ ->
+                                            match runStatements body with
+                                            | (Err _ as error), _ -> complete error
+                                            | result, StoredProgram.Flow.Leave target when label = Some target ->
+                                                result, StoredProgram.Flow.Complete
+                                            | _, StoredProgram.Flow.Iterate target when label = Some target -> iterate ()
+                                            | _, StoredProgram.Flow.Complete -> iterate ()
+                                            | result, flow -> result, flow
+
+                                    iterate ()
+                                | StoredProgram.Repeat(label, body, until) ->
+                                    let rec iterate () =
+                                        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+
+                                        match runStatements body with
+                                        | (Err _ as error), _ -> complete error
+                                        | result, StoredProgram.Flow.Leave target when label = Some target ->
+                                            result, StoredProgram.Flow.Complete
+                                        | _, StoredProgram.Flow.Iterate target when label = Some target -> iterate ()
+                                        | result, StoredProgram.Flow.Complete ->
+                                            match evalExpr (localContext ()) until with
+                                            | Error(code, message) -> complete (Err(code, message))
+                                            | Ok value when truthy value = Some true -> complete result
+                                            | Ok _ -> iterate ()
+                                        | result, flow -> result, flow
+
+                                    iterate ()
+                                | StoredProgram.Loop(label, body) ->
+                                    let rec iterate () =
+                                        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+
+                                        match runStatements body with
+                                        | (Err _ as error), _ -> complete error
+                                        | result, StoredProgram.Flow.Leave target when label = Some target ->
+                                            result, StoredProgram.Flow.Complete
+                                        | _, StoredProgram.Flow.Iterate target when label = Some target -> iterate ()
+                                        | _, StoredProgram.Flow.Complete -> iterate ()
+                                        | result, flow -> result, flow
+
+                                    iterate ()
+                                | StoredProgram.Leave label -> Affected 0UL, StoredProgram.Flow.Leave label
+                                | StoredProgram.Iterate label -> Affected 0UL, StoredProgram.Flow.Iterate label
+
+                            runStatements statements |> fst)
 
                 try
                     rows
@@ -13749,12 +13820,17 @@ let rec executeAs
             match StoredProgram.parse (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText) body with
             | Result.Error msg -> ids, Err(1064, sprintf "Trigger body has a syntax error: %s" msg)
             | Result.Ok bodyStatements ->
-                match bodyStatements |> traverse (validateTriggerStatement registry timing event columns) with
-                | Error result -> ids, result
-                | Ok _ ->
-                    match storeTriggerDefinition store currentAccount db table name timingText eventText order body with
+                match StoredProgram.validate [] bodyStatements with
+                | Error validation ->
+                    let code, message = StoredProgram.validationError validation
+                    ids, Err(code, message)
+                | Ok() ->
+                    match bodyStatements |> traverse (validateTriggerStatement registry timing event columns) with
                     | Error result -> ids, result
-                    | Ok() -> ids, Affected 0UL
+                    | Ok _ ->
+                        match storeTriggerDefinition store currentAccount db table name timingText eventText order body with
+                        | Error result -> ids, result
+                        | Ok() -> ids, Affected 0UL
 
     | DropTrigger(name, ifExists) ->
         let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)

@@ -31,7 +31,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 
 | Area | State | Largest single gap |
 |---|---|---|
-| SQL statements | Broad core; large admin/programmatic tail missing | Compound stored programs and replication/admin SQL |
+| SQL statements | Broad core; large admin/programmatic tail missing | Stored functions and replication/admin SQL |
 | Query execution | Composite equality/range access, bounded index ordering, restricted join reordering, and stable/correlated index probes | General cost-based planning and broader correlated forms |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, non-point buffers, and geographic SRS semantics |
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
@@ -39,8 +39,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
-| Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
-| Routines & events | Typed IN/OUT/INOUT procedures with compound DECLARE/SET/IF bodies, multi-result CALL, and one-time event declarations | Stored functions, cursors, handlers, loops, and event scheduling |
+| Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound control-flow bodies | Complex views and trigger handlers/dynamic SQL |
+| Routines & events | Typed IN/OUT/INOUT procedures with compound variables, conditions, loops, multi-result CALL, and one-time event declarations | Stored functions, cursors, handlers, and event scheduling |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
 | Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
@@ -295,7 +295,8 @@ other view shapes materialize once per statement.
 Triggers working: ordered multiple BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH
 ROW triggers with OLD/NEW row images, BEFORE SET NEW assignments,
 FOLLOWS/PRECEDES, and `BEGIN ... END` sequences of DML, local declarations and
-assignments, nested IF/ELSEIF/ELSE branches, and SET NEW statements;
+assignments, nested IF/ELSEIF/ELSE and CASE branches, labeled blocks, WHILE,
+REPEAT, and LOOP statements with LEAVE/ITERATE, and SET NEW statements;
 statement atomicity and 1442 cycle/self-write detection,
 definer-based privilege checks per fire, lifecycle maintenance, and SHOW
 TRIGGERS/I_S.TRIGGERS metadata. The creation-time SQL mode, client charset,
@@ -309,12 +310,13 @@ trigger is created.
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 | VIEW_DEFINITION rendering | fully-qualified canonical expression text | SHOW CREATE VIEW renders the stored declaration envelope, but its SELECT body and I_S.VIEWS.VIEW_DEFINITION retain the user's original text | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table INSERT/UPDATE/DELETE/REPLACE fire their row timings atomically; multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
-| Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML, local DECLARE/SET, scalar-subquery assignment, nested IF/ELSEIF/ELSE, and SET NEW are covered; CASE, loops, handlers, SIGNAL, and dynamic SQL remain absent | medium | refusal |
+| Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML, local DECLARE/SET, scalar-subquery assignment, IF and CASE branches, labeled blocks and loops, LEAVE/ITERATE, and SET NEW are covered; handlers, SIGNAL/RESIGNAL, and dynamic SQL remain absent | medium | refusal |
 
 ## 10. Stored routines, events, schedulers
 
 Working: procedures support typed `IN`, `OUT`, and `INOUT` parameters,
-`DECLARE`/`SET`, nested `IF`/`ELSEIF`/`ELSE`, sequential SQL statements,
+`DECLARE`/`SET`, nested `IF`/`ELSEIF`/`ELSE` and `CASE`, labeled blocks,
+`WHILE`, `REPEAT`, and `LOOP` with `LEAVE`/`ITERATE`, sequential SQL statements,
 routine variables in expressions and `LIMIT`, and multiple resultsets with
 the protocol's final OK result. CREATE/DROP/CALL, SHOW CREATE PROCEDURE, SHOW
 PROCEDURE STATUS, and persisted ROUTINES metadata are covered. DEFINER and
@@ -326,7 +328,7 @@ ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, and dynamic SQL | typed procedure parameters, local variables, nested IF branches, sequential statements, and multi-result CALL are covered; stored functions, handlers, cursors, loops, CASE, SIGNAL/RESIGNAL, and dynamic SQL remain absent | medium | refusal |
+| Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, and dynamic SQL | typed procedure parameters, scoped local variables, IF and CASE branches, labeled blocks and loops, LEAVE/ITERATE, sequential statements, and multi-result CALL are covered; stored functions, handlers, cursors, SIGNAL/RESIGNAL, and dynamic SQL remain absent | medium | refusal |
 | Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and schedule metadata persist, but no event is scheduled or executed | medium | refusal |
 | Event alteration | ALTER EVENT schedule/status/body/rename | absent | low | refusal |
 
@@ -509,10 +511,10 @@ implementation effort:
 2. Transaction scheduling and READ UNCOMMITTED. Indexed point/range UPDATE and
    DELETE statements wait and rebase, but deadlock victim selection, dirty
    reads, and the remaining transaction write shapes are not implemented.
-3. Complex join-derived updatable views and the remaining stored-program control
-   language. Procedures and triggers cover typed locals, nested conditional
-   branches, and sequential statements; loops, handlers, cursors, CASE, SIGNAL,
-   and dynamic SQL remain absent.
+3. Complex join-derived updatable views and the remaining stored-program
+   language. Procedures and triggers cover typed locals, conditional branches,
+   labeled blocks and loops, LEAVE/ITERATE, and sequential statements; stored
+   functions, handlers, cursors, SIGNAL/RESIGNAL, and dynamic SQL remain absent.
 4. Spatial indexes, overlay/buffer operations, and geographic SRS behavior.
    The common planar topology family includes equality and convex hull.
 5. Replication, logging, broad engine counters, and the remaining metadata

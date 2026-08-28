@@ -2910,11 +2910,9 @@ let private tryTextRoutineCommand (sql: string) =
     else
         None
 
-let private routineValidationError =
-    function
-    | StoredProgram.DuplicateParameter name -> Err(1330, sprintf "Duplicate parameter: %s" name)
-    | StoredProgram.DuplicateVariable name -> Err(1331, sprintf "Duplicate variable: %s" name)
-    | StoredProgram.UnknownVariable name -> Err(1193, sprintf "Unknown system variable '%s'" name)
+let private routineValidationError error =
+    let code, message = StoredProgram.validationError error
+    Err(code, message)
 
 let private parseRoutineDefinition options parameters body =
     let isSupportedText sql =
@@ -3034,7 +3032,8 @@ type private RoutineRun =
       Locals: Map<string, Executor.RoutineVariable>
       Results: (QueryResult * ColumnMetadata list) list
       AffectedRows: uint64
-      Error: QueryResult option }
+      Error: QueryResult option
+      Flow: StoredProgram.Flow }
 
 let private runRoutineStatements
     (store: Store)
@@ -3052,7 +3051,16 @@ let private runRoutineStatements
           Locals = locals
           Results = List.rev results
           AffectedRows = affectedRows
-          Error = Some error }
+          Error = Some error
+          Flow = StoredProgram.Flow.Complete }
+
+    let flowing session locals results affectedRows flow =
+        { Session = session
+          Locals = locals
+          Results = List.rev results
+          AffectedRows = affectedRows
+          Error = None
+          Flow = flow }
 
     let rec run current locals results affectedRows =
         function
@@ -3061,7 +3069,8 @@ let private runRoutineStatements
               Locals = locals
               Results = List.rev results
               AffectedRows = affectedRows
-              Error = None }
+              Error = None
+              Flow = StoredProgram.Flow.Complete }
         | statement :: rest ->
             match statement with
             | StoredProgram.Sql sql ->
@@ -3103,13 +3112,109 @@ let private runRoutineStatements
                 | Error error -> failed next locals results affectedRows error
                 | Ok value ->
                     let branch = if Value.truthy value = Some true then whenTrue else whenFalse
-                    let branchRun = run next locals [] 0UL branch
-                    let results = List.rev branchRun.Results @ results
-                    let affectedRows = affectedRows + branchRun.AffectedRows
+                    run next locals [] 0UL branch |> continueAfterNested rest results affectedRows
+            | StoredProgram.Block(label, body) ->
+                let blockRun = run current locals [] 0UL body
+                let flow =
+                    match blockRun.Flow, label with
+                    | StoredProgram.Flow.Leave target, Some label when target = label -> StoredProgram.Flow.Complete
+                    | flow, _ -> flow
 
-                    match branchRun.Error with
-                    | Some error -> failed branchRun.Session branchRun.Locals results affectedRows error
-                    | None -> run branchRun.Session branchRun.Locals results affectedRows rest
+                { blockRun with
+                    Locals = StoredProgram.restoreOuterScope body locals blockRun.Locals
+                    Flow = flow }
+                |> continueAfterNested rest results affectedRows
+            | StoredProgram.Case(selector, branches, otherwise) ->
+                let branchSelector = StoredProgram.caseBranchIndexExpression selector branches
+
+                let next, selected = evaluate locals current branchSelector
+
+                match selected with
+                | Error error -> failed next locals results affectedRows error
+                | Ok(VInt index) when index >= 0L ->
+                    branches
+                    |> List.item (int index)
+                    |> snd
+                    |> run next locals [] 0UL
+                    |> continueAfterNested rest results affectedRows
+                | Ok _ ->
+                    match otherwise with
+                    | None -> failed next locals results affectedRows (Err(1339, "Case not found for CASE statement"))
+                    | Some body -> run next locals [] 0UL body |> continueAfterNested rest results affectedRows
+            | StoredProgram.While(label, condition, body) ->
+                let rec iterate current locals results affectedRows =
+                    Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                    let next, evaluated = evaluate locals current condition
+
+                    match evaluated with
+                    | Error error -> failed next locals results affectedRows error
+                    | Ok value when Value.truthy value <> Some true -> run next locals results affectedRows rest
+                    | Ok _ ->
+                        let bodyRun = run next locals [] 0UL body
+                        let results = List.rev bodyRun.Results @ results
+                        let affectedRows = affectedRows + bodyRun.AffectedRows
+
+                        match bodyRun.Error, bodyRun.Flow with
+                        | Some error, _ -> failed bodyRun.Session bodyRun.Locals results affectedRows error
+                        | None, StoredProgram.Flow.Leave target when label = Some target ->
+                            run bodyRun.Session bodyRun.Locals results affectedRows rest
+                        | None, StoredProgram.Flow.Iterate target when label = Some target ->
+                            iterate bodyRun.Session bodyRun.Locals results affectedRows
+                        | None, StoredProgram.Flow.Complete -> iterate bodyRun.Session bodyRun.Locals results affectedRows
+                        | None, flow -> flowing bodyRun.Session bodyRun.Locals results affectedRows flow
+
+                iterate current locals results affectedRows
+            | StoredProgram.Repeat(label, body, until) ->
+                let rec iterate current locals results affectedRows =
+                    Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                    let bodyRun = run current locals [] 0UL body
+                    let results = List.rev bodyRun.Results @ results
+                    let affectedRows = affectedRows + bodyRun.AffectedRows
+
+                    match bodyRun.Error, bodyRun.Flow with
+                    | Some error, _ -> failed bodyRun.Session bodyRun.Locals results affectedRows error
+                    | None, StoredProgram.Flow.Leave target when label = Some target ->
+                        run bodyRun.Session bodyRun.Locals results affectedRows rest
+                    | None, StoredProgram.Flow.Iterate target when label = Some target ->
+                        iterate bodyRun.Session bodyRun.Locals results affectedRows
+                    | None, StoredProgram.Flow.Complete ->
+                        let next, evaluated = evaluate bodyRun.Locals bodyRun.Session until
+
+                        match evaluated with
+                        | Error error -> failed next bodyRun.Locals results affectedRows error
+                        | Ok value when Value.truthy value = Some true -> run next bodyRun.Locals results affectedRows rest
+                        | Ok _ -> iterate next bodyRun.Locals results affectedRows
+                    | None, flow -> flowing bodyRun.Session bodyRun.Locals results affectedRows flow
+
+                iterate current locals results affectedRows
+            | StoredProgram.Loop(label, body) ->
+                let rec iterate current locals results affectedRows =
+                    Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+                    let bodyRun = run current locals [] 0UL body
+                    let results = List.rev bodyRun.Results @ results
+                    let affectedRows = affectedRows + bodyRun.AffectedRows
+
+                    match bodyRun.Error, bodyRun.Flow with
+                    | Some error, _ -> failed bodyRun.Session bodyRun.Locals results affectedRows error
+                    | None, StoredProgram.Flow.Leave target when label = Some target ->
+                        run bodyRun.Session bodyRun.Locals results affectedRows rest
+                    | None, StoredProgram.Flow.Iterate target when label = Some target ->
+                        iterate bodyRun.Session bodyRun.Locals results affectedRows
+                    | None, StoredProgram.Flow.Complete -> iterate bodyRun.Session bodyRun.Locals results affectedRows
+                    | None, flow -> flowing bodyRun.Session bodyRun.Locals results affectedRows flow
+
+                iterate current locals results affectedRows
+            | StoredProgram.Leave label -> flowing current locals results affectedRows (StoredProgram.Flow.Leave label)
+            | StoredProgram.Iterate label -> flowing current locals results affectedRows (StoredProgram.Flow.Iterate label)
+
+    and continueAfterNested rest results affectedRows nested =
+        let results = List.rev nested.Results @ results
+        let affectedRows = affectedRows + nested.AffectedRows
+
+        match nested.Error, nested.Flow with
+        | Some error, _ -> failed nested.Session nested.Locals results affectedRows error
+        | None, StoredProgram.Flow.Complete -> run nested.Session nested.Locals results affectedRows rest
+        | None, flow -> flowing nested.Session nested.Locals results affectedRows flow
 
     and continueAfterSql locals results affectedRows rest next result =
         match result with

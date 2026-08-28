@@ -100,6 +100,36 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (1), (2), (3), (-1)") "fire each branch"
               Expect.equal (rows store "SELECT n FROM t ORDER BY id") [ [ Some "10" ]; [ Some "21" ]; [ Some "30" ]; [ Some "-1" ] ] "each row follows one branch"
 
+          testCase "trigger bodies compose CASE and WHILE control flow"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              let definition =
+                  """CREATE TRIGGER control BEFORE INSERT ON t FOR EACH ROW
+                      BEGIN
+                        DECLARE i INT DEFAULT 0;
+                        WHILE i < 2 DO
+                          SET NEW.n = NEW.n + 1;
+                          SET i = i + 1;
+                        END/*loop*/WHILE;
+                        CASE/*selector*/NEW.n
+                          WHEN 3 THEN SET NEW.n = 30;
+                          ELSE SET NEW.n = 40;
+                        END/*case*/CASE;
+                      END"""
+
+              expectOk
+                  (runDefault store definition)
+                  "create control-flow trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (1), (5)") "fire trigger"
+              Expect.equal (rows store "SELECT n FROM t ORDER BY n") [ [ Some "30" ]; [ Some "40" ] ] "control flow"
+
+              match runDefault store "CREATE TRIGGER bad_label BEFORE INSERT ON t FOR EACH ROW BEGIN LEAVE nowhere; END" with
+              | Err(1308, "LEAVE with no matching label: nowhere") -> ()
+              | other -> failtestf "expected unmatched-label error, got %A" other
+
           testCase "trigger blocks retain declared values from scalar subqueries"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
