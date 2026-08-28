@@ -2020,6 +2020,40 @@ let tests =
               | ResultSet(_, [ [ Some "mydb" ] ]) -> ()
               | other -> failtestf "expected mydb, got %A" other
 
+          testCase "tracked schema and system-variable assignments are retained for the next OK packet"
+          <| fun _ ->
+              let session =
+                  { create 1 (Fsdb.Storage.create ()) with
+                      Capabilities = ClientProtocol41 ||| ClientSessionTrack }
+
+              let session, _ = handle session "CREATE DATABASE tracked"
+              let session, _ = handle session "USE tracked"
+              Expect.equal session.SessionStateChanges [ SchemaChanged "tracked" ] "schema tracker"
+
+              let session, _ = handle session "SET autocommit = 1"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ SystemVariableChanged("autocommit", "ON") ]
+                  "same-value assignments are tracked"
+
+              let session, _ = handle session "SET session_track_state_change = ON"
+              Expect.isEmpty session.SessionStateChanges "the tracker does not report its own assignment"
+
+              let session, _ = handle session "SET @tracked = 1"
+              Expect.equal session.SessionStateChanges [ StateChanged ] "generic state-change tracker"
+
+              let session, _ = handle session "SET TRANSACTION READ ONLY"
+              Expect.equal session.SessionStateChanges [ StateChanged ] "next-transaction characteristics change session state"
+
+              let session, _ = handle session "SET character_set_results = NULL"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ SystemVariableChanged("character_set_results", ""); StateChanged ]
+                  "NULL is reported as an empty tracked value"
+
+              let session, _ = handle session "SELECT 1"
+              Expect.isEmpty session.SessionStateChanges "the next statement starts with an empty tracker"
+
           testCase "SCHEMA() is a synonym for DATABASE(), matching MySQL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

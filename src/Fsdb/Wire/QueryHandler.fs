@@ -1153,7 +1153,24 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
             | Error result -> session, result
             | Ok _ ->
                 let updated = actions |> List.fold applySetAction session
-                { updated with UserVariables = userVariables }, Affected 0UL
+                let updated = { updated with UserVariables = userVariables }
+                let changedSystemVariables =
+                    actions
+                    |> List.collect (function
+                        | SetNamesAction _ -> connectionVariableNames
+                        | SetVarAction(name, _, false) -> [ name ]
+                        | SetTransactionIsolationAction(SessionIsolation, _) -> [ "transaction_isolation" ]
+                        | _ -> [])
+
+                let changesSession =
+                    actions
+                    |> List.exists (function
+                        | SetVarAction(_, _, true)
+                        | SetTransactionIsolationAction(GlobalIsolation, _) -> false
+                        | SetVarAction("session_track_state_change", _, false) -> false
+                        | _ -> true)
+
+                Session.trackSystemVariableAssignments changesSession changedSystemVariables updated, Affected 0UL
 
 // ---------------------------------------------------------------------------
 // Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by
@@ -1468,7 +1485,7 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
     let session =
         if value = "0" then session else commitSession session
 
-    session, Affected 0UL
+    Session.trackSystemVariableAssignments true [ "autocommit" ] session, Affected 0UL
 
 /// Parses and executes anything that isn't one of the text-probe special
 /// cases above. Anything else is a 1064 syntax error with SQLSTATE 42000.
@@ -2217,19 +2234,25 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
             match validateSetAction session action with
             | Error result -> session, result
-            | Ok() -> applySetAction session action, Affected 0UL
+            | Ok() ->
+                let updated = applySetAction session action
+                let names = if scope = SessionIsolation then [ "transaction_isolation" ] else []
+                Session.trackSystemVariableAssignments (scope <> GlobalIsolation) names updated, Affected 0UL
     | SetTransactionAccess(sessionScope, readOnly) ->
         let value = if readOnly then "1" else "0"
 
-        (if sessionScope then
-             { session with
-                 Variables =
-                     session.Variables
-                     |> Map.add "transaction_read_only" (Some value)
-                     |> Map.add "tx_read_only" (Some value) }
-         else
-             { session with PendingTransactionReadOnly = Some readOnly }),
-        Affected 0UL
+        if sessionScope then
+            let updated =
+                { session with
+                    Variables =
+                        session.Variables
+                        |> Map.add "transaction_read_only" (Some value)
+                        |> Map.add "tx_read_only" (Some value) }
+
+            Session.trackSystemVariableAssignments true [ "transaction_read_only"; "tx_read_only" ] updated, Affected 0UL
+        else
+            let updated = { session with PendingTransactionReadOnly = Some readOnly }
+            Session.trackSystemVariableAssignments true [] updated, Affected 0UL
     | SetRoleNone -> session, Affected 0UL
     | SetCharacterSet charset ->
         let charset = charset.ToLowerInvariant()
@@ -2247,7 +2270,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match collation with
         | None -> session, Err(1115, sprintf "Unknown character set: '%s'" charset)
         | Some collation ->
-            applyConnectionEncoding session charset (Collation.tryFind collation), Affected 0UL
+            let updated = applyConnectionEncoding session charset (Collation.tryFind collation)
+            Session.trackSystemVariableAssignments true connectionVariableNames updated, Affected 0UL
     | SetPassword(userOpt, password) ->
         // No FOR clause selects the session's authenticated account.
         let wanted = userOpt |> Option.map accountRefOf |> Option.defaultValue (accountOf session)
@@ -2275,7 +2299,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | Release name -> releaseSavepoint name session
     | Use dbName ->
         if Storage.databaseExists (Session.currentStore session) dbName then
-            { session with Database = Some dbName }, Affected 0UL
+            Session.trackSchemaAssignment dbName ({ session with Database = Some dbName }), Affected 0UL
         else
             let code, msg = Storage.toMySqlError (Storage.NoSuchDatabase dbName)
             session, Err(code, msg)
@@ -3604,6 +3628,8 @@ let private recordDiagnostics
     recordResult (session, result)
 
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
+    let session = Session.clearSessionStateChanges session
+
     recordDiagnostics session (preservesDiagnostics rawSql) (fun () ->
         try
             let result = dispatch session rawSql
@@ -3652,6 +3678,7 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
 /// REPLACE execution path, retaining its coercion, trigger, and transaction
 /// behavior.
 let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value list list) : Session * QueryResult =
+    let session = Session.clearSessionStateChanges session
     let statement =
         if load.Replace then
             Replace(load.Table, load.Columns, rows |> List.map (List.map Lit))
@@ -3671,6 +3698,8 @@ let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value li
 /// (SET/SHOW/transaction control, which have no AST) still substitute into
 /// `Sql` and go through the ordinary text path.
 let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list) : Session * QueryResult =
+    let session = Session.clearSessionStateChanges session
+
     // The AST path calls `executeParsed` directly, which — unlike `handle` —
     // doesn't convert a stray .NET exception into an `Err`, so a bound value
     // that overflows a temporal/numeric op (or any bug) would otherwise drop

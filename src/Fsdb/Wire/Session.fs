@@ -29,6 +29,10 @@ let defaultVariables: Map<string, string option> =
           "autocommit", "1"
           "system_time_zone", "UTC"
           "time_zone", "SYSTEM"
+          "session_track_schema", "ON"
+          "session_track_state_change", "OFF"
+          "session_track_system_variables",
+          "time_zone,autocommit,character_set_client,character_set_results,character_set_connection"
           "auto_increment_increment", "1"
           // mysqldump reads these before setting them.
           "foreign_key_checks", "1"
@@ -161,6 +165,8 @@ type Session =
       PendingFoundRows: uint64 option
       /// Conditions from the most recently executed statement.
       Diagnostics: Condition list
+      /// Session changes encoded in the successful command's final OK packet.
+      SessionStateChanges: SessionStateChange list
       /// Per-column wire descriptors for the latest typed result set.
       LastResultColumnMetadata: ColumnMetadata list
       /// `Some` between BEGIN/START TRANSACTION and COMMIT/ROLLBACK.
@@ -215,6 +221,7 @@ let create (connectionId: int) (store: Store) : Session =
       FoundRows = 0UL
       PendingFoundRows = None
       Diagnostics = []
+      SessionStateChanges = []
       LastResultColumnMetadata = []
       Tx = None
       PendingTransactionReadOnly = None
@@ -234,6 +241,92 @@ let create (connectionId: int) (store: Store) : Session =
       TransportMetrics =
         { BytesReceived = 0L
           BytesSent = 0L } }
+
+let clearSessionStateChanges (session: Session) =
+    { session with SessionStateChanges = [] }
+
+let private booleanSystemVariables =
+    Set.ofList
+        [ "autocommit"
+          "foreign_key_checks"
+          "innodb_file_per_table"
+          "local_infile"
+          "performance_schema"
+          "read_only"
+          "restrict_fk_on_non_standard_key"
+          "session_track_schema"
+          "session_track_state_change"
+          "sql_generate_invisible_primary_key"
+          "sql_notes"
+          "transaction_read_only"
+          "tx_read_only"
+          "unique_checks" ]
+
+let private sessionTrackValue (name: string) (value: string option) =
+    match value with
+    | None -> ""
+    | Some value when Set.contains name booleanSystemVariables ->
+        match value.Trim().ToUpperInvariant() with
+        | "0"
+        | "OFF"
+        | "FALSE" -> "OFF"
+        | _ -> "ON"
+    | Some value -> value
+
+let private trackingIsEnabled name (session: Session) =
+    session.Variables
+    |> Map.tryFind name
+    |> Option.flatten
+    |> Option.exists (fun value ->
+        value.Equals("1", StringComparison.OrdinalIgnoreCase)
+        || value.Equals("ON", StringComparison.OrdinalIgnoreCase))
+
+let private appendSessionStateChanges stateChanged (changes: Protocol.SessionStateChange list) (session: Session) =
+    if session.Capabilities &&& ClientSessionTrack = 0u then
+        session
+    else
+        let changes =
+            if stateChanged && trackingIsEnabled "session_track_state_change" session then
+                changes @ [ Protocol.StateChanged ]
+            else
+                changes
+
+        { session with SessionStateChanges = session.SessionStateChanges @ changes }
+
+let private trackedSystemVariableNames (session: Session) =
+    session.Variables
+    |> Map.tryFind "session_track_system_variables"
+    |> Option.flatten
+    |> Option.defaultValue ""
+    |> fun value -> value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+    |> Seq.map _.ToLowerInvariant()
+    |> Set.ofSeq
+
+let trackSystemVariableAssignments stateChanged (names: string list) (session: Session) =
+    let tracked = trackedSystemVariableNames session
+    let tracksAll = Set.contains "*" tracked
+
+    names
+    |> List.distinct
+    |> List.choose (fun name ->
+        let name = name.ToLowerInvariant()
+
+        if tracksAll || Set.contains name tracked then
+            session.Variables
+            |> Map.tryFind name
+            |> Option.map (fun value -> Protocol.SystemVariableChanged(name, sessionTrackValue name value))
+        else
+            None)
+    |> fun changes -> appendSessionStateChanges stateChanged changes session
+
+let trackSchemaAssignment (schema: string) (session: Session) =
+    let changes =
+        if trackingIsEnabled "session_track_schema" session then
+            [ Protocol.SchemaChanged schema ]
+        else
+            []
+
+    appendSessionStateChanges true changes session
 
 /// The catalog store all statements on this session currently execute
 /// against: the shared store outside a transaction, or the transaction's

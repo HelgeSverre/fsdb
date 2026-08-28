@@ -86,6 +86,38 @@ let tests =
               let eof = Reader((eofPayloadWithWarnings ClientProtocol41 StatusAutocommit 5).[1..])
               Expect.equal (eof.ReadInt16LE()) 5 "legacy EOF warnings"
 
+          testCase "session tracking is advertised and encoded in OK packets"
+          <| fun _ ->
+              Expect.isTrue (ServerCapabilities &&& ClientSessionTrack <> 0u) "capability advertised"
+
+              let capabilities = ClientProtocol41 ||| ClientSessionTrack
+              let payload =
+                  okPayloadWithWarningsAndSessionState
+                      capabilities
+                      StatusAutocommit
+                      0UL
+                      0UL
+                      0
+                      [ SystemVariableChanged("autocommit", "OFF"); SchemaChanged "application" ]
+
+              let reader = Reader(payload.[1..])
+              reader.ReadLenEncInt() |> ignore
+              reader.ReadLenEncInt() |> ignore
+              let status = reader.ReadInt16LE()
+              reader.ReadInt16LE() |> ignore
+              Expect.isTrue (status &&& StatusSessionStateChanged <> 0) "state-changed status"
+              Expect.equal (reader.ReadLenEncString()) (Some "") "empty human-readable info"
+
+              let state = reader.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> reader.ReadBytes |> Reader
+              Expect.equal (state.ReadByte()) SessionTrackSystemVariables "system-variable tracker"
+              let systemVariable = state.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> state.ReadBytes |> Reader
+              Expect.equal (systemVariable.ReadLenEncString()) (Some "autocommit") "variable name"
+              Expect.equal (systemVariable.ReadLenEncString()) (Some "OFF") "variable value"
+              Expect.equal (state.ReadByte()) SessionTrackSchema "schema tracker"
+              let schema = state.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> state.ReadBytes |> Reader
+              Expect.equal (schema.ReadLenEncString()) (Some "application") "schema name"
+              Expect.equal state.Remaining 0 "all tracker bytes consumed"
+
           testCase "ERR payload carries the error code and message"
           <| fun _ ->
               let payload = errPayload ClientProtocol41 1064 "bad syntax"

@@ -97,6 +97,7 @@ let ClientMultiStatements = 0x00010000u
 let ClientMultiResults = 0x00020000u
 let ClientPluginAuth = 0x00080000u
 let ClientPluginAuthLenencClientData = 0x00200000u
+let ClientSessionTrack = 0x00800000u
 let ClientDeprecateEof = 0x01000000u
 
 /// What this server offers during the handshake. Effective per-connection
@@ -113,6 +114,7 @@ let ServerCapabilities =
     ||| ClientMultiStatements
     ||| ClientMultiResults
     ||| ClientPluginAuth
+    ||| ClientSessionTrack
     ||| ClientDeprecateEof
 
 /// Adds capabilities enabled by the current transport and server settings.
@@ -145,6 +147,18 @@ let StatusCursorExists = 0x0040
 
 /// SERVER_STATUS_LAST_ROW_SENT
 let StatusLastRowSent = 0x0080
+
+/// SERVER_SESSION_STATE_CHANGED
+let StatusSessionStateChanged = 0x4000
+
+let SessionTrackSystemVariables = 0uy
+let SessionTrackSchema = 1uy
+let SessionTrackStateChange = 2uy
+
+type SessionStateChange =
+    | SystemVariableChanged of name: string * value: string
+    | SchemaChanged of name: string
+    | StateChanged
 
 /// Builds the initial HandshakeV10 payload. `authPluginData` must be 20
 /// bytes — the mysql_native_password scramble `Server.authenticateHandshake`
@@ -262,7 +276,37 @@ let private okPayloadWithHeader
     (affectedRows: uint64)
     (lastInsertId: uint64)
     (warnings: int)
+    (sessionStateChanges: SessionStateChange list)
     : byte[] =
+    let sessionState =
+        let writer = Writer()
+
+        let writeBlock kind writeData =
+            let data = Writer()
+            writeData data
+            writer.WriteByte kind
+            writer.WriteLenEncBytes(data.ToArray())
+
+        for change in sessionStateChanges do
+            match change with
+            | SystemVariableChanged(name, value) ->
+                writeBlock SessionTrackSystemVariables (fun data ->
+                    data.WriteLenEncString name
+                    data.WriteLenEncString value)
+            | SchemaChanged name ->
+                writeBlock SessionTrackSchema (fun data -> data.WriteLenEncString name)
+            | StateChanged ->
+                writeBlock SessionTrackStateChange (fun data -> data.WriteLenEncString "1")
+
+        writer.ToArray()
+
+    let tracksSession = capabilities &&& ClientSessionTrack <> 0u
+    let statusFlags =
+        if tracksSession && sessionState.Length > 0 then
+            statusFlags ||| StatusSessionStateChanged
+        else
+            statusFlags
+
     let w = Writer()
     w.WriteByte header
     w.WriteLenEncInt affectedRows
@@ -271,6 +315,12 @@ let private okPayloadWithHeader
     if capabilities &&& ClientProtocol41 <> 0u then
         w.WriteInt16LE statusFlags
         w.WriteInt16LE warnings
+
+        if tracksSession then
+            w.WriteLenEncString ""
+
+            if sessionState.Length > 0 then
+                w.WriteLenEncBytes sessionState
 
     w.ToArray()
 
@@ -282,7 +332,7 @@ let private okPayloadWithHeader
 /// directly off the OK packet rather than tracking transaction state
 /// themselves.
 let okPayload (capabilities: uint32) (statusFlags: int) (affectedRows: uint64) (lastInsertId: uint64) : byte[] =
-    okPayloadWithHeader 0uy capabilities statusFlags affectedRows lastInsertId 0
+    okPayloadWithHeader 0uy capabilities statusFlags affectedRows lastInsertId 0 []
 
 let okPayloadWithWarnings
     (capabilities: uint32)
@@ -291,17 +341,35 @@ let okPayloadWithWarnings
     (lastInsertId: uint64)
     (warnings: int)
     : byte[] =
-    okPayloadWithHeader 0uy capabilities statusFlags affectedRows lastInsertId warnings
+    okPayloadWithHeader 0uy capabilities statusFlags affectedRows lastInsertId warnings []
+
+let okPayloadWithWarningsAndSessionState
+    (capabilities: uint32)
+    (statusFlags: int)
+    (affectedRows: uint64)
+    (lastInsertId: uint64)
+    (warnings: int)
+    (sessionStateChanges: SessionStateChange list)
+    : byte[] =
+    okPayloadWithHeader 0uy capabilities statusFlags affectedRows lastInsertId warnings sessionStateChanges
 
 /// Builds the OK packet that terminates a resultset when CLIENT_DEPRECATE_EOF
 /// is negotiated. Same shape as `okPayload`, but header 0xfe — clients tell
 /// it apart from a row by that header byte together with the packet length,
 /// so this can't just reuse okPayload's 0x00.
 let okEndOfResultSetPayload (capabilities: uint32) (statusFlags: int) : byte[] =
-    okPayloadWithHeader 0xfeuy capabilities statusFlags 0UL 0UL 0
+    okPayloadWithHeader 0xfeuy capabilities statusFlags 0UL 0UL 0 []
 
 let okEndOfResultSetPayloadWithWarnings (capabilities: uint32) (statusFlags: int) (warnings: int) : byte[] =
-    okPayloadWithHeader 0xfeuy capabilities statusFlags 0UL 0UL warnings
+    okPayloadWithHeader 0xfeuy capabilities statusFlags 0UL 0UL warnings []
+
+let okEndOfResultSetPayloadWithWarningsAndSessionState
+    (capabilities: uint32)
+    (statusFlags: int)
+    (warnings: int)
+    (sessionStateChanges: SessionStateChange list)
+    : byte[] =
+    okPayloadWithHeader 0xfeuy capabilities statusFlags 0UL 0UL warnings sessionStateChanges
 
 /// Minimal MySQL error-code -> SQLSTATE mapping. Drivers/ORMs branch on
 /// SQLSTATE, not the vendor code — PDO/Doctrine map 42000 to a syntax-error

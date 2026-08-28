@@ -254,11 +254,19 @@ let private resultHeadPayloads
     (statusFlags: int)
     (lastInsertId: uint64)
     (warningCount: int)
+    (sessionStateChanges: SessionStateChange list)
     (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : byte[] list =
     match result with
-    | Affected affectedRows -> [ okPayloadWithWarnings capabilities statusFlags affectedRows lastInsertId warningCount ]
+    | Affected affectedRows ->
+        [ okPayloadWithWarningsAndSessionState
+              capabilities
+              statusFlags
+              affectedRows
+              lastInsertId
+              warningCount
+              sessionStateChanges ]
     | Err(code, message) -> [ errPayload capabilities code message ]
     | MultipleResults _ -> invalidArg (nameof result) "Nested result collections must be sent through sendResult"
     | ResultSet(columns, _) ->
@@ -284,6 +292,7 @@ let rec private sendResult
     (statusFlags: int)
     (lastInsertId: uint64)
     (warningCount: int)
+    (sessionStateChanges: SessionStateChange list)
     (columnMetadata: ColumnMetadata list)
     (rowEncoder: ColumnMetadata list -> string option list -> byte[])
     (result: Executor.QueryResult)
@@ -299,6 +308,7 @@ let rec private sendResult
                     statusFlags
                     lastInsertId
                     warningCount
+                    sessionStateChanges
                     []
                     rowEncoder
                     (Affected 0UL)
@@ -311,6 +321,8 @@ let rec private sendResult
                         let partStatus =
                             if remaining.IsEmpty then statusFlags else statusFlags ||| StatusMoreResultsExists
 
+                        let partSessionState = if remaining.IsEmpty then sessionStateChanges else []
+
                         let! nextSeqId =
                             sendResult
                                 stream
@@ -319,6 +331,7 @@ let rec private sendResult
                                 partStatus
                                 lastInsertId
                                 warningCount
+                                partSessionState
                                 metadata
                                 rowEncoder
                                 part
@@ -334,7 +347,7 @@ let rec private sendResult
                 sendPayloads
                     stream
                     startSeq
-                    (resultHeadPayloads capabilities statusFlags lastInsertId warningCount metadata result)
+                    (resultHeadPayloads capabilities statusFlags lastInsertId warningCount sessionStateChanges metadata result)
 
             let! seqId = sendRows stream seqId metadata rowEncoder rows
 
@@ -345,7 +358,11 @@ let rec private sendResult
                     stream
                     seqId
                     [ (if deprecateEof then
-                           okEndOfResultSetPayloadWithWarnings capabilities statusFlags warningCount
+                           okEndOfResultSetPayloadWithWarningsAndSessionState
+                               capabilities
+                               statusFlags
+                               warningCount
+                               sessionStateChanges
                        else
                            eofPayloadWithWarnings capabilities statusFlags warningCount) ]
             return nextSeqId
@@ -354,7 +371,7 @@ let rec private sendResult
                 sendPayloads
                     stream
                     startSeq
-                    (resultHeadPayloads capabilities statusFlags lastInsertId warningCount [] result)
+                    (resultHeadPayloads capabilities statusFlags lastInsertId warningCount sessionStateChanges [] result)
     }
 
 let private sendCursorHead
@@ -399,6 +416,29 @@ let private sendCursorRows
         do! sendPayloads stream seqId [ terminator ] |> Async.Ignore
     }
 
+let private sendTextResult
+    (sessionStateChanges: SessionStateChange list)
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (startSeq: byte)
+    (statusFlags: int)
+    (lastInsertId: uint64)
+    (warningCount: int)
+    (columnMetadata: ColumnMetadata list)
+    (result: Executor.QueryResult)
+    : Async<byte> =
+    sendResult
+        stream
+        capabilities
+        startSeq
+        statusFlags
+        lastInsertId
+        warningCount
+        sessionStateChanges
+        columnMetadata
+        textRowPayloadTyped
+        result
+
 /// Writes a text resultset (or OK/ERR) as one or more packets, continuing
 /// the sequence-id numbering from `startSeq`. Not private: exercised
 /// directly by the test suite, since it's the only sequence-id-bearing
@@ -414,8 +454,7 @@ let sendQueryResult
     (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendResult stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata textRowPayloadTyped result
-    |> Async.Ignore
+    sendTextResult [] stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata result |> Async.Ignore
 
 /// As `sendQueryResult`, returning the next packet sequence id for a
 /// multi-result COM_QUERY response.
@@ -429,7 +468,44 @@ let sendQueryResultAndNextSeq
     (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : Async<byte> =
-    sendResult stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata textRowPayloadTyped result
+    sendTextResult [] stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata result
+
+let private sendQueryResultWithSessionStateAndNextSeq
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (startSeq: byte)
+    (statusFlags: int)
+    (lastInsertId: uint64)
+    (warningCount: int)
+    (sessionStateChanges: SessionStateChange list)
+    (columnMetadata: ColumnMetadata list)
+    (result: Executor.QueryResult)
+    : Async<byte> =
+    sendTextResult sessionStateChanges stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata result
+
+let private sendBinaryResult
+    (sessionStateChanges: SessionStateChange list)
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (startSeq: byte)
+    (statusFlags: int)
+    (lastInsertId: uint64)
+    (warningCount: int)
+    (columnMetadata: ColumnMetadata list)
+    (result: Executor.QueryResult)
+    : Async<unit> =
+    sendResult
+        stream
+        capabilities
+        startSeq
+        statusFlags
+        lastInsertId
+        warningCount
+        sessionStateChanges
+        columnMetadata
+        binaryRowPayload
+        result
+    |> Async.Ignore
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
 /// row format COM_STMT_EXECUTE requires (`binaryRowPayload`, which — unlike
@@ -445,8 +521,20 @@ let sendBinaryQueryResult
     (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendResult stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata binaryRowPayload result
-    |> Async.Ignore
+    sendBinaryResult [] stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata result
+
+let private sendBinaryQueryResultWithSessionState
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (startSeq: byte)
+    (statusFlags: int)
+    (lastInsertId: uint64)
+    (warningCount: int)
+    (sessionStateChanges: SessionStateChange list)
+    (columnMetadata: ColumnMetadata list)
+    (result: Executor.QueryResult)
+    : Async<unit> =
+    sendBinaryResult sessionStateChanges stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata result
 
 /// `SERVER_STATUS_AUTOCOMMIT` always, plus `SERVER_STATUS_IN_TRANS` while
 /// `session.Tx` is open — every OK/EOF packet reports this so PDO's
@@ -1097,14 +1185,25 @@ let private handleConnection
                                 return! loop session
                             | Some(InitDb db) ->
                                 if Storage.databaseExists (Session.currentStore session) db then
+                                    let session =
+                                        Session.clearSessionStateChanges session
+                                        |> fun session -> Session.trackSchemaAssignment db { session with Database = Some db }
+
                                     do!
                                         writePacketAsync
                                             stream
                                             { SeqId = seqId
-                                              Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                                              Payload =
+                                                okPayloadWithWarningsAndSessionState
+                                                    capabilities
+                                                    (statusFlagsFor session)
+                                                    0UL
+                                                    0UL
+                                                    0
+                                                    session.SessionStateChanges }
                                         |> Async.Ignore
 
-                                    return! loop { session with Database = Some db }
+                                    return! loop session
                                 else
                                     let code, message = Storage.toMySqlError (Storage.NoSuchDatabase db)
 
@@ -1235,13 +1334,14 @@ let private handleConnection
                                                         processEntry.Db <- nextSession.Database
                                                         let hasMore = not remaining.IsEmpty && (match result with Err _ -> false | _ -> true)
                                                         let! nextSeqId =
-                                                            sendQueryResultAndNextSeq
+                                                            sendQueryResultWithSessionStateAndNextSeq
                                                                 stream
                                                                 capabilities
                                                                 resultSeqId
                                                                 (if hasMore then statusFlagsForMore nextSession else statusFlagsFor nextSession)
                                                                 (uint64 nextSession.LastInsertId)
                                                                 (warningCountFor nextSession)
+                                                                nextSession.SessionStateChanges
                                                                 nextSession.LastResultColumnMetadata
                                                                 result
 
@@ -1587,13 +1687,14 @@ let private handleConnection
                                                 activeSession <- Some session
 
                                                 do!
-                                                    sendBinaryQueryResult
+                                                    sendBinaryQueryResultWithSessionState
                                                         stream
                                                         capabilities
                                                         seqId
                                                         (statusFlagsFor session)
                                                         (uint64 session.LastInsertId)
                                                         (warningCountFor session)
+                                                        session.SessionStateChanges
                                                         session.LastResultColumnMetadata
                                                         result
 

@@ -265,6 +265,49 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "CLIENT_SESSION_TRACK reports schema and system-variable assignments"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let capabilities = ClientProtocol41 ||| ClientSessionTrack
+                  let! client, stream = connectRawAsWithCapabilities server.Port "root" capabilities
+                  use client = client
+
+                  let query (sql: string) =
+                      async {
+                          let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          return! readPacketAsync stream
+                      }
+
+                  let sessionState (packet: Packet) =
+                      let reader = Reader(packet.Payload.[1..])
+                      reader.ReadLenEncInt() |> ignore
+                      reader.ReadLenEncInt() |> ignore
+                      let status = reader.ReadInt16LE()
+                      reader.ReadInt16LE() |> ignore
+                      reader.ReadLenEncString() |> ignore
+                      let length = reader.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0
+                      status, Reader(reader.ReadBytes length)
+
+                  let! _ = query "CREATE DATABASE tracked_wire"
+                  let! used = query "USE tracked_wire"
+                  let useStatus, useState = sessionState used.Value
+                  Expect.isTrue (useStatus &&& StatusSessionStateChanged <> 0) "USE marks the session changed"
+                  Expect.equal (useState.ReadByte()) SessionTrackSchema "schema tracker"
+                  let schema = useState.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> useState.ReadBytes |> Reader
+                  Expect.equal (schema.ReadLenEncString()) (Some "tracked_wire") "tracked schema"
+
+                  let! assigned = query "SET autocommit = 1"
+                  let setStatus, setState = sessionState assigned.Value
+                  Expect.isTrue (setStatus &&& StatusSessionStateChanged <> 0) "SET marks the session changed"
+                  Expect.equal (setState.ReadByte()) SessionTrackSystemVariables "system-variable tracker"
+                  let variable = setState.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> setState.ReadBytes |> Reader
+                  Expect.equal (variable.ReadLenEncString()) (Some "autocommit") "tracked variable"
+                  Expect.equal (variable.ReadLenEncString()) (Some "ON") "tracked value"
+              }
+              |> Async.RunSynchronously
+
           testCase "COM_SET_OPTION toggles multi-statements on the live connection"
           <| fun _ ->
               async {

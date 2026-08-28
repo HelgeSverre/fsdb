@@ -42,7 +42,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
 | Routines & events | Typed IN/OUT/INOUT procedures with compound DECLARE/SET/IF bodies, multi-result CALL, and one-time event declarations | Stored functions, cursors, handlers, loops, and event scheduling |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
-| Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, and multi-result batches | No session-state tracking |
+| Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
 | Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
 | Metadata | 23 INFORMATION_SCHEMA views, 10 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
@@ -66,7 +66,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Statement family | Impact | Class |
 |---|---|---|
-| Procedure declarations retain one simple `IN` parameter and `SQL SECURITY`; zero-parameter procedures execute a direct statement or a single statement wrapped in `BEGIN…END`. Parameterized execution, functions, multi-statement bodies, `DECLARE`, cursors, handlers, and `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
+| Procedures support typed `IN`/`OUT`/`INOUT` parameters, local variables, nested IF branches, sequential statements, and multi-result CALL; stored functions, loops, cursors, handlers, and `SIGNAL`/`GET DIAGNOSTICS` remain absent | medium | divergence/refusal |
 | One-time and recurring `CREATE/DROP EVENT` declarations and metadata are supported; ALTER, status changes, definer execution, and the scheduler thread remain absent | low | divergence/refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
@@ -369,6 +369,9 @@ require_secure_transport, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_conn
 max_prepared_stmt_count enforced with honest advertising, COM_SET_OPTION
 multi-statement toggling, mid-query
 disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
+`CLIENT_SESSION_TRACK` reports default-schema changes and assignments to the
+configured system-variable set, including same-value assignments, plus the
+generic state-change tracker when enabled.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -376,7 +379,7 @@ disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 | Compression | CLIENT_COMPRESS/ZSTD | CLIENT_COMPRESS zlib framing is negotiated; Zstandard is not offered | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, one-character field/line separators, `REPLACE`/`IGNORE`, column lists, and header skipping; no server-file loading, `SET`, user variables, or multibyte separators | low | subset |
-| Session state tracking | CLIENT_SESSION_TRACK info in OK packets | absent | low | refusal |
+| Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, and generic state-change blocks are encoded in final OK packets; transaction-characteristic and GTID blocks remain absent | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Unimplemented COM_* | CHANGE_USER | returns ERR 1047 (`Server.fs`) | low | refusal |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateHandshake` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
