@@ -3072,6 +3072,7 @@ let private runRoutineStatements
             { Conditions = []
               RowCount = 0L }
     let propagatedConditions = ResizeArray<Diagnostics.Condition>()
+    let cursors = ref Map.empty<string, StoredProgram.Cursor>
 
     let updateDiagnostics generated result =
         let conditions =
@@ -3174,6 +3175,80 @@ let private runRoutineStatements
                     run scope next locals results affectedRows rest
             | StoredProgram.DeclareCondition _
             | StoredProgram.DeclareHandler _ -> run scope current locals results affectedRows rest
+            | StoredProgram.DeclareCursor(name, query) ->
+                cursors.Value <- Map.add name (StoredProgram.cursor query) cursors.Value
+
+                run scope current locals results affectedRows rest
+            | StoredProgram.OpenCursor name ->
+                match StoredProgram.tryOpenCursor name cursors.Value with
+                | Result.Error error ->
+                    handleQueryResult scope current locals results affectedRows rest (ErrInfo error)
+                | Ok cursor ->
+                    let next, opened =
+                        executeWithDiagnostics current (fun () ->
+                            Executor.withRoutineVariables locals (fun () -> executeSql current cursor.Query))
+
+                    match opened with
+                    | ResultSet(columns, rows) ->
+                        let binaryValue index (value: string option) =
+                            match value, List.tryItem index next.LastResultColumnMetadata with
+                            | Some text, Some metadata
+                                when metadata.Flags &&& BinaryFlag <> 0us
+                                     && (metadata.TypeId = TypeString
+                                         || metadata.TypeId = TypeVarString
+                                         || metadata.TypeId = TypeBlob) ->
+                                VBytes(Encoding.Latin1.GetBytes text)
+                            | Some text, _ -> VString text
+                            | None, _ -> VNull
+
+                        let rows =
+                            rows
+                            |> List.map (List.mapi binaryValue >> List.toArray)
+                            |> List.toArray
+
+                        cursors.Value <- StoredProgram.setCursorRows name columns.Length rows cursors.Value
+
+                        run scope next locals results affectedRows rest
+                    | error -> handleQueryResult scope next locals results affectedRows rest error
+            | StoredProgram.FetchCursor(name, targets) ->
+                match StoredProgram.tryFetchCursorRow name targets.Length cursors.Value with
+                | Result.Error error ->
+                    handleQueryResult scope current locals results affectedRows rest (ErrInfo error)
+                | Ok(row, nextCursors) ->
+                    cursors.Value <- nextCursors
+
+                    let assigned, generated =
+                        Diagnostics.capture (fun () ->
+                            List.zip targets (Array.toList row)
+                            |> List.fold
+                                (fun assigned (target, value) ->
+                                    assigned
+                                    |> Result.bind (fun locals ->
+                                        match Map.tryFind target locals with
+                                        | None -> Error(Err(1327, sprintf "Undeclared variable: %s" target))
+                                        | Some local ->
+                                            coerceRoutineValue store local.Column value
+                                            |> Result.map (fun value ->
+                                                Map.add target { local with Value = value } locals)))
+                                (Ok locals))
+
+                    match assigned with
+                    | Ok locals ->
+                        updateDiagnostics generated (Affected 0UL)
+                        generated |> List.iter propagatedConditions.Add
+                        run scope current locals results affectedRows rest
+                    | Error error ->
+                        updateDiagnostics generated error
+                        generated |> List.iter propagatedConditions.Add
+                        handleQueryResult scope current locals results affectedRows rest error
+            | StoredProgram.CloseCursor name ->
+                match StoredProgram.tryCloseCursor name cursors.Value with
+                | Result.Error error ->
+                    handleQueryResult scope current locals results affectedRows rest (ErrInfo error)
+                | Ok nextCursors ->
+                    cursors.Value <- nextCursors
+                    updateDiagnostics [] (Affected 0UL)
+                    run scope current locals results affectedRows rest
             | StoredProgram.GetDiagnostics diagnostics ->
                 runDiagnostics scope diagnostics current locals results affectedRows rest
             | StoredProgram.Signal(condition, information) ->
@@ -3209,6 +3284,7 @@ let private runRoutineStatements
                     let branch = if Value.truthy value = Some true then whenTrue else whenFalse
                     run scope next locals [] 0UL branch |> continueAfterNested scope rest results affectedRows
             | StoredProgram.Block(label, body) ->
+                let beforeCursors = cursors.Value
                 let blockScope =
                     { Conditions = StoredProgram.conditionDefinitions scope.Conditions body
                       Statements = body
@@ -3216,6 +3292,7 @@ let private runRoutineStatements
                       StackedDiagnostics = scope.StackedDiagnostics }
 
                 let blockRun = run blockScope current locals [] 0UL body
+                cursors.Value <- StoredProgram.restoreOuterCursors body beforeCursors cursors.Value
                 let flow =
                     match blockRun.Flow, label with
                     | StoredProgram.Flow.Leave target, Some label when target = label -> StoredProgram.Flow.Complete

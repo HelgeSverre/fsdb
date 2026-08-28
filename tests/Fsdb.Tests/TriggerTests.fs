@@ -174,6 +174,40 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (1)") "fire diagnostics trigger"
               Expect.equal (rows store "SELECT n FROM t") [ [ Some "60011" ] ] "handler receives the raised code"
 
+          testCase "trigger cursors iterate query results with NOT FOUND handlers"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+              expectOk (runDefault store "CREATE TABLE trigger_values (n INT)") "create cursor source"
+              expectOk (runDefault store "INSERT INTO trigger_values VALUES (3), (1), (2)") "seed cursor source"
+
+              expectOk
+                  (runDefault
+                      store
+                      """CREATE TRIGGER cursor_total BEFORE INSERT ON t FOR EACH ROW
+                          BEGIN
+                            DECLARE done INT DEFAULT 0;
+                            DECLARE value INT;
+                            DECLARE total INT DEFAULT 0;
+                            DECLARE minimum_value INT DEFAULT 3;
+                            DECLARE values_cursor CURSOR FOR
+                              SELECT n FROM trigger_values WHERE n >= minimum_value ORDER BY n;
+                            DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+                            SET minimum_value = 1;
+                            OPEN values_cursor;
+                            read_loop: LOOP
+                              FETCH values_cursor INTO value;
+                              IF done THEN LEAVE read_loop; END IF;
+                              SET total = total + value;
+                            END LOOP;
+                            CLOSE values_cursor;
+                            SET NEW.n = total;
+                          END""")
+                  "create cursor trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (0)") "fire cursor trigger"
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "6" ] ] "cursor trigger accumulated rows"
+
           testCase "trigger blocks retain declared values from scalar subqueries"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

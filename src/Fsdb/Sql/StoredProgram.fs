@@ -55,6 +55,12 @@ type DiagnosticsStatement =
     { Area: DiagnosticsArea
       Request: DiagnosticsRequest }
 
+type Cursor =
+    { Query: Ast.Statement
+      Rows: Value[][] option
+      ColumnCount: int
+      Position: int }
+
 type Statement =
     | Sql of Ast.Statement
     | TextSql of string
@@ -69,6 +75,10 @@ type Statement =
     | Declare of Declaration
     | DeclareCondition of name: string * value: ConditionValue
     | DeclareHandler of action: HandlerAction * conditions: ConditionValue list * body: Statement
+    | DeclareCursor of name: string * query: Ast.Statement
+    | OpenCursor of name: string
+    | FetchCursor of name: string * targets: string list
+    | CloseCursor of name: string
     | Signal of condition: ConditionValue * information: (string * Expr) list
     | Resignal of condition: ConditionValue option * information: (string * Expr) list
     | GetDiagnostics of DiagnosticsStatement
@@ -95,9 +105,15 @@ type ValidationError =
     | DuplicateParameter of name: string
     | DuplicateVariable of name: string
     | DuplicateCondition of name: string
+    | DuplicateCursor of name: string
     | DuplicateHandler
     | UnknownVariable of name: string
+    | UndeclaredVariable of name: string
     | UnknownCondition of name: string
+    | UnknownCursor of name: string
+    | VariableAfterCursorOrHandler
+    | CursorAfterHandler
+    | DeclarationAfterStatement
     | InvalidSqlState of state: string
     | InvalidUserVariable of message: string
     | RedefiningLabel of name: string
@@ -108,30 +124,41 @@ let validationError =
     | DuplicateParameter name -> 1330, sprintf "Duplicate parameter: %s" name
     | DuplicateVariable name -> 1331, sprintf "Duplicate variable: %s" name
     | DuplicateCondition name -> 1332, sprintf "Duplicate condition: %s" name
+    | DuplicateCursor name -> 1333, sprintf "Duplicate cursor: %s" name
     | DuplicateHandler -> 1413, "Duplicate handler declared in the same block"
     | UnknownVariable name -> 1193, sprintf "Unknown system variable '%s'" name
+    | UndeclaredVariable name -> 1327, sprintf "Undeclared variable: %s" name
     | UnknownCondition name -> 1319, sprintf "Undefined CONDITION: %s" name
+    | UnknownCursor name -> 1324, sprintf "Undefined CURSOR: %s" name
+    | VariableAfterCursorOrHandler -> 1337, "Variable or condition declaration after cursor or handler declaration"
+    | CursorAfterHandler -> 1338, "Cursor declaration after handler declaration"
+    | DeclarationAfterStatement -> 1064, "Declarations must precede executable statements"
     | InvalidSqlState state -> 1407, sprintf "Bad SQLSTATE: '%s'" state
     | InvalidUserVariable message -> 3061, message
     | RedefiningLabel name -> 1309, sprintf "Redefining label %s" name
     | UnknownLabel(operation, name) -> 1308, sprintf "%s with no matching label: %s" operation name
 
-let rec sqlStatements =
+let rec private collectSqlStatements includeCursors =
     function
     | Sql statement -> [ statement ]
+    | DeclareCursor(_, query) when includeCursors -> [ query ]
+    | DeclareCursor _ -> []
     | TextSql _ -> []
     | Block(_, body)
-    | Loop(_, body) -> body |> List.collect sqlStatements
+    | Loop(_, body) -> body |> List.collect (collectSqlStatements includeCursors)
     | While(_, _, body)
-    | Repeat(_, body, _) -> body |> List.collect sqlStatements
+    | Repeat(_, body, _) -> body |> List.collect (collectSqlStatements includeCursors)
     | If(_, whenTrue, whenFalse) ->
-        (whenTrue @ whenFalse) |> List.collect sqlStatements
+        (whenTrue @ whenFalse) |> List.collect (collectSqlStatements includeCursors)
     | Case(_, branches, otherwise) ->
-        (branches |> List.collect (snd >> List.collect sqlStatements))
-        @ (otherwise |> Option.defaultValue [] |> List.collect sqlStatements)
-    | DeclareHandler(_, _, body) -> sqlStatements body
+        (branches |> List.collect (snd >> List.collect (collectSqlStatements includeCursors)))
+        @ (otherwise |> Option.defaultValue [] |> List.collect (collectSqlStatements includeCursors))
+    | DeclareHandler(_, _, body) -> collectSqlStatements includeCursors body
     | Declare _
     | DeclareCondition _
+    | OpenCursor _
+    | FetchCursor _
+    | CloseCursor _
     | GetDiagnostics _
     | Signal _
     | Resignal _
@@ -139,9 +166,13 @@ let rec sqlStatements =
     | Leave _
     | Iterate _ -> []
 
+let sqlStatements = collectSqlStatements true
+let executableSqlStatements = collectSqlStatements false
+
 let rec expressions =
     function
     | Sql _
+    | DeclareCursor _
     | TextSql _ -> []
     | Block(_, body)
     | Loop(_, body) -> body |> List.collect expressions
@@ -160,6 +191,9 @@ let rec expressions =
     | GetDiagnostics { Request = ConditionInformation(conditionNumber, _) } -> [ conditionNumber ]
     | GetDiagnostics _ -> []
     | DeclareCondition _ -> []
+    | OpenCursor _
+    | FetchCursor _
+    | CloseCursor _ -> []
     | SetLocal(_, value) -> [ value ]
     | Leave _
     | Iterate _ -> []
@@ -168,6 +202,13 @@ let declaredNames statements =
     statements
     |> List.choose (function
         | Declare declaration -> Some declaration.Name
+        | _ -> None)
+    |> Set.ofList
+
+let declaredCursorNames statements =
+    statements
+    |> List.choose (function
+        | DeclareCursor(name, _) -> Some name
         | _ -> None)
     |> Set.ofList
 
@@ -377,8 +418,8 @@ let diagnosticsAssignments snapshot request conditionNumber =
             assignments
             |> List.map (fun (target, item) -> target, conditionDiagnosticsValue condition item))
 
-let restoreOuterScope statements (before: Map<string, 'value>) after =
-    let shadowed = declaredNames statements
+let private restoreOuterDeclarations declared statements (before: Map<string, 'value>) after =
+    let shadowed = declared statements
 
     before
     |> Map.map (fun name value ->
@@ -386,6 +427,56 @@ let restoreOuterScope statements (before: Map<string, 'value>) after =
             value
         else
             after |> Map.tryFind name |> Option.defaultValue value)
+
+let restoreOuterScope statements before after =
+    restoreOuterDeclarations declaredNames statements before after
+
+let restoreOuterCursors statements before after =
+    restoreOuterDeclarations declaredCursorNames statements before after
+
+let cursor query =
+    { Query = query
+      Rows = None
+      ColumnCount = 0
+      Position = 0 }
+
+let private cursorError code message = SqlState.create code message
+
+let tryOpenCursor name cursors =
+    match Map.tryFind name cursors with
+    | None -> Result.Error(cursorError 1324 (sprintf "Undefined CURSOR: %s" name))
+    | Some { Rows = Some _ } -> Result.Error(cursorError 1325 "Cursor is already open")
+    | Some cursor -> Ok cursor
+
+let setCursorRows name columnCount rows cursors =
+    cursors
+    |> Map.change name (Option.map (fun cursor ->
+        { cursor with
+            Rows = Some rows
+            ColumnCount = columnCount
+            Position = 0 }))
+
+let tryFetchCursorRow name targetCount cursors =
+    match Map.tryFind name cursors with
+    | None -> Result.Error(cursorError 1324 (sprintf "Undefined CURSOR: %s" name))
+    | Some { Rows = None } -> Result.Error(cursorError 1326 "Cursor is not open")
+    | Some cursor when cursor.ColumnCount <> targetCount ->
+        Result.Error(cursorError 1328 "Incorrect number of FETCH variables")
+    | Some cursor ->
+        match cursor.Rows |> Option.bind (Array.tryItem cursor.Position) with
+        | None ->
+            Result.Error(
+                SqlState.createWithState 1329 "02000" "No data - zero rows fetched, selected, or processed"
+            )
+        | Some row ->
+            let cursors = Map.add name { cursor with Position = cursor.Position + 1 } cursors
+            Ok(row, cursors)
+
+let tryCloseCursor name cursors =
+    match Map.tryFind name cursors with
+    | None -> Result.Error(cursorError 1324 (sprintf "Undefined CURSOR: %s" name))
+    | Some { Rows = None } -> Result.Error(cursorError 1326 "Cursor is not open")
+    | Some cursor -> Ok(Map.add name { cursor with Rows = None; Position = 0 } cursors)
 
 let caseBranchIndexExpression selector branches =
     Ast.Case(
@@ -430,6 +521,11 @@ type private ValidationScope =
       DeclaredVariables: Set<string>
       Conditions: Map<string, ConditionValue>
       DeclaredConditions: Set<string>
+      Cursors: Set<string>
+      DeclaredCursors: Set<string>
+      HasCursorDeclaration: bool
+      HasHandlerDeclaration: bool
+      HasExecutableStatement: bool
       HandlerConditions: Set<ConditionValue>
       Labels: (string * LabelKind) list }
 
@@ -525,6 +621,41 @@ let private handlerPrefixPattern =
             separatorPattern,
         RegexOptions.IgnoreCase
     )
+
+let private cursorDeclarationPattern =
+    Regex(
+        sprintf
+            @"^DECLARE%s(?<name>%s)%sCURSOR%sFOR%s(?<query>[\s\S]+)$"
+            separatorPattern
+            labelPattern
+            separatorPattern
+            separatorPattern
+            separatorPattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private openCursorPattern =
+    Regex(sprintf @"^OPEN%s(?<name>%s)$" separatorPattern labelPattern, RegexOptions.IgnoreCase)
+
+let private fetchCursorPattern =
+    Regex(
+        sprintf
+            @"^FETCH%s(?:(?:NEXT%s)?FROM%s)?(?<name>%s)%sINTO%s(?<targets>(?:%s)(?:%s,%s(?:%s))*)$"
+            separatorPattern
+            separatorPattern
+            separatorPattern
+            labelPattern
+            separatorPattern
+            separatorPattern
+            labelPattern
+            triviaPattern
+            triviaPattern
+            labelPattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private closeCursorPattern =
+    Regex(sprintf @"^CLOSE%s(?<name>%s)$" separatorPattern labelPattern, RegexOptions.IgnoreCase)
 
 let private signalPattern =
     Regex(
@@ -1113,6 +1244,10 @@ let private parseWithFallback
         and parseStatement text =
             let declaration = declarationPattern.Match text
             let conditionDeclaration = conditionDeclarationPattern.Match text
+            let cursorDeclaration = cursorDeclarationPattern.Match text
+            let openCursor = openCursorPattern.Match text
+            let fetchCursor = fetchCursorPattern.Match text
+            let closeCursor = closeCursorPattern.Match text
             let assignment = assignmentPattern.Match text
             let leave = leavePattern.Match text
             let iterate = iteratePattern.Match text
@@ -1126,6 +1261,12 @@ let private parseWithFallback
                 parseConditionValue conditionDeclaration.Groups.["condition"].Value
                 |> Result.map (fun condition ->
                     DeclareCondition(normalizeLabel conditionDeclaration.Groups.["name"].Value, condition))
+            | Ok None when cursorDeclaration.Success ->
+                Parser.parseStoredStatementWithOptions options cursorDeclaration.Groups.["query"].Value
+                |> Result.bind (function
+                    | (Ast.Select _ | Ast.Union _) as query ->
+                        Ok(DeclareCursor(normalizeLabel cursorDeclaration.Groups.["name"].Value, query))
+                    | _ -> Error "Cursor declaration requires a SELECT statement")
             | Ok None when declaration.Success ->
                 Parser.parseColumnTypeWithOptions options declaration.Groups.["type"].Value
                 |> Result.bind (fun columnType ->
@@ -1142,6 +1283,16 @@ let private parseWithFallback
             | Ok None when assignment.Success ->
                 Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
                 |> Result.map (fun value -> SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value))
+            | Ok None when openCursor.Success ->
+                Ok(OpenCursor(normalizeLabel openCursor.Groups.["name"].Value))
+            | Ok None when fetchCursor.Success ->
+                let targets =
+                    Parser.splitTopLevelCommaSeparatedWithOptions options fetchCursor.Groups.["targets"].Value
+                    |> List.map normalizeLabel
+
+                Ok(FetchCursor(normalizeLabel fetchCursor.Groups.["name"].Value, targets))
+            | Ok None when closeCursor.Success ->
+                Ok(CloseCursor(normalizeLabel closeCursor.Groups.["name"].Value))
             | Ok None when leave.Success ->
                 Ok(Leave(normalizeLabel leave.Groups.["label"].Value))
             | Ok None when iterate.Success ->
@@ -1227,10 +1378,17 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
         | resolved -> Ok resolved
 
     let rec validateStatements scope =
+        let afterStatement =
+            { scope with
+                HasExecutableStatement = true }
+
         function
         | [] -> Ok scope
         | Sql _ :: rest
-        | TextSql _ :: rest -> validateStatements scope rest
+        | TextSql _ :: rest -> validateStatements afterStatement rest
+        | Declare _ :: _ when scope.HasExecutableStatement -> Error DeclarationAfterStatement
+        | Declare _ :: _ when scope.HasCursorDeclaration || scope.HasHandlerDeclaration ->
+            Error VariableAfterCursorOrHandler
         | Declare declaration :: _ when Set.contains declaration.Name scope.DeclaredVariables ->
             Error(DuplicateVariable declaration.Name)
         | Declare declaration :: rest ->
@@ -1239,6 +1397,9 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
                     Names = Set.add declaration.Name scope.Names
                     DeclaredVariables = Set.add declaration.Name scope.DeclaredVariables }
                 rest
+        | DeclareCondition _ :: _ when scope.HasExecutableStatement -> Error DeclarationAfterStatement
+        | DeclareCondition _ :: _ when scope.HasCursorDeclaration || scope.HasHandlerDeclaration ->
+            Error VariableAfterCursorOrHandler
         | DeclareCondition(name, _) :: _ when Set.contains name scope.DeclaredConditions ->
             Error(DuplicateCondition name)
         | DeclareCondition(name, condition) :: rest ->
@@ -1253,6 +1414,17 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
                             DeclaredConditions = Set.add name scope.DeclaredConditions }
                         rest
                 | _ -> Error(UnknownCondition name))
+        | DeclareCursor _ :: _ when scope.HasExecutableStatement -> Error DeclarationAfterStatement
+        | DeclareCursor _ :: _ when scope.HasHandlerDeclaration -> Error CursorAfterHandler
+        | DeclareCursor(name, _) :: _ when Set.contains name scope.DeclaredCursors -> Error(DuplicateCursor name)
+        | DeclareCursor(name, _) :: rest ->
+            validateStatements
+                { scope with
+                    Cursors = Set.add name scope.Cursors
+                    DeclaredCursors = Set.add name scope.DeclaredCursors
+                    HasCursorDeclaration = true }
+                rest
+        | DeclareHandler _ :: _ when scope.HasExecutableStatement -> Error DeclarationAfterStatement
         | DeclareHandler(action, conditions, body) :: rest ->
             conditions
             |> traverse (resolve scope)
@@ -1260,14 +1432,24 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
                 if resolved |> List.exists (fun condition -> Set.contains condition scope.HandlerConditions) then
                     Error DuplicateHandler
                 else
-                    validateStatements scope [ body ]
+                    validateStatements afterStatement [ body ]
                     |> Result.bind (fun _ ->
                         validateStatements
                             { scope with
+                                HasHandlerDeclaration = true
                                 HandlerConditions = Set.union scope.HandlerConditions (Set.ofList resolved) }
                             rest))
+        | OpenCursor name :: _ when not (Set.contains name scope.Cursors) -> Error(UnknownCursor name)
+        | CloseCursor name :: _ when not (Set.contains name scope.Cursors) -> Error(UnknownCursor name)
+        | FetchCursor(name, _) :: _ when not (Set.contains name scope.Cursors) -> Error(UnknownCursor name)
+        | FetchCursor(_, targets) :: rest ->
+            match targets |> List.tryFind (fun name -> not (Set.contains name scope.Names)) with
+            | Some name -> Error(UndeclaredVariable name)
+            | None -> validateStatements afterStatement rest
+        | OpenCursor _ :: rest
+        | CloseCursor _ :: rest -> validateStatements afterStatement rest
         | SetLocal(name, _) :: _ when not (Set.contains name scope.Names) -> Error(UnknownVariable name)
-        | SetLocal _ :: rest -> validateStatements scope rest
+        | SetLocal _ :: rest -> validateStatements afterStatement rest
         | GetDiagnostics diagnostics :: rest ->
             let assignments =
                 match diagnostics.Request with
@@ -1283,16 +1465,16 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
                     | Some message -> Error(InvalidUserVariable message)
                     | None -> Ok()
                 | LocalVariable _ -> Ok())
-            |> Result.bind (fun _ -> validateStatements scope rest)
+            |> Result.bind (fun _ -> validateStatements afterStatement rest)
         | If(_, whenTrue, whenFalse) :: rest ->
-            validateStatements scope whenTrue
-            |> Result.bind (fun _ -> validateStatements scope whenFalse)
-            |> Result.bind (fun _ -> validateStatements scope rest)
+            validateStatements afterStatement whenTrue
+            |> Result.bind (fun _ -> validateStatements afterStatement whenFalse)
+            |> Result.bind (fun _ -> validateStatements afterStatement rest)
         | Case(_, branches, otherwise) :: rest ->
             branches
-            |> traverse (snd >> validateStatements scope)
-            |> Result.bind (fun _ -> validateStatements scope (otherwise |> Option.defaultValue []))
-            |> Result.bind (fun _ -> validateStatements scope rest)
+            |> traverse (snd >> validateStatements afterStatement)
+            |> Result.bind (fun _ -> validateStatements afterStatement (otherwise |> Option.defaultValue []))
+            |> Result.bind (fun _ -> validateStatements afterStatement rest)
         | Block(label, body) :: rest ->
             addLabel label LabelKind.Block scope.Labels
             |> Result.bind (fun labels ->
@@ -1300,30 +1482,34 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
                     { scope with
                         DeclaredVariables = Set.empty
                         DeclaredConditions = Set.empty
+                        DeclaredCursors = Set.empty
+                        HasCursorDeclaration = false
+                        HasHandlerDeclaration = false
+                        HasExecutableStatement = false
                         HandlerConditions = Set.empty
                         Labels = labels }
                     body)
-            |> Result.bind (fun _ -> validateStatements scope rest)
+            |> Result.bind (fun _ -> validateStatements afterStatement rest)
         | While(label, _, body) :: rest
         | Repeat(label, body, _) :: rest
         | Loop(label, body) :: rest ->
             addLabel label LabelKind.Loop scope.Labels
-            |> Result.bind (fun labels -> validateStatements { scope with Labels = labels } body)
-            |> Result.bind (fun _ -> validateStatements scope rest)
+            |> Result.bind (fun labels -> validateStatements { afterStatement with Labels = labels } body)
+            |> Result.bind (fun _ -> validateStatements afterStatement rest)
         | Signal(condition, _) :: rest ->
-            resolve scope condition |> Result.bind (fun _ -> validateStatements scope rest)
+            resolve scope condition |> Result.bind (fun _ -> validateStatements afterStatement rest)
         | Resignal(condition, _) :: rest ->
             condition
             |> Option.map (resolve scope)
             |> Option.defaultValue (Ok(ErrorCode 0))
-            |> Result.bind (fun _ -> validateStatements scope rest)
+            |> Result.bind (fun _ -> validateStatements afterStatement rest)
         | Leave label :: _ when scope.Labels |> List.exists (fun (name, _) -> name = label) |> not ->
             Error(UnknownLabel("LEAVE", label))
         | Iterate label :: _
             when scope.Labels |> List.exists (fun (name, kind) -> name = label && kind = LabelKind.Loop) |> not ->
             Error(UnknownLabel("ITERATE", label))
         | Leave _ :: rest
-        | Iterate _ :: rest -> validateStatements scope rest
+        | Iterate _ :: rest -> validateStatements afterStatement rest
 
     addParameters Set.empty parameters
     |> Result.bind (fun names ->
@@ -1332,6 +1518,11 @@ let validate (parameters: Parameter list) (statements: Statement list) : Result<
               DeclaredVariables = names
               Conditions = Map.empty
               DeclaredConditions = Set.empty
+              Cursors = Set.empty
+              DeclaredCursors = Set.empty
+              HasCursorDeclaration = false
+              HasHandlerDeclaration = false
+              HasExecutableStatement = false
               HandlerConditions = Set.empty
               Labels = [] }
             statements)

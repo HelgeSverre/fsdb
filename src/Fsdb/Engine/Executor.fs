@@ -12232,7 +12232,7 @@ let private validateTriggerStatement
             | Ok _ -> Ok()
         | _ -> Error(Err(1064, "Trigger body accepts INSERT, UPDATE, DELETE, REPLACE, or SET NEW statements"))
 
-    match StoredProgram.sqlStatements triggerStatement |> traverse validateStatement with
+    match StoredProgram.executableSqlStatements triggerStatement |> traverse validateStatement with
     | Error error -> Error error
     | Ok _ ->
         match triggerRowImageError event columns triggerStatement with
@@ -12429,30 +12429,37 @@ let rec executeAs
                 let runBody (oldRow: Value[] option) (newRow: Value[] option) (statements: TriggerStatement list, account: Auth.Account) : QueryResult =
                     let definerRegistry = registryForDefiner account shadowed
                     let locals = ref Map.empty<string, Value>
+                    let cursors = ref Map.empty<string, StoredProgram.Cursor>
                     let currentDiagnostics: StoredProgram.DiagnosticsSnapshot ref =
                         ref
                             { Conditions = []
                               RowCount = 0L }
 
+                    let localColumn name =
+                        { Name = name
+                          Type = TText
+                          Nullable = true
+                          Default = None
+                          AutoIncrement = false
+                          PrimaryKey = false
+                          Unique = false
+                          Generated = None
+                          Comment = ""
+                          Collation = None
+                          Charset = None
+                          OnUpdateCurrentTimestamp = false }
+
                     let localContext () =
                         let bindings = locals.Value |> Map.toList
-                        let columns =
-                            bindings
-                            |> List.map (fun (name, _) ->
-                                { Name = name
-                                  Type = TText
-                                  Nullable = true
-                                  Default = None
-                                  AutoIncrement = false
-                                  PrimaryKey = false
-                                  Unique = false
-                                  Generated = None
-                                  Comment = ""
-                                  Collation = None
-                                  Charset = None
-                                  OnUpdateCurrentTimestamp = false })
+                        let columns = bindings |> List.map (fst >> localColumn)
                         let values = bindings |> List.map snd |> Array.ofList
                         contextFactory runStore definerRegistry db (columnIndexOf columns) Map.empty None values
+
+                    let localVariables () =
+                        locals.Value
+                        |> Map.map (fun name value ->
+                            { Column = localColumn name
+                              Value = value })
 
                     withTriggerRowScope
                         { Columns = columns
@@ -12460,26 +12467,27 @@ let rec executeAs
                           New = newRow }
                         (fun () ->
                             let runDml statement =
-                                match statement with
-                                | SetTriggerNew(column, expression) ->
-                                    match timing, event, newRow, resolveColumn columns column with
-                                    | Before, (TriggerInsert | TriggerUpdate), Some row, Ok index ->
-                                        let context = localContext ()
+                                withRoutineVariables (localVariables ()) (fun () ->
+                                    match statement with
+                                    | SetTriggerNew(column, expression) ->
+                                        match timing, event, newRow, resolveColumn columns column with
+                                        | Before, (TriggerInsert | TriggerUpdate), Some row, Ok index ->
+                                            let context = localContext ()
 
-                                        match evalExpr context expression |> Result.mapError Err with
-                                        | Error error -> error
-                                        | Ok value ->
-                                            match coerceValue runStore.ExecutionSettings.SqlMode.Strict columns.[index] value with
-                                            | Error error -> storageErr error
+                                            match evalExpr context expression |> Result.mapError Err with
+                                            | Error error -> error
                                             | Ok value ->
-                                                row.[index] <- value
-                                                Affected 0UL
-                                    | _ -> Err(1362, "Updating of NEW row is not allowed in after trigger")
-                                | _ ->
-                                    try
-                                        executeAs runStore definerRegistry db (0L, 0L) foundRows account statement |> snd
-                                    with SqlError(code, msg) ->
-                                        Err(code, msg)
+                                                match coerceValue runStore.ExecutionSettings.SqlMode.Strict columns.[index] value with
+                                                | Error error -> storageErr error
+                                                | Ok value ->
+                                                    row.[index] <- value
+                                                    Affected 0UL
+                                        | _ -> Err(1362, "Updating of NEW row is not allowed in after trigger")
+                                    | _ ->
+                                        try
+                                            executeAs runStore definerRegistry db (0L, 0L) foundRows account statement |> snd
+                                        with SqlError(code, msg) ->
+                                            Err(code, msg))
 
                             let complete result = result, StoredProgram.Flow.Complete
 
@@ -12530,6 +12538,51 @@ let rec executeAs
                                     evaluateSignal scope None (Some condition) information
                                 | StoredProgram.Resignal(condition, information) ->
                                     evaluateSignal scope scope.ActiveError condition information
+                                | StoredProgram.DeclareCursor(name, query) ->
+                                    cursors.Value <- Map.add name (StoredProgram.cursor query) cursors.Value
+                                    complete (Affected 0UL)
+                                | StoredProgram.OpenCursor name ->
+                                    match StoredProgram.tryOpenCursor name cursors.Value with
+                                    | Result.Error error -> complete (ErrInfo error)
+                                    | Ok cursor ->
+                                        match runDml cursor.Query with
+                                        | ResultSet(columns, rows) ->
+                                            let rows =
+                                                rows
+                                                |> List.map (
+                                                    List.map (Option.map VString >> Option.defaultValue VNull)
+                                                    >> List.toArray
+                                                )
+                                                |> List.toArray
+
+                                            cursors.Value <-
+                                                StoredProgram.setCursorRows name columns.Length rows cursors.Value
+
+                                            complete (Affected 0UL)
+                                        | error -> complete error
+                                | StoredProgram.FetchCursor(name, targets) ->
+                                    match StoredProgram.tryFetchCursorRow name targets.Length cursors.Value with
+                                    | Result.Error error -> complete (ErrInfo error)
+                                    | Ok(row, nextCursors) ->
+                                        cursors.Value <- nextCursors
+
+                                        match
+                                            List.zip targets (Array.toList row)
+                                            |> List.tryFind (fst >> fun target -> not (Map.containsKey target locals.Value))
+                                        with
+                                        | Some(target, _) -> complete (Err(1327, sprintf "Undeclared variable: %s" target))
+                                        | None ->
+                                            locals.Value <-
+                                                List.zip targets (Array.toList row)
+                                                |> List.fold (fun values (target, value) -> Map.add target value values) locals.Value
+
+                                            complete (Affected 0UL)
+                                | StoredProgram.CloseCursor name ->
+                                    match StoredProgram.tryCloseCursor name cursors.Value with
+                                    | Result.Error error -> complete (ErrInfo error)
+                                    | Ok nextCursors ->
+                                        cursors.Value <- nextCursors
+                                        complete (Affected 0UL)
                                 | StoredProgram.GetDiagnostics diagnostics -> runDiagnostics scope diagnostics
                                 | StoredProgram.Declare declaration ->
                                     match declaration.InitialValue with
@@ -12550,6 +12603,7 @@ let rec executeAs
                                         complete (Affected 0UL)
                                 | StoredProgram.Block(label, body) ->
                                     let before = locals.Value
+                                    let beforeCursors = cursors.Value
                                     let blockScope =
                                         { Conditions = StoredProgram.conditionDefinitions scope.Conditions body
                                           Statements = body
@@ -12558,6 +12612,7 @@ let rec executeAs
 
                                     let result, flow = runStatements blockScope body
                                     locals.Value <- StoredProgram.restoreOuterScope body before locals.Value
+                                    cursors.Value <- StoredProgram.restoreOuterCursors body beforeCursors cursors.Value
 
                                     match flow, label with
                                     | StoredProgram.Flow.Leave target, Some label when target = label ->

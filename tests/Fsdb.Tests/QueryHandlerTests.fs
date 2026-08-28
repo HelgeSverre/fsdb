@@ -2032,6 +2032,150 @@ let tests =
               | ResultSet(_, [ [ Some "1690" ] ]) -> ()
               | other -> failtestf "expected the scalar error diagnostic, got %A" other
 
+          testCase "stored cursors iterate ordered rows and signal NOT FOUND"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE cursor_numbers (n INT)"
+              let session, _ = handle session "INSERT INTO cursor_numbers VALUES (3), (1), (2)"
+
+              let definition =
+                  """CREATE PROCEDURE cursor_sum(
+                        OUT total INT,
+                        OUT seen INT,
+                        OUT not_found_code INT,
+                        OUT not_found_state VARCHAR(5))
+                      BEGIN
+                        DECLARE done INT DEFAULT 0;
+                        DECLARE value INT;
+                        DECLARE minimum_value INT DEFAULT 3;
+                        DECLARE numbers CURSOR FOR
+                          SELECT n FROM cursor_numbers WHERE n >= minimum_value ORDER BY n;
+                        DECLARE CONTINUE HANDLER FOR NOT FOUND
+                        BEGIN
+                          SET done = 1;
+                          GET STACKED DIAGNOSTICS CONDITION 1
+                            not_found_code = MYSQL_ERRNO,
+                            not_found_state = RETURNED_SQLSTATE;
+                        END;
+                        SET total = 0;
+                        SET seen = 0;
+                        SET minimum_value = 1;
+                        OPEN numbers;
+                        read_loop: LOOP
+                          FETCH numbers INTO value;
+                          IF done THEN LEAVE read_loop; END IF;
+                          SET total = total + value;
+                          SET seen = seen + 1;
+                        END LOOP;
+                        CLOSE numbers;
+                      END"""
+
+              let session, created = handle session definition
+              Expect.equal created (Affected 0UL) "created cursor procedure"
+
+              let session, called =
+                  handle session "CALL cursor_sum(@total, @seen, @not_found_code, @not_found_state)"
+
+              Expect.equal called (Affected 0UL) "called cursor procedure"
+
+              match handle session "SELECT @total, @seen, @not_found_code, @not_found_state" |> snd with
+              | ResultSet(_, [ [ Some "6"; Some "3"; Some "1329"; Some "02000" ] ]) -> ()
+              | other -> failtestf "expected cursor iteration results, got %A" other
+
+              let binaryDefinition =
+                  """CREATE PROCEDURE cursor_binary(OUT fetched BINARY(1))
+                      BEGIN
+                        DECLARE binary_cursor CURSOR FOR SELECT X'80';
+                        OPEN binary_cursor;
+                        FETCH binary_cursor INTO fetched;
+                        CLOSE binary_cursor;
+                      END"""
+
+              let session, created = handle session binaryDefinition
+              Expect.equal created (Affected 0UL) "created binary cursor procedure"
+              let session, called = handle session "CALL cursor_binary(@fetched)"
+              Expect.equal called (Affected 0UL) "called binary cursor procedure"
+
+              match handle session "SELECT HEX(@fetched)" |> snd with
+              | ResultSet(_, [ [ Some "80" ] ]) -> ()
+              | other -> failtestf "expected binary cursor value, got %A" other
+
+          testCase "stored cursors report lifecycle and declaration errors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE cursor_source (n INT)"
+              let session, _ = handle session "INSERT INTO cursor_source VALUES (1)"
+
+              let definitions =
+                  [ """CREATE PROCEDURE fetch_closed(OUT code INT)
+                         BEGIN
+                           DECLARE value INT;
+                           DECLARE numbers CURSOR FOR SELECT n, n + 1 FROM cursor_source;
+                           DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                             GET STACKED DIAGNOSTICS CONDITION 1 code = MYSQL_ERRNO;
+                           FETCH numbers INTO value, value;
+                         END"""
+                    """CREATE PROCEDURE open_twice(OUT code INT)
+                         BEGIN
+                           DECLARE numbers CURSOR FOR SELECT n FROM cursor_source;
+                           DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                             GET STACKED DIAGNOSTICS CONDITION 1 code = MYSQL_ERRNO;
+                           OPEN numbers;
+                           OPEN numbers;
+                         END"""
+                    """CREATE PROCEDURE wrong_fetch_arity(OUT code INT)
+                         BEGIN
+                           DECLARE value INT;
+                           DECLARE numbers CURSOR FOR SELECT n, n + 1 FROM cursor_source;
+                           DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                             GET STACKED DIAGNOSTICS CONDITION 1 code = MYSQL_ERRNO;
+                           OPEN numbers;
+                           FETCH numbers INTO value;
+                         END"""
+                    """CREATE PROCEDURE close_twice(OUT code INT)
+                         BEGIN
+                           DECLARE numbers CURSOR FOR SELECT n FROM cursor_source;
+                           DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
+                             GET STACKED DIAGNOSTICS CONDITION 1 code = MYSQL_ERRNO;
+                           OPEN numbers;
+                           CLOSE numbers;
+                           CLOSE numbers;
+                         END""" ]
+
+              let session =
+                  definitions
+                  |> List.fold (fun session definition ->
+                      let session, created = handle session definition
+                      Expect.equal created (Affected 0UL) "created cursor error procedure"
+                      session) session
+
+              let calls =
+                  [ "CALL fetch_closed(@fetch_closed)"
+                    "CALL open_twice(@open_twice)"
+                    "CALL close_twice(@close_twice)"
+                    "CALL wrong_fetch_arity(@wrong_arity)" ]
+
+              let session =
+                  calls
+                  |> List.fold (fun session call ->
+                      let session, called = handle session call
+                      Expect.equal called (Affected 0UL) "handled cursor lifecycle error"
+                      session) session
+
+              match handle session "SELECT @fetch_closed, @open_twice, @close_twice, @wrong_arity" |> snd with
+              | ResultSet(_, [ [ Some "1326"; Some "1325"; Some "1326"; Some "1328" ] ]) -> ()
+              | other -> failtestf "expected cursor lifecycle codes, got %A" other
+
+              for sql, code in
+                  [ "CREATE PROCEDURE cursor_after_handler() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET @handled = 1; DECLARE cursor_name CURSOR FOR SELECT 1; END", 1338
+                    "CREATE PROCEDURE variable_after_cursor() BEGIN DECLARE cursor_name CURSOR FOR SELECT 1; DECLARE value INT; END", 1337
+                    "CREATE PROCEDURE duplicate_cursor() BEGIN DECLARE cursor_name CURSOR FOR SELECT 1; DECLARE cursor_name CURSOR FOR SELECT 2; END", 1333
+                    "CREATE PROCEDURE unknown_cursor() BEGIN OPEN missing; END", 1324
+                    "CREATE PROCEDURE late_cursor() BEGIN SET @started = 1; DECLARE cursor_name CURSOR FOR SELECT 1; END", 1064 ] do
+                  match handle session sql |> snd with
+                  | Err(actual, _) -> Expect.equal actual code "cursor declaration error code"
+                  | other -> failtestf "expected cursor declaration error %d, got %A" code other
+
           testCase "SIGNAL preserves named conditions and RESIGNAL diagnostics"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

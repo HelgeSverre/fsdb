@@ -3142,6 +3142,34 @@ let tests =
               | Ok(Some _) -> ()
               | other -> failtestf "expected decimal condition number, got %A" other
 
+          testCase "stored cursor syntax accepts comments and FETCH variants"
+          <| fun _ ->
+              let body =
+                  """BEGIN
+                       DECLARE value INT;
+                       DECLARE done INT DEFAULT 0;
+                       DECLARE/* name */numbers/* cursor */CURSOR/* for */FOR
+                         SELECT n FROM source_numbers ORDER BY n;
+                       DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+                       OPEN/* cursor */numbers;
+                       FETCH NEXT FROM numbers INTO value;
+                       FETCH numbers INTO value, done;
+                       CLOSE/* cursor */numbers;
+                     END"""
+
+              match Fsdb.StoredProgram.parse defaultOptions body with
+              | Ok
+                  [ Fsdb.StoredProgram.Declare _
+                    Fsdb.StoredProgram.Declare _
+                    Fsdb.StoredProgram.DeclareCursor("numbers", Fsdb.Ast.Select _)
+                    Fsdb.StoredProgram.DeclareHandler _
+                    Fsdb.StoredProgram.OpenCursor "numbers"
+                    Fsdb.StoredProgram.FetchCursor("numbers", [ "value" ])
+                    Fsdb.StoredProgram.FetchCursor("numbers", [ "value"; "done" ])
+                    Fsdb.StoredProgram.CloseCursor "numbers" ] ->
+                  ()
+              | other -> failtestf "unexpected cursor program: %A" other
+
           testCase "statement batches reject unterminated literals"
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with
