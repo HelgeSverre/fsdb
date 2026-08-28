@@ -1119,7 +1119,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
                     && select.OrderBy.IsEmpty
                     && select.Limit.IsNone
                     && select.Offset.IsNone
-                    && not select.Locking
+                    && select.Locking.IsEmpty
                     && (select.Projections
                         |> List.exists (fun (expression, _) ->
                             match expression with

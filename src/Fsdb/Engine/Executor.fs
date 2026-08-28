@@ -387,7 +387,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
         && select.OrderBy.IsEmpty
         && select.Limit.IsNone
         && select.Offset.IsNone
-        && not select.Locking
+        && select.Locking.IsEmpty
 
     let exposesRequiredColumns database table columns =
         match InformationSchema.findTable store.Catalog database table with
@@ -4194,7 +4194,7 @@ and private existsEarlyExitSelect (select: SelectStmt) : SelectStmt =
        && not select.Rollup
        && select.Windows.IsEmpty
        && not select.CalculateFoundRows
-       && not select.Locking then
+       && select.Locking.IsEmpty then
         { select with Limit = Some(Lit(VInt 1L)) }
     else
         select
@@ -6561,7 +6561,7 @@ and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join lis
           OrderBy = []
           Limit = None
           Offset = None
-          Locking = false }
+          Locking = [] }
 
     referencedCtes ctes (selectOrUnionTableNames (PlainSelect query))
 
@@ -14107,7 +14107,7 @@ let rec executeAs
                 && select.Having.IsNone
                 && select.Limit.IsNone
                 && select.Offset.IsNone
-                && not select.Locking
+                && select.Locking.IsEmpty
                 && not (select.Projections |> List.exists (fst >> containsAggregate registry))
                 && not (select.OrderBy |> List.exists (fst >> containsAggregate registry))
             | _ -> false

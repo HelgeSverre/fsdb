@@ -3274,7 +3274,7 @@ let private valuesTable: Parser<FromItem, unit> =
                       OrderBy = []
                       Limit = None
                       Offset = None
-                      Locking = false }
+                      Locking = [] }
 
                 match rows with
                 | [ single ] -> preturn (FromSubquery(PlainSelect(branch single), alias))
@@ -3466,15 +3466,32 @@ let private windowClause: Parser<(string * WindowSpec) list, unit> =
 
 let private havingClause: Parser<Expr, unit> = keyword "HAVING" >>. expr
 
-/// `FOR UPDATE` / `FOR SHARE` / `LOCK IN SHARE MODE` — parsed and discarded;
-/// see the `Ast.SelectStmt.Locking` doc for why there's nothing else to do
-/// with it.
-let private lockClause: Parser<unit, unit> =
+let private lockClause: Parser<LockingRead, unit> =
+    let strength =
+        choice
+            [ keyword "UPDATE" >>% UpdateLock
+              keyword "SHARE" >>% ShareLock ]
+
+    let wait =
+        choice
+            [ keyword "NOWAIT" >>% NoWait
+              keyword "SKIP" >>. keyword "LOCKED" >>% SkipLocked ]
+
     (keyword "FOR"
-     >>. (keyword "UPDATE" <|> (keyword "SHARE" >>% ()))
-     >>. optional (keyword "OF" >>. sepBy1 identifier (sym ","))
-     >>. optional ((keyword "NOWAIT" >>% ()) <|> (keyword "SKIP" >>. keyword "LOCKED" >>% ())))
-    <|> (keyword "LOCK" >>. keyword "IN" >>. keyword "SHARE" >>. keyword "MODE" >>% ())
+     >>. strength
+     .>>. opt (keyword "OF" >>. sepBy1 identifier (sym ","))
+     .>>. opt wait
+     |>> fun ((strength, tables), wait) ->
+         { Strength = strength
+           Tables = tables |> Option.defaultValue []
+           Wait = wait |> Option.defaultValue WaitForLocks })
+    <|> (keyword "LOCK"
+         >>. keyword "IN"
+         >>. keyword "SHARE"
+         >>. keyword "MODE"
+         >>% { Strength = ShareLock
+               Tables = []
+               Wait = WaitForLocks })
 
 let private selectModifiers: Parser<bool * bool * bool, unit> =
     let duplicateMode =
@@ -3512,7 +3529,7 @@ selectStmtRecordRef.Value <-
      .>>. opt windowClause
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>>. opt limitClause
-     .>>. opt lockClause)
+     .>>. many lockClause)
     |>> fun (((((((((distinct, calculateFoundRows, straightJoin, projs, intoVariables), fromAndJoins), where), groupBy), having), windows), orderBy), limitOffset), locking) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
         let from = fromAndJoins |> Option.map fst
@@ -3534,7 +3551,7 @@ selectStmtRecordRef.Value <-
           OrderBy = orderBy |> Option.defaultValue []
           Limit = limit
           Offset = offset
-          Locking = locking.IsSome }
+          Locking = locking }
 
 selectQueryRef.Value <-
     opt withClause .>>. selectOrUnionBranches
@@ -3568,7 +3585,7 @@ let private expressionSelect =
           OrderBy = []
           Limit = None
           Offset = None
-          Locking = false }
+          Locking = [] }
 
 selectWithCtesRef.Value <-
     selectQuery |>> expressionSelect
@@ -3611,7 +3628,7 @@ let private querySelect projections from orderBy limit offset =
       OrderBy = orderBy
       Limit = limit
       Offset = offset
-      Locking = false }
+      Locking = [] }
 
 let private queryTail =
     opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))

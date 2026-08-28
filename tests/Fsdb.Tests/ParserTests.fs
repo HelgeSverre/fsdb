@@ -52,7 +52,7 @@ let private mkSelect
           OrderBy = orderBy
           Limit = limit |> Option.map (int64 >> VInt >> Lit)
           Offset = offset |> Option.map (int64 >> VInt >> Lit)
-          Locking = false }
+          Locking = [] }
 
 let tests =
     testList
@@ -158,7 +158,7 @@ let tests =
                               OrderBy = []
                               Limit = None
                               Offset = None
-                              Locking = false })
+                              Locking = [] })
                         "qualified aliased table ref"
 
                 testCase "FROM t x: alias without AS"
@@ -182,7 +182,7 @@ let tests =
                               OrderBy = []
                               Limit = None
                               Offset = None
-                              Locking = false })
+                              Locking = [] })
                         "bare alias"
 
                 testCase "SELECT without FROM"
@@ -1705,7 +1705,7 @@ let tests =
                               OrderBy = []
                               Limit = None
                               Offset = None
-                              Locking = false },
+                              Locking = [] },
                             [],
                             false
                         ))
@@ -2686,33 +2686,41 @@ let tests =
 
           testList
               "FOR UPDATE / LOCK IN SHARE MODE"
-              [ testCase "FOR UPDATE sets Locking"
+              [ testCase "FOR UPDATE retains its lock strength"
                 <| fun _ ->
                     match parseOk "SELECT * FROM t FOR UPDATE" with
-                    | Select { Locking = true } -> ()
-                    | other -> failtestf "expected Locking = true, got %A" other
+                    | Select { Locking = [ { Strength = UpdateLock; Tables = []; Wait = WaitForLocks } ] } -> ()
+                    | other -> failtestf "expected an UPDATE lock, got %A" other
 
-                testCase "LOCK IN SHARE MODE sets Locking"
+                testCase "LOCK IN SHARE MODE is a waiting shared lock"
                 <| fun _ ->
                     match parseOk "SELECT * FROM t LOCK IN SHARE MODE" with
-                    | Select { Locking = true } -> ()
-                    | other -> failtestf "expected Locking = true, got %A" other
+                    | Select { Locking = [ { Strength = ShareLock; Tables = []; Wait = WaitForLocks } ] } -> ()
+                    | other -> failtestf "expected a shared lock, got %A" other
 
-                testCase "FOR UPDATE and FOR SHARE accept locking details"
+                testCase "FOR UPDATE and FOR SHARE retain targets and wait policies"
                 <| fun _ ->
-                    [ "SELECT * FROM t FOR UPDATE NOWAIT"
-                      "SELECT * FROM t FOR UPDATE SKIP LOCKED"
-                      "SELECT * FROM t FOR SHARE OF t NOWAIT" ]
-                    |> List.iter (fun sql ->
-                        match parseOk sql with
-                        | Select { Locking = true } -> ()
-                        | other -> failtestf "expected a locking SELECT, got %A" other)
+                    match
+                        parseOk
+                            "SELECT * FROM t JOIN u ON u.id=t.id FOR UPDATE OF t NOWAIT FOR SHARE OF u SKIP LOCKED"
+                    with
+                    | Select { Locking = locking } ->
+                        Expect.equal
+                            locking
+                            [ { Strength = UpdateLock
+                                Tables = [ "t" ]
+                                Wait = NoWait }
+                              { Strength = ShareLock
+                                Tables = [ "u" ]
+                                Wait = SkipLocked } ]
+                            "locking clauses"
+                    | other -> failtestf "expected both locking clauses, got %A" other
 
-                testCase "no locking clause leaves Locking false"
+                testCase "no locking clause leaves Locking empty"
                 <| fun _ ->
                     match parseOk "SELECT * FROM t" with
-                    | Select { Locking = false } -> ()
-                    | other -> failtestf "expected Locking = false, got %A" other ]
+                    | Select { Locking = [] } -> ()
+                    | other -> failtestf "expected no locking clauses, got %A" other ]
 
           testList
               "failure cases"

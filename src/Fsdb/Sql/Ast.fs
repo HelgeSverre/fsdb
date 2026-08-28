@@ -542,6 +542,20 @@ and Join =
       On: Expr
       Using: string list }
 
+and LockingReadStrength =
+    | UpdateLock
+    | ShareLock
+
+and LockingReadWait =
+    | WaitForLocks
+    | NoWait
+    | SkipLocked
+
+and LockingRead =
+    { Strength: LockingReadStrength
+      Tables: string list
+      Wait: LockingReadWait }
+
 /// A `SELECT` statement's clauses as a record rather than a positional
 /// tuple: every clause after `SELECT ... FROM` is optional and grows
 /// independently, so a record avoids a breaking
@@ -583,10 +597,9 @@ and SelectStmt =
       OrderBy: OrderKey list
       Limit: Expr option
       Offset: Expr option
-      /// `FOR UPDATE` / `LOCK IN SHARE MODE` — accepted and ignored: this
-      /// engine has no transaction-held record or gap locks to apply, so the
-      /// clause only parses rather than changing snapshot visibility.
-      Locking: bool }
+      /// Locking clauses apply to this query block only. An empty `Tables`
+      /// list targets every physical source not named by another clause.
+      Locking: LockingRead list }
 
 let indexColumns names =
     names
