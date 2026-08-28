@@ -168,7 +168,7 @@ let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
-let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> option>()
+let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
@@ -177,13 +177,21 @@ let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
     DynamicScope.withValue variableContext (Some variables) body
 
 let withRoutineVariables (variables: Map<string, RoutineVariable>) (body: unit -> 'a) : 'a =
+    DynamicScope.withValue routineVariables (Some(ref variables)) body
+
+let withRoutineVariableState (variables: Map<string, RoutineVariable> ref) (body: unit -> 'a) : 'a =
     DynamicScope.withValue routineVariables (Some variables) body
+
+let currentRoutineVariables () = routineVariables.Value |> Option.map _.Value
+
+let replaceRoutineVariables variables =
+    routineVariables.Value |> Option.iter (fun current -> current.Value <- variables)
 
 let private currentVariableContext () = variableContext.Value
 
 let private tryRoutineVariable (name: string) =
     routineVariables.Value
-    |> Option.bind (Map.tryFind (name.ToLowerInvariant()))
+    |> Option.bind (fun variables -> Map.tryFind (name.ToLowerInvariant()) variables.Value)
 
 let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
     DynamicScope.withValue suppressVariableAssignments true body

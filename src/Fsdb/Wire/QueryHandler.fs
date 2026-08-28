@@ -2936,6 +2936,9 @@ let private parseRoutineDefinition options parameters body =
     let isSupportedText sql =
         (tryProbe sql (sql.TrimStart().ToUpperInvariant()) |> Option.isSome)
         || (tryTextPreparedCommand sql |> Result.exists Option.isSome)
+        || (match tryTextRoutineCommand sql with
+            | Some(CallProcedure _) -> true
+            | _ -> false)
 
     match StoredProgram.parseParameters options parameters, StoredProgram.parseRoutine options isSupportedText body with
     | Ok parsedParameters, Ok statements ->
@@ -2974,6 +2977,10 @@ let private evaluateRoutineExpression (session: Session) expression =
 
     { session with UserVariables = variables.UserVariables.Value }, result
 
+type private RoutineOutputTarget =
+    | UserVariableOutput of UserVariableRef
+    | LocalVariableOutput of string
+
 let private bindRoutineArguments
     database
     name
@@ -2985,7 +2992,7 @@ let private bindRoutineArguments
         current
         index
         (values: (StoredProgram.Parameter * Value) list)
-        (outputs: (StoredProgram.Parameter * UserVariableRef) list)
+        (outputs: (StoredProgram.Parameter * RoutineOutputTarget) list)
         (parameters: StoredProgram.Parameter list)
         (arguments: Expr list)
         =
@@ -3016,9 +3023,32 @@ let private bindRoutineArguments
                             current
                             (index + 1)
                             ((parameter, value) :: values)
-                            ((parameter, target) :: outputs)
+                            ((parameter, UserVariableOutput target) :: outputs)
                             parameterRest
                             argumentRest
+                | Col name ->
+                    match Executor.currentRoutineVariables () |> Option.bind (Map.tryFind name) with
+                    | Some local ->
+                        let value = if parameter.Mode = StoredProgram.Out then VNull else local.Value
+
+                        loop
+                            current
+                            (index + 1)
+                            ((parameter, value) :: values)
+                            ((parameter, LocalVariableOutput name) :: outputs)
+                            parameterRest
+                            argumentRest
+                    | None ->
+                        Error(
+                            Err(
+                                1414,
+                                sprintf
+                                    "OUT or INOUT argument %d for routine %s.%s is not a variable or NEW pseudo-variable in BEFORE trigger"
+                                    index
+                                    database
+                                    name
+                            )
+                        )
                 | _ ->
                     Error(
                         Err(
@@ -3034,7 +3064,7 @@ let private bindRoutineArguments
 
     loop session 1 [] [] parameters arguments
 
-let private applyRoutineOutputs variables outputs =
+let private applyUserVariableOutputs variables outputs =
     outputs
     |> List.fold
         (fun state (name, value) ->
@@ -3045,6 +3075,29 @@ let private applyRoutineOutputs variables outputs =
                 else
                     Error(Err(1105, "Too many user-defined variables"))))
         (Ok variables)
+
+let private applyProcedureOutputs store variables routineVariables outputs =
+    outputs
+    |> List.fold
+        (fun state (target, value) ->
+            state
+            |> Result.bind (fun (currentVariables, currentLocals) ->
+                match target with
+                | UserVariableOutput variable ->
+                    if Map.containsKey variable.Name currentVariables || currentVariables.Count < maxUserVariables then
+                        Ok(Map.add variable.Name value currentVariables, currentLocals)
+                    else
+                        Error(Err(1105, "Too many user-defined variables"))
+                | LocalVariableOutput name ->
+                    match currentLocals |> Option.bind (Map.tryFind name) with
+                    | None -> Error(Err(1414, sprintf "OUT or INOUT target %s is not a local variable" name))
+                    | Some local ->
+                        coerceRoutineValue store local.Column value
+                        |> Result.map (fun value ->
+                            currentVariables,
+                            currentLocals
+                            |> Option.map (Map.add name { local with Value = value }))))
+        (Ok(variables, routineVariables))
 
 type private RoutineRun =
     { Session: Session
@@ -3166,9 +3219,13 @@ let private runRoutineStatements
                     Executor.withRoutineVariables locals (fun () -> executeSql current sql))
                 ||> continueAfterSql scope locals results affectedRows rest
             | StoredProgram.TextSql sql ->
-                executeWithDiagnostics current (fun () ->
-                    Executor.withRoutineVariables locals (fun () -> executeText current sql))
-                ||> continueAfterSql scope locals results affectedRows rest
+                let routineState = ref locals
+
+                let next, result =
+                    executeWithDiagnostics current (fun () ->
+                        Executor.withRoutineVariableState routineState (fun () -> executeText current sql))
+
+                continueAfterSql scope routineState.Value results affectedRows rest next result
             | StoredProgram.Declare declaration ->
                 let next, evaluated =
                     match declaration.InitialValue with
@@ -3421,6 +3478,29 @@ let private runRoutineStatements
         | None, StoredProgram.Flow.Complete -> run scope nested.Session nested.Locals results affectedRows rest
         | None, flow -> flowing nested.Session nested.Locals results affectedRows flow
 
+    and continueAfterResultCollection scope locals results affectedRows rest next =
+        function
+        | [] -> run scope next locals results affectedRows rest
+        | (result, metadata) :: remaining ->
+            match result with
+            | Err _ ->
+                match Executor.errorInfo result with
+                | Some error -> handleCondition scope next locals results affectedRows rest error
+                | None -> failed next locals results affectedRows result
+            | ResultSet _ ->
+                continueAfterResultCollection
+                    scope
+                    locals
+                    ((result, metadata) :: results)
+                    affectedRows
+                    rest
+                    next
+                    remaining
+            | Affected count ->
+                continueAfterResultCollection scope locals results (affectedRows + count) rest next remaining
+            | MultipleResults nested ->
+                continueAfterResultCollection scope locals results affectedRows rest next (nested @ remaining)
+
     and continueAfterSql scope locals results affectedRows rest next result =
         match result with
         | Err _ ->
@@ -3429,8 +3509,8 @@ let private runRoutineStatements
             | None -> failed next locals results affectedRows result
         | ResultSet _ -> run scope next locals ((result, next.LastResultColumnMetadata) :: results) affectedRows rest
         | Affected count -> run scope next locals results (affectedRows + count) rest
-        | MultipleResults _ ->
-            failed next locals results affectedRows (Err(1105, "Nested routine result collections are not supported"))
+        | MultipleResults nested ->
+            continueAfterResultCollection scope locals results affectedRows rest next nested
 
     and handleQueryResult scope current locals results affectedRows rest result =
         match Executor.errorInfo result with
@@ -3638,7 +3718,7 @@ let private runTextDiagnostics session (diagnostics: StoredProgram.DiagnosticsSt
                         | Some message -> Error(Err(3061, message))
                         | None -> Ok(variable.Name, value)
                     | StoredProgram.LocalVariable name -> Error(Err(1327, sprintf "Undeclared variable: %s" name)))
-                |> Result.bind (applyRoutineOutputs next.UserVariables)
+                |> Result.bind (applyUserVariableOutputs next.UserVariables)
                 |> function
                     | Error result -> next, result
                     | Ok variables -> { next with UserVariables = variables }, Affected 0UL
@@ -3814,10 +3894,23 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         session, Err(code, message)
         | CallProcedure(qualifiedName, arguments) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+            let recursive =
+                session.RoutineStack
+                |> List.exists (fun (activeDatabase, activeName) ->
+                    activeDatabase.Equals(database, StringComparison.OrdinalIgnoreCase)
+                    && activeName.Equals(name, StringComparison.OrdinalIgnoreCase))
 
-            match routineEntries () |> List.tryFind (SystemCatalog.Routine.matches database name) with
-            | None -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
-            | Some routine ->
+            match recursive, routineEntries () |> List.tryFind (SystemCatalog.Routine.matches database name) with
+            | true, _ ->
+                session,
+                Err(
+                    1456,
+                    sprintf
+                        "Recursive limit 0 (as set by the max_sp_recursion_depth variable) was exceeded for routine %s"
+                        name
+                )
+            | false, None -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
+            | false, Some routine ->
                 match authorize "EXECUTE" database with
                 | Error(code, message) -> session, Err(code, message)
                 | Ok() ->
@@ -3862,6 +3955,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                                     User = account.Name
                                     AccountHost = account.Host
                                     Database = Some routine.Schema
+                                    RoutineStack = (routine.Schema, routine.Name) :: callerSession.RoutineStack
                                     Variables = routineVariables routine callerSession.Variables }
 
                             let mutable resultingSettings = capturedSettings
@@ -3896,24 +3990,33 @@ and private dispatchNormalized session rawSql parserOptions sql =
                                         |> List.choose (fun (parameter, target) ->
                                             run.Locals
                                             |> Map.tryFind parameter.Name
-                                            |> Option.map (fun local -> target.Name, local.Value))
+                                            |> Option.map (fun local -> target, local.Value))
 
-                                    let updatedVariables =
+                                    let updatedOutputs =
                                         match run.Error with
                                         | Some error -> Error error
-                                        | None -> applyRoutineOutputs executed.UserVariables outputValues
+                                        | None ->
+                                            applyProcedureOutputs
+                                                executionStore
+                                                executed.UserVariables
+                                                (Executor.currentRoutineVariables ())
+                                                outputValues
+
+                                    match updatedOutputs with
+                                    | Ok(_, Some locals) -> Executor.replaceRoutineVariables locals
+                                    | _ -> ()
 
                                     let result =
-                                        match results, updatedVariables with
+                                        match results, updatedOutputs with
                                         | [], Error error -> error
                                         | results, Error error -> MultipleResults(results @ [ error, [] ])
                                         | [], Ok _ -> Affected affectedRows
                                         | results, Ok _ -> MultipleResults(results @ [ Affected affectedRows, [] ])
 
                                     let executed =
-                                        match updatedVariables with
+                                        match updatedOutputs with
                                         | Error _ -> executed
-                                        | Ok variables -> { executed with UserVariables = variables }
+                                        | Ok(variables, _) -> { executed with UserVariables = variables }
 
                                     executed, result
 
@@ -3930,6 +4033,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                                 User = session.User
                                 AccountHost = session.AccountHost
                                 Database = session.Database
+                                RoutineStack = session.RoutineStack
                                 Variables = restoreRoutineVariables session.Variables changed executed.Variables },
                             result
         | DropProcedure(qualifiedName, ifExists) ->

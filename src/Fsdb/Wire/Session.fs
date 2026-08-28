@@ -180,6 +180,8 @@ type Session =
       /// SQL PREPARE names are connection-local strings rather than the
       /// integer ids assigned by COM_STMT_PREPARE.
       TextStatements: Map<string, PreparedStmt>
+      /// Active stored-procedure identities, innermost first.
+      RoutineStack: (string * string) list
       /// The next id COM_STMT_PREPARE will assign.
       NextStmtId: int
       /// Bytes buffered by COM_STMT_SEND_LONG_DATA, keyed by (statement id,
@@ -229,6 +231,7 @@ let create (connectionId: int) (store: Store) : Session =
       Statements = Map.empty
       Cursors = Map.empty
       TextStatements = Map.empty
+      RoutineStack = []
       NextStmtId = 1
       LongData = Map.empty
       LongDataBytes = 0L

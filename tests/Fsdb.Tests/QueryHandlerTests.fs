@@ -2222,6 +2222,77 @@ let tests =
               | Err(1064, _) -> ()
               | other -> failtestf "expected local PREPARE source rejection, got %A" other
 
+          testCase "stored procedures call procedures with local outputs"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session =
+                  [ """CREATE PROCEDURE inner_values(IN source INT, OUT doubled INT, INOUT running INT)
+                         BEGIN
+                           SELECT 'inner', source;
+                           SET doubled = source * 2;
+                           SET running = running + source;
+                         END"""
+                    """CREATE PROCEDURE outer_values(IN source INT, OUT result INT)
+                         BEGIN
+                           DECLARE running INT DEFAULT 10;
+                           CALL inner_values(source, result, running);
+                           SELECT 'outer', result, running;
+                         END"""
+                    """CREATE PROCEDURE recursive_call()
+                         BEGIN
+                           CALL recursive_call();
+                         END""" ]
+                  |> List.fold (fun session definition ->
+                      let session, created = handle session definition
+                      Expect.equal created (Affected 0UL) "created nested procedure"
+                      session) session
+
+              let session, called = handle session "CALL outer_values(3, @result)"
+
+              match called with
+              | MultipleResults
+                  [ (ResultSet(_, [ [ Some "inner"; Some "3" ] ]), _)
+                    (ResultSet(_, [ [ Some "outer"; Some "6"; Some "13" ] ]), _)
+                    (Affected 0UL, []) ] ->
+                  ()
+              | other -> failtestf "expected nested procedure resultsets, got %A" other
+
+              match handle session "SELECT @result" |> snd with
+              | ResultSet(_, [ [ Some "6" ] ]) -> ()
+              | other -> failtestf "expected nested OUT value, got %A" other
+
+              match handle session "CALL recursive_call()" |> snd with
+              | Err(1456, message) -> Expect.stringContains message "Recursive limit 0" "recursion limit"
+              | other -> failtestf "expected recursive CALL refusal, got %A" other
+
+          testCase "nested procedure errors retain prior results and reach handlers"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE PROCEDURE inner_failure() BEGIN SELECT 'before'; SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = 60020; END"
+
+              Expect.equal created (Affected 0UL) "created failing procedure"
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE PROCEDURE outer_handler(OUT code INT) BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION GET STACKED DIAGNOSTICS CONDITION 1 code = MYSQL_ERRNO; CALL inner_failure(); SELECT 'after', code; END"
+
+              Expect.equal created (Affected 0UL) "created handling procedure"
+
+              match handle session "CALL outer_handler(@code)" with
+              | session,
+                MultipleResults
+                    [ (ResultSet(_, [ [ Some "before" ] ]), _)
+                      (ResultSet(_, [ [ Some "after"; Some "60020" ] ]), _)
+                      (Affected 0UL, []) ] ->
+                  Expect.equal session.UserVariables.["code"] (VInt 60020L) "handled nested error"
+              | _, other -> failtestf "expected handled nested procedure results, got %A" other
+
           testCase "SIGNAL preserves named conditions and RESIGNAL diagnostics"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
