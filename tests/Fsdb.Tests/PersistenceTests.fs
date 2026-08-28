@@ -19,6 +19,7 @@ let private tempDataDir () =
 let private usersColumns =
     [ { Name = "id"
         Type = TInt false
+        NumericDisplay = None
         Nullable = false
         Default = None
         AutoIncrement = true
@@ -31,6 +32,7 @@ let private usersColumns =
         OnUpdateCurrentTimestamp = false }
       { Name = "name"
         Type = TVarchar 255
+        NumericDisplay = None
         Nullable = false
         Default = None
         AutoIncrement = false
@@ -43,6 +45,7 @@ let private usersColumns =
         OnUpdateCurrentTimestamp = false }
       { Name = "note"
         Type = TText
+        NumericDisplay = None
         Nullable = true
         Default = None
         AutoIncrement = false
@@ -61,6 +64,7 @@ let private usersColumns =
 let private tagColumns =
     [ { Name = "tag"
         Type = TVarchar 64
+        NumericDisplay = None
         Nullable = false
         Default = None
         AutoIncrement = false
@@ -78,6 +82,7 @@ let private snapshotPath dir = Path.Combine(dir, "snapshot.fsdb")
 let private mkCol (name: string) (typ: ColumnType) : ColumnDef =
     { Name = name
       Type = typ
+      NumericDisplay = None
       Nullable = true
       Default = None
       AutoIncrement = false
@@ -376,6 +381,7 @@ let tests =
               let cCol =
                   { Name = "c"
                     Type = TInt false
+                    NumericDisplay = None
                     Nullable = true
                     Default = None
                     AutoIncrement = false
@@ -413,6 +419,7 @@ let tests =
               let eventsColumns =
                   [ { Name = "id"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = true
@@ -427,6 +434,7 @@ let tests =
                       // fsp 6 preserves the stand-in's fraction so replay is
                       // compared against the complete physical value.
                       Type = TDateTime 6
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -439,6 +447,7 @@ let tests =
                       OnUpdateCurrentTimestamp = false }
                     { Name = "token"
                       Type = TVarchar 64
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -558,6 +567,7 @@ let tests =
               let extraCol =
                   { Name = "sku"
                     Type = TVarchar 64
+                    NumericDisplay = None
                     Nullable = true
                     Default = None
                     AutoIncrement = false
@@ -663,6 +673,7 @@ let tests =
                   "seq"
                   [ { Name = "n"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -801,6 +812,7 @@ let tests =
                   "hot"
                   [ { Name = "id"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -813,6 +825,7 @@ let tests =
                       OnUpdateCurrentTimestamp = false }
                     { Name = "n"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -1078,6 +1091,7 @@ let tests =
                   "dups"
                   [ { Name = "n"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -1126,6 +1140,7 @@ let tests =
                   "bulk"
                   [ { Name = "id"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -1138,6 +1153,7 @@ let tests =
                       OnUpdateCurrentTimestamp = false }
                     { Name = "n"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -1183,6 +1199,7 @@ let tests =
               let idCol name =
                   { Name = name
                     Type = TInt false
+                    NumericDisplay = None
                     Nullable = false
                     Default = None
                     AutoIncrement = false
@@ -1229,6 +1246,7 @@ let tests =
               let genCol =
                   { Name = "b"
                     Type = TInt false
+                    NumericDisplay = None
                     Nullable = true
                     Default = None
                     AutoIncrement = false
@@ -1246,6 +1264,7 @@ let tests =
                   "g"
                   [ { Name = "a"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = true
                       Default = None
                       AutoIncrement = false
@@ -1427,6 +1446,27 @@ let tests =
               | Ok([ column ], _) -> Expect.equal column.Comment "created by import" "the snapshot comment survives"
               | other -> failtestf "expected one reloaded column, got %A" other
 
+          testCase "numeric display attributes survive WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let display =
+                  { Width = Some 7
+                    Decimals = None
+                    ZeroFill = true }
+
+              let columns = [ { mkCol "id" (TInt true) with NumericDisplay = Some display } ]
+              createTable store defaultDatabase "displayed" columns [] [] None None |> ignore
+
+              let recoveredDisplay (recovered: Store) =
+                  recovered.Catalog.[defaultDatabase].[normalizeTableName "displayed"].Columns.Head.NumericDisplay
+
+              Expect.equal (recoveredDisplay (load dir)) (Some display) "the WAL attribute survives"
+              snapshotNow dir store
+              Expect.equal (recoveredDisplay (load dir)) (Some display) "the snapshot attribute survives"
+
           testCase "a table comment survives WAL and snapshot recovery"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -1502,6 +1542,7 @@ let tests =
               let stampColumns =
                   [ { Name = "id"
                       Type = TInt false
+                      NumericDisplay = None
                       Nullable = false
                       Default = None
                       AutoIncrement = false
@@ -1514,6 +1555,7 @@ let tests =
                       OnUpdateCurrentTimestamp = false }
                     { Name = "stamp"
                       Type = TDateTime 3
+                      NumericDisplay = None
                       Nullable = true
                       Default = Some DCurrentTimestamp
                       AutoIncrement = false

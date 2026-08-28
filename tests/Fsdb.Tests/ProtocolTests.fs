@@ -480,6 +480,7 @@ let tests =
               let required =
                   { Name = "n"
                     Type = TInt false
+                    NumericDisplay = None
                     Nullable = false
                     Default = None
                     AutoIncrement = false
@@ -502,6 +503,7 @@ let tests =
               let updatingTimestamp =
                   { required with
                       Type = TTimestamp 0
+                      NumericDisplay = None
                       Nullable = true
                       Default = Some DCurrentTimestamp
                       OnUpdateCurrentTimestamp = true }

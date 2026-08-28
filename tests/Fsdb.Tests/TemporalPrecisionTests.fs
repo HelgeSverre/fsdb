@@ -16,6 +16,7 @@ open Fsdb.QueryHandler
 let private col name ty : ColumnDef =
     { Name = name
       Type = ty
+      NumericDisplay = None
       Nullable = true
       Default = None
       AutoIncrement = false

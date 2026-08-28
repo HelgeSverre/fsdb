@@ -1183,6 +1183,7 @@ let private collectCallsNamed (name: string) (expr: Expr) : Expr list =
 let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : ColumnDef =
     { Name = name
       Type = ty
+      NumericDisplay = None
       Nullable = nullable
       Default = None
       AutoIncrement = false
@@ -4020,6 +4021,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             let castCol: ColumnDef =
                 { Name = "CAST"
                   Type = ty
+                  NumericDisplay = None
                   Nullable = true
                   Default = None
                   AutoIncrement = false
@@ -4339,6 +4341,7 @@ and private describeQueryColumns
     let computedColumn name ty nullable defaultValue collation =
         { Name = name
           Type = ty
+          NumericDisplay = None
           Nullable = nullable
           Default = defaultValue
           AutoIncrement = false
@@ -4827,6 +4830,7 @@ and private deriveColumns
         (fun n (col: Collation.Collation) columnMetadata ->
             { Name = n
               Type = declaredType columnMetadata
+              NumericDisplay = None
               Nullable = columnMetadata.Flags &&& NotNullFlag = 0us
               Default = None
               AutoIncrement = false
@@ -4925,6 +4929,7 @@ and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list
         let def name ty =
             [ { Name = name
                 Type = ty
+                NumericDisplay = None
                 Nullable = true
                 Default = None
                 AutoIncrement = false
@@ -7615,6 +7620,7 @@ and private runUnionStmtWithOuter
                 |> List.map (fun c ->
                     { Name = c
                       Type = TVarchar 255
+                      NumericDisplay = None
                       Nullable = true
                       Default = None
                       AutoIncrement = false
@@ -12478,6 +12484,7 @@ let rec executeAs
                     let localColumn name =
                         { Name = name
                           Type = TText
+                          NumericDisplay = None
                           Nullable = true
                           Default = None
                           AutoIncrement = false

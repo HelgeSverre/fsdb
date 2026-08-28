@@ -3175,6 +3175,7 @@ let private parseFunctionDefinition options parameters returnType body =
 let private routineColumn name columnType =
     { Name = name
       Type = columnType
+      NumericDisplay = None
       Nullable = true
       Default = None
       AutoIncrement = false

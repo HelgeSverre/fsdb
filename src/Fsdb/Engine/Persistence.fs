@@ -17,13 +17,27 @@ let private snapshotFileName = "snapshot.fsdb"
 /// Snapshot magic prevents a torn zero-filled file from decoding as an empty catalog.
 let private legacySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x31uy |] // "FSN1"
 let private columnCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |] // "FSN2"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x33uy |] // "FSN3"
+let private tableCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x33uy |] // "FSN3"
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x34uy |] // "FSN4"
 
 type private SnapshotFormat =
     { ColumnComments: bool
-      TableComments: bool }
+      TableComments: bool
+      NumericDisplays: bool }
 
-let private currentSnapshotFormat = { ColumnComments = true; TableComments = true }
+let private legacySnapshotFormat =
+    { ColumnComments = false
+      TableComments = false
+      NumericDisplays = false }
+
+let private columnCommentSnapshotFormat =
+    { legacySnapshotFormat with ColumnComments = true }
+
+let private tableCommentSnapshotFormat =
+    { columnCommentSnapshotFormat with TableComments = true }
+
+let private currentSnapshotFormat =
+    { tableCommentSnapshotFormat with NumericDisplays = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -32,10 +46,12 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = tableCommentSnapshotMagic then
+        Some tableCommentSnapshotFormat
     elif header = columnCommentSnapshotMagic then
-        Some { ColumnComments = true; TableComments = false }
+        Some columnCommentSnapshotFormat
     elif header = legacySnapshotMagic then
-        Some { ColumnComments = false; TableComments = false }
+        Some legacySnapshotFormat
     else
         None
 
@@ -407,7 +423,7 @@ let private decodeColumnDefault (r: #IReader) : ColumnDefault =
     | tag -> failwithf "Persistence: unknown ColumnDefault tag 0x%02x" tag
 
 /// Generated expressions must survive restart or later writes compute NULL.
-let private encodeColumnDef (includeComment: bool) (w: Writer) (c: ColumnDef) : unit =
+let private encodeColumnDef (format: SnapshotFormat) (w: Writer) (c: ColumnDef) : unit =
     writeStr w c.Name
     encodeColumnType w c.Type
     writeBool w c.Nullable
@@ -435,26 +451,66 @@ let private encodeColumnDef (includeComment: bool) (w: Writer) (c: ColumnDef) : 
     writeOptStr w c.Collation
     writeOptStr w c.Charset
     writeBool w c.OnUpdateCurrentTimestamp
-    if includeComment then
+    if format.ColumnComments then
         writeStr w c.Comment
 
-let private decodeColumnDef (includeComment: bool) (r: #IReader) : ColumnDef =
-    { Name = readStr r
-      Type = decodeColumnType r
-      Nullable = readBool r
-      Default = (match r.ReadByte() with 0uy -> None | _ -> Some(decodeColumnDefault r))
-      AutoIncrement = readBool r
-      PrimaryKey = readBool r
-      Unique = readBool r
-      Generated =
-        (match r.ReadByte() with
-         | 0uy -> None
-         | 2uy -> Some(decodeExpr r, Stored)
-         | _ -> Some(decodeExpr r, Virtual))
-      Collation = readOptStr r
-      Charset = readOptStr r
-      OnUpdateCurrentTimestamp = readBool r
-      Comment = if includeComment then readStr r else "" }
+    if format.NumericDisplays then
+        match c.NumericDisplay with
+        | None -> w.WriteByte 0uy
+        | Some display ->
+            w.WriteByte 1uy
+
+            match display.Width with
+            | None -> w.WriteByte 0uy
+            | Some width -> w.WriteByte 1uy; w.WriteInt32LE width
+
+            match display.Decimals with
+            | None -> w.WriteByte 0uy
+            | Some decimals -> w.WriteByte 1uy; w.WriteInt32LE decimals
+
+            writeBool w display.ZeroFill
+
+let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
+    let name = readStr r
+    let columnType = decodeColumnType r
+    let nullable = readBool r
+    let defaultValue = match r.ReadByte() with 0uy -> None | _ -> Some(decodeColumnDefault r)
+    let autoIncrement = readBool r
+    let primaryKey = readBool r
+    let unique = readBool r
+    let generated =
+        match r.ReadByte() with
+        | 0uy -> None
+        | 2uy -> Some(decodeExpr r, Stored)
+        | _ -> Some(decodeExpr r, Virtual)
+    let collation = readOptStr r
+    let charset = readOptStr r
+    let onUpdateCurrentTimestamp = readBool r
+    let comment = if format.ColumnComments then readStr r else ""
+    let numericDisplay =
+        if format.NumericDisplays && r.ReadByte() <> 0uy then
+            let width = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+            let decimals = if r.ReadByte() = 0uy then None else Some(r.ReadInt32LE())
+            Some
+                { Width = width
+                  Decimals = decimals
+                  ZeroFill = readBool r }
+        else
+            None
+
+    { Name = name
+      Type = columnType
+      NumericDisplay = numericDisplay
+      Nullable = nullable
+      Default = defaultValue
+      AutoIncrement = autoIncrement
+      PrimaryKey = primaryKey
+      Unique = unique
+      Generated = generated
+      Collation = collation
+      Charset = charset
+      OnUpdateCurrentTimestamp = onUpdateCurrentTimestamp
+      Comment = comment }
 
 let private lowercaseIndexColumnPrefix = "\u0000L:"
 let private expressionIndexColumnPrefix = "\u0000E:"
@@ -585,10 +641,10 @@ let private decodeColumnPosition (r: #IReader) : ColumnPosition =
 
 let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterAction) : unit =
     match a with
-    | AddColumn(c, position) -> w.WriteByte 0x01uy; encodeColumnDef format.ColumnComments w c; encodeColumnPosition w position
+    | AddColumn(c, position) -> w.WriteByte 0x01uy; encodeColumnDef format w c; encodeColumnPosition w position
     | DropColumn name -> w.WriteByte 0x02uy; writeStr w name
-    | ModifyColumn(c, position) -> w.WriteByte 0x03uy; encodeColumnDef format.ColumnComments w c; encodeColumnPosition w position
-    | ChangeColumn(oldName, c, position) -> w.WriteByte 0x04uy; writeStr w oldName; encodeColumnDef format.ColumnComments w c; encodeColumnPosition w position
+    | ModifyColumn(c, position) -> w.WriteByte 0x03uy; encodeColumnDef format w c; encodeColumnPosition w position
+    | ChangeColumn(oldName, c, position) -> w.WriteByte 0x04uy; writeStr w oldName; encodeColumnDef format w c; encodeColumnPosition w position
     | RenameTo name -> w.WriteByte 0x05uy; writeStr w name
     | RenameColumnTo(oldName, newName) -> w.WriteByte 0x06uy; writeStr w oldName; writeStr w newName
     | AddIndex ix -> w.WriteByte 0x07uy; encodeIndexDef w ix
@@ -619,10 +675,10 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
 
 let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterAction =
     match r.ReadByte() with
-    | 0x01uy -> AddColumn(decodeColumnDef format.ColumnComments r, decodeColumnPosition r)
+    | 0x01uy -> AddColumn(decodeColumnDef format r, decodeColumnPosition r)
     | 0x02uy -> DropColumn(readStr r)
-    | 0x03uy -> ModifyColumn(decodeColumnDef format.ColumnComments r, decodeColumnPosition r)
-    | 0x04uy -> ChangeColumn(readStr r, decodeColumnDef format.ColumnComments r, decodeColumnPosition r)
+    | 0x03uy -> ModifyColumn(decodeColumnDef format r, decodeColumnPosition r)
+    | 0x04uy -> ChangeColumn(readStr r, decodeColumnDef format r, decodeColumnPosition r)
     | 0x05uy -> RenameTo(readStr r)
     | 0x06uy -> RenameColumnTo(readStr r, readStr r)
     | 0x07uy -> AddIndex(decodeIndexDef r)
@@ -649,7 +705,7 @@ let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) 
         w.WriteByte 0x03uy
         writeStr w table.Name
         w.WriteInt32LE(List.length table.Columns)
-        List.iter (encodeColumnDef format.ColumnComments w) table.Columns
+        List.iter (encodeColumnDef format w) table.Columns
         w.WriteInt32LE(List.length table.Indexes)
         List.iter (encodeIndexDef w) table.Indexes
         w.WriteInt32LE(List.length table.ForeignKeys)
@@ -683,7 +739,7 @@ let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
     | 0x02uy -> DropDatabase(readStr r, readBool r)
     | 0x03uy ->
         let name = readStr r
-        let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef format.ColumnComments r)
+        let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef format r)
         let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
         let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
         let ifNotExists = readBool r
@@ -719,6 +775,8 @@ let private KindSchemaChangedV2 = 0x07uy
 let private KindSchemaChangedAtV2 = 0x08uy
 let private KindSchemaChangedV3 = 0x09uy
 let private KindSchemaChangedAtV3 = 0x0Auy
+let private KindSchemaChangedV4 = 0x0Buy
+let private KindSchemaChangedAtV4 = 0x0Cuy
 
 let private encodeRowBin (w: Writer) (row: Value[]) : unit =
     w.WriteInt32LE row.Length
@@ -757,11 +815,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         for row in rows do
             encodeRowBin w row
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV3
+        w.WriteByte KindSchemaChangedV4
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV3
+        w.WriteByte KindSchemaChangedAtV4
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
@@ -796,22 +854,28 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
         RowsDeleted(db, table, rows)
     | k when k = KindSchemaChanged ->
         let db = str ()
-        SchemaChanged(db, decodeStatement { ColumnComments = false; TableComments = false } r)
+        SchemaChanged(db, decodeStatement legacySnapshotFormat r)
     | k when k = KindTransactionCommitted ->
         TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r))
     | k when k = KindSchemaChangedAt ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement { ColumnComments = false; TableComments = false } r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement legacySnapshotFormat r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV2 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement { ColumnComments = true; TableComments = false } r)
+        SchemaChanged(db, decodeStatement columnCommentSnapshotFormat r)
     | k when k = KindSchemaChangedAtV2 ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement { ColumnComments = true; TableComments = false } r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement columnCommentSnapshotFormat r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV3 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement currentSnapshotFormat r)
+        SchemaChanged(db, decodeStatement tableCommentSnapshotFormat r)
     | k when k = KindSchemaChangedAtV3 ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement tableCommentSnapshotFormat r, DateTime(r.ReadInt64LE()))
+    | k when k = KindSchemaChangedV4 ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement currentSnapshotFormat r)
+    | k when k = KindSchemaChangedAtV4 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement currentSnapshotFormat r, DateTime(r.ReadInt64LE()))
     | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
@@ -939,10 +1003,10 @@ let private replayWal (store: Store) (walPath: string) : int64 =
 
 // Snapshots share the WAL row codec and publish through an atomic rename.
 
-let private encodeTableMeta (w: Writer) (t: Table) : unit =
+let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : unit =
     writeStr w t.OriginalName
     w.WriteInt32LE(List.length t.Columns)
-    List.iter (encodeColumnDef true w) t.Columns
+    List.iter (encodeColumnDef format w) t.Columns
     w.WriteInt32LE(List.length t.Indexes)
     List.iter (encodeIndexDef w) t.Indexes
     w.WriteInt32LE(List.length t.ForeignKeys)
@@ -988,7 +1052,7 @@ let private writeCatalog (s: FileStream) (catalog: Catalog) : unit =
         db
         |> Map.iter (fun tableKey table ->
             writeStr w tableKey
-            encodeTableMeta w table
+            encodeTableMeta currentSnapshotFormat w table
 
             for row in table.RowsArray do
                 encodeRowBin w row
@@ -1006,7 +1070,7 @@ let private writeCatalog (s: FileStream) (catalog: Catalog) : unit =
 
 let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let originalName = readStr r
-    let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef format.ColumnComments r)
+    let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef format r)
     let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
     let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
     let tableCharset = readOptStr r
@@ -1145,9 +1209,9 @@ let load (dataDir: string) : Store =
         let read = s.Read(header, 0, header.Length)
         let format =
             if read = snapshotMagic.Length then
-                snapshotFormat header |> Option.defaultValue { ColumnComments = false; TableComments = false }
+                snapshotFormat header |> Option.defaultValue legacySnapshotFormat
             else
-                { ColumnComments = false; TableComments = false }
+                legacySnapshotFormat
 
         let start = if read = snapshotMagic.Length && snapshotFormat header |> Option.isSome then int64 snapshotMagic.Length else 0L
         s.Seek(start, SeekOrigin.Begin) |> ignore

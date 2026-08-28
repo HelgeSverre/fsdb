@@ -313,9 +313,15 @@ and GeneratedKind =
     | Virtual
     | Stored
 
+and NumericDisplay =
+    { Width: int option
+      Decimals: int option
+      ZeroFill: bool }
+
 and ColumnDef =
     { Name: string
       Type: ColumnType
+      NumericDisplay: NumericDisplay option
       Nullable: bool
       Default: ColumnDefault option
       AutoIncrement: bool

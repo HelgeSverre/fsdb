@@ -13,6 +13,7 @@ let private prepareRow _ row = Ok row
 let private col name ty nullable =
     { Name = name
       Type = ty
+      NumericDisplay = None
       Nullable = nullable
       Default = None
       AutoIncrement = false

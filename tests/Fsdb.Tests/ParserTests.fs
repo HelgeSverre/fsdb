@@ -984,6 +984,7 @@ let tests =
                                 "t"
                                 [ { Name = "id"
                                     Type = TInt false
+                                    NumericDisplay = None
                                     Nullable = true
                                     Default = None
                                     AutoIncrement = true
@@ -996,6 +997,7 @@ let tests =
                                     OnUpdateCurrentTimestamp = false };
                               { Name = "name"
                                 Type = TVarchar 255
+                                NumericDisplay = None
                                 Nullable = false
                                 Default = None
                                 AutoIncrement = false
@@ -1008,6 +1010,7 @@ let tests =
                                 OnUpdateCurrentTimestamp = false };
                               { Name = "score"
                                 Type = TDecimal(5, 2, false)
+                                NumericDisplay = None
                                 Nullable = true
                                 Default = Some(DConst(VInt 0L))
                                 AutoIncrement = false
@@ -1068,6 +1071,7 @@ let tests =
                                 "t"
                                 [ { Name = "id"
                                     Type = TInt false
+                                    NumericDisplay = None
                                     Nullable = true
                                     Default = None
                                     AutoIncrement = false
@@ -1090,6 +1094,7 @@ let tests =
                                 "t"
                                 [ { Name = "id"
                                     Type = TInt false
+                                    NumericDisplay = None
                                     Nullable = true
                                     Default = None
                                     AutoIncrement = false
@@ -1102,6 +1107,7 @@ let tests =
                                     OnUpdateCurrentTimestamp = false };
                                   { Name = "name"
                                     Type = TVarchar 10
+                                    NumericDisplay = None
                                     Nullable = true
                                     Default = None
                                     AutoIncrement = false
@@ -1190,6 +1196,7 @@ let tests =
                                 "t"
                                 [ { Name = "id"
                                     Type = TInt false
+                                    NumericDisplay = None
                                     Nullable = true
                                     Default = None
                                     AutoIncrement = false
@@ -1454,6 +1461,23 @@ let tests =
                     match parseOk "CREATE TABLE t (a TINYINT(1) UNSIGNED)" with
                     | CreateTable { Columns = [ { Type = TTinyInt true } ] } -> ()
                     | other -> failtestf "expected TTinyInt true, got %A" other
+
+                testCase "numeric display attributes retain width, decimals and ZEROFILL"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "CREATE TABLE t (a INT(7) ZEROFILL, b SMALLINT ZEROFILL, c FLOAT(8,2) ZEROFILL, d DECIMAL(7,2) ZEROFILL, e INT(3))"
+                    with
+                    | CreateTable { Columns = columns } ->
+                        Expect.equal
+                            (columns |> List.map (fun column -> column.Type, column.NumericDisplay))
+                            [ TInt true, Some { Width = Some 7; Decimals = None; ZeroFill = true }
+                              TSmallInt true, Some { Width = Some 5; Decimals = None; ZeroFill = true }
+                              TFloat true, Some { Width = Some 8; Decimals = Some 2; ZeroFill = true }
+                              TDecimal(7, 2, true), Some { Width = None; Decimals = None; ZeroFill = true }
+                              TInt false, Some { Width = Some 3; Decimals = None; ZeroFill = false } ]
+                            "numeric display attributes"
+                    | other -> failtestf "expected numeric display attributes, got %A" other
 
                 testCase "COMMENT / CHARACTER SET / COLLATE column modifiers are accepted and ignored"
                 <| fun _ ->

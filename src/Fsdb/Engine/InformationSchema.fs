@@ -15,6 +15,7 @@ open Fsdb.Sql
 let private col (name: string) (ty: ColumnType) : ColumnDef =
     { Name = name
       Type = ty
+      NumericDisplay = None
       Nullable = true
       Default = None
       AutoIncrement = false

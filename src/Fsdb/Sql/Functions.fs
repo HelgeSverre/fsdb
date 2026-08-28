@@ -60,6 +60,7 @@ module VirtualTable =
     let private col (name: string) (ty: Ast.ColumnType) : Ast.ColumnDef =
         { Name = name
           Type = ty
+          NumericDisplay = None
           Nullable = true
           Default = None
           AutoIncrement = false

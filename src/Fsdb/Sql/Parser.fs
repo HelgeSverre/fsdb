@@ -751,21 +751,29 @@ let private literalValue: Parser<Value, unit> =
 // since `CAST(expr AS type)` reuses `columnType`.
 // ---------------------------------------------------------------------------
 
-/// A parenthesized width/precision like `(11)` or `(10,2)`, parsed and
-/// discarded — `Ast.ColumnType` doesn't track display width.
-let private ignoredWidth: Parser<unit, unit> =
-    optional (between (sym "(") (sym ")") (sepBy1 intTok (sym ",")))
+let private numericWidth: Parser<int * int option, unit> =
+    between (sym "(") (sym ")") (intTok .>>. opt (sym "," >>. intTok))
 
-/// As `ignoredWidth`, but keeping the number: `TINYINT`'s display width is
-/// the one that carries meaning, since `TINYINT(1)` is `BOOLEAN` (see
-/// `Ast.TBool`).
-let private tinyIntWidth: Parser<int option, unit> =
-    opt (between (sym "(") (sym ")") intTok)
+type private NumericTail =
+    { Unsigned: bool
+      ZeroFill: bool }
 
-/// `UNSIGNED` (and MySQL's deprecated `ZEROFILL`, which implies it) after
-/// any numeric type — carried on the int types, accepted-and-discarded on
-/// float/double/decimal since `Ast.ColumnType` doesn't track it there.
-let private unsignedFlag: Parser<bool, unit> = opt (keyword "UNSIGNED") |>> Option.isSome
+let private numericTail: Parser<NumericTail, unit> =
+    many ((keyword "UNSIGNED" >>% false) <|> (keyword "ZEROFILL" >>% true))
+    |>> fun modifiers ->
+        let zeroFill = List.contains true modifiers
+
+        { Unsigned = zeroFill || List.contains false modifiers
+          ZeroFill = zeroFill }
+
+let private numericDisplay width decimals zeroFill explicitDisplay =
+    if explicitDisplay || zeroFill then
+        Some
+            { Width = width
+              Decimals = decimals
+              ZeroFill = zeroFill }
+    else
+        None
 
 let private widthLen: Parser<int, unit> = between (sym "(") (sym ")") intTok
 let private optWidthLen: Parser<int option, unit> = opt widthLen
@@ -781,83 +789,94 @@ let private optFsp: Parser<int, unit> = opt widthLen |>> Option.defaultValue 0
 let private stringListParen: Parser<string list, unit> =
     between (sym "(") (sym ")") (sepBy1 (stringLit |>> (function VString s -> s | _ -> "")) (sym ","))
 
-let private columnType: Parser<ColumnType, unit> =
+let private columnTypeWithDisplay: Parser<ColumnType * NumericDisplay option, unit> =
     choice
-        [ keyword "TINYINT" >>. tinyIntWidth .>>. unsignedFlag
-          |>> (fun (width, unsigned) ->
-              // `TINYINT(1)` is what `BOOLEAN` expands to, and clients read
-              // the width to tell them apart. Signed only: `TINYINT(1)
-              // UNSIGNED` keeps the integer reading, as MySQL's own clients
-              // do.
-              if width = Some 1 && not unsigned then TBool else TTinyInt unsigned)
-          keyword "SMALLINT" >>. ignoredWidth >>. unsignedFlag |>> TSmallInt
-          keyword "MEDIUMINT" >>. ignoredWidth >>. unsignedFlag |>> TMediumInt
-          keyword "BIGINT" >>. ignoredWidth >>. unsignedFlag |>> TBigInt
-          (keyword "INT" <|> keyword "INTEGER") >>. ignoredWidth >>. unsignedFlag |>> TInt
-          keyword "BIT" >>. optWidthLen |>> (fun width -> TBit(defaultArg width 1))
-          keyword "VARCHAR" >>. widthLen |>> TVarchar
-          keyword "CHAR" >>. optWidthLen |>> (fun n -> TChar(defaultArg n 1))
-          keyword "TINYTEXT" >>% TTinyText
-          keyword "MEDIUMTEXT" >>% TMediumText
-          keyword "LONGTEXT" >>% TLongText
+        [ let integerType keywordParser defaultWidth makeType =
+              keywordParser
+              >>. opt widthLen
+              .>>. numericTail
+              |>> fun (width, tail) ->
+                  makeType tail.Unsigned,
+                  numericDisplay (width |> Option.orElseWith (fun () -> if tail.ZeroFill then Some defaultWidth else None)) None tail.ZeroFill width.IsSome
+
+          integerType (keyword "TINYINT") 3 (fun unsigned -> TTinyInt unsigned)
+          |>> fun (ty, display) ->
+              match display, ty with
+              | Some { Width = Some 1; ZeroFill = false }, TTinyInt false -> TBool, display
+              | _ -> ty, display
+          integerType (keyword "SMALLINT") 5 TSmallInt
+          integerType (keyword "MEDIUMINT") 8 TMediumInt
+          integerType (keyword "BIGINT") 20 TBigInt
+          integerType (keyword "INT" <|> keyword "INTEGER") 10 TInt
+          keyword "BIT" >>. optWidthLen |>> (fun width -> TBit(defaultArg width 1), None)
+          keyword "VARCHAR" >>. widthLen |>> (fun width -> TVarchar width, None)
+          keyword "CHAR" >>. optWidthLen |>> (fun width -> TChar(defaultArg width 1), None)
+          keyword "TINYTEXT" >>% (TTinyText, None)
+          keyword "MEDIUMTEXT" >>% (TMediumText, None)
+          keyword "LONGTEXT" >>% (TLongText, None)
           // `TEXT(n)`/`BLOB(n)` pick the smallest family member that holds
           // n — measured in CHARACTERS for TEXT (×4 bytes under utf8mb4:
           // TEXT(64) is already a plain TEXT) and bytes for BLOB
           // (oracle-verified boundaries: 63/16383 vs 255/65535).
           keyword "TEXT" >>. opt (attempt widthLen)
           |>> (function
-              | Some n when n <= 63 -> TTinyText
-              | Some n when n > 16383 && n <= 4194303 -> TMediumText
-              | Some n when n > 4194303 -> TLongText
-              | _ -> TText)
-          keyword "VARBINARY" >>. widthLen |>> TVarBinary
-          keyword "BINARY" >>. optWidthLen |>> (fun n -> TBinary(defaultArg n 1))
-          keyword "TINYBLOB" >>% TTinyBlob
-          keyword "MEDIUMBLOB" >>% TMediumBlob
-          keyword "LONGBLOB" >>% TLongBlob
+              | Some n when n <= 63 -> TTinyText, None
+              | Some n when n > 16383 && n <= 4194303 -> TMediumText, None
+              | Some n when n > 4194303 -> TLongText, None
+              | _ -> TText, None)
+          keyword "VARBINARY" >>. widthLen |>> (fun width -> TVarBinary width, None)
+          keyword "BINARY" >>. optWidthLen |>> (fun width -> TBinary(defaultArg width 1), None)
+          keyword "TINYBLOB" >>% (TTinyBlob, None)
+          keyword "MEDIUMBLOB" >>% (TMediumBlob, None)
+          keyword "LONGBLOB" >>% (TLongBlob, None)
           keyword "BLOB" >>. opt (attempt widthLen)
           |>> (function
-              | Some n when n <= 255 -> TTinyBlob
-              | Some n when n > 65535 && n <= 16777215 -> TMediumBlob
-              | Some n when n > 16777215 -> TLongBlob
-              | _ -> TBlob)
-          keyword "ENUM" >>. stringListParen |>> TEnum
-          keyword "SET" >>. stringListParen |>> TSet
+              | Some n when n <= 255 -> TTinyBlob, None
+              | Some n when n > 65535 && n <= 16777215 -> TMediumBlob, None
+              | Some n when n > 16777215 -> TLongBlob, None
+              | _ -> TBlob, None)
+          keyword "ENUM" >>. stringListParen |>> (fun values -> TEnum values, None)
+          keyword "SET" >>. stringListParen |>> (fun values -> TSet values, None)
           (keyword "DECIMAL" <|> keyword "NUMERIC")
-          >>. opt (between (sym "(") (sym ")") (intTok .>>. opt (sym "," >>. intTok)))
-          .>>. unsignedFlag
-          |>> fun (size, unsigned) ->
+          >>. opt numericWidth
+          .>>. numericTail
+          |>> fun (size, tail) ->
               match size with
-              | Some(p, scale) -> TDecimal(p, Option.defaultValue 0 scale, unsigned)
-              | None -> TDecimal(10, 0, unsigned)
-          keyword "REAL" >>. ignoredWidth >>. unsignedFlag
-          |>> fun unsigned ->
-              if currentOptions.Value.RealAsFloat then
-                  TFloat unsigned
-              else
-                  TDouble unsigned
-          keyword "DOUBLE" >>. optional (keyword "PRECISION") >>. ignoredWidth >>. unsignedFlag |>> TDouble
-          keyword "FLOAT" >>. ignoredWidth >>. unsignedFlag |>> TFloat
-          keyword "DATETIME" >>. optFsp |>> TDateTime
-          keyword "TIMESTAMP" >>. optFsp |>> TTimestamp
-          keyword "DATE" >>% TDate
-          keyword "TIME" >>. optFsp |>> TTime
-          keyword "YEAR" >>. ignoredWidth >>% TYear
-          keyword "JSON" >>% TJson
-          keyword "GEOMETRY" >>% TGeometry Geometry
-          keyword "POINT" >>% TGeometry Point
-          keyword "LINESTRING" >>% TGeometry LineString
-          keyword "POLYGON" >>% TGeometry Polygon
-          keyword "MULTIPOINT" >>% TGeometry MultiPoint
-          keyword "MULTILINESTRING" >>% TGeometry MultiLineString
-          keyword "MULTIPOLYGON" >>% TGeometry MultiPolygon
-          (keyword "GEOMETRYCOLLECTION" <|> keyword "GEOMCOLLECTION") >>% TGeometry GeometryCollection
+              | Some(p, scale) -> TDecimal(p, Option.defaultValue 0 scale, tail.Unsigned), numericDisplay None None tail.ZeroFill false
+              | None -> TDecimal(10, 0, tail.Unsigned), numericDisplay None None tail.ZeroFill false
+          let floatingType keywordParser makeType =
+              keywordParser
+              >>. opt numericWidth
+              .>>. numericTail
+              |>> fun (size, tail) ->
+                  let width, decimals = size |> Option.map fst, size |> Option.bind snd
+                  makeType tail.Unsigned, numericDisplay width decimals tail.ZeroFill size.IsSome
+
+          floatingType (keyword "REAL") (fun unsigned -> if currentOptions.Value.RealAsFloat then TFloat unsigned else TDouble unsigned)
+          floatingType (keyword "DOUBLE" >>. optional (keyword "PRECISION")) TDouble
+          floatingType (keyword "FLOAT") TFloat
+          keyword "DATETIME" >>. optFsp |>> (fun fsp -> TDateTime fsp, None)
+          keyword "TIMESTAMP" >>. optFsp |>> (fun fsp -> TTimestamp fsp, None)
+          keyword "DATE" >>% (TDate, None)
+          keyword "TIME" >>. optFsp |>> (fun fsp -> TTime fsp, None)
+          keyword "YEAR" >>. opt widthLen |>> (fun _ -> TYear, None)
+          keyword "JSON" >>% (TJson, None)
+          keyword "GEOMETRY" >>% (TGeometry Geometry, None)
+          keyword "POINT" >>% (TGeometry Point, None)
+          keyword "LINESTRING" >>% (TGeometry LineString, None)
+          keyword "POLYGON" >>% (TGeometry Polygon, None)
+          keyword "MULTIPOINT" >>% (TGeometry MultiPoint, None)
+          keyword "MULTILINESTRING" >>% (TGeometry MultiLineString, None)
+          keyword "MULTIPOLYGON" >>% (TGeometry MultiPolygon, None)
+          (keyword "GEOMETRYCOLLECTION" <|> keyword "GEOMCOLLECTION") >>% (TGeometry GeometryCollection, None)
           // Bare `VECTOR` is MySQL 9's default dimension 2048; `VECTOR()` is
           // a syntax error there too — `attempt widthLen` backtracks off the
           // empty parens, which then fail the rest of the column grammar.
-          keyword "VECTOR" >>. opt (attempt widthLen) |>> (fun n -> TVector(defaultArg n 2048))
-          (keyword "BOOLEAN" <|> keyword "BOOL") >>% TBool ]
+          keyword "VECTOR" >>. opt (attempt widthLen) |>> (fun n -> TVector(defaultArg n 2048), None)
+          (keyword "BOOLEAN" <|> keyword "BOOL") >>% (TBool, None) ]
     <?> "column type"
+
+let private columnType: Parser<ColumnType, unit> = columnTypeWithDisplay |>> fst
 
 // ---------------------------------------------------------------------------
 // Expressions
@@ -2096,11 +2115,12 @@ let private colMod: Parser<ColMod, unit> =
           attempt generatedColumn |>> MGenerated ]
 
 let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
-    (identifier .>>. columnType .>>. many colMod)
-    |>> fun ((name, ty), mods) ->
+    (identifier .>>. columnTypeWithDisplay .>>. many colMod)
+    |>> fun ((name, (ty, numericDisplay)), mods) ->
         let column =
             { Name = name
               Type = ty
+              NumericDisplay = numericDisplay
               Nullable = not (List.contains MNotNull mods)
               Default = mods |> List.tryPick (function MDefault v -> Some v | _ -> None)
               AutoIncrement = List.contains MAutoIncrement mods

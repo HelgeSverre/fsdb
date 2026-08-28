@@ -2513,6 +2513,7 @@ let acquireTransactionWriteTargets
 let private sysCol (name: string) (ty: ColumnType) (nullable: bool) (dflt: Value option) : ColumnDef =
     { Name = name
       Type = ty
+      NumericDisplay = None
       Nullable = nullable
       Default = dflt |> Option.map DConst
       AutoIncrement = false
