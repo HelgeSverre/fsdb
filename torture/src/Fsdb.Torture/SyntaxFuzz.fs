@@ -124,6 +124,8 @@ module SyntaxFuzz =
            "role_show_using", "SHOW GRANTS FOR 'syntax_role_user'@'%' USING 'syntax_parent'@'%'"
            "role_metadata",
            "SELECT ROLE_NAME, IS_GRANTABLE, IS_DEFAULT FROM information_schema.APPLICABLE_ROLES ORDER BY ROLE_NAME"
+           "mandatory_roles", "SET GLOBAL mandatory_roles = 'syntax_parent@%'"
+           "activate_all_roles", "SET GLOBAL activate_all_roles_on_login = ON"
            "role_revoke", "REVOKE 'syntax_parent'@'%' FROM 'syntax_role_user'@'%'"
            "dynamic_privilege", "GRANT XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* TO 'syntax_dynamic'@'%' WITH GRANT OPTION"
            "locked_user", sprintf "CREATE USER 'syntax_user_%s'@'%%' ACCOUNT LOCK" suffix
@@ -200,6 +202,8 @@ module SyntaxFuzz =
         | "role_account" -> Some(sprintf "DROP ROLE IF EXISTS 'syntax_role_%s'@'%%', 'syntax_role_%s'@''" suffix suffix)
         | "role_grant" -> Some "REVOKE 'syntax_parent'@'%' FROM 'syntax_role_delegate'@'%'"
         | "role_default" -> Some "SET DEFAULT ROLE NONE TO 'syntax_role_user'@'%'"
+        | "mandatory_roles" -> Some "SET GLOBAL mandatory_roles = ''"
+        | "activate_all_roles" -> Some "SET GLOBAL activate_all_roles_on_login = OFF"
         | "role_revoke" -> Some "GRANT 'syntax_parent'@'%' TO 'syntax_role_user'@'%' WITH ADMIN OPTION"
         | "dynamic_privilege" -> Some "REVOKE XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* FROM 'syntax_dynamic'@'%'"
         | "locked_user" -> Some(sprintf "DROP USER IF EXISTS 'syntax_user_%s'@'%%', 'syntax_user_%s'@''" suffix suffix)

@@ -116,7 +116,7 @@ The baseline corpus includes implemented features and declared gaps. Implemented
 baselines include HASH partition selection and growth, compound stored programs,
 account options, all four transaction isolation settings, and common
 administration statements. Declared gaps cover remaining administration and
-event-scheduling statements, roles, and missing spatial operations. A
+event-scheduling statements and missing spatial operations. A
 baseline-only run therefore acts as an executable gap inventory; it is expected
 to exit with findings until those features land.
 

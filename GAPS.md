@@ -43,7 +43,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Routines & events | Typed procedures, read-only stored functions, and persisted definer-context event scheduling | Data-changing stored functions and procedure calls from triggers |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
-| Auth & privileges | Static and dynamic privileges, per-host accounts, expiry sandboxes, resource caps, account locks, role graphs/defaults/activation, and inherited authorization | No column privileges, proxy users, or mandatory roles |
+| Auth & privileges | Static and dynamic privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No column privileges or proxy users |
 | Metadata | 25 INFORMATION_SCHEMA views, 13 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
@@ -423,7 +423,7 @@ SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
 level-shaped denials (1045/1044/1142), GRANT OPTION checked at target level,
 fail-closed unknown privileges, dynamic global privileges with individual grant options,
 role grants with admin option, transitive inheritance, default/session activation,
-role-aware metadata visibility, and DROP USER/ROLE cleanup across grant tables,
+mandatory roles, login-wide activation, role-aware metadata visibility, and DROP USER/ROLE cleanup across grant tables,
 privilege collection recursing through subqueries/derived tables/CTEs,
 SHOW DATABASES/TABLES visibility filtering, PROCESS-scoped PROCESSLIST/KILL,
 DROP TRIGGER resolved to its subject table for TRIGGER privilege
@@ -433,7 +433,6 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 |---|---|---|---|---|
 | Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
 | Text-probe privilege bypass | all statements checked | SET/USE and server-wide SHOW probes bypass the general AST gate; account, process, database, and table metadata probes carry scoped checks | low | divergence |
-| Mandatory roles | globally configured roles active for every account | role graphs, defaults, and explicit activation work; no server-wide mandatory-role setting | low | refusal |
 | Column-level privileges | mysql.columns_priv enforced | table exists, never consulted | low | divergence |
 | Advanced account policy | auth-plugin selection, password history/reuse/current policy, and global default lifetime | explicit expiry/lifetimes and resource limits are enforced; advanced policy clauses remain absent | low | refusal |
 | Proxy users | supported | absent | low | refusal |

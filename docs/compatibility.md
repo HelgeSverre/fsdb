@@ -322,8 +322,10 @@ metadata surfaces, and participate in authorization. Static `ALL PRIVILEGES`
 does not imply them.
 Roles use `mysql.role_edges` and `mysql.default_roles`; grants, admin option,
 transitive inheritance, default activation during authentication, session
-`SET ROLE`, role-aware metadata visibility, and `SHOW GRANTS ... USING` are
-enforced through the same authorization path as direct account privileges.
+`SET ROLE`, global mandatory roles, `activate_all_roles_on_login`, role-aware
+metadata visibility, and `SHOW GRANTS ... USING` are enforced through the same
+authorization path as direct account privileges. Mandatory roles are applicable
+to every account but, as in MySQL, remain inactive after `SET ROLE NONE`.
 
 Accounts select an exact peer address before CIDR/netmask, `localhost`
 loopback, and `%`/`_` patterns; `CURRENT_USER()` reports the selected
@@ -337,8 +339,8 @@ Deliberate divergences (each marked `ponytail:` at its code site):
   and CTEs. Text-probed account, process, database, and table metadata forms
   carry scoped checks; SET, USE, and server-wide SHOW forms remain outside
   the common privilege gate.
-- Mandatory roles, column-level privileges, proxy users, auth-plugin
-  selection, password history/reuse/current policy, and a mutable global
+- Column-level privileges, proxy users, auth-plugin selection,
+  password history/reuse/current policy, and a mutable global
   default password lifetime are absent. Thirteen of MySQL's roughly 38
   `mysql.*` tables exist, including fsdb's row-backed role/default-role,
   constraint, trigger, view, routine, function, and event catalogs.
