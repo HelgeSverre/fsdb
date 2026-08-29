@@ -474,6 +474,9 @@ let tests =
                           "scheduled_event"
                           "recurring_event"
                           "role_account"
+                          "role_grant"
+                          "role_default"
+                          "role_revoke"
                           "locked_user"
                           "account_requirements" ] do
                         Expect.isTrue
@@ -565,6 +568,11 @@ let tests =
                           "recurring_event"
                           "role_account"
                           "role_activation"
+                          "role_grant"
+                          "role_default"
+                          "role_show_using"
+                          "role_metadata"
+                          "role_revoke"
                           "dynamic_privilege"
                           "locked_user"
                           "account_requirements"
