@@ -146,6 +146,49 @@ let metadataOfColumn (column: ColumnDef) : ColumnMetadata =
         Flags = flags
         CollationId = wireCollation }
 
+let withIndexFlags (indexes: IndexDef list) (columnName: string) (metadata: ColumnMetadata) =
+    let directParts index =
+        index.KeyColumns
+        |> List.filter (fun part ->
+            part.Transform.IsNone
+            && part.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase))
+
+    let indexes =
+        indexes
+        |> List.filter (fun index -> not (index.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)))
+
+    let isPart = indexes |> List.exists (directParts >> List.isEmpty >> not)
+
+    let leading =
+        indexes
+        |> List.filter (fun index ->
+            index.KeyColumns
+            |> List.tryHead
+            |> Option.exists (fun part ->
+                part.Transform.IsNone
+                && part.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase)))
+
+    let isUnique =
+        leading
+        |> List.exists (fun index -> index.Unique && index.KeyColumns.Length = 1)
+
+    let isMultiple =
+        not isUnique && not leading.IsEmpty
+
+    let keyMask = UniqueKeyFlag ||| MultipleKeyFlag ||| PartKeyFlag
+    let baseFlags = metadata.Flags &&& ~~~keyMask
+    let primaryPart = metadata.Flags &&& PrimaryKeyFlag <> 0us
+
+    { metadata with
+        Flags =
+            baseFlags
+            ||| (if isUnique then UniqueKeyFlag else 0us)
+            ||| (if isMultiple then MultipleKeyFlag else 0us)
+            ||| (if isPart || primaryPart then PartKeyFlag else 0us) }
+
+let metadataOfTableColumn (indexes: IndexDef list) (column: ColumnDef) =
+    metadataOfColumn column |> withIndexFlags indexes column.Name
+
 /// Returns MySQL's canonical parameter descriptor for a contextual SQL type.
 let parameterMetadataOfType (ty: ColumnType) : ColumnMetadata =
     let binary typeId length decimals =

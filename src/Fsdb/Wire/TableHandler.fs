@@ -178,7 +178,7 @@ let private readCore registry (session: Session) name mode where limit offset =
                 | Ok rows ->
                     let take = countOr 1 limit
                     let skip = countOr 0 offset
-                    let metadata = table.Columns |> List.map ColumnWire.metadataOfColumn
+                    let metadata = table.Columns |> List.map (ColumnWire.metadataOfTableColumn table.Indexes)
 
                     if take = 0 then
                         { session with LastResultColumnMetadata = metadata }, resultSet table.Columns []

@@ -398,7 +398,9 @@ multi-statement toggling, mid-query
 disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 `CLIENT_SESSION_TRACK` reports default-schema changes and assignments to the
 configured system-variable set, including same-value assignments, plus the
-generic state-change tracker when enabled.
+generic state-change tracker when enabled. Physical result columns report
+primary, unique, composite, and non-unique key membership consistently across
+queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -411,7 +413,6 @@ generic state-change tracker when enabled.
 | Unimplemented COM_* | CHANGE_USER | returns ERR 1047 (`Server.fs`) | low | refusal |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateHandshake` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | direct physical COM_QUERY/COM_STMT_PREPARE columns and COM_FIELD_LIST report source names; declared expressions and text-probed resultsets report their effective MySQL collation ids; view, derived, and UNION source names remain empty | low | partial |
-| Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | numeric, temporal, required-default, primary/unique key-part, explicit numeric ZEROFILL, and implicit YEAR ZEROFILL flags are reported; non-unique secondary membership is still absent | low | divergence |
 | Prepared metadata | STMT_PREPARE_OK carries result columns and typed parameter definitions | result columns, schema/operator/DML contexts, and common numeric, temporal, JSON, and spatial built-in arguments are derived statically without evaluating the statement; less-common overloaded built-ins and registered extensions without declared signatures remain generic VAR_STRING | low | divergence |
 | Reprepare | automatic reprepare on metadata change | prepared ASTs resolve tables, columns, views, and result metadata from the live schema on each execution, yielding the same observable schema-change behavior without recompiling SQL text | low | aligned for supported syntax |
 | System variables | hundreds live | ~30 known; most others inert or absent; time_zone static strings with no conversion | medium | divergence |

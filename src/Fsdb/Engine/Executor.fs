@@ -2281,6 +2281,14 @@ let private outputColumnWireOverridesFor
             (fun origin metadata ->
                 metadata
                 |> Option.map (fun value ->
+                    let value =
+                        origin
+                        |> Option.bind (fun (source: ColumnOrigin) ->
+                            Storage.tableSnapshot ctx.Store source.Schema source.OriginalTable
+                            |> Result.toOption
+                            |> Option.map (fun table -> ColumnWire.withIndexFlags table.Indexes source.OriginalName value))
+                        |> Option.defaultValue value
+
                     { value with
                         Origin = origin }))
             origins

@@ -572,14 +572,18 @@ let tests =
           testCase "declared result metadata carries widths and column flags"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
-              let session, _ = handle session "CREATE TABLE meta (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, code CHAR(8) NOT NULL, state ENUM('new','closed') UNIQUE)"
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TABLE meta (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, code CHAR(8) NOT NULL, state ENUM('new','closed') UNIQUE, explicit_unique INT, first_part INT, second_part INT, indexed INT, UNIQUE KEY uq_explicit(explicit_unique), UNIQUE KEY uq_pair(first_part,second_part), KEY ix_indexed(indexed))"
 
-              match handle session "SELECT id, code, state FROM meta LIMIT 0" with
+              match handle session "SELECT id, code, state, explicit_unique, first_part, second_part, indexed FROM meta LIMIT 0" with
               | session, ResultSet(_, []) ->
-                  let id, code, state =
+                  let id, code, state, explicitUnique, firstPart, secondPart, indexed =
                       match session.LastResultColumnMetadata with
-                      | [ id; code; state ] -> id, code, state
-                      | metadata -> failtestf "expected three metadata records, got %A" metadata
+                      | [ id; code; state; explicitUnique; firstPart; secondPart; indexed ] ->
+                          id, code, state, explicitUnique, firstPart, secondPart, indexed
+                      | metadata -> failtestf "expected seven metadata records, got %A" metadata
 
                   Expect.equal id.TypeId TypeLong "INT wire type"
                   Expect.isTrue (id.Flags &&& UnsignedFlag <> 0us) "UNSIGNED flag"
@@ -591,6 +595,33 @@ let tests =
                   Expect.equal state.TypeId TypeString "ENUM wire type"
                   Expect.isTrue (state.Flags &&& EnumFlag <> 0us) "ENUM flag"
                   Expect.isTrue (state.Flags &&& UniqueKeyFlag <> 0us) "UNIQUE_KEY flag"
+                  Expect.isTrue (explicitUnique.Flags &&& UniqueKeyFlag <> 0us) "explicit single-column unique flag"
+                  Expect.isTrue (firstPart.Flags &&& MultipleKeyFlag <> 0us) "composite leading key flag"
+                  Expect.isTrue (firstPart.Flags &&& PartKeyFlag <> 0us) "composite leading part flag"
+                  Expect.isTrue (secondPart.Flags &&& MultipleKeyFlag = 0us) "non-leading key has no MULTIPLE_KEY flag"
+                  Expect.isTrue (secondPart.Flags &&& PartKeyFlag <> 0us) "non-leading key retains PART_KEY flag"
+                  Expect.isTrue (indexed.Flags &&& MultipleKeyFlag <> 0us) "non-unique secondary key flag"
+
+                  match prepareStatementForSession session "SELECT explicit_unique, first_part, second_part, indexed FROM meta" with
+                  | Ok(statement, count) ->
+                      let _, columns = preparedMetadata session statement count
+                      let flags = columns |> List.map (fun column -> column.Metadata.Flags)
+
+                      Expect.isTrue (flags.[0] &&& UniqueKeyFlag <> 0us) "prepared unique key flag"
+                      Expect.isTrue (flags.[1] &&& MultipleKeyFlag <> 0us) "prepared composite leading flag"
+                      Expect.isTrue (flags.[2] &&& PartKeyFlag <> 0us) "prepared composite part flag"
+                      Expect.isTrue (flags.[3] &&& MultipleKeyFlag <> 0us) "prepared non-unique key flag"
+                  | other -> failtestf "expected prepared key metadata, got %A" other
+
+                  let session, dropped = handle session "ALTER TABLE meta DROP INDEX ix_indexed"
+                  Expect.equal dropped (Affected 0UL) "secondary index dropped"
+
+                  match handle session "SELECT indexed FROM meta LIMIT 0" with
+                  | session, ResultSet(_, []) ->
+                      let flags = session.LastResultColumnMetadata.Head.Flags
+                      Expect.isTrue (flags &&& MultipleKeyFlag = 0us) "dropped index clears MULTIPLE_KEY"
+                      Expect.isTrue (flags &&& PartKeyFlag = 0us) "dropped index clears PART_KEY"
+                  | _, other -> failtestf "expected metadata after dropping the index, got %A" other
               | _, other -> failtestf "expected an empty typed resultset, got %A" other
 
           testCase "a bare system variable reports its own result metadata"
@@ -1756,7 +1787,7 @@ let tests =
           testCase "HANDLER validates lifecycle and result metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
-              let session, _ = handle session "CREATE TABLE handler_contract (id INT PRIMARY KEY, happened TIME(3))"
+              let session, _ = handle session "CREATE TABLE handler_contract (id INT PRIMARY KEY, happened TIME(3), KEY ix_happened(happened))"
               let session, _ = handle session "INSERT INTO handler_contract VALUES (1, '01:02:03.125')"
               let session, _ = handle session "CREATE VIEW handler_view AS SELECT * FROM handler_contract"
 
@@ -1782,6 +1813,7 @@ let tests =
               | read, ResultSet(_, [ [ Some "1"; Some "01:02:03.125" ] ]) ->
                   Expect.equal (read.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong; TypeTime ] "declared metadata"
                   Expect.equal read.LastResultColumnMetadata.[1].Decimals 3uy "TIME precision"
+                  Expect.isTrue (read.LastResultColumnMetadata.[1].Flags &&& MultipleKeyFlag <> 0us) "HANDLER secondary-key metadata"
               | _, other -> failtestf "expected typed handler row, got %A" other
 
               match prepareStatementForSession session "HANDLER h READ FIRST" with

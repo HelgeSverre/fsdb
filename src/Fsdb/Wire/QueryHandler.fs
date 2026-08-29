@@ -3575,9 +3575,17 @@ let preparedMetadata
             let resultColumns =
                 List.map2
                     (fun (column: ColumnDef) origin ->
+                        let metadata =
+                            origin
+                            |> Option.bind (fun source ->
+                                Storage.tableSnapshot store source.Schema source.OriginalTable
+                                |> Result.toOption
+                                |> Option.map (fun table -> ColumnWire.metadataOfTableColumn table.Indexes column))
+                            |> Option.defaultWith (fun () -> ColumnWire.metadataOfColumn column)
+
                         { Name = column.Name
                           Metadata =
-                            { ColumnWire.metadataOfColumn column with
+                            { metadata with
                                 Origin = origin } }
                         : Fsdb.Protocol.ColumnDef)
                     columns

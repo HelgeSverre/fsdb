@@ -1790,7 +1790,7 @@ let tests =
                   Expect.equal useErr.Value.Payload.[0] 0xffuy "USE a missing database replies ERR"
                   Expect.equal (Reader(useErr.Value.Payload.[1..]).ReadInt16LE()) 1049 "1049 unknown database"
 
-                  let! _ = query "CREATE TABLE t (n INT)"
+                  let! _ = query "CREATE TABLE t (n INT, KEY ix_n(n))"
                   let! _ = readPacketAsync stream
 
                   // COM_FIELD_LIST: column defs + EOF for an existing
@@ -1806,6 +1806,13 @@ let tests =
                   Expect.equal (field.ReadLenEncString()) (Some "t") "field physical table"
                   Expect.equal (field.ReadLenEncString()) (Some "n") "field name"
                   Expect.equal (field.ReadLenEncString()) (Some "n") "field physical name"
+                  Expect.equal (field.ReadByte()) 0x0cuy "fixed metadata length"
+                  field.ReadInt16LE() |> ignore
+                  field.ReadInt32LE() |> ignore
+                  field.ReadByte() |> ignore
+                  let fieldFlags = uint16 (field.ReadInt16LE())
+                  Expect.isTrue (fieldFlags &&& MultipleKeyFlag <> 0us) "COM_FIELD_LIST carries secondary-key membership"
+                  Expect.isTrue (fieldFlags &&& PartKeyFlag <> 0us) "COM_FIELD_LIST carries key-part membership"
                   let! _ = readPacketAsync stream // trailing EOF
 
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x04uy |] (Array.append (Text.Encoding.UTF8.GetBytes "ghost") [| 0uy |]) }

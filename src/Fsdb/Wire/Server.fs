@@ -1602,7 +1602,7 @@ let private handleConnection
                                 activeSession <- Some session
                                 let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-                                match Storage.scan (Session.currentStore session) dbName table with
+                                match Storage.tableSnapshot (Session.currentStore session) dbName table with
                                 | Result.Error e ->
                                     let code, message = Storage.toMySqlError e
 
@@ -1611,12 +1611,12 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
-                                | Result.Ok(columns, _rows) ->
+                                | Result.Ok storedTable ->
                                     let payloads =
-                                        (columns
+                                        (storedTable.Columns
                                          |> List.map (fun column ->
                                              let metadata =
-                                                 { ColumnWire.metadataOfColumn column with
+                                                 { ColumnWire.metadataOfTableColumn storedTable.Indexes column with
                                                      Origin =
                                                          Some
                                                              { Schema = dbName

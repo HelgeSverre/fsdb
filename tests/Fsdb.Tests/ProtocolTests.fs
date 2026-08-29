@@ -515,6 +515,29 @@ let tests =
               Expect.isTrue (timestampMetadata.Flags &&& OnUpdateNowFlag <> 0us) "on update"
               Expect.isFalse (timestampMetadata.Flags &&& NoDefaultValueFlag <> 0us) "has default"
 
+              let index name unique columns =
+                  { Name = name
+                    KeyColumns = indexColumns columns
+                    Unique = unique
+                    Visible = true
+                    Kind = BTree }
+
+              let indexes =
+                  [ index "uq_single" true [ "single" ]
+                    index "uq_pair" true [ "first"; "second" ]
+                    index "ix_plain" false [ "plain" ] ]
+
+              let flags name =
+                  metadataOfColumn { required with Name = name }
+                  |> withIndexFlags indexes name
+                  |> _.Flags
+
+              Expect.isTrue (flags "single" &&& UniqueKeyFlag <> 0us) "single unique key"
+              Expect.isTrue (flags "first" &&& MultipleKeyFlag <> 0us) "leading composite key"
+              Expect.isTrue (flags "second" &&& MultipleKeyFlag = 0us) "non-leading composite key"
+              Expect.isTrue (flags "second" &&& PartKeyFlag <> 0us) "composite key part"
+              Expect.isTrue (flags "plain" &&& MultipleKeyFlag <> 0us) "non-unique key"
+
           testCase "textRowPayload encodes NULL and strings in one row"
           <| fun _ ->
               let reader = Reader(textRowPayload [ None; Some "hi"; Some "" ])
