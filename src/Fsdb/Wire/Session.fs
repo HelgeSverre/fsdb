@@ -160,6 +160,8 @@ type Session =
       User: string
       /// The Host column of the account selected during authentication.
       AccountHost: string
+      /// Directly granted roles enabled for this connection.
+      ActiveRoles: Fsdb.Auth.Account list
       /// An authenticated expired credential restricts this connection to
       /// password-reset statements until one succeeds.
       PasswordExpired: bool
@@ -235,6 +237,7 @@ let create (connectionId: int) (store: Store) : Session =
     { ConnectionId = connectionId
       User = "root"
       AccountHost = "%"
+      ActiveRoles = Fsdb.Auth.defaultRolesForAccount store (Fsdb.Auth.account "root" "%")
       PasswordExpired = false
       LoginUser = ""
       ClientHost = "localhost"

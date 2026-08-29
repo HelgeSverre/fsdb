@@ -510,6 +510,7 @@ let private registryFor (session: Session) : Functions.Registry =
         else
             raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'RELEASE_ALL_LOCKS'")))
     |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(Auth.formatAccount (accountOf session)))
+    |> Functions.registerScalar "CURRENT_ROLE" (fun _ -> VString(Auth.formatCurrentRoles session.ActiveRoles))
     |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
     |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
 
@@ -1312,7 +1313,6 @@ let private setTransactionAccess =
     Regex(@"^SET\s+(SESSION\s+)?TRANSACTION\s+READ\s+(ONLY|WRITE)$", RegexOptions.IgnoreCase)
 
 let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", RegexOptions.IgnoreCase)
-let private setRoleNone = Regex(@"^SET\s+ROLE\s+NONE$", RegexOptions.IgnoreCase)
 
 type private DirtyTransactionView =
     { BaseCatalog: Catalog
@@ -1953,8 +1953,12 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                     Auth.checkDynamicGrantOptionsForAccount
                         store
                         (accountOf session)
+                        session.ActiveRoles
                         privileges
                         (Auth.targetOfLevel dbName level)
+                | GrantRoles(roles, _, _)
+                | RevokeRoles(roles, _) ->
+                    Auth.checkRoleGrantAuthorityForAccount store (accountOf session) session.ActiveRoles roles
                 | _ -> Ok()
 
             let transactionAccess () =
@@ -1962,9 +1966,9 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                 | Some tx, (Select _ | Union _) when tx.ReadOnly && statementContainsUpdateLock stmt ->
                     Error(1792, "Cannot execute statement in a READ ONLY transaction")
                 | Some tx, (Select _ | Union _ | Explain _ | ChecksumTables _) when tx.ReadOnly ->
-                    Auth.checkForAccount store (accountOf session) requiredPrivileges
+                    Auth.checkForAccountWithRoles store (accountOf session) session.ActiveRoles requiredPrivileges
                 | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
-                | _ -> Auth.checkForAccount store (accountOf session) requiredPrivileges
+                | _ -> Auth.checkForAccountWithRoles store (accountOf session) session.ActiveRoles requiredPrivileges
 
             statementAccess
             |> Result.bind transactionAccess
@@ -2159,6 +2163,9 @@ let private causesImplicitCommit = function
     | DropRole _
     | Grant _
     | Revoke _
+    | GrantRoles _
+    | RevokeRoles _
+    | SetDefaultRole _
     | CreateTrigger _
     | DropTrigger _
     | CreateView _
@@ -2450,7 +2457,8 @@ type private Probe =
     | SetAutocommit of value: string
     | SetTransactionIsolation of scope: TransactionIsolationScope * level: string
     | SetTransactionAccess of sessionScope: bool * readOnly: bool
-    | SetRoleNone
+    | SetRoleStatement
+    | SetDefaultRoleStatement
     | SetCharacterSet of charset: string
     | SetPassword of user: string option * password: string
     | SetVar
@@ -2541,13 +2549,15 @@ let private tryProbe (sql: string) : Probe option =
         Some(SetTransactionAccess(m.Groups.[1].Success, m.Groups.[2].Value.Equals("ONLY", StringComparison.OrdinalIgnoreCase)))
     elif setCharacterSet.IsMatch sql then
         Some(SetCharacterSet((setCharacterSet.Match sql).Groups.[1].Value))
-    elif setRoleNone.IsMatch sql then
-        Some SetRoleNone
     elif alterCurrentUserPasswordRe.IsMatch sql then
         Some(SetPassword(None, (alterCurrentUserPasswordRe.Match sql).Groups.[1].Value))
     elif setPasswordRe.IsMatch sql then
         let m = setPasswordRe.Match sql
         Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
+    elif command.StartsWith("SET DEFAULT ROLE ", StringComparison.OrdinalIgnoreCase) then
+        Some SetDefaultRoleStatement
+    elif command.StartsWith("SET ROLE ", StringComparison.OrdinalIgnoreCase) then
+        Some SetRoleStatement
     elif command.StartsWith("SET ", StringComparison.OrdinalIgnoreCase) then
         Some SetVar
     elif rollbackToSavepointStmt.IsMatch sql then
@@ -2761,7 +2771,36 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         else
             let updated = { session with PendingTransactionReadOnly = Some readOnly }
             Session.trackSystemVariableAssignments true [] updated, Affected 0UL
-    | SetRoleNone -> session, Affected 0UL
+    | SetRoleStatement ->
+        match Parser.parseWithOptions (parserOptionsForSession session) sql with
+        | Ok(SetRole selection) ->
+            match Auth.resolveRoleSelection session.Store (accountOf session) selection with
+            | Ok roles -> { session with ActiveRoles = roles }, Affected 0UL
+            | Error(code, message) -> session, Err(code, message)
+        | _ -> session, parserError sql "Invalid SET ROLE statement"
+    | SetDefaultRoleStatement ->
+        match Parser.parseWithOptions (parserOptionsForSession session) sql with
+        | Ok(SetDefaultRole(selection, users)) ->
+            let ownsEveryTarget =
+                users
+                |> List.forall (fun (name, host) -> Auth.sameAccount (accountOf session) (Auth.account name host))
+
+            let access =
+                if ownsEveryTarget then
+                    Ok()
+                else
+                    Auth.checkForAccountWithRoles
+                        session.Store
+                        (accountOf session)
+                        session.ActiveRoles
+                        [ "CREATE USER", Auth.Global ]
+
+            access
+            |> Result.bind (fun () -> Auth.setDefaultRoles session.Store selection users)
+            |> function
+                | Ok() -> session, Affected 0UL
+                | Error(code, message) -> session, Err(code, message)
+        | _ -> session, parserError sql "Invalid SET DEFAULT ROLE statement"
     | SetCharacterSet charset ->
         let charset = charset.ToLowerInvariant()
 
@@ -5531,12 +5570,16 @@ let private countsAsAccountUpdate = function
     | DropRole _
     | Grant _
     | Revoke _
+    | GrantRoles _
+    | RevokeRoles _
+    | SetDefaultRole _
     | CreateTrigger _
     | SetTriggerNew _
     | DropTrigger _
     | CreateView _
     | DropView _ -> true
     | Select _
+    | SetRole _
     | Do _
     | Union _
     | ChecksumTables _

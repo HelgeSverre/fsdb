@@ -1244,6 +1244,7 @@ let private handleConnection
                     { Session.create connectionId store with
                         User = selectedAccount.Name
                         AccountHost = selectedAccount.Host
+                        ActiveRoles = Auth.defaultRolesForAccount store selectedAccount
                         PasswordExpired = passwordExpired
                         LoginUser = resp.Username
                         ClientHost = displayHost
@@ -2007,6 +2008,7 @@ let private handleConnection
                                     { Session.create session.ConnectionId session.Store with
                                         User = session.User
                                         AccountHost = session.AccountHost
+                                        ActiveRoles = Auth.defaultRolesForAccount session.Store (Auth.account session.User session.AccountHost)
                                         PasswordExpired = session.PasswordExpired
                                         LoginUser = session.LoginUser
                                         ClientHost = session.ClientHost

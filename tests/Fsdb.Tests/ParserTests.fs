@@ -3059,6 +3059,26 @@ let tests =
                         (Revoke([ "SELECT"; "GRANT OPTION" ], (Some "shop", None), [ "bob", "%" ]))
                         "revoke with grant option"
 
+                testCase "role grants defaults and activation parse"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "GRANT 'reader'@'%', writer TO alice, bob@localhost WITH ADMIN OPTION")
+                        (GrantRoles([ "reader", "%"; "writer", "%" ], [ "alice", "%"; "bob", "localhost" ], true))
+                        "role grant"
+
+                    Expect.equal
+                        (parseOk "REVOKE reader FROM alice")
+                        (RevokeRoles([ "reader", "%" ], [ "alice", "%" ]))
+                        "role revoke"
+
+                    Expect.equal (parseOk "SET ROLE DEFAULT") (SetRole DefaultRoles) "default activation"
+                    Expect.equal (parseOk "SET ROLE ALL EXCEPT reader, writer") (SetRole(AllRolesExcept [ "reader", "%"; "writer", "%" ])) "all except"
+
+                    Expect.equal
+                        (parseOk "SET DEFAULT ROLE reader, writer TO alice")
+                        (SetDefaultRole(NamedRoles [ "reader", "%"; "writer", "%" ], [ "alice", "%" ]))
+                        "default role assignment"
+
                 testCase "DROP USER and ALTER USER ... IDENTIFIED BY parse"
                 <| fun _ ->
                     Expect.equal

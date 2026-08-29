@@ -15340,6 +15340,16 @@ let rec executeAs
                     | Ok counts -> ids, Affected(uint64 (List.sum counts))
                     | Error e -> ids, storageErr e
 
+    | GrantRoles(roles, users, withAdminOption) ->
+        match Auth.grantRoles store roles users withAdminOption with
+        | Ok() -> ids, Affected 0UL
+        | Error(code, message) -> ids, Err(code, message)
+    | RevokeRoles(roles, users) ->
+        match Auth.revokeRoles store roles users with
+        | Ok() -> ids, Affected 0UL
+        | Error(code, message) -> ids, Err(code, message)
+    | SetRole _
+    | SetDefaultRole _ -> ids, Err(1235, "Role statement execution requires a session")
     | ChecksumTables(tables, quick) ->
         ids, checksumTables store dbName tables quick
     | Explain(format, inner) ->

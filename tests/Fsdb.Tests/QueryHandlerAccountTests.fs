@@ -566,6 +566,78 @@ let tests =
               | Err(1227, _) -> ()
               | other -> failtestf "expected DROP ROLE to require its own privilege, got %A" other
 
+          testCase "role grants activate transitive privileges defaults and admin options"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE role_db"
+              let root, _ = handle root "CREATE TABLE role_db.documents (id INT PRIMARY KEY)"
+              let root, _ = handle root "INSERT INTO role_db.documents VALUES (1)"
+              let root, _ = handle root "CREATE ROLE reader, parent, cycle_a, cycle_b"
+              let root, _ = handle root "CREATE USER alice, bob"
+              let root, _ = handle root "GRANT SELECT ON role_db.* TO reader"
+              let root, _ = handle root "GRANT reader TO parent"
+              let root, _ = handle root "GRANT parent TO alice WITH ADMIN OPTION"
+
+              let alice = { create 2 store with User = "alice"; AccountHost = "%" }
+
+              match handle alice "SELECT CURRENT_ROLE()" |> snd with
+              | ResultSet(_, [ [ Some "NONE" ] ]) -> ()
+              | other -> failtestf "expected no initially active role, got %A" other
+
+              match handle alice "SELECT * FROM role_db.documents" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected inactive role privilege refusal, got %A" other
+
+              let alice, activated = handle alice "SET ROLE parent"
+              Expect.equal activated (Affected 0UL) "direct role activates"
+
+              match handle alice "SELECT CURRENT_ROLE(), id FROM role_db.documents" |> snd with
+              | ResultSet(_, [ [ Some "`parent`@`%`"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected inherited reader privilege, got %A" other
+
+              match handle alice "SET ROLE reader" |> snd with
+              | Err(3530, message) -> Expect.stringContains message "not granted" "only directly granted roles activate"
+              | other -> failtestf "expected indirect role activation refusal, got %A" other
+
+              match handle alice "GRANT parent TO bob" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected admin-option delegation, got %A" other
+
+              let bob = { create 3 store with User = "bob"; AccountHost = "%" }
+              let bob, _ = handle bob "SET ROLE parent"
+
+              match handle bob "SELECT id FROM role_db.documents" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected delegated role privilege, got %A" other
+
+              let root, _ = handle root "GRANT cycle_a TO cycle_b"
+
+              match handle root "GRANT cycle_b TO cycle_a" |> snd with
+              | Err(4027, message) -> Expect.stringContains message "create a loop" "cycle refusal"
+              | other -> failtestf "expected role-cycle refusal, got %A" other
+
+              let alice, defaulted = handle alice "SET DEFAULT ROLE parent TO alice"
+              Expect.equal defaulted (Affected 0UL) "users may select their own direct default role"
+              let alice, _ = handle alice "SET ROLE NONE"
+
+              match handle alice "SELECT id FROM role_db.documents" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected SET ROLE NONE to remove inherited access, got %A" other
+
+              let alice, _ = handle alice "SET ROLE DEFAULT"
+
+              match handle alice "SELECT CURRENT_ROLE(), id FROM role_db.documents" |> snd with
+              | ResultSet(_, [ [ Some "`parent`@`%`"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected default role reactivation, got %A" other
+
+              match handle root "SHOW GRANTS FOR alice" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.isTrue
+                      (rows |> List.exists (fun row -> row = [ Some "GRANT `parent`@`%` TO `alice`@`%` WITH ADMIN OPTION" ]))
+                      "role grant appears in SHOW GRANTS"
+              | other -> failtestf "expected role grant metadata, got %A" other
+
           testCase "SET PASSWORD is enforced: own password is free, someone else's needs CREATE USER"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

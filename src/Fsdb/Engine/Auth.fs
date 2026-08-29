@@ -574,6 +574,26 @@ let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * s
         deleteWhere "tables_priv"
         deleteWhere "columns_priv"
         deleteWhere "global_grants"
+
+        let deleteRoleReferences table accountColumns =
+            match scanList store "mysql" table with
+            | Error _ -> ()
+            | Ok(columns, _) ->
+                deleteRows
+                    store
+                    "mysql"
+                    table
+                    (fun row ->
+                        accountColumns
+                        |> List.exists (fun (userColumn, hostColumn) ->
+                            sameAccount
+                                (account (userColumnText columns row userColumn) (userColumnText columns row hostColumn))
+                                (account name host))
+                        |> Ok)
+                |> ignore
+
+        deleteRoleReferences "role_edges" [ "FROM_USER", "FROM_HOST"; "TO_USER", "TO_HOST" ]
+        deleteRoleReferences "default_roles" [ "USER", "HOST"; "DEFAULT_ROLE_USER", "DEFAULT_ROLE_HOST" ]
         store.AccountResources.TryRemove(accountResourceKey (account name host)) |> ignore
         Ok()
 
@@ -611,8 +631,48 @@ let renameUser
                     |> Result.mapError toMySqlError
                 | _ -> Ok()
 
-        [ "user"; "db"; "tables_priv"; "columns_priv"; "global_grants" ]
-        |> traverse renameRows
+        let renameRoleRows table accountColumns =
+            match scanList store "mysql" table with
+            | Error error -> Error(toMySqlError error)
+            | Ok(columns, _) ->
+                let resolved =
+                    accountColumns
+                    |> traverse (fun (userColumn, hostColumn) ->
+                        match resolveColumn columns userColumn, resolveColumn columns hostColumn with
+                        | Ok userIndex, Ok hostIndex -> Ok(userIndex, hostIndex)
+                        | _ -> Error(1105, "Invalid role catalog shape"))
+
+                resolved
+                |> Result.bind (fun indices ->
+                    updateRows
+                        store
+                        "mysql"
+                        table
+                        None
+                        (fun row ->
+                            Ok(
+                                indices
+                                |> List.exists (fun (userIndex, hostIndex) ->
+                                    sameAccount (account (Value.toText row.[userIndex] |> Option.defaultValue "") (Value.toText row.[hostIndex] |> Option.defaultValue "")) oldAccount)
+                            ))
+                        (fun row ->
+                            let renamed = Array.copy row
+
+                            indices
+                            |> List.iter (fun (userIndex, hostIndex) ->
+                                if sameAccount (account (Value.toText row.[userIndex] |> Option.defaultValue "") (Value.toText row.[hostIndex] |> Option.defaultValue "")) oldAccount then
+                                    renamed.[userIndex] <- VString newAccount.Name
+                                    renamed.[hostIndex] <- VString newAccount.Host)
+
+                            Ok renamed)
+                    |> Result.map ignore
+                    |> Result.mapError toMySqlError)
+
+        [ for table in [ "user"; "db"; "tables_priv"; "columns_priv"; "global_grants" ] do
+              yield renameRows table
+          yield renameRoleRows "role_edges" [ "FROM_USER", "FROM_HOST"; "TO_USER", "TO_HOST" ]
+          yield renameRoleRows "default_roles" [ "USER", "HOST"; "DEFAULT_ROLE_USER", "DEFAULT_ROLE_HOST" ] ]
+        |> traverse id
         |> Result.map (fun _ ->
             match store.AccountResources.TryRemove(accountResourceKey oldAccount) with
             | true, usage -> store.AccountResources.[accountResourceKey newAccount] <- usage
@@ -777,6 +837,62 @@ let hasDynamicPrivilege (store: Store) (wanted: Account) (privilege: string) =
 let private hasGrantableDynamicPrivilege (store: Store) (wanted: Account) (privilege: string) =
     dynamicGrantsForAccount store wanted
     |> List.exists (fun grant -> eqI grant.Privilege privilege && grant.Grantable)
+
+type RoleGrant =
+    { Role: Account
+      Grantee: Account
+      AdminOption: bool }
+
+let private compareAccounts left right =
+    Operators.compare (left.Name, left.Host.ToLowerInvariant()) (right.Name, right.Host.ToLowerInvariant())
+
+let roleGrants (store: Store) : RoleGrant list =
+    match scanList store "mysql" "role_edges" with
+    | Error _ -> []
+    | Ok(columns, rows) ->
+        rows
+        |> List.map (fun row ->
+            { Role = account (userColumnText columns row "FROM_USER") (userColumnText columns row "FROM_HOST")
+              Grantee = account (userColumnText columns row "TO_USER") (userColumnText columns row "TO_HOST")
+              AdminOption = userColumnText columns row "WITH_ADMIN_OPTION" = "Y" })
+
+let directRoleGrantsForAccount (store: Store) (wanted: Account) : RoleGrant list =
+    roleGrants store
+    |> List.filter (fun grant -> sameAccount grant.Grantee wanted)
+    |> List.sortWith (fun left right -> compareAccounts left.Role right.Role)
+
+let roleClosure (store: Store) (roots: Account list) : Account list =
+    let grants = roleGrants store
+
+    let rec visit visited pending =
+        match pending with
+        | [] -> visited
+        | current :: rest when visited |> List.exists (sameAccount current) -> visit visited rest
+        | current :: rest ->
+            let inherited =
+                grants
+                |> List.choose (fun grant -> if sameAccount grant.Grantee current then Some grant.Role else None)
+
+            visit (current :: visited) (inherited @ rest)
+
+    visit [] roots |> List.sortWith compareAccounts
+
+let defaultRolesForAccount (store: Store) (wanted: Account) : Account list =
+    match scanList store "mysql" "default_roles" with
+    | Error _ -> []
+    | Ok(columns, rows) ->
+        rows
+        |> List.choose (fun row ->
+            let grantee = account (userColumnText columns row "USER") (userColumnText columns row "HOST")
+
+            if sameAccount grantee wanted then
+                Some(account (userColumnText columns row "DEFAULT_ROLE_USER") (userColumnText columns row "DEFAULT_ROLE_HOST"))
+            else
+                None)
+        |> List.sortWith compareAccounts
+
+let effectiveAccounts (store: Store) (wanted: Account) (activeRoles: Account list) =
+    wanted :: roleClosure store activeRoles
 
 /// Splits a `Table_priv`/`Column_priv` SET string into its members — public
 /// because `InformationSchema.TABLE_PRIVILEGES` reads the same encoding.
@@ -1014,6 +1130,226 @@ let private applyResolvedPrivileges store name host resolved target withGrantOpt
     applyStatic
     |> Result.bind (fun () ->
         applyDynamicPrivileges store name host resolved.Dynamic withGrantOption granting)
+
+let private quotedAccount account = sprintf "`%s`@`%s`" account.Name account.Host
+
+let private roleGrantMatches (columns: ColumnDef list) (role: Account) (grantee: Account) (row: Value[]) =
+    sameAccount role (account (userColumnText columns row "FROM_USER") (userColumnText columns row "FROM_HOST"))
+    && sameAccount grantee (account (userColumnText columns row "TO_USER") (userColumnText columns row "TO_HOST"))
+
+let private unknownAuthorization account =
+    Error(3523, sprintf "Unknown authorization ID %s" (quotedAccount account))
+
+let private validateAccountsExist store accounts =
+    accounts
+    |> List.distinctBy (fun account -> account.Name, account.Host.ToLowerInvariant())
+    |> traverse (fun wanted ->
+        if tryUserRowForAccount store wanted |> Option.isSome then Ok() else unknownAuthorization wanted)
+    |> Result.map ignore
+
+let private roleGraphWouldCycle (grants: RoleGrant list) =
+    let rec reaches target visited current =
+        if sameAccount target current then
+            true
+        elif visited |> List.exists (sameAccount current) then
+            false
+        else
+            grants
+            |> List.exists (fun grant ->
+                sameAccount grant.Grantee current
+                && reaches target (current :: visited) grant.Role)
+
+    grants |> List.exists (fun grant -> reaches grant.Grantee [] grant.Role)
+
+let grantRoles
+    (store: Store)
+    (roles: (string * string) list)
+    (users: (string * string) list)
+    (withAdminOption: bool)
+    : Result<unit, int * string> =
+    let roles = roles |> List.map (fun (name, host) -> account name host)
+    let users = users |> List.map (fun (name, host) -> account name host)
+    let proposed =
+        [ for user in users do
+              for role in roles do
+                  yield
+                      { Role = role
+                        Grantee = user
+                        AdminOption = withAdminOption } ]
+
+    validateAccountsExist store (roles @ users)
+    |> Result.bind (fun () ->
+        if roleGraphWouldCycle (roleGrants store @ proposed) then
+            let cycle = proposed |> List.head
+            Error(
+                4027,
+                sprintf
+                    "User account %s is directly or indirectly granted to the role %s. The GRANT would create a loop"
+                    (quotedAccount cycle.Grantee)
+                    (quotedAccount cycle.Role)
+            )
+        else
+            proposed
+            |> traverse (fun grant ->
+                match scanList store "mysql" "role_edges" with
+                | Error error -> Error(toMySqlError error)
+                | Ok(columns, rows) ->
+                    let matches = roleGrantMatches columns grant.Role grant.Grantee
+
+                    match rows |> List.tryFind matches with
+                    | Some _ when withAdminOption ->
+                        updateSystemRows
+                            store
+                            "role_edges"
+                            (fun _ row -> matches row)
+                            [ "WITH_ADMIN_OPTION", VString "Y" ]
+                        |> Result.map ignore
+                    | Some _ -> Ok()
+                    | None ->
+                        insertRows
+                            store
+                            "mysql"
+                            "role_edges"
+                            (Some [ "FROM_HOST"; "FROM_USER"; "TO_HOST"; "TO_USER"; "WITH_ADMIN_OPTION" ])
+                            [ [ VString grant.Role.Host
+                                VString grant.Role.Name
+                                VString grant.Grantee.Host
+                                VString grant.Grantee.Name
+                                VString(if withAdminOption then "Y" else "N") ] ]
+                        |> Result.map ignore
+                        |> Result.mapError toMySqlError)
+            |> Result.map ignore)
+
+let revokeRoles (store: Store) (roles: (string * string) list) (users: (string * string) list) : Result<unit, int * string> =
+    let roles = roles |> List.map (fun (name, host) -> account name host)
+    let users = users |> List.map (fun (name, host) -> account name host)
+
+    validateAccountsExist store (roles @ users)
+    |> Result.bind (fun () ->
+        [ for user in users do
+              for role in roles do
+                  yield role, user ]
+        |> traverse (fun (role, user) ->
+            match scanList store "mysql" "role_edges", scanList store "mysql" "default_roles" with
+            | Ok(edgeColumns, _), Ok(defaultColumns, _) ->
+                deleteRows store "mysql" "role_edges" (fun row -> Ok(roleGrantMatches edgeColumns role user row))
+                |> Result.mapError toMySqlError
+                |> Result.bind (fun _ ->
+                    deleteRows
+                        store
+                        "mysql"
+                        "default_roles"
+                        (fun row ->
+                            let grantee =
+                                account
+                                    (userColumnText defaultColumns row "USER")
+                                    (userColumnText defaultColumns row "HOST")
+
+                            let defaultRole =
+                                account
+                                    (userColumnText defaultColumns row "DEFAULT_ROLE_USER")
+                                    (userColumnText defaultColumns row "DEFAULT_ROLE_HOST")
+
+                            Ok(sameAccount grantee user && sameAccount defaultRole role))
+                    |> Result.map ignore
+                    |> Result.mapError toMySqlError)
+            | Error error, _
+            | _, Error error -> Error(toMySqlError error))
+        |> Result.map ignore)
+
+let resolveRoleSelection (store: Store) (grantee: Account) selection : Result<Account list, int * string> =
+    let direct = directRoleGrantsForAccount store grantee |> List.map _.Role
+    let isDirect role = direct |> List.exists (sameAccount role)
+
+    let validate roles =
+        roles
+        |> traverse (fun role ->
+            if isDirect role then
+                Ok role
+            else
+                Error(3530, sprintf "%s is not granted to %s" (quotedAccount role) (quotedAccount grantee)))
+        |> Result.map (List.sortWith compareAccounts)
+
+    match selection with
+    | NoRoles -> Ok []
+    | DefaultRoles -> defaultRolesForAccount store grantee |> validate
+    | AllRoles -> Ok direct
+    | AllRolesExcept excluded ->
+        let excluded = excluded |> List.map (fun (name, host) -> account name host)
+        validate excluded
+        |> Result.map (fun valid -> direct |> List.filter (fun role -> valid |> List.exists (sameAccount role) |> not))
+    | NamedRoles roles -> roles |> List.map (fun (name, host) -> account name host) |> validate
+
+let setDefaultRoles
+    (store: Store)
+    (selection: RoleSelection)
+    (users: (string * string) list)
+    : Result<unit, int * string> =
+    users
+    |> List.map (fun (name, host) -> account name host)
+    |> traverse (fun user ->
+        if tryUserRowForAccount store user |> Option.isNone then
+            unknownAuthorization user
+        else
+            resolveRoleSelection store user selection
+            |> Result.bind (fun roles ->
+                match scanList store "mysql" "default_roles" with
+                | Error error -> Error(toMySqlError error)
+                | Ok(columns, _) ->
+                    deleteRows
+                        store
+                        "mysql"
+                        "default_roles"
+                        (fun row ->
+                            Ok(
+                                sameAccount
+                                    user
+                                    (account (userColumnText columns row "USER") (userColumnText columns row "HOST"))
+                            ))
+                    |> Result.mapError toMySqlError
+                    |> Result.bind (fun _ ->
+                        roles
+                        |> traverse (fun role ->
+                            insertRows
+                                store
+                                "mysql"
+                                "default_roles"
+                                (Some [ "HOST"; "USER"; "DEFAULT_ROLE_HOST"; "DEFAULT_ROLE_USER" ])
+                                [ [ VString user.Host; VString user.Name; VString role.Host; VString role.Name ] ]
+                            |> Result.map ignore
+                            |> Result.mapError toMySqlError)
+                        |> Result.map ignore)))
+    |> Result.map ignore
+
+let checkRoleGrantAuthorityForAccount
+    (store: Store)
+    (wanted: Account)
+    (activeRoles: Account list)
+    (roles: (string * string) list)
+    : Result<unit, int * string> =
+    let actors = effectiveAccounts store wanted activeRoles
+    let requestedRoles = roles |> List.map (fun (name, host) -> account name host)
+    let roleAdmin = actors |> List.exists (fun actor -> hasDynamicPrivilege store actor "ROLE_ADMIN")
+
+    let canAdmin role =
+        roleGrants store
+        |> List.exists (fun grant ->
+            sameAccount grant.Role role
+            && grant.AdminOption
+            && actors |> List.exists (sameAccount grant.Grantee))
+
+    if roleAdmin || requestedRoles |> List.forall canAdmin then
+        Ok()
+    else
+        Error(
+            1227,
+            "Access denied; you need (at least one of) the WITH ADMIN OPTION privilege(s) for this operation"
+        )
+
+let formatCurrentRoles roles =
+    match roles |> List.sortWith compareAccounts with
+    | [] -> "NONE"
+    | active -> active |> List.map quotedAccount |> String.concat ","
 
 /// `GRANT privs ON target TO users [WITH GRANT OPTION]`. MySQL 8 no longer
 /// auto-creates unknown grantees — that's 1410.
@@ -1290,6 +1626,10 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
             | Result.Error _ -> [], [] // invalid list — the executor reports it
 
         grantOptionRequirements @ privilegeRequirements
+    | GrantRoles _
+    | RevokeRoles _
+    | SetRole _
+    | SetDefaultRole _ -> []
     // CREATE TRIGGER carries its subject table in the statement. DROP's
     // subject is resolved by `requiredPrivilegesInStore` below.
     | CreateTrigger(_, _, _, table, _, _) -> onTables "TRIGGER" [ split table ]
@@ -1504,15 +1844,37 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
 
         required |> traverse checkOne |> Result.map ignore
 
+let checkForAccountWithRoles
+    (store: Store)
+    (wanted: Account)
+    (activeRoles: Account list)
+    (required: (string * PrivTarget) list)
+    : Result<unit, int * string> =
+    let roles = roleClosure store activeRoles
+
+    required
+    |> traverse (fun requirement ->
+        let direct = checkForAccount store wanted [ requirement ]
+
+        if Result.isOk direct || roles |> List.exists (fun role -> checkForAccount store role [ requirement ] |> Result.isOk) then
+            Ok()
+        else
+            direct)
+    |> Result.map ignore
+
 let checkDynamicGrantOptionsForAccount
     (store: Store)
     (wanted: Account)
+    (activeRoles: Account list)
     (privileges: string list)
     (target: PrivTarget)
     : Result<unit, int * string> =
     expandPrivs (privileges |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target
     |> Result.bind (fun resolved ->
-        if resolved.Dynamic |> List.forall (hasGrantableDynamicPrivilege store wanted) then
+        let actors = effectiveAccounts store wanted activeRoles
+        let grantable privilege = actors |> List.exists (fun actor -> hasGrantableDynamicPrivilege store actor privilege)
+
+        if resolved.Dynamic |> List.forall grantable then
             Ok()
         else
             Error(
@@ -1589,6 +1951,9 @@ let hasGlobalPrivForAccount (store: Store) (wanted: Account) (privSql: string) :
         match checkForAccount store wanted [ privSql, Global ] with
         | Result.Ok() -> true
         | Result.Error _ -> false
+
+let hasGlobalPrivForAccountWithRoles store wanted activeRoles privSql =
+    checkForAccountWithRoles store wanted activeRoles [ privSql, Global ] |> Result.isOk
 
 let hasGlobalPriv (store: Store) (user: string) (privSql: string) = hasGlobalPrivForAccount store (account user "%") privSql
 
@@ -1715,6 +2080,17 @@ let renderGrantsForAccount (store: Store) (wanted: Account) : Result<string * st
                         quoted
                         (if hasOption then " WITH GRANT OPTION" else ""))
 
-        Ok(sprintf "Grants for %s@%s" name host, globalLine :: dynamicLines @ dbLines @ tableLines)
+        let roleLines =
+            directRoleGrantsForAccount store wanted
+            |> List.groupBy _.AdminOption
+            |> List.sortBy fst
+            |> List.map (fun (adminOption, grants) ->
+                sprintf
+                    "GRANT %s TO %s%s"
+                    (grants |> List.map (_.Role >> quotedAccount) |> String.concat ",")
+                    quoted
+                    (if adminOption then " WITH ADMIN OPTION" else ""))
+
+        Ok(sprintf "Grants for %s@%s" name host, globalLine :: dynamicLines @ dbLines @ tableLines @ roleLines)
 
 let renderGrants (store: Store) (name: string) = renderGrantsForAccount store (account name "%")

@@ -4070,7 +4070,7 @@ let private grantLevel: Parser<string option * string option, unit> =
           attempt (identOrString .>> sym "." .>>. identOrString) |>> fun (db, t) -> Some db, Some t
           identOrString |>> fun t -> None, Some t ]
 
-let private grantStmt: Parser<Statement, unit> =
+let private grantPrivilegesStmt: Parser<Statement, unit> =
     (keyword "GRANT" >>. sepBy1 privilegeName (sym ",")
      .>> keyword "ON"
      .>>. grantLevel
@@ -4079,13 +4079,51 @@ let private grantStmt: Parser<Statement, unit> =
      .>>. (opt (keyword "WITH" >>. keyword "GRANT" >>. keyword "OPTION") |>> Option.isSome))
     |>> fun (((privs, level), users), wgo) -> Grant(privs, level, users, wgo)
 
-let private revokeStmt: Parser<Statement, unit> =
+let private grantRolesStmt: Parser<Statement, unit> =
+    (keyword "GRANT" >>. sepBy1 userRef (sym ",")
+     .>> keyword "TO"
+     .>>. sepBy1 userRef (sym ",")
+     .>>. (opt (keyword "WITH" >>. keyword "ADMIN" >>. keyword "OPTION") |>> Option.isSome))
+    |>> fun ((roles, users), withAdminOption) -> GrantRoles(roles, users, withAdminOption)
+
+let private grantStmt = attempt grantPrivilegesStmt <|> grantRolesStmt
+
+let private revokePrivilegesStmt: Parser<Statement, unit> =
     (keyword "REVOKE" >>. sepBy1 privilegeName (sym ",")
      .>> keyword "ON"
      .>>. grantLevel
      .>> keyword "FROM"
      .>>. sepBy1 userRef (sym ","))
     |>> fun ((privs, level), users) -> Revoke(privs, level, users)
+
+let private revokeRolesStmt: Parser<Statement, unit> =
+    (keyword "REVOKE" >>. sepBy1 userRef (sym ",")
+     .>> keyword "FROM"
+     .>>. sepBy1 userRef (sym ","))
+    |>> fun (roles, users) -> RevokeRoles(roles, users)
+
+let private revokeStmt = attempt revokePrivilegesStmt <|> revokeRolesStmt
+
+let private roleSelection allowDefault =
+    let defaultRole =
+        if allowDefault then [ keyword "DEFAULT" >>% DefaultRoles ] else []
+
+    [ keyword "NONE" >>% NoRoles ]
+    @ defaultRole
+    @ [ attempt (keyword "ALL" >>. keyword "EXCEPT" >>. sepBy1 userRef (sym ",") |>> AllRolesExcept)
+        keyword "ALL" >>% AllRoles
+        sepBy1 userRef (sym ",") |>> NamedRoles ]
+    |> choice
+
+let private setDefaultRoleStmt: Parser<Statement, unit> =
+    (keyword "SET" >>. keyword "DEFAULT" >>. keyword "ROLE"
+     >>. roleSelection false
+     .>> keyword "TO"
+     .>>. sepBy1 userRef (sym ","))
+    |>> SetDefaultRole
+
+let private setRoleStmt: Parser<Statement, unit> =
+    keyword "SET" >>. keyword "ROLE" >>. roleSelection true |>> SetRole
 
 /// `CREATE TABLE` vs. `CREATE INDEX` and `DROP TABLE` vs. `DROP INDEX` share
 /// a leading keyword before diverging, so those four need `attempt` to
@@ -4096,6 +4134,8 @@ statementRef.Value <-
     choice
         [ attempt createUserStmt
           attempt createRoleStmt
+          attempt setDefaultRoleStmt
+          attempt setRoleStmt
           attempt renameUserStmt
           attempt createTriggerStmt
           attempt createViewStmt

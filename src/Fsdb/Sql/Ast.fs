@@ -783,6 +783,13 @@ type CreateTableSpec =
       Comment: string option
       Partitioning: HashPartitioning option }
 
+type RoleSelection =
+    | NoRoles
+    | DefaultRoles
+    | AllRoles
+    | AllRolesExcept of (string * string) list
+    | NamedRoles of (string * string) list
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
     | DropDatabase of name: string * ifExists: bool
@@ -847,6 +854,10 @@ type Statement =
     | AlterUser of name: string * host: string * password: string option * ifExists: bool * options: AccountOptions
     | CreateRole of users: (string * string) list * ifNotExists: bool
     | DropRole of users: (string * string) list * ifExists: bool
+    | GrantRoles of roles: (string * string) list * users: (string * string) list * withAdminOption: bool
+    | RevokeRoles of roles: (string * string) list * users: (string * string) list
+    | SetRole of RoleSelection
+    | SetDefaultRole of roles: RoleSelection * users: (string * string) list
     /// `GRANT privs ON level TO users [WITH GRANT OPTION]` — `privs` are the
     /// SQL privilege names (`"ALL"` for ALL PRIVILEGES, `"USAGE"` grants
     /// nothing); `level` is `(db, table)`: `(None, None)` = `*.*`,

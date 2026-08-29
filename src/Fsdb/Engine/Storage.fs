@@ -2802,6 +2802,19 @@ let private mysqlGlobalGrantsColumns: ColumnDef list =
       keyCol "PRIV" 32
       sysCol "WITH_GRANT_OPTION" (TEnum [ "N"; "Y" ]) false (Some(VString "N")) ]
 
+let private mysqlRoleEdgesColumns: ColumnDef list =
+    [ keyCol "FROM_HOST" 255
+      keyCol "FROM_USER" 32
+      keyCol "TO_HOST" 255
+      keyCol "TO_USER" 32
+      sysCol "WITH_ADMIN_OPTION" (TEnum [ "N"; "Y" ]) false (Some(VString "N")) ]
+
+let private mysqlDefaultRolesColumns: ColumnDef list =
+    [ keyCol "HOST" 255
+      keyCol "USER" 32
+      keyCol "DEFAULT_ROLE_HOST" 255
+      keyCol "DEFAULT_ROLE_USER" 32 ]
+
 let private rootDynamicGrantRows =
     Privileges.dynamic
     |> List.map (fun privilege -> [| VString "root"; VString "%"; VString privilege; VString "Y" |])
@@ -2975,6 +2988,8 @@ let private mysqlSystemDatabase () : Database =
       "tables_priv", sysTable "tables_priv" mysqlTablesPrivColumns []
       "columns_priv", sysTable "columns_priv" mysqlColumnsPrivColumns []
       "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns rootDynamicGrantRows
+      "role_edges", sysTable "role_edges" mysqlRoleEdgesColumns []
+      "default_roles", sysTable "default_roles" mysqlDefaultRolesColumns []
       "triggers", sysTable "triggers" mysqlTriggersColumns []
       "views", sysTable "views" mysqlViewsColumns []
       "routines", sysTable "routines" mysqlRoutinesColumns []
@@ -3024,7 +3039,9 @@ let ensureMysqlSchema (store: Store) : unit =
       "functions", mysqlStoredFunctionsColumns
       "events", mysqlEventsColumns
       "check_constraints", mysqlCheckConstraintsColumns
-      "global_grants", mysqlGlobalGrantsColumns ]
+      "global_grants", mysqlGlobalGrantsColumns
+      "role_edges", mysqlRoleEdgesColumns
+      "default_roles", mysqlDefaultRolesColumns ]
     |> List.iter (fun (name, columns) -> ensureTable name columns)
 
 let ensureRootDynamicPrivileges (store: Store) : unit =
