@@ -1392,10 +1392,11 @@ let private applyColumnSpecifications
                 let current = existing |> Option.map (userColumnText columns >> fun read -> read "Column_priv" |> setMembers) |> Option.defaultValue []
 
                 let updated =
-                    if granting then
-                        current @ (members |> List.filter (fun setName -> current |> List.exists (eqI setName) |> not))
-                    else
-                        current |> List.filter (fun setName -> members |> List.exists (eqI setName) |> not)
+                    (if granting then
+                         current @ (members |> List.filter (fun setName -> current |> List.exists (eqI setName) |> not))
+                     else
+                         current |> List.filter (fun setName -> members |> List.exists (eqI setName) |> not))
+                    |> canonicalColumnPrivilegeMembers
 
                 column, members, existing.IsSome, current, updated)
 
@@ -1461,7 +1462,10 @@ let private revokeTablePrivilegesFromColumns store wanted database table (privil
             |> traverse (fun row ->
                 let column = userColumnText columns row "Column_name"
                 let current = setMembers (userColumnText columns row "Column_priv")
-                let updated = current |> List.filter (fun setName -> members |> List.exists (eqI setName) |> not)
+                let updated =
+                    current
+                    |> List.filter (fun setName -> members |> List.exists (eqI setName) |> not)
+                    |> canonicalColumnPrivilegeMembers
 
                 if updated.IsEmpty then
                     deleteRows store "mysql" "columns_priv" (fun candidate -> Ok(matches candidate && eqI (userColumnText columns candidate "Column_name") column))
@@ -1759,7 +1763,7 @@ let revokeSpecifications
     (users: (string * string) list)
     : Result<unit, int * string> =
     let names = privilegeNames privs
-    let revokesGrantOption = names |> List.exists (fun privilege -> privilege = "GRANT OPTION" || privilege = "ALL")
+    let revokesGrantOption = names |> List.exists ((=) "GRANT OPTION")
     let columnSpecifications, wholeSpecifications = privs |> List.partition (fun privilege -> not privilege.Columns.IsEmpty)
 
     validateColumnSpecifications store target columnSpecifications
@@ -1775,7 +1779,7 @@ let revokeSpecifications
                 if (tryUserRowForAccount store wanted).IsNone then
                     Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
                 else
-                    (if wholeSpecifications |> List.forall (fun privilege -> privilege.Name = "GRANT OPTION") then
+                    (if wholeSpecifications.IsEmpty then
                          Ok()
                      else
                          applyResolvedPrivileges store name host resolved target revokesGrantOption false)
@@ -1961,9 +1965,11 @@ let private requirementsForReferences privilege localSources outerSources refere
 
             let resolved =
                 if resolved.IsEmpty then
-                    match targets localSources with
-                    | [ target ] -> [ { Qualifier = ""; Columns = []; Target = Some target } ]
-                    | _ -> []
+                    targets localSources
+                    |> List.map (fun target ->
+                        { Qualifier = ""
+                          Columns = []
+                          Target = Some target })
                 else
                     resolved
 
@@ -2054,6 +2060,13 @@ let rec private selectColumnRequirements store defaultDb outerSources inheritedC
         |> List.map _.ToLowerInvariant()
         |> Set.ofList
 
+    let groupAliases =
+        aliases
+        |> Set.filter (fun alias ->
+            sources
+            |> List.exists (fun source -> source.Columns |> List.exists (eqI alias))
+            |> not)
+
     let plain expression =
         expressionColumnRequirements store defaultDb sources outerSources ctes Set.empty expression
 
@@ -2069,17 +2082,20 @@ let rec private selectColumnRequirements store defaultDb outerSources inheritedC
     let withAliases expression =
         expressionColumnRequirements store defaultDb sources outerSources ctes aliases expression
 
+    let withGroupAliases expression =
+        expressionColumnRequirements store defaultDb sources outerSources ctes groupAliases expression
+
     cteRequirements
     @ fromRequirements
     @ joinRequirements
     @ (select.Projections |> List.collect projectionRequirements)
     @ (select.Where |> Option.map plain |> Option.defaultValue [])
-    @ (select.GroupBy |> List.collect withAliases)
+    @ (select.GroupBy |> List.collect withGroupAliases)
     @ (select.Having |> Option.map withAliases |> Option.defaultValue [])
     @ (select.OrderBy |> List.collect (fst >> withAliases))
     @ (select.Windows
        |> List.collect (snd >> OverSpec >> Expression.overExpressions)
-       |> List.collect withAliases)
+       |> List.collect plain)
     @ (select.Limit |> Option.map plain |> Option.defaultValue [])
     @ (select.Offset |> Option.map plain |> Option.defaultValue [])
 
@@ -2135,6 +2151,17 @@ let private targetColumns defaultDb (table: string) (columns: string list) privi
         [ allColumnsRequirement privilege target ]
     else
         columns |> List.map (targetRequirement privilege target)
+
+let private targetSource store defaultDb table =
+    let database, table = splitQualified defaultDb table
+
+    physicalSource
+        store
+        defaultDb
+        { Database = Some database
+          Table = table
+          Alias = None
+          Partitions = [] }
 
 let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
     let cteNames =
@@ -2199,7 +2226,7 @@ let rec private statementColumnRequirements store defaultDb =
            |> List.collect (fun (_, select) ->
                selectColumnRequirements store defaultDb [] Map.empty select))
     | Insert(table, columns, rows, onDuplicate, _) ->
-        let source = physicalSource store defaultDb { Database = None; Table = table; Alias = None; Partitions = [] }
+        let source = targetSource store defaultDb table
 
         targetColumns defaultDb table columns "INSERT"
         @ (if onDuplicate.IsEmpty then [] else targetColumns defaultDb table (onDuplicate |> List.map fst) "UPDATE")
@@ -2209,7 +2236,7 @@ let rec private statementColumnRequirements store defaultDb =
         @ (onDuplicate
            |> List.collect (snd >> expressionColumnRequirements store defaultDb [ source ] [] Map.empty Set.empty))
     | InsertSelect(table, columns, select, onDuplicate, _) ->
-        let source = physicalSource store defaultDb { Database = None; Table = table; Alias = None; Partitions = [] }
+        let source = targetSource store defaultDb table
 
         targetColumns defaultDb table columns "INSERT"
         @ (if onDuplicate.IsEmpty then [] else targetColumns defaultDb table (onDuplicate |> List.map fst) "UPDATE")
@@ -3023,13 +3050,13 @@ let renderGrantsForAccountUsing
 
                     let privileges = tablePrivileges @ columnPrivileges
 
-                    if privileges.IsEmpty then
+                    if privileges.IsEmpty && not (hasMember "Grant") then
                         None
                     else
                         Some(
                             sprintf
                                 "GRANT %s ON `%s`.`%s` TO %s%s"
-                                (String.concat ", " privileges)
+                                (if privileges.IsEmpty then "USAGE" else String.concat ", " privileges)
                                 database
                                 table
                                 quoted

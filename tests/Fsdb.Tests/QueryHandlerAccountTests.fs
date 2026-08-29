@@ -1260,6 +1260,7 @@ let tests =
               let root, _ = handle root "INSERT INTO column_auth.items VALUES (1, 0, 9)"
               let root, _ = handle root "INSERT INTO column_auth.details VALUES (1, 7, 99)"
               let root, _ = handle root "CREATE VIEW column_auth.visible_items AS SELECT id, hidden FROM column_auth.items"
+              let root, _ = handle root "CREATE VIEW column_auth.computed_items AS SELECT id + 1 AS next_id, hidden + 1 AS next_hidden FROM column_auth.items"
               let root, _ = handle root "CREATE USER partial"
 
               let root, _ =
@@ -1268,7 +1269,8 @@ let tests =
                       "GRANT SELECT(id), INSERT(id), UPDATE(status) ON column_auth.items TO partial"
 
               let root, _ = handle root "GRANT SELECT(id, public_value) ON column_auth.details TO partial"
-              let _, _ = handle root "GRANT SELECT(id) ON column_auth.visible_items TO partial"
+              let root, _ = handle root "GRANT SELECT(id) ON column_auth.visible_items TO partial"
+              let _, _ = handle root "GRANT SELECT(next_id) ON column_auth.computed_items TO partial"
 
               let partial =
                   { create 2 store with
@@ -1304,6 +1306,8 @@ let tests =
                   "SELECT id, (SELECT public_value FROM details WHERE details.id = items.id) FROM items"
                   [ [ Some "1"; Some "7" ] ]
               expectRows "SELECT id FROM visible_items" [ [ Some "1" ] ]
+              expectRows "SELECT next_id FROM computed_items" [ [ Some "2" ] ]
+              expectRows "SELECT id AS projected FROM items GROUP BY projected" [ [ Some "1" ] ]
               expectColumnDenied "SELECT" "hidden" "SELECT hidden FROM items"
               expectColumnDenied "SELECT" "hidden" "SELECT i.id FROM items AS i WHERE i.hidden = 9"
               expectColumnDenied
@@ -1315,6 +1319,12 @@ let tests =
                   "secret_value"
                   "SELECT id, (SELECT secret_value FROM details WHERE details.id = items.id) FROM items"
               expectColumnDenied "SELECT" "hidden" "SELECT hidden FROM visible_items"
+              expectColumnDenied "SELECT" "next_hidden" "SELECT next_hidden FROM computed_items"
+              expectColumnDenied "SELECT" "hidden" "SELECT id AS hidden FROM items GROUP BY hidden"
+              expectColumnDenied
+                  "SELECT"
+                  "hidden"
+                  "SELECT id AS hidden, ROW_NUMBER() OVER (ORDER BY hidden) FROM items"
               expectColumnDenied "SELECT" "hidden" "SELECT id FROM items WHERE hidden = 9"
               expectColumnDenied "SELECT" "hidden" "WITH hidden_cte AS (SELECT hidden FROM items) SELECT hidden FROM hidden_cte"
 
@@ -1399,6 +1409,20 @@ let tests =
               match handle root "SELECT * FROM mysql.columns_priv WHERE User = 'grantor'" |> snd with
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected REVOKE ALL to remove column grants, got %A" other
+
+              match handle root "SELECT * FROM mysql.tables_priv WHERE User = 'grantor'" |> snd with
+              | ResultSet(_, [ row ]) -> Expect.equal row.[6] (Some "Grant") "grant option remains"
+              | other -> failtestf "expected the grant-option row to remain, got %A" other
+
+              match handle root "SHOW GRANTS FOR grantor" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.contains
+                      (rows |> List.map (List.head >> Option.get))
+                      "GRANT USAGE ON `column_admin`.`records` TO `grantor`@`%` WITH GRANT OPTION"
+                      "grant-option-only line"
+              | other -> failtestf "expected grant-option-only SHOW GRANTS line, got %A" other
+
+              let root, _ = handle root "REVOKE GRANT OPTION ON column_admin.records FROM grantor"
 
               match handle root "SELECT * FROM mysql.tables_priv WHERE User = 'grantor'" |> snd with
               | ResultSet(_, []) -> ()

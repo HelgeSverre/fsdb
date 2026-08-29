@@ -1650,15 +1650,29 @@ let private columnPrivilegesRows (catalog: Catalog) : Value[] list =
           Some tablePrivilegesIndex ->
             let ownOnly = restrictedTo "SELECT"
 
-            let isGrantable user host database table =
+            let grantableTables =
                 tablesTable.Rows
-                |> List.exists (fun row ->
-                    eqI (rowText row tableUserIndex) user
-                    && eqI (rowText row tableHostIndex) host
-                    && eqI (rowText row tableDatabaseIndex) database
-                    && eqI (rowText row tableNameIndex) table
-                    && (Fsdb.Auth.setMembers (rowText row tablePrivilegesIndex)
-                        |> List.exists (eqI "Grant")))
+                |> List.choose (fun row ->
+                    if
+                        Fsdb.Auth.setMembers (rowText row tablePrivilegesIndex)
+                        |> List.exists (eqI "Grant")
+                    then
+                        Some(
+                            rowText row tableUserIndex,
+                            rowText row tableHostIndex,
+                            rowText row tableDatabaseIndex,
+                            rowText row tableNameIndex
+                        )
+                    else
+                        None)
+
+            let isGrantable user host database table =
+                grantableTables
+                |> List.exists (fun (candidateUser, candidateHost, candidateDatabase, candidateTable) ->
+                    eqI candidateUser user
+                    && eqI candidateHost host
+                    && eqI candidateDatabase database
+                    && eqI candidateTable table)
 
             let privilegeOrder = [ "Insert"; "References"; "Select"; "Update" ]
 
@@ -1965,7 +1979,6 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
                         (rowText row dbIndex)
                         (rowText row nameIndex)
                         (rowText row columnIndex)
-                    |> List.map _.ToLowerInvariant()
                     |> String.concat ","
                     |> vs
 

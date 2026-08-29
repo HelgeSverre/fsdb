@@ -349,8 +349,8 @@ let private registryForViewSecurity
 let private registryForView (store: Store) (registry: Registry) (view: StoredView) (statement: Statement) =
     registryForViewSecurity store registry view.SecurityType view.Definer view.Schema statement
 
-/// Reads one view definition from the row-backed catalog. The explicit column
-/// list is JSON so every legal quoted identifier round-trips without inventing
+/// Reads one view definition from the row-backed catalog. The effective output
+/// names are JSON so every legal quoted identifier round-trips without inventing
 /// a second escaping convention. Invalid catalog text is treated as an absent
 /// list so direct catalog damage cannot crash the query worker.
 let private tryStoredView (store: Store) (dbName: string) (viewName: string) : StoredView option =
@@ -14283,6 +14283,14 @@ let rec executeAs
         | _, _, _, Some(code, message), _ -> ids, Err(code, message)
         | _, _, _, _, Error(code, message) -> ids, Err(code, message)
         | Result.Ok((Select _ | Union _) as view), true, None, None, Ok definer ->
+            let storedColumnNames =
+                match viewSpec.Columns with
+                | _ :: _ as explicit -> explicit
+                | [] ->
+                    statementColumns store registry db view
+                    |> Option.map (List.map _.Name)
+                    |> Option.defaultValue []
+
             let algorithm =
                 if algorithm = "MERGE" && not (supportsMergeAlgorithm view) then
                     Diagnostics.warning 1354 "View merge algorithm can't be used here for now (assumed undefined algorithm)"
@@ -14333,15 +14341,15 @@ let rec executeAs
                                   "check_option"
                                   "security_type"
                                   "algorithm" ])
-                            [ [ VString viewName
-                                VString db
-                                VString viewDefinition
-                                VString(JsonSerializer.Serialize(viewSpec.Columns |> List.toArray))
-                                VDateTime System.DateTime.Now
-                                VString definer
-                                VString checkOption
-                                VString security
-                                VString algorithm ] ]
+                                [ [ VString viewName
+                                    VString db
+                                    VString viewDefinition
+                                    VString(JsonSerializer.Serialize(storedColumnNames |> List.toArray))
+                                    VDateTime System.DateTime.Now
+                                    VString definer
+                                    VString checkOption
+                                    VString security
+                                    VString algorithm ] ]
                     with
                     | Ok _ -> ids, Affected 0UL
                     | Error error -> ids, storageErr error
