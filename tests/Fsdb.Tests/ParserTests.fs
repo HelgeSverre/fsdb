@@ -2750,6 +2750,10 @@ let tests =
                         Expect.equal lock.Mode ReadTableLock "mode"
                     | other -> failtestf "expected a commented lock request, got %A" other ]
 
+          testCase "accepts ALTER TABLE without actions"
+          <| fun _ ->
+              Expect.equal (parseOk "ALTER TABLE app.t") (AlterTable("app.t", [])) "MySQL accepts the no-op form"
+
           testList
               "failure cases"
               [ testCase "garbage input is an Error, not an exception"

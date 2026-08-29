@@ -2833,7 +2833,7 @@ let private alterAction: Parser<AlterAction list, unit> =
     <?> "ALTER TABLE action"
 
 let private alterTableStmt: Parser<Statement, unit> =
-    (keyword "ALTER" >>. keyword "TABLE" >>. qualifiedTableName .>>. sepBy1 alterAction (sym ","))
+    (keyword "ALTER" >>. keyword "TABLE" >>. qualifiedTableName .>>. sepBy alterAction (sym ","))
     |>> fun (table, actions) -> AlterTable(table, List.concat actions)
 
 let private renameTablePair: Parser<string * string, unit> =
