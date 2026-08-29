@@ -4503,16 +4503,28 @@ let splitStatements (sql: string) : Result<string list, string> =
         let prefix = sql.[start .. at - 1]
 
         let options = System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        let matchesPrefix pattern =
+            System.Text.RegularExpressions.Regex.IsMatch(prefix, pattern, options)
 
-        System.Text.RegularExpressions.Regex.IsMatch(
-            prefix,
-            @"^\s*CREATE\s+TRIGGER\b[\s\S]*\bFOR\s+EACH\s+ROW(?:\s+(?:FOLLOWS|PRECEDES)\s+(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*))?\s*$",
-            options
+        // A stored program header ends here, so the semicolons that follow
+        // belong to its body and cannot separate multi-statement buffers.
+        let definer = @"(?:DEFINER\s*=\s*\S+\s+)?"
+
+        matchesPrefix (
+            @"^\s*CREATE\s+"
+            + definer
+            + @"TRIGGER\b[\s\S]*\bFOR\s+EACH\s+ROW(?:\s+(?:FOLLOWS|PRECEDES)\s+(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*))?\s*$"
         )
-        || System.Text.RegularExpressions.Regex.IsMatch(
-            prefix,
-            @"^\s*CREATE\s+PROCEDURE\s+\S+\s*\((?:[^()]|\([^()]*\))*\)\s*(?:SQL\s+SECURITY\s+(?:INVOKER|DEFINER)\s*)?$",
-            options
+        || matchesPrefix (
+            @"^\s*CREATE\s+"
+            + definer
+            + @"PROCEDURE\s+\S+\s*\((?:[^()]|\([^()]*\))*\)\s*(?:SQL\s+SECURITY\s+(?:INVOKER|DEFINER)\s*)?$"
+        )
+        || matchesPrefix (
+            @"^\s*CREATE\s+"
+            + definer
+            + @"FUNCTION\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s*\((?:[^()]|\([^()]*\))*\)\s+RETURNS\s+[A-Za-z]+(?:\s*\([^)]*\))?(?:\s+UNSIGNED)?\s*"
+            + @"(?:(?:LANGUAGE\s+SQL|(?:NOT\s+)?DETERMINISTIC|SQL\s+SECURITY\s+(?:DEFINER|INVOKER)|NO\s+SQL|CONTAINS\s+SQL|READS\s+SQL\s+DATA|MODIFIES\s+SQL\s+DATA|COMMENT\s+'(?:''|\\.|[^'])*')\s*)*$"
         )
 
     let addStatement stop =

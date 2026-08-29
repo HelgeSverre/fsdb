@@ -3275,6 +3275,20 @@ let tests =
                       "the function call leaves BEGIN as the only compound level"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "statement batches preserve compound function bodies"
+          <| fun _ ->
+              let sql =
+                  "CREATE DEFINER=`root`@`localhost` FUNCTION record(value INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO log (marker) VALUES (CONCAT('value-', value)); RETURN value; END; SELECT 1"
+
+              match splitStatements sql with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ "CREATE DEFINER=`root`@`localhost` FUNCTION record(value INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO log (marker) VALUES (CONCAT('value-', value)); RETURN value; END"
+                        "SELECT 1" ]
+                      "the function body remains one statement"
+              | Error error -> failtestf "unexpected split error: %s" error
+
           testCase "statement batches preserve compound procedure bodies"
           <| fun _ ->
               let sql = "CREATE PROCEDURE first_post() BEGIN SELECT id FROM posts LIMIT 1; END; SELECT 1"
