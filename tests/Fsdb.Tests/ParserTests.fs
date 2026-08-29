@@ -14,6 +14,7 @@ let private parseOk (sql: string) : Statement =
     | Error msg -> failtestf "expected %s to parse, got error: %s" sql msg
 
 let private col name = Col name
+let private privilege name = PrivilegeSpec.named name
 
 let private createTableSpec name columns =
     { Name = name
@@ -3029,34 +3030,44 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "GRANT SELECT, INSERT ON shop.* TO 'bob'@'%'")
-                        (Grant([ "SELECT"; "INSERT" ], (Some "shop", None), [ "bob", "%" ], false))
+                        (Grant([ privilege "SELECT"; privilege "INSERT" ], (Some "shop", None), [ "bob", "%" ], false))
                         "db level"
 
                     Expect.equal
                         (parseOk "GRANT ALL PRIVILEGES ON *.* TO bob WITH GRANT OPTION")
-                        (Grant([ "ALL" ], (None, None), [ "bob", "%" ], true))
+                        (Grant([ privilege "ALL" ], (None, None), [ "bob", "%" ], true))
                         "global with grant option"
 
                     Expect.equal
                         (parseOk "GRANT CREATE TEMPORARY TABLES, SHOW DATABASES ON *.* TO bob")
-                        (Grant([ "CREATE TEMPORARY TABLES"; "SHOW DATABASES" ], (None, None), [ "bob", "%" ], false))
+                        (Grant(
+                            [ privilege "CREATE TEMPORARY TABLES"; privilege "SHOW DATABASES" ],
+                            (None, None),
+                            [ "bob", "%" ],
+                            false
+                        ))
                         "multi-word privilege names"
 
                     Expect.equal
                         (parseOk "GRANT SELECT ON shop.orders TO bob")
-                        (Grant([ "SELECT" ], (Some "shop", Some "orders"), [ "bob", "%" ], false))
+                        (Grant([ privilege "SELECT" ], (Some "shop", Some "orders"), [ "bob", "%" ], false))
                         "table level"
 
                     Expect.equal
                         (parseOk "GRANT XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* TO bob WITH GRANT OPTION")
-                        (Grant([ "XA_RECOVER_ADMIN"; "BACKUP_ADMIN" ], (None, None), [ "bob", "%" ], true))
+                        (Grant(
+                            [ privilege "XA_RECOVER_ADMIN"; privilege "BACKUP_ADMIN" ],
+                            (None, None),
+                            [ "bob", "%" ],
+                            true
+                        ))
                         "dynamic global privileges"
 
                 testCase "REVOKE parses, including GRANT OPTION in the list"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "REVOKE SELECT, GRANT OPTION ON shop.* FROM 'bob'@'%'")
-                        (Revoke([ "SELECT"; "GRANT OPTION" ], (Some "shop", None), [ "bob", "%" ]))
+                        (Revoke([ privilege "SELECT"; privilege "GRANT OPTION" ], (Some "shop", None), [ "bob", "%" ]))
                         "revoke with grant option"
 
                 testCase "role grants defaults and activation parse"

@@ -790,6 +790,14 @@ type RoleSelection =
     | AllRolesExcept of (string * string) list
     | NamedRoles of (string * string) list
 
+type PrivilegeSpec =
+    { Name: string
+      Columns: string list }
+
+[<RequireQualifiedAccess>]
+module PrivilegeSpec =
+    let named name = { Name = name; Columns = [] }
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
     | DropDatabase of name: string * ifExists: bool
@@ -858,16 +866,16 @@ type Statement =
     | RevokeRoles of roles: (string * string) list * users: (string * string) list
     | SetRole of RoleSelection
     | SetDefaultRole of roles: RoleSelection * users: (string * string) list
-    /// `GRANT privs ON level TO users [WITH GRANT OPTION]` — `privs` are the
-    /// SQL privilege names (`"ALL"` for ALL PRIVILEGES, `"USAGE"` grants
-    /// nothing); `level` is `(db, table)`: `(None, None)` = `*.*`,
+    /// `GRANT privs ON level TO users [WITH GRANT OPTION]`; each privilege
+    /// carries its optional column list. `"ALL"` means ALL PRIVILEGES and
+    /// `"USAGE"` grants nothing. `level` is `(db, table)`: `(None, None)` = `*.*`,
     /// `(Some db, None)` = `db.*`, `(Some db, Some t)` = `db.t`, and
     /// `(None, Some t)` = bare `t`, resolved against the session database at
     /// execution time.
-    | Grant of privs: string list * level: (string option * string option) * users: (string * string) list * withGrantOption: bool
+    | Grant of privs: PrivilegeSpec list * level: (string option * string option) * users: (string * string) list * withGrantOption: bool
     /// `REVOKE privs ON level FROM users` — same shapes as `Grant`;
-    /// `"GRANT OPTION"` may appear in `privs`.
-    | Revoke of privs: string list * level: (string option * string option) * users: (string * string) list
+    /// `"GRANT OPTION"` may appear as a privilege name.
+    | Revoke of privs: PrivilegeSpec list * level: (string option * string option) * users: (string * string) list
     /// `CREATE TRIGGER name timing event ON table FOR EACH ROW body` —
     /// `body` is the single statement after `FOR EACH ROW`, carried as the
     /// raw SQL text exactly as written: the executor validates it by

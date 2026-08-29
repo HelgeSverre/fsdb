@@ -4062,6 +4062,8 @@ let private privilegeName: Parser<string, unit> =
     choice ((attempt (keyword "ALL" >>. optional (keyword "PRIVILEGES") >>% "ALL")) :: (names |> List.map ofName))
     <|> (identifier |>> _.ToUpperInvariant())
 
+let private privilegeSpec = privilegeName |>> PrivilegeSpec.named
+
 /// `ON *.* | db.* | db.tbl | tbl` — see `Ast.Grant`'s doc for the encoding.
 let private grantLevel: Parser<string option * string option, unit> =
     choice
@@ -4071,7 +4073,7 @@ let private grantLevel: Parser<string option * string option, unit> =
           identOrString |>> fun t -> None, Some t ]
 
 let private grantPrivilegesStmt: Parser<Statement, unit> =
-    (keyword "GRANT" >>. sepBy1 privilegeName (sym ",")
+    (keyword "GRANT" >>. sepBy1 privilegeSpec (sym ",")
      .>> keyword "ON"
      .>>. grantLevel
      .>> keyword "TO"
@@ -4089,7 +4091,7 @@ let private grantRolesStmt: Parser<Statement, unit> =
 let private grantStmt = attempt grantPrivilegesStmt <|> grantRolesStmt
 
 let private revokePrivilegesStmt: Parser<Statement, unit> =
-    (keyword "REVOKE" >>. sepBy1 privilegeName (sym ",")
+    (keyword "REVOKE" >>. sepBy1 privilegeSpec (sym ",")
      .>> keyword "ON"
      .>>. grantLevel
      .>> keyword "FROM"

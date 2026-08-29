@@ -995,6 +995,9 @@ let private expandPrivs (privs: string list) (target: PrivTarget) : Result<Resol
             { Static = resolved |> List.choose (function Choice1Of2 privilege -> Some privilege | _ -> None)
               Dynamic = resolved |> List.choose (function Choice2Of2 privilege -> Some privilege | _ -> None) })
 
+let private privilegeNames (privileges: PrivilegeSpec list) =
+    privileges |> List.map _.Name
+
 /// One user's grant/revoke at one level. `yes` is `'Y'` for GRANT, `'N'`
 /// for REVOKE; table-level edits union/subtract the SET string instead.
 let private applyAtLevel
@@ -1427,14 +1430,14 @@ let formatCurrentRoles roles =
 
 /// `GRANT privs ON target TO users [WITH GRANT OPTION]`. MySQL 8 no longer
 /// auto-creates unknown grantees — that's 1410.
-let grant
+let grantSpecifications
     (store: Store)
-    (privs: string list)
+    (privs: PrivilegeSpec list)
     (target: PrivTarget)
     (users: (string * string) list)
     (withGrantOption: bool)
     : Result<unit, int * string> =
-    expandPrivs privs target
+    expandPrivs (privilegeNames privs) target
     |> Result.bind (fun resolved ->
         users
         |> traverse (fun (name, host) ->
@@ -1444,11 +1447,22 @@ let grant
                 applyResolvedPrivileges store name host resolved target withGrantOption true)
         |> Result.map ignore)
 
-/// `REVOKE privs ON target FROM users`.
-let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (string * string) list) : Result<unit, int * string> =
-    let revokesGrantOption = privs |> List.exists (fun p -> p = "GRANT OPTION" || p = "ALL")
+let grant store privileges target users withGrantOption =
+    privileges
+    |> List.map PrivilegeSpec.named
+    |> fun specs -> grantSpecifications store specs target users withGrantOption
 
-    expandPrivs (privs |> List.filter (fun p -> p <> "GRANT OPTION")) target
+/// `REVOKE privs ON target FROM users`.
+let revokeSpecifications
+    (store: Store)
+    (privs: PrivilegeSpec list)
+    (target: PrivTarget)
+    (users: (string * string) list)
+    : Result<unit, int * string> =
+    let names = privilegeNames privs
+    let revokesGrantOption = names |> List.exists (fun privilege -> privilege = "GRANT OPTION" || privilege = "ALL")
+
+    expandPrivs (names |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target
     |> Result.bind (fun resolved ->
         users
         |> traverse (fun (name, host) ->
@@ -1457,6 +1471,11 @@ let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (str
             else
                 applyResolvedPrivileges store name host resolved target revokesGrantOption false)
         |> Result.map ignore)
+
+let revoke store privileges target users =
+    privileges
+    |> List.map PrivilegeSpec.named
+    |> fun specs -> revokeSpecifications store specs target users
 
 /// Every real table a statement's expressions and sources read, walked
 /// recursively — a derived table (`FROM (SELECT ... secret)`), a scalar or
@@ -1684,7 +1703,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         // mysql.global_grants. Static privileges still share the grant
         // option stored at the target level.
         let privilegeRequirements, grantOptionRequirements =
-            match expandPrivs (privs |> List.filter (fun p -> p <> "GRANT OPTION")) target with
+            match expandPrivs (privilegeNames privs |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target with
             | Result.Ok resolved ->
                 let privileges =
                     (resolved.Static |> List.map (fun privilege -> privilege.Sql)) @ resolved.Dynamic

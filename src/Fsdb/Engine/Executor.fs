@@ -14501,12 +14501,12 @@ let rec executeAs
         | Error(code, msg) -> ids, Err(code, msg)
 
     | Grant(privs, level, users, withGrantOption) ->
-        match Auth.grant store privs (Auth.targetOfLevel dbName level) users withGrantOption with
+        match Auth.grantSpecifications store privs (Auth.targetOfLevel dbName level) users withGrantOption with
         | Ok() -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 
     | Revoke(privs, level, users) ->
-        match Auth.revoke store privs (Auth.targetOfLevel dbName level) users with
+        match Auth.revokeSpecifications store privs (Auth.targetOfLevel dbName level) users with
         | Ok() -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 

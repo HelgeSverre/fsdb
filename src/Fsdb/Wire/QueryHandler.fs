@@ -2036,7 +2036,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                         store
                         (accountOf session)
                         session.ActiveRoles
-                        privileges
+                        (privileges |> List.map _.Name)
                         (Auth.targetOfLevel dbName level)
                 | GrantRoles(roles, _, _)
                 | RevokeRoles(roles, _) ->
