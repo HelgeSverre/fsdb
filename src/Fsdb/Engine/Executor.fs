@@ -12277,16 +12277,21 @@ let private validateCheckForeignKeys
 // Triggers
 // ---------------------------------------------------------------------------
 
-/// The `(db, normalized table)` tables whose INSERTs are currently firing
-/// triggers on this thread — the "statement which invoked this stored
-/// function/trigger" chain error 1442 checks against; its length is the
-/// trigger recursion depth. Thread-local like `Storage.queryCancellation`:
-/// one statement executes on one thread, and firing never crosses threads.
+/// Trigger subjects on the current execution thread, innermost first.
 let private triggerChain = new System.Threading.ThreadLocal<(string * string) list>(fun () -> [])
 
-/// MySQL 8.4.11's exact 1442 text (write-probed on the disposable server):
-/// fired when a trigger body writes a table the invoking statement chain is
-/// already writing.
+let private triggerInvocationTables =
+    new System.Threading.ThreadLocal<Set<string * string>>(fun () -> Set.empty)
+
+let private withTriggerInvocationTables tables body =
+    let previous = triggerInvocationTables.Value
+    triggerInvocationTables.Value <- Set.union previous tables
+
+    try
+        body ()
+    finally
+        triggerInvocationTables.Value <- previous
+
 let private err1442 (table: string) : QueryResult =
     Err(
         1442,
@@ -12739,11 +12744,10 @@ let rec executeAs
         | Ok(columns, _) ->
             let chain = triggerChain.Value
             let self = db, normalizeTableName table
+            let protectedTables = Set.add self (Set.union (Set.ofList chain) triggerInvocationTables.Value)
 
-            // Re-parse (body text is the single source of truth, see
-            // `Ast.CreateTrigger`) and run the 1442 checks before any row's
-            // body executes. A body targeting a table the invoking chain is
-            // already writing fires nothing at all.
+            // MySQL rejects every trigger before firing any row when its body
+            // writes a table targeted by the invoking statement.
             let checkBody trigger =
                 match StoredProgram.parseTrigger (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
@@ -12751,15 +12755,11 @@ let rec executeAs
                     let dmlStatements = bodyStatements |> List.collect StoredProgram.sqlStatements
                     let targets = dmlStatements |> List.choose (writtenTableOf db)
 
-                    match targets |> List.tryFind (fun target -> List.contains target (self :: chain)) with
+                    match targets |> List.tryFind protectedTables.Contains with
                     | Some target -> Result.Error(err1442 (snd target))
                     | _ ->
-                        // A body runs with the DEFINER's privileges, not the
-                        // invoking session's — otherwise GRANT TRIGGER on one
-                        // table would hand its holder every table a body can
-                        // name. Per fire rather than at CREATE, so a revoke
-                        // takes effect immediately; per trigger in a chain,
-                        // each against its own definer.
+                        // Definer privileges are checked at execution so revokes
+                        // take effect without recreating the trigger.
                         if trigger.Definer = "" then
                             Result.Error(
                                 Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name)
@@ -12903,7 +12903,7 @@ let rec executeAs
                                               TriggerRegistry = definerRegistry
                                               TriggerDatabase = db
                                               TriggerAccount = account
-                                              TriggerProtectedTables = self :: chain |> Set.ofList
+                                              TriggerProtectedTables = protectedTables
                                               TriggerUserVariables = variables.UserVariables }
 
                                         withRoutineVariableState locals (fun () -> execute execution sql)
@@ -13197,6 +13197,12 @@ let rec executeAs
                                 | _ -> None)))
                 finally
                     triggerChain.Value <- chain
+
+    let triggerStorageResult =
+        function
+        | None -> Ok()
+        | Some(Err(code, message)) -> Error(ExpressionError(code, message))
+        | Some _ -> Error(ExpressionError(1105, "Trigger execution failed"))
 
     let validateViewCandidate (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
         match viewCheckScope.Value with
@@ -15263,7 +15269,7 @@ let rec executeAs
                     let physicalGroups =
                         sources
                         |> List.choose _.PhysicalTable
-                        |> List.fold (fun acc t -> if acc |> List.exists (fun t' -> physicalKey t' = physicalKey t) then acc else acc @ [ t ]) []
+                        |> List.distinctBy physicalKey
                         |> Array.ofList
 
                     let sourcePhys =
@@ -15271,21 +15277,9 @@ let rec executeAs
                         |> List.map (fun source -> source.PhysicalTable |> Option.map (fun tableRef -> physicalGroups |> Array.findIndex (fun t -> physicalKey t = physicalKey tableRef)))
                         |> Array.ofList
 
-                    // `claims` stays keyed by *source* (one set per alias,
-                    // as `Ast.UpdateStmt`'s "at most once" doc
-                    // describes) — a physical row matched twice through the
-                    // *same* alias (`t1 JOIN t2` where two `t2` rows both
-                    // join the same `t1` row) is only written once by that
-                    // alias, but a self-join's two *different* aliases each
-                    // get their own claim on the same physical row, so both
-                    // land — matching MySQL, where `a` and `b` are
-                    // independent roles even when they're the same table.
-                    // `pending` is what's keyed by physical table: every
-                    // alias's surviving write for a given physical row
-                    // accumulates into the *same* entry, so one
-                    // `updateRows` pass per physical table applies every
-                    // alias's columns for that row together instead of two
-                    // passes racing each other's row-array replacement.
+                    // Aliases claim rows independently, while pending changes
+                    // share one batch per physical table. This preserves
+                    // self-join roles without publishing competing row arrays.
                     let claims = sources |> List.map (fun _ -> System.Collections.Generic.HashSet<Value[]>(HashIdentity.Reference)) |> Array.ofList
                     let pending = physicalGroups |> Array.map (fun _ -> System.Collections.Generic.Dictionary<Value[], (int * Value) list>(HashIdentity.Reference))
 
@@ -15303,14 +15297,8 @@ let rec executeAs
                                 // across tables too.
                                 let working = Array.copy flat
 
-                                // Claimed once per (srcIdx, physRow) *before*
-                                // the assignment loop below, not inside it:
-                                // the claim must span the whole `SET` list
-                                // (`claims.Contains` flips true the moment
-                                // the first column claims the row, so a
-                                // per-assignment check would drop every
-                                // later column for the same table, e.g. `b`
-                                // in `SET t1.a = 10, t1.b = 20`).
+                                // A claim spans the complete SET list so later
+                                // assignments to the same alias are retained.
                                 let claimedThisRow =
                                     identities
                                     |> List.mapi (fun srcIdx identity ->
@@ -15348,22 +15336,10 @@ let rec executeAs
                     match joinedRows |> traverse processRow with
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok _ ->
-                        // All per-table writes must succeed together or not
-                        // at all — MySQL rolls back the whole statement when
-                        // a later table's write violates a constraint,
-                        // rather than leaving an earlier table's rows
-                        // mutated. `beginTransactionSnapshot` gives an
-                        // isolated scratch catalog to write every physical
-                        // table's batch into; only merged back into `store`
-                        // (as one `TransactionCommitted` WAL entry, not N
-                        // separate ones) once every batch has actually
-                        // succeeded.
+                        // MySQL rolls back every target when any target or
+                        // trigger fails, so publication uses one catalog merge.
                         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
-                        // Any source alias resolving to a given physical
-                        // table shares its column list (same physical
-                        // schema), so the first one found suffices to look
-                        // up `ON UPDATE CURRENT_TIMESTAMP` columns for it.
                         let physicalColumns =
                             physicalGroups
                             |> Array.mapi (fun i _ ->
@@ -15378,58 +15354,92 @@ let rec executeAs
                                 |> List.choose (fun (srcIdx, colIdx, _) -> if sourcePhys.[srcIdx] = Some i then Some colIdx else None)
                                 |> Set.ofList)
 
+                        let invocationTables = physicalGroups |> Array.map physicalKey |> Set.ofArray
+
                         let apply =
-                            physicalGroups
-                            |> Array.mapi (fun i tableRef ->
-                                if pending.[i].Count = 0 then
-                                    Ok 0
-                                else
-                                    let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
-                                    let predicate row = Ok(pending.[i].ContainsKey row)
+                            withTriggerInvocationTables invocationTables (fun () ->
+                                physicalGroups
+                                |> Array.mapi (fun i tableRef ->
+                                    if pending.[i].Count = 0 then
+                                        Ok 0
+                                    else
+                                        let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
+                                        let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "UPDATE"
+                                        let afterTriggers = triggersFor snapshot tdb tname "AFTER" "UPDATE"
+                                        let changedRows = ResizeArray<Value[] option * Value[] option>()
+                                        let predicate row = Ok(pending.[i].ContainsKey row)
 
-                                    let updater row =
-                                        let updated =
-                                            match pending.[i].TryGetValue row with
-                                            | true, vals ->
-                                                let newRow = Array.copy row
+                                        let updater row =
+                                            let updated =
+                                                match pending.[i].TryGetValue row with
+                                                | true, vals ->
+                                                    let newRow = Array.copy row
 
-                                                for colIdx, v in vals do
-                                                    newRow.[colIdx] <- v
+                                                    for colIdx, v in vals do
+                                                        newRow.[colIdx] <- v
 
-                                                Ok(
-                                                    applyOnUpdateTimestamps
-                                                        (temporalCoercionMode snapshot)
-                                                        physicalColumns.[i]
-                                                        assignedIdxsByPhys.[i]
-                                                        row
-                                                        newRow
+                                                    Ok(
+                                                        applyOnUpdateTimestamps
+                                                            (temporalCoercionMode snapshot)
+                                                            physicalColumns.[i]
+                                                            assignedIdxsByPhys.[i]
+                                                            row
+                                                            newRow
+                                                    )
+                                                    |> Result.bind (computeGeneratedRow snapshot registry tdb tname physicalColumns.[i])
+                                                | false, _ -> Ok row
+
+                                            match updated with
+                                            | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                                Diagnostics.warning 3819 message
+                                                Ok row
+                                            | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
+                                                Diagnostics.warning 1369 message
+                                                Ok row
+                                            | Error error -> Error error
+                                            | Ok candidate ->
+                                                triggerStorageResult (
+                                                    fireTriggers
+                                                        snapshot
+                                                        tdb
+                                                        tname
+                                                        Before
+                                                        TriggerUpdate
+                                                        beforeTriggers
+                                                        [ Some row, Some candidate ]
                                                 )
-                                                |> Result.bind (computeGeneratedRow snapshot registry tdb tname physicalColumns.[i])
-                                                |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i])
-                                            | false, _ -> Ok row
+                                                |> Result.bind (fun () ->
+                                                    match validateViewCandidate snapshot tdb tname physicalColumns.[i] candidate with
+                                                    | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
+                                                        Diagnostics.warning 1369 message
+                                                        Ok row
+                                                    | Error error -> Error error
+                                                    | Ok candidate ->
+                                                        changedRows.Add(Some(Array.copy row), Some candidate)
+                                                        Ok candidate)
 
-                                        match updated with
-                                        | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
-                                            Diagnostics.warning 3819 message
-                                            Ok row
-                                        | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
-                                            Diagnostics.warning 1369 message
-                                            Ok row
-                                        | result -> result
-
-                                    updateRows snapshot tdb tname None predicate updater)
-                            |> Array.toList
-                            |> traverse id
+                                        match updateRows snapshot tdb tname None predicate updater with
+                                        | Error error -> Error error
+                                        | Ok changed ->
+                                            triggerStorageResult (
+                                                fireTriggers
+                                                    snapshot
+                                                    tdb
+                                                    tname
+                                                    After
+                                                    TriggerUpdate
+                                                    afterTriggers
+                                                    (List.ofSeq changedRows)
+                                            )
+                                            |> Result.map (fun () -> changed))
+                                |> Array.toList
+                                |> traverse id)
 
                         match apply with
                         | Ok counts ->
                             Storage.commitCatalogInto store baseCatalog snapshot
-                            // `pending.[i].Count` is the matched-row count per
-                            // physical table (every row this JOIN claimed for
-                            // it, whether or not the write actually changed
-                            // anything) — `counts` from `updateRows` is the
-                            // changed-row count `List.sum counts` reports by
-                            // default.
+                            // CLIENT_FOUND_ROWS reports claimed rows; the
+                            // default reports rows changed after BEFORE triggers.
                             let matched = pending |> Array.sumBy (fun d -> d.Count)
                             ids, Affected(uint64 (if foundRows then matched else List.sum counts))
                         | Error e -> ids, storageErr e)
@@ -15549,13 +15559,6 @@ let rec executeAs
                                 ids, Affected(uint64 affected)
 
     | Delete deleteStmt ->
-        // Multi-table `DELETE t1[, t2] FROM t1 JOIN t2 ON ...` / `DELETE
-        // FROM t1 USING t1 JOIN t2 ON ...` — resolves the whole join, marks
-        // (by reference) every physical row of every named `Targets` table
-        // that any matched combined row touches, then removes each target
-        // table's marked rows via `Storage.deleteRows`, one call per table.
-        // A physical row reached through more than one join match is still
-        // only in the set once (a `HashSet`), so it's deleted at most once.
         match runMutationJoin store registry dbName deleteStmt.From deleteStmt.Joins with
         | Error e -> ids, e
         | Ok(sources, joinedRows) ->
@@ -15574,8 +15577,25 @@ let rec executeAs
             | Error(code, message) -> ids, Err(code, message)
             | Ok targetIndices ->
                 let check = whereMatches ctxFor deleteStmt.Where
+                let targetIndices = List.distinct targetIndices
 
-                let claimedByTarget = targetIndices |> List.map (fun i -> i, System.Collections.Generic.HashSet<Value[]>(HashIdentity.Reference)) |> Map.ofList
+                let physicalKey (tableRef: TableRef) =
+                    tableRef.Database |> Option.defaultValue dbName, normalizeTableName tableRef.Table
+
+                let targetTables =
+                    targetIndices
+                    |> List.choose (fun index -> sources.[index].PhysicalTable |> Option.map (fun tableRef -> index, tableRef))
+
+                let physicalGroups = targetTables |> List.map snd |> List.distinctBy physicalKey |> Array.ofList
+
+                let physicalIndex =
+                    targetTables
+                    |> List.map (fun (sourceIndex, tableRef) ->
+                        sourceIndex, physicalGroups |> Array.findIndex (fun candidate -> physicalKey candidate = physicalKey tableRef))
+                    |> Map.ofList
+
+                let claimed = physicalGroups |> Array.map (fun _ -> HashSet<Value[]>(HashIdentity.Reference))
+                let claimedRows = physicalGroups |> Array.map (fun _ -> ResizeArray<Value[]>())
 
                 let processRow ((identities, flat): Value[] option list * Value[]) : Result<unit, EvalError> =
                     check flat
@@ -15583,25 +15603,49 @@ let rec executeAs
                         if isMatch then
                             for i in targetIndices do
                                 match List.item i identities with
-                                | Some physRow -> claimedByTarget.[i].Add physRow |> ignore
+                                | Some physRow ->
+                                    let group = physicalIndex.[i]
+
+                                    if claimed.[group].Add physRow then
+                                        claimedRows.[group].Add physRow
                                 | None -> ())
 
                 match joinedRows |> traverse processRow with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
+                    let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+                    let invocationTables =
+                        sources
+                        |> List.choose _.PhysicalTable
+                        |> List.map physicalKey
+                        |> Set.ofList
+
                     let apply =
-                        targetIndices
-                        |> List.distinct
-                        |> traverse (fun i ->
-                            match sources.[i].PhysicalTable with
-                            | None -> Error(NoSuchTable sources.[i].Qualifier)
-                            | Some tableRef ->
-                                let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
-                                let set = claimedByTarget.[i]
-                                deleteRows store tdb tname (fun row -> Ok(set.Contains row)))
+                        withTriggerInvocationTables invocationTables (fun () ->
+                            physicalGroups
+                            |> Array.mapi (fun index tableRef ->
+                                if claimedRows.[index].Count = 0 then
+                                    Ok 0
+                                else
+                                    let tdb, tname = tableRef.Database |> Option.defaultValue dbName, tableRef.Table
+                                    let deletedRows = claimedRows.[index] |> Seq.map (fun row -> Some row, None) |> List.ofSeq
+                                    let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "DELETE"
+                                    let afterTriggers = triggersFor snapshot tdb tname "AFTER" "DELETE"
+
+                                    triggerStorageResult (fireTriggers snapshot tdb tname Before TriggerDelete beforeTriggers deletedRows)
+                                    |> Result.bind (fun () ->
+                                        match deleteRows snapshot tdb tname (fun row -> Ok(claimed.[index].Contains row)) with
+                                        | Error error -> Error error
+                                        | Ok count ->
+                                            triggerStorageResult (fireTriggers snapshot tdb tname After TriggerDelete afterTriggers deletedRows)
+                                            |> Result.map (fun () -> count)))
+                            |> Array.toList
+                            |> traverse id)
 
                     match apply with
-                    | Ok counts -> ids, Affected(uint64 (List.sum counts))
+                    | Ok counts ->
+                        Storage.commitCatalogInto store baseCatalog snapshot
+                        ids, Affected(uint64 (List.sum counts))
                     | Error e -> ids, storageErr e
 
     | GrantRoles(roles, users, withAdminOption) ->
