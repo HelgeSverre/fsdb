@@ -1491,7 +1491,9 @@ let private userPrivilegesRows (catalog: Catalog) : Value[] list =
                 | Some account -> Fsdb.Auth.sameAccount (Fsdb.Auth.account (rowText row userIdx) (rowText row hostIdx)) account
                 | None -> true)
             |> List.collect (fun row ->
-                let grantee = sprintf "'%s'@'%s'" (rowText row userIdx) (rowText row hostIdx)
+                let user = rowText row userIdx
+                let host = rowText row hostIdx
+                let grantee = sprintf "'%s'@'%s'" user host
                 let grantable = if rowText row grantIdx = "Y" then "YES" else "NO"
 
                 let granted =
@@ -1499,8 +1501,36 @@ let private userPrivilegesRows (catalog: Catalog) : Value[] list =
                     |> List.filter (fun d ->
                         colIdx t d.UserCol |> Option.map (fun i -> rowText row i = "Y") |> Option.defaultValue false)
 
-                let privNames = if granted.IsEmpty then [ "USAGE" ] else granted |> List.map (fun d -> d.Sql)
-                privNames |> List.map (fun p -> [| vs grantee; vs "def"; vs p; vs grantable |]))
+                let staticRows =
+                    let privNames = if granted.IsEmpty then [ "USAGE" ] else granted |> List.map (fun d -> d.Sql)
+                    privNames |> List.map (fun p -> [| vs grantee; vs "def"; vs p; vs grantable |])
+
+                let dynamicRows =
+                    match mysqlTable catalog "global_grants" with
+                    | None -> []
+                    | Some grants ->
+                        match colIdx grants "USER", colIdx grants "HOST", colIdx grants "PRIV", colIdx grants "WITH_GRANT_OPTION" with
+                        | Some dynamicUser, Some dynamicHost, Some privilege, Some option ->
+                            grants.Rows
+                            |> List.filter (fun grant ->
+                                Fsdb.Auth.sameAccount
+                                    (Fsdb.Auth.account (rowText grant dynamicUser) (rowText grant dynamicHost))
+                                    (Fsdb.Auth.account user host))
+                            |> List.choose (fun grant ->
+                                let name = rowText grant privilege
+
+                                if Privileges.contains name then
+                                    Some
+                                        [| vs grantee
+                                           vs "def"
+                                           vs (name.ToUpperInvariant())
+                                           vs (if rowText grant option = "Y" then "YES" else "NO") |]
+                                else
+                                    None)
+                            |> List.sortBy (fun row -> rowText row 2)
+                        | _ -> []
+
+                staticRows @ dynamicRows)
         | _ -> []
 
 /// Per-database grants off `mysql.db`.
@@ -1884,16 +1914,7 @@ let showPrivileges () : ShowResult =
           "Usage", "Server Admin", "No privileges - allow connect only" ]
 
     let dynamicRows =
-        [ "FIREWALL_EXEMPT"; "AUDIT_ABORT_EXEMPT"; "ALLOW_NONEXISTENT_DEFINER"; "SENSITIVE_VARIABLES_OBSERVER"
-          "AUTHENTICATION_POLICY_ADMIN"; "GROUP_REPLICATION_STREAM"; "FLUSH_PRIVILEGES"; "PASSWORDLESS_USER_ADMIN"
-          "FLUSH_TABLES"; "FLUSH_OPTIMIZER_COSTS"; "OPTIMIZE_LOCAL_TABLE"; "INNODB_REDO_LOG_ENABLE"
-          "APPLICATION_PASSWORD_ADMIN"; "REPLICATION_APPLIER"; "SESSION_VARIABLES_ADMIN"; "TELEMETRY_LOG_ADMIN"
-          "AUDIT_ADMIN"; "TABLE_ENCRYPTION_ADMIN"; "SERVICE_CONNECTION_ADMIN"; "FLUSH_USER_RESOURCES"
-          "REPLICATION_SLAVE_ADMIN"; "CLONE_ADMIN"; "CONNECTION_ADMIN"; "SYSTEM_USER"; "ENCRYPTION_KEY_ADMIN"
-          "RESOURCE_GROUP_ADMIN"; "SHOW_ROUTINE"; "XA_RECOVER_ADMIN"; "SET_ANY_DEFINER"; "ROLE_ADMIN"
-          "PERSIST_RO_VARIABLES_ADMIN"; "BINLOG_ADMIN"; "BINLOG_ENCRYPTION_ADMIN"; "BACKUP_ADMIN"
-          "GROUP_REPLICATION_ADMIN"; "TRANSACTION_GTID_TAG"; "RESOURCE_GROUP_USER"; "SYSTEM_VARIABLES_ADMIN"
-          "FLUSH_STATUS"; "INNODB_REDO_LOG_ARCHIVE" ]
+        Privileges.dynamic
         |> List.map (fun n -> n, "Server Admin", "")
 
     Ok(

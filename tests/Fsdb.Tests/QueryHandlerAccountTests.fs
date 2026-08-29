@@ -749,11 +749,11 @@ let tests =
               match handle root "SHOW GRANTS" |> snd with
               | ResultSet([ header ], rows) ->
                   Expect.equal header "Grants for root@%" "header names the account"
-
-                  Expect.equal
-                      (rows |> List.map (List.head >> Option.get))
-                      [ "GRANT ALL PRIVILEGES ON *.* TO `root`@`%` WITH GRANT OPTION" ]
-                      "root's single global line"
+                  let grants = rows |> List.map (List.head >> Option.get)
+                  Expect.equal (List.head grants) "GRANT ALL PRIVILEGES ON *.* TO `root`@`%` WITH GRANT OPTION" "static grants"
+                  Expect.equal grants.Length 2 "static and dynamic global lines"
+                  Expect.stringContains grants.[1] "XA_RECOVER_ADMIN" "bootstrap dynamic privileges"
+                  Expect.stringEnds grants.[1] "WITH GRANT OPTION" "bootstrap dynamic privileges are grantable"
               | other -> failtestf "expected root's grants, got %A" other
 
               let root, _ = handle root "CREATE USER worker"
@@ -786,6 +786,63 @@ let tests =
               match handle root "FLUSH PRIVILEGES" |> snd with
               | Affected 0UL -> ()
               | other -> failtestf "expected FLUSH PRIVILEGES to be an OK no-op, got %A" other
+
+          testCase "dynamic global privileges retain individual grant options and metadata"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE USER grantor, target"
+              let root, _ = handle root "GRANT XA_RECOVER_ADMIN ON *.* TO grantor"
+              let root, _ = handle root "GRANT BACKUP_ADMIN ON *.* TO grantor WITH GRANT OPTION"
+
+              match handle root "SHOW GRANTS FOR grantor" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (List.head >> Option.get))
+                      [ "GRANT USAGE ON *.* TO `grantor`@`%`"
+                        "GRANT XA_RECOVER_ADMIN ON *.* TO `grantor`@`%`"
+                        "GRANT BACKUP_ADMIN ON *.* TO `grantor`@`%` WITH GRANT OPTION" ]
+                      "dynamic privileges are grouped by grantability"
+              | other -> failtestf "expected dynamic grants, got %A" other
+
+              match handle root "SELECT PRIV, WITH_GRANT_OPTION FROM mysql.global_grants WHERE USER = 'grantor' ORDER BY PRIV" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "BACKUP_ADMIN"; Some "Y" ]; [ Some "XA_RECOVER_ADMIN"; Some "N" ] ] "stored grants"
+              | other -> failtestf "expected mysql.global_grants rows, got %A" other
+
+              match handle root "SELECT PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE = \"'grantor'@'%'\" ORDER BY PRIVILEGE_TYPE" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "BACKUP_ADMIN"; Some "YES" ]
+                        [ Some "USAGE"; Some "NO" ]
+                        [ Some "XA_RECOVER_ADMIN"; Some "NO" ] ]
+                      "information_schema combines static usage and dynamic grants"
+              | other -> failtestf "expected dynamic USER_PRIVILEGES rows, got %A" other
+
+              let grantor = { create 2 store with User = "grantor"; AccountHost = "%" }
+
+              match handle grantor "GRANT XA_RECOVER_ADMIN ON *.* TO target" |> snd with
+              | Err(1227, message) -> Expect.stringContains message "GRANT OPTION" "non-grantable privilege"
+              | other -> failtestf "expected dynamic grant-option refusal, got %A" other
+
+              match handle grantor "GRANT BACKUP_ADMIN ON *.* TO target" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected grantable dynamic privilege to delegate, got %A" other
+
+              let grantor, _ = handle grantor "REVOKE BACKUP_ADMIN ON *.* FROM target"
+
+              match handle grantor "REVOKE BACKUP_ADMIN ON *.* FROM target" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected absent dynamic revoke to succeed, got %A" other
+
+              match handle root "GRANT XA_RECOVER_ADMIN ON shop.* TO target" |> snd with
+              | Err(3619, message) -> Expect.stringContains message "XA_RECOVER_ADMIN" "global-only privilege level"
+              | other -> failtestf "expected dynamic privilege level refusal, got %A" other
+
+              match handle root "GRANT MADE_UP_ADMIN ON *.* TO target" |> snd with
+              | Err(1149, message) -> Expect.stringContains message "MADE_UP_ADMIN" "unknown privilege"
+              | other -> failtestf "expected unknown privilege refusal, got %A" other
 
           testCase "table metadata probes require a privilege and listings hide inaccessible tables"
           <| fun _ ->

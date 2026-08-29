@@ -1592,7 +1592,7 @@ let private rollbackXa xid session =
     | _ -> completePreparedXa false xid session
 
 let private recoverXa convertXid session =
-    if not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER") then
+    if not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "XA_RECOVER_ADMIN") then
         session, Err(1227, "Access denied; you need (at least one of) the XA_RECOVER_ADMIN privilege(s) for this operation")
     else
         let rows =
@@ -1946,13 +1946,28 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
         // Privilege enforcement — the one gate every parsed statement goes
         // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
         let access =
-            match session.Tx, stmt with
-            | Some tx, (Select _ | Union _) when tx.ReadOnly && statementContainsUpdateLock stmt ->
-                Error(1792, "Cannot execute statement in a READ ONLY transaction")
-            | Some tx, (Select _ | Union _ | Explain _ | ChecksumTables _) when tx.ReadOnly ->
-                Auth.checkForAccount store (accountOf session) requiredPrivileges
-            | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
-            | _ -> Auth.checkForAccount store (accountOf session) requiredPrivileges
+            let statementAccess =
+                match stmt with
+                | Grant(privileges, level, _, _)
+                | Revoke(privileges, level, _) ->
+                    Auth.checkDynamicGrantOptionsForAccount
+                        store
+                        (accountOf session)
+                        privileges
+                        (Auth.targetOfLevel dbName level)
+                | _ -> Ok()
+
+            let transactionAccess () =
+                match session.Tx, stmt with
+                | Some tx, (Select _ | Union _) when tx.ReadOnly && statementContainsUpdateLock stmt ->
+                    Error(1792, "Cannot execute statement in a READ ONLY transaction")
+                | Some tx, (Select _ | Union _ | Explain _ | ChecksumTables _) when tx.ReadOnly ->
+                    Auth.checkForAccount store (accountOf session) requiredPrivileges
+                | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
+                | _ -> Auth.checkForAccount store (accountOf session) requiredPrivileges
+
+            statementAccess
+            |> Result.bind transactionAccess
 
         match access with
         | Error(code, msg) -> session, Err(code, msg)

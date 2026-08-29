@@ -4284,8 +4284,10 @@ let tests =
               | other -> failtestf "expected the privileges list, got %A" other
 
               match handle session "SHOW GRANTS FOR CURRENT_USER()" |> snd with
-              | ResultSet(_, [ [ Some grant ] ]) -> Expect.stringContains grant "GRANT ALL PRIVILEGES ON *.*" "the one truthful grant"
-              | other -> failtestf "expected one grant row, got %A" other
+              | ResultSet(_, [ [ Some staticGrant ]; [ Some dynamicGrant ] ]) ->
+                  Expect.stringContains staticGrant "GRANT ALL PRIVILEGES ON *.*" "static grant"
+                  Expect.stringContains dynamicGrant "XA_RECOVER_ADMIN" "dynamic grant"
+              | other -> failtestf "expected static and dynamic grant rows, got %A" other
 
           testCase "SHOW TRIGGERS/EVENTS/PROCEDURE STATUS are empty with real headers; unknown db still 1049"
           <| fun _ ->
@@ -5962,18 +5964,36 @@ let tests =
               closeSession root
               let replacement = create 2 store
 
-              match handle replacement "XA START 'rules'" |> snd with
+              let replacement, started = handle replacement "XA START 'rules'"
+
+              match started with
               | Affected 0UL -> ()
               | other -> failtestf "expected disconnect to release the active XID, got %A" other
 
-              let replacement, _ = handle replacement "XA END 'rules'"
-              let replacement, _ = handle replacement "XA PREPARE 'rules'"
+              let replacement, inserted = handle replacement "INSERT INTO xa_rules VALUES (1)"
+              Expect.equal inserted (Affected 1UL) "XA branch contains a recoverable write"
+              let replacement, ended = handle replacement "XA END 'rules'"
+              Expect.equal ended (Affected 0UL) "XA branch ends"
+              let replacement, prepared = handle replacement "XA PREPARE 'rules'"
+              Expect.equal prepared (Affected 0UL) "XA branch prepares"
               let replacement, _ = handle replacement "CREATE USER 'xa_limited'@'%'"
               let limited = { create 3 store with User = "xa_limited"; AccountHost = "%" }
 
               match handle limited "XA RECOVER" |> snd with
               | Err(1227, message) -> Expect.stringContains message "XA_RECOVER_ADMIN" "recovery privilege"
               | other -> failtestf "expected XA_RECOVER_ADMIN refusal, got %A" other
+
+              let replacement, _ = handle replacement "GRANT XA_RECOVER_ADMIN ON *.* TO xa_limited"
+
+              match handle limited "XA RECOVER" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected authorized XA recovery, got %A" other
+
+              let replacement, _ = handle replacement "REVOKE XA_RECOVER_ADMIN ON *.* FROM xa_limited"
+
+              match handle limited "XA RECOVER" |> snd with
+              | Err(1227, message) -> Expect.stringContains message "XA_RECOVER_ADMIN" "revoked recovery privilege"
+              | other -> failtestf "expected revoked XA recovery refusal, got %A" other
 
               handle replacement "XA ROLLBACK 'rules'" |> ignore
 

@@ -413,8 +413,8 @@ let tryConsumeAccountStatement store account isUpdate =
 // level (a `tables_priv.Table_priv` SET member). Order matches mysql.user's
 // column order — SHOW GRANTS and USER_PRIVILEGES render in this order, same
 // as MySQL. GRANT OPTION is deliberately absent (it's `Grant_priv`/the
-// `WITH GRANT OPTION` suffix, not a grantable list member); roles/dynamic
-// privileges don't exist here at all.
+// `WITH GRANT OPTION` suffix, not a grantable list member). Dynamic
+// privileges live in mysql.global_grants instead of mysql.user columns.
 // ---------------------------------------------------------------------------
 
 type PrivDef =
@@ -747,6 +747,37 @@ let targetOfLevel (defaultDb: string) (level: string option * string option) : P
 
 let private eqI (a: string) (b: string) = String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
 
+type DynamicGrant =
+    { Privilege: string
+      Grantable: bool }
+
+let dynamicGrantsForAccount (store: Store) (wanted: Account) : DynamicGrant list =
+    match scanList store "mysql" "global_grants" with
+    | Error _ -> []
+    | Ok(columns, rows) ->
+        rows
+        |> List.choose (fun row ->
+            if rowAccount columns row |> Option.exists (sameAccount wanted) then
+                let privilege = userColumnText columns row "PRIV"
+
+                if Privileges.contains privilege then
+                    Some
+                        { Privilege = privilege.ToUpperInvariant()
+                          Grantable = userColumnText columns row "WITH_GRANT_OPTION" = "Y" }
+                else
+                    None
+            else
+                None)
+        |> List.sortBy _.Privilege
+
+let hasDynamicPrivilege (store: Store) (wanted: Account) (privilege: string) =
+    dynamicGrantsForAccount store wanted
+    |> List.exists (fun grant -> eqI grant.Privilege privilege)
+
+let private hasGrantableDynamicPrivilege (store: Store) (wanted: Account) (privilege: string) =
+    dynamicGrantsForAccount store wanted
+    |> List.exists (fun grant -> eqI grant.Privilege privilege && grant.Grantable)
+
 /// Splits a `Table_priv`/`Column_priv` SET string into its members — public
 /// because `InformationSchema.TABLE_PRIVILEGES` reads the same encoding.
 let setMembers (s: string) : string list =
@@ -756,7 +787,11 @@ let setMembers (s: string) : string list =
 /// every static privilege that exists at that level, `USAGE` becomes
 /// nothing, and a privilege that doesn't exist at the level is a MySQL
 /// 1221/1144.
-let private expandPrivs (privs: string list) (target: PrivTarget) : Result<PrivDef list, int * string> =
+type private ResolvedPrivileges =
+    { Static: PrivDef list
+      Dynamic: string list }
+
+let private expandPrivs (privs: string list) (target: PrivTarget) : Result<ResolvedPrivileges, int * string> =
     let atLevel (d: PrivDef) =
         match target with
         | Global -> true
@@ -764,18 +799,27 @@ let private expandPrivs (privs: string list) (target: PrivTarget) : Result<PrivD
         | OnTable _ -> d.TablePriv.IsSome
 
     if privs |> List.exists (fun p -> p = "ALL") then
-        Ok(staticPrivileges |> List.filter atLevel)
+        Ok
+            { Static = staticPrivileges |> List.filter atLevel
+              Dynamic = [] }
     else
         privs
         |> List.filter (fun p -> p <> "USAGE")
         |> traverse (fun p ->
             match privBySql p with
-            | Some d when atLevel d -> Result.Ok d
+            | Some d when atLevel d -> Result.Ok(Choice1Of2 d)
             | Some _ ->
                 match target with
                 | OnTable _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
                 | _ -> Result.Error(1221, "Incorrect usage of DB GRANT and GLOBAL PRIVILEGES")
+            | None when Privileges.contains p ->
+                match target with
+                | Global -> Result.Ok(Choice2Of2(p.ToUpperInvariant()))
+                | _ -> Result.Error(3619, sprintf "Illegal privilege level specified for %s" (p.ToUpperInvariant()))
             | None -> Result.Error(1149, sprintf "Unknown privilege '%s'" p))
+        |> Result.map (fun resolved ->
+            { Static = resolved |> List.choose (function Choice1Of2 privilege -> Some privilege | _ -> None)
+              Dynamic = resolved |> List.choose (function Choice2Of2 privilege -> Some privilege | _ -> None) })
 
 /// One user's grant/revoke at one level. `yes` is `'Y'` for GRANT, `'N'`
 /// for REVOKE; table-level edits union/subtract the SET string instead.
@@ -908,6 +952,69 @@ let private applyAtLevel
                 | None -> Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
             | _ -> Result.Error(1146, "Table 'tables_priv' doesn't exist")
 
+let private applyDynamicPrivileges
+    (store: Store)
+    (name: string)
+    (host: string)
+    (privileges: string list)
+    (withGrantOption: bool)
+    (granting: bool)
+    : Result<unit, int * string> =
+    let wanted = account name host
+
+    privileges
+    |> traverse (fun privilege ->
+        match scanList store "mysql" "global_grants" with
+        | Error error -> Error(toMySqlError error)
+        | Ok(columns, rows) ->
+            let matches row =
+                rowAccount columns row |> Option.exists (sameAccount wanted)
+                && eqI (userColumnText columns row "PRIV") privilege
+
+            match rows |> List.tryFind matches, granting with
+            | Some _, true when withGrantOption ->
+                updateSystemRows
+                    store
+                    "global_grants"
+                    (fun _ row -> matches row)
+                    [ "WITH_GRANT_OPTION", VString "Y" ]
+                |> Result.map ignore
+            | Some _, true -> Ok()
+            | None, true ->
+                insertRows
+                    store
+                    "mysql"
+                    "global_grants"
+                    (Some [ "USER"; "HOST"; "PRIV"; "WITH_GRANT_OPTION" ])
+                    [ [ VString wanted.Name
+                        VString wanted.Host
+                        VString privilege
+                        VString(if withGrantOption then "Y" else "N") ] ]
+                |> Result.map ignore
+                |> Result.mapError toMySqlError
+            | Some _, false ->
+                deleteRows store "mysql" "global_grants" (matches >> Ok)
+                |> Result.map ignore
+                |> Result.mapError toMySqlError
+            | None, false -> Ok())
+    |> Result.map ignore
+
+let private applyResolvedPrivileges store name host resolved target withGrantOption granting =
+    let changesOnlyDynamicPrivileges =
+        resolved.Static.IsEmpty
+        && not resolved.Dynamic.IsEmpty
+        && (granting || not withGrantOption)
+
+    let applyStatic =
+        if changesOnlyDynamicPrivileges then
+            Ok()
+        else
+            applyAtLevel store name host resolved.Static target withGrantOption granting
+
+    applyStatic
+    |> Result.bind (fun () ->
+        applyDynamicPrivileges store name host resolved.Dynamic withGrantOption granting)
+
 /// `GRANT privs ON target TO users [WITH GRANT OPTION]`. MySQL 8 no longer
 /// auto-creates unknown grantees — that's 1410.
 let grant
@@ -918,13 +1025,13 @@ let grant
     (withGrantOption: bool)
     : Result<unit, int * string> =
     expandPrivs privs target
-    |> Result.bind (fun defs ->
+    |> Result.bind (fun resolved ->
         users
         |> traverse (fun (name, host) ->
             if (tryUserRowForAccount store (account name host)).IsNone then
                 Result.Error(1410, "You are not allowed to create a user with GRANT")
             else
-                applyAtLevel store name host defs target withGrantOption true)
+                applyResolvedPrivileges store name host resolved target withGrantOption true)
         |> Result.map ignore)
 
 /// `REVOKE privs ON target FROM users`.
@@ -932,13 +1039,13 @@ let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (str
     let revokesGrantOption = privs |> List.exists (fun p -> p = "GRANT OPTION" || p = "ALL")
 
     expandPrivs (privs |> List.filter (fun p -> p <> "GRANT OPTION")) target
-    |> Result.bind (fun defs ->
+    |> Result.bind (fun resolved ->
         users
         |> traverse (fun (name, host) ->
             if (tryUserRowForAccount store (account name host)).IsNone then
                 Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
             else
-                applyAtLevel store name host defs target revokesGrantOption false)
+                applyResolvedPrivileges store name host resolved target revokesGrantOption false)
         |> Result.map ignore)
 
 /// Every real table a statement's expressions and sources read, walked
@@ -1163,19 +1270,26 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         // "or higher" part.
         let target = targetOfLevel defaultDb level
 
-        // `GRANT OPTION` is required unconditionally below and isn't a
-        // static privilege `expandPrivs` knows — filter it out first (same
-        // as `revoke`'s own expansion) so a statement like
-        // `REVOKE GRANT OPTION, SELECT ...` still collects the SELECT
-        // requirement instead of `expandPrivs` erroring and dropping every
-        // privilege-specific check, which would let a scoped grant-option
-        // holder revoke privileges it doesn't hold.
-        let privReqs =
+        // A dynamic privilege carries its own grant option in
+        // mysql.global_grants. Static privileges still share the grant
+        // option stored at the target level.
+        let privilegeRequirements, grantOptionRequirements =
             match expandPrivs (privs |> List.filter (fun p -> p <> "GRANT OPTION")) target with
-            | Result.Ok defs -> defs |> List.map (fun d -> d.Sql, target)
-            | Result.Error _ -> [] // invalid list — the executor reports it
+            | Result.Ok resolved ->
+                let privileges =
+                    (resolved.Static |> List.map (fun privilege -> privilege.Sql)) @ resolved.Dynamic
+                    |> List.map (fun privilege -> privilege, target)
 
-        ("GRANT OPTION", target) :: privReqs
+                let grantOption =
+                    if resolved.Static.IsEmpty && not resolved.Dynamic.IsEmpty then
+                        []
+                    else
+                        [ "GRANT OPTION", target ]
+
+                privileges, grantOption
+            | Result.Error _ -> [], [] // invalid list — the executor reports it
+
+        grantOptionRequirements @ privilegeRequirements
     // CREATE TRIGGER carries its subject table in the statement. DROP's
     // subject is resolved by `requiredPrivilegesInStore` below.
     | CreateTrigger(_, _, _, table, _, _) -> onTables "TRIGGER" [ split table ]
@@ -1235,23 +1349,26 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
         // runs per statement, so exit before any of the db/table lookup
         // machinery below is even allocated.
         let globallyHeld (privSql: string) =
-            match userRow with
-            | None -> false
-            | Some(cols, row) ->
-                let col =
-                    if privSql = "GRANT OPTION" then
-                        Some "Grant_priv"
-                    else
-                        privBySql privSql |> Option.map (fun d -> d.UserCol)
+            if Privileges.contains privSql then
+                hasDynamicPrivilege store wanted privSql
+            else
+                match userRow with
+                | None -> false
+                | Some(cols, row) ->
+                    let col =
+                        if privSql = "GRANT OPTION" then
+                            Some "Grant_priv"
+                        else
+                            privBySql privSql |> Option.map (fun d -> d.UserCol)
 
-                match col with
-                | Some c -> userColumnText cols row c = "Y"
-                | None ->
-                    // An unknown privilege name means the emitter and the
-                    // static vocabulary drifted — fail closed and log, never
-                    // silently grant.
-                    Log.diagnostic "fsdb: auth: unknown privilege '%s' required — denying" privSql
-                    false
+                    match col with
+                    | Some c -> userColumnText cols row c = "Y"
+                    | None ->
+                        // An unknown privilege name means the emitter and the
+                        // static vocabulary drifted — fail closed and log, never
+                        // silently grant.
+                        Log.diagnostic "fsdb: auth: unknown privilege '%s' required — denying" privSql
+                        false
 
         if required |> List.forall (fst >> globallyHeld) then
             Ok()
@@ -1328,7 +1445,15 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                 (mine @ [ "Db", textIs db; "Table_name", textIs table; "Table_priv", hasSetMember "Grant" ])
 
         let checkOne (privSql: string, target: PrivTarget) : Result<unit, int * string> =
-            if privSql = "GRANT OPTION" then
+            if Privileges.contains privSql then
+                if target = Global && hasDynamicPrivilege store wanted privSql then
+                    Ok()
+                else
+                    Error(
+                        1227,
+                        sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql
+                    )
+            elif privSql = "GRANT OPTION" then
                 // GRANT/REVOKE themselves: grant option held at the target's
                 // level or higher (global Grant_priv ⊃ mysql.db row ⊃
                 // tables_priv `Grant` member). Denials use MySQL's
@@ -1350,35 +1475,50 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                     | OnTable(_, table) ->
                         Error(1142, sprintf "GRANT command denied to user '%s'@'localhost' for table '%s'" user table)
             else
+                match privBySql privSql with
+                | None ->
+                    Log.diagnostic "fsdb: auth: unknown privilege '%s' required — denying" privSql
+                    Error(1227, sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql)
+                | Some def ->
+                    let allowed =
+                        hasGlobal def
+                        || (match target with
+                            | Global -> false
+                            | OnDb db
+                            | OnTable(db, _) when eqI db "information_schema" && eqI privSql "SELECT" -> true
+                            | OnDb db -> hasDb def db
+                            | OnTable(db, table) -> hasDb def db || hasTable def db table)
 
-            match privBySql privSql with
-            | None ->
-                Log.diagnostic "fsdb: auth: unknown privilege '%s' required — denying" privSql
-                Error(1227, sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql)
-            | Some def ->
-                let allowed =
-                    hasGlobal def
-                    || (match target with
-                        | Global -> false
-                        | OnDb db
-                        | OnTable(db, _) when eqI db "information_schema" && eqI privSql "SELECT" -> true
-                        | OnDb db -> hasDb def db
-                        | OnTable(db, table) -> hasDb def db || hasTable def db table)
-
-                if allowed then
-                    Ok()
-                else
-                    match target with
-                    | Global ->
-                        Error(
-                            1227,
-                            sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql
-                        )
-                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" user wanted.Host db)
-                    | OnTable(_, table) ->
-                        Error(1142, sprintf "%s command denied to user '%s'@'localhost' for table '%s'" privSql user table)
+                    if allowed then
+                        Ok()
+                    else
+                        match target with
+                        | Global ->
+                            Error(
+                                1227,
+                                sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql
+                            )
+                        | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" user wanted.Host db)
+                        | OnTable(_, table) ->
+                            Error(1142, sprintf "%s command denied to user '%s'@'localhost' for table '%s'" privSql user table)
 
         required |> traverse checkOne |> Result.map ignore
+
+let checkDynamicGrantOptionsForAccount
+    (store: Store)
+    (wanted: Account)
+    (privileges: string list)
+    (target: PrivTarget)
+    : Result<unit, int * string> =
+    expandPrivs (privileges |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target
+    |> Result.bind (fun resolved ->
+        if resolved.Dynamic |> List.forall (hasGrantableDynamicPrivilege store wanted) then
+            Ok()
+        else
+            Error(
+                1227,
+                "Access denied; you need (at least one of) the GRANT OPTION privilege(s) for this operation"
+            ))
 
 /// Checks the conventional `'name'@'%'` identity used by embedded callers.
 let check (store: Store) (user: string) (required: (string * PrivTarget) list) =
@@ -1443,9 +1583,12 @@ let renderCreateUser (store: Store) (name: string) = renderCreateUserForAccount 
 /// visibility (PROCESSLIST, KILL) and mysql-schema reads. Reuses `check`'s
 /// hierarchy, so root's all-Y row and any GLOBAL grant satisfy it.
 let hasGlobalPrivForAccount (store: Store) (wanted: Account) (privSql: string) : bool =
-    match checkForAccount store wanted [ privSql, Global ] with
-    | Result.Ok() -> true
-    | Result.Error _ -> false
+    if Privileges.contains privSql then
+        hasDynamicPrivilege store wanted privSql
+    else
+        match checkForAccount store wanted [ privSql, Global ] with
+        | Result.Ok() -> true
+        | Result.Error _ -> false
 
 let hasGlobalPriv (store: Store) (user: string) (privSql: string) = hasGlobalPrivForAccount store (account user "%") privSql
 
@@ -1488,9 +1631,9 @@ let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string 
     else granted |> List.map (fun d -> d.Sql) |> String.concat ", "
 
 /// The `SHOW GRANTS FOR 'name'@'host'` rows: the global line from the
-/// mysql.user row, one line per mysql.db row, one per tables_priv row —
-/// 1141 when the account doesn't exist. Dynamic-privilege and
-/// PROXY lines (real root shows both; nothing here models either).
+/// mysql.user row, dynamic mysql.global_grants grouped by grantability, one
+/// line per mysql.db row, and one per tables_priv row — 1141 when the account
+/// doesn't exist. PROXY lines remain outside the model.
 let renderGrantsForAccount (store: Store) (wanted: Account) : Result<string * string list, int * string> =
     match tryUserRowForAccount store wanted with
     | None -> Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" wanted.Name wanted.Host)
@@ -1511,6 +1654,17 @@ let renderGrantsForAccount (store: Store) (wanted: Account) : Result<string * st
                 (renderPrivList globalGranted staticPrivileges)
                 quoted
                 (withOption "Grant_priv" cols row)
+
+        let dynamicLines =
+            dynamicGrantsForAccount store wanted
+            |> List.groupBy _.Grantable
+            |> List.sortBy fst
+            |> List.map (fun (grantable, grants) ->
+                sprintf
+                    "GRANT %s ON *.* TO %s%s"
+                    (grants |> List.map _.Privilege |> String.concat ",")
+                    quoted
+                    (if grantable then " WITH GRANT OPTION" else ""))
 
         let dbLines =
             match scanList store "mysql" "db" with
@@ -1561,6 +1715,6 @@ let renderGrantsForAccount (store: Store) (wanted: Account) : Result<string * st
                         quoted
                         (if hasOption then " WITH GRANT OPTION" else ""))
 
-        Ok(sprintf "Grants for %s@%s" name host, globalLine :: dbLines @ tableLines)
+        Ok(sprintf "Grants for %s@%s" name host, globalLine :: dynamicLines @ dbLines @ tableLines)
 
 let renderGrants (store: Store) (name: string) = renderGrantsForAccount store (account name "%")

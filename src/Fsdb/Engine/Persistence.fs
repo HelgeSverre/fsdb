@@ -19,19 +19,22 @@ let private legacySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x31uy |] // "FSN1"
 let private columnCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |] // "FSN2"
 let private tableCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x33uy |] // "FSN3"
 let private numericDisplaySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x34uy |] // "FSN4"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x35uy |] // "FSN5"
+let private partitionSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x35uy |] // "FSN5"
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x36uy |] // "FSN6"
 
 type private SnapshotFormat =
     { ColumnComments: bool
       TableComments: bool
       NumericDisplays: bool
-      Partitions: bool }
+      Partitions: bool
+      DynamicPrivileges: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
       TableComments = false
       NumericDisplays = false
-      Partitions = false }
+      Partitions = false
+      DynamicPrivileges = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -42,8 +45,11 @@ let private tableCommentSnapshotFormat =
 let private numericDisplaySnapshotFormat =
     { tableCommentSnapshotFormat with NumericDisplays = true }
 
-let private currentSnapshotFormat =
+let private partitionSnapshotFormat =
     { numericDisplaySnapshotFormat with Partitions = true }
+
+let private currentSnapshotFormat =
+    { partitionSnapshotFormat with DynamicPrivileges = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -52,6 +58,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = partitionSnapshotMagic then
+        Some partitionSnapshotFormat
     elif header = numericDisplaySnapshotMagic then
         Some numericDisplaySnapshotFormat
     elif header = tableCommentSnapshotMagic then
@@ -1321,7 +1329,7 @@ let load (dataDir: string) : Store =
 
     // Streaming permits snapshots larger than the runtime byte-array limit.
     // Legacy unframed snapshots begin at offset zero; framed versions skip magic.
-    let readSnapshot (path: string) : Catalog =
+    let readSnapshot (path: string) : Catalog * SnapshotFormat =
         use s = new FileStream(path, FileMode.Open, FileAccess.Read)
         let header = Array.zeroCreate<byte> snapshotMagic.Length
         let read = s.Read(header, 0, header.Length)
@@ -1333,28 +1341,41 @@ let load (dataDir: string) : Store =
 
         let start = if read = snapshotMagic.Length && snapshotFormat header |> Option.isSome then int64 snapshotMagic.Length else 0L
         s.Seek(start, SeekOrigin.Begin) |> ignore
-        decodeCatalog format (StreamReader(s))
+        decodeCatalog format (StreamReader(s)), format
+
+    let mutable loadedFormat = None
+
+    let loadSnapshot path =
+        let catalog, format = readSnapshot path
+        setCatalog store catalog
+        loadedFormat <- Some format
 
     // A torn `.new` cannot supersede the old snapshot and WAL.
     let loadedFromNew =
         File.Exists newPath
         && verifySnapshotIntegrity newPath
         && (try
-                setCatalog store (readSnapshot newPath)
+                loadSnapshot newPath
                 true
             with _ ->
                 false)
 
     if loadedFromNew then
+        if loadedFormat |> Option.exists (fun format -> not format.DynamicPrivileges) then
+            Storage.ensureRootDynamicPrivileges store
+
         File.WriteAllText(walPath, "")
         File.Move(newPath, snapshotPath, true)
         fsyncDir dataDir
     else
         if File.Exists snapshotPath then
-            setCatalog store (readSnapshot snapshotPath)
+            loadSnapshot snapshotPath
 
         // Legacy snapshots need mysql.* before replay can apply account events.
         Storage.ensureMysqlSchema store
+
+        if loadedFormat |> Option.exists (fun format -> not format.DynamicPrivileges) then
+            Storage.ensureRootDynamicPrivileges store
 
         // Physical events already passed the commit-time FK policy.
         store.ForeignKeyChecks <- false

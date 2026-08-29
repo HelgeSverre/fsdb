@@ -119,6 +119,7 @@ module SyntaxFuzz =
            sprintf "CREATE EVENT syntax_recurring_%s ON SCHEDULE EVERY 1 DAY DO INSERT INTO syntax_log VALUES (998)" suffix
            "role_account", sprintf "CREATE ROLE 'syntax_role_%s'@'%%'" suffix
            "role_activation", "SET ROLE NONE"
+           "dynamic_privilege", "GRANT XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* TO 'syntax_dynamic'@'%' WITH GRANT OPTION"
            "locked_user", sprintf "CREATE USER 'syntax_user_%s'@'%%' ACCOUNT LOCK" suffix
            "account_requirements",
            sprintf
@@ -159,6 +160,7 @@ module SyntaxFuzz =
            "CREATE VIEW syntax_materialized_join AS SELECT t.id, t.n, x.total FROM syntax_target AS t JOIN syntax_materialized_totals AS x ON x.id = t.id"
            "CREATE VIEW syntax_union_component AS SELECT id, n AS marker FROM syntax_source WHERE n > 0 UNION ALL SELECT id, n AS marker FROM syntax_source WHERE n < 0"
            "CREATE VIEW syntax_union_join AS SELECT t.id, t.n, x.marker FROM syntax_target AS t JOIN syntax_union_component AS x ON x.id = t.id"
+           "CREATE USER 'syntax_dynamic'@'%'"
            "CREATE TABLE syntax_partitioned (id INT) PARTITION BY HASH(id) PARTITIONS 2"
            "INSERT INTO syntax_partitioned VALUES (1), (2), (3)"
            "CREATE PROCEDURE syntax_callable(IN value INT, OUT doubled INT) BEGIN DECLARE local_value INT DEFAULT value + 1; SET doubled = local_value * 2; SELECT local_value, doubled; END"
@@ -185,6 +187,7 @@ module SyntaxFuzz =
         | "scheduled_event" -> Some(sprintf "DROP EVENT syntax_event_%s" suffix)
         | "recurring_event" -> Some(sprintf "DROP EVENT syntax_recurring_%s" suffix)
         | "role_account" -> Some(sprintf "DROP ROLE IF EXISTS 'syntax_role_%s'@'%%', 'syntax_role_%s'@''" suffix suffix)
+        | "dynamic_privilege" -> Some "REVOKE XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* FROM 'syntax_dynamic'@'%'"
         | "locked_user" -> Some(sprintf "DROP USER IF EXISTS 'syntax_user_%s'@'%%', 'syntax_user_%s'@''" suffix suffix)
         | "account_requirements" -> Some(sprintf "DROP USER IF EXISTS 'syntax_secure_%s'@'%%', 'syntax_secure_%s'@''" suffix suffix)
         | _ -> None

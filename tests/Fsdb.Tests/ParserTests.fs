@@ -3047,6 +3047,11 @@ let tests =
                         (Grant([ "SELECT" ], (Some "shop", Some "orders"), [ "bob", "%" ], false))
                         "table level"
 
+                    Expect.equal
+                        (parseOk "GRANT XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* TO bob WITH GRANT OPTION")
+                        (Grant([ "XA_RECOVER_ADMIN"; "BACKUP_ADMIN" ], (None, None), [ "bob", "%" ], true))
+                        "dynamic global privileges"
+
                 testCase "REVOKE parses, including GRANT OPTION in the list"
                 <| fun _ ->
                     Expect.equal

@@ -4060,6 +4060,7 @@ let private privilegeName: Parser<string, unit> =
           "USAGE" ]
 
     choice ((attempt (keyword "ALL" >>. optional (keyword "PRIVILEGES") >>% "ALL")) :: (names |> List.map ofName))
+    <|> (identifier |>> _.ToUpperInvariant())
 
 /// `ON *.* | db.* | db.tbl | tbl` — see `Ast.Grant`'s doc for the encoding.
 let private grantLevel: Parser<string option * string option, unit> =

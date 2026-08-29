@@ -2802,6 +2802,10 @@ let private mysqlGlobalGrantsColumns: ColumnDef list =
       keyCol "PRIV" 32
       sysCol "WITH_GRANT_OPTION" (TEnum [ "N"; "Y" ]) false (Some(VString "N")) ]
 
+let private rootDynamicGrantRows =
+    Privileges.dynamic
+    |> List.map (fun privilege -> [| VString "root"; VString "%"; VString privilege; VString "Y" |])
+
 /// The bootstrap `root`@`%` row: every static privilege 'Y', empty
 /// authentication_string (= no password; the handshake accepts only an
 /// empty offered password for it), remaining columns their type's rest
@@ -2970,7 +2974,7 @@ let private mysqlSystemDatabase () : Database =
       "db", sysTable "db" mysqlDbColumns []
       "tables_priv", sysTable "tables_priv" mysqlTablesPrivColumns []
       "columns_priv", sysTable "columns_priv" mysqlColumnsPrivColumns []
-      "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns []
+      "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns rootDynamicGrantRows
       "triggers", sysTable "triggers" mysqlTriggersColumns []
       "views", sysTable "views" mysqlViewsColumns []
       "routines", sysTable "routines" mysqlRoutinesColumns []
@@ -3019,8 +3023,37 @@ let ensureMysqlSchema (store: Store) : unit =
       "routines", mysqlRoutinesColumns
       "functions", mysqlStoredFunctionsColumns
       "events", mysqlEventsColumns
-      "check_constraints", mysqlCheckConstraintsColumns ]
+      "check_constraints", mysqlCheckConstraintsColumns
+      "global_grants", mysqlGlobalGrantsColumns ]
     |> List.iter (fun (name, columns) -> ensureTable name columns)
+
+let ensureRootDynamicPrivileges (store: Store) : unit =
+    ensureMysqlSchema store
+    let dbRef = store.Databases.["mysql"]
+    let table = dbRef.Value.["global_grants"]
+
+    let granted =
+        table.Rows
+        |> List.choose (fun row ->
+            match row with
+            | [| VString user; VString host; VString privilege; _ |]
+                when user = "root" && host = "%" -> Some(privilege.ToUpperInvariant())
+            | _ -> None)
+        |> Set.ofList
+
+    let missing =
+        rootDynamicGrantRows
+        |> List.filter (fun row ->
+            match row.[2] with
+            | VString privilege -> Set.contains privilege granted |> not
+            | _ -> false)
+
+    if not missing.IsEmpty then
+        dbRef.Value <-
+            Map.add
+                "global_grants"
+                { table with RowsArray = table.RowsArray.AddRange missing }
+                dbRef.Value
 
 let create () : Store =
     let databases = ConcurrentDictionary<string, Database ref>()

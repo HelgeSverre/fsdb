@@ -1029,6 +1029,7 @@ let tests =
               Fsdb.Auth.grant store [ "DELETE" ] (Fsdb.Auth.OnTable("shop", "orders")) [ "worker", "%" ] false |> ignore
               Fsdb.Auth.grant store [ "INSERT" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] false |> ignore
               Fsdb.Auth.revoke store [ "UPDATE" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] |> ignore
+              Fsdb.Auth.grant store [ "BACKUP_ADMIN" ] Fsdb.Auth.Global [ "worker", "%" ] true |> ignore
 
               let reloaded = load dir
 
@@ -1037,10 +1038,37 @@ let tests =
                   Expect.equal
                       lines
                       [ "GRANT USAGE ON *.* TO `worker`@`%`"
+                        "GRANT BACKUP_ADMIN ON *.* TO `worker`@`%` WITH GRANT OPTION"
                         "GRANT SELECT, INSERT ON `shop`.* TO `worker`@`%`"
                         "GRANT DELETE ON `shop`.`orders` TO `worker`@`%`" ]
                       "replayed grants minus the revoked UPDATE"
               | Error e -> failtestf "expected worker's grants after reload, got %A" e
+
+          testCase "dynamic privilege bootstrap migrates legacy snapshots without undoing current revokes"
+          <| fun _ ->
+              let legacyDir = tempDataDir ()
+              let legacy = create ()
+              Fsdb.Auth.revoke legacy [ "XA_RECOVER_ADMIN" ] Fsdb.Auth.Global [ "root", "%" ] |> ignore
+              snapshotNow legacyDir legacy
+
+              let legacyBytes = File.ReadAllBytes(snapshotPath legacyDir)
+              legacyBytes.[3] <- byte '5'
+              File.WriteAllBytes(snapshotPath legacyDir, legacyBytes)
+
+              let migrated = load legacyDir
+              Expect.isTrue
+                  (Fsdb.Auth.hasDynamicPrivilege migrated (Fsdb.Auth.account "root" "%") "XA_RECOVER_ADMIN")
+                  "pre-dynamic snapshot receives the bootstrap grants"
+
+              let currentDir = tempDataDir ()
+              let current = create ()
+              Fsdb.Auth.revoke current [ "XA_RECOVER_ADMIN" ] Fsdb.Auth.Global [ "root", "%" ] |> ignore
+              snapshotNow currentDir current
+
+              let reloaded = load currentDir
+              Expect.isFalse
+                  (Fsdb.Auth.hasDynamicPrivilege reloaded (Fsdb.Auth.account "root" "%") "XA_RECOVER_ADMIN")
+                  "current snapshot preserves an explicit revoke"
 
           testCase "a snapshot written without the mysql schema gets it re-seeded on load"
           <| fun _ ->

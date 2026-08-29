@@ -22,6 +22,7 @@
     <Compile Include="Sql/Temporal.fs" />
     <Compile Include="Sql/TemporalLocale.fs" />
     <Compile Include="Sql/Value.fs" />
+    <Compile Include="Sql/Privileges.fs" />
     <Compile Include="Sql/FullText.fs" />
     <Compile Include="Sql/Ast.fs" />
     <Compile Include="Sql/Expression.fs" />

@@ -565,6 +565,7 @@ let tests =
                           "recurring_event"
                           "role_account"
                           "role_activation"
+                          "dynamic_privilege"
                           "locked_user"
                           "account_requirements"
                           "read_uncommitted"
