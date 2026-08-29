@@ -610,6 +610,29 @@ type ExplicitTableLock =
       Alias: string option
       Mode: ExplicitTableLockMode }
 
+type HandlerComparison =
+    | HandlerEqual
+    | HandlerLessOrEqual
+    | HandlerGreaterOrEqual
+    | HandlerLess
+    | HandlerGreater
+
+type HandlerPosition =
+    | HandlerFirst
+    | HandlerNext
+    | HandlerPrevious
+    | HandlerLast
+
+type HandlerReadMode =
+    | HandlerNatural of HandlerPosition
+    | HandlerIndexPosition of index: string * position: HandlerPosition
+    | HandlerIndexComparison of index: string * comparison: HandlerComparison * values: Expr list
+
+type HandlerCommand =
+    | HandlerOpen of table: string * alias: string option
+    | HandlerRead of name: string * mode: HandlerReadMode * where: Expr option * limit: Expr option * offset: Expr option
+    | HandlerClose of name: string
+
 let indexColumns names =
     names
     |> List.map (fun name ->

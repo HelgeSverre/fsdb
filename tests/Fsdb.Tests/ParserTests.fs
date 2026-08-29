@@ -2750,6 +2750,41 @@ let tests =
                         Expect.equal lock.Mode ReadTableLock "mode"
                     | other -> failtestf "expected a commented lock request, got %A" other ]
 
+          testList
+              "HANDLER"
+              [ testCase "parses lifecycle and read forms"
+                <| fun _ ->
+                    Expect.equal
+                        (parseHandler "HANDLER app.items OPEN AS cursor")
+                        (Ok(HandlerOpen("app.items", Some "cursor")))
+                        "qualified open"
+
+                    Expect.equal
+                        (parseHandler "HANDLER cursor READ `PRIMARY` >= (2, 'b') WHERE active = 1 LIMIT 3 OFFSET 1")
+                        (Ok(
+                            HandlerRead(
+                                "cursor",
+                                HandlerIndexComparison("PRIMARY", HandlerGreaterOrEqual, [ Lit(VInt 2L); Lit(VString "b") ]),
+                                Some(BinOp(Eq, Col "active", Lit(VInt 1L))),
+                                Some(Lit(VInt 3L)),
+                                Some(Lit(VInt 1L))
+                            )
+                        ))
+                        "indexed comparison"
+
+                    Expect.equal
+                        (parseHandler "HANDLER cursor READ FIRST")
+                        (Ok(HandlerRead("cursor", HandlerNatural HandlerFirst, None, None, None)))
+                        "natural read"
+
+                    Expect.equal (parseHandler "HANDLER cursor CLOSE") (Ok(HandlerClose "cursor")) "close"
+
+                testCase "rejects invalid read forms"
+                <| fun _ ->
+                    Expect.isError (parseHandler "HANDLER cursor READ PREV") "natural PREV is invalid"
+                    Expect.isError (parseHandler "HANDLER cursor READ ix = ()") "comparison keys are nonempty"
+                    Expect.isError (parseHandler "HANDLER cursor READ ix NEXT trailing") "trailing input is rejected" ]
+
           testCase "accepts ALTER TABLE without actions"
           <| fun _ ->
               Expect.equal (parseOk "ALTER TABLE app.t") (AlterTable("app.t", [])) "MySQL accepts the no-op form"

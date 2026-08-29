@@ -4340,6 +4340,58 @@ let parseTableLocksWithOptions (options: ParserOptions) (sql: string) : Result<E
 let parseTableLocks (sql: string) : Result<ExplicitTableLock list, string> =
     parseTableLocksWithOptions defaultOptions sql
 
+let private handlerPosition =
+    choice
+        [ keyword "FIRST" >>% HandlerFirst
+          keyword "NEXT" >>% HandlerNext
+          keyword "PREV" >>% HandlerPrevious
+          keyword "LAST" >>% HandlerLast ]
+
+let private handlerComparison =
+    choice
+        [ attempt (sym "<=" >>% HandlerLessOrEqual)
+          attempt (sym ">=" >>% HandlerGreaterOrEqual)
+          sym "=" >>% HandlerEqual
+          sym "<" >>% HandlerLess
+          sym ">" >>% HandlerGreater ]
+
+let private handlerReadMode =
+    let indexed =
+        identifier
+        >>= fun index ->
+            (handlerPosition |>> fun position -> HandlerIndexPosition(index, position))
+            <|> (handlerComparison .>>. between (sym "(") (sym ")") (sepBy1 expr (sym ","))
+                 |>> fun (comparison, values) -> HandlerIndexComparison(index, comparison, values))
+
+    (choice [ keyword "FIRST" >>% HandlerFirst; keyword "NEXT" >>% HandlerNext ] |>> HandlerNatural)
+    <|> indexed
+
+let private handlerCommand =
+    keyword "HANDLER"
+    >>. choice
+        [ attempt
+              (qualifiedTableName
+               .>> keyword "OPEN"
+               .>>. opt (opt (keyword "AS") >>. identifier)
+               |>> HandlerOpen)
+          attempt
+              (identifier
+               .>> keyword "READ"
+               .>>. handlerReadMode
+               .>>. opt (keyword "WHERE" >>. expr)
+               .>>. opt limitClause
+               |>> fun (((name, mode), where), limitOffset) ->
+                   let limit, offset = limitOffset |> Option.defaultValue (None, None)
+                   HandlerRead(name, mode, where, limit, offset))
+          identifier .>> keyword "CLOSE" |>> HandlerClose ]
+
+let parseHandlerWithOptions (options: ParserOptions) (sql: string) : Result<HandlerCommand, string> =
+    let parser = ws >>. handlerCommand .>> opt (sym ";") .>> eof
+    withParserState options sql (runWithDepthLimit parser)
+
+let parseHandler (sql: string) : Result<HandlerCommand, string> =
+    parseHandlerWithOptions defaultOptions sql
+
 /// Splits a COM_QUERY batch at statement delimiters outside literals,
 /// comments, and supported compound object bodies. The parser still validates each
 /// returned statement separately.
