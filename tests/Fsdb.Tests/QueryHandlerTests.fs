@@ -3756,7 +3756,7 @@ let tests =
               let session =
                   apply
                       session
-                      "CREATE EVENT recurring_run ON SCHEDULE EVERY 1 SECOND STARTS CURRENT_TIMESTAMP + INTERVAL 2 SECOND ENDS CURRENT_TIMESTAMP + INTERVAL 3 SECOND ON COMPLETION PRESERVE DO INSERT INTO event_log VALUES ('recurring', CURRENT_USER())"
+                      "CREATE EVENT recurring_run ON SCHEDULE EVERY 1 SECOND STARTS CURRENT_TIMESTAMP + INTERVAL 2 SECOND ENDS CURRENT_TIMESTAMP + INTERVAL 6 SECOND ON COMPLETION PRESERVE DO INSERT INTO event_log VALUES ('recurring', CURRENT_USER())"
 
               let session =
                   apply
@@ -3785,6 +3785,8 @@ let tests =
 
               while timer.Elapsed < TimeSpan.FromSeconds 5.0 && waitingForEvents () do
                   System.Threading.Thread.Sleep 25
+
+              let session = apply session "ALTER EVENT recurring_run DISABLE"
 
               Expect.equal
                   (TestSupport.Sql.rows store "SELECT label,actor FROM event_log ORDER BY label,actor")
