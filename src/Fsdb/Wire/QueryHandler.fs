@@ -230,16 +230,19 @@ let private isGlobalScope (scope: string) : bool =
 let private isSessionScope (scope: string) : bool =
     scope.IndexOf("SESSION", StringComparison.OrdinalIgnoreCase) >= 0
 
+let private globalScopeOnlyVariables =
+    Set.ofList [ "activate_all_roles_on_login"; "mandatory_roles" ]
+
 let private globalOnlyVariables =
-    Set.ofList
-        [ "activate_all_roles_on_login"
-          "event_scheduler"
-          "local_infile"
-          "mandatory_roles"
-          "max_allowed_packet"
-          "max_connections"
-          "max_prepared_stmt_count"
-          "net_write_timeout" ]
+    Set.union
+        globalScopeOnlyVariables
+        (Set.ofList
+            [ "event_scheduler"
+              "local_infile"
+              "max_allowed_packet"
+              "max_connections"
+              "max_prepared_stmt_count"
+              "net_write_timeout" ])
 
 /// The raw (unflattened) lookup behind `resolveAtRef` — kept separate so
 /// `handleAtVarSelect` can still tell "unknown system variable" (outer
@@ -254,7 +257,7 @@ let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name
     elif sigil = "@@" && not (isGlobalScope scope) && name = "error_count" then
         Some(Some(string (session.Diagnostics |> List.filter (fun condition -> condition.Level = Diagnostics.Error) |> List.length)))
     elif sigil = "@@" then
-        if isGlobalScope scope || globalOnlyVariables.Contains name then
+        if isGlobalScope scope || globalScopeOnlyVariables.Contains name then
             Session.tryGlobalVariable session.Store name
         else
             lookupVar session name
@@ -313,7 +316,7 @@ let private expressionVariablesFor (session: Session) (userVariables: Map<string
         fun scope name ->
             let name = name.ToLowerInvariant()
 
-            if isSessionScope scope && globalOnlyVariables.Contains name then
+            if isSessionScope scope && globalScopeOnlyVariables.Contains name then
                 Error(1238, sprintf "Variable '%s' is a GLOBAL variable" name)
             else
                 match lookupAtRef session "@@" scope name with
