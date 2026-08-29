@@ -104,6 +104,8 @@ module SyntaxFuzz =
            "table_lock", "LOCK TABLES syntax_target READ"
            "commented_table_lock", "LOCK/**/TABLES syntax_target AS/*alias*/locked READ/**/LOCAL"
            "handler_open", "HANDLER syntax_target OPEN AS syntax_handler"
+           "xa_start", sprintf "XA START 'syntax_%s', X'6272616E6368', 42" suffix
+           "xa_recover", "XA RECOVER CONVERT XID"
            "stored_procedure", sprintf "CREATE PROCEDURE syntax_proc_%s() SELECT 1" suffix
            "procedure_parameter", sprintf "CREATE PROCEDURE syntax_proc_param_%s(IN value INT) SELECT value" suffix
            "procedure_compound",
@@ -176,6 +178,7 @@ module SyntaxFuzz =
         | "table_lock" -> Some "UNLOCK TABLES"
         | "commented_table_lock" -> Some "UNLOCK TABLE"
         | "handler_open" -> Some "HANDLER syntax_handler CLOSE"
+        | "xa_start" -> Some(sprintf "XA END 'syntax_%s', X'6272616E6368', 42" suffix)
         | "stored_procedure" -> Some(sprintf "DROP PROCEDURE syntax_proc_%s" suffix)
         | "procedure_parameter" -> Some(sprintf "DROP PROCEDURE syntax_proc_param_%s" suffix)
         | "procedure_compound" -> Some(sprintf "DROP PROCEDURE syntax_proc_body_%s" suffix)
@@ -189,6 +192,7 @@ module SyntaxFuzz =
     let private cleanupStatements candidate =
         match candidate.Feature, candidate.CleanupSql with
         | "handler_open", Some cleanup -> [ cleanup; "HANDLER syntax_target CLOSE" ]
+        | "xa_start", Some cleanup -> [ cleanup; cleanup.Replace("XA END", "XA ROLLBACK") ]
         | _, Some cleanup -> [ cleanup ]
         | _, None -> []
 

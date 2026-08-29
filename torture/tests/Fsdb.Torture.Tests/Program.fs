@@ -549,6 +549,8 @@ let tests =
                           "text_prepared_statement"
                           "table_lock"
                           "handler_open"
+                          "xa_start"
+                          "xa_recover"
                           "stored_procedure"
                           "procedure_parameter"
                           "procedure_compound"
