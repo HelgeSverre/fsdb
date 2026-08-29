@@ -54,9 +54,11 @@ let tests =
                           [ "check_constraints"
                             "columns_priv"
                             "db"
+                            "default_roles"
                             "events"
                             "functions"
                             "global_grants"
+                            "role_edges"
                             "routines"
                             "tables_priv"
                             "triggers"
@@ -630,6 +632,47 @@ let tests =
               match handle alice "SELECT CURRENT_ROLE(), id FROM role_db.documents" |> snd with
               | ResultSet(_, [ [ Some "`parent`@`%`"; Some "1" ] ]) -> ()
               | other -> failtestf "expected default role reactivation, got %A" other
+
+              match
+                  handle
+                      alice
+                      "SELECT ROLE_NAME, ROLE_HOST, IS_DEFAULT, IS_MANDATORY FROM information_schema.ENABLED_ROLES ORDER BY ROLE_NAME"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "parent"; Some "%"; Some "YES"; Some "NO" ]
+                    [ Some "reader"; Some "%"; Some "NO"; Some "NO" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected active and inherited role metadata, got %A" other
+
+              match
+                  handle
+                      alice
+                      "SELECT GRANTEE, ROLE_NAME, IS_GRANTABLE, IS_DEFAULT FROM information_schema.APPLICABLE_ROLES ORDER BY GRANTEE, ROLE_NAME"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "alice"; Some "parent"; Some "YES"; Some "YES" ]
+                    [ Some "parent"; Some "reader"; Some "NO"; Some "NO" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected direct and inherited applicable roles, got %A" other
+
+              match handle alice "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'role_db'" |> snd with
+              | ResultSet(_, [ [ Some "documents" ] ]) -> ()
+              | other -> failtestf "expected role privileges to reveal table metadata, got %A" other
+
+              let alice, prepared = handle alice "PREPARE clear_roles FROM 'SET ROLE NONE'"
+              Expect.equal prepared (Affected 0UL) "role statement prepares"
+              let alice, executed = handle alice "EXECUTE clear_roles"
+              Expect.equal executed (Affected 0UL) "prepared role statement executes in the session"
+
+              match handle alice "SELECT CURRENT_ROLE()" |> snd with
+              | ResultSet(_, [ [ Some "NONE" ] ]) -> ()
+              | other -> failtestf "expected the prepared statement to clear active roles, got %A" other
 
               match handle root "SHOW GRANTS FOR alice" |> snd with
               | ResultSet(_, rows) ->

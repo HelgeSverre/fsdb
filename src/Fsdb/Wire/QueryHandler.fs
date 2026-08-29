@@ -306,6 +306,18 @@ let private expressionVariables (session: Session) = expressionVariablesFor sess
 
 let private accountOf (session: Session) = Auth.account session.User session.AccountHost
 
+let private checkSessionAccess session store required =
+    Auth.checkForAccountWithRoles store (accountOf session) session.ActiveRoles required
+
+let private hasSessionGlobalPrivilege session privilege =
+    Auth.hasGlobalPrivForAccountWithRoles session.Store (accountOf session) session.ActiveRoles privilege
+
+let private canSessionSeeDatabase session store database =
+    Auth.canSeeDatabaseForAccountWithRoles store (accountOf session) session.ActiveRoles database
+
+let private canSessionSeeTable session store database table =
+    Auth.canSeeTableForAccountWithRoles store (accountOf session) session.ActiveRoles database table
+
 let private lockWaitTimeout (session: Session) =
     lookupVar session "innodb_lock_wait_timeout"
     |> Option.flatten
@@ -322,12 +334,17 @@ let private canInspectRoutine (session: Session) schema definer =
         let viewer = accountOf session
 
         Auth.sameAccount viewer owner
-        || Auth.hasGlobalPrivForAccount session.Store viewer "SELECT"
-        || (Auth.checkForAccount session.Store viewer [ "ALTER ROUTINE", Auth.OnDb schema ] |> Result.isOk)
+        || Auth.hasGlobalPrivForAccountWithRoles session.Store viewer session.ActiveRoles "SELECT"
+        || (Auth.checkForAccountWithRoles
+                session.Store
+                viewer
+                session.ActiveRoles
+                [ "ALTER ROUTINE", Auth.OnDb schema ]
+            |> Result.isOk)
 
 let private canSeeRoutine session schema definer =
     canInspectRoutine session schema definer
-    || (Auth.checkForAccount session.Store (accountOf session) [ "EXECUTE", Auth.OnDb schema ] |> Result.isOk)
+    || (checkSessionAccess session session.Store [ "EXECUTE", Auth.OnDb schema ] |> Result.isOk)
 
 type private AdvisoryLock =
     { Owner: int
@@ -651,7 +668,7 @@ let private tableAccessDenied (session: Session) (table: string) =
     Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table '%s'" session.User table)
 
 let private showTableResult (session: Session) (dbName: string) (table: string) (result: InformationSchema.ShowResult) =
-    let canSee = Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName table
+    let canSee = canSessionSeeTable session (Session.currentStore session) dbName table
 
     match result with
     | Error _ -> showResult result
@@ -659,14 +676,14 @@ let private showTableResult (session: Session) (dbName: string) (table: string) 
     | Ok _ -> tableAccessDenied session table
 
 let private visibleTableRows (session: Session) (dbName: string) (rows: string option list list) =
-    let canSee = Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName
+    let canSee = canSessionSeeTable session (Session.currentStore session) dbName
 
     rows |> List.filter (function Some table :: _ -> canSee table | _ -> false)
 
 let private inspectAccount (session: Session) (wanted: Auth.Account) (render: unit -> QueryResult) =
     let viewer = accountOf session
 
-    if Auth.sameAccount wanted viewer || Auth.hasGlobalPrivForAccount session.Store viewer "SELECT" then
+    if Auth.sameAccount wanted viewer || hasSessionGlobalPrivilege session "SELECT" then
         session, render ()
     else
         session, Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table 'user'" session.User)
@@ -745,7 +762,7 @@ let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     let store = Session.currentStore session
 
     let columns, rows = InformationSchema.showDatabases store.Catalog (not (Map.isEmpty store.VirtualTables)) (likeSuffix sql)
-    let visible = rows |> List.filter (function | [ Some db ] -> Auth.canSeeDatabaseForAccount store (accountOf session) db | _ -> false)
+    let visible = rows |> List.filter (function | [ Some db ] -> canSessionSeeDatabase session store db | _ -> false)
     ResultSet(columns, visible)
 
 let private overlayCatalog (catalog: Storage.Catalog) (overlay: Storage.Catalog) =
@@ -1169,12 +1186,12 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
 
 let private validateSetAction (session: Session) (action: SetAction) : Result<unit, QueryResult> =
     match action with
-    | SetTransactionIsolationAction(GlobalIsolation, _) when not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER") ->
+    | SetTransactionIsolationAction(GlobalIsolation, _) when not (hasSessionGlobalPrivilege session "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetTransactionIsolationAction(NextTransactionIsolation, _) when session.Tx.IsSome ->
         Error(Err(1568, "Transaction characteristics can't be changed while a transaction is in progress"))
     | SetTransactionIsolationAction(_, (ReadUncommitted | ReadCommitted | RepeatableRead | Serializable)) -> Ok()
-    | SetVarAction(_, _, true) when not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER") ->
+    | SetVarAction(_, _, true) when not (hasSessionGlobalPrivilege session "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
@@ -1279,7 +1296,7 @@ let private canUseRequestedDefiner session requested =
     let definer = requestedDefinerAccount session requested
 
     Auth.sameAccount definer (accountOf session)
-    || Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
+    || hasSessionGlobalPrivilege session "SUPER"
 
 let private setPasswordRe =
     Regex(@"^SET\s+PASSWORD\s*(?:FOR\s+([^=\s]+)\s*)?=\s*'([^']*)'\s*;?$", RegexOptions.IgnoreCase)
@@ -1298,6 +1315,36 @@ let private showGrantsRe = Regex(@"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?\s*;?$", Reg
 let private flushPrivilegesRe = Regex(@"^FLUSH\s+(?:LOCAL\s+)?PRIVILEGES\s*;?$", RegexOptions.IgnoreCase)
 let private flushUserResourcesRe = Regex(@"^FLUSH\s+USER_RESOURCES\s*;?$", RegexOptions.IgnoreCase)
 let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreCase)
+
+let private applyRoleStatement session =
+    function
+    | SetRole selection ->
+        match Auth.resolveRoleSelection session.Store (accountOf session) selection with
+        | Ok roles -> { session with ActiveRoles = roles }, Affected 0UL
+        | Error(code, message) -> session, Err(code, message)
+    | SetDefaultRole(selection, users) ->
+        let ownsEveryTarget =
+            users
+            |> List.forall (fun (name, host) -> Auth.sameAccount (accountOf session) (Auth.account name host))
+
+        let access =
+            if ownsEveryTarget then
+                Ok()
+            else
+                checkSessionAccess session session.Store [ "CREATE USER", Auth.Global ]
+
+        access
+        |> Result.bind (fun () -> Auth.setDefaultRoles session.Store selection users)
+        |> function
+            | Ok() -> session, Affected 0UL
+            | Error(code, message) -> session, Err(code, message)
+    | _ -> session, Err(1105, "Internal role statement dispatch error")
+
+let private isRoleSessionStatement =
+    function
+    | SetRole _
+    | SetDefaultRole _ -> true
+    | _ -> false
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
 let private lockTablesRe = Regex(@"^LOCK\s+TABLES(?:\s|$)", RegexOptions.IgnoreCase)
@@ -1592,7 +1639,7 @@ let private rollbackXa xid session =
     | _ -> completePreparedXa false xid session
 
 let private recoverXa convertXid session =
-    if not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "XA_RECOVER_ADMIN") then
+    if not (hasSessionGlobalPrivilege session "XA_RECOVER_ADMIN") then
         session, Err(1227, "Access denied; you need (at least one of) the XA_RECOVER_ADMIN privilege(s) for this operation")
     else
         let rows =
@@ -2133,7 +2180,12 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
             session.Store
             session.ConnectionId
             accesses
-            (fun () -> InformationSchema.withViewer store (accountOf session) (fun () -> executeParsedStatement session stmt))
+            (fun () ->
+                InformationSchema.withViewer
+                    store
+                    (accountOf session)
+                    session.ActiveRoles
+                    (fun () -> executeParsedStatement session stmt))
     with
     | Ok result -> result
     | Error(code, message) -> session, Err(code, message)
@@ -2711,7 +2763,7 @@ let private acquireExplicitTableLocks session sql =
                           "SELECT", Auth.OnTable(table.Database, table.Table) ]))
                 |> List.collect id
 
-            match Auth.checkForAccount session.Store (accountOf session) privileges with
+            match checkSessionAccess session session.Store privileges with
             | Error(code, message) -> session, Err(code, message)
             | Ok() ->
                 match
@@ -2773,33 +2825,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             Session.trackSystemVariableAssignments true [] updated, Affected 0UL
     | SetRoleStatement ->
         match Parser.parseWithOptions (parserOptionsForSession session) sql with
-        | Ok(SetRole selection) ->
-            match Auth.resolveRoleSelection session.Store (accountOf session) selection with
-            | Ok roles -> { session with ActiveRoles = roles }, Affected 0UL
-            | Error(code, message) -> session, Err(code, message)
+        | Ok(SetRole _ as statement) -> applyRoleStatement session statement
         | _ -> session, parserError sql "Invalid SET ROLE statement"
     | SetDefaultRoleStatement ->
         match Parser.parseWithOptions (parserOptionsForSession session) sql with
-        | Ok(SetDefaultRole(selection, users)) ->
-            let ownsEveryTarget =
-                users
-                |> List.forall (fun (name, host) -> Auth.sameAccount (accountOf session) (Auth.account name host))
-
-            let access =
-                if ownsEveryTarget then
-                    Ok()
-                else
-                    Auth.checkForAccountWithRoles
-                        session.Store
-                        (accountOf session)
-                        session.ActiveRoles
-                        [ "CREATE USER", Auth.Global ]
-
-            access
-            |> Result.bind (fun () -> Auth.setDefaultRoles session.Store selection users)
-            |> function
-                | Ok() -> session, Affected 0UL
-                | Error(code, message) -> session, Err(code, message)
+        | Ok(SetDefaultRole _ as statement) -> applyRoleStatement session statement
         | _ -> session, parserError sql "Invalid SET DEFAULT ROLE statement"
     | SetCharacterSet charset ->
         let charset = charset.ToLowerInvariant()
@@ -2829,7 +2859,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         // gate, so this one carries its own check.
         let required = if Auth.sameAccount wanted (accountOf session) then [] else [ "CREATE USER", Auth.Global ]
 
-        match Auth.checkForAccount store (accountOf session) required |> Result.bind (fun () -> Auth.setPassword store wanted.Name wanted.Host password) with
+        match checkSessionAccess session store required |> Result.bind (fun () -> Auth.setPassword store wanted.Name wanted.Host password) with
         | Ok() -> { session with PasswordExpired = false }, Affected 0UL
         | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql
@@ -2995,7 +3025,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             |> Map.toList
             |> List.map (snd >> _.OriginalName)
             |> List.filter matches
-            |> List.filter (Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName)
+            |> List.filter (canSessionSeeTable session (Session.currentStore session) dbName)
             |> List.sort
             |> List.map (fun table -> [ Some dbName; Some table; Some "0"; Some "0" ])
 
@@ -3016,7 +3046,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
     | ShowProcesslist full ->
         let result =
-            InformationSchema.withViewer session.Store (accountOf session) (fun () -> InformationSchema.showProcesslist full |> showResult)
+            InformationSchema.withViewer
+                session.Store
+                (accountOf session)
+                session.ActiveRoles
+                (fun () -> InformationSchema.showProcesslist full |> showResult)
 
         session, result
     | ShowTriggers db ->
@@ -3027,12 +3061,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
     | ShowRoutineStatus kind ->
         session,
-        InformationSchema.withViewer (Session.currentStore session) (accountOf session) (fun () ->
+        InformationSchema.withViewer (Session.currentStore session) (accountOf session) session.ActiveRoles (fun () ->
             InformationSchema.showRoutineStatus (Session.currentStore session).Catalog kind)
         |> showResult
     | Kill(queryOnly, id) ->
-        let canSeeAll = Auth.hasGlobalPrivForAccount session.Store (accountOf session) "PROCESS"
-        let canKillAll = Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
+        let canSeeAll = hasSessionGlobalPrivilege session "PROCESS"
+        let canKillAll = hasSessionGlobalPrivilege session "SUPER"
 
         match InformationSchema.tryFindProcess id with
         // A caller without PROCESS can't see another user's connection, so
@@ -3331,7 +3365,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             session, Err(1305, sprintf "%s %s does not exist" kind name)
     | FlushPrivileges -> session, Affected 0UL
     | FlushUserResources ->
-        match Auth.checkForAccount session.Store (accountOf session) [ "RELOAD", Auth.Global ] with
+        match checkSessionAccess session session.Store [ "RELOAD", Auth.Global ] with
         | Error(code, message) -> session, Err(code, message)
         | Ok() ->
             Auth.resetAllAccountResources session.Store
@@ -3459,7 +3493,7 @@ let preparedMetadata
         let schema = session.Database |> Option.defaultValue defaultDatabase
         let registry = registryFor session
 
-        match Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store schema statement) with
+        match checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema statement) with
         | Error _ -> List.replicate parameterCount generic, []
         | Ok() ->
             let parameters = PreparedMetadata.parameterDefinitions store registry schema statement parameterCount
@@ -4607,7 +4641,7 @@ let rec private invokeStoredFunction
     if List.contains key calls then
         raise (Diagnostics.EvaluationError(1424, "Recursive stored functions and triggers are not allowed"))
 
-    match Auth.checkForAccount caller.Store (accountOf caller) [ "EXECUTE", Auth.OnDb routine.Schema ] with
+    match checkSessionAccess caller caller.Store [ "EXECUTE", Auth.OnDb routine.Schema ] with
     | Error(code, message) -> raise (Diagnostics.EvaluationError(code, message))
     | Ok() -> ()
 
@@ -4639,7 +4673,13 @@ let rec private invokeStoredFunction
 
         List.distinct (expressions @ cursorQueries)
 
-    match Auth.checkForAccount caller.Store executionAccount expressionPrivileges with
+    let expressionAccess =
+        if Auth.sameAccount executionAccount (accountOf caller) then
+            checkSessionAccess caller caller.Store expressionPrivileges
+        else
+            Auth.checkForAccount caller.Store executionAccount expressionPrivileges
+
+    match expressionAccess with
     | Error(code, message) -> raise (Diagnostics.EvaluationError(code, message))
     | Ok() -> ()
 
@@ -4860,7 +4900,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
     let runTextRoutine session command =
         let authorize privilege database =
-            Auth.checkForAccount session.Store (accountOf session) [ privilege, Auth.OnDb database ]
+            checkSessionAccess session session.Store [ privilege, Auth.OnDb database ]
 
         match command with
         | CreateProcedure(qualifiedName, parameters, securityType, body, requestedDefiner) ->
@@ -5155,7 +5195,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
     let runTextEvent session command =
         let authorize database =
-            Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ]
+            checkSessionAccess session session.Store [ "EVENT", Auth.OnDb database ]
 
         let resolveDefiner (requested: string option) =
             let definer = requestedDefinerAccount session requested
@@ -5597,7 +5637,7 @@ let private textRoutineUpdateAuthorization session = function
     | CreateFunction(qualifiedName, _, _, _, _, _, requestedDefiner) ->
         let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
-        Auth.checkForAccount session.Store (accountOf session) [ "CREATE ROUTINE", Auth.OnDb database ]
+        checkSessionAccess session session.Store [ "CREATE ROUTINE", Auth.OnDb database ]
         |> Result.map (fun () -> canUseRequestedDefiner session requestedDefiner)
         |> Result.defaultValue false
         |> Some
@@ -5605,7 +5645,7 @@ let private textRoutineUpdateAuthorization session = function
     | DropFunction(qualifiedName, _) ->
         let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
-        Auth.checkForAccount session.Store (accountOf session) [ "ALTER ROUTINE", Auth.OnDb database ]
+        checkSessionAccess session session.Store [ "ALTER ROUTINE", Auth.OnDb database ]
         |> Result.isOk
         |> Some
 
@@ -5613,18 +5653,18 @@ let private textEventUpdateIsAuthorized session = function
     | Event.Create creation ->
         let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) creation.Name
 
-        Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ]
+        checkSessionAccess session session.Store [ "EVENT", Auth.OnDb database ]
         |> Result.map (fun () -> canUseRequestedDefiner session creation.Definer)
         |> Result.defaultValue false
     | Event.Alter alteration ->
         let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) alteration.Name
 
-        Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ]
+        checkSessionAccess session session.Store [ "EVENT", Auth.OnDb database ]
         |> Result.map (fun () -> canUseRequestedDefiner session alteration.Definer)
         |> Result.defaultValue false
     | Event.Drop(qualifiedName, _) ->
         let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-        Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] |> Result.isOk
+        checkSessionAccess session session.Store [ "EVENT", Auth.OnDb database ] |> Result.isOk
 
 let rec private parsedAccountStatement session parserOptions depth sql =
     match tryProbe sql with
@@ -5672,11 +5712,11 @@ let private accountUpdateIsAuthorized session = function
     | ProbedAccountStatement(SetPassword(user, _)) ->
         let wanted = user |> Option.map accountRefOf |> Option.defaultValue (accountOf session)
         let required = if Auth.sameAccount wanted (accountOf session) then [] else [ "CREATE USER", Auth.Global ]
-        Auth.checkForAccount (Session.currentStore session) (accountOf session) required |> Result.isOk
+        checkSessionAccess session (Session.currentStore session) required |> Result.isOk
     | ParsedAccountStatement statement ->
         let store = Session.currentStore session
         let database = session.Database |> Option.defaultValue defaultDatabase
-        Auth.checkForAccount store (accountOf session) (requiredPrivilegesForStatement session store database statement)
+        checkSessionAccess session store (requiredPrivilegesForStatement session store database statement)
         |> Result.isOk
     | TextAccountUpdate authorized -> authorized
     | ProbedAccountStatement _ -> false
@@ -5787,7 +5827,7 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
 
                     let database = session.Database |> Option.defaultValue defaultDatabase
 
-                    match Auth.checkForAccount store account (Auth.requiredPrivilegesInStore store database statement) with
+                    match checkSessionAccess session store (Auth.requiredPrivilegesInStore store database statement) with
                     | Ok() -> Result.Ok(Some load)
                     | Error(code, message) -> Result.Error(Err(code, message))
 
@@ -5852,6 +5892,8 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
 
                     if session.PasswordExpired && not resetsPassword then
                         session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
+                    elif isRoleSessionStatement statement then
+                        applyRoleStatement session statement
                     else
                         let accountStatement = ParsedAccountStatement statement
                         let account = accountOf session

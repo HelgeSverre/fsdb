@@ -927,17 +927,39 @@ let private processes = System.Collections.Concurrent.ConcurrentDictionary<int64
 /// privilege views read it to scope rows to the caller unless the caller
 /// holds the privilege that reveals everyone (`PROCESS`, or a mysql-schema
 /// read for the grant views) — the same information hiding real MySQL does.
-let currentViewer = System.Threading.AsyncLocal<(Store * Fsdb.Auth.Account) option>()
+type private Viewer =
+    { Store: Store
+      Account: Fsdb.Auth.Account
+      ActiveRoles: Fsdb.Auth.Account list }
+
+let private currentViewer = System.Threading.AsyncLocal<Viewer option>()
+
+let currentViewerAccount () = currentViewer.Value |> Option.map _.Account
 
 /// Runs a query with information-schema visibility scoped to one account.
-let withViewer (store: Store) (user: Fsdb.Auth.Account) (body: unit -> 'a) : 'a =
-    DynamicScope.withValue currentViewer (Some(store, user)) body
+let withViewer store account activeRoles (body: unit -> 'a) : 'a =
+    DynamicScope.withValue
+        currentViewer
+        (Some
+            { Store = store
+              Account = account
+              ActiveRoles = activeRoles })
+        body
 
 /// The account a viewer is limited to, or `None` when it may see all rows
 /// (embedded/internal, or it holds `priv`).
 let private restrictedTo (priv: string) : Fsdb.Auth.Account option =
     match currentViewer.Value with
-    | Some(store, user) when not (Fsdb.Auth.hasGlobalPrivForAccount store user priv) -> Some user
+    | Some viewer when
+        not (
+            Fsdb.Auth.hasGlobalPrivForAccountWithRoles
+                viewer.Store
+                viewer.Account
+                viewer.ActiveRoles
+                priv
+        )
+        ->
+        Some viewer.Account
     | _ -> None
 
 /// Stamped by `Server.listen` — `SHOW STATUS`'s `Uptime` baseline.
@@ -1186,13 +1208,26 @@ let private routineAccess schema definer =
     match currentViewer.Value, Fsdb.Auth.tryParseAccount definer with
     | None, _ -> true, true
     | Some _, None -> false, false
-    | Some(store, viewer), Some owner ->
-        let ownsRoutine = Fsdb.Auth.sameAccount viewer owner
+    | Some viewer, Some owner ->
+        let ownsRoutine = Fsdb.Auth.sameAccount viewer.Account owner
         let seesDefinitions =
             ownsRoutine
-            || Fsdb.Auth.hasGlobalPrivForAccount store viewer "SELECT"
-            || (Fsdb.Auth.checkForAccount store viewer [ "ALTER ROUTINE", Fsdb.Auth.OnDb schema ] |> Result.isOk)
-        let canExecute = Fsdb.Auth.checkForAccount store viewer [ "EXECUTE", Fsdb.Auth.OnDb schema ] |> Result.isOk
+            || Fsdb.Auth.hasGlobalPrivForAccountWithRoles viewer.Store viewer.Account viewer.ActiveRoles "SELECT"
+            || (Fsdb.Auth.checkForAccountWithRoles
+                    viewer.Store
+                    viewer.Account
+                    viewer.ActiveRoles
+                    [ "ALTER ROUTINE", Fsdb.Auth.OnDb schema ]
+                |> Result.isOk)
+
+        let canExecute =
+            Fsdb.Auth.checkForAccountWithRoles
+                viewer.Store
+                viewer.Account
+                viewer.ActiveRoles
+                [ "EXECUTE", Fsdb.Auth.OnDb schema ]
+            |> Result.isOk
+
         seesDefinitions || canExecute, seesDefinitions
 
 let private routineVisible schema definer = routineAccess schema definer |> fst
@@ -1604,6 +1639,67 @@ let private columnPrivilegesColumns =
       strCol "PRIVILEGE_TYPE"
       strCol "IS_GRANTABLE" ]
 
+let private enabledRolesColumns =
+    [ strCol "ROLE_NAME"
+      strCol "ROLE_HOST"
+      strCol "IS_DEFAULT"
+      strCol "IS_MANDATORY" ]
+
+let private applicableRolesColumns =
+    [ strCol "USER"
+      strCol "HOST"
+      strCol "GRANTEE"
+      strCol "GRANTEE_HOST"
+      strCol "ROLE_NAME"
+      strCol "ROLE_HOST"
+      strCol "IS_GRANTABLE"
+      strCol "IS_DEFAULT"
+      strCol "IS_MANDATORY" ]
+
+let private isDefaultRole store account role =
+    Fsdb.Auth.defaultRolesForAccount store account
+    |> List.exists (Fsdb.Auth.sameAccount role)
+
+let private enabledRolesRows () =
+    match currentViewer.Value with
+    | None -> []
+    | Some viewer ->
+        Fsdb.Auth.roleClosure viewer.Store viewer.ActiveRoles
+        |> List.map (fun role ->
+            [| vs role.Name
+               vs role.Host
+               vs (if isDefaultRole viewer.Store viewer.Account role then "YES" else "NO")
+               vs "NO" |])
+
+let private applicableRolesRows () =
+    match currentViewer.Value with
+    | None -> []
+    | Some viewer ->
+        let rec collect visited pending grants =
+            match pending with
+            | [] -> grants
+            | grantee :: rest when visited |> List.exists (Fsdb.Auth.sameAccount grantee) ->
+                collect visited rest grants
+            | grantee :: rest ->
+                let direct = Fsdb.Auth.directRoleGrantsForAccount viewer.Store grantee
+
+                collect
+                    (grantee :: visited)
+                    (rest @ (direct |> List.map _.Role))
+                    (grants @ direct)
+
+        collect [] [ viewer.Account ] []
+        |> List.map (fun grant ->
+            [| vs viewer.Account.Name
+               vs viewer.Account.Host
+               vs grant.Grantee.Name
+               vs grant.Grantee.Host
+               vs grant.Role.Name
+               vs grant.Role.Host
+               vs (if grant.AdminOption then "YES" else "NO")
+               vs (if isDefaultRole viewer.Store viewer.Account grant.Role then "YES" else "NO")
+               vs "NO" |])
+
 /// The one storage engine fsdb reports for every table — `SHOW ENGINES`'
 /// twin lives in `showEngines` below off this same row.
 let private enginesColumns =
@@ -1622,12 +1718,14 @@ let private enginesRows: Value[] list =
 /// `SHOW TABLES FROM information_schema` append, so listing and resolution
 /// can't drift.
 let private virtualTableDefs : (string * ColumnDef list) list =
-    [ "CHARACTER_SETS", characterSetsColumns
+    [ "APPLICABLE_ROLES", applicableRolesColumns
+      "CHARACTER_SETS", characterSetsColumns
       "CHECK_CONSTRAINTS", checkConstraintsColumns
       "COLLATIONS", collationsColumns
       "COLLATION_CHARACTER_SET_APPLICABILITY", collationCharacterSetApplicabilityColumns
       "COLUMNS", columnsColumns
       "COLUMN_PRIVILEGES", columnPrivilegesColumns
+      "ENABLED_ROLES", enabledRolesColumns
       "ENGINES", enginesColumns
       "EVENTS", eventsColumns
       "KEY_COLUMN_USAGE", keyColumnUsageColumns
@@ -1685,7 +1783,7 @@ let private selfColumnsRowsCached : Lazy<Value[] list> =
 let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (rows: Value[] list) : Value[] list =
     match currentViewer.Value with
     | None -> rows
-    | Some(store, user) ->
+    | Some viewer ->
         let columnIndex name =
             columns
             |> List.tryFindIndex (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
@@ -1698,21 +1796,46 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
 
         let visibleSchema (row: Value[]) =
             schemaIndex
-            |> Option.map (fun index -> row.[index] |> Value.toText |> Option.map (Fsdb.Auth.canSeeDatabaseForAccount store user) |> Option.defaultValue false)
+            |> Option.map (fun index ->
+                row.[index]
+                |> Value.toText
+                |> Option.map (
+                    Fsdb.Auth.canSeeDatabaseForAccountWithRoles
+                        viewer.Store
+                        viewer.Account
+                        viewer.ActiveRoles
+                )
+                |> Option.defaultValue false)
             |> Option.defaultValue true
 
         let visibleObject (row: Value[]) =
             let visibleTable =
                 match schemaIndex, tableIndex with
-                | Some dbIndex, Some nameIndex -> Fsdb.Auth.canSeeTableForAccount store user (rowText row dbIndex) (rowText row nameIndex)
+                | Some dbIndex, Some nameIndex ->
+                    Fsdb.Auth.canSeeTableForAccountWithRoles
+                        viewer.Store
+                        viewer.Account
+                        viewer.ActiveRoles
+                        (rowText row dbIndex)
+                        (rowText row nameIndex)
                 | _ -> true
 
             visibleTable
             && (match tableName with
                 | "VIEWS" ->
-                    Fsdb.Auth.checkForAccount store user [ "SHOW VIEW", Fsdb.Auth.OnTable(rowText row 1, rowText row 2) ] |> Result.isOk
+                    Fsdb.Auth.checkForAccountWithRoles
+                        viewer.Store
+                        viewer.Account
+                        viewer.ActiveRoles
+                        [ "SHOW VIEW", Fsdb.Auth.OnTable(rowText row 1, rowText row 2) ]
+                    |> Result.isOk
                 | "TRIGGERS" ->
-                    Fsdb.Auth.checkForAccount store user [ "TRIGGER", Fsdb.Auth.OnTable(rowText row 1, rowText row 6) ] |> Result.isOk
+                    Fsdb.Auth.checkForAccountWithRoles
+                        viewer.Store
+                        viewer.Account
+                        viewer.ActiveRoles
+                        [ "TRIGGER", Fsdb.Auth.OnTable(rowText row 1, rowText row 6) ]
+                    |> Result.isOk
                 | _ -> true)
 
         rows |> List.filter (fun row -> visibleSchema row && visibleObject row)
@@ -1727,6 +1850,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
 
     let rows =
         match upper with
+        | "APPLICABLE_ROLES" -> Some(applicableRolesRows ())
         | "TABLES" -> Some(tablesRows catalog @ selfTablesRows ())
         | "COLUMNS" -> Some(columnsRows catalog viewColumns @ selfColumnsRowsCached.Value)
         | "STATISTICS" -> Some(statisticsRows catalog)
@@ -1744,6 +1868,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "SCHEMA_PRIVILEGES" -> Some(schemaPrivilegesRows catalog)
         | "TABLE_PRIVILEGES" -> Some(tablePrivilegesRows catalog)
         | "ENGINES" -> Some enginesRows
+        | "ENABLED_ROLES" -> Some(enabledRolesRows ())
         // Events remain a real empty set (COLUMN_PRIVILEGES too: no
         // column-level grants exist).
         | "TRIGGERS" -> Some(triggersRows catalog)

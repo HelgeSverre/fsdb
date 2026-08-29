@@ -607,8 +607,25 @@ let renameUser
     let oldAccount = account oldName oldHost
     let newAccount = account newName newHost
 
+    let isRoleIdentifier =
+        match scanList store "mysql" "role_edges" with
+        | Error _ -> false
+        | Ok(columns, rows) ->
+            match resolveColumn columns "FROM_USER", resolveColumn columns "FROM_HOST" with
+            | Ok userIndex, Ok hostIndex ->
+                rows
+                |> List.exists (fun row ->
+                    sameAccount
+                        oldAccount
+                        (account
+                            (Value.toText row.[userIndex] |> Option.defaultValue "")
+                            (Value.toText row.[hostIndex] |> Option.defaultValue "")))
+            | _ -> false
+
     if (tryUserRowForAccount store oldAccount).IsNone || (tryUserRowForAccount store newAccount).IsSome then
         operationFailed "RENAME USER" oldName oldHost
+    elif isRoleIdentifier then
+        Error(3532, "Renaming of a role identifier is forbidden")
     else
         let renameRows table =
             match scanList store "mysql" table with
@@ -1981,10 +1998,18 @@ let canSeeDatabaseForAccount (store: Store) (wanted: Account) (db: string) : boo
 
 let canSeeDatabase (store: Store) (user: string) (db: string) = canSeeDatabaseForAccount store (account user "%") db
 
+let canSeeDatabaseForAccountWithRoles store wanted activeRoles db =
+    effectiveAccounts store wanted activeRoles
+    |> List.exists (fun actor -> canSeeDatabaseForAccount store actor db)
+
 /// Whether any privilege at table scope or above makes a table visible in
 /// metadata views.
 let canSeeTableForAccount (store: Store) (wanted: Account) (db: string) (table: string) : bool =
     staticPrivileges |> List.exists (fun def -> checkForAccount store wanted [ def.Sql, OnTable(db, table) ] |> Result.isOk)
+
+let canSeeTableForAccountWithRoles store wanted activeRoles db table =
+    effectiveAccounts store wanted activeRoles
+    |> List.exists (fun actor -> canSeeTableForAccount store actor db table)
 
 let canSeeTable (store: Store) (user: string) (db: string) (table: string) = canSeeTableForAccount store (account user "%") db table
 
