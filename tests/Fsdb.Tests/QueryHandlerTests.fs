@@ -5936,6 +5936,11 @@ let tests =
               let root, _ = handle local "ROLLBACK"
               let root, _ = handle root "XA START 'rules'"
 
+              for sql in [ "XA PREPARE 'other'"; "XA COMMIT 'other'"; "XA ROLLBACK 'other'" ] do
+                  match handle root sql |> snd with
+                  | Err(1399, message) -> Expect.stringContains message "ACTIVE state" sql
+                  | other -> failtestf "expected ACTIVE XAER_RMFAIL for %s, got %A" sql other
+
               match handle root "CREATE TABLE xa_forbidden (id INT)" |> snd with
               | Err(1399, message) -> Expect.stringContains message "ACTIVE state" "DDL refusal"
               | other -> failtestf "expected XAER_RMFAIL for DDL, got %A" other
@@ -5974,6 +5979,16 @@ let tests =
               | other -> failtestf "expected XAER_INVAL for SUSPEND, got %A" other
 
               let suspended, _ = handle suspended "XA END 'suspend'"
+
+              for sql in [ "XA END 'other'"; "XA COMMIT 'other'"; "XA ROLLBACK 'other'" ] do
+                  match handle suspended sql |> snd with
+                  | Err(1399, message) -> Expect.stringContains message "IDLE state" sql
+                  | other -> failtestf "expected IDLE XAER_RMFAIL for %s, got %A" sql other
+
+              match handle suspended "XA PREPARE 'other'" |> snd with
+              | Err(1397, message) -> Expect.stringContains message "Unknown XID" "idle PREPARE mismatch"
+              | other -> failtestf "expected XAER_NOTA for idle PREPARE mismatch, got %A" other
+
               handle suspended "XA ROLLBACK 'suspend'" |> ignore
 
               for xid in [ "X''"; "b''" ] do

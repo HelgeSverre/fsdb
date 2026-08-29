@@ -1529,12 +1529,13 @@ let private endXa xid session =
     match xaAssociation session with
     | Some(current, Active) when current = xid ->
         { session with Tx = session.Tx |> Option.map (fun tx -> { tx with Xa = Some(xid, Idle) }) }, Affected 0UL
-    | Some(current, _) when current <> xid -> session, xaUnknown
+    | Some(_, Active) -> session, xaUnknown
     | Some(_, state) -> session, xaRmFail (xaStateName state)
     | None -> session, xaRmFail "NON-EXISTING"
 
 let private prepareXa xid session =
     match session.Tx, xaAssociation session with
+    | _, Some(_, Active) -> session, xaRmFail "ACTIVE"
     | Some transaction, Some(current, Idle) when current = xid ->
         let validateWholeSnapshot = transaction.Isolation = Serializable
         let baseCatalog, snapshot =
@@ -1550,8 +1551,7 @@ let private prepareXa xid session =
             { session with Tx = None; Cursors = Map.empty }, Affected 0UL
         else
             session, Err(1440, "XAER_DUPID: The XID already exists")
-    | _, Some(current, _) when current <> xid -> session, xaUnknown
-    | _, Some(_, state) -> session, xaRmFail (xaStateName state)
+    | _, Some(_, Idle) -> session, xaUnknown
     | _ -> session, xaRmFail "NON-EXISTING"
 
 let private completePreparedXa commit xid session =
@@ -1574,7 +1574,6 @@ let private commitXa xid onePhase session =
         removeXaAssociation session xid
         removeTransactionView session
         { session with Tx = None; Cursors = Map.empty }, Affected 0UL
-    | _, Some(current, _) when current <> xid -> session, xaUnknown
     | _, Some(_, state) -> session, xaRmFail (xaStateName state)
     | _ -> completePreparedXa true xid session
 
@@ -1589,7 +1588,6 @@ let private rollbackXa xid session =
         Storage.releaseTransactionLocks transaction.Snapshot
         removeTransactionView session
         { session with Tx = None; Cursors = Map.empty }, Affected 0UL
-    | _, Some(current, _) when current <> xid -> session, xaUnknown
     | _, Some(_, state) -> session, xaRmFail (xaStateName state)
     | _ -> completePreparedXa false xid session
 
