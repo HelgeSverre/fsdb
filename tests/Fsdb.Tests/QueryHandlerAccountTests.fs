@@ -1268,7 +1268,10 @@ let tests =
                       root
                       "GRANT SELECT(id), INSERT(id), UPDATE(status) ON column_auth.items TO partial"
 
-              let root, _ = handle root "GRANT SELECT(id, public_value) ON column_auth.details TO partial"
+              let root, _ =
+                  handle
+                      root
+                      "GRANT SELECT(id, public_value), UPDATE(secret_value) ON column_auth.details TO partial"
               let root, _ = handle root "GRANT SELECT(id) ON column_auth.visible_items TO partial"
               let _, _ = handle root "GRANT SELECT(next_id) ON column_auth.computed_items TO partial"
 
@@ -1343,6 +1346,15 @@ let tests =
               match handle partial "UPDATE items SET status = id WHERE id = 1" |> snd with
               | Affected 1UL -> ()
               | other -> failtestf "expected permitted update, got %A" other
+
+              match
+                  handle
+                      partial
+                      "UPDATE items AS i JOIN details AS d ON d.id = i.id SET secret_value = 8 WHERE i.id = 1"
+                  |> snd
+              with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the unqualified target to resolve to details, got %A" other
 
               expectColumnDenied "UPDATE" "hidden" "UPDATE items SET hidden = 1 WHERE id = 1"
               expectColumnDenied "SELECT" "hidden" "UPDATE items SET status = hidden WHERE id = 1"

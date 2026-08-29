@@ -2174,7 +2174,12 @@ let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
 
     let targetOf (assignment: Assignment) =
         match assignment.Table with
-        | None -> Some(List.head sources)
+        | None ->
+            sources
+            |> List.filter (fun source -> source.Columns |> List.exists (eqI assignment.Column))
+            |> function
+                | [ source ] -> Some source
+                | _ -> None
         | Some qualifier -> sources |> List.tryFind (fun source -> eqI source.Qualifier qualifier)
 
     let writes =
