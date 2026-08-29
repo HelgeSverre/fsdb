@@ -3359,6 +3359,14 @@ let tests =
 
               expectAffected "TRUNCATE TABLE function_effects"
 
+              match execute "SELECT record_value(id) FROM function_source LIMIT 0" with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected metadata-only function query, got %A" other
+
+              match execute "SELECT COUNT(*) FROM function_effects" with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected metadata probing to suppress function effects, got %A" other
+
               match execute "SELECT id, record_value(id) FROM function_source ORDER BY id" with
               | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ]) -> ()
               | other -> failtestf "expected one function call per source row, got %A" other

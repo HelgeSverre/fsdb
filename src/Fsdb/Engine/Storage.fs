@@ -2948,7 +2948,7 @@ let mysqlStoredFunctionsColumns: ColumnDef list =
       sysCol "parameter_definition" TText false (Some(VString ""))
       sysCol "security_type" (TChar 7) false (Some(VString "DEFINER"))
       sysCol "is_deterministic" (TChar 3) false (Some(VString "NO"))
-      sysCol "sql_data_access" (TChar 16) false (Some(VString "CONTAINS SQL"))
+      sysCol "sql_data_access" (TChar 17) false (Some(VString "CONTAINS SQL"))
       sysCol "sql_mode" TText false (Some(VString SystemCatalog.StoredExecutionContext.legacySqlMode))
       sysCol "character_set_client" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCharacterSetClient))
       sysCol "collation_connection" (TChar 64) false (Some(VString SystemCatalog.StoredExecutionContext.legacyCollationConnection))

@@ -191,6 +191,7 @@ let private variableContext = System.Threading.AsyncLocal<VariableContext option
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
 let private triggerTextExecutor = System.Threading.AsyncLocal<(TriggerTextExecution -> string -> QueryResult) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
+let private metadataProbe = System.Threading.AsyncLocal<bool>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
@@ -222,6 +223,11 @@ let private tryRoutineVariable (name: string) =
 
 let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
     DynamicScope.withValue suppressVariableAssignments true body
+
+let private withMetadataProbe (body: unit -> 'a) : 'a =
+    DynamicScope.withValue metadataProbe true body
+
+let internal isMetadataProbe () = metadataProbe.Value
 
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
     DynamicScope.withValue triggerRowScope (Some scope) body
@@ -10341,10 +10347,11 @@ and private runSelect
 
     match
         Diagnostics.suppress (fun () ->
-            withSuppressedVariableAssignments (fun () ->
-                matches probe
-                |> Result.bind (fun _ -> projectRow probe)
-                |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols)))) with
+            withMetadataProbe (fun () ->
+                withSuppressedVariableAssignments (fun () ->
+                    matches probe
+                    |> Result.bind (fun _ -> projectRow probe)
+                    |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols))))) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjection when limit = Some 0 ->
         // `LIMIT 0` is the standard "column metadata, no rows" probe
@@ -10357,7 +10364,13 @@ and private runSelect
         // `LIMIT 0` caller actually asked for.
         let colNames = probeProjection |> List.map fst
 
-        match rows |> traverseSeq (fun row -> matches row |> Result.bind (fun keep -> if keep then projectRow row |> Result.map Some else Ok None)) with
+        match
+            withMetadataProbe (fun () ->
+                rows
+                |> traverseSeq (fun row ->
+                    matches row
+                    |> Result.bind (fun keep -> if keep then projectRow row |> Result.map Some else Ok None)))
+        with
         | Error(code, message) -> Err(code, message), [], []
         | Ok allProjected ->
             ResultSet(colNames, []), applyWireOverrides outputWireOverrides (columnMetadataOf (List.length colNames) allProjected), []

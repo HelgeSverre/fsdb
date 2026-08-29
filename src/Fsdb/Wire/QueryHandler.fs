@@ -23,6 +23,8 @@ type QueryResult = Fsdb.Executor.QueryResult
 open Fsdb.Executor
 
 let private storedProgramProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
+let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
+let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
 
 let private triggerTableKey (database: string) table =
     database.ToLowerInvariant(), normalizeTableName table
@@ -2172,7 +2174,8 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             | None -> evaluate ()
 
         let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
-            Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView
+            DynamicScope.withValue storedFunctionSession (Some session) (fun () ->
+                Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView)
 
         let columnMetadata = completeResultMetadata session result columnMetadata
 
@@ -2307,6 +2310,10 @@ let private startsTransaction = function
 
 let private autocommitDisabled (session: Session) =
     lookupVar session "autocommit" |> Option.flatten = Some "0"
+
+let private insideFunctionOrTrigger (session: Session) =
+    session.RoutineStack
+    |> List.exists (fun (kind, _, _) -> kind = "FUNCTION" || kind = "TRIGGER")
 
 let private implicitCommitDatabases dbName stmt =
     Auth.requiredPrivileges dbName stmt
@@ -2462,6 +2469,8 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
         elif causesImplicitCommit stmt && xaAssociation session |> Option.isSome then
             let state = xaAssociation session |> Option.map (snd >> xaStateName) |> Option.defaultValue "NON-EXISTING"
             session, xaRmFail state
+        elif causesImplicitCommit stmt && insideFunctionOrTrigger session then
+            session, Err(1422, "Explicit or implicit commit is not allowed in stored function or trigger.")
         elif causesImplicitCommit stmt then
             let session = commitSession session
             TableLocks.releaseExplicit session.Store session.ConnectionId
@@ -2656,6 +2665,17 @@ let private probeCausesImplicitCommit = function
     | LockTables
     | UnlockTables -> true
     | _ -> false
+
+let private probeForbiddenInFunctionOrTrigger probe =
+    probeCausesImplicitCommit probe
+    || (match probe with
+        | Begin _
+        | Commit _
+        | Rollback
+        | RollbackTo _
+        | Savepoint _
+        | Release _ -> true
+        | _ -> false)
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -3862,7 +3882,7 @@ let private parseFunctionDefinition options parameters returnType body =
     match
         StoredProgram.parseParameters options parameters,
         Parser.parseColumnTypeWithOptions options returnType,
-        StoredProgram.parse options body
+        StoredProgram.parseRoutine options (StoredProgram.tryCall options >> Option.isSome) body
     with
     | Ok parsedParameters, Ok parsedReturnType, Ok statements
         when parsedParameters |> List.exists (fun parameter -> parameter.Mode <> StoredProgram.In) ->
@@ -3871,10 +3891,24 @@ let private parseFunctionDefinition options parameters returnType body =
         StoredProgram.validateFunction parsedParameters statements
         |> Result.mapError routineValidationError
         |> Result.bind (fun () ->
-            match statements |> List.collect StoredProgram.executableSqlStatements with
-            | (Select _ | Union _) :: _ -> Error(Err(1415, "Not allowed to return a result set from a function"))
-            | _ :: _ -> Error(Err(1235, "SQL statements in stored functions are not supported"))
-            | [] -> Ok(parsedParameters, parsedReturnType, statements))
+            statements
+            |> List.collect StoredProgram.executableSqlStatements
+            |> List.tryPick (function
+                | Select _
+                | Union _ -> Some(Err(1415, "Not allowed to return a result set from a function"))
+                | Insert _
+                | InsertSelect _
+                | Replace _
+                | ReplaceSelect _
+                | ReplaceSet _
+                | LoadData _
+                | Update _
+                | Delete _
+                | Do _ -> None
+                | _ -> Some(Err(1422, "Explicit or implicit commit is not allowed in stored function or trigger.")))
+            |> function
+                | Some error -> Error error
+                | None -> Ok(parsedParameters, parsedReturnType, statements))
     | Error _, _, _ -> Error(syntaxError parameters)
     | _, Error _, _ -> Error(syntaxError returnType)
     | _, _, Error _ when Regex.IsMatch(body, @"\b(?:PREPARE|EXECUTE|DEALLOCATE\s+PREPARE)\b", RegexOptions.IgnoreCase) ->
@@ -4740,15 +4774,13 @@ let private evaluateEventTiming (session: Session) options (schedule: string) =
                     | Some timing -> next, Ok timing
                     | None -> next, Error(Err(1542, "INTERVAL is either not positive or too big"))
 
-let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
-let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
-
 let private raiseFunctionError result =
     match Executor.errorInfo result with
     | Some error -> raise (Diagnostics.EvaluationError(error.Code, error.Message))
     | None -> raise (Diagnostics.EvaluationError(1105, "Stored function execution failed"))
 
 let rec private invokeStoredFunction
+    executeText
     (declaredSession: Session)
     (routine: SystemCatalog.StoredFunction.Entry)
     (arguments: Value list)
@@ -4762,7 +4794,7 @@ let rec private invokeStoredFunction
                 AccountHost = account.Host }
         | None -> caller
 
-    let caller = withStoredFunctions caller
+    let caller = withStoredFunctions executeText caller
     let calls = storedFunctionCalls.Value |> Option.defaultValue []
     let key = routine.Schema.ToLowerInvariant(), routine.Name.ToLowerInvariant()
 
@@ -4856,7 +4888,7 @@ let rec private invokeStoredFunction
         runRoutineStatements
             executionStore
             executeParsed
-            (fun current _ -> current, Err(1235, "SQL statements in stored functions are not supported"))
+            executeText
             executionSession
             locals
             statements
@@ -4883,14 +4915,18 @@ let rec private invokeStoredFunction
             )
         )
 
-and private withStoredFunctions current =
+and private withStoredFunctions executeText current =
     let functions =
         match Storage.scanList current.Store "mysql" "functions" with
         | Ok(_, rows) -> rows |> List.choose SystemCatalog.StoredFunction.tryRead
         | Error _ -> []
 
     let register name routine registry =
-        let invoke = invokeStoredFunction current routine
+        let invoke arguments =
+            if Executor.isMetadataProbe () then
+                VNull
+            else
+                invokeStoredFunction executeText current routine arguments
 
         match Parser.parseColumnTypeWithOptions (SqlMode.parserOptionsFor routine.SqlMode) routine.ReturnType with
         | Error _ -> Functions.registerScalar name invoke registry
@@ -4925,9 +4961,9 @@ and private withStoredFunctions current =
 
     { current with CustomFunctions = registry }
 
-let private withStoredFunctionRegistry session execute =
+let private withStoredFunctionRegistry executeText session execute =
     let customFunctions = session.CustomFunctions
-    let decorated = withStoredFunctions session
+    let decorated = withStoredFunctions executeText session
     let executed, result = execute decorated
     { executed with CustomFunctions = customFunctions }, result
 
@@ -5025,7 +5061,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
                 match statement.Ast with
                 | Some ast ->
-                    withStoredFunctionRegistry session (fun current ->
+                    withStoredFunctionRegistry dispatch session (fun current ->
                         executeParsed current (bindPlaceholders ast values))
                 | None ->
                     dispatch
@@ -5603,7 +5639,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
     elif isHandler then
         match Parser.parseHandlerWithOptions parserOptions sql with
         | Ok command ->
-            withStoredFunctionRegistry session (fun current ->
+            withStoredFunctionRegistry dispatch session (fun current ->
                 TableHandler.run (registryFor current) (lockWaitTimeout current) current command)
         | Error detail -> session, parserError sql detail
     else
@@ -5617,13 +5653,13 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | None ->
                 match tryTextRoutineCommand sql with
                 | Some(CallProcedure _ as command) ->
-                    withStoredFunctionRegistry session (fun current -> runTextRoutine current command)
+                    withStoredFunctionRegistry dispatch session (fun current -> runTextRoutine current command)
                 | Some _ when xaAssociation session |> Option.isSome -> session, xaRmFail "ACTIVE"
                 | Some command -> runTextRoutine (commitSession session) command
                 | None ->
                     match tryTextPreparedCommand sql with
                     | Error result -> session, result
-                    | Ok(Some _) when session.RoutineStack |> List.exists (fun (kind, _, _) -> kind = "TRIGGER") ->
+                    | Ok(Some _) when insideFunctionOrTrigger session ->
                         session, Err(1336, "Dynamic SQL is not allowed in stored function or trigger")
                     | Ok(Some command) -> runTextPrepared command
                     | Ok None when not (placeholderPositionsWithOptions parserOptions sql |> List.isEmpty) ->
@@ -5633,6 +5669,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         session, syntaxError sql
                     | Ok None ->
                         match tryProbe sql with
+                        | Some probe when insideFunctionOrTrigger session && probeForbiddenInFunctionOrTrigger probe ->
+                            session, Err(1422, "Explicit or implicit commit is not allowed in stored function or trigger.")
                         | Some probe when probeCausesImplicitCommit probe && xaAssociation session |> Option.isSome ->
                             session, xaRmFail "ACTIVE"
                         | Some probe ->
@@ -5640,7 +5678,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             // values from which descriptors can be inferred.
                             let session, result = runProbe session sql probe
                             { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
-                        | None -> withStoredFunctionRegistry session (fun current -> executeStatement current sql rawSql)
+                        | None -> withStoredFunctionRegistry dispatch session (fun current -> executeStatement current sql rawSql)
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and
@@ -5937,7 +5975,7 @@ let executeEventBody (session: Session) (body: string) : Session * QueryResult =
     | Error _ -> session, syntaxError body
     | Ok statements ->
         withTriggerTextExecution session (fun () ->
-            withStoredFunctionRegistry session (fun current ->
+            withStoredFunctionRegistry dispatch session (fun current ->
                 let outcome =
                     runRoutineStatements
                         (Session.currentStore current)
@@ -6036,7 +6074,7 @@ let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value li
         recordDiagnostics session false (fun () ->
             try
                 withTriggerTextExecution session (fun () ->
-                    withStoredFunctionRegistry session (fun current -> executeParsed current statement))
+                    withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
             with
             | :? OperationCanceledException -> reraise ()
             | ex -> recoverExecutionError session "LOAD DATA LOCAL INFILE" ex)
@@ -6093,7 +6131,7 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
                         | Ok() ->
                             let executed, result =
                                 withTriggerTextExecution session (fun () ->
-                                    withStoredFunctionRegistry session (fun current -> executeParsed current statement))
+                                    withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
 
                             (if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                  { executed with PasswordExpired = false }
