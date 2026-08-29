@@ -910,8 +910,17 @@ let private resolveSystemSetRhs
 /// list (`SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')`) gets
 /// split apart.
 let private splitSetAssignments (options: Parser.ParserOptions) (sql: string) : Result<string list, string> =
-    let body = Regex.Replace(sql, @"^SET\s+", "", RegexOptions.IgnoreCase)
-    Parser.splitNonEmptyTopLevelCommaSeparatedWithOptions options body
+    Parser.splitNonEmptyTopLevelCommaSeparatedWithOptions options sql
+    |> Result.bind (function
+        | first :: rest ->
+            let prefix = Regex.Match(first, @"^SET\s+", RegexOptions.IgnoreCase)
+
+            if prefix.Success then
+                let assignment = first.Substring(prefix.Length).Trim()
+                if assignment = "" then Error "SET requires an assignment" else Ok(assignment :: rest)
+            else
+                Error "SET requires an assignment"
+        | [] -> Error "SET requires an assignment")
 
 /// One `SET` fragment's parsed effect, applied only once every fragment in
 /// the statement has parsed successfully (see `handleSet`) — mirrors real
@@ -2280,7 +2289,9 @@ type private Probe =
 /// COM_QUERY (`dispatch`) and COM_STMT_PREPARE (`prepareStatement`) can
 /// never disagree about which statements are text-probed vs. parsed the way
 /// two independently-written predicates could drift.
-let private tryProbe (sql: string) (upper: string) : Probe option =
+let private tryProbe (sql: string) : Probe option =
+    let command = sql.TrimStart()
+
     if setAutocommit.IsMatch sql then
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
     elif setTransactionIsolation.IsMatch sql then
@@ -2305,23 +2316,23 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
     elif setPasswordRe.IsMatch sql then
         let m = setPasswordRe.Match sql
         Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
-    elif upper.StartsWith "SET " then
+    elif command.StartsWith("SET ", StringComparison.OrdinalIgnoreCase) then
         Some SetVar
     elif rollbackToSavepointStmt.IsMatch sql then
         Some(RollbackTo((rollbackToSavepointStmt.Match sql).Groups.[2].Value))
-    elif beginTx.IsMatch upper then
-        let mode = (beginTx.Match upper).Groups.[1]
+    elif beginTx.IsMatch command then
+        let mode = (beginTx.Match command).Groups.[1]
         Some(Begin(if mode.Success then Some(mode.Value = "ONLY") else None))
-    elif commitTx.IsMatch upper then
-        Some(Commit(Regex.IsMatch(upper, @"AND\s+CHAIN$", RegexOptions.IgnoreCase)))
-    elif rollbackTx.IsMatch upper then
+    elif commitTx.IsMatch command then
+        Some(Commit(Regex.IsMatch(command, @"AND\s+CHAIN$", RegexOptions.IgnoreCase)))
+    elif rollbackTx.IsMatch command then
         Some Rollback
     elif savepointStmt.IsMatch sql then
         Some(Savepoint((savepointStmt.Match sql).Groups.[1].Value))
     elif releaseSavepointStmt.IsMatch sql then
         Some(Release((releaseSavepointStmt.Match sql).Groups.[1].Value))
-    elif upper.StartsWith "USE " then
-        Some(Use(sql.Substring(4).Trim().Trim('`')))
+    elif command.StartsWith("USE ", StringComparison.OrdinalIgnoreCase) then
+        Some(Use(command.Substring(4).Trim().Trim('`')))
     elif showVariablesRe.IsMatch sql then
         let scope = (showVariablesRe.Match sql).Groups.[1].Value
         Some(ShowVariables(scope.Trim().ToUpperInvariant() = "GLOBAL"))
@@ -2404,13 +2415,16 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(ShowConditions false)
     elif showErrorsRe.IsMatch sql then
         Some(ShowConditions true)
-    elif upper.StartsWith "SHOW DATABASES" then
+    elif command.StartsWith("SHOW DATABASES", StringComparison.OrdinalIgnoreCase) then
         Some ShowDatabases
-    elif upper.StartsWith "SHOW TABLE STATUS" then
+    elif command.StartsWith("SHOW TABLE STATUS", StringComparison.OrdinalIgnoreCase) then
         Some ShowTableStatus
-    elif upper.StartsWith "SHOW COLLATION" then
+    elif command.StartsWith("SHOW COLLATION", StringComparison.OrdinalIgnoreCase) then
         Some ShowCollation
-    elif upper.StartsWith "SHOW TABLES" || upper.StartsWith "SHOW FULL TABLES" then
+    elif
+        command.StartsWith("SHOW TABLES", StringComparison.OrdinalIgnoreCase)
+        || command.StartsWith("SHOW FULL TABLES", StringComparison.OrdinalIgnoreCase)
+    then
         Some ShowTables
     elif showCreateViewRe.IsMatch sql then
         Some(ShowCreateView((showCreateViewRe.Match sql).Groups.[1].Value))
@@ -3102,11 +3116,10 @@ let private prepareStatementWithOptions
     (sql: string)
     : Result<Statement option * int, int * string> =
     let trimmed = sql.Trim().TrimEnd(';').Trim()
-    let upper = trimmed.ToUpperInvariant()
 
-    if upper.StartsWith("LOAD DATA", StringComparison.Ordinal) then
+    if trimmed.StartsWith("LOAD DATA", StringComparison.OrdinalIgnoreCase) then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
-    elif (tryProbe trimmed upper).IsSome then
+    elif (tryProbe trimmed).IsSome then
         Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
     else
         match Parser.parseWithOptions options sql with
@@ -3330,7 +3343,7 @@ let private routineValidationError error =
     Err(code, message)
 
 let private isSupportedStoredProgramText options sql =
-    let probe = tryProbe sql (sql.TrimStart().ToUpperInvariant())
+    let probe = tryProbe sql
 
     let supportedProbe =
         match probe with
@@ -5109,9 +5122,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         // unreachable placeholders out of persisted expressions.
                         session, syntaxError sql
                     | Ok None ->
-                        let upper = sql.ToUpperInvariant()
-
-                        match tryProbe sql upper with
+                        match tryProbe sql with
                         | Some probe ->
                             // Probe results contain rendered strings rather than
                             // values from which descriptors can be inferred.
@@ -5178,19 +5189,20 @@ let private recoverExecutionError (session: Session) (description: string) (erro
         abortTransaction session, Err(1105, "Internal error")
 
 let private preservesDiagnostics parserOptions (sql: string) =
-    let upper = sql.Trim().ToUpperInvariant()
-
     match StoredProgram.parseDiagnostics parserOptions sql with
     | Ok(Some _) -> true
+    | _ when
+        showWarningsRe.IsMatch sql
+        || showErrorsRe.IsMatch sql
+        || showCountWarningsRe.IsMatch sql
+        || showCountErrorsRe.IsMatch sql
+        -> true
     | _ ->
-        match tryProbe sql upper with
-        | Some(ShowConditions _ | ShowMessageCount _) -> true
-        | _ ->
-            Regex.IsMatch(
-                sql,
-                @"^\s*SELECT\s+@@(?:SESSION\.)?(?:WARNING_COUNT|ERROR_COUNT)(?:\s+AS\s+\w+)?\s*$",
-                RegexOptions.IgnoreCase
-            )
+        Regex.IsMatch(
+            sql,
+            @"^\s*SELECT\s+@@(?:SESSION\.)?(?:WARNING_COUNT|ERROR_COUNT)(?:\s+AS\s+\w+)?\s*$",
+            RegexOptions.IgnoreCase
+        )
 
 let private recordDiagnostics
     (session: Session)
@@ -5289,7 +5301,7 @@ let private textEventUpdateIsAuthorized session = function
         Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] |> Result.isOk
 
 let rec private parsedAccountStatement session parserOptions depth sql =
-    match tryProbe sql (sql.ToUpperInvariant()) with
+    match tryProbe sql with
     | Some probe -> ProbedAccountStatement probe
     | None ->
         match parseStatement parserOptions sql with

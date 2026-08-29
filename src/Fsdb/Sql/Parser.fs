@@ -97,31 +97,45 @@ let inline private visitTopLevelCharactersWithOptions
                 index <- index + 1
             | None -> index <- index + 1
 
-let private topLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : string list =
+let private topLevelCommaSeparatedWithOptions (options: ParserOptions) rejectEmpty (text: string) : string list * bool =
     let parts = ResizeArray<string>()
     let mutable start = 0
+    let mutable hasEmptyPart = false
 
     let addPart finish =
-        parts.Add(text.Substring(start, finish - start).Trim())
+        let mutable first = start
+        let mutable last = finish - 1
+
+        while first <= last && Char.IsWhiteSpace text.[first] do
+            first <- first + 1
+
+        while last >= first && Char.IsWhiteSpace text.[last] do
+            last <- last - 1
+
+        if first <= last then
+            parts.Add(text.Substring(first, last - first + 1))
+        else
+            hasEmptyPart <- true
 
     visitTopLevelCharactersWithOptions options text (fun index ->
         if text.[index] = ',' then
             addPart index
             start <- index + 1
 
-        true)
+        not (rejectEmpty && hasEmptyPart))
 
-    addPart text.Length
-    List.ofSeq parts
+    if not (rejectEmpty && hasEmptyPart) then
+        addPart text.Length
+
+    List.ofSeq parts, hasEmptyPart
 
 let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : string list =
-    topLevelCommaSeparatedWithOptions options text
-    |> List.filter (String.IsNullOrWhiteSpace >> not)
+    topLevelCommaSeparatedWithOptions options false text |> fst
 
 let splitNonEmptyTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : Result<string list, string> =
-    let parts = topLevelCommaSeparatedWithOptions options text
+    let parts, hasEmptyPart = topLevelCommaSeparatedWithOptions options true text
 
-    if parts |> List.exists String.IsNullOrWhiteSpace then
+    if hasEmptyPart then
         Result.Error "Expected an expression between commas"
     else
         Result.Ok parts
