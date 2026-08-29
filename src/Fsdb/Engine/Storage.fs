@@ -3046,6 +3046,56 @@ let private parentKeySourceAdd (key: string) (source: ParentKeySource) : unit =
 let private tableAt (store: Store) (dbName: string) (tableName: string) : Table option =
     tableSnapshot store dbName tableName |> Result.toOption
 
+type HandlerIndexRows =
+    { Columns: ColumnDef list
+      ColumnIndices: int list
+      PrefixLengths: int option list
+      Transforms: IndexTransform option list
+      Rows: (RowId * Value list * Value[]) list }
+
+let handlerNaturalRows (table: Table) : (RowId * Value[]) list =
+    table.RowsArray.Indexed |> List.ofSeq
+
+let tryHandlerIndexRows (table: Table) (indexName: string) : HandlerIndexRows option =
+    rangeKeyGroups table
+    |> List.tryFind (fun group -> group.Name.Equals(indexName, StringComparison.OrdinalIgnoreCase))
+    |> Option.bind (fun group ->
+        table.SecondaryOrder
+        |> Map.tryFind group.Name
+        |> Option.map (fun entries ->
+            { Columns = table.Columns
+              ColumnIndices = group.Indices
+              PrefixLengths = group.PrefixLengths
+              Transforms = group.Transforms
+              Rows =
+                entries
+                |> Seq.choose (fun entry ->
+                    table.RowsArray.TryFind entry.RowId
+                    |> Option.map (fun row -> entry.RowId, entry.Values, row))
+                |> List.ofSeq }))
+
+let coerceHandlerIndexValues
+    (store: Store)
+    (index: HandlerIndexRows)
+    (values: Value list)
+    : Result<Value list, StorageError> =
+    if values.IsEmpty || values.Length > index.ColumnIndices.Length then
+        Error(ColumnCountMismatch(values.Length, index.ColumnIndices.Length))
+    else
+        List.zip3
+            (index.ColumnIndices |> List.take values.Length)
+            (index.PrefixLengths |> List.take values.Length)
+            (index.Transforms |> List.take values.Length)
+        |> List.zip values
+        |> traverse (fun (value, (columnIndex, prefixLength, transform)) ->
+            Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) index.Columns.[columnIndex] value)
+            |> Result.map (projectIndexValue prefixLength transform))
+
+let compareHandlerIndexValues (index: HandlerIndexRows) (left: Value list) (right: Value list) : int =
+    let count = min left.Length right.Length
+    let collations = index.ColumnIndices |> List.take count |> List.map (fun column -> index.Columns.[column].Collation)
+    compareIndexedKeys collations (List.replicate count Asc) (List.take count left) (List.take count right)
+
 type EqualityLookup =
     { IndexName: string
       ColumnIndices: int list
@@ -7191,7 +7241,16 @@ let private replayRowIds (table: Table) (targets: Value[] list) : RowId option l
 
         locate [] (List.ofSeq table.RowsArray.Indexed) targets
 
-let private reindexReplayRow table uniqueGroups secondaryGroups removed added uniqueIndex secondaryIndex secondaryOrder =
+let private reindexReplayRow
+    (table: Table)
+    uniqueGroups
+    secondaryGroups
+    removed
+    added
+    uniqueIndex
+    secondaryIndex
+    secondaryOrder
+    =
     reindexRow
         table.Columns
         uniqueGroups

@@ -103,6 +103,21 @@ type PreparedCursor =
       Rows: string option list array
       Offset: int }
 
+type HandlerCursorPosition =
+    | Unpositioned
+    | BeforeFirst
+    | AtRow of RowId
+    | AfterLast
+
+type TableHandler =
+    { Database: string
+      Table: string
+      Temporary: bool
+      CreateTime: DateTime
+      Columns: Fsdb.Ast.ColumnDef list
+      Indexes: Fsdb.Ast.IndexDef list
+      Positions: Map<string, HandlerCursorPosition> }
+
 type TransactionIsolation =
     | ReadUncommitted
     | ReadCommitted
@@ -181,6 +196,8 @@ type Session =
       Statements: Map<int, PreparedStmt>
       /// At most one forward-only cursor per prepared statement.
       Cursors: Map<int, PreparedCursor>
+      /// Session-local low-level table cursors keyed by OPEN name or alias.
+      TableHandlers: Map<string, TableHandler>
       /// SQL PREPARE names are connection-local strings rather than the
       /// integer ids assigned by COM_STMT_PREPARE.
       TextStatements: Map<string, PreparedStmt>
@@ -235,6 +252,7 @@ let create (connectionId: int) (store: Store) : Session =
       PendingTransactionIsolation = None
       Statements = Map.empty
       Cursors = Map.empty
+      TableHandlers = Map.empty
       TextStatements = Map.empty
       RoutineStack = []
       NextStmtId = 1

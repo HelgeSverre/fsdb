@@ -10459,6 +10459,20 @@ let evaluateExpression (store: Store) (registry: Registry) (dbName: string) (exp
     let context = contextFactory store registry dbName Map.empty Map.empty None [||]
     evalExpr context expression |> Result.mapError Err
 
+let evaluateRowPredicate
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (qualifier: string)
+    (columns: ColumnDef list)
+    (row: Value[])
+    (expression: Expr)
+    : Result<bool, QueryResult> =
+    let context = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None row
+    evalExpr { context with Clause = WhereClause } expression
+    |> Result.map (truthy >> (=) (Some true))
+    |> Result.mapError Err
+
 /// The physical rows a single-table `UPDATE`/`DELETE` actually mutates:
 /// every row `matches` (the `WHERE`, or everything when there's none),
 /// ordered by `orderBy` and capped at `limit` — computed up front, against

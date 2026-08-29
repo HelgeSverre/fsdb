@@ -306,6 +306,15 @@ let private expressionVariables (session: Session) = expressionVariablesFor sess
 
 let private accountOf (session: Session) = Auth.account session.User session.AccountHost
 
+let private lockWaitTimeout (session: Session) =
+    lookupVar session "innodb_lock_wait_timeout"
+    |> Option.flatten
+    |> Option.bind (fun value ->
+        match Int32.TryParse value with
+        | true, seconds -> Some(TimeSpan.FromSeconds(float seconds))
+        | _ -> None)
+    |> Option.defaultWith Limits.lockWaitTimeout
+
 let private canInspectRoutine (session: Session) schema definer =
     match Auth.tryParseAccount definer with
     | None -> false
@@ -1376,15 +1385,6 @@ let private rebaseReadUncommittedSnapshot (session: Session) (tx: Transaction) =
 
     baseCatalog, snapshot
 
-let private lockWaitTimeout (session: Session) =
-    lookupVar session "innodb_lock_wait_timeout"
-    |> Option.flatten
-    |> Option.bind (fun value ->
-        match Int32.TryParse value with
-        | true, seconds -> Some(TimeSpan.FromSeconds(float seconds))
-        | _ -> None)
-    |> Option.defaultWith Limits.lockWaitTimeout
-
 /// Commits the open transaction by publishing its private catalog. Ordinary
 /// isolation levels merge disjoint row changes; SERIALIZABLE validates the
 /// transaction's read snapshot before publication. No open transaction is a
@@ -2117,28 +2117,31 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let usesTemporary = action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt
 
-    if usesTemporary then
-        executeWithTemporaryCatalog action session stmt
-    elif causesImplicitCommit stmt then
-        let session = commitSession session
-        TableLocks.releaseExplicit session.Store session.ConnectionId
+    let executed, result =
+        if usesTemporary then
+            executeWithTemporaryCatalog action session stmt
+        elif causesImplicitCommit stmt then
+            let session = commitSession session
+            TableLocks.releaseExplicit session.Store session.ConnectionId
 
-        if changesCatalogMembership stmt then
-            executeParsedCore session stmt
-        else
-            Storage.withDatabaseLocks
-                (lockWaitTimeout session)
-                session.Store
-                (implicitCommitDatabases dbName stmt)
-                (fun () -> executeParsedCore session stmt)
-    else
-        let session =
-            if session.Tx.IsNone && autocommitDisabled session && startsTransaction stmt then
-                beginTransaction (configuredReadOnly session) session
+            if changesCatalogMembership stmt then
+                executeParsedCore session stmt
             else
-                session
+                Storage.withDatabaseLocks
+                    (lockWaitTimeout session)
+                    session.Store
+                    (implicitCommitDatabases dbName stmt)
+                    (fun () -> executeParsedCore session stmt)
+        else
+            let session =
+                if session.Tx.IsNone && autocommitDisabled session && startsTransaction stmt then
+                    beginTransaction (configuredReadOnly session) session
+                else
+                    session
 
-        executeParsedCore session stmt
+            executeParsedCore session stmt
+
+    TableHandler.invalidate session stmt executed result, result
 
 let private executeParsed session stmt = executeParsedWithTemporaryAction None session stmt
 
@@ -3116,8 +3119,13 @@ let private prepareStatementWithOptions
     (sql: string)
     : Result<Statement option * int, int * string> =
     let trimmed = sql.Trim().TrimEnd(';').Trim()
+    let command = Parser.stripVersionCommentsWithOptions options trimmed
 
-    if trimmed.StartsWith("LOAD DATA", StringComparison.OrdinalIgnoreCase) then
+    let startsWithKeyword (keyword: string) =
+        command.StartsWith(keyword, StringComparison.OrdinalIgnoreCase)
+        && (command.Length = keyword.Length || Char.IsWhiteSpace command.[keyword.Length])
+
+    if startsWithKeyword "LOAD DATA" || startsWithKeyword "HANDLER" then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
     elif (tryProbe trimmed).IsSome then
         Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
@@ -5098,8 +5106,18 @@ and private dispatchNormalized session rawSql parserOptions sql =
                     let code, message = Storage.toMySqlError error
                     session, Err(code, message)
 
+    let isHandler =
+        sql.StartsWith("HANDLER", StringComparison.OrdinalIgnoreCase)
+        && (sql.Length = 7 || Char.IsWhiteSpace sql.[7])
+
     if Parser.isBlank sql then
         session, Affected 0UL
+    elif isHandler then
+        match Parser.parseHandlerWithOptions parserOptions sql with
+        | Ok command ->
+            withStoredFunctionRegistry session (fun current ->
+                TableHandler.run (registryFor current) (lockWaitTimeout current) current command)
+        | Error detail -> session, parserError sql detail
     else
         match StoredProgram.parseDiagnostics parserOptions sql with
         | Error _ -> session, syntaxError sql

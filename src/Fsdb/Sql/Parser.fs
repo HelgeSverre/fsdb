@@ -4387,7 +4387,21 @@ let private handlerCommand =
 
 let parseHandlerWithOptions (options: ParserOptions) (sql: string) : Result<HandlerCommand, string> =
     let parser = ws >>. handlerCommand .>> opt (sym ";") .>> eof
+
     withParserState options sql (runWithDepthLimit parser)
+    |> Result.bind (fun command ->
+        let expressions =
+            match command with
+            | HandlerRead(_, HandlerIndexComparison(_, _, values), where, limit, offset) ->
+                values @ Option.toList where @ Option.toList limit @ Option.toList offset
+            | HandlerRead(_, _, where, limit, offset) ->
+                Option.toList where @ Option.toList limit @ Option.toList offset
+            | _ -> []
+
+        if expressions |> List.exists (Fsdb.Sql.Expression.collectSubqueries >> List.isEmpty >> not) then
+            Result.Error "subqueries are not valid in HANDLER"
+        else
+            Result.Ok command)
 
 let parseHandler (sql: string) : Result<HandlerCommand, string> =
     parseHandlerWithOptions defaultOptions sql

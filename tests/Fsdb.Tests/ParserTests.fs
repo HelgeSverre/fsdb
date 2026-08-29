@@ -2783,6 +2783,7 @@ let tests =
                 <| fun _ ->
                     Expect.isError (parseHandler "HANDLER cursor READ PREV") "natural PREV is invalid"
                     Expect.isError (parseHandler "HANDLER cursor READ ix = ()") "comparison keys are nonempty"
+                    Expect.isError (parseHandler "HANDLER cursor READ FIRST WHERE EXISTS (SELECT 1)") "subqueries are invalid"
                     Expect.isError (parseHandler "HANDLER cursor READ ix NEXT trailing") "trailing input is rejected" ]
 
           testCase "accepts ALTER TABLE without actions"

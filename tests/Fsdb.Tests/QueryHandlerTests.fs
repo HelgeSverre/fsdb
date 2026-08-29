@@ -1707,6 +1707,149 @@ let tests =
                       "every executable expression is rewritten"
               | Error error -> failtestf "unexpected parse error: %s" error
 
+          testCase "HANDLER reads natural and indexed row order"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE handler_rows (id INT PRIMARY KEY, grp INT, name VARCHAR(20), INDEX ix_grp_name(grp, name))"
+              let session, _ = handle session "INSERT INTO handler_rows VALUES (3,2,'c'),(1,1,'b'),(4,2,'a'),(2,1,'a')"
+              let session, opened = handle session "HANDLER handler_rows OPEN AS cursor"
+              Expect.equal opened (Affected 0UL) "opened"
+
+              let session, first = handle session "HANDLER cursor READ FIRST"
+              Expect.equal first (ResultSet([ "id"; "grp"; "name" ], [ [ Some "1"; Some "1"; Some "b" ] ])) "natural order"
+
+              let session, next = handle session "HANDLER cursor READ NEXT"
+              Expect.equal next (ResultSet([ "id"; "grp"; "name" ], [ [ Some "2"; Some "1"; Some "a" ] ])) "natural cursor"
+
+              let session, primary = handle session "HANDLER cursor READ `PRIMARY` FIRST"
+              Expect.equal primary (ResultSet([ "id"; "grp"; "name" ], [ [ Some "1"; Some "1"; Some "b" ] ])) "primary order"
+
+              let session, range = handle session "HANDLER cursor READ ix_grp_name > (1, 'a') WHERE id <> 3 LIMIT 2"
+              Expect.equal
+                  range
+                  (ResultSet(
+                      [ "id"; "grp"; "name" ],
+                      [ [ Some "1"; Some "1"; Some "b" ]; [ Some "4"; Some "2"; Some "a" ] ]
+                  ))
+                  "comparison, predicate, and limit"
+
+              let session, _ = handle session "HANDLER cursor READ `PRIMARY` FIRST WHERE id = 99"
+
+              match handle session "HANDLER cursor READ `PRIMARY` PREV" with
+              | session, ResultSet(_, [ [ Some "4"; _; _ ] ]) ->
+                  let session, _ = handle session "HANDLER handler_rows OPEN AS zero_cursor"
+                  let session, empty = handle session "HANDLER zero_cursor READ `PRIMARY` FIRST LIMIT 0"
+                  Expect.equal empty (ResultSet([ "id"; "grp"; "name" ], [])) "LIMIT zero"
+
+                  match handle session "HANDLER zero_cursor READ `PRIMARY` NEXT" with
+                  | nextSession, ResultSet(_, [ [ Some "1"; _; _ ] ]) ->
+                      let nextSession, _ = handle nextSession "HANDLER zero_cursor CLOSE"
+                      let session, closed = handle nextSession "HANDLER cursor CLOSE"
+                      Expect.equal closed (Affected 0UL) "closed"
+
+                      match handle session "HANDLER cursor READ FIRST" |> snd with
+                      | Err(1109, _) -> ()
+                      | other -> failtestf "expected a closed handler error, got %A" other
+                  | _, other -> failtestf "expected LIMIT zero to preserve position, got %A" other
+              | _, other -> failtestf "expected PREV from end of index, got %A" other
+
+          testCase "HANDLER validates lifecycle and result metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE handler_contract (id INT PRIMARY KEY, happened TIME(3))"
+              let session, _ = handle session "INSERT INTO handler_contract VALUES (1, '01:02:03.125')"
+              let session, _ = handle session "CREATE VIEW handler_view AS SELECT * FROM handler_contract"
+
+              match handle session "HANDLER handler_view OPEN" |> snd with
+              | Err(1347, _) -> ()
+              | other -> failtestf "expected a base-table error, got %A" other
+
+              let session, _ = handle session "HANDLER handler_contract OPEN AS h"
+
+              match handle session "HANDLER handler_contract OPEN AS h" |> snd with
+              | Err(1066, _) -> ()
+              | other -> failtestf "expected a duplicate alias error, got %A" other
+
+              match handle session "HANDLER h READ missing FIRST" |> snd with
+              | Err(1176, _) -> ()
+              | other -> failtestf "expected a missing-index error, got %A" other
+
+              match handle session "HANDLER h READ `PRIMARY` = (1, 2)" |> snd with
+              | Err(1070, _) -> ()
+              | other -> failtestf "expected a key-part error, got %A" other
+
+              match handle session "HANDLER h READ `PRIMARY` FIRST" with
+              | read, ResultSet(_, [ [ Some "1"; Some "01:02:03.125" ] ]) ->
+                  Expect.equal (read.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong; TypeTime ] "declared metadata"
+                  Expect.equal read.LastResultColumnMetadata.[1].Decimals 3uy "TIME precision"
+              | _, other -> failtestf "expected typed handler row, got %A" other
+
+              match prepareStatementForSession session "HANDLER h READ FIRST" with
+              | Error(1295, _) -> ()
+              | other -> failtestf "expected prepared protocol refusal, got %A" other
+
+          testCase "HANDLER follows temporary and schema lifetimes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TEMPORARY TABLE handler_temp (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO handler_temp VALUES (2), (1)"
+              let session, _ = handle session "HANDLER handler_temp OPEN AS temp_cursor"
+
+              match handle session "HANDLER temp_cursor READ `PRIMARY` FIRST" with
+              | session, ResultSet(_, [ [ Some "1" ] ]) ->
+                  let session, _ = handle session "ALTER TABLE handler_temp ADD COLUMN label VARCHAR(10)"
+
+                  match handle session "HANDLER temp_cursor READ FIRST" |> snd with
+                  | Err(1109, _) -> ()
+                  | other -> failtestf "expected ALTER to close the handler, got %A" other
+
+                  let session, _ = handle session "HANDLER handler_temp OPEN AS temp_cursor"
+                  let session, _ = handle session "BEGIN"
+
+                  match handle session "HANDLER temp_cursor READ FIRST" with
+                  | session, Err(1192, _) ->
+                      let session, _ = handle session "ROLLBACK"
+
+                      match handle session "HANDLER temp_cursor READ FIRST" |> snd with
+                      | ResultSet(_, [ [ Some "1"; None ] ]) -> ()
+                      | other -> failtestf "expected the handler after rollback, got %A" other
+                  | _, other -> failtestf "expected an active-transaction refusal, got %A" other
+              | _, other -> failtestf "expected a temporary indexed row, got %A" other
+
+          testCase "HANDLER reads wait behind explicit write locks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE handler_locked (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "INSERT INTO handler_locked VALUES (1)"
+              let reader, _ = handle (create 2 store) "SET SESSION innodb_lock_wait_timeout = 1"
+              let reader, _ = handle reader "HANDLER handler_locked OPEN AS h"
+              let holder, _ = handle (create 3 store) "LOCK TABLES handler_locked WRITE"
+
+              match handle reader "HANDLER h READ FIRST" |> snd with
+              | Err(1205, _) -> ()
+              | other -> failtestf "expected a lock wait timeout, got %A" other
+
+              let _, _ = handle holder "UNLOCK TABLES"
+
+              match handle reader "HANDLER h READ FIRST" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the read after unlock, got %A" other
+
+          testCase "HANDLER detects schema changes from other sessions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let owner = create 1 store
+              let owner, _ = handle owner "CREATE TABLE handler_schema (id INT PRIMARY KEY)"
+              let owner, _ = handle owner "HANDLER handler_schema OPEN AS h"
+              let _, altered = handle (create 2 store) "ALTER TABLE handler_schema ADD COLUMN label VARCHAR(10)"
+              Expect.equal altered (Affected 0UL) "altered"
+
+              match handle owner "HANDLER h READ FIRST" with
+              | owner, Err(1109, _) ->
+                  Expect.isFalse (Map.containsKey "h" owner.TableHandlers) "invalidated cursor removed"
+              | _, other -> failtestf "expected the changed table to close the handler, got %A" other
+
           testCase "LOCK TABLES accepts MySQL lock-list syntax"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
