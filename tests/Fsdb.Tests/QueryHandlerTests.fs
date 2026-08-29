@@ -375,6 +375,23 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected an OK/0-rows ack, got %A" other
 
+          testCase "dense executable comments preserve token boundaries"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql in
+                  [ "SELECT/*!*/1"
+                    "SELECT/*!80400*/1"
+                    "SELECT/*! SQL_NO_CACHE*/1"
+                    "SELECT/*!80400 SQL_NO_CACHE*/1" ] do
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected executable-comment query to return 1: %s produced %A" sql other
+
+              match handle session "SELECT /*!80400 1*//*!80400 +1*/" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected adjacent executable comments to retain both expressions, got %A" other
+
           testCase "a comment-only statement is a harmless no-op, not a syntax error"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

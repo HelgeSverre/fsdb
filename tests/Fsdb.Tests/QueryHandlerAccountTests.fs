@@ -536,6 +536,14 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected SET ROLE NONE to clear the empty active-role set, got %A" other
 
+              match handle session "SET-- fuzz\nROLE-- fuzz\nNONE" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected comments between SET ROLE tokens, got %A" other
+
+              match handle session "SET# fuzz\nDEFAULT# fuzz\nROLE NONE TO root" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected comments between SET DEFAULT ROLE tokens, got %A" other
+
               match handle session "DROP ROLE reader" |> snd with
               | Affected 0UL -> Expect.isNone (Fsdb.Auth.tryUserRow store "reader") "role removed"
               | other -> failtestf "expected DROP ROLE, got %A" other

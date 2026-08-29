@@ -121,4 +121,19 @@ let tests =
                     "SELECT /*!080400 SQL_NO_CACHE */ 1"
                     "SELECT /*!99999 invalid tokens */ 1"
                     "SELECT /*!1234 invalid tokens */ 1" ] do
-                  expectParse "executable comment version" "version boundary" sql ]
+                  expectParse "executable comment version" "version boundary" sql
+
+          testCase "executable comments remain token boundaries"
+          <| fun _ ->
+              for sql in
+                  [ "SELECT/*!*/1"
+                    "SELECT/*!80400*/1"
+                    "SELECT/*! SQL_NO_CACHE*/1"
+                    "SELECT/*!80400 SQL_NO_CACHE*/1"
+                    "SELECT /*!80400 1*//*!80400 +1*/" ] do
+                  expectParse "executable comment separator" "dense boundary" sql
+
+              for sql in [ "SEL/*!80400 ECT*/ 1"; "SELECT 1 FR/*!80400 OM*/ DUAL" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Error _ -> ()
+                  | Ok statement -> failtestf "executable comments must not splice identifiers: %s parsed as %A" sql statement ]

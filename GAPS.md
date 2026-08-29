@@ -90,7 +90,6 @@ refuses it through the prepared-statement protocol.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Locking-read granularity | row and next-key locks over the selected access path | `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, `OF`, `NOWAIT`, and `SKIP LOCKED` hold shared or exclusive row-stripe ownership until transaction end; direct indexed single-table predicates narrow their targets, while joins and scan-shaped reads conservatively lock every row in each named physical source; no next-key/gap locks | low | divergence |
-| Executable-comment edge cases | versioned comment bodies follow the server grammar at each token boundary | ordinary `/*!NNNNN … */` splicing works; empty and densely adjacent executable comments can still be accepted or rejected differently | low | divergence |
 Expression coverage that does exist: full comparison/logical/arithmetic
 operators incl. `<=>`, row-value comparisons and `IN`, `XOR`, three-valued logic; CASE (both forms);
 CAST/CONVERT; EXISTS/IN/ANY/SOME/ALL/BETWEEN/LIKE [ESCAPE]/REGEXP; `->`/`->>` JSON

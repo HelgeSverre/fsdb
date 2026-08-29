@@ -448,9 +448,11 @@ let tests =
                         [ "dense_block_comments"
                           "dense_hash_comments"
                           "dense_dash_comments"
+                          "dense_empty_executable_comments"
                           "dense_version_comments"
                           "dense_future_comments"
                           "punctuation_block_comments"
+                          "punctuation_empty_executable_comments"
                           "punctuation_version_comments"
                           "punctuation_future_comments" ] do
                         Expect.isTrue (mutations |> Array.exists (fun candidate -> candidate.Mutation = name)) name

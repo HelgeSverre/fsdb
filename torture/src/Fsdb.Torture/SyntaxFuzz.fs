@@ -354,9 +354,11 @@ module SyntaxFuzz =
            "dense_block_comments", replaceWhitespace "/* fuzz */" >> Some
            "dense_hash_comments", replaceWhitespace "# fuzz\n" >> Some
            "dense_dash_comments", replaceWhitespace "-- fuzz\n" >> Some
+           "dense_empty_executable_comments", replaceWhitespace "/*!*/" >> Some
            "dense_version_comments", replaceWhitespace "/*!080400 */" >> Some
            "dense_future_comments", replaceWhitespace "/*!99999 ignored_tokens */" >> Some
            "punctuation_block_comments", surroundPunctuation "/**/" >> Some
+           "punctuation_empty_executable_comments", surroundPunctuation "/*!*/" >> Some
            "punctuation_version_comments", surroundPunctuation "/*!080400 */" >> Some
            "punctuation_future_comments", surroundPunctuation "/*!99999 ignored_tokens */" >> Some |]
 

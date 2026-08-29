@@ -1395,6 +1395,8 @@ let private setTransactionAccess =
     Regex(@"^SET\s+(SESSION\s+)?TRANSACTION\s+READ\s+(ONLY|WRITE)$", RegexOptions.IgnoreCase)
 
 let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", RegexOptions.IgnoreCase)
+let private setDefaultRoleStatement = Regex(@"^SET\s+DEFAULT\s+ROLE(?:\s|$)", RegexOptions.IgnoreCase)
+let private setRoleStatement = Regex(@"^SET\s+ROLE(?:\s|$)", RegexOptions.IgnoreCase)
 
 type private DirtyTransactionView =
     { BaseCatalog: Catalog
@@ -2641,9 +2643,9 @@ let private tryProbe (sql: string) : Probe option =
     elif setPasswordRe.IsMatch sql then
         let m = setPasswordRe.Match sql
         Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
-    elif command.StartsWith("SET DEFAULT ROLE ", StringComparison.OrdinalIgnoreCase) then
+    elif setDefaultRoleStatement.IsMatch command then
         Some SetDefaultRoleStatement
-    elif command.StartsWith("SET ROLE ", StringComparison.OrdinalIgnoreCase) then
+    elif setRoleStatement.IsMatch command then
         Some SetRoleStatement
     elif command.StartsWith("SET ", StringComparison.OrdinalIgnoreCase) then
         Some SetVar

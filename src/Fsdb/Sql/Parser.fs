@@ -242,6 +242,19 @@ let private serverVersionNumber = 80400
 let private rewriteVersionComments (stripOrdinaryComments: bool) (options: ParserOptions) (sql: string) =
     let sb = Text.StringBuilder(sql.Length)
     let mutable i = 0
+
+    let appendExecutable (text: string) =
+        if text.Length = 0 then
+            sb.Append ' ' |> ignore
+        else
+            if not (Char.IsWhiteSpace text.[0]) then
+                sb.Append ' ' |> ignore
+
+            sb.Append text |> ignore
+
+            if not (Char.IsWhiteSpace text.[text.Length - 1]) then
+                sb.Append ' ' |> ignore
+
     // `'`/`"`/`` ` `` while inside a string/identifier literal — a `/*!`
     // that appears there is data, not a version comment (see the copy loop
     // below for how it's tracked in and out of literals).
@@ -335,12 +348,12 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (options: Parse
                         0
 
                 if leadingDigits = 0 then
-                    sb.Append(inner: string) |> ignore
+                    appendExecutable inner
                 elif versionLength > 0 then
                     let version = Int32.Parse(inner.Substring(0, versionLength), Globalization.CultureInfo.InvariantCulture)
 
                     if version <= serverVersionNumber then
-                        sb.Append(inner.Substring(versionLength): string) |> ignore
+                        appendExecutable (inner.Substring versionLength)
                     else
                         sb.Append ' ' |> ignore
                 else
@@ -384,15 +397,18 @@ let private isIdentChar c = Char.IsLetterOrDigit c || c = '_'
 let private keyword (s: string) : Parser<unit, unit> =
     attempt (pstringCI s >>. nextCharSatisfiesNot isIdentChar) .>> ws <?> s
 
-let private functionKeyword (s: string) : Parser<unit, unit> =
-    let openParen: Parser<unit, unit> =
+let private functionOpenParen whitespaceSensitive : Parser<unit, unit> =
+    if whitespaceSensitive then
         fun stream ->
             if currentOptions.Value.IgnoreSpace then
                 (spaces >>. pchar '(' >>. ws) stream
             else
                 (pchar '(' >>. ws) stream
+    else
+        ws >>. pchar '(' >>. ws
 
-    attempt (pstringCI s >>. nextCharSatisfiesNot isIdentChar >>. openParen) <?> s
+let private functionKeyword (s: string) : Parser<unit, unit> =
+    attempt (pstringCI s >>. nextCharSatisfiesNot isIdentChar >>. functionOpenParen true) <?> s
 
 let private intTok: Parser<int, unit> = pint32 .>> ws
 
@@ -1108,13 +1124,7 @@ let private genericFuncCall: Parser<Expr, unit> =
                 fail "reserved function name"
             else
                 let openParen =
-                    if not qualified && whitespaceSensitiveFunctionNames.Contains normalizedName then
-                        if currentOptions.Value.IgnoreSpace then
-                            spaces >>. pchar '(' >>. ws
-                        else
-                            pchar '(' >>. ws
-                    else
-                        ws >>. pchar '(' >>. ws
+                    functionOpenParen (not qualified && whitespaceSensitiveFunctionNames.Contains normalizedName)
 
                 openParen
                 >>. sepBy (if not qualified && distinctAggregates.Contains name then distinctArg else expr) (sym ",")
@@ -1274,12 +1284,14 @@ let private windowFnOf (name: string) (args: Expr list) : Choice<WindowFn, strin
 /// (`SUM(x)` with no `OVER`) on the ordinary `funcCallAtom` path.
 let private windowCallAtom: Parser<Expr, unit> =
     attempt (
-        (many1Satisfy2 isIdentStart isIdentChar .>> ws)
+        many1Satisfy2 isIdentStart isIdentChar
         >>= fun name ->
             if not (windowFunctionNames.Contains name) then
                 fail "not a window function"
             else
-                between (sym "(") (sym ")") (sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ","))
+                functionOpenParen (whitespaceSensitiveFunctionNames.Contains name)
+                >>. sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+                .>> sym ")"
                 .>> followedByL (keyword "OVER") "OVER"
                 |>> fun args -> name, args
     )

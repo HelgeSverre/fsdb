@@ -269,6 +269,7 @@ let tests =
                     for sql in
                         [ "SELECT COUNT (*) FROM t"
                           "SELECT COUNT/**/(*) FROM t"
+                          "SELECT SUM/**/(n) OVER () FROM t"
                           "SELECT CAST (1 AS SIGNED)"
                           "SELECT EXTRACT (YEAR FROM created_at) FROM t" ] do
                         match parse sql with
@@ -292,6 +293,10 @@ let tests =
                         (Ok(mkSelect([ FuncCall("COUNT", [ Star None ]), None ], Some "t", None, [], None, None)))
                         "spaced COUNT"
 
+                    match parseWithOptions options "SELECT SUM (n) OVER () FROM t" with
+                    | Ok _ -> ()
+                    | Error error -> failtestf "expected IGNORE_SPACE to parse a spaced windowed SUM, got %s" error
+
                     for sql in
                         [ "SELECT CAST (1 AS SIGNED)"
                           "SELECT EXTRACT (YEAR FROM created_at) FROM t"
@@ -305,6 +310,10 @@ let tests =
                     match parseWithOptions options "SELECT COUNT /**/ (*) FROM t" with
                     | Error _ -> ()
                     | Ok statement -> failtestf "expected an intervening comment to remain invalid, got %A" statement
+
+                    match parseWithOptions options "SELECT SUM/**/(n) OVER () FROM t" with
+                    | Error _ -> ()
+                    | Ok statement -> failtestf "expected a commented windowed SUM to remain invalid, got %A" statement
 
                     match parseWithOptions options "CREATE TABLE count (i INT)" with
                     | Error _ -> ()
