@@ -22,7 +22,7 @@ type QueryResult = Fsdb.Executor.QueryResult
 
 open Fsdb.Executor
 
-let private triggerProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
+let private storedProgramProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
 
 let private triggerTableKey (database: string) table =
     database.ToLowerInvariant(), normalizeTableName table
@@ -2214,7 +2214,11 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
     let store = Session.currentStore session
     let database = session.Database |> Option.defaultValue defaultDatabase
     let accesses = TableLocks.accessesForStatement store session.TemporaryCatalog database stmt
-    let protectedTables = DynamicScope.valueOrDefault Set.empty triggerProtectedTables
+    let protectedTables = DynamicScope.valueOrDefault Set.empty storedProgramProtectedTables
+    let statementTables =
+        accesses
+        |> List.map (fun access -> triggerTableKey access.Database access.Table)
+        |> Set.ofList
 
     match
         accesses
@@ -2238,11 +2242,12 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
                 session.ConnectionId
                 accesses
                 (fun () ->
-                    InformationSchema.withViewer
-                        store
-                        (accountOf session)
-                        session.ActiveRoles
-                        (fun () -> executeParsedStatement session stmt))
+                    DynamicScope.withValue storedProgramProtectedTables (Set.union protectedTables statementTables) (fun () ->
+                        InformationSchema.withViewer
+                            store
+                            (accountOf session)
+                            session.ActiveRoles
+                            (fun () -> executeParsedStatement session stmt)))
         with
         | Ok result -> result
         | Error(code, message) -> session, Err(code, message)
@@ -2294,6 +2299,7 @@ let private startsTransaction = function
     | Delete _
     | ChecksumTables _
     | Explain _ -> true
+    | Do _ -> true
     | _ -> false
 
 let private autocommitDisabled (session: Session) =
@@ -2472,7 +2478,21 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
                 else
                     session
 
-            executeParsedCore session stmt
+            if session.Tx.IsSome || not (startsTransaction stmt) then
+                executeParsedCore session stmt
+            else
+                let mutable working = beginTransaction (configuredReadOnly session) session
+
+                try
+                    let executed, result = executeParsedCore working stmt
+                    working <- executed
+
+                    match terminalErrorInfo result with
+                    | Some _ -> rollbackSession executed, result
+                    | None -> commitSession executed, result
+                with _ ->
+                    rollbackSession working |> ignore
+                    reraise ()
 
     TableHandler.invalidate session stmt executed result, result
 
@@ -4939,7 +4959,7 @@ and private withTriggerTextExecution session body =
                 RoutineStack = ("TRIGGER", context.TriggerDatabase, "") :: session.RoutineStack }
 
         let executed, result =
-            DynamicScope.withValue triggerProtectedTables context.TriggerProtectedTables (fun () ->
+            DynamicScope.withValue storedProgramProtectedTables context.TriggerProtectedTables (fun () ->
                 dispatch triggerSession sql)
 
         context.TriggerUserVariables.Value <- executed.UserVariables
