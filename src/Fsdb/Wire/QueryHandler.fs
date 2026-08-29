@@ -1278,6 +1278,7 @@ let private flushUserResourcesRe = Regex(@"^FLUSH\s+USER_RESOURCES\s*;?$", Regex
 let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreCase)
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
+let private lockTablesRe = Regex(@"^LOCK\s+TABLES(?:\s|$)", RegexOptions.IgnoreCase)
 let private unlockTablesRe = Regex(@"^UNLOCK\s+TABLES?\s*$", RegexOptions.IgnoreCase)
 
 let private setTransactionIsolation =
@@ -2373,7 +2374,7 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some FlushTables
     elif flushLogsRe.IsMatch sql then
         Some FlushLogs
-    elif upper = "LOCK TABLES" || upper.StartsWith("LOCK TABLES ", StringComparison.Ordinal) then
+    elif lockTablesRe.IsMatch sql then
         Some LockTables
     elif unlockTablesRe.IsMatch sql then
         Some UnlockTables

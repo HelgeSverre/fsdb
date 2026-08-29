@@ -1725,6 +1725,10 @@ let tests =
               Expect.equal result (Affected 0UL) "comments may separate lock-list tokens"
               Expect.equal (handle session "UNLOCK TABLES" |> snd) (Affected 0UL) "plural unlock accepted"
 
+              let session, result = handle session "LOCK-- comment\nTABLES-- comment\nt-- comment\nREAD"
+              Expect.equal result (Affected 0UL) "line comments may separate lock-list tokens"
+              Expect.equal (handle session "UNLOCK TABLES" |> snd) (Affected 0UL) "line-comment lock released"
+
           testCase "LOCK TABLES enforces aliases and access modes"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
