@@ -2723,6 +2723,25 @@ let tests =
                     | other -> failtestf "expected no locking clauses, got %A" other ]
 
           testList
+              "LOCK TABLES"
+              [ testCase "retains qualified names aliases and modes"
+                <| fun _ ->
+                    match parseTableLocks "LOCK TABLES app.t READ LOCAL, `app`.`u` AS writer WRITE, v reader READ" with
+                    | Ok locks ->
+                        Expect.equal
+                            locks
+                            [ { Name = "app.t"; Alias = None; Mode = ReadTableLock }
+                              { Name = "app.u"; Alias = Some "writer"; Mode = WriteTableLock }
+                              { Name = "v"; Alias = Some "reader"; Mode = ReadTableLock } ]
+                            "lock requests"
+                    | Error error -> failtestf "unexpected lock parse error: %s" error
+
+                testCase "rejects empty and malformed lock lists"
+                <| fun _ ->
+                    Expect.isError (parseTableLocks "LOCK TABLES") "a lock list is required"
+                    Expect.isError (parseTableLocks "LOCK TABLES t SHARE") "only READ and WRITE are valid" ]
+
+          testList
               "failure cases"
               [ testCase "garbage input is an Error, not an exception"
                 <| fun _ ->

@@ -601,6 +601,15 @@ and SelectStmt =
       /// list targets every physical source not named by another clause.
       Locking: LockingRead list }
 
+type ExplicitTableLockMode =
+    | ReadTableLock
+    | WriteTableLock
+
+type ExplicitTableLock =
+    { Name: string
+      Alias: string option
+      Mode: ExplicitTableLockMode }
+
 let indexColumns names =
     names
     |> List.map (fun name ->

@@ -1714,6 +1714,11 @@ let tests =
               let session, _ = handle session "CREATE TABLE u (id INT)"
               let session, result = handle session "LOCK TABLES t READ, u AS writer WRITE"
               Expect.equal result (Affected 0UL) "lock list accepted"
+
+              match handle session "LOCK TABLES t SHARE" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected an invalid lock mode to fail, got %A" other
+
               Expect.equal (handle session "UNLOCK TABLES" |> snd) (Affected 0UL) "unlock accepted"
 
           testCase "single-statement stored procedures persist and execute"

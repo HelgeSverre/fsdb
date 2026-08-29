@@ -1278,11 +1278,6 @@ let private flushUserResourcesRe = Regex(@"^FLUSH\s+USER_RESOURCES\s*;?$", Regex
 let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreCase)
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
-let private lockTablesRe =
-    Regex(
-        @"^LOCK\s+TABLES\s+\S+(?:\s+(?:AS\s+)?[A-Za-z_][A-Za-z0-9_$]*)?\s+(?:READ(?:\s+LOCAL)?|WRITE)(?:\s*,\s*\S+(?:\s+(?:AS\s+)?[A-Za-z_][A-Za-z0-9_$]*)?\s+(?:READ(?:\s+LOCAL)?|WRITE))*\s*$",
-        RegexOptions.IgnoreCase
-    )
 let private unlockTablesRe = Regex(@"^UNLOCK\s+TABLES\s*$", RegexOptions.IgnoreCase)
 
 let private setTransactionIsolation =
@@ -2363,7 +2358,7 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some FlushTables
     elif flushLogsRe.IsMatch sql then
         Some FlushLogs
-    elif lockTablesRe.IsMatch sql then
+    elif upper = "LOCK TABLES" || upper.StartsWith("LOCK TABLES ", StringComparison.Ordinal) then
         Some LockTables
     elif unlockTablesRe.IsMatch sql then
         Some UnlockTables
@@ -2997,7 +2992,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         session, Affected 0UL
     | FlushTables
     | FlushLogs -> session, Affected 0UL
-    | LockTables
+    | LockTables ->
+        match Parser.parseTableLocksWithOptions (parserOptionsForSession session) sql with
+        | Ok _ -> session, Affected 0UL
+        | Error detail -> session, parserError sql detail
     | UnlockTables -> session, Affected 0UL
 let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
     Fsdb.Sql.Expression.rewriteStatement

@@ -4299,6 +4299,31 @@ let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
         else
             Result.Error "LOAD DATA delimiters must be empty or one character")
 
+let private explicitTableLockMode =
+    choice
+        [ attempt (keyword "READ" >>. opt (keyword "LOCAL") >>% ReadTableLock)
+          keyword "WRITE" >>% WriteTableLock ]
+
+let private explicitTableLock =
+    let suffix =
+        choice
+            [ attempt (keyword "AS" >>. identifier .>>. explicitTableLockMode |>> fun (alias, mode) -> Some alias, mode)
+              attempt (identifier .>>. explicitTableLockMode |>> fun (alias, mode) -> Some alias, mode)
+              explicitTableLockMode |>> fun mode -> None, mode ]
+
+    qualifiedTableName .>>. suffix
+    |>> fun (name, (alias, mode)) ->
+        { Name = name
+          Alias = alias
+          Mode = mode }
+
+let parseTableLocksWithOptions (options: ParserOptions) (sql: string) : Result<ExplicitTableLock list, string> =
+    let parser = ws >>. keyword "LOCK" >>. keyword "TABLES" >>. sepBy1 explicitTableLock (sym ",") .>> opt (sym ";") .>> eof
+    withParserState options sql (runWithDepthLimit parser)
+
+let parseTableLocks (sql: string) : Result<ExplicitTableLock list, string> =
+    parseTableLocksWithOptions defaultOptions sql
+
 /// Splits a COM_QUERY batch at statement delimiters outside literals,
 /// comments, and supported compound object bodies. The parser still validates each
 /// returned statement separately.
