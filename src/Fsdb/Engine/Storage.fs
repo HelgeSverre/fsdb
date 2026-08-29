@@ -419,6 +419,30 @@ let private hasCommitConsumer (store: Store) =
 let private collectsCommitEvents (store: Store) =
     store.PendingEvents.IsSome || hasCommitConsumer store
 
+let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent list) (observerEvents: CommitEvent list) =
+    let durableAction, observerError =
+        lock store.CommitLock (fun () ->
+            let action =
+                store.Durability.Sink
+                |> Option.map (fun sink -> sink.Enqueue durableEvents)
+                |> Option.defaultValue ignore
+
+            let error =
+                try
+                    for event in observerEvents do
+                        for observer in store.OnCommit do
+                            observer event
+
+                    None
+                with error ->
+                    Some error
+
+            action, error)
+
+    fun () ->
+        durableAction ()
+        observerError |> Option.iter raise
+
 let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
     match events, store.PendingEvents with
     | [], _ -> ignore
@@ -426,32 +450,12 @@ let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> un
         buffer.AddRange events
         ignore
     | events, None when hasCommitConsumer store ->
-        let durableAction, observerError =
-            lock store.CommitLock (fun () ->
-                let action =
-                    match store.Durability.Sink with
-                    | Some sink ->
-                        match events with
-                        | [] -> ignore
-                        | [ event ] -> sink.Enqueue [ event ]
-                        | events -> sink.Enqueue [ TransactionCommitted events ]
-                    | None -> ignore
+        let durableEvents =
+            match events with
+            | [ event ] -> [ event ]
+            | events -> [ TransactionCommitted events ]
 
-                let error =
-                    try
-                        for event in events do
-                            for observer in store.OnCommit do
-                                observer event
-
-                        None
-                    with error ->
-                        Some error
-
-                action, error)
-
-        fun () ->
-            durableAction ()
-            observerError |> Option.iter raise
+        preparePublishedEvents store durableEvents events
     | _ -> ignore
 
 let private prepareResultEvents (store: Store) (eventsOf: 'a -> CommitEvent list) (result: 'a) : unit -> unit =
@@ -615,38 +619,10 @@ let private prepareXaCommitEvents (xid: Xa.Xid) (store: Store) (snapshot: Store)
     | Some targetBuffer ->
         targetBuffer.Add(XaCommitted(xid, events))
         ignore
-    | None ->
-        let durableAction, observerError =
-            lock store.CommitLock (fun () ->
-                let action =
-                    store.Durability.Sink
-                    |> Option.map (fun sink -> sink.Enqueue [ XaCommitted(xid, events) ])
-                    |> Option.defaultValue ignore
-
-                let error =
-                    try
-                        for event in events do
-                            for observer in store.OnCommit do
-                                observer event
-
-                        None
-                    with error ->
-                        Some error
-
-                action, error)
-
-        fun () ->
-            durableAction ()
-            observerError |> Option.iter raise
+    | None -> preparePublishedEvents store [ XaCommitted(xid, events) ] events
 
 let private persistXaControl (store: Store) (event: CommitEvent) : unit =
-    let acknowledge =
-        lock store.CommitLock (fun () ->
-            match store.Durability.Sink with
-            | Some sink -> sink.Enqueue [ event ]
-            | None -> ignore)
-
-    acknowledge ()
+    preparePublishedEvents store [ event ] [] |> fun acknowledge -> acknowledge ()
 
 let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
@@ -6939,6 +6915,8 @@ let private commitCatalogIntoWith
                 if needsCatalogLock then lock store.Lock publish else publish ()
 
             acknowledge ()
+        else
+            prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
 
 let commitCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->

@@ -65,7 +65,7 @@ let private xidPart noBackslashEscapes charset =
         |>> (Collation.Charset.encode charset >> List.ofArray)
 
     let quotedHex =
-        attempt (pstringCI "X" >>. between (pchar '\'') (pchar '\'') (many1Chars hex))
+        attempt (pstringCI "X" >>. between (pchar '\'') (pchar '\'') (manyChars hex))
         >>= fun digits ->
             if digits.Length % 2 = 0 then
                 preturn (hexBytes false digits)
@@ -77,7 +77,7 @@ let private xidPart noBackslashEscapes charset =
         |>> hexBytes true
 
     let bits =
-        attempt (pstringCI "b" >>. between (pchar '\'') (pchar '\'') (many1Chars (anyOf "01")))
+        attempt (pstringCI "b" >>. between (pchar '\'') (pchar '\'') (manyChars (anyOf "01")))
         |>> bitBytes
 
     choice [ quotedHex; prefixedHex; bits; quoted ] .>> spaces

@@ -407,6 +407,21 @@ let tests =
               | [ [| VInt 1L |] ] -> ()
               | other -> failtestf "expected rollback recovery to discard the second row, got %A" other
 
+              let emptyStore = load dir
+              attach dir emptyStore
+              let emptySession = Fsdb.Session.create 5 emptyStore
+              let emptySession = run emptySession "XA START 'durable-empty'"
+              let emptySession = run emptySession "XA END 'durable-empty'"
+              let _ = run emptySession "XA PREPARE 'durable-empty'"
+              let recoveredEmpty = load dir
+              attach dir recoveredEmpty
+              let emptyRecovery = Fsdb.Session.create 6 recoveredEmpty
+              let _ = run emptyRecovery "XA COMMIT 'durable-empty'"
+
+              match handle (Fsdb.Session.create 7 (load dir)) "XA RECOVER" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected the read-only completed branch to stay gone, got %A" other
+
           testCase "attach + reload preserves BIT(64) boundary values"
           <| fun _ ->
               let dir = tempDataDir ()

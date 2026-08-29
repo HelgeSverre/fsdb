@@ -5976,6 +5976,12 @@ let tests =
               let suspended, _ = handle suspended "XA END 'suspend'"
               handle suspended "XA ROLLBACK 'suspend'" |> ignore
 
+              for xid in [ "X''"; "b''" ] do
+                  let empty, started = handle replacement ("XA START " + xid)
+                  Expect.equal started (Affected 0UL) (xid + " starts")
+                  let empty, _ = handle empty ("XA END " + xid)
+                  handle empty ("XA ROLLBACK " + xid) |> ignore
+
           // -----------------------------------------------------------------
           // Session user identity + the built-in `mysql` system schema
           // -----------------------------------------------------------------

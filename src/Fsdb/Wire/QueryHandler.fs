@@ -1537,8 +1537,14 @@ let private prepareXa xid session =
     match session.Tx, xaAssociation session with
     | Some transaction, Some(current, Idle) when current = xid ->
         let validateWholeSnapshot = transaction.Isolation = Serializable
+        let baseCatalog, snapshot =
+            if transaction.Seeded then
+                transaction.BaseCatalog, transaction.Snapshot
+            else
+                let catalog, snapshot = Storage.beginTransactionSnapshotWithBase session.Store
+                catalog, Storage.carryTransactionLocks transaction.Snapshot snapshot
 
-        if Storage.prepareXa session.Store xid validateWholeSnapshot transaction.BaseCatalog transaction.Snapshot then
+        if Storage.prepareXa session.Store xid validateWholeSnapshot baseCatalog snapshot then
             removeXaAssociation session xid
             removeTransactionView session
             { session with Tx = None; Cursors = Map.empty }, Affected 0UL
