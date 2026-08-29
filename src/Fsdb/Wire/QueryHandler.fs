@@ -5893,15 +5893,25 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
             match Parser.parseLocalLoad sql with
             | Result.Error _ -> Result.Error(syntaxError sql)
             | Result.Ok load ->
+                let columns =
+                    load.Fields
+                    |> List.choose (function
+                        | Parser.LoadColumn name -> Some name
+                        | Parser.LoadUserVariable _ -> None)
+
                 match load.Charset |> Option.map _.ToLowerInvariant() with
                 | Some value when value <> "utf8" && value <> "utf8mb4" ->
                     Result.Error(Err(1235, sprintf "LOAD DATA CHARACTER SET %s is not supported" value))
+                | _ when load.Fields |> List.exists (function Parser.LoadUserVariable _ -> true | _ -> false) ->
+                    Result.Error(Err(1235, "LOAD DATA user variables are not supported"))
+                | _ when not load.Assignments.IsEmpty ->
+                    Result.Error(Err(1235, "LOAD DATA SET assignments are not supported"))
                 | _ ->
                     let statement =
                         if load.Replace then
-                            Replace(load.Table, load.Columns, [])
+                            Replace(load.Table, columns, [])
                         else
-                            Insert(load.Table, load.Columns, [], [], load.Ignore)
+                            Insert(load.Table, columns, [], [], load.Ignore)
 
                     let database = session.Database |> Option.defaultValue defaultDatabase
 
@@ -5923,11 +5933,17 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
 /// behavior.
 let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value list list) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
+    let columns =
+        load.Fields
+        |> List.choose (function
+            | Parser.LoadColumn name -> Some name
+            | Parser.LoadUserVariable _ -> None)
+
     let statement =
         if load.Replace then
-            Replace(load.Table, load.Columns, rows |> List.map (List.map Lit))
+            Replace(load.Table, columns, rows |> List.map (List.map Lit))
         else
-            Insert(load.Table, load.Columns, rows |> List.map (List.map Lit), [], load.Ignore)
+            Insert(load.Table, columns, rows |> List.map (List.map Lit), [], load.Ignore)
 
     let executed, result =
         recordDiagnostics session false (fun () ->

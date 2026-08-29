@@ -3584,7 +3584,29 @@ let tests =
                   Expect.equal load.Escape (Some "\\") "escape"
                   Expect.equal load.LineTerminator "\n" "line terminator"
                   Expect.equal load.IgnoreLines 1 "header lines"
-                  Expect.sequenceEqual load.Columns [ "id"; "name" ] "target columns"
+                  Expect.sequenceEqual load.Fields [ LoadColumn "id"; LoadColumn "name" ] "target fields"
+                  Expect.isEmpty load.Assignments "SET assignments"
+              | Error error -> failtestf "unexpected parse error: %s" error
+
+          testCase "LOAD DATA LOCAL INFILE parses user variables and SET expressions"
+          <| fun _ ->
+              match
+                  parseLocalLoad
+                      "LOAD DATA LOCAL INFILE 'records.tsv' INTO TABLE people (@raw_id, name) SET id = CAST(@raw_id AS UNSIGNED), label = CONCAT(name, ':', id)"
+              with
+              | Ok load ->
+                  Expect.sequenceEqual
+                      load.Fields
+                      [ LoadUserVariable { Name = "raw_id"; Sql = "@raw_id" }; LoadColumn "name" ]
+                      "input fields"
+
+                  Expect.equal load.Assignments.Length 2 "SET assignment count"
+
+                  match load.Assignments with
+                  | [ "id", Cast(UserVariable variable, TBigInt true)
+                      "label", FuncCall("CONCAT", [ Col "name"; Lit(VString ":"); Col "id" ]) ] ->
+                      Expect.equal variable.Name "raw_id" "SET user variable"
+                  | assignments -> failtestf "unexpected assignments: %A" assignments
               | Error error -> failtestf "unexpected parse error: %s" error
 
           testCase "LOAD DATA LOCAL INFILE rejects multi-character enclosure and escape settings"

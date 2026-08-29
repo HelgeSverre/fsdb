@@ -184,6 +184,10 @@ let private whenOption
 
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
+type LocalLoadField =
+    | LoadColumn of name: string
+    | LoadUserVariable of variable: UserVariableRef
+
 type LocalLoad =
     { FileName: string
       Table: string
@@ -195,7 +199,8 @@ type LocalLoad =
       Escape: string option
       LineTerminator: string
       IgnoreLines: int
-      Columns: string list }
+      Fields: LocalLoadField list
+      Assignments: (string * Expr) list }
 
 // ---------------------------------------------------------------------------
 // Whitespace, comments, tokens
@@ -2997,6 +3002,9 @@ let private localLoadLines =
         | Some terminator -> terminator |> Option.defaultValue "\n"
 
 let private localLoadData: Parser<LocalLoad, unit> =
+    let field = (attempt userVariableTarget |>> LoadUserVariable) <|> (identifier |>> LoadColumn)
+    let assignments = sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
+
     (keyword "LOAD"
      >>. keyword "DATA"
      >>. keyword "LOCAL"
@@ -3010,8 +3018,9 @@ let private localLoadData: Parser<LocalLoad, unit> =
      .>>. localLoadFields
      .>>. localLoadLines
      .>>. opt (keyword "IGNORE" >>. intTok .>> (keyword "LINES" <|> keyword "ROWS"))
-     .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ","))))
-    |>> fun (((((((fileName, replace), table), charset), fields), lineTerminator), ignoreLines), columns) ->
+     .>>. opt (between (sym "(") (sym ")") (sepBy1 field (sym ",")))
+     .>>. opt (keyword "SET" >>. assignments))
+    |>> fun ((((((((fileName, replace), table), charset), fields), lineTerminator), ignoreLines), columns), assignments) ->
         let fieldTerminator, enclosed, escape = fields
 
         { FileName = fileName
@@ -3024,7 +3033,8 @@ let private localLoadData: Parser<LocalLoad, unit> =
           Escape = escape
           LineTerminator = lineTerminator
           IgnoreLines = ignoreLines |> Option.defaultValue 0
-          Columns = columns |> Option.defaultValue [] }
+          Fields = columns |> Option.defaultValue []
+          Assignments = assignments |> Option.defaultValue [] }
 
 /// A projection's alias — `AS name`, or real MySQL's implicit form with no
 /// `AS` at all (`SELECT 1 x FROM t`, `SELECT price * qty total FROM
