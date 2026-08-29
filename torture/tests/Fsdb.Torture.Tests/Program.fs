@@ -541,6 +541,8 @@ let tests =
                           "explain_analyze"
                           "checksum_table"
                           "locking_nowait"
+                          "locking_skip"
+                          "locking_share_of"
                           "select_into_variable"
                           "text_prepared_statement"
                           "table_lock"
@@ -599,6 +601,7 @@ let tests =
                           TableCharset = None
                           TableCollation = None
                           TableComment = ""
+                          Partitioning = None
                           CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty
                           SecondaryIndex = Map.empty
@@ -621,6 +624,7 @@ let tests =
                           TableCharset = None
                           TableCollation = None
                           TableComment = ""
+                          Partitioning = None
                           CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty
                           SecondaryIndex = Map.empty

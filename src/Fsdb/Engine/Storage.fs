@@ -539,18 +539,44 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
     match store.TransactionLocks with
     | None -> body ()
     | Some context ->
-        let held = lock context.HeldStripes (fun () -> HashSet<RowLockStripe>(context.HeldStripes, HashIdentity.Reference))
+        let held = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
+        let modes = Dictionary<RowLockStripe, bool * bool>(HashIdentity.Reference)
+
+        for stripe in held do
+            lock stripe.SyncRoot (fun () ->
+                modes.Add(
+                    stripe,
+                    (stripe.ExclusiveOwner = Some context.Owner, stripe.SharedOwners.Contains context.Owner)
+                ))
 
         try
             body ()
         with _ ->
-            let acquired =
+            let current =
                 lock context.HeldStripes (fun () ->
                     context.HeldStripes
-                    |> Seq.filter (held.Contains >> not)
                     |> Seq.toArray)
 
-            releaseLockStripes context acquired
+            current
+            |> Array.filter (modes.ContainsKey >> not)
+            |> releaseLockStripes context
+
+            for stripe in held do
+                let hadExclusive, hadShared = modes.[stripe]
+
+                lock stripe.SyncRoot (fun () ->
+                    let releasedExclusive =
+                        not hadExclusive && stripe.ExclusiveOwner = Some context.Owner
+
+                    let releasedShared =
+                        not hadShared && stripe.SharedOwners.Remove context.Owner
+
+                    if releasedExclusive then
+                        stripe.ExclusiveOwner <- None
+
+                    if releasedExclusive || releasedShared then
+                        Threading.Monitor.PulseAll stripe.SyncRoot)
+
             reraise ()
 
 let private prepareTransactionEvents (store: Store) (snapshot: Store) : unit -> unit =

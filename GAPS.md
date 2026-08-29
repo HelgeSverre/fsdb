@@ -1,7 +1,7 @@
 # MySQL 8.4 feature gaps
 
 A map of where fsdb diverges from or lacks MySQL 8.4 functionality. Oracle for
-every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-28, based on a
+every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-29, based on a
 full static exploration of `src/Fsdb/` plus the documented records
 (`docs/compatibility.md`, `torture/findings/`, `torture/support/known-gaps.json`,
 `benchmarks/results/`) and the adversarial parser, wire, privilege, logging,
@@ -81,7 +81,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | accepted and ignored, including `LOCK IN SHARE MODE`; no transaction-held read locks | low | divergence |
+| Locking-read granularity | row and next-key locks over the selected access path | `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, `OF`, `NOWAIT`, and `SKIP LOCKED` hold shared or exclusive row-stripe ownership until transaction end; direct indexed single-table predicates narrow their targets, while joins and scan-shaped reads conservatively lock every row in each named physical source; no next-key/gap locks | low | divergence |
 | Executable-comment edge cases | versioned comment bodies follow the server grammar at each token boundary | ordinary `/*!NNNNN … */` splicing works; empty and densely adjacent executable comments can still be accepted or rejected differently | low | divergence |
 Expression coverage that does exist: full comparison/logical/arithmetic
 operators incl. `<=>`, row-value comparisons and `IN`, `XOR`, three-valued logic; CASE (both forms);
@@ -234,7 +234,7 @@ lock-free.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
-| READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads remain unsupported | medium | partial |
+| READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads use the latest committed row versions and retain row ownership until transaction end | low | partial |
 | Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes, while literal VALUES inserts/upserts claim supplied unique keys and existing duplicate rows; generated/default keys, INSERT SELECT, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize their catalog-wide referential actions; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 1.06x | medium | partial |

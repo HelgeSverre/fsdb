@@ -4901,6 +4901,42 @@ let tests =
               let _, _ = handle blocker "ROLLBACK"
               ()
 
+          testCase "failed NOWAIT restores earlier shared lock modes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE shared_before_failure (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE TABLE blocked_after_upgrade (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "INSERT INTO shared_before_failure VALUES (1)"
+              let _, _ = handle setup "INSERT INTO blocked_after_upgrade VALUES (1)"
+
+              let blocker, _ = handle (create 2 store) "BEGIN"
+              let blocker, _ = handle blocker "SELECT id FROM blocked_after_upgrade FOR UPDATE"
+              let upgrader, _ = handle (create 3 store) "BEGIN"
+              let upgrader, _ = handle upgrader "SELECT id FROM shared_before_failure FOR SHARE"
+
+              match
+                  handle
+                      upgrader
+                      "SELECT a.id,b.id FROM shared_before_failure a JOIN blocked_after_upgrade b ON b.id=a.id FOR UPDATE OF a,b NOWAIT"
+                  |> snd
+              with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected the later source to reject NOWAIT, got %A" other
+
+              let observer, _ = handle (create 4 store) "BEGIN"
+
+              match handle observer "SELECT id FROM shared_before_failure FOR SHARE NOWAIT" with
+              | observer, ResultSet(_, [ [ Some "1" ] ]) ->
+                  match handle observer "SELECT id FROM shared_before_failure FOR UPDATE NOWAIT" |> snd with
+                  | Err(3572, _) -> ()
+                  | other -> failtestf "expected the original shared lock to remain, got %A" other
+              | _, other -> failtestf "expected the failed upgrade to return to shared mode, got %A" other
+
+              let _, _ = handle blocker "ROLLBACK"
+              let _, _ = handle upgrader "ROLLBACK"
+              ()
+
           testCase "locking clauses validate aliases and do not persist in autocommit"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -4940,6 +4976,55 @@ let tests =
               match handle session "SELECT id FROM readonly_locks FOR UPDATE" |> snd with
               | Err(1792, _) -> ()
               | other -> failtestf "expected an update locking read to be rejected, got %A" other
+
+          testCase "nested locking clauses remain query-block scoped"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE outer_locks (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE TABLE inner_locks (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "INSERT INTO outer_locks VALUES (1)"
+              let _, _ = handle setup "INSERT INTO inner_locks VALUES (1)"
+
+              let holder, _ = handle (create 2 store) "BEGIN"
+
+              let holder, result =
+                  handle
+                      holder
+                      "SELECT id,(SELECT id FROM inner_locks WHERE id=1) FROM outer_locks o FOR UPDATE OF o"
+
+              match result with
+              | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected the outer locking read to succeed, got %A" other
+
+              let contender, _ = handle (create 3 store) "BEGIN"
+
+              match handle contender "SELECT id FROM inner_locks FOR UPDATE NOWAIT" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the nested nonlocking source to remain available, got %A" other
+
+              let _, _ = handle contender "ROLLBACK"
+
+              let innerHolder, _ = handle (create 4 store) "BEGIN"
+
+              let innerHolder, result =
+                  handle
+                      innerHolder
+                      "SELECT id FROM outer_locks WHERE EXISTS(SELECT id FROM inner_locks WHERE id=1 FOR UPDATE)"
+
+              match result with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the nested locking read to succeed, got %A" other
+
+              let observer, _ = handle (create 5 store) "BEGIN"
+
+              match handle observer "SELECT id FROM inner_locks FOR UPDATE NOWAIT" |> snd with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected the nested locking clause to hold the inner row, got %A" other
+
+              let _, _ = handle holder "ROLLBACK"
+              let _, _ = handle innerHolder "ROLLBACK"
+              ()
 
           testCase "ordinary transaction commits do not wait on the store-wide coordination lock"
           <| fun _ ->

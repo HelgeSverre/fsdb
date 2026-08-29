@@ -96,6 +96,9 @@ module SyntaxFuzz =
            "explain_analyze", "EXPLAIN ANALYZE SELECT id FROM syntax_target WHERE id = 1"
            "checksum_table", "CHECKSUM TABLE syntax_target"
            "locking_nowait", "SELECT id FROM syntax_target WHERE id = 1 FOR UPDATE NOWAIT"
+           "locking_skip", "SELECT id FROM syntax_target ORDER BY id FOR UPDATE SKIP LOCKED"
+           "locking_share_of",
+           "SELECT t.id,s.id FROM syntax_target t JOIN syntax_source s ON s.id=t.id FOR UPDATE OF t FOR SHARE OF s NOWAIT"
            "select_into_variable", "SELECT COUNT(*) INTO @syntax_count FROM syntax_target"
            "text_prepared_statement", sprintf "PREPARE syntax_stmt_%s FROM 'SELECT 1'" suffix
            "table_lock", "LOCK TABLES syntax_target READ"

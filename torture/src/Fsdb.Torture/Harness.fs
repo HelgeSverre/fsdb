@@ -1566,7 +1566,7 @@ module DmlBattery =
 
 [<RequireQualifiedAccess>]
 module Comparison =
-    let empty =
+    let empty: ComparisonRecord =
         { Equal = false
           Category = "not_run"
           Detail = "comparison did not run"
@@ -1604,7 +1604,7 @@ module Comparison =
         else
             None
 
-    let compare mysql fsdb =
+    let compare (mysql: DatabaseSnapshot) (fsdb: DatabaseSnapshot) =
         let mysqlNames = mysql.Tables |> Array.map _.Name
         let fsdbNames = fsdb.Tables |> Array.map _.Name
 

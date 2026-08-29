@@ -185,6 +185,11 @@ statements wait for an existing row owner and rebase before applying their
 change. Remaining overlapping write shapes fail with MySQL's retryable 1205
 error. Immutable row pages let the merge inspect only pages changed from the
 transaction snapshot and maintain indexes incrementally.
+`FOR UPDATE`, `FOR SHARE`, and `LOCK IN SHARE MODE` use current committed row
+versions and retain shared or exclusive row-stripe ownership until transaction
+end. `OF`, `NOWAIT`, and `SKIP LOCKED` follow MySQL's transaction behavior;
+direct indexed single-table predicates narrow the locked rows, while joins and
+scan-shaped locking reads conservatively lock each targeted physical source.
 PK/UNIQUE and composite secondary equality lookups go through maps keyed by
 the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
 exactly as MySQL's do. Direct literal ranges in a single-table `SELECT` can
