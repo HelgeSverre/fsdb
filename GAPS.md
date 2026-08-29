@@ -64,6 +64,10 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 `LOCK TABLES` enforces READ/WRITE ownership, aliases, atomic lock lists,
 temporary-table exemptions, transaction boundaries, and implicit view/trigger
 dependencies; `UNLOCK TABLE[S]` and disconnect release ownership.
+`HANDLER` supports session-local table aliases, natural and named-index
+navigation, prefix comparisons, WHERE/LIMIT filtering, temporary tables,
+live row roots, declared result metadata, and DDL invalidation; MySQL likewise
+refuses it through the prepared-statement protocol.
 
 ### Statements MySQL 8.4 parses that fsdb refuses (no grammar, no probe)
 
@@ -72,7 +76,7 @@ dependencies; `UNLOCK TABLE[S]` and disconnect release ownership.
 | Procedures support typed `IN`/`OUT`/`INOUT` parameters, nested calls with local output targets, scoped variables, read-only cursors, dynamic `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE`, compound control flow, condition handlers, `SIGNAL`/`RESIGNAL`, `GET CURRENT/STACKED DIAGNOSTICS`, and multi-result CALL. Stored functions support typed parameters/results, read-only cursors, handlers, control flow, nested calls, SQL SECURITY, prepared invocation, and metadata; data-changing statements and procedure calls from functions remain refused | medium | divergence/refusal |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
-| `HANDLER` and XA transactions remain absent | low | refusal |
+| XA transactions remain absent | low | refusal |
 | `ALTER TABLE` accepts `ALGORITHM` and `LOCK` execution hints but does not enforce the requested online-DDL strategy | low | divergence |
 | HASH and LINEAR HASH partition definitions, `pN` selection, INFORMATION_SCHEMA/SHOW metadata, and `ADD`/`COALESCE PARTITION` are logical catalog features over the shared row store; physical pruning plus `DROP`/`REORGANIZE PARTITION` remain absent | low | divergence/refusal |
 | `CREATE/DROP ROLE` are backed by locked `mysql.user` accounts and `SET ROLE NONE` clears the empty active-role set; other `SET ROLE`, `SET DEFAULT ROLE`, role grants/inheritance, dynamic privileges (`BACKUP_ADMIN`…), and `GRANT PROXY` remain absent | medium | divergence/refusal |
@@ -460,7 +464,7 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | The complete 79-case corpus matches native MySQL 8.4.11. Account requirements, typed/compound procedures, CALL, HASH partition selection/growth, and all four transaction isolation settings now pass. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-29 |
+| Executable gap baselines | The complete corpus matches native MySQL 8.4.11. Account requirements, typed/compound procedures, CALL, HANDLER, HASH partition selection/growth, and all four transaction isolation settings now pass. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-29 |
 | Depth-three syntax stress | Three 10,000-mutation seeds over the earlier corpus produced no crash, timeout, protocol fault, or invariant failure. The current baseline-only rerun has no differences; executable-comment/error-contract edges remain mutation targets rather than declared baseline gaps. Fuzz-found incomplete procedure blocks and reserved row, partition, and window-function aliases reject with 1064 | baseline inventory resolved; mutation stress retained 2026-08-29 |
 | Same-row transaction contention | The original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts. Row-delta publication removed whole-table copy/reindex work. A 64x200 campaign then completed all 12,800 prepared transactions with exact parity and zero failures. After unique-key claims landed, a separate 32x100 hot-account campaign matched all 3,200 MySQL outcomes with zero failures; fsdb reached 267 tx/s at p99 373 ms versus MySQL's 132 tx/s at p99 871 ms on the same host | correctness resolved; constant-factor and higher-contention performance open |
 | Multi-database scaling | Single-capture snapshots, deferred transaction catalogs, and per-database lock namespaces prevent cross-database conflicts. A 12-database, 19,200-transaction campaign preserved every database independently with no cross-database bleed; wall time was 0.38x the serial projection against a 0.80 ceiling | correctness and scaling threshold resolved 2026-08-27 |

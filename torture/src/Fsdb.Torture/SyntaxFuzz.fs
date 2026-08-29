@@ -103,6 +103,7 @@ module SyntaxFuzz =
            "text_prepared_statement", sprintf "PREPARE syntax_stmt_%s FROM 'SELECT 1'" suffix
            "table_lock", "LOCK TABLES syntax_target READ"
            "commented_table_lock", "LOCK/**/TABLES syntax_target AS/*alias*/locked READ/**/LOCAL"
+           "handler_open", "HANDLER syntax_target OPEN AS syntax_handler"
            "stored_procedure", sprintf "CREATE PROCEDURE syntax_proc_%s() SELECT 1" suffix
            "procedure_parameter", sprintf "CREATE PROCEDURE syntax_proc_param_%s(IN value INT) SELECT value" suffix
            "procedure_compound",
@@ -174,6 +175,7 @@ module SyntaxFuzz =
         | "text_prepared_statement" -> Some(sprintf "DEALLOCATE PREPARE syntax_stmt_%s" suffix)
         | "table_lock" -> Some "UNLOCK TABLES"
         | "commented_table_lock" -> Some "UNLOCK TABLE"
+        | "handler_open" -> Some "HANDLER syntax_handler CLOSE"
         | "stored_procedure" -> Some(sprintf "DROP PROCEDURE syntax_proc_%s" suffix)
         | "procedure_parameter" -> Some(sprintf "DROP PROCEDURE syntax_proc_param_%s" suffix)
         | "procedure_compound" -> Some(sprintf "DROP PROCEDURE syntax_proc_body_%s" suffix)
@@ -183,6 +185,15 @@ module SyntaxFuzz =
         | "locked_user" -> Some(sprintf "DROP USER IF EXISTS 'syntax_user_%s'@'%%', 'syntax_user_%s'@''" suffix suffix)
         | "account_requirements" -> Some(sprintf "DROP USER IF EXISTS 'syntax_secure_%s'@'%%', 'syntax_secure_%s'@''" suffix suffix)
         | _ -> None
+
+    let private cleanupStatements candidate =
+        match candidate.Feature, candidate.CleanupSql with
+        | "handler_open", Some cleanup -> [ cleanup; "HANDLER syntax_target CLOSE" ]
+        | _, Some cleanup -> [ cleanup ]
+        | _, None -> []
+
+    let private cleanupSucceeded feature outcome =
+        TargetOutcome.succeeded outcome || feature = "handler_open" && outcome.ErrorCode = 1109
 
     let private replaceAt index length replacement (value: string) =
         value.Substring(0, index) + replacement + value.Substring(index + length)
@@ -468,21 +479,19 @@ module SyntaxFuzz =
                         let! mysqlOutcome = Database.execute "mysql" mysql options.TimeoutSeconds candidate.Sql
                         let! fsdbOutcome = Database.execute "fsdb" fsdb options.TimeoutSeconds candidate.Sql
 
-                        match candidate.CleanupSql with
-                        | Some cleanup when TargetOutcome.succeeded mysqlOutcome ->
-                            let! outcome = Database.execute "mysql" mysql options.TimeoutSeconds cleanup
+                        if TargetOutcome.succeeded mysqlOutcome then
+                            for cleanup in cleanupStatements candidate do
+                                let! outcome = Database.execute "mysql" mysql options.TimeoutSeconds cleanup
 
-                            if not (TargetOutcome.succeeded outcome) then
-                                failwithf "MySQL syntax cleanup failed for %s: %s" cleanup outcome.Message
-                        | _ -> ()
+                                if not (cleanupSucceeded candidate.Feature outcome) then
+                                    failwithf "MySQL syntax cleanup failed for %s: %s" cleanup outcome.Message
 
-                        match candidate.CleanupSql with
-                        | Some cleanup when TargetOutcome.succeeded fsdbOutcome ->
-                            let! outcome = Database.execute "fsdb" fsdb options.TimeoutSeconds cleanup
+                        if TargetOutcome.succeeded fsdbOutcome then
+                            for cleanup in cleanupStatements candidate do
+                                let! outcome = Database.execute "fsdb" fsdb options.TimeoutSeconds cleanup
 
-                            if not (TargetOutcome.succeeded outcome) then
-                                failwithf "fsdb syntax cleanup failed for %s: %s" cleanup outcome.Message
-                        | _ -> ()
+                                if not (cleanupSucceeded candidate.Feature outcome) then
+                                    failwithf "fsdb syntax cleanup failed for %s: %s" cleanup outcome.Message
 
                         let classification = classify candidate.Baseline mysqlOutcome fsdbOutcome
 
