@@ -1719,7 +1719,351 @@ let tests =
               | Err(1064, _) -> ()
               | other -> failtestf "expected an invalid lock mode to fail, got %A" other
 
-              Expect.equal (handle session "UNLOCK TABLES" |> snd) (Affected 0UL) "unlock accepted"
+              Expect.equal (handle session "UNLOCK TABLE" |> snd) (Affected 0UL) "singular unlock accepted"
+
+              let session, result = handle session "LOCK/**/TABLES t/**/READ"
+              Expect.equal result (Affected 0UL) "comments may separate lock-list tokens"
+              Expect.equal (handle session "UNLOCK TABLES" |> snd) (Affected 0UL) "plural unlock accepted"
+
+          testCase "LOCK TABLES enforces aliases and access modes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE lock_access (id INT PRIMARY KEY, n INT)"
+              let session, _ = handle session "CREATE TABLE unlocked_access (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO lock_access VALUES (1, 10)"
+              let session, _ = handle session "INSERT INTO unlocked_access VALUES (1)"
+              let session, _ = handle session "LOCK TABLES lock_access READ"
+
+              match handle session "SELECT n FROM lock_access" |> snd with
+              | ResultSet(_, [ [ Some "10" ] ]) -> ()
+              | other -> failtestf "expected the read-locked table to remain readable, got %A" other
+
+              match handle session "UPDATE lock_access SET n=11 WHERE id=1" |> snd with
+              | Err(1099, _) -> ()
+              | other -> failtestf "expected the read lock to reject writes, got %A" other
+
+              match handle session "SELECT id FROM unlocked_access" |> snd with
+              | Err(1100, _) -> ()
+              | other -> failtestf "expected an unlisted table to be rejected, got %A" other
+
+              match handle session "SELECT n FROM lock_access AS other_name" |> snd with
+              | Err(1100, _) -> ()
+              | other -> failtestf "expected an unlisted alias to be rejected, got %A" other
+
+              let session, _ = handle session "UNLOCK TABLES"
+              let session, _ = handle session "LOCK TABLES lock_access AS writable WRITE"
+
+              match handle session "SELECT n FROM lock_access" |> snd with
+              | Err(1100, _) -> ()
+              | other -> failtestf "expected the base name to be hidden by the lock alias, got %A" other
+
+              match handle session "UPDATE lock_access AS writable SET n=11 WHERE id=1" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the write alias to permit updates, got %A" other
+
+              let session, _ = handle session "UNLOCK TABLES"
+
+              match handle session "SELECT n FROM lock_access" |> snd with
+              | ResultSet(_, [ [ Some "11" ] ]) -> ()
+              | other -> failtestf "expected unrestricted access after UNLOCK TABLES, got %A" other
+
+          testCase "table READ locks share and table WRITE locks exclude"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE lock_compatibility (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO lock_compatibility VALUES (1, 10)"
+              let reader, _ = handle (create 2 store) "LOCK TABLES lock_compatibility READ"
+
+              match handle (create 3 store) "SELECT n FROM lock_compatibility" |> snd with
+              | ResultSet(_, [ [ Some "10" ] ]) -> ()
+              | other -> failtestf "expected concurrent reads under a READ lock, got %A" other
+
+              let waitingWriter =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 4 store) "UPDATE lock_compatibility SET n=11 WHERE id=1")
+
+              Expect.isFalse (waitingWriter.Wait(TimeSpan.FromMilliseconds 100.0)) "the READ lock blocks writers"
+              let reader, _ = handle reader "UNLOCK TABLES"
+              Expect.isTrue (waitingWriter.Wait(TimeSpan.FromSeconds 2.0)) "the writer continues after the READ lock releases"
+
+              match waitingWriter.Result |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the waiting writer to succeed, got %A" other
+
+              let writer, _ = handle reader "LOCK TABLES lock_compatibility WRITE"
+
+              let waitingReader =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 5 store) "SELECT n FROM lock_compatibility")
+
+              Expect.isFalse (waitingReader.Wait(TimeSpan.FromMilliseconds 100.0)) "the WRITE lock blocks readers"
+              let _, _ = handle writer "UNLOCK TABLES"
+              Expect.isTrue (waitingReader.Wait(TimeSpan.FromSeconds 2.0)) "the reader continues after the WRITE lock releases"
+
+              match waitingReader.Result |> snd with
+              | ResultSet(_, [ [ Some "11" ] ]) -> ()
+              | other -> failtestf "expected the waiting reader to succeed, got %A" other
+
+          testCase "table lock statements follow MySQL transaction boundaries"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE lock_transactions (id INT PRIMARY KEY)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO lock_transactions VALUES (1)"
+              let session, _ = handle session "LOCK TABLES lock_transactions WRITE"
+              let session, _ = handle session "ROLLBACK"
+              let session, committed = handle session "SELECT COUNT(*) FROM lock_transactions WHERE id=1"
+              Expect.equal committed (ResultSet([ "COUNT(*)" ], [ [ Some "1" ] ])) "LOCK TABLES commits the preceding transaction"
+              let session, _ = handle session "SET autocommit=0"
+              let session, inserted = handle session "INSERT INTO lock_transactions VALUES (2)"
+              Expect.equal inserted (Affected 1UL) "the explicit WRITE lock permits the insert"
+              Expect.isSome session.Tx "autocommit zero opens a transaction"
+              let session, _ = handle session "UNLOCK TABLES"
+              Expect.isNone session.Tx "UNLOCK TABLES commits the open transaction"
+              let session, _ = handle session "ROLLBACK"
+              let session, unlocked = handle session "SELECT COUNT(*) FROM lock_transactions WHERE id=2"
+              Expect.equal unlocked (ResultSet([ "COUNT(*)" ], [ [ Some "1" ] ])) "UNLOCK TABLES commits while explicit locks are held"
+              let session, _ = handle session "LOCK TABLES lock_transactions WRITE"
+              let session, _ = handle session "START TRANSACTION"
+
+              match handle session "SELECT COUNT(*) FROM lock_transactions" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected START TRANSACTION to release the explicit lock, got %A" other
+
+          testCase "temporary tables remain accessible in explicit lock mode"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE permanent_lock_target (id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TEMPORARY TABLE temporary_lock_target (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO permanent_lock_target VALUES (1)"
+              let session, _ = handle session "LOCK TABLES permanent_lock_target READ"
+
+              match handle session "INSERT INTO temporary_lock_target VALUES (1)" with
+              | session, Affected 1UL ->
+                  match handle session "SELECT COUNT(*) FROM temporary_lock_target" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected the temporary table to remain readable, got %A" other
+              | _, other -> failtestf "expected the temporary table to remain writable, got %A" other
+
+              let session, _ = handle session "UNLOCK TABLES"
+              let session, _ = handle session "LOCK TABLES temporary_lock_target WRITE"
+
+              match handle session "SELECT id FROM permanent_lock_target" |> snd with
+              | Err(1100, _) -> ()
+              | other -> failtestf "expected a temporary-only lock list to restrict permanent tables, got %A" other
+
+          testCase "view locks include base tables without exposing their names"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE locked_view_base (id INT PRIMARY KEY, n INT)"
+              let setup, _ = handle setup "INSERT INTO locked_view_base VALUES (1, 10)"
+              let _, _ = handle setup "CREATE VIEW locked_view AS SELECT id,n FROM locked_view_base"
+              let holder, _ = handle (create 2 store) "LOCK TABLES locked_view READ"
+
+              match handle holder "SELECT n FROM locked_view" |> snd with
+              | ResultSet(_, [ [ Some "10" ] ]) -> ()
+              | other -> failtestf "expected the locked view to remain readable, got %A" other
+
+              match handle holder "SELECT n FROM locked_view_base" |> snd with
+              | Err(1100, _) -> ()
+              | other -> failtestf "expected the implicit base lock to remain hidden, got %A" other
+
+              let waiting =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 3 store) "UPDATE locked_view_base SET n=11 WHERE id=1")
+
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the view's base lock blocks writers"
+              let _, _ = handle holder "UNLOCK TABLES"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "the base writer continues after the view unlocks"
+
+              match waiting.Result |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the waiting base update to succeed, got %A" other
+
+          testCase "table locks include trigger dependencies without exposing them"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE locked_trigger_source (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE TABLE locked_trigger_log (id INT PRIMARY KEY)"
+
+              let _, _ =
+                  handle
+                      setup
+                      "CREATE TRIGGER lock_dependency AFTER INSERT ON locked_trigger_source FOR EACH ROW INSERT INTO locked_trigger_log VALUES(NEW.id)"
+
+              let holder, _ = handle (create 2 store) "LOCK TABLES locked_trigger_source WRITE"
+
+              match handle holder "INSERT INTO locked_trigger_source VALUES(1)" with
+              | holder, Affected 1UL ->
+                  match handle holder "SELECT id FROM locked_trigger_log" |> snd with
+                  | Err(1100, _) -> ()
+                  | other -> failtestf "expected the implicit trigger-table lock to remain hidden, got %A" other
+              | _, other -> failtestf "expected the trigger write under its implicit dependency lock, got %A" other
+
+              let waiting =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 3 store) "SELECT id FROM locked_trigger_log")
+
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the trigger dependency blocks other readers"
+              let _, _ = handle holder "UNLOCK TABLES"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "the trigger table becomes readable after unlock"
+
+              match waiting.Result |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the trigger row after unlock, got %A" other
+
+          testCase "LOCK TABLES acquisition is atomic and replaces prior locks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE atomic_lock_first (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE TABLE atomic_lock_second (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "INSERT INTO atomic_lock_first VALUES (1)"
+              let _, _ = handle setup "INSERT INTO atomic_lock_second VALUES (1)"
+              let holder, _ = handle (create 2 store) "LOCK TABLES atomic_lock_second WRITE"
+              let contender, _ = handle (create 3 store) "LOCK TABLES atomic_lock_first READ"
+
+              let waiting =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle contender "LOCK TABLES atomic_lock_first WRITE, atomic_lock_second WRITE")
+
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the combined lock waits for every table"
+
+              match handle (create 4 store) "UPDATE atomic_lock_first SET id=id WHERE id=1" |> snd with
+              | Affected _ -> ()
+              | other -> failtestf "expected the contender's prior lock to release before waiting, got %A" other
+
+              let _, _ = handle holder "UNLOCK TABLES"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "the atomic lock list acquires after its blocker releases"
+
+              match waiting.Result with
+              | contender, Affected 0UL ->
+                  let _, _ = handle contender "UNLOCK TABLES"
+                  ()
+              | _, other -> failtestf "expected the combined lock to succeed, got %A" other
+
+          testCase "failed table lock acquisition leaves no partial or prior locks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE timeout_lock_first (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE TABLE timeout_lock_second (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "INSERT INTO timeout_lock_first VALUES (1)"
+              let _, _ = handle setup "INSERT INTO timeout_lock_second VALUES (1)"
+              let holder, _ = handle (create 2 store) "LOCK TABLES timeout_lock_second WRITE"
+              let contender, _ = handle (create 3 store) "LOCK TABLES timeout_lock_first READ"
+              let contender, _ = handle contender "SET innodb_lock_wait_timeout=1"
+
+              match handle contender "LOCK TABLES timeout_lock_first WRITE, timeout_lock_second WRITE" |> snd with
+              | Err(1205, _) -> ()
+              | other -> failtestf "expected the combined lock to time out, got %A" other
+
+              match handle (create 4 store) "UPDATE timeout_lock_first SET id=id WHERE id=1" |> snd with
+              | Affected _ -> ()
+              | other -> failtestf "expected the prior and partial locks to be absent after timeout, got %A" other
+
+              let _, _ = handle holder "UNLOCK TABLES"
+              ()
+
+          testCase "a valid replacement lock list releases prior locks before resolution"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE replaced_lock (id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TABLE newly_accessible_after_error (id INT PRIMARY KEY)"
+              let session, _ = handle session "LOCK TABLES replaced_lock READ"
+
+              match handle session "LOCK TABLES missing_replacement_lock WRITE" with
+              | session, Err(1146, _) ->
+                  match handle session "SELECT id FROM newly_accessible_after_error" |> snd with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected the prior lock mode to be gone after resolution failed, got %A" other
+              | _, other -> failtestf "expected the missing replacement table to fail, got %A" other
+
+          testCase "table locks cover CTE and subquery aliases"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE lock_tree_source (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO lock_tree_source VALUES (1)"
+              let session, _ = handle session "LOCK TABLES lock_tree_source AS outer_source READ"
+
+              let sql =
+                  "WITH selected AS (SELECT id FROM lock_tree_source AS outer_source WHERE EXISTS (SELECT 1 FROM lock_tree_source AS inner_source WHERE inner_source.id=outer_source.id)) SELECT id FROM selected"
+
+              match handle session sql |> snd with
+              | Err(1100, _) -> ()
+              | other -> failtestf "expected the unlisted subquery alias to fail, got %A" other
+
+              let session, result =
+                  handle session "LOCK TABLES lock_tree_source AS outer_source READ, lock_tree_source AS inner_source READ"
+
+              Expect.equal result (Affected 0UL) "both source aliases locked"
+
+              match handle session sql |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the fully locked CTE query to succeed, got %A" other
+
+              let _, _ = handle session "UNLOCK TABLES"
+              ()
+
+          testCase "permanent DDL releases explicit table locks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE ddl_lock_source (id INT PRIMARY KEY)"
+              let session, _ = handle session "LOCK TABLES ddl_lock_source READ"
+              let session, result = handle session "CREATE TABLE ddl_lock_created (id INT PRIMARY KEY)"
+              Expect.equal result (Affected 0UL) "DDL accepted"
+
+              match handle session "SELECT id FROM ddl_lock_source" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected DDL to release the explicit lock mode, got %A" other
+
+          testCase "table locks require SELECT and LOCK TABLES privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE TABLE privileged_lock (id INT PRIMARY KEY)"
+              let root, _ = handle root "CREATE USER 'lock_user'@'%'"
+              let _, _ = handle root "GRANT SELECT ON fsdb.privileged_lock TO 'lock_user'@'%'"
+
+              let limited =
+                  { create 2 store with
+                      User = "lock_user"
+                      AccountHost = "%"
+                      LoginUser = "lock_user" }
+
+              match handle limited "LOCK TABLES privileged_lock READ" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected LOCK TABLES privilege enforcement, got %A" other
+
+              let _, _ = handle root "GRANT LOCK TABLES ON fsdb.* TO 'lock_user'@'%'"
+
+              match handle limited "LOCK TABLES privileged_lock WRITE" with
+              | limited, Affected 0UL ->
+                  let _, _ = handle limited "UNLOCK TABLES"
+                  ()
+              | _, other -> failtestf "expected SELECT plus LOCK TABLES to permit a WRITE lock, got %A" other
+
+          testCase "closing a session releases its explicit table locks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE abandoned_table_lock (id INT PRIMARY KEY)"
+              let _, _ = handle setup "INSERT INTO abandoned_table_lock VALUES (1)"
+              let holder, _ = handle (create 2 store) "LOCK TABLES abandoned_table_lock WRITE"
+              closeSession holder
+
+              match handle (create 3 store) "SELECT id FROM abandoned_table_lock" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected disconnect cleanup to release the table lock, got %A" other
 
           testCase "single-statement stored procedures persist and execute"
           <| fun _ ->

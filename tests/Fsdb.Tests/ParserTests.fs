@@ -2739,7 +2739,16 @@ let tests =
                 testCase "rejects empty and malformed lock lists"
                 <| fun _ ->
                     Expect.isError (parseTableLocks "LOCK TABLES") "a lock list is required"
-                    Expect.isError (parseTableLocks "LOCK TABLES t SHARE") "only READ and WRITE are valid" ]
+                    Expect.isError (parseTableLocks "LOCK TABLES t SHARE") "only READ and WRITE are valid"
+
+                testCase "accepts comments between lock-list tokens"
+                <| fun _ ->
+                    match parseTableLocks "LOCK/**/TABLES `app`./* qualifier */`t` AS/* alias */reader READ/**/LOCAL" with
+                    | Ok [ lock ] ->
+                        Expect.equal lock.Name "app.t" "qualified name"
+                        Expect.equal lock.Alias (Some "reader") "alias"
+                        Expect.equal lock.Mode ReadTableLock "mode"
+                    | other -> failtestf "expected a commented lock request, got %A" other ]
 
           testList
               "failure cases"

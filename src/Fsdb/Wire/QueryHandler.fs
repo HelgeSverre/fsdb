@@ -1278,7 +1278,7 @@ let private flushUserResourcesRe = Regex(@"^FLUSH\s+USER_RESOURCES\s*;?$", Regex
 let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreCase)
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
-let private unlockTablesRe = Regex(@"^UNLOCK\s+TABLES\s*$", RegexOptions.IgnoreCase)
+let private unlockTablesRe = Regex(@"^UNLOCK\s+TABLES?\s*$", RegexOptions.IgnoreCase)
 
 let private setTransactionIsolation =
     Regex(
@@ -1537,6 +1537,7 @@ let private prepareTransactionWrite (statement: Statement) (session: Session) : 
 let closeSession (session: Session) : unit =
     releaseAllAdvisoryLocks session |> ignore
     rollbackSession session |> ignore
+    TableLocks.releaseExplicit session.Store session.ConnectionId
 
 let private savepointNotFound (name: string) : QueryResult =
     Err(1305, sprintf "SAVEPOINT %s does not exist" name)
@@ -1894,7 +1895,20 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
     | None -> execute session
 
 let private executeParsedCore (session: Session) (stmt: Statement) : Session * QueryResult =
-    InformationSchema.withViewer (Session.currentStore session) (accountOf session) (fun () -> executeParsedStatement session stmt)
+    let store = Session.currentStore session
+    let database = session.Database |> Option.defaultValue defaultDatabase
+    let accesses = TableLocks.accessesForStatement store session.TemporaryCatalog database stmt
+
+    match
+        TableLocks.withStatementAccess
+            (lockWaitTimeout session)
+            session.Store
+            session.ConnectionId
+            accesses
+            (fun () -> InformationSchema.withViewer store (accountOf session) (fun () -> executeParsedStatement session stmt))
+    with
+    | Ok result -> result
+    | Error(code, message) -> session, Err(code, message)
 
 type private TemporaryAction =
     | CreateTemporary
@@ -2094,6 +2108,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
         executeWithTemporaryCatalog action session stmt
     elif causesImplicitCommit stmt then
         let session = commitSession session
+        TableLocks.releaseExplicit session.Store session.ConnectionId
 
         if changesCatalogMembership stmt then
             executeParsedCore session stmt
@@ -2496,6 +2511,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | RollbackTo name -> rollbackToSavepoint name session
     | Begin readOnly ->
         let access = readOnly |> Option.defaultValue (configuredReadOnly session)
+        TableLocks.releaseExplicit session.Store session.ConnectionId
         beginTransaction access session, Affected 0UL
     | Commit chain ->
         let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
@@ -2994,9 +3010,45 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | FlushLogs -> session, Affected 0UL
     | LockTables ->
         match Parser.parseTableLocksWithOptions (parserOptionsForSession session) sql with
-        | Ok _ -> session, Affected 0UL
+        | Ok requested ->
+            let session = commitSession session
+            TableLocks.releaseExplicit session.Store session.ConnectionId
+            let database = session.Database |> Option.defaultValue defaultDatabase
+
+            match TableLocks.explicitAccesses session.Store session.TemporaryCatalog database requested with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok accesses ->
+                let privileges =
+                    accesses
+                    |> List.choose (fun table ->
+                        table.ReferenceName
+                        |> Option.map (fun _ ->
+                            [ "LOCK TABLES", Auth.OnTable(table.Database, table.Table)
+                              "SELECT", Auth.OnTable(table.Database, table.Table) ]))
+                    |> List.collect id
+
+                match Auth.checkForAccount session.Store (accountOf session) privileges with
+                | Error(code, message) -> session, Err(code, message)
+                | Ok() ->
+                    match
+                        TableLocks.acquireExplicit
+                            (lockWaitTimeout session)
+                            session.Store
+                            session.ConnectionId
+                            accesses
+                    with
+                    | Ok() -> session, Affected 0UL
+                    | Error(code, message) -> session, Err(code, message)
         | Error detail -> session, parserError sql detail
-    | UnlockTables -> session, Affected 0UL
+    | UnlockTables ->
+        let session =
+            if TableLocks.holdsExplicit session.Store session.ConnectionId then
+                commitSession session
+            else
+                session
+
+        TableLocks.releaseExplicit session.Store session.ConnectionId
+        session, Affected 0UL
 let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
     Fsdb.Sql.Expression.rewriteStatement
         (function
