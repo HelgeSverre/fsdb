@@ -190,6 +190,11 @@ versions and retain shared or exclusive row-stripe ownership until transaction
 end. `OF`, `NOWAIT`, and `SKIP LOCKED` follow MySQL's transaction behavior;
 direct indexed single-table predicates narrow the locked rows, while joins and
 scan-shaped locking reads conservatively lock each targeted physical source.
+`LOCK TABLES` provides session-scoped shared/exclusive ownership with MySQL's
+alias restrictions, temporary-table exception, atomic replacement lists, and
+implicit locks for view and trigger dependencies. Ordinary statements acquire
+compatible table ownership only for their execution, so explicit locks also
+coordinate with sessions that never issue `LOCK TABLES`.
 PK/UNIQUE and composite secondary equality lookups go through maps keyed by
 the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
 exactly as MySQL's do. Direct literal ranges in a single-table `SELECT` can

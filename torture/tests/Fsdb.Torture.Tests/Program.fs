@@ -465,6 +465,7 @@ let tests =
                           "partitioned_table"
                           "text_prepared_statement"
                           "table_lock"
+                          "commented_table_lock"
                           "stored_procedure"
                           "procedure_parameter"
                           "procedure_compound"

@@ -102,6 +102,7 @@ module SyntaxFuzz =
            "select_into_variable", "SELECT COUNT(*) INTO @syntax_count FROM syntax_target"
            "text_prepared_statement", sprintf "PREPARE syntax_stmt_%s FROM 'SELECT 1'" suffix
            "table_lock", "LOCK TABLES syntax_target READ"
+           "commented_table_lock", "LOCK/**/TABLES syntax_target AS/*alias*/locked READ/**/LOCAL"
            "stored_procedure", sprintf "CREATE PROCEDURE syntax_proc_%s() SELECT 1" suffix
            "procedure_parameter", sprintf "CREATE PROCEDURE syntax_proc_param_%s(IN value INT) SELECT value" suffix
            "procedure_compound",
@@ -172,6 +173,7 @@ module SyntaxFuzz =
         | "partitioned_table" -> Some(sprintf "DROP TABLE syntax_partition_%s" suffix)
         | "text_prepared_statement" -> Some(sprintf "DEALLOCATE PREPARE syntax_stmt_%s" suffix)
         | "table_lock" -> Some "UNLOCK TABLES"
+        | "commented_table_lock" -> Some "UNLOCK TABLE"
         | "stored_procedure" -> Some(sprintf "DROP PROCEDURE syntax_proc_%s" suffix)
         | "procedure_parameter" -> Some(sprintf "DROP PROCEDURE syntax_proc_param_%s" suffix)
         | "procedure_compound" -> Some(sprintf "DROP PROCEDURE syntax_proc_body_%s" suffix)
