@@ -124,6 +124,10 @@ type TransactionIsolation =
     | RepeatableRead
     | Serializable
 
+type XaAssociationState =
+    | Active
+    | Idle
+
 type Savepoint =
     { Sequence: int
       BaseCatalog: Catalog
@@ -147,7 +151,8 @@ type Transaction =
       /// Sequence numbers preserve establishment order independently of writes.
       Savepoints: Map<string, Savepoint>
       /// Monotonic and never reused after a savepoint is dropped.
-      NextSavepointSeq: int }
+      NextSavepointSeq: int
+      Xa: (Xa.Xid * XaAssociationState) option }
 
 type Session =
     { ConnectionId: int

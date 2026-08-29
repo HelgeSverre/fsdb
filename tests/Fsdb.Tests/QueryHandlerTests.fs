@@ -5830,6 +5830,90 @@ let tests =
                   Expect.equal (session.Variables.["collation_connection"]) (Some "latin1_swedish_ci") "default collation"
               | _, other -> failtestf "expected SET CHARACTER SET to succeed, got %A" other
 
+          testCase "XA transactions detach at prepare and commit across sessions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let second = create 2 store
+              let first, _ = handle first "CREATE TABLE xa_rows (id INT PRIMARY KEY, value INT)"
+              let first, started = handle first "XA START 'global', 'branch', 7"
+              Expect.equal started (Affected 0UL) "XA branch starts"
+              let first, inserted = handle first "INSERT INTO xa_rows VALUES (1, 10)"
+              Expect.equal inserted (Affected 1UL) "branch writes privately"
+
+              match handle second "SELECT COUNT(*) FROM xa_rows" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected the unprepared write to stay private, got %A" other
+
+              match handle first "COMMIT" |> snd with
+              | Err(1399, message) -> Expect.stringContains message "ACTIVE state" "local COMMIT is refused"
+              | other -> failtestf "expected XAER_RMFAIL in ACTIVE state, got %A" other
+
+              let first, ended = handle first "XA END 'global', 'branch', 7"
+              Expect.equal ended (Affected 0UL) "XA branch becomes idle"
+
+              match handle first "SELECT 1" |> snd with
+              | Err(1399, message) -> Expect.stringContains message "IDLE state" "idle branches reject ordinary statements"
+              | other -> failtestf "expected XAER_RMFAIL in IDLE state, got %A" other
+
+              let first, prepared = handle first "XA PREPARE 'global', 'branch', 7"
+              Expect.equal prepared (Affected 0UL) "XA branch prepares"
+              Expect.isNone first.Tx "prepare detaches the local transaction"
+
+              match handle second "XA RECOVER" |> snd with
+              | ResultSet(columns, [ [ Some "7"; Some "6"; Some "6"; Some "globalbranch" ] ]) ->
+                  Expect.equal columns [ "formatID"; "gtrid_length"; "bqual_length"; "data" ] "recover columns"
+              | other -> failtestf "expected one recoverable branch, got %A" other
+
+              let second, committed = handle second "XA COMMIT 'global', 'branch', 7"
+              Expect.equal committed (Affected 0UL) "another session commits the detached branch"
+
+              match handle second "SELECT value FROM xa_rows WHERE id = 1" |> snd with
+              | ResultSet(_, [ [ Some "10" ] ]) -> ()
+              | other -> failtestf "expected the XA write after commit, got %A" other
+
+              match handle first "XA COMMIT 'global', 'branch', 7" |> snd with
+              | Err(1397, message) -> Expect.stringContains message "Unknown XID" "completed branch is gone"
+              | other -> failtestf "expected XAER_NOTA after completion, got %A" other
+
+          testCase "XA one-phase commit rollback and duplicate identifiers follow MySQL states"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let observer = create 2 store
+              let session, _ = handle session "CREATE TABLE xa_outcomes (id INT PRIMARY KEY)"
+              let session, _ = handle session "XA START X'6F6E65', b'10', 4294967295"
+              let session, _ = handle session "INSERT INTO xa_outcomes VALUES (1)"
+              let session, _ = handle session "XA END X'6F6E65', b'10', 4294967295"
+              let session, committed = handle session "XA COMMIT X'6F6E65', b'10', 4294967295 ONE PHASE"
+              Expect.equal committed (Affected 0UL) "idle branch commits in one phase"
+
+              let session, _ = handle session "XA START 'rollback'"
+              let session, _ = handle session "INSERT INTO xa_outcomes VALUES (2)"
+              let session, _ = handle session "XA END 'rollback'"
+              let session, _ = handle session "XA PREPARE 'rollback'"
+
+              match handle observer "XA START 'rollback'" |> snd with
+              | Err(1440, message) -> Expect.stringContains message "XID already exists" "prepared identifiers stay reserved"
+              | other -> failtestf "expected XAER_DUPID, got %A" other
+
+              let observer, rolledBack = handle observer "XA ROLLBACK 'rollback'"
+              Expect.equal rolledBack (Affected 0UL) "another session rolls the branch back"
+
+              match handle observer "SELECT GROUP_CONCAT(id ORDER BY id) FROM xa_outcomes" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected only the one-phase commit, got %A" other
+
+              match handle session "XA END 'missing'" |> snd with
+              | Err(1399, message) -> Expect.stringContains message "NON-EXISTING state" "no branch is associated"
+              | other -> failtestf "expected XAER_RMFAIL without an associated branch, got %A" other
+
+          testCase "XA statements are refused by the prepared protocol"
+          <| fun _ ->
+              match prepareStatement "XA START 'prepared'" with
+              | Result.Error(1295, message) -> Expect.stringContains message "prepared statement protocol" "prepared refusal"
+              | other -> failtestf "expected XA prepare refusal, got %A" other
+
           // -----------------------------------------------------------------
           // Session user identity + the built-in `mysql` system schema
           // -----------------------------------------------------------------

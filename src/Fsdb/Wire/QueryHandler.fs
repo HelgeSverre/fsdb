@@ -1321,6 +1321,24 @@ type private DirtyTransactionView =
 let private dirtyTransactionViews =
     ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<int, DirtyTransactionView>>()
 
+type private XaEntry =
+    | Associated of connectionId: int
+    | PreparedBranch of Transaction
+
+let private xaTransactions =
+    ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<Xa.Xid, XaEntry>>()
+
+let private xaEntries (store: Store) =
+    xaTransactions.GetValue(store.Databases, fun _ -> ConcurrentDictionary<Xa.Xid, XaEntry>())
+
+let private removeXaAssociation (session: Session) xid =
+    let entries = xaEntries session.Store
+
+    lock entries (fun () ->
+        match entries.TryGetValue xid with
+        | true, Associated owner when owner = session.ConnectionId -> entries.TryRemove xid |> ignore
+        | _ -> ())
+
 let private transactionViews (store: Store) =
     dirtyTransactionViews.GetValue(store.Databases, fun _ -> ConcurrentDictionary<int, DirtyTransactionView>())
 
@@ -1385,17 +1403,12 @@ let private rebaseReadUncommittedSnapshot (session: Session) (tx: Transaction) =
 
     baseCatalog, snapshot
 
-/// Commits the open transaction by publishing its private catalog. Ordinary
-/// isolation levels merge disjoint row changes; SERIALIZABLE validates the
-/// transaction's read snapshot before publication. No open transaction is a
-/// no-op, matching MySQL.
-let private commitSession (session: Session) : Session =
-    match session.Tx with
-    | Some tx when not tx.Seeded ->
+/// Publishes a supplied transaction so local COMMIT and detached XA completion
+/// share one merge, durability, and lock-release path.
+let private publishTransaction (session: Session) (tx: Transaction) =
+    if not tx.Seeded then
         Storage.releaseTransactionLocks tx.Snapshot
-        removeTransactionView session
-        { session with Tx = None; Cursors = Map.empty }
-    | Some tx ->
+    else
         let timeout = lockWaitTimeout session
 
         match tx.Isolation with
@@ -1403,8 +1416,16 @@ let private commitSession (session: Session) : Session =
         | _ -> Storage.commitCatalogIntoWithTimeout timeout session.Store tx.BaseCatalog tx.Snapshot
 
         Storage.releaseTransactionLocks tx.Snapshot
-        removeTransactionView session
 
+/// Commits the open transaction by publishing its private catalog. Ordinary
+/// isolation levels merge disjoint row changes; SERIALIZABLE validates the
+/// transaction's read snapshot before publication. No open transaction is a
+/// no-op, matching MySQL.
+let private commitSession (session: Session) : Session =
+    match session.Tx with
+    | Some tx ->
+        publishTransaction session tx
+        removeTransactionView session
         { session with Tx = None; Cursors = Map.empty }
     | None -> { session with Cursors = Map.empty }
 
@@ -1416,6 +1437,10 @@ let private commitSession (session: Session) : Session =
 /// CAS-safe merge as `commitSession`); leaves everything else (rows,
 /// schema) alone.
 let private rollbackSession (session: Session) : Session =
+    session.Tx
+    |> Option.bind _.Xa
+    |> Option.iter (fst >> removeXaAssociation session)
+
     match session.Tx with
     | Some tx when not tx.Seeded -> Storage.releaseTransactionLocks tx.Snapshot
     | Some tx ->
@@ -1461,7 +1486,161 @@ let private beginTransaction (readOnly: bool) (session: Session) : Session =
                   ReadOnly = readOnly
                   Seeded = false
                   Savepoints = Map.empty
-                  NextSavepointSeq = 0 } }
+                  NextSavepointSeq = 0
+                  Xa = None } }
+
+let private xaRmFail state =
+    Err(1399, sprintf "XAER_RMFAIL: The command cannot be executed when global transaction is in the  %s state" state)
+
+let private xaUnknown = Err(1397, "XAER_NOTA: Unknown XID")
+
+let private xaStateName = function
+    | Active -> "ACTIVE"
+    | Idle -> "IDLE"
+
+let private xaAssociation (session: Session) =
+    session.Tx |> Option.bind _.Xa
+
+let private startXa xid session =
+    match session.Tx with
+    | Some tx ->
+        match tx.Xa with
+        | Some(_, state) -> session, xaRmFail (xaStateName state)
+        | None -> session, Err(1400, "XAER_OUTSIDE: Some work is done outside global transaction")
+    | None when TableLocks.holdsExplicit session.Store session.ConnectionId ->
+        session, Err(1400, "XAER_OUTSIDE: Some work is done outside global transaction")
+    | None ->
+        let entries = xaEntries session.Store
+
+        lock entries (fun () ->
+            if entries.Keys |> Seq.exists (Xa.sameBranch xid) then
+                session, Err(1440, "XAER_DUPID: The XID already exists")
+            else
+                entries.[xid] <- Associated session.ConnectionId
+                let started = beginTransaction false session
+
+                match started.Tx with
+                | Some transaction ->
+                    { started with Tx = Some { transaction with Xa = Some(xid, Active) } }, Affected 0UL
+                | None -> session, xaRmFail "NON-EXISTING")
+
+let private endXa xid session =
+    match xaAssociation session with
+    | Some(current, Active) when current = xid ->
+        { session with Tx = session.Tx |> Option.map (fun tx -> { tx with Xa = Some(xid, Idle) }) }, Affected 0UL
+    | Some(current, _) when current <> xid -> session, xaUnknown
+    | Some(_, state) -> session, xaRmFail (xaStateName state)
+    | None -> session, xaRmFail "NON-EXISTING"
+
+let private prepareXa xid session =
+    match session.Tx, xaAssociation session with
+    | Some transaction, Some(current, Idle) when current = xid ->
+        let entries = xaEntries session.Store
+
+        lock entries (fun () -> entries.[xid] <- PreparedBranch transaction)
+        removeTransactionView session
+        { session with Tx = None; Cursors = Map.empty }, Affected 0UL
+    | _, Some(current, _) when current <> xid -> session, xaUnknown
+    | _, Some(_, state) -> session, xaRmFail (xaStateName state)
+    | _ -> session, xaRmFail "NON-EXISTING"
+
+let private completePreparedXa commit xid session =
+    let entries = xaEntries session.Store
+
+    let prepared =
+        lock entries (fun () ->
+            match entries.TryGetValue xid with
+            | true, PreparedBranch transaction ->
+                entries.TryRemove xid |> ignore
+                Some transaction
+            | _ -> None)
+
+    match prepared with
+    | None -> session, xaUnknown
+    | Some transaction ->
+        try
+            if commit then
+                publishTransaction session transaction
+            else
+                if transaction.Seeded then
+                    Storage.bumpAutoIncrementsInto session.Store transaction.Snapshot.Catalog
+
+                Storage.releaseTransactionLocks transaction.Snapshot
+
+            session, Affected 0UL
+        with error ->
+            lock entries (fun () -> entries.TryAdd(xid, PreparedBranch transaction) |> ignore)
+            raise error
+
+let private commitXa xid onePhase session =
+    match session.Tx, xaAssociation session with
+    | Some transaction, Some(current, Idle) when current = xid && onePhase ->
+        publishTransaction session transaction
+        removeXaAssociation session xid
+        removeTransactionView session
+        { session with Tx = None; Cursors = Map.empty }, Affected 0UL
+    | _, Some(current, _) when current <> xid -> session, xaUnknown
+    | _, Some(_, state) -> session, xaRmFail (xaStateName state)
+    | _ -> completePreparedXa true xid session
+
+let private rollbackXa xid session =
+    match session.Tx, xaAssociation session with
+    | Some transaction, Some(current, Idle) when current = xid ->
+        removeXaAssociation session xid
+
+        if transaction.Seeded then
+            Storage.bumpAutoIncrementsInto session.Store transaction.Snapshot.Catalog
+
+        Storage.releaseTransactionLocks transaction.Snapshot
+        removeTransactionView session
+        { session with Tx = None; Cursors = Map.empty }, Affected 0UL
+    | _, Some(current, _) when current <> xid -> session, xaUnknown
+    | _, Some(_, state) -> session, xaRmFail (xaStateName state)
+    | _ -> completePreparedXa false xid session
+
+let private recoverXa convertXid session =
+    let rows =
+        xaEntries session.Store
+        |> Seq.choose (fun entry ->
+            match entry.Value with
+            | Associated _ -> None
+            | PreparedBranch _ ->
+                let xid = entry.Key
+                let bytes = Xa.data xid
+                let data =
+                    if convertXid then
+                        "0x" + Convert.ToHexString bytes
+                    else
+                        Text.Encoding.Latin1.GetString bytes
+
+                Some
+                    [ Some(string xid.FormatId)
+                      Some(string xid.GlobalId.Length)
+                      Some(string xid.BranchQualifier.Length)
+                      Some data ])
+        |> Seq.sortBy (fun row -> row.[3])
+        |> List.ofSeq
+
+    session, ResultSet([ "formatID"; "gtrid_length"; "bqual_length"; "data" ], rows)
+
+let private runXa (parserOptions: Parser.ParserOptions) (session: Session) sql =
+    let charset =
+        session.Variables
+        |> Map.tryFind "character_set_client"
+        |> Option.flatten
+        |> Option.defaultValue "utf8mb4"
+
+    let executed, result =
+        match Xa.parse parserOptions.NoBackslashEscapes charset sql with
+        | Error detail -> session, parserError sql detail
+        | Ok(Xa.Start xid) -> startXa xid session
+        | Ok(Xa.End xid) -> endXa xid session
+        | Ok(Xa.Prepare xid) -> prepareXa xid session
+        | Ok(Xa.Commit(xid, onePhase)) -> commitXa xid onePhase session
+        | Ok(Xa.Rollback xid) -> rollbackXa xid session
+        | Ok(Xa.Recover convertXid) -> recoverXa convertXid session
+
+    { executed with LastResultColumnMetadata = completeResultMetadata executed result [] }, result
 
 /// Seeds fixed snapshots and refreshes statement-scoped isolation views.
 let startTransactionStatement (session: Session) : Session =
@@ -2120,6 +2299,9 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
     let executed, result =
         if usesTemporary then
             executeWithTemporaryCatalog action session stmt
+        elif causesImplicitCommit stmt && xaAssociation session |> Option.isSome then
+            let state = xaAssociation session |> Option.map (snd >> xaStateName) |> Option.defaultValue "NON-EXISTING"
+            session, xaRmFail state
         elif causesImplicitCommit stmt then
             let session = commitSession session
             TableLocks.releaseExplicit session.Store session.ConnectionId
@@ -2452,6 +2634,39 @@ let private tryProbe (sql: string) : Probe option =
 /// re-derive a little from `sql` themselves rather than `Probe` carrying
 /// every last capture group, since that parsing already lives in
 /// `handleSet`/`handleShowVariables`/etc. and shouldn't move twice.
+let private acquireExplicitTableLocks session sql =
+    match Parser.parseTableLocksWithOptions (parserOptionsForSession session) sql with
+    | Error detail -> session, parserError sql detail
+    | Ok requested ->
+        let session = commitSession session
+        TableLocks.releaseExplicit session.Store session.ConnectionId
+        let database = session.Database |> Option.defaultValue defaultDatabase
+
+        match TableLocks.explicitAccesses session.Store session.TemporaryCatalog database requested with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok accesses ->
+            let privileges =
+                accesses
+                |> List.choose (fun table ->
+                    table.ReferenceName
+                    |> Option.map (fun _ ->
+                        [ "LOCK TABLES", Auth.OnTable(table.Database, table.Table)
+                          "SELECT", Auth.OnTable(table.Database, table.Table) ]))
+                |> List.collect id
+
+            match Auth.checkForAccount session.Store (accountOf session) privileges with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() ->
+                match
+                    TableLocks.acquireExplicit
+                        (lockWaitTimeout session)
+                        session.Store
+                        session.ConnectionId
+                        accesses
+                with
+                | Ok() -> session, Affected 0UL
+                | Error(code, message) -> session, Err(code, message)
+
 let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
     let session =
         match probe with
@@ -2468,6 +2683,9 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | _ -> session
 
     match probe with
+    | SetAutocommit "1" when xaAssociation session |> Option.isSome ->
+        let state = xaAssociation session |> Option.map (snd >> xaStateName) |> Option.defaultValue "NON-EXISTING"
+        session, xaRmFail state
     | SetAutocommit value -> handleSetAutocommit value session
     | SetTransactionIsolation(scope, level) ->
         match transactionIsolationOf level with
@@ -2531,14 +2749,23 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | SetVar -> handleSet session sql
     | RollbackTo name -> rollbackToSavepoint name session
     | Begin readOnly ->
-        let access = readOnly |> Option.defaultValue (configuredReadOnly session)
-        TableLocks.releaseExplicit session.Store session.ConnectionId
-        beginTransaction access session, Affected 0UL
+        match xaAssociation session with
+        | Some(_, state) -> session, xaRmFail (xaStateName state)
+        | None ->
+            let access = readOnly |> Option.defaultValue (configuredReadOnly session)
+            TableLocks.releaseExplicit session.Store session.ConnectionId
+            beginTransaction access session, Affected 0UL
     | Commit chain ->
-        let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
-        let committed = commitSession session
-        (if chain then beginTransaction readOnly committed else committed), Affected 0UL
-    | Rollback -> rollbackSession session, Affected 0UL
+        match xaAssociation session with
+        | Some(_, state) -> session, xaRmFail (xaStateName state)
+        | None ->
+            let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
+            let committed = commitSession session
+            (if chain then beginTransaction readOnly committed else committed), Affected 0UL
+    | Rollback ->
+        match xaAssociation session with
+        | Some(_, state) -> session, xaRmFail (xaStateName state)
+        | None -> rollbackSession session, Affected 0UL
     | Savepoint name -> savepoint name session
     | Release name -> releaseSavepoint name session
     | Use dbName ->
@@ -3030,46 +3257,21 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | FlushTables
     | FlushLogs -> session, Affected 0UL
     | LockTables ->
-        match Parser.parseTableLocksWithOptions (parserOptionsForSession session) sql with
-        | Ok requested ->
-            let session = commitSession session
-            TableLocks.releaseExplicit session.Store session.ConnectionId
-            let database = session.Database |> Option.defaultValue defaultDatabase
-
-            match TableLocks.explicitAccesses session.Store session.TemporaryCatalog database requested with
-            | Error(code, message) -> session, Err(code, message)
-            | Ok accesses ->
-                let privileges =
-                    accesses
-                    |> List.choose (fun table ->
-                        table.ReferenceName
-                        |> Option.map (fun _ ->
-                            [ "LOCK TABLES", Auth.OnTable(table.Database, table.Table)
-                              "SELECT", Auth.OnTable(table.Database, table.Table) ]))
-                    |> List.collect id
-
-                match Auth.checkForAccount session.Store (accountOf session) privileges with
-                | Error(code, message) -> session, Err(code, message)
-                | Ok() ->
-                    match
-                        TableLocks.acquireExplicit
-                            (lockWaitTimeout session)
-                            session.Store
-                            session.ConnectionId
-                            accesses
-                    with
-                    | Ok() -> session, Affected 0UL
-                    | Error(code, message) -> session, Err(code, message)
-        | Error detail -> session, parserError sql detail
+        match xaAssociation session with
+        | Some(_, state) -> session, xaRmFail (xaStateName state)
+        | None -> acquireExplicitTableLocks session sql
     | UnlockTables ->
-        let session =
-            if TableLocks.holdsExplicit session.Store session.ConnectionId then
-                commitSession session
-            else
-                session
+        match xaAssociation session with
+        | Some(_, state) -> session, xaRmFail (xaStateName state)
+        | None ->
+            let session =
+                if TableLocks.holdsExplicit session.Store session.ConnectionId then
+                    commitSession session
+                else
+                    session
 
-        TableLocks.releaseExplicit session.Store session.ConnectionId
-        session, Affected 0UL
+            TableLocks.releaseExplicit session.Store session.ConnectionId
+            session, Affected 0UL
 let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
     Fsdb.Sql.Expression.rewriteStatement
         (function
@@ -3125,7 +3327,7 @@ let private prepareStatementWithOptions
         command.StartsWith(keyword, StringComparison.OrdinalIgnoreCase)
         && (command.Length = keyword.Length || Char.IsWhiteSpace command.[keyword.Length])
 
-    if startsWithKeyword "LOAD DATA" || startsWithKeyword "HANDLER" then
+    if startsWithKeyword "LOAD DATA" || startsWithKeyword "HANDLER" || startsWithKeyword "XA" then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
     elif (tryProbe trimmed).IsSome then
         Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
@@ -5110,8 +5312,16 @@ and private dispatchNormalized session rawSql parserOptions sql =
         sql.StartsWith("HANDLER", StringComparison.OrdinalIgnoreCase)
         && (sql.Length = 7 || Char.IsWhiteSpace sql.[7])
 
+    let isXa =
+        sql.StartsWith("XA", StringComparison.OrdinalIgnoreCase)
+        && (sql.Length = 2 || Char.IsWhiteSpace sql.[2])
+
     if Parser.isBlank sql then
         session, Affected 0UL
+    elif isXa then
+        runXa parserOptions session sql
+    elif xaAssociation session |> Option.exists (fun (_, state) -> state = Idle) then
+        session, xaRmFail "IDLE"
     elif isHandler then
         match Parser.parseHandlerWithOptions parserOptions sql with
         | Ok command ->
@@ -5177,6 +5387,10 @@ let private recordResult ((session, result): Session * QueryResult) : Session * 
     session, result
 
 let private abortTransaction (session: Session) =
+    session.Tx
+    |> Option.bind _.Xa
+    |> Option.iter (fst >> removeXaAssociation session)
+
     session.Tx |> Option.iter (fun transaction -> Storage.releaseTransactionLocks transaction.Snapshot)
     removeTransactionView session
     { session with Tx = None }
