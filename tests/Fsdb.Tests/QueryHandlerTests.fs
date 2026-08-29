@@ -5860,10 +5860,17 @@ let tests =
               Expect.equal prepared (Affected 0UL) "XA branch prepares"
               Expect.isNone first.Tx "prepare detaches the local transaction"
 
-              match handle second "XA RECOVER" |> snd with
+              let second, recovered = handle second "XA RECOVER"
+
+              match recovered with
               | ResultSet(columns, [ [ Some "7"; Some "6"; Some "6"; Some "globalbranch" ] ]) ->
                   Expect.equal columns [ "formatID"; "gtrid_length"; "bqual_length"; "data" ] "recover columns"
               | other -> failtestf "expected one recoverable branch, got %A" other
+
+              Expect.equal
+                  (second.LastResultColumnMetadata |> List.map _.TypeId)
+                  [ TypeLongLong; TypeLongLong; TypeLongLong; TypeVarString ]
+                  "recover metadata types"
 
               let second, committed = handle second "XA COMMIT 'global', 'branch', 7"
               Expect.equal committed (Affected 0UL) "another session commits the detached branch"

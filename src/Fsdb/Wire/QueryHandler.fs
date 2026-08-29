@@ -1617,19 +1617,43 @@ let private runXa (parserOptions: Parser.ParserOptions) (session: Session) sql =
         |> Option.flatten
         |> Option.defaultValue "utf8mb4"
 
-    let executed, result =
-        match Xa.parse parserOptions.NoBackslashEscapes charset sql with
-        | Error detail -> session, parserError sql detail
-        | Ok(Xa.Start(_, true))
-        | Ok(Xa.End(_, true)) -> session, Err(1398, "XAER_INVAL: Invalid arguments (or unsupported command)")
-        | Ok(Xa.Start(xid, false)) -> startXa xid session
-        | Ok(Xa.End(xid, false)) -> endXa xid session
-        | Ok(Xa.Prepare xid) -> prepareXa xid session
-        | Ok(Xa.Commit(xid, onePhase)) -> commitXa xid onePhase session
-        | Ok(Xa.Rollback xid) -> rollbackXa xid session
-        | Ok(Xa.Recover convertXid) -> recoverXa convertXid session
+    match Xa.parse parserOptions.NoBackslashEscapes charset sql with
+    | Error detail -> session, parserError sql detail
+    | Ok command ->
+        let executed, result =
+            match command with
+            | Xa.Start(_, true)
+            | Xa.End(_, true) -> session, Err(1398, "XAER_INVAL: Invalid arguments (or unsupported command)")
+            | Xa.Start(xid, false) -> startXa xid session
+            | Xa.End(xid, false) -> endXa xid session
+            | Xa.Prepare xid -> prepareXa xid session
+            | Xa.Commit(xid, onePhase) -> commitXa xid onePhase session
+            | Xa.Rollback xid -> rollbackXa xid session
+            | Xa.Recover convertXid -> recoverXa convertXid session
 
-    { executed with LastResultColumnMetadata = completeResultMetadata executed result [] }, result
+        let metadata =
+            match command, result with
+            | Xa.Recover _, ResultSet _ ->
+                let number =
+                    { Value.columnMetadata TypeLongLong with
+                        ColumnLength = 12u
+                        Flags = NotNullFlag ||| BinaryFlag ||| NumFlag
+                        CollationId = Some 63us }
+
+                let data =
+                    { Value.columnMetadata TypeVarString with
+                        ColumnLength = 1032u
+                        Flags = NotNullFlag
+                        Decimals = 31uy
+                        CollationId =
+                            Collation.idAndSortlen
+                            |> Map.tryFind "utf8mb4_0900_ai_ci"
+                            |> Option.map (fst >> uint16) }
+
+                [ number; number; number; data ]
+            | _ -> []
+
+        { executed with LastResultColumnMetadata = completeResultMetadata executed result metadata }, result
 
 /// Seeds fixed snapshots and refreshes statement-scoped isolation views.
 let startTransactionStatement (session: Session) : Session =
