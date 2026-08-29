@@ -54,6 +54,8 @@ let defaultVariables: Map<string, string option> =
           "block_encryption_mode", "aes-128-ecb"
           "default_storage_engine", "InnoDB"
           "event_scheduler", "ON"
+          "activate_all_roles_on_login", "OFF"
+          "mandatory_roles", ""
           "innodb_buffer_pool_size", "134217728"
           "innodb_file_per_table", "ON"
           "read_only", "OFF"
@@ -72,9 +74,54 @@ let private globalVariablesByStore =
 let private globalVariablesOf (store: Store) : ConcurrentDictionary<string, string option> =
     globalVariablesByStore.GetValue(store.Lock, (fun _ -> ConcurrentDictionary()))
 
+let private unquoteAccountPart (value: string) =
+    let value = value.Trim()
+
+    if value.Length >= 2 && (value.[0] = value.[value.Length - 1]) && (value.[0] = '`' || value.[0] = '\'') then
+        let quote = string value.[0]
+        value.[1 .. value.Length - 2].Replace(quote + quote, quote)
+    else
+        value
+
+let tryParseMandatoryRoles (value: string) =
+    let value = value.Trim()
+
+    if value = "" then
+        Some []
+    else
+        match Parser.parse ("SET ROLE " + value) with
+        | Ok(SetRole(NamedRoles roles)) -> roles |> List.map (fun (name, host) -> Fsdb.Auth.account name host) |> Some
+        | _ ->
+            match Parser.splitNonEmptyTopLevelCommaSeparatedWithOptions Parser.defaultOptions value with
+            | Result.Error _ -> None
+            | Result.Ok identities ->
+                let roles =
+                    identities
+                    |> List.map (fun identity ->
+                        let separator = identity.LastIndexOf '@'
+
+                        let name, host =
+                            if separator < 0 then
+                                unquoteAccountPart identity, "%"
+                            else
+                                unquoteAccountPart identity[.. separator - 1], unquoteAccountPart identity[separator + 1 ..]
+
+                        if name = "" || host = "" then None else Some(Fsdb.Auth.account name host))
+
+                if roles |> List.forall Option.isSome then roles |> List.choose id |> Some else None
+
 /// Applies a global override without changing the issuing session.
 let setGlobalVariable (store: Store) (name: string) (value: string option) : unit =
-    (globalVariablesOf store).[name.ToLowerInvariant()] <- value
+    let name = name.ToLowerInvariant()
+
+    lock store.Lock (fun () ->
+        (globalVariablesOf store).[name] <- value
+
+        if name = "mandatory_roles" then
+            value
+            |> Option.bind tryParseMandatoryRoles
+            |> Option.defaultValue []
+            |> Fsdb.Auth.setMandatoryRoles store)
 
 /// `None` is unknown; `Some None` is a known variable holding NULL.
 let tryGlobalVariable (store: Store) (name: string) : string option option =
@@ -83,6 +130,20 @@ let tryGlobalVariable (store: Store) (name: string) : string option option =
     match (globalVariablesOf store).TryGetValue name with
     | true, v -> Some v
     | false, _ -> liveDefaults () |> Map.tryFind name
+
+let initialRoles store account =
+    let applicable = Fsdb.Auth.applicableRolesForAccount store account
+
+    let activateAll =
+        tryGlobalVariable store "activate_all_roles_on_login"
+        |> Option.flatten
+        |> Option.exists (fun value -> value = "1" || value.Equals("ON", StringComparison.OrdinalIgnoreCase))
+
+    if activateAll then
+        applicable
+    else
+        Fsdb.Auth.defaultRolesForAccount store account
+        |> List.filter (fun role -> applicable |> List.exists (Fsdb.Auth.sameAccount role))
 
 /// Returns defaults overlaid with the store's GLOBAL assignments.
 let globalVariablesSnapshot (store: Store) : Map<string, string option> =
@@ -237,7 +298,7 @@ let create (connectionId: int) (store: Store) : Session =
     { ConnectionId = connectionId
       User = "root"
       AccountHost = "%"
-      ActiveRoles = Fsdb.Auth.defaultRolesForAccount store (Fsdb.Auth.account "root" "%")
+      ActiveRoles = initialRoles store (Fsdb.Auth.account "root" "%")
       PasswordExpired = false
       LoginUser = ""
       ClientHost = "localhost"

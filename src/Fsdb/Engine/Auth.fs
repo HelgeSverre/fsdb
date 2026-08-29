@@ -63,6 +63,34 @@ let internal tryParseAccount (identity: string) =
 let sameAccount left right =
     left.Name = right.Name && String.Equals(left.Host, right.Host, StringComparison.OrdinalIgnoreCase)
 
+let private mandatoryRolesByStore =
+    System.Runtime.CompilerServices.ConditionalWeakTable<obj, Account list ref>()
+
+let mandatoryRoles (store: Store) =
+    let roles = mandatoryRolesByStore.GetValue(store.Lock, fun _ -> ref [])
+    lock roles (fun () -> roles.Value)
+
+let setMandatoryRoles (store: Store) roles =
+    let roles =
+        roles
+        |> List.map (fun role -> account role.Name role.Host)
+        |> List.distinctBy (fun role -> role.Name, role.Host.ToLowerInvariant())
+
+    let stored = mandatoryRolesByStore.GetValue(store.Lock, fun _ -> ref [])
+    lock stored (fun () -> stored.Value <- roles)
+
+let isMandatoryRole store wanted =
+    mandatoryRoles store |> List.exists (sameAccount wanted)
+
+let private mandatoryRoleError role =
+    Error(
+        3628,
+        sprintf
+            "The role `%s`@`%s` is a mandatory role and can't be revoked or dropped. The restriction can be lifted by excluding the role identifier from the global variable mandatory_roles."
+            role.Name
+            role.Host
+    )
+
 let private rowAccount (cols: ColumnDef list) (row: Value[]) =
     match resolveColumn cols "User", resolveColumn cols "Host" with
     | Ok userIndex, Ok hostIndex ->
@@ -560,14 +588,18 @@ let createUser (store: Store) (name: string) (host: string) (password: string op
 /// `DROP USER 'name'@'host'` — removes the account and any of its rows in
 /// the other grant tables.
 let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * string> =
+    let wanted = account name host
+
     let deleteWhere (table: string) =
         match scanList store "mysql" table with
         | Error _ -> ()
         | Ok(cols, _) ->
-            deleteRows store "mysql" table (fun row -> Ok(rowAccount cols row |> Option.exists (sameAccount (account name host)))) |> ignore
+            deleteRows store "mysql" table (fun row -> Ok(rowAccount cols row |> Option.exists (sameAccount wanted))) |> ignore
 
-    if (tryUserRowForAccount store (account name host)).IsNone then
+    if (tryUserRowForAccount store wanted).IsNone then
         operationFailed "DROP USER" name host
+    elif isMandatoryRole store wanted then
+        mandatoryRoleError wanted
     else
         deleteWhere "user"
         deleteWhere "db"
@@ -588,13 +620,13 @@ let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * s
                         |> List.exists (fun (userColumn, hostColumn) ->
                             sameAccount
                                 (account (userColumnText columns row userColumn) (userColumnText columns row hostColumn))
-                                (account name host))
+                                wanted)
                         |> Ok)
                 |> ignore
 
         deleteRoleReferences "role_edges" [ "FROM_USER", "FROM_HOST"; "TO_USER", "TO_HOST" ]
         deleteRoleReferences "default_roles" [ "USER", "HOST"; "DEFAULT_ROLE_USER", "DEFAULT_ROLE_HOST" ]
-        store.AccountResources.TryRemove(accountResourceKey (account name host)) |> ignore
+        store.AccountResources.TryRemove(accountResourceKey wanted) |> ignore
         Ok()
 
 let renameUser
@@ -877,6 +909,15 @@ let directRoleGrantsForAccount (store: Store) (wanted: Account) : RoleGrant list
     roleGrants store
     |> List.filter (fun grant -> sameAccount grant.Grantee wanted)
     |> List.sortWith (fun left right -> compareAccounts left.Role right.Role)
+
+let applicableRolesForAccount store wanted =
+    let configuredMandatoryRoles =
+        mandatoryRoles store
+        |> List.filter (fun role -> tryUserRowForAccount store role |> Option.isSome)
+
+    (directRoleGrantsForAccount store wanted |> List.map _.Role) @ configuredMandatoryRoles
+    |> List.distinctBy (fun role -> role.Name, role.Host.ToLowerInvariant())
+    |> List.sortWith compareAccounts
 
 let roleClosure (store: Store) (roots: Account list) : Account list =
     let grants = roleGrants store
@@ -1246,7 +1287,11 @@ let revokeRoles (store: Store) (roles: (string * string) list) (users: (string *
     let roles = distinctAccounts roles
     let users = distinctAccounts users
 
-    validateAccountsExist store (roles @ users)
+    let mandatory = roles |> List.tryFind (isMandatoryRole store)
+
+    (match mandatory with
+     | Some role -> mandatoryRoleError role
+     | None -> validateAccountsExist store (roles @ users))
     |> Result.bind (fun () ->
         [ for user in users do
               for role in roles do
@@ -1279,8 +1324,11 @@ let revokeRoles (store: Store) (roles: (string * string) list) (users: (string *
             | _, Error error -> Error(toMySqlError error))
         |> Result.map ignore)
 
+let dropRole (store: Store) (name: string) (host: string) =
+    dropUser store name host
+
 let resolveRoleSelection (store: Store) (grantee: Account) selection : Result<Account list, int * string> =
-    let direct = directRoleGrantsForAccount store grantee |> List.map _.Role
+    let direct = applicableRolesForAccount store grantee
     let isDirect role = direct |> List.exists (sameAccount role)
 
     let validate roles =

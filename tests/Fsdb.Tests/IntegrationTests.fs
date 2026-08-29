@@ -947,6 +947,63 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "activate_all_roles_on_login includes direct and mandatory roles"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let root = create 1 store
+                  let root, _ = handle root "CREATE DATABASE login_roles"
+                  let root, _ = handle root "CREATE TABLE login_roles.documents (id INT PRIMARY KEY)"
+                  let root, _ = handle root "INSERT INTO login_roles.documents VALUES (1)"
+                  let root, _ = handle root "CREATE ROLE inherited_reader, mandatory_parent, optional_reader"
+                  let root, _ = handle root "CREATE USER role_user"
+                  let root, _ = handle root "GRANT SELECT ON login_roles.* TO inherited_reader"
+                  let root, _ = handle root "GRANT inherited_reader TO mandatory_parent"
+                  let root, _ = handle root "GRANT optional_reader TO role_user"
+                  let root, _ = handle root "SET GLOBAL mandatory_roles = 'mandatory_parent@%'"
+                  let _, _ = handle root "SET GLOBAL activate_all_roles_on_login = ON"
+
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+
+                  let connectionString =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=role_user;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                          server.Port
+
+                  use connection = new MySqlConnector.MySqlConnection(connectionString)
+                  do! connection.OpenAsync() |> Async.AwaitTask
+
+                  use command = connection.CreateCommand()
+                  command.CommandText <- "SELECT CURRENT_ROLE()"
+                  let! currentRoles = command.ExecuteScalarAsync() |> Async.AwaitTask
+
+                  Expect.equal
+                      (string currentRoles)
+                      "`mandatory_parent`@`%`,`optional_reader`@`%`"
+                      "all applicable role roots activate"
+
+                  command.CommandText <- "SELECT id FROM login_roles.documents"
+                  use! reader = command.ExecuteReaderAsync() |> Async.AwaitTask
+                  Expect.isTrue (reader.Read()) "one document"
+                  Expect.equal (reader.GetInt32 0) 1 "mandatory role inheritance authorizes the query"
+                  do! reader.CloseAsync() |> Async.AwaitTask
+
+                  command.CommandText <- "SET ROLE NONE"
+                  let! _ = command.ExecuteNonQueryAsync() |> Async.AwaitTask
+                  command.CommandText <- "SELECT id FROM login_roles.documents"
+
+                  let! denied = command.ExecuteScalarAsync() |> Async.AwaitTask |> Async.Catch
+
+                  match denied with
+                  | Choice1Of2 _ -> failtest "expected SET ROLE NONE to remove mandatory access"
+                  | Choice2Of2 error ->
+                      match error.GetBaseException() with
+                      | :? MySqlConnector.MySqlException as error ->
+                          Expect.equal error.Number 1142 "mandatory roles can be deactivated"
+                      | error -> failtestf "expected a MySQL access error, got %A" error
+              }
+              |> Async.RunSynchronously
+
           testCase "handshake auth verifies stored passwords: right password connects, wrong password and unknown user get 1045"
           <| fun _ ->
               async {

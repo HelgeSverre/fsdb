@@ -1664,17 +1664,33 @@ let private enabledRolesRows () =
     match currentViewer.Value with
     | None -> []
     | Some viewer ->
-        Fsdb.Auth.roleClosure viewer.Store viewer.ActiveRoles
+        viewer.ActiveRoles
+        |> List.distinctBy (fun role -> role.Name, role.Host.ToLowerInvariant())
+        |> List.sortBy (fun role -> role.Name, role.Host.ToLowerInvariant())
         |> List.map (fun role ->
             [| vs role.Name
                vs role.Host
                vs (if isDefaultRole viewer.Store viewer.Account role then "YES" else "NO")
-               vs "NO" |])
+               vs (if Fsdb.Auth.isMandatoryRole viewer.Store role then "YES" else "NO") |])
 
 let private applicableRolesRows () =
     match currentViewer.Value with
     | None -> []
     | Some viewer ->
+        let direct = Fsdb.Auth.directRoleGrantsForAccount viewer.Store viewer.Account
+
+        let mandatory =
+            Fsdb.Auth.mandatoryRoles viewer.Store
+            |> List.filter (fun role -> Fsdb.Auth.tryUserRowForAccount viewer.Store role |> Option.isSome)
+            |> List.filter (fun role -> direct |> List.exists (fun grant -> Fsdb.Auth.sameAccount grant.Role role) |> not)
+            |> List.map (fun role ->
+                { Role = role
+                  Grantee = viewer.Account
+                  AdminOption = false }
+                : Fsdb.Auth.RoleGrant)
+
+        let roots = direct @ mandatory
+
         let rec collect visited pending grants =
             match pending with
             | [] -> grants
@@ -1688,7 +1704,7 @@ let private applicableRolesRows () =
                     (rest @ (direct |> List.map _.Role))
                     (grants @ direct)
 
-        collect [] [ viewer.Account ] []
+        collect [] (roots |> List.map _.Role) roots
         |> List.map (fun grant ->
             [| vs viewer.Account.Name
                vs viewer.Account.Host
@@ -1698,7 +1714,14 @@ let private applicableRolesRows () =
                vs grant.Role.Host
                vs (if grant.AdminOption then "YES" else "NO")
                vs (if isDefaultRole viewer.Store viewer.Account grant.Role then "YES" else "NO")
-               vs "NO" |])
+               vs
+                   (if
+                        Fsdb.Auth.sameAccount grant.Grantee viewer.Account
+                        && Fsdb.Auth.isMandatoryRole viewer.Store grant.Role
+                    then
+                        "YES"
+                    else
+                        "NO") |])
 
 /// The one storage engine fsdb reports for every table — `SHOW ENGINES`'
 /// twin lives in `showEngines` below off this same row.

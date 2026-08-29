@@ -14467,7 +14467,7 @@ let rec executeAs
 
     | DropRole(users, ifExists) ->
         let dropOne (name, host) =
-            match Auth.dropUser store name host with
+            match Auth.dropRole store name host with
             | Error(1396, _) when ifExists -> Ok()
             | Error(1396, _) -> Error(1396, sprintf "Operation DROP ROLE failed for '%s'@'%s'" name host)
             | result -> result

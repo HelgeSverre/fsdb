@@ -227,6 +227,20 @@ let valueToSqlLiteral (v: Value) : string =
 let private isGlobalScope (scope: string) : bool =
     scope.IndexOf("GLOBAL", StringComparison.OrdinalIgnoreCase) >= 0
 
+let private isSessionScope (scope: string) : bool =
+    scope.IndexOf("SESSION", StringComparison.OrdinalIgnoreCase) >= 0
+
+let private globalOnlyVariables =
+    Set.ofList
+        [ "activate_all_roles_on_login"
+          "event_scheduler"
+          "local_infile"
+          "mandatory_roles"
+          "max_allowed_packet"
+          "max_connections"
+          "max_prepared_stmt_count"
+          "net_write_timeout" ]
+
 /// The raw (unflattened) lookup behind `resolveAtRef` — kept separate so
 /// `handleAtVarSelect` can still tell "unknown system variable" (outer
 /// `None`) apart from "known, currently NULL" when deciding whether to
@@ -240,7 +254,7 @@ let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name
     elif sigil = "@@" && not (isGlobalScope scope) && name = "error_count" then
         Some(Some(string (session.Diagnostics |> List.filter (fun condition -> condition.Level = Diagnostics.Error) |> List.length)))
     elif sigil = "@@" then
-        if isGlobalScope scope then
+        if isGlobalScope scope || globalOnlyVariables.Contains name then
             Session.tryGlobalVariable session.Store name
         else
             lookupVar session name
@@ -297,9 +311,14 @@ let private expressionVariablesFor (session: Session) (userVariables: Map<string
     { UserVariables = ref userVariables
       ReadSystemVariable =
         fun scope name ->
-            match lookupAtRef session "@@" scope name with
-            | Some value -> Ok(systemVariableValue name value)
-            | None -> Error(1193, sprintf "Unknown system variable '%s'" name)
+            let name = name.ToLowerInvariant()
+
+            if isSessionScope scope && globalOnlyVariables.Contains name then
+                Error(1238, sprintf "Variable '%s' is a GLOBAL variable" name)
+            else
+                match lookupAtRef session "@@" scope name with
+                | Some value -> Ok(systemVariableValue name value)
+                | None -> Error(1193, sprintf "Unknown system variable '%s'" name)
       MaxUserVariables = maxUserVariables }
 
 let private expressionVariables (session: Session) = expressionVariablesFor session session.UserVariables
@@ -1006,14 +1025,12 @@ let private applyConnectionEncoding (session: Session) charset (collation: Colla
 /// way. Grows as real clients ask for more.
 let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
-let private globalOnlyLimitVariables =
-    Set.ofList
-        [ "event_scheduler"
-          "local_infile"
-          "max_allowed_packet"
-          "max_connections"
-          "max_prepared_stmt_count"
-          "net_write_timeout" ]
+let private normalizeOnOff name value =
+    match value |> toText |> Option.map (_.Trim().ToUpperInvariant()) with
+    | Some("1" | "ON") -> Ok "ON"
+    | Some("0" | "OFF") -> Ok "OFF"
+    | Some value -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name value))
+    | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
 
 let private normalizeIsolationLevel (raw: string) : string =
     Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
@@ -1090,8 +1107,17 @@ let private parseSetFragment
                 if Session.tryGlobalVariable session.Store name |> Option.isNone then
                     Error(Err(1193, sprintf "Unknown system variable '%s'" name))
                 else
-                    match resolveSystemSetRhs session userVariables sql varMatch.Groups.[3].Value with
+                    let rhs = varMatch.Groups.[3].Value
+                    let usesDefault = rhs.Trim().Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
+
+                    match resolveSystemSetRhs session userVariables sql rhs with
                     | Error result -> Error result
+                    | Ok(_, sideEffects)
+                        when usesDefault
+                             && (name = "activate_all_roles_on_login"
+                                 || name = "event_scheduler"
+                                 || name = "mandatory_roles") ->
+                        Ok(SetVarAction(name, Session.defaultVariables.[name], isGlobal), sideEffects)
                     | Ok(VString value, sideEffects) when name = "block_encryption_mode" ->
                         match Functions.tryBlockEncryptionMode value with
                         | Some canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
@@ -1110,12 +1136,15 @@ let private parseSetFragment
                         match Functions.tryTimeLocale value with
                         | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
                         | None -> Error(Err(1649, sprintf "Unknown locale: '%s'" value))
-                    | Ok(value, sideEffects) when name = "event_scheduler" ->
-                        match value |> toText |> Option.map (_.Trim().ToUpperInvariant()) with
-                        | Some("1" | "ON") -> Ok(SetVarAction(name, Some "ON", isGlobal), sideEffects)
-                        | Some("0" | "OFF") -> Ok(SetVarAction(name, Some "OFF", isGlobal), sideEffects)
-                        | Some value -> Error(Err(1231, sprintf "Variable 'event_scheduler' can't be set to the value of '%s'" value))
-                        | None -> Error(Err(1231, "Variable 'event_scheduler' can't be set to the value of 'NULL'"))
+                    | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" ->
+                        normalizeOnOff name value
+                        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
+                    | Ok(value, sideEffects) when name = "mandatory_roles" ->
+                        match toText value with
+                        | Some value when Session.tryParseMandatoryRoles value |> Option.isSome ->
+                            Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
+                        | Some value -> Error(Err(1231, sprintf "Variable 'mandatory_roles' can't be set to the value of '%s'" value))
+                        | None -> Error(Err(1231, "Variable 'mandatory_roles' can't be set to the value of 'NULL'"))
                     | Ok(VNull, sideEffects) when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None, isGlobal), sideEffects)
                     | Ok(VNull, _) -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
                     | Ok(value, sideEffects) -> Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
@@ -1195,7 +1224,7 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
-    | SetVarAction(name, _, false) when globalOnlyLimitVariables.Contains name ->
+    | SetVarAction(name, _, false) when globalOnlyVariables.Contains name ->
         Error(Err(1229, sprintf "Variable '%s' is a GLOBAL variable and should be set with SET GLOBAL" name))
     | SetVarAction(name, Some value, false) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))

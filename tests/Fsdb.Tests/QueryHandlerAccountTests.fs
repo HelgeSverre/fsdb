@@ -639,13 +639,8 @@ let tests =
                       "SELECT ROLE_NAME, ROLE_HOST, IS_DEFAULT, IS_MANDATORY FROM information_schema.ENABLED_ROLES ORDER BY ROLE_NAME"
                   |> snd
               with
-              | ResultSet(
-                  _,
-                  [ [ Some "parent"; Some "%"; Some "YES"; Some "NO" ]
-                    [ Some "reader"; Some "%"; Some "NO"; Some "NO" ] ]
-                ) ->
-                  ()
-              | other -> failtestf "expected active and inherited role metadata, got %A" other
+              | ResultSet(_, [ [ Some "parent"; Some "%"; Some "YES"; Some "NO" ] ]) -> ()
+              | other -> failtestf "expected explicitly active role metadata, got %A" other
 
               match
                   handle
@@ -762,6 +757,142 @@ let tests =
               match handle root "SELECT COUNT(*) FROM mysql.default_roles WHERE DEFAULT_ROLE_USER = 'beta'" |> snd with
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected DROP ROLE to remove default-role rows, got %A" other
+
+          testCase "mandatory roles are applicable but remain explicitly activatable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE mandatory_db"
+              let root, _ = handle root "CREATE TABLE mandatory_db.documents (id INT PRIMARY KEY)"
+              let root, _ = handle root "INSERT INTO mandatory_db.documents VALUES (1)"
+              let root, _ = handle root "CREATE ROLE mandatory_parent, mandatory_reader"
+              let root, _ = handle root "CREATE USER alice"
+              let root, _ = handle root "GRANT SELECT ON mandatory_db.* TO mandatory_reader"
+              let root, _ = handle root "GRANT mandatory_reader TO mandatory_parent"
+              let root, configured = handle root "SET GLOBAL mandatory_roles = 'mandatory_parent@%'"
+              Expect.equal configured (Affected 0UL) "mandatory roles configure globally"
+
+              match
+                  handle
+                      root
+                      "SELECT @@mandatory_roles, @@global.mandatory_roles, @@activate_all_roles_on_login"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "mandatory_parent@%"; Some "mandatory_parent@%"; Some "OFF" ] ]) -> ()
+              | other -> failtestf "expected global role variables, got %A" other
+
+              match handle root "SELECT @@session.mandatory_roles" |> snd with
+              | Err(1238, _) -> ()
+              | other -> failtestf "expected mandatory_roles to reject SESSION scope, got %A" other
+
+              let aliceAccount = Fsdb.Auth.account "alice" "%"
+
+              let alice =
+                  { create 2 store with
+                      User = "alice"
+                      ActiveRoles = initialRoles store aliceAccount }
+
+              match handle alice "SELECT CURRENT_ROLE()" |> snd with
+              | ResultSet(_, [ [ Some "NONE" ] ]) -> ()
+              | other -> failtestf "expected mandatory roles to start inactive, got %A" other
+
+              match
+                  handle
+                      alice
+                      "SELECT GRANTEE, ROLE_NAME, IS_MANDATORY FROM information_schema.APPLICABLE_ROLES ORDER BY GRANTEE, ROLE_NAME"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "alice"; Some "mandatory_parent"; Some "YES" ]
+                    [ Some "mandatory_parent"; Some "mandatory_reader"; Some "NO" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected mandatory and inherited applicable roles, got %A" other
+
+              let alice, activated = handle alice "SET ROLE mandatory_parent"
+              Expect.equal activated (Affected 0UL) "mandatory role activates without a direct grant"
+
+              match handle alice "SELECT CURRENT_ROLE(), id FROM mandatory_db.documents" |> snd with
+              | ResultSet(_, [ [ Some "`mandatory_parent`@`%`"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected mandatory role inheritance, got %A" other
+
+              match
+                  handle
+                      alice
+                      "SELECT ROLE_NAME, IS_DEFAULT, IS_MANDATORY FROM information_schema.ENABLED_ROLES"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "mandatory_parent"; Some "NO"; Some "YES" ] ]) -> ()
+              | other -> failtestf "expected only the active mandatory root, got %A" other
+
+              let alice, _ = handle alice "SET ROLE NONE"
+
+              match handle alice "SELECT id FROM mandatory_db.documents" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected SET ROLE NONE to deactivate mandatory privileges, got %A" other
+
+              match handle root "REVOKE mandatory_parent FROM alice" |> snd with
+              | Err(3628, _) -> ()
+              | other -> failtestf "expected mandatory-role revoke refusal, got %A" other
+
+              match handle root "DROP ROLE mandatory_parent" |> snd with
+              | Err(3628, _) -> ()
+              | other -> failtestf "expected mandatory-role drop refusal, got %A" other
+
+              match handle root "DROP USER mandatory_parent" |> snd with
+              | Err(3628, _) -> ()
+              | other -> failtestf "expected mandatory-account drop refusal, got %A" other
+
+              let root, defaulted = handle root "SET DEFAULT ROLE mandatory_parent TO alice"
+              Expect.equal defaulted (Affected 0UL) "mandatory roles can be defaults"
+
+              let defaultSession =
+                  { create 3 store with
+                      User = "alice"
+                      ActiveRoles = initialRoles store aliceAccount }
+
+              match handle defaultSession "SELECT CURRENT_ROLE()" |> snd with
+              | ResultSet(_, [ [ Some "`mandatory_parent`@`%`" ] ]) -> ()
+              | other -> failtestf "expected mandatory default activation, got %A" other
+
+              let root, _ = handle root "SET GLOBAL mandatory_roles = ''"
+              let inactiveSession =
+                  { create 4 store with
+                      User = "alice"
+                      ActiveRoles = initialRoles store aliceAccount }
+
+              match handle inactiveSession "SET ROLE DEFAULT" |> snd with
+              | Err(3530, _) -> ()
+              | other -> failtestf "expected stale mandatory default refusal, got %A" other
+
+              match handle root "SET mandatory_roles = 'mandatory_parent@%'" |> snd with
+              | Err(1229, _) -> ()
+              | other -> failtestf "expected GLOBAL-only mandatory_roles, got %A" other
+
+              match handle root "SET activate_all_roles_on_login = ON" |> snd with
+              | Err(1229, _) -> ()
+              | other -> failtestf "expected GLOBAL-only login role activation, got %A" other
+
+              match handle root "SET GLOBAL mandatory_roles = 'broken@'" |> snd with
+              | Err(1231, _) -> ()
+              | other -> failtestf "expected malformed mandatory role refusal, got %A" other
+
+              let root, _ = handle root "SET GLOBAL mandatory_roles = 'ghost@%'"
+
+              match handle root "DROP ROLE ghost" |> snd with
+              | Err(1396, _) -> ()
+              | other -> failtestf "expected an absent configured role to remain absent, got %A" other
+
+              let root, resetMandatory = handle root "SET GLOBAL mandatory_roles = DEFAULT"
+              Expect.equal resetMandatory (Affected 0UL) "mandatory roles reset to the global default"
+              let root, _ = handle root "SET GLOBAL activate_all_roles_on_login = ON"
+              let root, resetActivation = handle root "SET GLOBAL activate_all_roles_on_login = DEFAULT"
+              Expect.equal resetActivation (Affected 0UL) "login activation resets to the global default"
+
+              match handle root "SELECT @@mandatory_roles, @@activate_all_roles_on_login" |> snd with
+              | ResultSet(_, [ [ Some ""; Some "OFF" ] ]) -> ()
+              | other -> failtestf "expected role variable defaults, got %A" other
 
           testCase "SET PASSWORD is enforced: own password is free, someone else's needs CREATE USER"
           <| fun _ ->
