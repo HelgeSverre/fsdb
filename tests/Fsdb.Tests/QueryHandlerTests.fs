@@ -2392,6 +2392,45 @@ let tests =
               | ProcedureResult([ "10" ], [ [ Some "10" ] ]) -> ()
               | other -> failtestf "expected parameterized procedure result, got %A" other
 
+          testCase "PARAMETERS describes procedure arguments and function returns"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, procedureResult =
+                  handle
+                      session
+                      "CREATE PROCEDURE describe_values(IN i INT UNSIGNED, OUT s VARCHAR(12) CHARACTER SET latin1 COLLATE latin1_bin, INOUT d DECIMAL(8,3), IN dt DATETIME(4), IN b BIT(9), IN plain VARCHAR(2) CHARACTER SET latin1) SELECT 1"
+
+              Expect.equal procedureResult (Affected 0UL) "procedure created"
+
+              let session, functionResult =
+                  handle
+                      session
+                      "CREATE FUNCTION describe_value(CamelCase CHAR(3), y TIME(6)) RETURNS BIGINT UNSIGNED DETERMINISTIC RETURN 1"
+
+              Expect.equal functionResult (Affected 0UL) "function created"
+
+              match
+                  handle
+                      session
+                      "SELECT specific_name,ordinal_position,parameter_mode,parameter_name,data_type,character_maximum_length,character_octet_length,numeric_precision,numeric_scale,datetime_precision,character_set_name,collation_name,dtd_identifier,routine_type FROM information_schema.parameters WHERE specific_schema='fsdb' ORDER BY specific_name,ordinal_position"
+                  |> snd
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "describe_value"; Some "0"; None; None; Some "bigint"; None; None; Some "20"; Some "0"; None; None; None; Some "bigint unsigned"; Some "FUNCTION" ]
+                        [ Some "describe_value"; Some "1"; Some "IN"; Some "CamelCase"; Some "char"; Some "3"; Some "12"; None; None; None; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "char(3)"; Some "FUNCTION" ]
+                        [ Some "describe_value"; Some "2"; Some "IN"; Some "y"; Some "time"; None; None; None; None; Some "6"; None; None; Some "time(6)"; Some "FUNCTION" ]
+                        [ Some "describe_values"; Some "1"; Some "IN"; Some "i"; Some "int"; None; None; Some "10"; Some "0"; None; None; None; Some "int unsigned"; Some "PROCEDURE" ]
+                        [ Some "describe_values"; Some "2"; Some "OUT"; Some "s"; Some "varchar"; Some "12"; Some "12"; None; None; None; Some "latin1"; Some "latin1_bin"; Some "varchar(12)"; Some "PROCEDURE" ]
+                        [ Some "describe_values"; Some "3"; Some "INOUT"; Some "d"; Some "decimal"; None; None; Some "8"; Some "3"; None; None; None; Some "decimal(8,3)"; Some "PROCEDURE" ]
+                        [ Some "describe_values"; Some "4"; Some "IN"; Some "dt"; Some "datetime"; None; None; None; None; Some "4"; None; None; Some "datetime(4)"; Some "PROCEDURE" ]
+                        [ Some "describe_values"; Some "5"; Some "IN"; Some "b"; Some "bit"; None; None; Some "9"; Some "0"; None; None; None; Some "bit(9)"; Some "PROCEDURE" ]
+                        [ Some "describe_values"; Some "6"; Some "IN"; Some "plain"; Some "varchar"; Some "2"; Some "2"; None; None; None; Some "latin1"; Some "latin1_swedish_ci"; Some "varchar(2)"; Some "PROCEDURE" ] ]
+                      "routine parameters use MySQL's ordinal and type metadata"
+              | other -> failtestf "expected stored routine parameter metadata, got %A" other
+
           testCase "single-statement procedure blocks persist and execute"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -3517,6 +3556,15 @@ let tests =
               with
               | ResultSet(_, [ [ Some "function_definer"; None ] ]) -> ()
               | other -> failtestf "expected redacted routine information for an EXECUTE grantee, got %A" other
+
+              match
+                  handle
+                      caller
+                      "SELECT ORDINAL_POSITION,PARAMETER_NAME,ROUTINE_TYPE FROM information_schema.PARAMETERS WHERE SPECIFIC_NAME = 'function_definer'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "0"; None; Some "FUNCTION" ] ]) -> ()
+              | other -> failtestf "expected parameter metadata for an EXECUTE grantee, got %A" other
 
               match handle caller "SHOW FUNCTION STATUS" |> snd with
               | ResultSet(_, rows) ->

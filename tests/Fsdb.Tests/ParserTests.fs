@@ -3357,11 +3357,19 @@ let tests =
           <| fun _ ->
               match Fsdb.StoredProgram.parseParameters defaultOptions "IN n INT, OUT label VARCHAR(10), INOUT amount DECIMAL(8, 2)" with
               | Ok
-                  [ { Name = "n"; ColumnType = TInt false; Mode = Fsdb.StoredProgram.In }
-                    { Name = "label"; ColumnType = TVarchar 10; Mode = Fsdb.StoredProgram.Out }
-                    { Name = "amount"; ColumnType = TDecimal(8, 2, false); Mode = Fsdb.StoredProgram.InOut } ] ->
+                  [ { Name = "n"; DisplayName = "n"; ColumnType = TInt false; Charset = None; Collation = None; Mode = Fsdb.StoredProgram.In }
+                    { Name = "label"; DisplayName = "label"; ColumnType = TVarchar 10; Charset = None; Collation = None; Mode = Fsdb.StoredProgram.Out }
+                    { Name = "amount"; DisplayName = "amount"; ColumnType = TDecimal(8, 2, false); Charset = None; Collation = None; Mode = Fsdb.StoredProgram.InOut } ] ->
                   ()
               | other -> failtestf "unexpected parameters: %A" other
+
+              match Fsdb.StoredProgram.parseParameters defaultOptions "OUT label VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin" with
+              | Ok [ { DisplayName = "label"; Charset = Some "latin1"; Collation = Some "latin1_bin" } ] -> ()
+              | other -> failtestf "unexpected character parameter: %A" other
+
+              match Fsdb.StoredProgram.parseParameters defaultOptions "IN label VARCHAR(10) COLLATE latin1_bin" with
+              | Error _ -> ()
+              | other -> failtestf "expected COLLATE without CHARACTER SET to be refused, got %A" other
 
               match Fsdb.StoredProgram.parse defaultOptions "BEGIN DECLARE amount DECIMAL(8, 2) DEFAULT 1.25; SET amount = amount + 1; END" with
               | Ok

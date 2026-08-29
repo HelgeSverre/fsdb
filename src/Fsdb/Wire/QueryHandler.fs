@@ -3842,6 +3842,11 @@ let private routineColumn name columnType =
       Collation = None
       Charset = None }
 
+let private parameterColumn (parameter: StoredProgram.Parameter) =
+    { routineColumn parameter.Name parameter.ColumnType with
+        Collation = parameter.Collation
+        Charset = parameter.Charset }
+
 let private coerceRoutineValue (store: Store) column value =
     Storage.coerceValue store.ExecutionSettings.SqlMode.Strict column value
     |> Result.mapError (Storage.toMySqlError >> Err)
@@ -4783,7 +4788,7 @@ let rec private invokeStoredFunction
                     caller.Variables }
 
     let initializeParameter ((parameter: StoredProgram.Parameter), value) =
-        let column = routineColumn parameter.Name parameter.ColumnType
+        let column = parameterColumn parameter
 
         coerceRoutineValue executionStore column value
         |> Result.map (fun value -> parameter.Name, { Executor.RoutineVariable.Column = column; Value = value })
@@ -5154,7 +5159,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
                             let executeBody () =
                                 let initializeVariable ((parameter: StoredProgram.Parameter), value) =
-                                    let column = routineColumn parameter.Name parameter.ColumnType
+                                    let column = parameterColumn parameter
 
                                     coerceRoutineValue executionStore column value
                                     |> Result.map (fun value -> parameter.Name, { Executor.RoutineVariable.Column = column; Value = value })

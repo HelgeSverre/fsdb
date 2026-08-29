@@ -100,7 +100,10 @@ type ParameterMode =
 
 type Parameter =
     { Name: string
+      DisplayName: string
       ColumnType: ColumnType
+      Charset: string option
+      Collation: string option
       Mode: ParameterMode }
 
 type ValidationError =
@@ -1023,17 +1026,21 @@ let parseParameters (options: Parser.ParserOptions) (text: string) : Result<Para
         if not matched.Success then
             Error(sprintf "Invalid routine parameter: %s" value)
         else
-            let name = matched.Groups.["name"].Value.Trim('`').Replace("``", "`").ToLowerInvariant()
+            let displayName = matched.Groups.["name"].Value.Trim('`').Replace("``", "`")
+            let name = displayName.ToLowerInvariant()
             let mode =
                 match matched.Groups.["mode"].Value.ToUpperInvariant() with
                 | "OUT" -> Out
                 | "INOUT" -> InOut
                 | _ -> In
 
-            Parser.parseColumnTypeWithOptions options matched.Groups.["type"].Value
-            |> Result.map (fun columnType ->
+            Parser.parseRoutineParameterTypeWithOptions options matched.Groups.["type"].Value
+            |> Result.map (fun (columnType, charset, collation) ->
                 { Name = name
+                  DisplayName = displayName
                   ColumnType = columnType
+                  Charset = charset
+                  Collation = collation
                   Mode = mode })
 
     if String.IsNullOrWhiteSpace text then

@@ -2119,6 +2119,48 @@ let private checkDefinition: Parser<string option * Expr * bool, unit> =
     .>>. checkEnforcement
     |>> fun ((name, expression), enforced) -> name, expression, enforced
 
+let private characterTypeMod: Parser<ColMod, unit> =
+    choice
+        [ attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET") >>. knownCharset |>> MCharset
+          keyword "BINARY" >>% MBinary
+          keyword "COLLATE"
+          >>. identOrString
+          >>= fun name ->
+              match Collation.tryFind name with
+              | Some _ -> preturn (MCollate name)
+              | None -> fail (sprintf "Unknown collation '%s'" name) ]
+
+let private characterMetadata mods =
+    let charset =
+        mods
+        |> List.tryPick (function
+            | MCharset value -> Some value
+            | _ -> None)
+        |> Option.orElseWith (fun () ->
+            mods
+            |> List.tryPick (function
+                | MCollate collation -> Some(Collation.charsetOfCollation collation)
+                | _ -> None))
+
+    let collation =
+        mods
+        |> List.tryPick (function
+            | MCollate value -> Some value
+            | _ -> None)
+        |> Option.orElseWith (fun () ->
+            if List.contains MBinary mods then
+                match charset |> Option.map _.ToLowerInvariant() with
+                | Some "ascii" -> Some "ascii_bin"
+                | Some "latin1" -> Some "latin1_bin"
+                | Some "utf8"
+                | Some "utf8mb3" -> Some "utf8mb3_bin"
+                | Some "binary" -> Some "binary"
+                | _ -> Some "utf8mb4_bin"
+            else
+                None)
+
+    charset, collation
+
 let private colMod: Parser<ColMod, unit> =
     choice
         [ attempt (checkDefinition |>> MCheck)
@@ -2135,19 +2177,14 @@ let private colMod: Parser<ColMod, unit> =
           )
           >>% MOnUpdateCurrentTimestamp
           keyword "COMMENT" >>. stringLit |>> (function VString text -> MComment text | _ -> MComment "")
-          attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET") >>. knownCharset |>> MCharset
-          keyword "BINARY" >>% MBinary
-          keyword "COLLATE"
-          >>. identOrString
-          >>= fun name ->
-              match Collation.tryFind name with
-              | Some _ -> preturn (MCollate name)
-              | None -> fail (sprintf "Unknown collation '%s'" name)
+          attempt characterTypeMod
           attempt generatedColumn |>> MGenerated ]
 
 let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
     (identifier .>>. columnTypeWithDisplay .>>. many colMod)
     |>> fun ((name, (ty, numericDisplay)), mods) ->
+        let charset, collation = characterMetadata mods
+
         let column =
             { Name = name
               Type = ty
@@ -2160,32 +2197,8 @@ let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
               OnUpdateCurrentTimestamp = List.contains MOnUpdateCurrentTimestamp mods
               Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
               Comment = mods |> List.rev |> List.tryPick (function MComment text -> Some text | _ -> None) |> Option.defaultValue ""
-              Collation =
-                  mods
-                  |> List.tryPick (function MCollate c -> Some c | _ -> None)
-                  |> Option.orElseWith (fun () ->
-                      if List.contains MBinary mods then
-                          let charset = mods |> List.tryPick (function MCharset value -> Some value | _ -> None)
-
-                          match charset |> Option.map _.ToLowerInvariant() with
-                          | Some "ascii" -> Some "ascii_bin"
-                          | Some "latin1" -> Some "latin1_bin"
-                          | Some "utf8"
-                          | Some "utf8mb3" -> Some "utf8mb3_bin"
-                          | Some "binary" -> Some "binary"
-                          | _ -> Some "utf8mb4_bin"
-                      else
-                          None)
-              Charset =
-                  mods
-                  |> List.tryPick (function
-                      | MCharset c -> Some c
-                      | _ -> None)
-                  |> Option.orElseWith (fun () ->
-                      mods
-                      |> List.tryPick (function
-                          | MCollate _ -> Some "utf8mb4"
-                          | _ -> None)) }
+              Collation = collation
+              Charset = charset }
 
         let checks =
             mods
@@ -4595,6 +4608,25 @@ let parseColumnTypeWithOptions (options: ParserOptions) (sql: string) : Result<C
 
 let parseColumnType (sql: string) : Result<ColumnType, string> =
     parseColumnTypeWithOptions defaultOptions sql
+
+let parseRoutineParameterTypeWithOptions
+    (options: ParserOptions)
+    (sql: string)
+    : Result<ColumnType * string option * string option, string> =
+    let parameterType =
+        columnTypeWithDisplay
+        .>>. many characterTypeMod
+        >>= fun ((columnType, _), mods) ->
+            let hasCharset = mods |> List.exists (function MCharset _ -> true | _ -> false)
+            let hasCollation = mods |> List.exists (function MCollate _ -> true | _ -> false)
+
+            if hasCollation && not hasCharset then
+                fail "COLLATE requires CHARACTER SET in a stored-program parameter"
+            else
+                let charset, collation = characterMetadata mods
+                preturn (columnType, charset, collation)
+
+    withParserState options sql (runWithDepthLimit (ws >>. parameterType .>> eof))
 
 /// Parses the user-defined-variable target at the front of a `SET`
 /// assignment. The right-hand side remains source text because `SET` has

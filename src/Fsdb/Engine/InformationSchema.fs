@@ -204,10 +204,10 @@ let private numericPrecisionScale (ty: ColumnType) : (int64 * int64) option =
     | TSmallInt _ -> Some(5L, 0L)
     | TMediumInt _ -> Some(7L, 0L)
     | TInt _ -> Some(10L, 0L)
-    | TBigInt _ -> Some(19L, 0L)
+    | TBigInt unsigned -> Some((if unsigned then 20L else 19L), 0L)
     | TBit width -> Some(int64 width, 0L)
     | TDecimal(p, s, _) -> Some(int64 p, int64 s)
-    | TFloat _ -> Some(10L, 0L)
+    | TFloat _ -> Some(12L, 0L)
     | TDouble _ -> Some(22L, 0L)
     | _ -> None
 
@@ -1082,8 +1082,7 @@ let private processlistRows () : Value[] list =
            vopt ptmp.Info |])
 
 // ---------------------------------------------------------------------------
-// Stored-object catalogs. Views and triggers project their row-backed mysql
-// catalogs; routines and events remain genuinely empty.
+// Stored-object catalogs projected from their row-backed mysql tables.
 // ---------------------------------------------------------------------------
 
 let private viewsColumns =
@@ -1306,6 +1305,172 @@ let private parametersColumns =
       strCol "COLLATION_NAME"
       strCol "DTD_IDENTIFIER"
       strCol "ROUTINE_TYPE" ]
+
+let private defaultCollationForCharset =
+    function
+    | "utf8"
+    | "utf8mb3" -> "utf8mb3_general_ci"
+    | "latin1" -> "latin1_swedish_ci"
+    | "ascii" -> "ascii_general_ci"
+    | "binary" -> "binary"
+    | _ -> "utf8mb4_0900_ai_ci"
+
+let private parameterCharacterMetadata fallbackCollation (parameter: StoredProgram.Parameter) =
+    if isStringy parameter.ColumnType then
+        let charset =
+            parameter.Charset
+            |> Option.orElseWith (fun () -> parameter.Collation |> Option.map Collation.charsetOfCollation)
+            |> Option.defaultWith (fun () -> Collation.charsetOfCollation fallbackCollation)
+
+        let collation =
+            parameter.Collation
+            |> Option.orElseWith (fun () ->
+                parameter.Charset
+                |> Option.map (fun value -> defaultCollationForCharset (value.ToLowerInvariant())))
+            |> Option.defaultValue fallbackCollation
+
+        Some charset, Some collation
+    else
+        None, None
+
+let private parameterRow
+    routineType
+    schema
+    name
+    fallbackCollation
+    ordinal
+    mode
+    parameterName
+    (parameter: StoredProgram.Parameter)
+    =
+    let characterLength = charMaxLength parameter.ColumnType
+    let charset, collation = parameterCharacterMetadata fallbackCollation parameter
+
+    let octetLength =
+        characterLength
+        |> Option.map (fun length ->
+            match parameter.ColumnType with
+            | TChar _
+            | TVarchar _ -> length * int64 (Collation.maxBytesPerCharacter charset)
+            | _ -> length)
+
+    let numeric = numericPrecisionScale parameter.ColumnType
+
+    [| vs "def"
+       vs schema
+       vs name
+       VInt(int64 ordinal)
+       mode |> Option.map vs |> Option.defaultValue VNull
+       parameterName |> Option.map vs |> Option.defaultValue VNull
+       vs (dataTypeName parameter.ColumnType)
+       characterLength |> Option.map VInt |> Option.defaultValue VNull
+       octetLength |> Option.map VInt |> Option.defaultValue VNull
+       numeric |> Option.map (fst >> VInt) |> Option.defaultValue VNull
+       numeric |> Option.map (snd >> VInt) |> Option.defaultValue VNull
+       datetimePrecision parameter.ColumnType |> Option.map VInt |> Option.defaultValue VNull
+       charset |> Option.map vs |> Option.defaultValue VNull
+       collation |> Option.map vs |> Option.defaultValue VNull
+       vs (columnTypeText parameter.ColumnType)
+       vs routineType |]
+
+let private parameterMode =
+    function
+    | StoredProgram.In -> "IN"
+    | StoredProgram.Out -> "OUT"
+    | StoredProgram.InOut -> "INOUT"
+
+type private ParameterRoutine =
+    { RoutineType: string
+      Schema: string
+      Name: string
+      Definer: string
+      Parameters: string
+      ReturnType: string option
+      SqlMode: string
+      CollationConnection: string }
+
+let private parametersRows (catalog: Catalog) =
+    let options sqlMode = SqlMode.parserOptionsFor sqlMode
+
+    let procedures =
+        mysqlTable catalog "routines"
+        |> Option.map (fun table ->
+            table.RowsArray
+            |> Seq.choose SystemCatalog.Routine.tryRead
+            |> Seq.map (fun routine ->
+                { RoutineType = "PROCEDURE"
+                  Schema = routine.Schema
+                  Name = routine.Name
+                  Definer = routine.Definer
+                  Parameters = routine.Parameters
+                  ReturnType = None
+                  SqlMode = routine.SqlMode
+                  CollationConnection = routine.CollationConnection })
+            |> List.ofSeq)
+        |> Option.defaultValue []
+
+    let functions =
+        mysqlTable catalog "functions"
+        |> Option.map (fun table ->
+            table.RowsArray
+            |> Seq.choose SystemCatalog.StoredFunction.tryRead
+            |> Seq.map (fun routine ->
+                { RoutineType = "FUNCTION"
+                  Schema = routine.Schema
+                  Name = routine.Name
+                  Definer = routine.Definer
+                  Parameters = routine.Parameters
+                  ReturnType = Some routine.ReturnType
+                  SqlMode = routine.SqlMode
+                  CollationConnection = routine.CollationConnection })
+            |> List.ofSeq)
+        |> Option.defaultValue []
+
+    procedures @ functions
+    |> List.filter (fun routine -> routineVisible routine.Schema routine.Definer)
+    |> List.collect (fun routine ->
+        let parsedParameters =
+            StoredProgram.parseParameters (options routine.SqlMode) routine.Parameters
+
+        let resultRows =
+            match routine.ReturnType with
+            | None -> Ok []
+            | Some returnType ->
+                Parser.parseRoutineParameterTypeWithOptions (options routine.SqlMode) returnType
+                |> Result.map (fun (columnType, charset, collation) ->
+                    let parameter: StoredProgram.Parameter =
+                        { Name = ""
+                          DisplayName = ""
+                          ColumnType = columnType
+                          Charset = charset
+                          Collation = collation
+                          Mode = StoredProgram.In }
+
+                    [ parameterRow
+                          routine.RoutineType
+                          routine.Schema
+                          routine.Name
+                          routine.CollationConnection
+                          0
+                          None
+                          None
+                          parameter ])
+
+        match resultRows, parsedParameters with
+        | Ok result, Ok parameters ->
+            result
+            @ (parameters
+               |> List.mapi (fun index parameter ->
+                   parameterRow
+                       routine.RoutineType
+                       routine.Schema
+                       routine.Name
+                       routine.CollationConnection
+                       (index + 1)
+                       (Some(parameterMode parameter.Mode))
+                       (Some parameter.DisplayName)
+                       parameter))
+        | _ -> [])
 
 let private triggersColumns =
     [ strCol "TRIGGER_CATALOG"
@@ -2015,12 +2180,10 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "COLUMN_PRIVILEGES" -> Some(columnPrivilegesRows catalog)
         | "ENGINES" -> Some enginesRows
         | "ENABLED_ROLES" -> Some(enabledRolesRows ())
-        // PARAMETERS remains empty until stored-program parameter metadata
-        // is exposed through information_schema.
         | "TRIGGERS" -> Some(triggersRows catalog)
         | "VIEWS" -> Some(viewsRows catalog)
         | "ROUTINES" -> Some(routinesRows catalog)
-        | "PARAMETERS" -> Some []
+        | "PARAMETERS" -> Some(parametersRows catalog)
         | "EVENTS" -> Some(eventsRows catalog)
         | _ -> None
 

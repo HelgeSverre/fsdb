@@ -1179,10 +1179,28 @@ let tests =
               let reloaded = load dir
               let recovered = Fsdb.Session.create 2 reloaded
 
+              let expectParameters session context =
+                  match
+                      handle
+                          session
+                          "SELECT specific_name,ordinal_position,parameter_name FROM information_schema.parameters WHERE specific_schema='fsdb' ORDER BY specific_name,ordinal_position"
+                      |> snd
+                  with
+                  | ResultSet(_, rows) ->
+                      Expect.equal
+                          rows
+                          [ [ Some "doubled"; Some "0"; None ]
+                            [ Some "doubled"; Some "1"; Some "value" ]
+                            [ Some "topics"; Some "1"; Some "num" ] ]
+                          context
+                  | other -> failtestf "expected recovered parameter metadata, got %A" other
+
               match handle recovered "SHOW CREATE PROCEDURE topics" |> snd with
               | ResultSet(_, [ [ Some "topics"; Some ""; Some ddl; Some "latin1"; Some "latin1_bin"; Some "utf8mb4_0900_ai_ci" ] ]) ->
                   Expect.stringContains ddl "PROCEDURE `topics`(IN num INT) SQL SECURITY INVOKER" "signature recovered"
               | other -> failtestf "expected recovered procedure metadata, got %A" other
+
+              expectParameters recovered "WAL retains routine parameters"
 
               match handle recovered "CALL topics(6)" |> snd with
               | MultipleResults [ (ResultSet([ "doubled" ], [ [ Some "12" ] ]), _); (Affected 0UL, []) ] -> ()
@@ -1201,6 +1219,8 @@ let tests =
 
               let snapshotted = load dir
               let recovered = Fsdb.Session.create 3 snapshotted
+
+              expectParameters recovered "snapshot retains routine parameters"
 
               match handle recovered "SELECT doubled(9)" |> snd with
               | ResultSet(_, [ [ Some "18" ] ]) -> ()
