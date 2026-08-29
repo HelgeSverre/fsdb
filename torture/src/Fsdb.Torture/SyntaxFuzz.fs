@@ -113,6 +113,8 @@ module SyntaxFuzz =
                "CREATE PROCEDURE syntax_proc_body_%s(IN value INT, OUT doubled INT) BEGIN DECLARE local_value INT DEFAULT value + 1; SET doubled = local_value * 2; SELECT local_value, doubled; END"
                suffix
            "procedure_call", "CALL syntax_callable(3, @syntax_output)"
+           "routine_parameters_metadata",
+           "SELECT SPECIFIC_NAME, ORDINAL_POSITION, PARAMETER_MODE, PARAMETER_NAME, DATA_TYPE, DTD_IDENTIFIER, ROUTINE_TYPE FROM information_schema.PARAMETERS WHERE SPECIFIC_SCHEMA = DATABASE() AND SPECIFIC_NAME = 'syntax_callable' ORDER BY ORDINAL_POSITION"
            "scheduled_event",
            sprintf "CREATE EVENT syntax_event_%s ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY DO INSERT INTO syntax_log VALUES (999)" suffix
            "recurring_event",

@@ -254,8 +254,8 @@ own collation. `SET collation_connection` governs literals, so
 `information_schema.COLUMNS` carries `CHARACTER_SET_NAME`, `COLLATION_NAME`,
 and `COLUMN_COMMENT`.
 
-The deliberate gaps — including complex updatable views, the full stored
-program language, stored routines, events, and every smaller divergence — are
+The deliberate gaps — including complex updatable views, the remaining stored
+program language, replication, and every smaller divergence — are
 documented in
 [docs/compatibility.md](docs/compatibility.md) and marked `ponytail:` at
 their code sites.

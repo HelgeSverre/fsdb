@@ -564,6 +564,7 @@ let tests =
                           "stored_procedure"
                           "procedure_parameter"
                           "procedure_compound"
+                          "routine_parameters_metadata"
                           "scheduled_event"
                           "recurring_event"
                           "role_account"

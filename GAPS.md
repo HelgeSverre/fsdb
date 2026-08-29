@@ -339,7 +339,9 @@ routine variables in expressions and `LIMIT`, and multiple resultsets with
 the protocol's final OK result. CREATE/DROP/CALL, SHOW CREATE PROCEDURE, SHOW
 PROCEDURE STATUS, and persisted ROUTINES metadata are covered. DEFINER and
 INVOKER bodies use the corresponding account, routine schema, and captured SQL
-mode, client charset, and connection collation.
+mode, client charset, and connection collation. INFORMATION_SCHEMA.PARAMETERS
+reports procedure arguments and function return/argument rows with declared
+type, ordinal, mode, charset, and collation metadata.
 Stored functions support typed parameters and return coercion, `RETURN`,
 compound control flow, handlers, read-only cursors and subqueries, nested
 function calls, DEFINER/INVOKER execution, native-function name precedence,
@@ -457,7 +459,7 @@ live Limits reporting.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS | 25 views; role and column-privilege views are live, ROUTINES and EVENTS expose supported declarations, while PARAMETERS remains empty | low | divergence |
+| INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS | 25 views; role and privilege views are live, while ROUTINES, PARAMETERS, and EVENTS expose supported declarations | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, and Com_select/insert/update/delete/replace counters; engine and latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
