@@ -2081,6 +2081,48 @@ let tests =
               let _, _ = handle session "UNLOCK TABLES"
               ()
 
+          testCase "table locks distinguish read and write sides of joined DML"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE joined_lock_target (id INT PRIMARY KEY, n INT)"
+              let session, _ = handle session "CREATE TABLE joined_lock_source (id INT PRIMARY KEY, n INT)"
+              let session, _ = handle session "INSERT INTO joined_lock_target VALUES (1, 0)"
+              let session, _ = handle session "INSERT INTO joined_lock_source VALUES (1, 10)"
+
+              let session, _ =
+                  handle session "LOCK TABLES joined_lock_target AS target WRITE, joined_lock_source AS source READ"
+
+              match
+                  handle
+                      session
+                      "UPDATE joined_lock_target AS target JOIN joined_lock_source AS source ON source.id=target.id SET target.n=source.n"
+                  |> snd
+              with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the writable join target to update, got %A" other
+
+              match
+                  handle
+                      session
+                      "UPDATE joined_lock_target AS target JOIN joined_lock_source AS source ON source.id=target.id SET source.n=target.n"
+                  |> snd
+              with
+              | Err(1099, _) -> ()
+              | other -> failtestf "expected the read-locked join source to reject updates, got %A" other
+
+              match
+                  handle
+                      session
+                      "DELETE target FROM joined_lock_target AS target JOIN joined_lock_source AS source ON source.id=target.id"
+                  |> snd
+              with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the named writable delete target to succeed, got %A" other
+
+              let _, _ = handle session "UNLOCK TABLES"
+              ()
+
           testCase "permanent DDL releases explicit table locks"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
