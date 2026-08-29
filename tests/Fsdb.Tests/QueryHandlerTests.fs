@@ -2164,6 +2164,27 @@ let tests =
                   | other -> failtestf "expected missing procedure, got %A" other
               | _, other -> failtestf "expected procedure result, got %A" other
 
+          testCase "routine and SET comma lists reject empty elements"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql in
+                  [ "CREATE PROCEDURE invalid_parameter_list(IN value INT,, OUT doubled INT) SELECT value"
+                    "CREATE PROCEDURE invalid_local_set(IN value INT) BEGIN SET value value + 1; SELECT value; END"
+                    "SET @first=1,,@second=2" ] do
+                  match handle session sql |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected invalid comma or assignment syntax for %s, got %A" sql other
+
+              let session, created =
+                  handle session "CREATE PROCEDURE strict_call(IN value INT, OUT doubled INT) SET doubled=value*2"
+
+              Expect.equal created (Affected 0UL) "valid procedure created"
+
+              match handle session "CALL strict_call(3,,@out)" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected an empty CALL argument to fail, got %A" other
+
           testCase "procedure declarations preserve one parameter and SQL SECURITY"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

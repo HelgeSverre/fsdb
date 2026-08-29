@@ -909,9 +909,9 @@ let private resolveSystemSetRhs
 /// (`sql_mode`'s comma-separated mode list) nor a function call's argument
 /// list (`SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')`) gets
 /// split apart.
-let private splitSetAssignments (options: Parser.ParserOptions) (sql: string) : string list =
+let private splitSetAssignments (options: Parser.ParserOptions) (sql: string) : Result<string list, string> =
     let body = Regex.Replace(sql, @"^SET\s+", "", RegexOptions.IgnoreCase)
-    Parser.splitTopLevelCommaSeparatedWithOptions options body
+    Parser.splitNonEmptyTopLevelCommaSeparatedWithOptions options body
 
 /// One `SET` fragment's parsed effect, applied only once every fragment in
 /// the statement has parsed successfully (see `handleSet`) — mirrors real
@@ -1172,13 +1172,16 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
 
     let parsed =
         splitSetAssignments options sql
-        |> List.fold
-            (fun state fragment ->
-                state
-                |> Result.bind (fun (actions, sideEffects) ->
-                    parseSetFragment sql session sideEffects fragment
-                    |> Result.map (fun (action, nextSideEffects) -> action :: actions, nextSideEffects)))
-            (Ok([], session.UserVariables))
+        |> Result.mapError (fun _ -> syntaxError sql)
+        |> Result.bind (fun fragments ->
+            fragments
+            |> List.fold
+                (fun state fragment ->
+                    state
+                    |> Result.bind (fun (actions, sideEffects) ->
+                        parseSetFragment sql session sideEffects fragment
+                        |> Result.map (fun (action, nextSideEffects) -> action :: actions, nextSideEffects)))
+                (Ok([], session.UserVariables)))
 
     match parsed with
     | Error result -> session, result
@@ -3326,8 +3329,24 @@ let private routineValidationError error =
     let code, message = StoredProgram.validationError error
     Err(code, message)
 
-let private isSupportedStoredProgramText sql =
-    (tryProbe sql (sql.TrimStart().ToUpperInvariant()) |> Option.isSome)
+let private isSupportedStoredProgramText options sql =
+    let probe = tryProbe sql (sql.TrimStart().ToUpperInvariant())
+
+    let supportedProbe =
+        match probe with
+        | Some SetVar ->
+            splitSetAssignments options sql
+            |> Result.exists (fun fragments ->
+                not fragments.IsEmpty
+                && (fragments
+                    |> List.forall (fun fragment ->
+                        setNames.IsMatch fragment
+                        || setVar.IsMatch fragment
+                        || (Parser.parseUserVariableSetAssignment fragment |> Result.isOk))))
+        | Some _ -> true
+        | None -> false
+
+    supportedProbe
     || (tryTextPreparedCommand sql |> Result.exists Option.isSome)
     || (match tryTextRoutineCommand sql with
         | Some(CallProcedure _) -> true
@@ -3336,7 +3355,7 @@ let private isSupportedStoredProgramText sql =
 let private parseRoutineDefinition options parameters body =
     match
         StoredProgram.parseParameters options parameters,
-        StoredProgram.parseRoutine options isSupportedStoredProgramText body
+        StoredProgram.parseRoutine options (isSupportedStoredProgramText options) body
     with
     | Ok parsedParameters, Ok statements ->
         StoredProgram.validate parsedParameters statements
@@ -4175,7 +4194,7 @@ let private runTextDiagnostics session (diagnostics: StoredProgram.DiagnosticsSt
                     | Ok variables -> { next with UserVariables = variables }, Affected 0UL
 
 let private validEventBody options (body: string) =
-    match StoredProgram.parseRoutine options isSupportedStoredProgramText body with
+    match StoredProgram.parseRoutine options (isSupportedStoredProgramText options) body with
     | Ok statements -> StoredProgram.validate [] statements |> Result.isOk
     | Error _ -> false
 
@@ -5379,7 +5398,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
 let executeEventBody (session: Session) (body: string) : Session * QueryResult =
     let options = parserOptionsForSession session
 
-    match StoredProgram.parseRoutine options isSupportedStoredProgramText body with
+    match StoredProgram.parseRoutine options (isSupportedStoredProgramText options) body with
     | Error _ -> session, syntaxError body
     | Ok statements ->
         withStoredFunctionRegistry session (fun current ->

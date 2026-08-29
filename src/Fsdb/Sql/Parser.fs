@@ -97,22 +97,12 @@ let inline private visitTopLevelCharactersWithOptions
                 index <- index + 1
             | None -> index <- index + 1
 
-let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : string list =
+let private topLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : string list =
     let parts = ResizeArray<string>()
     let mutable start = 0
 
     let addPart finish =
-        let mutable first = start
-        let mutable last = finish - 1
-
-        while first <= last && Char.IsWhiteSpace text.[first] do
-            first <- first + 1
-
-        while last >= first && Char.IsWhiteSpace text.[last] do
-            last <- last - 1
-
-        if first <= last then
-            parts.Add(text.Substring(first, last - first + 1))
+        parts.Add(text.Substring(start, finish - start).Trim())
 
     visitTopLevelCharactersWithOptions options text (fun index ->
         if text.[index] = ',' then
@@ -123,6 +113,18 @@ let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: strin
 
     addPart text.Length
     List.ofSeq parts
+
+let splitTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : string list =
+    topLevelCommaSeparatedWithOptions options text
+    |> List.filter (String.IsNullOrWhiteSpace >> not)
+
+let splitNonEmptyTopLevelCommaSeparatedWithOptions (options: ParserOptions) (text: string) : Result<string list, string> =
+    let parts = topLevelCommaSeparatedWithOptions options text
+
+    if parts |> List.exists String.IsNullOrWhiteSpace then
+        Result.Error "Expected an expression between commas"
+    else
+        Result.Ok parts
 
 let trySplitTopLevelKeywordWithOptions
     (options: ParserOptions)

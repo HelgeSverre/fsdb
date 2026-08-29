@@ -1039,14 +1039,15 @@ let parseParameters (options: Parser.ParserOptions) (text: string) : Result<Para
     if String.IsNullOrWhiteSpace text then
         Ok []
     else
-        Parser.splitTopLevelCommaSeparatedWithOptions options text |> traverse parseOne
+        Parser.splitNonEmptyTopLevelCommaSeparatedWithOptions options text
+        |> Result.bind (traverse parseOne)
 
 let parseArguments (options: Parser.ParserOptions) (text: string) : Result<Expr list, string> =
     if String.IsNullOrWhiteSpace text then
         Ok []
     else
-        Parser.splitTopLevelCommaSeparatedWithOptions options text
-        |> traverse (Parser.parseExpressionWithOptions options)
+        Parser.splitNonEmptyTopLevelCommaSeparatedWithOptions options text
+        |> Result.bind (traverse (Parser.parseExpressionWithOptions options))
 
 let private parseWithFallback
     (options: Parser.ParserOptions)
