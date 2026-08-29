@@ -113,9 +113,9 @@ packet terminator, and then rejected with 1153 when over the cap.
 
 The supported load subset is UTF-8/utf8mb4 input with one-character
 field/line delimiters, optional enclosure and escape characters, `REPLACE` or
-`IGNORE`, header-line skipping, and target column lists. Server-side
-`LOAD DATA INFILE`, multibyte delimiters, `SET` assignments, and user-variable
-targets remain unsupported.
+`IGNORE`, header-line skipping, target columns or user variables, and ordered
+`SET` transformations. Server-side `LOAD DATA INFILE` and multibyte delimiters
+remain unsupported.
 
 ## Views and triggers
 

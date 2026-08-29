@@ -36,6 +36,7 @@ module AstKind =
         | Replace _ -> "replace"
         | ReplaceSelect _ -> "replace_select"
         | ReplaceSet _ -> "replace_set"
+        | LoadData _ -> "load_data"
         | Select _ -> "select"
         | Do _ -> "do"
         | Union _ -> "union"

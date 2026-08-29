@@ -184,10 +184,6 @@ let private whenOption
 
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
-type LocalLoadField =
-    | LoadColumn of name: string
-    | LoadUserVariable of variable: UserVariableRef
-
 type LocalLoad =
     { FileName: string
       Table: string
@@ -199,7 +195,7 @@ type LocalLoad =
       Escape: string option
       LineTerminator: string
       IgnoreLines: int
-      Fields: LocalLoadField list
+      Fields: LoadDataField list
       Assignments: (string * Expr) list }
 
 // ---------------------------------------------------------------------------
@@ -4375,10 +4371,10 @@ let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
 
 /// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
 /// client-to-server data stream.
-let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
+let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<LocalLoad, string> =
     let parser = ws >>. localLoadData .>> opt (sym ";") .>> eof
 
-    withParserState defaultOptions sql (runWithDepthLimit parser)
+    withParserState options sql (runWithDepthLimit parser)
     |> Result.bind (fun load ->
         let validSeparator value = value = "" || value.Length = 1
 
@@ -4391,6 +4387,9 @@ let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
             Result.Ok load
         else
             Result.Error "LOAD DATA delimiters must be empty or one character")
+
+let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
+    parseLocalLoadWithOptions defaultOptions sql
 
 let private explicitTableLockMode =
     choice

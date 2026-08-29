@@ -483,7 +483,7 @@ let tests =
 
                       do!
                           query
-                              "CREATE TABLE transformed_load (id INT, name VARCHAR(20), doubled INT, label VARCHAR(40), untouched INT DEFAULT 9)"
+                              "CREATE TABLE transformed_load (id INT NOT NULL AUTO_INCREMENT, name VARCHAR(20), doubled INT, label VARCHAR(40), untouched INT DEFAULT 9)"
                           |> Async.Ignore
 
                       let! _ = readPacketAsync stream
@@ -495,7 +495,7 @@ let tests =
 
                       let! request = readPacketAsync stream
                       Expect.equal request.Value.Payload.[0] 0xfbuy "LOCAL request"
-                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "01\tAda\n2\tGrace\n" } |> Async.Ignore
+                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "100\tAda\n101\tGrace\n" } |> Async.Ignore
                       do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
                       let! loaded = readPacketAsync stream
                       Expect.equal loaded.Value.Payload.[0] 0uy "LOAD succeeds"
@@ -504,8 +504,8 @@ let tests =
                       | Ok(_, rows) ->
                           Expect.sequenceEqual
                               (rows |> List.map Array.toList)
-                              [ [ VInt 1L; VString "Ada"; VInt 2L; VString "Ada:2"; VInt 9L ]
-                                [ VInt 2L; VString "Grace"; VInt 4L; VString "Grace:4"; VInt 9L ] ]
+                              [ [ VInt 100L; VString "Ada"; VInt 200L; VString "Ada:200"; VInt 9L ]
+                                [ VInt 101L; VString "Grace"; VInt 202L; VString "Grace:202"; VInt 9L ] ]
                               "coerced and sequential SET values"
                       | Error error -> failtestf "table scan failed: %A" error
 
@@ -515,7 +515,107 @@ let tests =
                       let! _ = readPacketAsync stream
                       let! variable = readPacketAsync stream
                       let! _ = readPacketAsync stream
-                      Expect.equal (Reader(variable.Value.Payload).ReadLenEncString()) (Some "2") "last input variable persists"
+                      Expect.equal (Reader(variable.Value.Payload).ReadLenEncString()) (Some "101") "last input variable persists"
+
+                      do! query "INSERT INTO transformed_load (name) VALUES ('Later')" |> Async.Ignore
+                      let! inserted = readPacketAsync stream
+                      Expect.equal inserted.Value.Payload.[0] 0uy "ordinary insert succeeds"
+
+                      match Fsdb.Storage.scanList store "fsdb" "transformed_load" with
+                      | Ok(_, rows) -> Expect.equal rows.[2].[0] (VInt 102L) "SET auto-increment values advance the sequence"
+                      | Error error -> failtestf "table scan failed: %A" error
+
+                      do!
+                          query
+                              "LOAD DATA LOCAL INFILE 'null-id.tsv' INTO TABLE transformed_load (@discard, name) SET id = NULL, doubled = 1, label = name"
+                          |> Async.Ignore
+
+                      let! request = readPacketAsync stream
+                      Expect.equal request.Value.Payload.[0] 0xfbuy "NULL auto-increment LOCAL request"
+                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "ignored\tNullId\n" } |> Async.Ignore
+                      do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                      let! loaded = readPacketAsync stream
+                      Expect.equal loaded.Value.Payload.[0] 0uy "NULL auto-increment LOAD succeeds"
+
+                      match Fsdb.Storage.scanList store "fsdb" "transformed_load" with
+                      | Ok(_, rows) -> Expect.equal rows.[3].[0] (VInt 103L) "NULL assignment generates the next key"
+                      | Error error -> failtestf "table scan failed: %A" error
+
+                      do!
+                          query "CREATE TABLE transformed_view_base (id INT PRIMARY KEY, name VARCHAR(20), label VARCHAR(40))"
+                          |> Async.Ignore
+
+                      let! _ = readPacketAsync stream
+
+                      do!
+                          query
+                              "CREATE VIEW transformed_view (view_id, view_name, view_label) AS SELECT id, name, label FROM transformed_view_base"
+                          |> Async.Ignore
+
+                      let! _ = readPacketAsync stream
+
+                      do!
+                          query
+                              "LOAD DATA LOCAL INFILE 'view.tsv' INTO TABLE transformed_view (@raw_id, view_name) SET view_id = @raw_id, view_label = CONCAT(view_name, ':', view_id)"
+                          |> Async.Ignore
+
+                      let! request = readPacketAsync stream
+                      Expect.equal request.Value.Payload.[0] 0xfbuy "view LOCAL request"
+                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "7\tMapped\n" } |> Async.Ignore
+                      do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                      let! loaded = readPacketAsync stream
+                      Expect.equal loaded.Value.Payload.[0] 0uy "view LOAD succeeds"
+
+                      match Fsdb.Storage.scanList store "fsdb" "transformed_view_base" with
+                      | Ok(_, rows) ->
+                          Expect.sequenceEqual
+                              (rows |> List.map Array.toList)
+                              [ [ VInt 7L; VString "Mapped"; VString "Mapped:7" ] ]
+                              "LOAD targets writable view columns"
+                      | Error error -> failtestf "table scan failed: %A" error
+                  }
+                  |> Async.RunSynchronously)
+
+          TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE applies transformations before REPLACE"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
+                  async {
+                      let store = Fsdb.Storage.create ()
+                      use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                      let! client, stream = connectRawAsWithCapabilities server.Port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                      use client = client
+
+                      let query (sql: string) =
+                          writePacketAsync
+                              stream
+                              { SeqId = 0uy
+                                Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      do! query "CREATE TABLE replaced_load (id INT NOT NULL PRIMARY KEY, name VARCHAR(20), marker VARCHAR(40))" |> Async.Ignore
+                      let! _ = readPacketAsync stream
+                      do! query "INSERT INTO replaced_load VALUES (1, 'Old', 'old')" |> Async.Ignore
+                      let! _ = readPacketAsync stream
+
+                      do!
+                          query
+                              "LOAD DATA LOCAL INFILE 'replace.tsv' REPLACE INTO TABLE replaced_load (@raw_id, name) SET id = @raw_id, marker = CONCAT(name, ':', id)"
+                          |> Async.Ignore
+
+                      let! request = readPacketAsync stream
+                      Expect.equal request.Value.Payload.[0] 0xfbuy "LOCAL request"
+                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "1\tNew\n2\tAdded\n" } |> Async.Ignore
+                      do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                      let! loaded = readPacketAsync stream
+                      Expect.equal loaded.Value.Payload.[0] 0uy "REPLACE load succeeds"
+
+                      match Fsdb.Storage.scanList store "fsdb" "replaced_load" with
+                      | Ok(_, rows) ->
+                          Expect.sequenceEqual
+                              (rows |> List.map Array.toList)
+                              [ [ VInt 1L; VString "New"; VString "New:1" ]
+                                [ VInt 2L; VString "Added"; VString "Added:2" ] ]
+                              "transformed candidates replace by their final keys"
+                      | Error error -> failtestf "table scan failed: %A" error
                   }
                   |> Async.RunSynchronously)
 

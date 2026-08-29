@@ -447,6 +447,9 @@ let rec private directStatementAccesses defaultDb =
     | ReplaceSet(table, assignments) ->
         namedAccess defaultDb WriteAccess table
         :: expressionsAccesses defaultDb (assignments |> List.map snd)
+    | LoadData load ->
+        namedAccess defaultDb WriteAccess load.Table
+        :: expressionsAccesses defaultDb (load.Assignments |> List.map snd)
     | Update update -> updateAccesses defaultDb update
     | Delete delete -> deleteAccesses defaultDb delete
     | Do expressions -> expressionsAccesses defaultDb expressions

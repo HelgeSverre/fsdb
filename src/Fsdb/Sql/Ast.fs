@@ -798,6 +798,18 @@ type PrivilegeSpec =
 module PrivilegeSpec =
     let named name = { Name = name; Columns = [] }
 
+type LoadDataField =
+    | LoadColumn of name: string
+    | LoadUserVariable of variable: UserVariableRef
+
+type LoadDataCommand =
+    { Table: string
+      Fields: LoadDataField list
+      Rows: Value list list
+      Assignments: (string * Expr) list
+      Replace: bool
+      Ignore: bool }
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
     | DropDatabase of name: string * ifExists: bool
@@ -837,6 +849,9 @@ type Statement =
     | Replace of table: string * columns: string list * rows: Expr list list
     | ReplaceSelect of table: string * columns: string list * select: SelectStmt
     | ReplaceSet of table: string * assignments: (string * Expr) list
+    /// Parsed separately from ordinary statements because the row bytes
+    /// arrive in packets after the command has been accepted.
+    | LoadData of LoadDataCommand
     | Select of SelectStmt
     | Do of expressions: Expr list
     /// A set operation over two or more `SELECT` branches — `UNION`,

@@ -345,6 +345,10 @@ let rec rewriteStatement replace =
     | ReplaceSelect(table, columns, select) -> ReplaceSelect(table, columns, rewriteSelect replace select)
     | ReplaceSet(table, assignments) ->
         ReplaceSet(table, assignments |> List.map (fun (column, expression) -> column, rewriteExpression expression))
+    | LoadData load ->
+        LoadData
+            { load with
+                Assignments = load.Assignments |> List.map (fun (column, expression) -> column, rewriteExpression expression) }
     | SetTriggerNew(column, value) -> SetTriggerNew(column, rewriteExpression value)
     | Update update ->
         Update

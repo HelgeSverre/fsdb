@@ -243,6 +243,14 @@ type private ViewColumnTarget =
       Qualifier: string
       Column: string }
 
+let private sameViewTarget (left: ViewColumnTarget) (right: ViewColumnTarget) =
+    left.Database.Equals(right.Database, System.StringComparison.OrdinalIgnoreCase)
+    && left.Table.Equals(right.Table, System.StringComparison.OrdinalIgnoreCase)
+    && left.Qualifier.Equals(right.Qualifier, System.StringComparison.OrdinalIgnoreCase)
+
+let private viewTargetKey (target: ViewColumnTarget) =
+    target.Database, target.Table, target.Qualifier
+
 type private ViewTargetKey = string * string * string
 
 type private WritableViewSource =
@@ -10967,13 +10975,7 @@ let private validateViewAssignmentTarget (view: UpdatableView) (target: ViewColu
             Error(Err(1348, sprintf "Column '%s' is not updatable" column))
         | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column)))
     |> Result.bind (fun targets ->
-        if
-            targets
-            |> List.forall (fun candidate ->
-                candidate.Database.Equals(target.Database, System.StringComparison.OrdinalIgnoreCase)
-                && candidate.Table.Equals(target.Table, System.StringComparison.OrdinalIgnoreCase)
-                && candidate.Qualifier.Equals(target.Qualifier, System.StringComparison.OrdinalIgnoreCase))
-        then
+        if targets |> List.forall (sameViewTarget target) then
             Ok()
         else
             Error(Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName)))
@@ -13384,7 +13386,14 @@ let rec executeAs
 
                 upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows)
 
-    let replaceEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) =
+    let replaceEvaluatedWith
+        (db: string)
+        (table: string)
+        (cols: string list option)
+        (rowsValues: Value list list)
+        (deferred: Set<int>)
+        (prepareFor: Store -> ColumnDef list -> int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+        =
         let beforeInsert = beforeInsertTriggers store db table
         let afterInsert = afterInsertTriggers store db table
         let beforeDelete = triggersFor store db table "BEFORE" "DELETE"
@@ -13395,15 +13404,17 @@ let rec executeAs
         | _, Error error -> ids, storageErr error
         | false, Ok(tableColumns, _) ->
             finishInsert db table (fun targetStore ->
-                replaceRows
+                replaceRowsWithOrdinal
                     targetStore
                     db
                     table
                     cols
                     rowsValues
-                    (prepareInsertRow targetStore db table tableColumns))
+                    deferred
+                    (prepareFor targetStore tableColumns))
         | true, Ok(tableColumns, _) ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+            let prepare = prepareFor snapshot tableColumns
 
             let fire timing event (triggers: StoredTrigger list) rows =
                 if List.isEmpty triggers then
@@ -13426,13 +13437,14 @@ let rec executeAs
                 Diagnostics.withRowNumber (rowNumber + 1) (fun () ->
                     result
                     |> Result.bind (fun (firstAuto, lastExplicit, affected, inserted) ->
-                        Storage.prepareInsertCandidate
+                        Storage.prepareInsertCandidateWithDeferred
                             snapshot
                             db
                             table
                             cols
                             values
-                            (prepareInsertRow snapshot db table tableColumns)
+                            deferred
+                            (prepare rowNumber)
                         |> Result.mapError storageErr
                         |> Result.bind (fun prepared ->
                             replaceConflictRows snapshot db table prepared.Values
@@ -13471,6 +13483,16 @@ let rec executeAs
 
                 nextIds ids (outcome.LastInsertId, outcome.GeneratedId), Affected(uint64 outcome.Affected)
 
+    let replaceEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) =
+        replaceEvaluatedWith
+            db
+            table
+            cols
+            rowsValues
+            Set.empty
+            (fun targetStore tableColumns _ omitted candidate ->
+                prepareInsertRow targetStore db table tableColumns omitted candidate)
+
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
         let retarget (access: ViewAccess) =
             let qualified = access.Database + "." + access.Table
@@ -13481,6 +13503,7 @@ let rec executeAs
             | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
             | ReplaceSelect(_, columns, select) -> ReplaceSelect(qualified, columns, select)
             | ReplaceSet(_, assignments) -> ReplaceSet(qualified, assignments)
+            | LoadData load -> LoadData { load with Table = qualified }
             | Update update -> Update { update with From = { update.From with Database = Some access.Database; Table = access.Table } }
             | Delete delete -> Delete { delete with From = { delete.From with Database = Some access.Database; Table = access.Table } }
             | other -> other
@@ -14525,6 +14548,190 @@ let rec executeAs
         match Auth.revokeSpecifications store privs (Auth.targetOfLevel dbName level) users with
         | Ok() -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
+
+    | LoadData load when tryStoredView store (splitQualified dbName load.Table |> fst) (splitQualified dbName load.Table |> snd) |> Option.isSome ->
+        let viewDb, viewName = splitQualified dbName load.Table
+
+        match tryUpdatableView store viewDb viewName with
+        | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
+        | Some view when load.Replace && not view.UpdateJoins.IsEmpty ->
+            ids, Err(1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName)
+        | Some view when not view.Insertable -> ids, Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" viewName)
+        | Some view when not view.UpdateJoins.IsEmpty && load.Fields.IsEmpty ->
+            ids, Err(1394, sprintf "Can not insert into join view '%s.%s' without fields list" view.ViewDatabase view.ViewName)
+        | Some view ->
+            let fields =
+                if load.Fields.IsEmpty then
+                    view.OrderedColumns |> List.map LoadColumn
+                else
+                    load.Fields
+
+            let writeColumns =
+                (fields
+                 |> List.choose (function
+                     | LoadColumn name -> Some name
+                     | LoadUserVariable _ -> None))
+                @ (load.Assignments |> List.map fst)
+
+            let resolvedTarget =
+                if writeColumns.IsEmpty then
+                    match Set.toList view.InsertableTargets with
+                    | [ targetKey ] ->
+                        match view.Targets |> Map.values |> Seq.tryFind (viewTargetKey >> (=) targetKey) with
+                        | Some target -> Ok target
+                        | None -> Error(Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" view.ViewName))
+                    | _ -> Error(Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" view.ViewName))
+                else
+                    resolveViewInsertTarget view writeColumns |> Result.map fst
+
+            let rewriteField (target: ViewColumnTarget) = function
+                | LoadUserVariable variable -> Ok(LoadUserVariable variable)
+                | LoadColumn column ->
+                    match Map.tryFind (column.ToLowerInvariant()) view.Targets with
+                    | Some fieldTarget when sameViewTarget fieldTarget target ->
+                        Ok(LoadColumn fieldTarget.Column)
+                    | Some _ ->
+                        Error(Err(1393, sprintf "Can not modify more than one base table through a join view '%s.%s'" view.ViewDatabase view.ViewName))
+                    | None when view.OrderedColumns |> List.exists (fun name -> name.Equals(column, System.StringComparison.OrdinalIgnoreCase)) ->
+                        Error(Err(1471, sprintf "The target table %s of the INSERT is not insertable-into" view.ViewName))
+                    | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column))
+
+            match resolvedTarget with
+            | Error error -> ids, error
+            | Ok target ->
+                match
+                    validateViewAssignmentTarget view target load.Assignments,
+                    rewriteViewAssignments view load.Assignments,
+                    fields |> traverse (rewriteField target)
+                with
+                | Error error, _, _
+                | _, Error error, _
+                | _, _, Error error -> ids, error
+                | Ok(), Ok assignments, Ok baseFields ->
+                    let rewritten =
+                        LoadData
+                            { load with
+                                Table = target.Database + "." + target.Table
+                                Fields = baseFields
+                                Assignments = assignments }
+
+                    executeViewWrite view target rewritten
+
+    | LoadData load ->
+        let db, table = splitQualified dbName load.Table
+
+        match scan store db table with
+        | Error error -> ids, storageErr error
+        | Ok(tableColumns, _) ->
+            let fields =
+                if load.Fields.IsEmpty then
+                    tableColumns |> List.map (fun column -> LoadColumn column.Name)
+                else
+                    load.Fields
+
+            let inputColumns =
+                fields
+                |> List.choose (function
+                    | LoadColumn name -> Some name
+                    | LoadUserVariable _ -> None)
+
+            let splitRow (row: Value list) =
+                if row.Length <> fields.Length then
+                    Error(ColumnCountMismatch(fields.Length, row.Length))
+                else
+                    List.zip fields row
+                    |> List.fold
+                        (fun (values, variables) -> function
+                            | LoadColumn _, value -> value :: values, variables
+                            | LoadUserVariable variable, value -> values, (variable, value) :: variables)
+                        ([], [])
+                    |> fun (values, variables) -> Ok(List.rev values, List.rev variables)
+
+            match load.Rows |> traverse splitRow with
+            | Error error -> ids, storageErr error
+            | Ok preparedRows ->
+                let rowsValues, rowVariables = preparedRows |> List.unzip
+                let rowVariables = List.toArray rowVariables
+
+                match
+                    load.Assignments
+                    |> traverse (fun (name, expression) ->
+                        resolveAssignableColumn tableColumns table name
+                        |> Result.map (fun index -> index, expression))
+                with
+                | Error error -> ids, storageErr error
+                | Ok indexedAssignments ->
+                    let assignedIndices = indexedAssignments |> List.map fst |> Set.ofList
+                    let columnIndex = columnIndexOf tableColumns
+                    let qualifiers = singleQualifier table tableColumns
+
+                    let prepareFor
+                        (targetStore: Store)
+                        (currentColumns: ColumnDef list)
+                        (ordinal: int)
+                        (omitted: Set<int>)
+                        (candidate: Value[])
+                        =
+                        let bindVariables () =
+                            match currentVariableContext () with
+                            | None -> Error(ExpressionError(1105, "LOAD DATA requires a session variable context"))
+                            | Some bindings ->
+                                rowVariables.[ordinal]
+                                |> List.fold
+                                    (fun state (variable, value) ->
+                                        state
+                                        |> Result.bind (fun variables ->
+                                            match UserVariableRef.validationError variable with
+                                            | Some message -> Error(ExpressionError(3061, message))
+                                            | None when Map.containsKey variable.Name variables || variables.Count < bindings.MaxUserVariables ->
+                                                Ok(Map.add variable.Name value variables)
+                                            | None -> Error(ExpressionError(1105, "Too many user-defined variables"))))
+                                    (Ok bindings.UserVariables.Value)
+                                |> Result.map (fun variables -> bindings.UserVariables.Value <- variables)
+
+                        bindVariables ()
+                        |> Result.bind (fun () ->
+                            let context = contextFactory targetStore registry dbName columnIndex qualifiers None candidate
+
+                            indexedAssignments
+                            |> List.fold
+                                (fun state (index, expression) ->
+                                    state
+                                    |> Result.bind (fun () ->
+                                        evalExpr context expression
+                                        |> Result.mapError ExpressionError
+                                        |> Result.bind (fun value ->
+                                            let column = currentColumns.[index]
+
+                                            if column.AutoIncrement && value = VNull then
+                                                Ok VNull
+                                            else
+                                                coerceStoredColumnValue targetStore column value)
+                                        |> Result.map (fun value -> candidate.[index] <- value)))
+                                (Ok()))
+                        |> Result.bind (fun () ->
+                            prepareInsertRow
+                                targetStore
+                                db
+                                table
+                                currentColumns
+                                (Set.difference omitted assignedIndices)
+                                candidate)
+
+                    let cols = if load.Fields.IsEmpty then None else Some inputColumns
+                    if load.Replace then
+                        replaceEvaluatedWith db table cols rowsValues assignedIndices prepareFor
+                    else
+                        finishInsert db table (fun targetStore ->
+                            match scan targetStore db table with
+                            | Error error -> Error error
+                            | Ok(currentColumns, _) ->
+                                let prepare = prepareFor targetStore currentColumns
+
+                                if load.Ignore then
+                                    insertRowsIgnorePreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare
+                                else
+                                    insertRowsPreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare)
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
         let viewDb, viewName = splitQualified dbName table

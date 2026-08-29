@@ -1924,6 +1924,7 @@ let private isDataChangeStatement =
     | Replace _
     | ReplaceSelect _
     | ReplaceSet _
+    | LoadData _
     | Update _
     | Delete _
     | CreateTableAs _ -> true
@@ -1933,6 +1934,7 @@ let private ignoresDataChangeErrors =
     function
     | Insert(_, _, _, _, true)
     | InsertSelect(_, _, _, _, true)
+    | LoadData { Ignore = true }
     | Update { Ignore = true } -> true
     | _ -> false
 
@@ -2005,6 +2007,8 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
     | Replace _
     | ReplaceSelect _
     | ReplaceSet _ -> InformationSchema.recordCommand InformationSchema.ReplaceCommand
+    | LoadData load when load.Replace -> InformationSchema.recordCommand InformationSchema.ReplaceCommand
+    | LoadData _ -> InformationSchema.recordCommand InformationSchema.InsertCommand
     | Update _ -> InformationSchema.recordCommand InformationSchema.UpdateCommand
     | Delete _ -> InformationSchema.recordCommand InformationSchema.DeleteCommand
     | _ -> ()
@@ -2189,6 +2193,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             | Replace _
             | ReplaceSelect _
             | ReplaceSet _
+            | LoadData _
             | Update _
             | Delete _ -> true
             | _ -> false
@@ -2261,6 +2266,7 @@ let private startsTransaction = function
     | Replace _
     | ReplaceSelect _
     | ReplaceSet _
+    | LoadData _
     | Select _
     | Union _
     | Update _
@@ -5677,6 +5683,7 @@ let private countsAsAccountUpdate = function
     | Replace _
     | ReplaceSelect _
     | ReplaceSet _
+    | LoadData _
     | Update _
     | Delete _
     | Truncate _
@@ -5890,34 +5897,45 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
         let account = accountOf session
 
         let prepared =
-            match Parser.parseLocalLoad sql with
+            match Parser.parseLocalLoadWithOptions (parserOptionsForSession session) sql with
             | Result.Error _ -> Result.Error(syntaxError sql)
             | Result.Ok load ->
-                let columns =
-                    load.Fields
-                    |> List.choose (function
-                        | Parser.LoadColumn name -> Some name
-                        | Parser.LoadUserVariable _ -> None)
-
                 match load.Charset |> Option.map _.ToLowerInvariant() with
                 | Some value when value <> "utf8" && value <> "utf8mb4" ->
                     Result.Error(Err(1235, sprintf "LOAD DATA CHARACTER SET %s is not supported" value))
-                | _ when load.Fields |> List.exists (function Parser.LoadUserVariable _ -> true | _ -> false) ->
-                    Result.Error(Err(1235, "LOAD DATA user variables are not supported"))
-                | _ when not load.Assignments.IsEmpty ->
-                    Result.Error(Err(1235, "LOAD DATA SET assignments are not supported"))
                 | _ ->
-                    let statement =
-                        if load.Replace then
-                            Replace(load.Table, columns, [])
+                    let inputVariables =
+                        load.Fields
+                        |> List.choose (function
+                            | LoadUserVariable variable -> Some variable
+                            | LoadColumn _ -> None)
+
+                    match inputVariables |> List.tryPick UserVariableRef.validationError with
+                    | Some message -> Result.Error(Err(3061, message))
+                    | None ->
+                        let newVariables =
+                            inputVariables
+                            |> List.map _.Name
+                            |> Set.ofList
+                            |> Set.filter (fun name -> not (session.UserVariables.ContainsKey name))
+
+                        if session.UserVariables.Count + newVariables.Count > maxUserVariables then
+                            Result.Error(Err(1105, "Too many user-defined variables"))
                         else
-                            Insert(load.Table, columns, [], [], load.Ignore)
+                            let statement =
+                                LoadData
+                                    { Table = load.Table
+                                      Fields = load.Fields
+                                      Rows = []
+                                      Assignments = load.Assignments
+                                      Replace = load.Replace
+                                      Ignore = load.Ignore }
 
-                    let database = session.Database |> Option.defaultValue defaultDatabase
+                            let database = session.Database |> Option.defaultValue defaultDatabase
 
-                    match checkSessionAccess session store (Auth.requiredPrivilegesInStore store database statement) with
-                    | Ok() -> Result.Ok(Some load)
-                    | Error(code, message) -> Result.Error(Err(code, message))
+                            match checkSessionAccess session store (Auth.requiredPrivilegesInStore store database statement) with
+                            | Ok() -> Result.Ok(Some load)
+                            | Error(code, message) -> Result.Error(Err(code, message))
 
         let isUpdate =
             match prepared with
@@ -5928,22 +5946,18 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
         | Result.Error(code, message) -> Result.Error(Err(code, message))
         | Result.Ok() -> prepared
 
-/// Inserts already-decoded LOCAL INFILE rows through the ordinary INSERT or
-/// REPLACE execution path, retaining its coercion, trigger, and transaction
-/// behavior.
+/// Keeps the parsed field and SET mappings until the client upload has been
+/// decoded; an ordinary INSERT AST cannot represent either mapping.
 let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value list list) : Session * QueryResult =
     let session = Session.clearSessionStateChanges session
-    let columns =
-        load.Fields
-        |> List.choose (function
-            | Parser.LoadColumn name -> Some name
-            | Parser.LoadUserVariable _ -> None)
-
     let statement =
-        if load.Replace then
-            Replace(load.Table, columns, rows |> List.map (List.map Lit))
-        else
-            Insert(load.Table, columns, rows |> List.map (List.map Lit), [], load.Ignore)
+        LoadData
+            { Table = load.Table
+              Fields = load.Fields
+              Rows = rows
+              Assignments = load.Assignments
+              Replace = load.Replace
+              Ignore = load.Ignore }
 
     let executed, result =
         recordDiagnostics session false (fun () ->

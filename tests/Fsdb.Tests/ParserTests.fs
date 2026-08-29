@@ -3609,6 +3609,15 @@ let tests =
                   | assignments -> failtestf "unexpected assignments: %A" assignments
               | Error error -> failtestf "unexpected parse error: %s" error
 
+          testCase "LOAD DATA LOCAL INFILE applies expression parser modes"
+          <| fun _ ->
+              let options = { defaultOptions with PipesAsConcat = true }
+
+              match parseLocalLoadWithOptions options "LOAD DATA LOCAL INFILE 'x' INTO TABLE t (@x) SET label = @x || '!'" with
+              | Ok { Assignments = [ "label", FuncCall("CONCAT", [ UserVariable variable; Lit(VString "!") ]) ] } ->
+                  Expect.equal variable.Name "x" "user variable"
+              | other -> failtestf "unexpected parse: %A" other
+
           testCase "LOAD DATA LOCAL INFILE rejects multi-character enclosure and escape settings"
           <| fun _ ->
               for sql in

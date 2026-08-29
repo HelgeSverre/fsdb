@@ -268,6 +268,26 @@ let tests =
                   (Err(1064, "SET NEW is only valid in a trigger body"))
                   "NEW has no row image outside a trigger"
 
+          testCase "BEFORE INSERT changes to an auto-increment key advance its sequence"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (runDefault store "CREATE TABLE trigger_auto (id INT AUTO_INCREMENT PRIMARY KEY, n INT)") "create table"
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TRIGGER trigger_auto_before BEFORE INSERT ON trigger_auto FOR EACH ROW SET NEW.id = NEW.n")
+                  "create trigger"
+
+              expectOk (runDefault store "INSERT INTO trigger_auto(n) VALUES (100)") "insert assigned key"
+              expectOk (runDefault store "DROP TRIGGER trigger_auto_before") "drop trigger"
+              expectOk (runDefault store "INSERT INTO trigger_auto(n) VALUES (0)") "insert generated key"
+
+              Expect.equal
+                  (rows store "SELECT id, n FROM trigger_auto ORDER BY id")
+                  [ [ Some "100"; Some "100" ]; [ Some "101"; Some "0" ] ]
+                  "the next generated key follows the trigger-assigned value"
+
           testCase "UPDATE and DELETE expose their row images at each timing"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

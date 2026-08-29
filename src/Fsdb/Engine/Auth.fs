@@ -2260,6 +2260,17 @@ let rec private statementColumnRequirements store defaultDb =
         targetColumns defaultDb table (assignments |> List.map fst) "INSERT"
         @ (assignments
            |> List.collect (snd >> expressionColumnRequirements store defaultDb [] [] Map.empty Set.empty))
+    | LoadData load ->
+        let source = targetSource store defaultDb load.Table
+        let inputColumns =
+            load.Fields
+            |> List.choose (function
+                | LoadColumn name -> Some name
+                | LoadUserVariable _ -> None)
+
+        targetColumns defaultDb load.Table (inputColumns @ (load.Assignments |> List.map fst)) "INSERT"
+        @ (load.Assignments
+           |> List.collect (snd >> expressionColumnRequirements store defaultDb [ source ] [] Map.empty Set.empty))
     | Update update -> updateColumnRequirements store defaultDb update
     | Delete delete -> deleteColumnRequirements store defaultDb delete
     | CreateTableAs(_, query, _) -> statementColumnRequirements store defaultDb query
@@ -2325,6 +2336,10 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         onTables "INSERT" [ split table ]
         @ onTables "DELETE" [ split table ]
         @ onTables "SELECT" (assignments |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct)
+    | LoadData load ->
+        onTables "INSERT" [ split load.Table ]
+        @ (if load.Replace then onTables "DELETE" [ split load.Table ] else [])
+        @ onTables "SELECT" (load.Assignments |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct)
     | Do expressions -> onTables "SELECT" (expressions |> List.collect (exprReadTables defaultDb) |> List.distinct)
     | Update u ->
         let cteTables, boundCtes = cteReadTablesIn Set.empty defaultDb u.Ctes
