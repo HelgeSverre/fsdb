@@ -1373,6 +1373,11 @@ let private parseWithFallback
 let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
     parseWithFallback options (fun _ -> false) body
 
+let private callStatement = Regex(@"^\s*CALL\s+[^\s(]+(?:\s*\(.*\))?\s*$", RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+
+let parseTrigger (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
+    parseWithFallback options callStatement.IsMatch body
+
 let parseRoutine (options: Parser.ParserOptions) isSupportedText body =
     parseWithFallback options isSupportedText body
 

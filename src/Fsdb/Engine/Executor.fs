@@ -12400,7 +12400,7 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
             afterInsertTriggers store db table
             |> List.fold
                 (fun (seen, databases) trigger ->
-                    match StoredProgram.parse (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
+                    match StoredProgram.parseTrigger (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
                     | Ok statements ->
                         statements
                         |> List.collect (bodyTargets db)
@@ -12733,7 +12733,7 @@ let rec executeAs
             // body executes. A body targeting a table the invoking chain is
             // already writing fires nothing at all.
             let checkBody trigger =
-                match StoredProgram.parse (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
+                match StoredProgram.parseTrigger (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body with
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
                 | Result.Ok bodyStatements ->
                     let dmlStatements = bodyStatements |> List.collect StoredProgram.sqlStatements
@@ -14427,7 +14427,7 @@ let rec executeAs
         match scan store db table with
         | Error e -> ids, storageErr e
         | Ok(columns, _) ->
-            match StoredProgram.parse (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText) body with
+            match StoredProgram.parseTrigger (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText) body with
             | Result.Error msg -> ids, Err(1064, sprintf "Trigger body has a syntax error: %s" msg)
             | Result.Ok bodyStatements ->
                 match StoredProgram.validate [] bodyStatements with

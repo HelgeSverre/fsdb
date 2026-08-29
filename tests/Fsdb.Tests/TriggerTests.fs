@@ -69,6 +69,60 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "fire compound trigger"
               Expect.equal (rows store "SELECT n FROM t") [ [ Some "22" ] ] "later assignments observe the updated NEW row"
 
+          testCase "trigger bodies call procedures with nested DML and output variables"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              session <- step session "CREATE TABLE procedure_source (id INT PRIMARY KEY, n INT)"
+              session <- step session "CREATE TABLE procedure_log (n INT, tag VARCHAR(20))"
+              session <- step session "CREATE PROCEDURE write_log(IN value INT) INSERT INTO procedure_log VALUES (value, 'direct')"
+              session <- step session "CREATE PROCEDURE nested_log(IN value INT) INSERT INTO procedure_log VALUES (value, 'nested')"
+              session <- step session "CREATE PROCEDURE call_nested(IN value INT) CALL nested_log(value)"
+              session <- step session "CREATE PROCEDURE assign_output(IN value INT, OUT result INT) SET result = value * 2"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER procedure_calls AFTER INSERT ON procedure_source FOR EACH ROW BEGIN CALL write_log(NEW.n); CALL call_nested(NEW.n + 1); CALL assign_output(NEW.n, @trigger_output); END"
+
+              let executed, result = handle session "INSERT INTO procedure_source VALUES (1, 9)"
+              expectOk result "fire procedure trigger"
+
+              Expect.equal
+                  (rows store "SELECT n, tag FROM procedure_log ORDER BY n")
+                  [ [ Some "9"; Some "direct" ]; [ Some "10"; Some "nested" ] ]
+                  "direct and nested procedure writes"
+
+              Expect.equal (Map.tryFind "trigger_output" executed.UserVariables) (Some(VInt 18L)) "OUT variable"
+
+          testCase "trigger procedure resultsets and dynamic SQL fail atomically"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              session <- step session "CREATE TABLE procedure_source (id INT PRIMARY KEY)"
+              session <- step session "CREATE PROCEDURE returns_rows() SELECT 1"
+              session <- step session "CREATE TRIGGER result_trigger AFTER INSERT ON procedure_source FOR EACH ROW CALL returns_rows()"
+
+              match handle session "INSERT INTO procedure_source VALUES (1)" |> snd with
+              | Err(1415, "Not allowed to return a result set from a trigger") -> ()
+              | other -> failtestf "expected trigger resultset refusal, got %A" other
+
+              Expect.equal (rows store "SELECT COUNT(*) FROM procedure_source") [ [ Some "0" ] ] "resultset failure rolls back"
+              session <- step session "DROP TRIGGER result_trigger"
+
+              session <-
+                  step
+                      session
+                      "CREATE PROCEDURE dynamic_sql() BEGIN PREPARE trigger_stmt FROM 'SELECT 1'; EXECUTE trigger_stmt; DEALLOCATE PREPARE trigger_stmt; END"
+
+              session <- step session "CREATE TRIGGER dynamic_trigger AFTER INSERT ON procedure_source FOR EACH ROW CALL dynamic_sql()"
+
+              match handle session "INSERT INTO procedure_source VALUES (2)" |> snd with
+              | Err(1336, "Dynamic SQL is not allowed in stored function or trigger") -> ()
+              | other -> failtestf "expected trigger dynamic SQL refusal, got %A" other
+
+              Expect.equal (rows store "SELECT COUNT(*) FROM procedure_source") [ [ Some "0" ] ] "dynamic SQL failure rolls back"
+
           testCase "conditional trigger bodies execute only when their predicate is true"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -497,7 +497,7 @@ let private triggerEntries store =
     | Ok(_, rows) -> rows |> Seq.choose SystemCatalog.Trigger.tryRead |> List.ofSeq
 
 let private storedProgramStatements sqlMode body =
-    match StoredProgram.parse (SqlMode.parserOptionsFor sqlMode) body with
+    match StoredProgram.parseTrigger (SqlMode.parserOptionsFor sqlMode) body with
     | Ok statements -> statements |> List.collect StoredProgram.sqlStatements
     | Error _ -> []
 
