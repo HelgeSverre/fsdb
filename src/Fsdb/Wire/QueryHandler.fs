@@ -1484,15 +1484,16 @@ let private rebaseReadUncommittedSnapshot (session: Session) (tx: Transaction) =
 
 /// Publishes a supplied transaction so local COMMIT and detached XA completion
 /// share one merge, durability, and lock-release path.
-let private publishTransaction (session: Session) (tx: Transaction) =
+let private publishTransaction (publishFlat: bool) (session: Session) (tx: Transaction) =
     if not tx.Seeded then
         Storage.releaseTransactionLocks tx.Snapshot
     else
         let timeout = lockWaitTimeout session
 
         match tx.Isolation with
-        | Serializable -> Storage.commitSerializableCatalogIntoWithTimeout timeout session.Store tx.BaseCatalog tx.Snapshot
-        | _ -> Storage.commitCatalogIntoWithTimeout timeout session.Store tx.BaseCatalog tx.Snapshot
+        | Serializable ->
+            Storage.commitSerializableCatalogIntoWithTimeout timeout publishFlat session.Store tx.BaseCatalog tx.Snapshot
+        | _ -> Storage.commitCatalogIntoWithTimeout timeout publishFlat session.Store tx.BaseCatalog tx.Snapshot
 
         Storage.releaseTransactionLocks tx.Snapshot
 
@@ -1500,13 +1501,15 @@ let private publishTransaction (session: Session) (tx: Transaction) =
 /// isolation levels merge disjoint row changes; SERIALIZABLE validates the
 /// transaction's read snapshot before publication. No open transaction is a
 /// no-op, matching MySQL.
-let private commitSession (session: Session) : Session =
+let private commitSessionWith (publishFlat: bool) (session: Session) : Session =
     match session.Tx with
     | Some tx ->
-        publishTransaction session tx
+        publishTransaction publishFlat session tx
         removeTransactionView session
         { session with Tx = None; Cursors = Map.empty }
     | None -> { session with Cursors = Map.empty }
+
+let private commitSession (session: Session) : Session = commitSessionWith false session
 
 /// Discards the open transaction's snapshot — a no-op, matching real MySQL,
 /// if there isn't one open — except for each table's AUTO_INCREMENT
@@ -1653,7 +1656,7 @@ let private completePreparedXa commit xid session =
 let private commitXa xid onePhase session =
     match session.Tx, xaAssociation session with
     | Some transaction, Some(current, Idle) when current = xid && onePhase ->
-        publishTransaction session transaction
+        publishTransaction false session transaction
         removeXaAssociation session xid
         removeTransactionView session
         { session with Tx = None; Cursors = Map.empty }, Affected 0UL
@@ -2489,7 +2492,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
 
                     match terminalErrorInfo result with
                     | Some _ -> rollbackSession executed, result
-                    | None -> commitSession executed, result
+                    | None -> commitSessionWith true executed, result
                 with _ ->
                     rollbackSession working |> ignore
                     reraise ()

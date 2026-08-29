@@ -67,8 +67,10 @@ let sameAccount left right =
 let private mandatoryRolesByStore =
     System.Runtime.CompilerServices.ConditionalWeakTable<obj, Account list ref>()
 
+/// Keyed by `CommitLock` because transaction snapshots get a fresh `Lock`;
+/// mandatory roles are server-global and must survive private-root statements.
 let mandatoryRoles (store: Store) =
-    let roles = mandatoryRolesByStore.GetValue(store.Lock, fun _ -> ref [])
+    let roles = mandatoryRolesByStore.GetValue(store.CommitLock, fun _ -> ref [])
     lock roles (fun () -> roles.Value)
 
 let setMandatoryRoles (store: Store) roles =
@@ -77,7 +79,7 @@ let setMandatoryRoles (store: Store) roles =
         |> List.map (fun role -> account role.Name role.Host)
         |> List.distinctBy (fun role -> role.Name, role.Host.ToLowerInvariant())
 
-    let stored = mandatoryRolesByStore.GetValue(store.Lock, fun _ -> ref [])
+    let stored = mandatoryRolesByStore.GetValue(store.CommitLock, fun _ -> ref [])
     lock stored (fun () -> stored.Value <- roles)
 
 let isMandatoryRole store wanted =

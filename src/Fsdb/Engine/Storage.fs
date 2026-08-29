@@ -602,15 +602,22 @@ let private transactionEvents (snapshot: Store) =
     |> Option.map List.ofSeq
     |> Option.defaultValue []
 
-let private prepareTransactionEvents (store: Store) (snapshot: Store) : unit -> unit =
+/// `flat` publishes the private root's events as the statement's own events
+/// instead of one `TransactionCommitted` group: an autocommit statement runs on
+/// a private root, but subscribers see the shape a direct statement produced.
+let private prepareTransactionEventsWith (flat: bool) (store: Store) (snapshot: Store) : unit -> unit =
     match transactionEvents snapshot with
     | events when not events.IsEmpty ->
         match store.PendingEvents with
         | Some targetBuffer ->
             targetBuffer.AddRange events
             ignore
+        | None when flat -> prepareEvents store events
         | None -> prepareEvents store [ TransactionCommitted events ]
     | _ -> ignore
+
+let private prepareTransactionEvents (store: Store) (snapshot: Store) : unit -> unit =
+    prepareTransactionEventsWith false store snapshot
 
 let private prepareXaCommitEvents (xid: Xa.Xid) (store: Store) (snapshot: Store) : unit -> unit =
     let events = transactionEvents snapshot
@@ -7092,17 +7099,23 @@ let private commitCatalogIntoWith
         else
             prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
 
-let commitCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
+let commitCatalogIntoWithTimeout (timeout: TimeSpan) (publishFlat: bool) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
-        commitCatalogIntoWith timeout false prepareTransactionEvents store baseCatalog snapshot)
+        commitCatalogIntoWith timeout false (prepareTransactionEventsWith publishFlat) store baseCatalog snapshot)
 
 let commitCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
         commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false prepareTransactionEvents store baseCatalog snapshot)
 
-let commitSerializableCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
+let commitSerializableCatalogIntoWithTimeout
+    (timeout: TimeSpan)
+    (publishFlat: bool)
+    (store: Store)
+    (baseCatalog: Catalog)
+    (snapshot: Store)
+    : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
-        commitCatalogIntoWith timeout true prepareTransactionEvents store baseCatalog snapshot)
+        commitCatalogIntoWith timeout true (prepareTransactionEventsWith publishFlat) store baseCatalog snapshot)
 
 let commitSerializableCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
