@@ -4617,14 +4617,46 @@ let parseRoutineParameterTypeWithOptions
         columnTypeWithDisplay
         .>>. many characterTypeMod
         >>= fun ((columnType, _), mods) ->
-            let hasCharset = mods |> List.exists (function MCharset _ -> true | _ -> false)
-            let hasCollation = mods |> List.exists (function MCollate _ -> true | _ -> false)
+            let charsets = mods |> List.choose (function MCharset value -> Some value | _ -> None)
+            let collations = mods |> List.choose (function MCollate value -> Some value | _ -> None)
+            let binaryCount = mods |> List.filter ((=) MBinary) |> List.length
 
-            if hasCollation && not hasCharset then
+            let acceptsCharacterMetadata =
+                match columnType with
+                | TChar _
+                | TVarchar _
+                | TTinyText
+                | TText
+                | TMediumText
+                | TLongText
+                | TEnum _
+                | TSet _ -> true
+                | _ -> false
+
+            if not mods.IsEmpty && not acceptsCharacterMetadata then
+                fail "Character metadata requires a character parameter type"
+            elif charsets.Length > 1 || collations.Length > 1 || binaryCount > 1 then
+                fail "Duplicate character metadata in a stored-program parameter"
+            elif not collations.IsEmpty && charsets.IsEmpty then
                 fail "COLLATE requires CHARACTER SET in a stored-program parameter"
             else
                 let charset, collation = characterMetadata mods
-                preturn (columnType, charset, collation)
+
+                match charset, collation with
+                | Some charset, Some collation when not (Collation.belongsToCharset charset collation) ->
+                    fail (sprintf "COLLATION '%s' is not valid for CHARACTER SET '%s'" collation charset)
+                | Some "binary", _ ->
+                    match columnType with
+                    | TChar width -> preturn (TBinary width, None, None)
+                    | TVarchar width -> preturn (TVarBinary width, None, None)
+                    | TTinyText -> preturn (TTinyBlob, None, None)
+                    | TText -> preturn (TBlob, None, None)
+                    | TMediumText -> preturn (TMediumBlob, None, None)
+                    | TLongText -> preturn (TLongBlob, None, None)
+                    | _ -> preturn (columnType, charset, collation)
+                | _ ->
+                    let collation = if binaryCount = 0 then collation else None
+                    preturn (columnType, charset, collation)
 
     withParserState options sql (runWithDepthLimit (ws >>. parameterType .>> eof))
 

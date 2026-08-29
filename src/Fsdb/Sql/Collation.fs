@@ -490,6 +490,24 @@ let charsetOfCollation (name: string) : string =
         | -1 -> lower
         | i -> lower.Substring(0, i)
 
+let defaultNameForCharset (charset: string) =
+    match charset.ToLowerInvariant() with
+    | "utf8"
+    | "utf8mb3" -> "utf8mb3_general_ci"
+    | "latin1" -> "latin1_swedish_ci"
+    | "ascii" -> "ascii_general_ci"
+    | "binary" -> "binary"
+    | _ -> "utf8mb4_0900_ai_ci"
+
+let belongsToCharset (charset: string) (collation: string) =
+    let charset = charset.ToLowerInvariant()
+    let owner = charsetOfCollation collation
+
+    match charset with
+    | "utf8"
+    | "utf8mb3" -> owner = "utf8" || owner = "utf8mb3"
+    | _ -> owner = charset
+
 let maxBytesPerCharacter (charset: string option) =
     match charset |> Option.map _.ToLowerInvariant() with
     | Some "ascii"

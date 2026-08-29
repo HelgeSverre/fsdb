@@ -4997,28 +4997,11 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
     | ConvertCharset(charset, requestedCollation) ->
         let charset = charset.ToLowerInvariant()
 
-        let defaultCollation =
-            match charset with
-            | "utf8mb4" -> "utf8mb4_0900_ai_ci"
-            | "utf8"
-            | "utf8mb3" -> "utf8mb3_general_ci"
-            | "latin1" -> "latin1_swedish_ci"
-            | "ascii" -> "ascii_general_ci"
-            | _ -> "binary"
+        let defaultCollation = Collation.defaultNameForCharset charset
 
         let collation = requestedCollation |> Option.defaultValue defaultCollation
 
-        let compatible =
-            match charset with
-            | "utf8mb4" -> collation.StartsWith("utf8mb4_", StringComparison.OrdinalIgnoreCase)
-            | "utf8"
-            | "utf8mb3" ->
-                collation.StartsWith("utf8mb3_", StringComparison.OrdinalIgnoreCase)
-                || collation.StartsWith("utf8_", StringComparison.OrdinalIgnoreCase)
-            | "latin1" -> collation.StartsWith("latin1_", StringComparison.OrdinalIgnoreCase)
-            | "ascii" -> collation.StartsWith("ascii_", StringComparison.OrdinalIgnoreCase)
-            | "binary" -> String.Equals(collation, "binary", StringComparison.OrdinalIgnoreCase)
-            | _ -> false
+        let compatible = Collation.belongsToCharset charset collation
 
         if not compatible then
             Error(ExpressionError(1253, sprintf "COLLATION '%s' is not valid for CHARACTER SET '%s'" collation charset))

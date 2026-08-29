@@ -178,13 +178,16 @@ let columnTypeTextOfColumn (column: ColumnDef) : string =
         name + size + (if display.ZeroFill then " unsigned zerofill" else unsigned)
     | _ -> columnTypeText column.Type
 
-/// `character_maximum_length` — only meaningful for the string-ish types;
-/// MySQL's fixed per-type ceilings for the `TEXT`/`BLOB` family (`TINYTEXT`
-/// = 255, `TEXT` = 65535, ...), the declared length for `CHAR`/`VARCHAR`.
+/// MySQL reports declared binary/text widths directly, while ENUM and SET
+/// expose the longest value they can render rather than their storage size.
 let private charMaxLength (ty: ColumnType) : int64 option =
+    let length (text: string) = text.EnumerateRunes() |> Seq.length |> int64
+
     match ty with
     | TChar n
-    | TVarchar n -> Some(int64 n)
+    | TVarchar n
+    | TBinary n
+    | TVarBinary n -> Some(int64 n)
     | TTinyText
     | TTinyBlob -> Some 255L
     | TText
@@ -193,6 +196,18 @@ let private charMaxLength (ty: ColumnType) : int64 option =
     | TMediumBlob -> Some 16777215L
     | TLongText
     | TLongBlob -> Some 4294967295L
+    | TEnum values ->
+        values
+        |> List.map length
+        |> function
+            | [] -> Some 0L
+            | lengths -> Some(List.max lengths)
+    | TSet values ->
+        values
+        |> List.map length
+        |> function
+            | [] -> Some 0L
+            | lengths -> Some(List.sum lengths + int64 lengths.Length - 1L)
     | _ -> None
 
 /// `numeric_precision`/`numeric_scale` — MySQL's standard precision per
@@ -355,15 +370,16 @@ let private columnsColumns =
       strCol "GENERATION_EXPRESSION"
       intCol "SRS_ID" ]
 
-/// `CHARACTER_OCTET_LENGTH` — the byte capacity behind
-/// `CHARACTER_MAXIMUM_LENGTH`: x4 for utf8mb4 CHAR/VARCHAR, equal for the
-/// fixed-capacity TEXT/BLOB/BINARY families.
-let private charOctetLength (ty: ColumnType) : int64 option =
+/// Declared character widths expand by the charset's maximum encoded width;
+/// the TEXT/BLOB families already carry byte ceilings in their type.
+let private charOctetLength charset (ty: ColumnType) : int64 option =
     charMaxLength ty
     |> Option.map (fun n ->
         match ty with
         | TChar _
-        | TVarchar _ -> n * 4L
+        | TVarchar _
+        | TEnum _
+        | TSet _ -> n * int64 (Collation.maxBytesPerCharacter charset)
         | _ -> n)
 
 /// Renders a generated-column expression back to SQL for
@@ -524,7 +540,7 @@ let private columnRowWith (privileges: string) (dbName: string) (tableName: stri
        vs (if c.PrimaryKey || not c.Nullable then "NO" else "YES")
        vs (dataTypeName c.Type)
        (charMaxLength c.Type |> Option.map VInt |> Option.defaultValue VNull)
-       (charOctetLength c.Type |> Option.map VInt |> Option.defaultValue VNull)
+       (charOctetLength c.Charset c.Type |> Option.map VInt |> Option.defaultValue VNull)
        (precision |> Option.map VInt |> Option.defaultValue VNull)
        (scale |> Option.map VInt |> Option.defaultValue VNull)
        (datetimePrecision c.Type |> Option.map VInt |> Option.defaultValue VNull)
@@ -1271,7 +1287,7 @@ let private routinesRows (catalog: Catalog) =
 
                 [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "FUNCTION"; vs dataType
                    characterLength |> Option.map VInt |> Option.defaultValue VNull
-                   characterLength |> Option.map (fun length -> VInt(length * 4L)) |> Option.defaultValue VNull
+                   columnType |> Option.bind (charOctetLength None) |> Option.map VInt |> Option.defaultValue VNull
                    numeric |> Option.map (fst >> VInt) |> Option.defaultValue VNull
                    numeric |> Option.map (snd >> VInt) |> Option.defaultValue VNull
                    temporal |> Option.map VInt |> Option.defaultValue VNull
@@ -1306,17 +1322,12 @@ let private parametersColumns =
       strCol "DTD_IDENTIFIER"
       strCol "ROUTINE_TYPE" ]
 
-let private defaultCollationForCharset =
-    function
-    | "utf8"
-    | "utf8mb3" -> "utf8mb3_general_ci"
-    | "latin1" -> "latin1_swedish_ci"
-    | "ascii" -> "ascii_general_ci"
-    | "binary" -> "binary"
-    | _ -> "utf8mb4_0900_ai_ci"
-
 let private parameterCharacterMetadata fallbackCollation (parameter: StoredProgram.Parameter) =
-    if isStringy parameter.ColumnType then
+    let binaryCharset =
+        parameter.Charset
+        |> Option.exists (fun charset -> charset.Equals("binary", StringComparison.OrdinalIgnoreCase))
+
+    if isStringy parameter.ColumnType && not binaryCharset then
         let charset =
             parameter.Charset
             |> Option.orElseWith (fun () -> parameter.Collation |> Option.map Collation.charsetOfCollation)
@@ -1326,7 +1337,7 @@ let private parameterCharacterMetadata fallbackCollation (parameter: StoredProgr
             parameter.Collation
             |> Option.orElseWith (fun () ->
                 parameter.Charset
-                |> Option.map (fun value -> defaultCollationForCharset (value.ToLowerInvariant())))
+                |> Option.map Collation.defaultNameForCharset)
             |> Option.defaultValue fallbackCollation
 
         Some charset, Some collation
@@ -1346,13 +1357,7 @@ let private parameterRow
     let characterLength = charMaxLength parameter.ColumnType
     let charset, collation = parameterCharacterMetadata fallbackCollation parameter
 
-    let octetLength =
-        characterLength
-        |> Option.map (fun length ->
-            match parameter.ColumnType with
-            | TChar _
-            | TVarchar _ -> length * int64 (Collation.maxBytesPerCharacter charset)
-            | _ -> length)
+    let octetLength = charOctetLength charset parameter.ColumnType
 
     let numeric = numericPrecisionScale parameter.ColumnType
 

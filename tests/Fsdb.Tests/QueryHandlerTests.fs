@@ -2399,7 +2399,7 @@ let tests =
               let session, procedureResult =
                   handle
                       session
-                      "CREATE PROCEDURE describe_values(IN i INT UNSIGNED, OUT s VARCHAR(12) CHARACTER SET latin1 COLLATE latin1_bin, INOUT d DECIMAL(8,3), IN dt DATETIME(4), IN b BIT(9), IN plain VARCHAR(2) CHARACTER SET latin1) SELECT 1"
+                      "CREATE PROCEDURE describe_values(IN i INT UNSIGNED, OUT s VARCHAR(12) CHARACTER SET latin1 COLLATE latin1_bin, INOUT d DECIMAL(8,3), IN dt DATETIME(4), IN b BIT(9), IN plain VARCHAR(2) CHARACTER SET latin1, IN e ENUM('a','long'), IN tags SET('a','bbb'), IN raw VARCHAR(4) CHARACTER SET binary) SELECT 1"
 
               Expect.equal procedureResult (Affected 0UL) "procedure created"
 
@@ -2427,9 +2427,33 @@ let tests =
                         [ Some "describe_values"; Some "3"; Some "INOUT"; Some "d"; Some "decimal"; None; None; Some "8"; Some "3"; None; None; None; Some "decimal(8,3)"; Some "PROCEDURE" ]
                         [ Some "describe_values"; Some "4"; Some "IN"; Some "dt"; Some "datetime"; None; None; None; None; Some "4"; None; None; Some "datetime(4)"; Some "PROCEDURE" ]
                         [ Some "describe_values"; Some "5"; Some "IN"; Some "b"; Some "bit"; None; None; Some "9"; Some "0"; None; None; None; Some "bit(9)"; Some "PROCEDURE" ]
-                        [ Some "describe_values"; Some "6"; Some "IN"; Some "plain"; Some "varchar"; Some "2"; Some "2"; None; None; None; Some "latin1"; Some "latin1_swedish_ci"; Some "varchar(2)"; Some "PROCEDURE" ] ]
+                        [ Some "describe_values"; Some "6"; Some "IN"; Some "plain"; Some "varchar"; Some "2"; Some "2"; None; None; None; Some "latin1"; Some "latin1_swedish_ci"; Some "varchar(2)"; Some "PROCEDURE" ]
+                        [ Some "describe_values"; Some "7"; Some "IN"; Some "e"; Some "enum"; Some "4"; Some "16"; None; None; None; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "enum('a','long')"; Some "PROCEDURE" ]
+                        [ Some "describe_values"; Some "8"; Some "IN"; Some "tags"; Some "set"; Some "5"; Some "20"; None; None; None; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "set('a','bbb')"; Some "PROCEDURE" ]
+                        [ Some "describe_values"; Some "9"; Some "IN"; Some "raw"; Some "varbinary"; Some "4"; Some "4"; None; None; None; None; None; Some "varbinary(4)"; Some "PROCEDURE" ] ]
                       "routine parameters use MySQL's ordinal and type metadata"
               | other -> failtestf "expected stored routine parameter metadata, got %A" other
+
+          testCase "routine parameters enforce character declarations"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              [ "CREATE PROCEDURE invalid_numeric(IN value INT CHARACTER SET latin1) SELECT 1"
+                "CREATE PROCEDURE invalid_duplicate(IN value VARCHAR(10) CHARACTER SET latin1 CHARACTER SET ascii) SELECT 1"
+                "CREATE PROCEDURE invalid_collation(IN value VARCHAR(10) CHARACTER SET latin1 COLLATE utf8mb4_bin) SELECT 1" ]
+              |> List.iter (fun sql ->
+                  match handle session sql |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected invalid routine character metadata to fail, got %A" other)
+
+              let session, created =
+                  handle session "CREATE PROCEDURE ascii_parameter(IN value VARCHAR(10) CHARACTER SET ascii) SELECT value"
+
+              Expect.equal created (Affected 0UL) "ASCII procedure created"
+
+              match handle session "CALL ascii_parameter('é')" |> snd with
+              | Err(1366, _) -> ()
+              | other -> failtestf "expected strict parameter transcoding to fail, got %A" other
 
           testCase "single-statement procedure blocks persist and execute"
           <| fun _ ->
