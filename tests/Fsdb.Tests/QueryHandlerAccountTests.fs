@@ -681,6 +681,88 @@ let tests =
                       "role grant appears in SHOW GRANTS"
               | other -> failtestf "expected role grant metadata, got %A" other
 
+              match handle root "SHOW GRANTS FOR alice USING parent" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (List.head >> Option.get))
+                      [ "GRANT USAGE ON *.* TO `alice`@`%`"
+                        "GRANT SELECT ON `role_db`.* TO `alice`@`%`"
+                        "GRANT `parent`@`%` TO `alice`@`%` WITH ADMIN OPTION" ]
+                      "USING materializes inherited role privileges"
+              | other -> failtestf "expected materialized role grants, got %A" other
+
+              match handle root "SHOW GRANTS FOR alice USING reader" |> snd with
+              | Err(3530, _) -> ()
+              | other -> failtestf "expected indirect USING role refusal, got %A" other
+
+          testCase "role selection and lifecycle keep grant catalogs consistent"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE ROLE alpha, beta"
+              let root, _ = handle root "CREATE USER member, delegate"
+              let root, _ = handle root "GRANT alpha, beta TO member"
+              let root, _ = handle root "GRANT alpha TO member WITH ADMIN OPTION"
+              let root, _ = handle root "GRANT alpha TO member"
+              let root, _ = handle root "SET DEFAULT ROLE ALL TO member"
+
+              let memberSession = { create 2 store with User = "member"; AccountHost = "%" }
+              let memberSession, _ = handle memberSession "SET ROLE ALL EXCEPT beta"
+
+              match handle memberSession "SELECT CURRENT_ROLE()" |> snd with
+              | ResultSet(_, [ [ Some "`alpha`@`%`" ] ]) -> ()
+              | other -> failtestf "expected ALL EXCEPT to retain alpha, got %A" other
+
+              let memberSession, _ = handle memberSession "SET ROLE beta, alpha"
+
+              match handle memberSession "SELECT CURRENT_ROLE()" |> snd with
+              | ResultSet(_, [ [ Some "`alpha`@`%`,`beta`@`%`" ] ]) -> ()
+              | other -> failtestf "expected canonical active-role order, got %A" other
+
+              match handle root "SELECT WITH_ADMIN_OPTION FROM mysql.role_edges WHERE FROM_USER = 'alpha' AND TO_USER = 'member'" |> snd with
+              | ResultSet(_, [ [ Some "Y" ] ]) -> ()
+              | other -> failtestf "expected repeated grants not to remove admin option, got %A" other
+
+              match handle root "SET DEFAULT ROLE alpha TO member, missing" |> snd with
+              | Err(3523, _) -> ()
+              | other -> failtestf "expected the unknown default-role target to reject the statement, got %A" other
+
+              match handle root "SELECT DEFAULT_ROLE_USER FROM mysql.default_roles WHERE USER = 'member' ORDER BY DEFAULT_ROLE_USER" |> snd with
+              | ResultSet(_, [ [ Some "alpha" ]; [ Some "beta" ] ]) -> ()
+              | other -> failtestf "expected failed multi-account default change to remain atomic, got %A" other
+
+              let delegateSession = { create 3 store with User = "delegate"; AccountHost = "%" }
+
+              match handle delegateSession "GRANT alpha TO delegate" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected a non-administrator role grant refusal, got %A" other
+
+              let root, _ = handle root "GRANT ROLE_ADMIN ON *.* TO delegate"
+
+              match handle delegateSession "GRANT alpha TO delegate" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected ROLE_ADMIN to authorize role grants, got %A" other
+
+              match handle root "RENAME USER alpha TO renamed" |> snd with
+              | Err(3532, _) -> ()
+              | other -> failtestf "expected a granted role identifier not to be renamed, got %A" other
+
+              let root, _ = handle root "REVOKE alpha FROM member"
+
+              match handle root "SELECT DEFAULT_ROLE_USER FROM mysql.default_roles WHERE USER = 'member'" |> snd with
+              | ResultSet(_, [ [ Some "beta" ] ]) -> ()
+              | other -> failtestf "expected revoke to remove the matching default role, got %A" other
+
+              let root, _ = handle root "DROP ROLE beta"
+
+              match handle root "SELECT COUNT(*) FROM mysql.role_edges WHERE FROM_USER = 'beta' OR TO_USER = 'beta'" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected DROP ROLE to remove graph edges, got %A" other
+
+              match handle root "SELECT COUNT(*) FROM mysql.default_roles WHERE DEFAULT_ROLE_USER = 'beta'" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected DROP ROLE to remove default-role rows, got %A" other
+
           testCase "SET PASSWORD is enforced: own password is free, someone else's needs CREATE USER"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

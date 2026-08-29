@@ -240,7 +240,7 @@ view `WITH CHECK OPTION`,
 with real `CREATE USER`/`GRANT`/`REVOKE` privilege enforcement.
 
 The introspection surface GUI clients lean on is served with real data:
-23 `information_schema` tables whose column sets are diffed against a live
+25 `information_schema` tables whose column sets are diffed against a live
 MySQL 8.4, the `SHOW` family (`STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`,
 `CREATE TABLE`, ...), and a live `PROCESSLIST` with working
 `KILL QUERY|CONNECTION`.

@@ -1307,8 +1307,11 @@ let private alterCurrentUserPasswordRe =
         RegexOptions.IgnoreCase
     )
 
-/// `SHOW GRANTS [FOR 'user'@'host' | FOR CURRENT_USER[()]]`.
-let private showGrantsRe = Regex(@"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?\s*;?$", RegexOptions.IgnoreCase)
+let private showGrantsRe =
+    Regex(
+        @"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?(?:\s+USING\s+(.+?))?\s*;?$",
+        RegexOptions.IgnoreCase
+    )
 
 /// `FLUSH [LOCAL] PRIVILEGES` — a no-op OK: privilege reads always hit the
 /// live mysql.* rows, there's no cache to flush.
@@ -2551,7 +2554,7 @@ type private Probe =
     | Describe of name: string
     | ShowIndex of name: string * dbOverride: string option
     | ShowCollation
-    | ShowGrants of user: string option
+    | ShowGrants of user: string option * usingRoles: string option
     | ShowCreateUser of user: string
     | ShowCreateProgram of kind: string * name: string
     | ShowPrivileges
@@ -2671,7 +2674,12 @@ let private tryProbe (sql: string) : Probe option =
         Some(ShowCreateTrigger((showCreateTriggerRe.Match sql).Groups.[1].Value))
     elif showGrantsRe.IsMatch sql then
         let m = showGrantsRe.Match sql
-        Some(ShowGrants(if m.Groups.[1].Success then Some m.Groups.[1].Value else None))
+        Some(
+            ShowGrants(
+                (if m.Groups.[1].Success then Some m.Groups.[1].Value else None),
+                (if m.Groups.[2].Success then Some m.Groups.[2].Value else None)
+            )
+        )
     elif flushPrivilegesRe.IsMatch sql then
         Some FlushPrivileges
     elif flushUserResourcesRe.IsMatch sql then
@@ -3199,7 +3207,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             let columnName = showIndexTextFilter "Column_name" sql
             columns, rows |> List.filter (fun row -> matches 2 keyName row && matches 4 columnName row))
         |> showTableResult session dbName table
-    | ShowGrants userOpt ->
+    | ShowGrants(userOpt, usingRoles) ->
         // No FOR clause or CURRENT_USER selects the authenticated account.
         let wanted =
             match userOpt with
@@ -3207,10 +3215,25 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             | Some u when u.Trim().ToUpperInvariant().StartsWith "CURRENT_USER" -> accountOf session
             | Some u -> accountRefOf u
 
+        let roles =
+            match usingRoles with
+            | None -> Ok None
+            | Some text ->
+                match Parser.parseWithOptions (parserOptionsForSession session) ("SET ROLE " + text.TrimEnd(';')) with
+                | Ok(SetRole(NamedRoles roles)) ->
+                    roles
+                    |> List.map (fun (name, host) -> Auth.account name host)
+                    |> Some
+                    |> Ok
+                | _ -> Error(syntaxError sql)
+
         inspectAccount session wanted (fun () ->
-            match Auth.renderGrantsForAccount (Session.currentStore session) wanted with
-            | Ok(header, lines) -> ResultSet([ header ], lines |> List.map (fun line -> [ Some line ]))
-            | Error(code, msg) -> Err(code, msg))
+            match roles with
+            | Error error -> error
+            | Ok roles ->
+                match Auth.renderGrantsForAccountUsing (Session.currentStore session) wanted roles with
+                | Ok(header, lines) -> ResultSet([ header ], lines |> List.map (fun line -> [ Some line ]))
+                | Error(code, msg) -> Err(code, msg))
     | ShowCreateUser userRef ->
         let wanted =
             if Regex.IsMatch(userRef, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) then

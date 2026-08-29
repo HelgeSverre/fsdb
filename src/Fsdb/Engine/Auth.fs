@@ -1150,6 +1150,11 @@ let private applyResolvedPrivileges store name host resolved target withGrantOpt
 
 let private quotedAccount account = sprintf "`%s`@`%s`" account.Name account.Host
 
+let private distinctAccounts references =
+    references
+    |> List.map (fun (name, host) -> account name host)
+    |> List.distinctBy (fun account -> account.Name, account.Host.ToLowerInvariant())
+
 let private roleGrantMatches (columns: ColumnDef list) (role: Account) (grantee: Account) (row: Value[]) =
     sameAccount role (account (userColumnText columns row "FROM_USER") (userColumnText columns row "FROM_HOST"))
     && sameAccount grantee (account (userColumnText columns row "TO_USER") (userColumnText columns row "TO_HOST"))
@@ -1184,8 +1189,8 @@ let grantRoles
     (users: (string * string) list)
     (withAdminOption: bool)
     : Result<unit, int * string> =
-    let roles = roles |> List.map (fun (name, host) -> account name host)
-    let users = users |> List.map (fun (name, host) -> account name host)
+    let roles = distinctAccounts roles
+    let users = distinctAccounts users
     let proposed =
         [ for user in users do
               for role in roles do
@@ -1238,8 +1243,8 @@ let grantRoles
             |> Result.map ignore)
 
 let revokeRoles (store: Store) (roles: (string * string) list) (users: (string * string) list) : Result<unit, int * string> =
-    let roles = roles |> List.map (fun (name, host) -> account name host)
-    let users = users |> List.map (fun (name, host) -> account name host)
+    let roles = distinctAccounts roles
+    let users = distinctAccounts users
 
     validateAccountsExist store (roles @ users)
     |> Result.bind (fun () ->
@@ -1280,6 +1285,7 @@ let resolveRoleSelection (store: Store) (grantee: Account) selection : Result<Ac
 
     let validate roles =
         roles
+        |> List.distinctBy (fun role -> role.Name, role.Host.ToLowerInvariant())
         |> traverse (fun role ->
             if isDirect role then
                 Ok role
@@ -1303,13 +1309,16 @@ let setDefaultRoles
     (users: (string * string) list)
     : Result<unit, int * string> =
     users
-    |> List.map (fun (name, host) -> account name host)
+    |> distinctAccounts
     |> traverse (fun user ->
         if tryUserRowForAccount store user |> Option.isNone then
             unknownAuthorization user
         else
             resolveRoleSelection store user selection
-            |> Result.bind (fun roles ->
+            |> Result.map (fun roles -> user, roles))
+    |> Result.bind (fun assignments ->
+        assignments
+        |> traverse (fun (user, roles) ->
                 match scanList store "mysql" "default_roles" with
                 | Error error -> Error(toMySqlError error)
                 | Ok(columns, _) ->
@@ -2020,102 +2029,145 @@ let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string 
     elif granted.IsEmpty then "USAGE"
     else granted |> List.map (fun d -> d.Sql) |> String.concat ", "
 
-/// The `SHOW GRANTS FOR 'name'@'host'` rows: the global line from the
-/// mysql.user row, dynamic mysql.global_grants grouped by grantability, one
-/// line per mysql.db row, and one per tables_priv row — 1141 when the account
-/// doesn't exist. PROXY lines remain outside the model.
-let renderGrantsForAccount (store: Store) (wanted: Account) : Result<string * string list, int * string> =
+/// Combines grants from selected roles under the account named in the output;
+/// MySQL's `USING` form materializes inherited privileges rather than showing
+/// separate grants to each role account.
+let renderGrantsForAccountUsing
+    (store: Store)
+    (wanted: Account)
+    (usingRoles: Account list option)
+    : Result<string * string list, int * string> =
     match tryUserRowForAccount store wanted with
     | None -> Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" wanted.Name wanted.Host)
-    | Some(cols, row) ->
+    | Some _ ->
         let name = wanted.Name
-        let host = userColumnText cols row "Host"
-        let quoted = sprintf "`%s`@`%s`" name host
+        let host = wanted.Host
+        let quoted = quotedAccount wanted
 
-        let withOption (grantCol: string) (getCols: ColumnDef list) (r: Value[]) =
-            if userColumnText getCols r grantCol = "Y" then " WITH GRANT OPTION" else ""
+        let resolveActors =
+            match usingRoles with
+            | None -> Ok [ wanted ]
+            | Some roles ->
+                let selection = NamedRoles(roles |> List.map (fun role -> role.Name, role.Host))
 
-        let globalGranted =
-            staticPrivileges |> List.filter (fun d -> userColumnText cols row d.UserCol = "Y")
+                resolveRoleSelection store wanted selection
+                |> Result.map (fun active -> wanted :: roleClosure store active)
 
-        let globalLine =
-            sprintf
-                "GRANT %s ON *.* TO %s%s"
-                (renderPrivList globalGranted staticPrivileges)
-                quoted
-                (withOption "Grant_priv" cols row)
+        resolveActors
+        |> Result.map (fun actors ->
+            let belongsToActor columns row =
+                rowAccount columns row
+                |> Option.exists (fun rowOwner -> actors |> List.exists (sameAccount rowOwner))
 
-        let dynamicLines =
-            dynamicGrantsForAccount store wanted
-            |> List.groupBy _.Grantable
-            |> List.sortBy fst
-            |> List.map (fun (grantable, grants) ->
+            let userRows =
+                match scanList store "mysql" "user" with
+                | Ok(columns, rows) -> columns, rows |> List.filter (belongsToActor columns)
+                | Error _ -> [], []
+
+            let globalGranted =
+                let columns, rows = userRows
+
+                staticPrivileges
+                |> List.filter (fun privilege ->
+                    rows |> List.exists (fun row -> userColumnText columns row privilege.UserCol = "Y"))
+
+            let globalGrantOption =
+                let columns, rows = userRows
+                rows |> List.exists (fun row -> userColumnText columns row "Grant_priv" = "Y")
+
+            let globalLine =
                 sprintf
                     "GRANT %s ON *.* TO %s%s"
-                    (grants |> List.map _.Privilege |> String.concat ",")
+                    (renderPrivList globalGranted staticPrivileges)
                     quoted
-                    (if grantable then " WITH GRANT OPTION" else ""))
+                    (if globalGrantOption then " WITH GRANT OPTION" else "")
 
-        let dbLines =
-            match scanList store "mysql" "db" with
-            | Result.Error _ -> []
-            | Result.Ok(dbCols, rows) ->
-                let dbLevel = staticPrivileges |> List.filter (fun d -> d.DbCol.IsSome)
-
-                rows
-                |> List.filter (fun r -> rowAccount dbCols r |> Option.exists (sameAccount wanted))
-                |> List.map (fun r ->
-                    let granted = dbLevel |> List.filter (fun d -> userColumnText dbCols r d.DbCol.Value = "Y")
-
+            let dynamicLines =
+                actors
+                |> List.collect (dynamicGrantsForAccount store)
+                |> List.groupBy (fun grant -> grant.Privilege)
+                |> List.map (fun (privilege, grants) ->
+                    { Privilege = privilege
+                      Grantable = grants |> List.exists _.Grantable })
+                |> List.groupBy _.Grantable
+                |> List.sortBy fst
+                |> List.map (fun (grantable, grants) ->
                     sprintf
-                        "GRANT %s ON `%s`.* TO %s%s"
-                        (renderPrivList granted dbLevel)
-                        (userColumnText dbCols r "Db")
+                        "GRANT %s ON *.* TO %s%s"
+                        (grants |> List.map _.Privilege |> List.sort |> String.concat ",")
                         quoted
-                        (withOption "Grant_priv" dbCols r))
+                        (if grantable then " WITH GRANT OPTION" else ""))
 
-        let tableLines =
-            match scanList store "mysql" "tables_priv" with
-            | Result.Error _ -> []
-            | Result.Ok(tCols, rows) ->
-                rows
-                |> List.filter (fun r -> rowAccount tCols r |> Option.exists (sameAccount wanted))
-                |> List.map (fun r ->
-                    let members = setMembers (userColumnText tCols r "Table_priv")
-                    let hasOption = members |> List.exists (eqI "Grant")
+            let dbLines =
+                match scanList store "mysql" "db" with
+                | Result.Error _ -> []
+                | Result.Ok(columns, rows) ->
+                    let dbLevel = staticPrivileges |> List.filter (fun privilege -> privilege.DbCol.IsSome)
 
-                    let granted =
-                        staticPrivileges
-                        |> List.filter (fun d ->
-                            match d.TablePriv with
-                            | Some tp -> members |> List.exists (eqI tp)
-                            | None -> false)
+                    rows
+                    |> List.filter (belongsToActor columns)
+                    |> List.groupBy (fun row -> userColumnText columns row "Db")
+                    |> List.sortBy fst
+                    |> List.map (fun (database, grants) ->
+                        let granted =
+                            dbLevel
+                            |> List.filter (fun privilege ->
+                                grants
+                                |> List.exists (fun row -> userColumnText columns row privilege.DbCol.Value = "Y"))
 
-                    let privText =
-                        if granted.IsEmpty then
-                            "USAGE"
-                        else
-                            granted |> List.map (fun d -> d.Sql) |> String.concat ", "
+                        let hasOption = grants |> List.exists (fun row -> userColumnText columns row "Grant_priv" = "Y")
 
+                        sprintf
+                            "GRANT %s ON `%s`.* TO %s%s"
+                            (renderPrivList granted dbLevel)
+                            database
+                            quoted
+                            (if hasOption then " WITH GRANT OPTION" else ""))
+
+            let tableLines =
+                match scanList store "mysql" "tables_priv" with
+                | Result.Error _ -> []
+                | Result.Ok(columns, rows) ->
+                    rows
+                    |> List.filter (belongsToActor columns)
+                    |> List.groupBy (fun row ->
+                        userColumnText columns row "Db", userColumnText columns row "Table_name")
+                    |> List.sortBy fst
+                    |> List.map (fun ((database, table), grants) ->
+                        let members =
+                            grants
+                            |> List.collect (fun row -> setMembers (userColumnText columns row "Table_priv"))
+
+                        let hasMember name = members |> List.exists (eqI name)
+
+                        let granted =
+                            staticPrivileges
+                            |> List.filter (fun privilege -> privilege.TablePriv |> Option.exists hasMember)
+
+                        let privText =
+                            if granted.IsEmpty then "USAGE" else granted |> List.map _.Sql |> String.concat ", "
+
+                        sprintf
+                            "GRANT %s ON `%s`.`%s` TO %s%s"
+                            privText
+                            database
+                            table
+                            quoted
+                            (if hasMember "Grant" then " WITH GRANT OPTION" else ""))
+
+            let roleLines =
+                directRoleGrantsForAccount store wanted
+                |> List.groupBy _.AdminOption
+                |> List.sortBy fst
+                |> List.map (fun (adminOption, grants) ->
                     sprintf
-                        "GRANT %s ON `%s`.`%s` TO %s%s"
-                        privText
-                        (userColumnText tCols r "Db")
-                        (userColumnText tCols r "Table_name")
+                        "GRANT %s TO %s%s"
+                        (grants |> List.map (_.Role >> quotedAccount) |> String.concat ",")
                         quoted
-                        (if hasOption then " WITH GRANT OPTION" else ""))
+                        (if adminOption then " WITH ADMIN OPTION" else ""))
 
-        let roleLines =
-            directRoleGrantsForAccount store wanted
-            |> List.groupBy _.AdminOption
-            |> List.sortBy fst
-            |> List.map (fun (adminOption, grants) ->
-                sprintf
-                    "GRANT %s TO %s%s"
-                    (grants |> List.map (_.Role >> quotedAccount) |> String.concat ",")
-                    quoted
-                    (if adminOption then " WITH ADMIN OPTION" else ""))
+            sprintf "Grants for %s@%s" name host, globalLine :: dynamicLines @ dbLines @ tableLines @ roleLines)
 
-        Ok(sprintf "Grants for %s@%s" name host, globalLine :: dynamicLines @ dbLines @ tableLines @ roleLines)
+let renderGrantsForAccount store wanted = renderGrantsForAccountUsing store wanted None
 
 let renderGrants (store: Store) (name: string) = renderGrantsForAccount store (account name "%")

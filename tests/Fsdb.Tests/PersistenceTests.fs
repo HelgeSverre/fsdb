@@ -1044,6 +1044,42 @@ let tests =
                       "replayed grants minus the revoked UPDATE"
               | Error e -> failtestf "expected worker's grants after reload, got %A" e
 
+          testCase "role graph and default roles survive WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              for name in [ "reader"; "parent"; "alice" ] do
+                  Fsdb.Auth.createUser store name "%" None |> ignore
+
+              Fsdb.Auth.grant store [ "SELECT" ] (Fsdb.Auth.OnDb "role_db") [ "reader", "%" ] false |> ignore
+              Fsdb.Auth.grantRoles store [ "reader", "%" ] [ "parent", "%" ] false |> ignore
+              Fsdb.Auth.grantRoles store [ "parent", "%" ] [ "alice", "%" ] true |> ignore
+              Fsdb.Auth.setDefaultRoles store (NamedRoles [ "parent", "%" ]) [ "alice", "%" ] |> ignore
+
+              let assertRecovered label recovered =
+                  let alice = Fsdb.Auth.account "alice" "%"
+                  let parent = Fsdb.Auth.account "parent" "%"
+
+                  Expect.equal
+                      (Fsdb.Auth.defaultRolesForAccount recovered alice)
+                      [ parent ]
+                      (label + " default role")
+
+                  match Fsdb.Auth.renderGrantsForAccountUsing recovered alice (Some [ parent ]) with
+                  | Ok(_, lines) ->
+                      Expect.contains
+                          lines
+                          "GRANT SELECT ON `role_db`.* TO `alice`@`%`"
+                          (label + " inherited grant")
+                  | Error error -> failtestf "%s role rendering failed: %A" label error
+
+              let replayed = load dir
+              assertRecovered "WAL" replayed
+              snapshotNow dir replayed
+              assertRecovered "snapshot" (load dir)
+
           testCase "dynamic privilege bootstrap migrates legacy snapshots without undoing current revokes"
           <| fun _ ->
               let legacyDir = tempDataDir ()

@@ -914,6 +914,39 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "default roles activate during authentication"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let root = create 1 store
+                  let root, _ = handle root "CREATE DATABASE role_db"
+                  let root, _ = handle root "CREATE TABLE role_db.documents (id INT PRIMARY KEY)"
+                  let root, _ = handle root "INSERT INTO role_db.documents VALUES (1)"
+                  let root, _ = handle root "CREATE ROLE reader"
+                  let root, _ = handle root "CREATE USER role_user"
+                  let root, _ = handle root "GRANT SELECT ON role_db.* TO reader"
+                  let root, _ = handle root "GRANT reader TO role_user"
+                  let _, _ = handle root "SET DEFAULT ROLE reader TO role_user"
+
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+
+                  let connectionString =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=role_user;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                          server.Port
+
+                  use connection = new MySqlConnector.MySqlConnection(connectionString)
+                  do! connection.OpenAsync() |> Async.AwaitTask
+
+                  use command = connection.CreateCommand()
+                  command.CommandText <- "SELECT CURRENT_ROLE(), id FROM role_db.documents"
+                  use! reader = command.ExecuteReaderAsync() |> Async.AwaitTask
+                  Expect.isTrue (reader.Read()) "one document"
+                  Expect.equal (reader.GetString 0) "`reader`@`%`" "default role"
+                  Expect.equal (reader.GetInt32 1) 1 "inherited SELECT privilege"
+              }
+              |> Async.RunSynchronously
+
           testCase "handshake auth verifies stored passwords: right password connects, wrong password and unknown user get 1045"
           <| fun _ ->
               async {

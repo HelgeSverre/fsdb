@@ -43,8 +43,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Routines & events | Typed procedures, read-only stored functions, and persisted definer-context event scheduling | Data-changing stored functions and procedure calls from triggers |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
-| Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, expiry sandboxes, resource caps, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
-| Metadata | 23 INFORMATION_SCHEMA views, 11 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
+| Auth & privileges | Static and dynamic privileges, per-host accounts, expiry sandboxes, resource caps, account locks, role graphs/defaults/activation, and inherited authorization | No column privileges, proxy users, or mandatory roles |
+| Metadata | 25 INFORMATION_SCHEMA views, 13 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -80,7 +80,7 @@ refuses it through the prepared-statement protocol.
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
 | `ALTER TABLE` accepts `ALGORITHM` and `LOCK` execution hints but does not enforce the requested online-DDL strategy | low | divergence |
 | HASH and LINEAR HASH partition definitions, `pN` selection, INFORMATION_SCHEMA/SHOW metadata, and `ADD`/`COALESCE PARTITION` are logical catalog features over the shared row store; physical pruning plus `DROP`/`REORGANIZE PARTITION` remain absent | low | divergence/refusal |
-| `CREATE/DROP ROLE` are backed by locked `mysql.user` accounts and `SET ROLE NONE` clears the empty active-role set; other `SET ROLE`, `SET DEFAULT ROLE`, role grants/inheritance, and `GRANT PROXY` remain absent | medium | divergence/refusal |
+| `GRANT PROXY` remains absent; role DDL, grants, admin option, transitive inheritance, default roles, session activation, metadata, and `SHOW GRANTS ... USING` are supported | low | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
 | `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`, per-account query/update/connection limits, explicit password lifetimes, and the expired-password reset sandbox. `REQUIRE X509` is retained but cannot authenticate without client-certificate transport; auth-plugin selection, issuer/subject/cipher requirements, password history/reuse/current policy, and a mutable global default lifetime remain absent | medium | refusal |
@@ -421,7 +421,9 @@ SHA1-double password hashing with constant-time compare, CREATE/DROP/ALTER
 USER with account lock, TLS requirements, explicit password expiry, and resource limits,
 SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
 level-shaped denials (1045/1044/1142), GRANT OPTION checked at target level,
-fail-closed unknown privileges, DROP USER cleanup across grant tables,
+fail-closed unknown privileges, dynamic global privileges with individual grant options,
+role grants with admin option, transitive inheritance, default/session activation,
+role-aware metadata visibility, and DROP USER/ROLE cleanup across grant tables,
 privilege collection recursing through subqueries/derived tables/CTEs,
 SHOW DATABASES/TABLES visibility filtering, PROCESS-scoped PROCESSLIST/KILL,
 DROP TRIGGER resolved to its subject table for TRIGGER privilege
@@ -431,21 +433,20 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 |---|---|---|---|---|
 | Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
 | Text-probe privilege bypass | all statements checked | SET/USE and server-wide SHOW probes bypass the general AST gate; account, process, database, and table metadata probes carry scoped checks | low | divergence |
-| Roles | CREATE ROLE, SET ROLE, role grants, mandatory roles | CREATE/DROP ROLE persist locked accounts and `SET ROLE NONE` succeeds; activation of named roles, grants, inheritance, and mandatory roles are absent | medium | divergence/refusal |
-| Dynamic privileges | BACKUP_ADMIN, CONNECTION_ADMIN, … | vocabulary absent from GRANT parsing | low | refusal |
+| Mandatory roles | globally configured roles active for every account | role graphs, defaults, and explicit activation work; no server-wide mandatory-role setting | low | refusal |
 | Column-level privileges | mysql.columns_priv enforced | table exists, never consulted | low | divergence |
 | Advanced account policy | auth-plugin selection, password history/reuse/current policy, and global default lifetime | explicit expiry/lifetimes and resource limits are enforced; advanced policy clauses remain absent | low | refusal |
 | Proxy users | supported | absent | low | refusal |
-| SHOW GRANTS completeness | includes dynamic-privilege and PROXY lines | `Auth.renderGrantsForAccount` omits them | low | divergence |
+| SHOW GRANTS completeness | includes role, dynamic-privilege, and PROXY lines | role/dynamic lines and `USING` materialization work; PROXY lines are absent | low | divergence |
 | System-table coverage | ~38 mysql.* tables | `Storage.mysqlSystemDatabase` provides the account/grant, trigger/view/constraint, routine, and event catalogs used by supported features | low | divergence |
 
 ## 14. Metadata, server administration, logging, replication
 
-Working: 23 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
+Working: 25 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
 COLUMNS (including column comments), STATISTICS, TABLE_CONSTRAINTS, KEY_COLUMN_USAGE,
 REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
-ENGINES, COLLATIONS, CHARACTER_SETS, privilege views, …), direct
-SELECT-ability of the 10 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
+ENGINES, COLLATIONS, CHARACTER_SETS, privilege and role views, …), direct
+SELECT-ability of the 13 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
 TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
 COLLATION/PRIVILEGES (73 oracle-verified rows)/PROCESSLIST/VARIABLES/STATUS/
 GRANTS/TRIGGERS/WARNINGS/ERRORS with statement condition counts, DESCRIBE,
@@ -456,7 +457,7 @@ live Limits reporting.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; ROUTINES and EVENTS expose supported declarations, while PARAMETERS and COLUMN_PRIVILEGES remain empty | low | divergence |
+| INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS | 25 views; role views are live, ROUTINES and EVENTS expose supported declarations, while PARAMETERS and COLUMN_PRIVILEGES remain empty | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, and Com_select/insert/update/delete/replace counters; engine and latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
