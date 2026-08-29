@@ -451,6 +451,14 @@ let tests =
                       "function metadata"
               | _, other -> failtestf "expected an empty resultset, got %A" other
 
+          testCase "recursive JSON schemas return the MySQL maximum-depth error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT JSON_SCHEMA_VALID('{\"$ref\":\"#\"}', '{}')" |> snd with
+              | Err(3157, message) -> Expect.equal message "The JSON document exceeds the maximum depth." "error text"
+              | other -> failtestf "expected recursive schema error 3157, got %A" other
+
           testCase "planar geometry functions compose through SQL expressions"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

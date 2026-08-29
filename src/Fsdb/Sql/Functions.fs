@@ -1010,6 +1010,32 @@ let private tryResolveJsonPointer (root: JsonObject) (reference: string) =
             (Some(root :> JsonNode))
     | _ -> None
 
+let private exceedsJsonSchemaReferenceDepth (root: JsonObject) =
+    let visiting = System.Collections.Generic.HashSet<JsonNode>(HashIdentity.Reference)
+
+    let rec visit remainingDepth (node: JsonNode) =
+        if remainingDepth < 0 then
+            true
+        elif isNull node then
+            false
+        elif not (visiting.Add node) then
+            true
+        else
+            let recursive =
+                match node with
+                | :? JsonObject as obj ->
+                    match obj["$ref"] |> tryJsonString with
+                    | Some reference when reference.StartsWith "#" ->
+                        tryResolveJsonPointer root reference |> Option.exists (visit (remainingDepth - 1))
+                    | _ -> obj |> Seq.exists (fun property -> property.Key <> "$ref" && visit (remainingDepth - 1) property.Value)
+                | :? JsonArray as array -> array |> Seq.exists (visit (remainingDepth - 1))
+                | _ -> false
+
+            visiting.Remove node |> ignore
+            recursive
+
+    visit maxJsonSchemaDepth root
+
 type private JsonSchemaRegexBudget =
     { Started: System.Diagnostics.Stopwatch
       mutable Attempts: int }
@@ -1451,6 +1477,10 @@ let private jsonSchemaValidation functionName schemaValue documentValue =
         match schemaNode with
         | :? JsonObject as schema ->
             normalizeJsonSchema schema
+
+            if exceedsJsonSchemaReferenceDepth schema then
+                raise (SqlError(3157, "The JSON document exceeds the maximum depth."))
+
             let cleanSchema = stripJsonSchemaRegularExpressions schema :?> JsonObject
             let patternFailures = ResizeArray<JsonSchemaFailure>()
             let patternPropertyMatches = ResizeArray<JsonSchemaFailure>()

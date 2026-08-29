@@ -1236,18 +1236,23 @@ let tests =
                           Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "\"aaa\"" ]) (VInt 1L) "reference target"
                           Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "\"bbb\"" ]) (VInt 0L) "reference target violation"
 
-                      testCase "JSON schema refuses recursive local references containing patterns"
+                      testCase "JSON schema reports recursive local references as maximum depth"
                       <| fun _ ->
                           let schema =
                               VString
                                   """{"$ref":"#/definitions/node","definitions":{"node":{"type":"object","properties":{"value":{"type":"string","pattern":"^a+$"},"next":{"$ref":"#/definitions/node"}}}}}"""
 
-                          Expect.throwsC
-                              (fun () -> call "JSON_SCHEMA_VALID" [ schema; VString """{"value":"a","next":{"value":"a"}}""" ] |> ignore)
-                              (fun error ->
-                                  match error with
-                                  | Fsdb.Functions.SqlError(1235, _) -> ()
-                                  | other -> failtestf "expected 1235, got %A" other)
+                          for functionName, recursiveSchema, document in
+                              [ "JSON_SCHEMA_VALID", schema, VString """{"value":"a","next":{"value":"a"}}"""
+                                "JSON_SCHEMA_VALIDATION_REPORT", schema, VString """{"value":"a","next":{"value":"b"}}"""
+                                "JSON_SCHEMA_VALID", VString """{"$ref":"#"}""", VString "{}" ] do
+                              Expect.throwsC
+                                  (fun () -> call functionName [ recursiveSchema; document ] |> ignore)
+                                  (fun error ->
+                                      match error with
+                                      | Fsdb.Functions.SqlError(3157, message) ->
+                                          Expect.equal message "The JSON document exceeds the maximum depth." "maximum-depth error"
+                                      | other -> failtestf "expected 3157, got %A" other)
 
                       testCase "JSON schema functions return NULL for a SQL NULL argument and reject invalid JSON"
                       <| fun _ ->

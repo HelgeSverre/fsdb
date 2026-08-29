@@ -144,7 +144,6 @@ CURRENT_USER/USER/SESSION_USER.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| JSON Schema recursive regular-expression references | Local reference cycles traversing `pattern` or `patternProperties` return 1235 | low |
 | Geometry topology and relations | overlays, non-point buffers, buffer strategies, and geographic SRS semantics; planar point `ST_Buffer` and common predicates work | low |
 
 `CONVERT_TZ` resolves numeric offsets and `SYSTEM`, but named zones return NULL
