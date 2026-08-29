@@ -3234,7 +3234,7 @@ let tests =
                   [ "CREATE FUNCTION missing_return(value INT) RETURNS INT BEGIN SET value = value + 1; END", 1320
                     "CREATE FUNCTION bad_out(OUT value INT) RETURNS INT RETURN value", 1064
                     "CREATE FUNCTION result_function() RETURNS INT BEGIN SELECT 1; RETURN 1; END", 1415
-                    "CREATE FUNCTION writing_function() RETURNS INT BEGIN INSERT INTO function_target VALUES (1); RETURN 1; END", 1235
+                    "CREATE FUNCTION ddl_function() RETURNS INT BEGIN CREATE TABLE function_target (id INT); RETURN 1; END", 1422
                     "CREATE FUNCTION dynamic_function() RETURNS INT BEGIN PREPARE selected FROM 'SELECT 1'; RETURN 1; END", 1336
                     "CREATE PROCEDURE invalid_return() RETURN 1", 1313 ] do
                   match handle session sql |> snd with
@@ -3313,6 +3313,111 @@ let tests =
               match handle session "SELECT value FROM routine_commit" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected pre-function transaction write to stay committed, got %A" other
+
+          testCase "stored function writes share the invoking statement transaction"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              let expectAffected sql =
+                  match execute sql with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s failed: %A" sql other
+
+              expectAffected "CREATE TABLE function_source (id INT PRIMARY KEY)"
+              expectAffected "CREATE TABLE function_effects (id INT AUTO_INCREMENT PRIMARY KEY, marker VARCHAR(32))"
+              expectAffected "CREATE TABLE function_targets (id INT PRIMARY KEY)"
+              expectAffected "INSERT INTO function_source VALUES (1), (2)"
+
+              expectAffected
+                  "CREATE FUNCTION record_value(value INT) RETURNS INT MODIFIES SQL DATA BEGIN INSERT INTO function_effects(marker) VALUES (CONCAT('value-', value)); RETURN value; END"
+
+              expectAffected
+                  "CREATE FUNCTION declared_no_sql(value INT) RETURNS INT NO SQL BEGIN INSERT INTO function_effects(marker) VALUES ('declared-no-sql'); RETURN value; END"
+
+              expectAffected
+                  "CREATE PROCEDURE record_from_procedure(IN value INT) BEGIN INSERT INTO function_effects(marker) VALUES (CONCAT('proc-', value)); END"
+
+              expectAffected
+                  "CREATE FUNCTION call_writer(value INT) RETURNS INT MODIFIES SQL DATA BEGIN CALL record_from_procedure(value); RETURN value; END"
+
+              match execute "SELECT record_value(3), call_writer(4), declared_no_sql(5)" with
+              | ResultSet(_, [ [ Some "3"; Some "4"; Some "5" ] ]) -> ()
+              | other -> failtestf "expected mutating function values, got %A" other
+
+              match execute "SELECT marker FROM function_effects ORDER BY id" with
+              | ResultSet(_, rows) ->
+                  Expect.sequenceEqual
+                      rows
+                      [ [ Some "value-3" ]; [ Some "proc-4" ]; [ Some "declared-no-sql" ] ]
+                      "function effects preserve evaluation order"
+              | other -> failtestf "expected function effects, got %A" other
+
+              expectAffected "TRUNCATE TABLE function_effects"
+
+              match execute "SELECT id, record_value(id) FROM function_source ORDER BY id" with
+              | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected one function call per source row, got %A" other
+
+              match execute "SELECT marker FROM function_effects ORDER BY id" with
+              | ResultSet(_, [ [ Some "value-1" ]; [ Some "value-2" ] ]) -> ()
+              | other -> failtestf "expected per-row function effects, got %A" other
+
+              expectAffected "TRUNCATE TABLE function_effects"
+
+              match execute "SELECT record_value(id) FROM function_source WHERE id = 999" with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected empty function input, got %A" other
+
+              match execute "SELECT COUNT(*) FROM function_effects" with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected no effects for an empty input, got %A" other
+
+              expectAffected "INSERT INTO function_targets VALUES (2)"
+
+              match execute "INSERT INTO function_targets SELECT record_value(id) FROM function_source ORDER BY id" with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected duplicate target failure, got %A" other
+
+              match execute "SELECT id FROM function_targets ORDER BY id" with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected failed outer DML to roll back its rows, got %A" other
+
+              match execute "SELECT COUNT(*) FROM function_effects" with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected failed outer DML to roll back function effects, got %A" other
+
+              expectAffected "BEGIN"
+
+              match execute "SELECT record_value(7)" with
+              | ResultSet(_, [ [ Some "7" ] ]) -> ()
+              | other -> failtestf "expected transactional function result, got %A" other
+
+              expectAffected "ROLLBACK"
+
+              match execute "SELECT COUNT(*) FROM function_effects" with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected explicit rollback to discard function effects, got %A" other
+
+              expectAffected
+                  "CREATE FUNCTION touch_source(value INT) RETURNS INT MODIFIES SQL DATA BEGIN UPDATE function_source SET id = id WHERE id = value; RETURN value; END"
+
+              match execute "SELECT touch_source(id) FROM function_source" with
+              | Err(1442, message) -> Expect.stringContains message "function_source" "invoking table named"
+              | other -> failtestf "expected invoking-table refusal, got %A" other
+
+              expectAffected "CREATE PROCEDURE result_procedure() SELECT 1"
+
+              expectAffected
+                  "CREATE FUNCTION call_result_procedure() RETURNS INT MODIFIES SQL DATA BEGIN CALL result_procedure(); RETURN 1; END"
+
+              match execute "SELECT call_result_procedure()" with
+              | Err(1415, _) -> ()
+              | other -> failtestf "expected function result-set refusal, got %A" other
 
           testCase "stored procedures call procedures with local outputs"
           <| fun _ ->
