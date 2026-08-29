@@ -1806,6 +1806,55 @@ let tests =
               | ResultSet(_, [ [ Some "11" ] ]) -> ()
               | other -> failtestf "expected the waiting reader to succeed, got %A" other
 
+          testCase "ordinary statements overlap while explicit acquisition waits"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE statement_lock_scope (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO statement_lock_scope VALUES (1, 10)"
+              use entered = new Threading.ManualResetEventSlim(false)
+              use release = new Threading.ManualResetEventSlim(false)
+
+              let registry =
+                  Fsdb.Functions.empty
+                  |> Fsdb.Functions.registerScalar
+                      "HOLD_STATEMENT"
+                      (fun _ ->
+                          entered.Set()
+                          release.Wait()
+                          VInt 1L)
+
+              let reader =
+                  { create 2 store with CustomFunctions = registry }
+
+              let reading =
+                  System.Threading.Tasks.Task.Run(fun () -> handle reader "SELECT HOLD_STATEMENT() FROM statement_lock_scope")
+
+              Expect.isTrue (entered.Wait(TimeSpan.FromSeconds 2.0)) "the ordinary read is active"
+
+              let updating =
+                  System.Threading.Tasks.Task.Run(fun () -> handle (create 3 store) "UPDATE statement_lock_scope SET n=11 WHERE id=1")
+
+              Expect.isTrue (updating.Wait(TimeSpan.FromSeconds 2.0)) "ordinary reads and writes use storage concurrency"
+
+              match updating.Result |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the overlapping update to succeed, got %A" other
+
+              let locking =
+                  System.Threading.Tasks.Task.Run(fun () -> handle (create 4 store) "LOCK TABLES statement_lock_scope WRITE")
+
+              Expect.isFalse (locking.Wait(TimeSpan.FromMilliseconds 100.0)) "an explicit WRITE lock waits for the active read"
+              release.Set()
+              Expect.isTrue (reading.Wait(TimeSpan.FromSeconds 2.0)) "the reader finishes after release"
+              Expect.isTrue (locking.Wait(TimeSpan.FromSeconds 2.0)) "the explicit lock acquires after the reader"
+
+              match locking.Result with
+              | owner, Affected 0UL ->
+                  let _, _ = handle owner "UNLOCK TABLES"
+                  ()
+              | _, other -> failtestf "expected the explicit lock to acquire, got %A" other
+
           testCase "table lock statements follow MySQL transaction boundaries"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

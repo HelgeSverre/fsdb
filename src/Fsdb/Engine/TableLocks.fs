@@ -21,8 +21,10 @@ type Access =
       Mode: AccessMode }
 
 type private TableState =
-    { Readers: HashSet<int>
-      mutable Writer: int option }
+    { ExplicitReaders: HashSet<int>
+      mutable ExplicitWriter: int option
+      StatementReaders: HashSet<int>
+      StatementWriters: HashSet<int> }
 
 type private ExplicitContext =
     { Names: Map<string, Access>
@@ -68,31 +70,43 @@ let private stateFor (manager: Manager) key =
     | true, state -> state
     | false, _ ->
         let state =
-            { Readers = HashSet()
-              Writer = None }
+            { ExplicitReaders = HashSet()
+              ExplicitWriter = None
+              StatementReaders = HashSet()
+              StatementWriters = HashSet() }
 
         manager.Tables.Add(key, state)
         state
 
-let private available owner mode (state: TableState) =
+let private explicitlyAvailable owner mode (state: TableState) =
     match mode with
-    | ReadAccess -> state.Writer |> Option.forall ((=) owner)
+    | ReadAccess ->
+        state.ExplicitWriter |> Option.forall ((=) owner)
+        && (state.StatementWriters.Count = 0 || (state.StatementWriters.Count = 1 && state.StatementWriters.Contains owner))
     | WriteAccess ->
-        state.Writer |> Option.forall ((=) owner)
-        && (state.Readers.Count = 0 || (state.Readers.Count = 1 && state.Readers.Contains owner))
+        state.ExplicitWriter |> Option.forall ((=) owner)
+        && (state.ExplicitReaders.Count = 0
+            || (state.ExplicitReaders.Count = 1 && state.ExplicitReaders.Contains owner))
+        && (state.StatementReaders.Count = 0 || (state.StatementReaders.Count = 1 && state.StatementReaders.Contains owner))
+        && (state.StatementWriters.Count = 0 || (state.StatementWriters.Count = 1 && state.StatementWriters.Contains owner))
 
-let private isAvailable owner mode (manager: Manager) key =
+let private explicitAvailable owner mode (manager: Manager) key =
     match manager.Tables.TryGetValue key with
     | false, _ -> true
-    | true, state -> available owner mode state
+    | true, state -> explicitlyAvailable owner mode state
+
+let private statementAvailable mode (state: TableState) =
+    match mode with
+    | ReadAccess -> state.ExplicitWriter.IsNone
+    | WriteAccess -> state.ExplicitWriter.IsNone && state.ExplicitReaders.Count = 0
 
 let private acquirePhysical owner (manager: Manager) physical =
     for KeyValue(key, mode) in physical do
         let state = stateFor manager key
 
         match mode with
-        | ReadAccess -> state.Readers.Add owner |> ignore
-        | WriteAccess -> state.Writer <- Some owner
+        | ReadAccess -> state.ExplicitReaders.Add owner |> ignore
+        | WriteAccess -> state.ExplicitWriter <- Some owner
 
 let private releasePhysical owner (manager: Manager) physical =
     for KeyValue(key, mode) in physical do
@@ -100,11 +114,16 @@ let private releasePhysical owner (manager: Manager) physical =
         | false, _ -> ()
         | true, state ->
             match mode with
-            | ReadAccess -> state.Readers.Remove owner |> ignore
-            | WriteAccess when state.Writer = Some owner -> state.Writer <- None
+            | ReadAccess -> state.ExplicitReaders.Remove owner |> ignore
+            | WriteAccess when state.ExplicitWriter = Some owner -> state.ExplicitWriter <- None
             | WriteAccess -> ()
 
-            if state.Writer.IsNone && state.Readers.Count = 0 then
+            if
+                state.ExplicitWriter.IsNone
+                && state.ExplicitReaders.Count = 0
+                && state.StatementReaders.Count = 0
+                && state.StatementWriters.Count = 0
+            then
                 manager.Tables.Remove key |> ignore
 
 let private waitForPhysical timeout owner (manager: Manager) physical =
@@ -113,7 +132,7 @@ let private waitForPhysical timeout owner (manager: Manager) physical =
     let rec wait () =
         let ready =
             physical
-            |> Map.forall (fun key mode -> isAvailable owner mode manager key)
+            |> Map.forall (fun key mode -> explicitAvailable owner mode manager key)
 
         if ready then
             true
@@ -122,6 +141,50 @@ let private waitForPhysical timeout owner (manager: Manager) physical =
             remaining > TimeSpan.Zero && Monitor.Wait(manager.SyncRoot, remaining) && wait ()
 
     wait ()
+
+let private waitForStatement timeout (manager: Manager) physical =
+    let deadline = DateTime.UtcNow + timeout
+
+    let rec wait () =
+        let ready =
+            physical
+            |> Map.forall (fun key mode ->
+                match manager.Tables.TryGetValue key with
+                | false, _ -> true
+                | true, state -> statementAvailable mode state)
+
+        if ready then
+            true
+        else
+            let remaining = deadline - DateTime.UtcNow
+            remaining > TimeSpan.Zero && Monitor.Wait(manager.SyncRoot, remaining) && wait ()
+
+    wait ()
+
+let private acquireStatement owner (manager: Manager) physical =
+    for KeyValue(key, mode) in physical do
+        let state = stateFor manager key
+
+        match mode with
+        | ReadAccess -> state.StatementReaders.Add owner |> ignore
+        | WriteAccess -> state.StatementWriters.Add owner |> ignore
+
+let private releaseStatement owner (manager: Manager) physical =
+    for KeyValue(key, mode) in physical do
+        match manager.Tables.TryGetValue key with
+        | false, _ -> ()
+        | true, state ->
+            match mode with
+            | ReadAccess -> state.StatementReaders.Remove owner |> ignore
+            | WriteAccess -> state.StatementWriters.Remove owner |> ignore
+
+            if
+                state.ExplicitWriter.IsNone
+                && state.ExplicitReaders.Count = 0
+                && state.StatementReaders.Count = 0
+                && state.StatementWriters.Count = 0
+            then
+                manager.Tables.Remove key |> ignore
 
 let private accessName (access: Access) =
     access.ReferenceName |> Option.defaultValue access.Table
@@ -212,8 +275,8 @@ let withStatementAccess timeout store owner accesses body =
                     (fun result access -> result |> Result.bind (fun () -> validateExplicitAccess context access))
                     (Ok())
                 |> Result.map (fun () -> false)
-            | false, _ when waitForPhysical timeout owner manager physical ->
-                acquirePhysical owner manager physical
+            | false, _ when waitForStatement timeout manager physical ->
+                acquireStatement owner manager physical
                 Ok true
             | false, _ -> Error(1205, "Lock wait timeout exceeded; try restarting transaction"))
 
@@ -225,7 +288,7 @@ let withStatementAccess timeout store owner accesses body =
         finally
             if releaseAfter then
                 lock manager.SyncRoot (fun () ->
-                    releasePhysical owner manager physical
+                    releaseStatement owner manager physical
                     Monitor.PulseAll manager.SyncRoot)
 
 let private access database table referenceName mode =
