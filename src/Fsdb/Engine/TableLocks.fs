@@ -496,14 +496,50 @@ let private triggerEntries store =
     | Error _ -> []
     | Ok(_, rows) -> rows |> Seq.choose SystemCatalog.Trigger.tryRead |> List.ofSeq
 
-let private storedProgramStatements sqlMode body =
-    match StoredProgram.parseTrigger (SqlMode.parserOptionsFor sqlMode) body with
-    | Ok statements -> statements |> List.collect StoredProgram.sqlStatements
-    | Error _ -> []
+let private routineEntries store : Map<string, SystemCatalog.Routine.Entry> =
+    match scan store "mysql" "routines" with
+    | Error _ -> Map.empty
+    | Ok(_, rows) ->
+        rows
+        |> Seq.choose SystemCatalog.Routine.tryRead
+        |> Seq.map (fun routine -> tableKey routine.Schema routine.Name, routine)
+        |> Map.ofSeq
+
+let private storedProgramStatements
+    (routines: Map<string, SystemCatalog.Routine.Entry>)
+    defaultDb
+    (options: Parser.ParserOptions)
+    (statements: StoredProgram.Statement list)
+    =
+    let rec collect visited defaultDb (options: Parser.ParserOptions) statements =
+        let direct = statements |> List.collect StoredProgram.sqlStatements
+
+        let called =
+            statements
+            |> List.collect StoredProgram.textSqlStatements
+            |> List.choose (StoredProgram.tryCall options)
+            |> List.collect (fun name ->
+                let database, name = splitQualified defaultDb name
+                let key = tableKey database name
+
+                match Set.contains key visited, Map.tryFind key routines with
+                | true, _
+                | false, None -> []
+                | false, Some(routine: SystemCatalog.Routine.Entry) ->
+                    let options = SqlMode.parserOptionsFor routine.SqlMode
+
+                    match StoredProgram.parseRoutine options (StoredProgram.tryCall options >> Option.isSome) routine.Definition with
+                    | Error _ -> []
+                    | Ok body -> collect (Set.add key visited) routine.Schema options body)
+
+        direct @ called
+
+    collect Set.empty defaultDb options statements
 
 let private expandDependencies store accesses =
     let views = viewEntries store
     let triggers = triggerEntries store
+    let routines = routineEntries store
 
     let rec expand visited access =
         let key = tableKey access.Database access.Table
@@ -534,10 +570,15 @@ let private expandDependencies store accesses =
                     triggers
                     |> List.filter (fun trigger -> tableKey trigger.Schema trigger.Table = key)
                     |> List.collect (fun trigger ->
-                        storedProgramStatements trigger.SqlMode trigger.Body
-                        |> List.collect (directStatementAccesses trigger.Schema)
-                        |> List.collect (fun dependency ->
-                            expand visited { dependency with ReferenceName = None }))
+                        let options = SqlMode.parserOptionsFor trigger.SqlMode
+
+                        match StoredProgram.parseTrigger options trigger.Body with
+                        | Error _ -> []
+                        | Ok statements ->
+                            storedProgramStatements routines trigger.Schema options statements
+                            |> List.collect (directStatementAccesses trigger.Schema)
+                            |> List.collect (fun dependency ->
+                                expand visited { dependency with ReferenceName = None }))
 
             access :: (viewDependencies @ triggerDependencies)
 

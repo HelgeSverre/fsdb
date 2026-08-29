@@ -12572,7 +12572,7 @@ let private validateTriggerStatement
             | Ok index when columns.[index].Generated.IsSome ->
                 Error(Err(1362, sprintf "Updating of NEW row is not allowed for generated column '%s'" column))
             | Ok _ -> Ok()
-        | _ -> Error(Err(1064, "Trigger body accepts INSERT, UPDATE, DELETE, REPLACE, or SET NEW statements"))
+        | _ -> Error(Err(1064, "Trigger body accepts INSERT, UPDATE, DELETE, REPLACE, CALL, or SET NEW statements"))
 
     match StoredProgram.executableSqlStatements triggerStatement |> traverse validateStatement with
     | Error error -> Error error

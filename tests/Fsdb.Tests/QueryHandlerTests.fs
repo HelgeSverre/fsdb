@@ -2159,11 +2159,13 @@ let tests =
               let setup = create 1 store
               let setup, _ = handle setup "CREATE TABLE locked_trigger_source (id INT PRIMARY KEY)"
               let setup, _ = handle setup "CREATE TABLE locked_trigger_log (id INT PRIMARY KEY)"
+              let setup, _ = handle setup "CREATE PROCEDURE write_locked_log(IN value INT) INSERT INTO locked_trigger_log VALUES(value)"
+              let setup, _ = handle setup "CREATE PROCEDURE call_locked_log(IN value INT) CALL write_locked_log(value)"
 
               let _, _ =
                   handle
                       setup
-                      "CREATE TRIGGER lock_dependency AFTER INSERT ON locked_trigger_source FOR EACH ROW INSERT INTO locked_trigger_log VALUES(NEW.id)"
+                      "CREATE TRIGGER lock_dependency AFTER INSERT ON locked_trigger_source FOR EACH ROW CALL call_locked_log(NEW.id)"
 
               let holder, _ = handle (create 2 store) "LOCK TABLES locked_trigger_source WRITE"
 
@@ -2422,6 +2424,10 @@ let tests =
                   handle session "CREATE PROCEDURE strict_call(IN value INT, OUT doubled INT) SET doubled=value*2"
 
               Expect.equal created (Affected 0UL) "valid procedure created"
+
+              match handle session "CALL strict_call(3,@out)" with
+              | called, Affected 0UL -> Expect.equal (Map.tryFind "out" called.UserVariables) (Some(VInt 6L)) "single SET body"
+              | _, other -> failtestf "expected a valid single-statement procedure call, got %A" other
 
               match handle session "CALL strict_call(3,,@out)" |> snd with
               | Err(1064, _) -> ()

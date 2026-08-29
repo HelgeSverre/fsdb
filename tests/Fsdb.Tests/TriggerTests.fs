@@ -904,8 +904,12 @@ let tests =
               | Err(1064, _) -> ()
               | other -> failtestf "expected 1064 for an unparseable body, got %A" other
 
+              match runDefault store "CREATE TRIGGER bad AFTER INSERT ON t FOR EACH ROW CALL p(1); DROP TABLE log" with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected 1064 for trailing CALL syntax, got %A" other
+
               match runDefault store "CREATE TRIGGER bad AFTER INSERT ON t FOR EACH ROW SELECT 1" with
-              | Err(1064, msg) -> Expect.stringContains msg "accepts INSERT, UPDATE, DELETE, REPLACE, or SET NEW" "kind restriction named"
+              | Err(1064, msg) -> Expect.stringContains msg "accepts INSERT, UPDATE, DELETE, REPLACE, CALL, or SET NEW" "kind restriction named"
               | other -> failtestf "expected 1064 for a SELECT body, got %A" other
 
               match runDefault store "CREATE TRIGGER bad AFTER INSERT ON nosuch FOR EACH ROW INSERT INTO log(n) VALUES (1)" with

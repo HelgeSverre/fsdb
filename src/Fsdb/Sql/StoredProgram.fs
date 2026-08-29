@@ -179,6 +179,20 @@ let rec private collectSqlStatements includeCursors =
 let sqlStatements = collectSqlStatements true
 let executableSqlStatements = collectSqlStatements false
 
+let rec textSqlStatements =
+    function
+    | TextSql sql -> [ sql ]
+    | Block(_, body)
+    | Loop(_, body)
+    | While(_, _, body)
+    | Repeat(_, body, _) -> body |> List.collect textSqlStatements
+    | If(_, whenTrue, whenFalse) -> (whenTrue @ whenFalse) |> List.collect textSqlStatements
+    | Case(_, branches, otherwise) ->
+        (branches |> List.collect (snd >> List.collect textSqlStatements))
+        @ (otherwise |> Option.defaultValue [] |> List.collect textSqlStatements)
+    | DeclareHandler(_, _, body) -> textSqlStatements body
+    | _ -> []
+
 let rec expressions =
     function
     | Sql _
@@ -1379,10 +1393,28 @@ let private parseWithFallback
 let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
     parseWithFallback options (fun _ -> false) body
 
-let private callStatement = Regex(@"^\s*CALL\s+[^\s(]+(?:\s*\(.*\))?\s*$", RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+let private callIdentifier = @"(?:`(?:``|[^`])+`|[A-Za-z_$][A-Za-z0-9_$]*)"
+
+let private callStatement =
+    Regex(
+        sprintf @"^\s*CALL\s+(?<name>%s(?:\.%s)?)(?:\s*\((?<arguments>.*)\))?\s*$" callIdentifier callIdentifier,
+        RegexOptions.IgnoreCase ||| RegexOptions.Singleline
+    )
+
+let tryCall (options: Parser.ParserOptions) (sql: string) =
+    let matched = callStatement.Match sql
+
+    if
+        matched.Success
+        && (not matched.Groups.["arguments"].Success
+            || (parseArguments options matched.Groups.["arguments"].Value |> Result.isOk))
+    then
+        Some(matched.Groups.["name"].Value)
+    else
+        None
 
 let parseTrigger (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
-    parseWithFallback options callStatement.IsMatch body
+    parseWithFallback options (tryCall options >> Option.isSome) body
 
 let parseRoutine (options: Parser.ParserOptions) isSupportedText body =
     parseWithFallback options isSupportedText body
