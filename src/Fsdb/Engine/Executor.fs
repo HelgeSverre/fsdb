@@ -309,7 +309,7 @@ let private checkStoredDefiner (store: Store) (definer: string) (db: string) (st
     match Auth.tryParseAccount definer with
     | Some account when Auth.tryUserRowForAccount store account |> Option.isNone ->
         Error(1449, sprintf "The user specified as a definer ('%s') does not exist" definer)
-    | Some account -> Auth.checkForAccount store account (Auth.requiredPrivileges db statement)
+    | Some account -> Auth.checkForAccount store account (Auth.requiredPrivilegesInStore store db statement)
     | None -> Error(1449, "The user specified as a definer ('') does not exist")
 
 let private registryForDefiner (account: Auth.Account) (registry: Registry) =
@@ -336,7 +336,7 @@ let private registryForViewSecurity
     if securityType.Equals("INVOKER", System.StringComparison.OrdinalIgnoreCase) then
         match registryAccount registry with
         | Some account ->
-            Auth.checkForAccount store account (Auth.requiredPrivileges schema statement)
+            Auth.checkForAccount store account (Auth.requiredPrivilegesInStore store schema statement)
             |> Result.map (fun () -> registry)
         | None -> Error(1449, "The current invoker account does not exist")
     else

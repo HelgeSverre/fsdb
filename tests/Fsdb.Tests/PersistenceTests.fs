@@ -1024,6 +1024,10 @@ let tests =
               let store = load dir
               attach dir store
 
+              let session = Fsdb.Session.create 1 store
+              let session, _ = handle session "CREATE DATABASE shop"
+              let _, _ = handle session "CREATE TABLE shop.orders (id INT, note TEXT)"
+
               Fsdb.Auth.createUser store "worker" "%" None |> ignore
               Fsdb.Auth.grant store [ "SELECT"; "UPDATE" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] false |> ignore
               Fsdb.Auth.grant store [ "DELETE" ] (Fsdb.Auth.OnTable("shop", "orders")) [ "worker", "%" ] false |> ignore
@@ -1031,18 +1035,30 @@ let tests =
               Fsdb.Auth.revoke store [ "UPDATE" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] |> ignore
               Fsdb.Auth.grant store [ "BACKUP_ADMIN" ] Fsdb.Auth.Global [ "worker", "%" ] true |> ignore
 
-              let reloaded = load dir
+              Fsdb.Auth.grantSpecifications
+                  store
+                  [ { Name = "SELECT"; Columns = [ "id" ] } ]
+                  (Fsdb.Auth.OnTable("shop", "orders"))
+                  [ "worker", "%" ]
+                  false
+              |> ignore
 
-              match Fsdb.Auth.renderGrants reloaded "worker" with
-              | Ok(_, lines) ->
-                  Expect.equal
-                      lines
-                      [ "GRANT USAGE ON *.* TO `worker`@`%`"
-                        "GRANT BACKUP_ADMIN ON *.* TO `worker`@`%` WITH GRANT OPTION"
-                        "GRANT SELECT, INSERT ON `shop`.* TO `worker`@`%`"
-                        "GRANT DELETE ON `shop`.`orders` TO `worker`@`%`" ]
-                      "replayed grants minus the revoked UPDATE"
-              | Error e -> failtestf "expected worker's grants after reload, got %A" e
+              let assertRecovered label recovered =
+                  match Fsdb.Auth.renderGrants recovered "worker" with
+                  | Ok(_, lines) ->
+                      Expect.equal
+                          lines
+                          [ "GRANT USAGE ON *.* TO `worker`@`%`"
+                            "GRANT BACKUP_ADMIN ON *.* TO `worker`@`%` WITH GRANT OPTION"
+                            "GRANT SELECT, INSERT ON `shop`.* TO `worker`@`%`"
+                            "GRANT DELETE, SELECT (`id`) ON `shop`.`orders` TO `worker`@`%`" ]
+                          (label + " grants minus the revoked UPDATE")
+                  | Error e -> failtestf "expected worker's grants after %s, got %A" label e
+
+              let replayed = load dir
+              assertRecovered "WAL replay" replayed
+              snapshotNow dir replayed
+              assertRecovered "snapshot recovery" (load dir)
 
           testCase "role graph and default roles survive WAL and snapshot recovery"
           <| fun _ ->

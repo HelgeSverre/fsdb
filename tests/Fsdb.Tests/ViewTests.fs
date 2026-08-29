@@ -627,7 +627,7 @@ let tests =
               let root = apply root "GRANT CREATE VIEW ON fsdb.* TO owner"
               let owner = { Fsdb.Session.create 2 store with User = "owner" }
               let _owner = apply owner "CREATE VIEW writable_vendors AS SELECT id, name FROM vendors"
-              let root = apply root "GRANT UPDATE, INSERT ON fsdb.writable_vendors TO writer"
+              let root = apply root "GRANT SELECT, UPDATE, INSERT ON fsdb.writable_vendors TO writer"
               let writer = { Fsdb.Session.create 3 store with User = "writer" }
               let _root = apply root "REVOKE UPDATE, INSERT ON fsdb.vendors FROM owner"
 
@@ -662,7 +662,7 @@ let tests =
               let root = apply root "GRANT CREATE VIEW ON fsdb.* TO outer_owner"
               let outerOwner = { Fsdb.Session.create 3 store with User = "outer_owner" }
               let _outerOwner = apply outerOwner "CREATE VIEW outer_secured AS SELECT id, n FROM inner_secured"
-              let root = apply root "GRANT UPDATE ON fsdb.outer_secured TO nested_writer"
+              let root = apply root "GRANT SELECT, UPDATE ON fsdb.outer_secured TO nested_writer"
               let writer = { Fsdb.Session.create 4 store with User = "nested_writer" }
               let writer = apply writer "UPDATE outer_secured SET n = 11 WHERE id = 1"
               let _root = apply root "REVOKE UPDATE ON fsdb.secured_rows FROM inner_owner"
@@ -1203,7 +1203,7 @@ let tests =
               let root = apply root "GRANT CREATE VIEW ON fsdb.* TO owner"
               let root = apply root "GRANT SELECT, UPDATE ON fsdb.source TO owner"
               let root = apply root "GRANT SELECT, SHOW VIEW ON fsdb.invoker_view TO reader"
-              let root = apply root "GRANT UPDATE ON fsdb.invoker_writable TO reader"
+              let root = apply root "GRANT SELECT, UPDATE ON fsdb.invoker_writable TO reader"
               let owner = { Fsdb.Session.create 2 store with User = "owner" }
               let reader = { Fsdb.Session.create 3 store with User = "reader" }
 

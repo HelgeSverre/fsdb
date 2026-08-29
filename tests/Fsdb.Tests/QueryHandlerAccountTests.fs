@@ -1250,6 +1250,188 @@ let tests =
                       "only columns carrying a privilege are visible"
               | other -> failtestf "expected scoped SHOW FULL COLUMNS, got %A" other
 
+          testCase "column grants authorize only referenced and written columns"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE column_auth"
+              let root, _ = handle root "CREATE TABLE column_auth.items (id INT, status INT, hidden INT)"
+              let root, _ = handle root "CREATE TABLE column_auth.details (id INT, public_value INT, secret_value INT)"
+              let root, _ = handle root "INSERT INTO column_auth.items VALUES (1, 0, 9)"
+              let root, _ = handle root "INSERT INTO column_auth.details VALUES (1, 7, 99)"
+              let root, _ = handle root "CREATE VIEW column_auth.visible_items AS SELECT id, hidden FROM column_auth.items"
+              let root, _ = handle root "CREATE USER partial"
+
+              let root, _ =
+                  handle
+                      root
+                      "GRANT SELECT(id), INSERT(id), UPDATE(status) ON column_auth.items TO partial"
+
+              let root, _ = handle root "GRANT SELECT(id, public_value) ON column_auth.details TO partial"
+              let _, _ = handle root "GRANT SELECT(id) ON column_auth.visible_items TO partial"
+
+              let partial =
+                  { create 2 store with
+                      User = "partial"
+                      Database = Some "column_auth" }
+
+              let expectRows sql expected =
+                  match handle partial sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "expected rows for %s, got %A" sql other
+
+              let expectColumnDenied command column sql =
+                  match handle partial sql |> snd with
+                  | Err(1143, message) ->
+                      Expect.stringContains message command "command"
+                      Expect.stringContains message (sprintf "column '%s'" column) "column"
+                  | other -> failtestf "expected 1143 for %s, got %A" sql other
+
+              expectRows "SELECT id FROM items" [ [ Some "1" ] ]
+              expectRows "SELECT COUNT(*) FROM items" [ [ Some "1" ] ]
+              expectRows "WITH visible AS (SELECT id FROM items) SELECT id FROM visible" [ [ Some "1" ] ]
+              expectRows "SELECT id FROM (SELECT id FROM items) AS visible" [ [ Some "1" ] ]
+              expectRows
+                  "SELECT d.public_value FROM items AS i JOIN details AS d ON d.id = i.id"
+                  [ [ Some "7" ] ]
+              expectRows
+                  "SELECT d.public_value FROM items AS i JOIN details AS d USING (id)"
+                  [ [ Some "7" ] ]
+              expectRows
+                  "SELECT d.public_value FROM items AS i NATURAL JOIN details AS d"
+                  [ [ Some "7" ] ]
+              expectRows
+                  "SELECT id, (SELECT public_value FROM details WHERE details.id = items.id) FROM items"
+                  [ [ Some "1"; Some "7" ] ]
+              expectRows "SELECT id FROM visible_items" [ [ Some "1" ] ]
+              expectColumnDenied "SELECT" "hidden" "SELECT hidden FROM items"
+              expectColumnDenied "SELECT" "hidden" "SELECT i.id FROM items AS i WHERE i.hidden = 9"
+              expectColumnDenied
+                  "SELECT"
+                  "secret_value"
+                  "SELECT d.secret_value FROM items AS i JOIN details AS d ON d.id = i.id"
+              expectColumnDenied
+                  "SELECT"
+                  "secret_value"
+                  "SELECT id, (SELECT secret_value FROM details WHERE details.id = items.id) FROM items"
+              expectColumnDenied "SELECT" "hidden" "SELECT hidden FROM visible_items"
+              expectColumnDenied "SELECT" "hidden" "SELECT id FROM items WHERE hidden = 9"
+              expectColumnDenied "SELECT" "hidden" "WITH hidden_cte AS (SELECT hidden FROM items) SELECT hidden FROM hidden_cte"
+
+              match handle partial "SELECT * FROM items" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "SELECT command denied" "table-wide read"
+              | other -> failtestf "expected table-level denial for SELECT *, got %A" other
+
+              match handle partial "INSERT INTO items (id) VALUES (2)" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected permitted column insert, got %A" other
+
+              match handle partial "INSERT INTO items VALUES (3, 0, 0)" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "INSERT command denied" "implicit all-column insert"
+              | other -> failtestf "expected table-level insert denial, got %A" other
+
+              match handle partial "UPDATE items SET status = id WHERE id = 1" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected permitted update, got %A" other
+
+              expectColumnDenied "UPDATE" "hidden" "UPDATE items SET hidden = 1 WHERE id = 1"
+              expectColumnDenied "SELECT" "hidden" "UPDATE items SET status = hidden WHERE id = 1"
+
+              match handle partial "DELETE FROM items WHERE id = 1" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "DELETE command denied" "delete stays table-scoped"
+              | other -> failtestf "expected DELETE denial, got %A" other
+
+          testCase "column grant validation, delegation, and revocation are exact"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE column_admin"
+              let root, _ = handle root "CREATE TABLE column_admin.records (id INT, hidden INT)"
+              let root, _ = handle root "CREATE USER grantor, recipient"
+
+              match handle root "GRANT SELECT(missing) ON column_admin.records TO grantor" |> snd with
+              | Err(1054, message) -> Expect.stringContains message "Unknown column 'missing'" "unknown column"
+              | other -> failtestf "expected unknown grant column, got %A" other
+
+              match handle root "GRANT SELECT(id) ON column_admin.* TO grantor" |> snd with
+              | Err(1144, _) -> ()
+              | other -> failtestf "expected database-level column grant refusal, got %A" other
+
+              let root, _ = handle root "GRANT SELECT(id) ON column_admin.records TO grantor WITH GRANT OPTION"
+              let grantor = { create 2 store with User = "grantor" }
+
+              match handle grantor "GRANT SELECT(id) ON column_admin.records TO recipient" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected exact column delegation, got %A" other
+
+              match handle grantor "GRANT SELECT(hidden) ON column_admin.records TO recipient" |> snd with
+              | Err(1143, message) -> Expect.stringContains message "column 'hidden'" "delegated column"
+              | other -> failtestf "expected unheld column delegation denial, got %A" other
+
+              match handle root "REVOKE SELECT(hidden) ON column_admin.records FROM grantor" |> snd with
+              | Err(1147, _) -> ()
+              | other -> failtestf "expected absent column revoke refusal, got %A" other
+
+              let root, _ = handle root "GRANT SELECT(hidden), UPDATE(id) ON column_admin.records TO grantor"
+              let root, _ = handle root "REVOKE SELECT(id) ON column_admin.records FROM grantor"
+
+              match
+                  handle
+                      root
+                      "SELECT Column_name, Column_priv FROM mysql.columns_priv WHERE User = 'grantor' ORDER BY Column_name"
+                  |> snd
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "hidden"; Some "Select" ]; [ Some "id"; Some "Update" ] ]
+                      "specific revoke preserves other column grants"
+              | other -> failtestf "expected remaining column grants, got %A" other
+
+              let root, _ = handle root "REVOKE SELECT ON column_admin.records FROM grantor"
+
+              match handle root "SELECT Column_name, Column_priv FROM mysql.columns_priv WHERE User = 'grantor'" |> snd with
+              | ResultSet(_, [ [ Some "id"; Some "Update" ] ]) -> ()
+              | other -> failtestf "expected table SELECT revoke to remove every column SELECT, got %A" other
+
+              let root, _ = handle root "REVOKE ALL PRIVILEGES ON column_admin.records FROM grantor"
+
+              match handle root "SELECT * FROM mysql.columns_priv WHERE User = 'grantor'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected REVOKE ALL to remove column grants, got %A" other
+
+              match handle root "SELECT * FROM mysql.tables_priv WHERE User = 'grantor'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected the empty table summary to be removed, got %A" other
+
+          testCase "active roles contribute column privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE role_columns"
+              let root, _ = handle root "CREATE TABLE role_columns.items (visible INT, hidden INT)"
+              let root, _ = handle root "INSERT INTO role_columns.items VALUES (1, 2)"
+              let root, _ = handle root "CREATE USER role_user"
+              let root, _ = handle root "CREATE ROLE field_reader"
+              let root, _ = handle root "GRANT SELECT(hidden) ON role_columns.items TO field_reader"
+              let _, _ = handle root "GRANT field_reader TO role_user"
+
+              let user =
+                  { create 2 store with
+                      User = "role_user"
+                      Database = Some "role_columns" }
+
+              match handle user "SELECT hidden FROM items" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected inactive role denial, got %A" other
+
+              let user, activated = handle user "SET ROLE field_reader"
+              Expect.equal activated (Affected 0UL) "role activates"
+
+              match handle user "SELECT hidden FROM items" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected role column grant, got %A" other
+
           testCase "table metadata probes require a privilege and listings hide inaccessible tables"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

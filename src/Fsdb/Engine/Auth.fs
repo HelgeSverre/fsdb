@@ -5,6 +5,7 @@ open System
 open System.Collections.Generic
 open System.Net
 open System.Security.Cryptography
+open System.Text.Json
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
@@ -834,9 +835,8 @@ let isAccountLocked (cols: ColumnDef list) (row: Value[]) = userColumnText cols 
 
 // ---------------------------------------------------------------------------
 // GRANT / REVOKE and privilege checks. Scope hierarchy is MySQL's:
-// global (mysql.user) ⊃ db (mysql.db) ⊃ table (mysql.tables_priv).
-// Column-level privileges, roles, and partial revokes are not modeled; the
-// three levels above are what real clients and apps actually exercise.
+// global (mysql.user) ⊃ db (mysql.db) ⊃ table (mysql.tables_priv) ⊃
+// column (mysql.columns_priv).
 // ---------------------------------------------------------------------------
 
 /// Where a privilege applies.
@@ -845,6 +845,7 @@ type PrivTarget =
     | OnDb of db: string
     | OnTable of db: string * table: string
     | OnColumn of db: string * table: string * column: string
+    | OnAllColumns of db: string * table: string
 
 /// Resolves `Ast.Grant`/`Revoke`'s `(db, table)` level encoding against the
 /// session database (a bare `ON t` means the current db's table).
@@ -972,7 +973,8 @@ let private expandPrivs (privs: string list) (target: PrivTarget) : Result<Resol
         | Global -> true
         | OnDb _ -> d.DbCol.IsSome
         | OnTable _
-        | OnColumn _ -> d.TablePriv.IsSome
+        | OnColumn _
+        | OnAllColumns _ -> d.TablePriv.IsSome
 
     if privs |> List.exists (fun p -> p = "ALL") then
         Ok
@@ -987,7 +989,8 @@ let private expandPrivs (privs: string list) (target: PrivTarget) : Result<Resol
             | Some _ ->
                 match target with
                 | OnTable _
-                | OnColumn _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
+                | OnColumn _
+                | OnAllColumns _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
                 | _ -> Result.Error(1221, "Incorrect usage of DB GRANT and GLOBAL PRIVILEGES")
             | None when Privileges.contains p ->
                 match target with
@@ -1136,7 +1139,8 @@ let private applyAtLevel
                     | Result.Error e -> Result.Error(toMySqlError e)
                 | None -> Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
             | _ -> Result.Error(1146, "Table 'tables_priv' doesn't exist")
-    | OnColumn _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
+    | OnColumn _
+    | OnAllColumns _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
 
 let private applyDynamicPrivileges
     (store: Store)
@@ -1201,6 +1205,47 @@ let private applyResolvedPrivileges store name host resolved target withGrantOpt
     |> Result.bind (fun () ->
         applyDynamicPrivileges store name host resolved.Dynamic withGrantOption granting)
 
+let private projectionName =
+    function
+    | _, Some alias -> Some alias
+    | Col name, None -> Some name
+    | QualifiedCol(_, name), None -> Some name
+    | _ -> None
+
+let private projectionNames (select: SelectStmt) =
+    select.Projections |> List.choose projectionName
+
+let private storedViewColumns store database table =
+    let decode names =
+        if names = "" then
+            []
+        else
+            try
+                match JsonSerializer.Deserialize<string[]>(names) with
+                | null -> []
+                | values -> List.ofArray values
+            with :? JsonException ->
+                []
+
+    match scanList store "mysql" "views" with
+    | Error _ -> []
+    | Ok(_, rows) ->
+        rows
+        |> List.choose SystemCatalog.View.tryRead
+        |> List.tryFind (fun view -> eqI view.Schema database && eqI view.Name table)
+        |> Option.map (fun view ->
+            match decode view.ColumnNames with
+            | _ :: _ as explicit -> explicit
+            | [] ->
+                match Parser.parseViewDefinition view.Definition with
+                | Ok definition ->
+                    match definition.Statement with
+                    | Select select -> projectionNames select
+                    | Union(first, _, _, _, _) -> projectionNames first
+                    | _ -> []
+                | Error _ -> [])
+        |> Option.defaultValue []
+
 let private columnPrivilegeDefs =
     staticPrivileges
     |> List.filter (fun privilege ->
@@ -1222,9 +1267,16 @@ let private validateColumnSpecifications store target (specifications: Privilege
     match specifications, target with
     | [], _ -> Ok []
     | _, OnTable(database, table) ->
-        match scan store database table with
-        | Error error -> Error(toMySqlError error)
-        | Ok(columns, _) ->
+        let columnNames =
+            match scan store database table with
+            | Ok(columns, _) -> Ok(columns |> List.map _.Name)
+            | Error error ->
+                match storedViewColumns store database table with
+                | _ :: _ as columns -> Ok columns
+                | [] -> Error(toMySqlError error)
+
+        columnNames
+        |> Result.bind (fun columns ->
             specifications
             |> traverse (fun specification ->
                 match columnPrivilegeSetName specification.Name with
@@ -1236,10 +1288,10 @@ let private validateColumnSpecifications store target (specifications: Privilege
                 | Some _ ->
                     specification.Columns
                     |> traverse (fun requested ->
-                        match columns |> List.tryFind (fun column -> eqI column.Name requested) with
-                        | Some column -> Ok column.Name
+                        match columns |> List.tryFind (fun column -> eqI column requested) with
+                        | Some column -> Ok column
                         | None -> Error(1054, sprintf "Unknown column '%s' in '%s'" requested table))
-                    |> Result.map (fun resolved -> { specification with Columns = resolved |> List.distinctBy _.ToLowerInvariant() }))
+                    |> Result.map (fun resolved -> { specification with Columns = resolved |> List.distinctBy _.ToLowerInvariant() })))
     | _ ->
         Error(
             1144,
@@ -1817,6 +1869,386 @@ let private tableRefsOfFrom (defaultDb: string) (from: FromItem option) (joins: 
 let private selectTables (defaultDb: string) (s: SelectStmt) : (string * string) list =
     selectReadTables defaultDb s
 
+type private PrivilegeSource =
+    { Qualifier: string
+      Columns: string list
+      Target: (string * string) option }
+
+type private ColumnReference =
+    | BareColumn of string
+    | QualifiedColumn of qualifier: string * column: string
+    | AllColumns
+    | QualifiedAllColumns of qualifier: string
+
+let private selectOrUnionProjectionNames =
+    function
+    | PlainSelect select -> projectionNames select
+    | UnionSelect(first, _, _, _, _) -> projectionNames first
+
+let private jsonTableColumnNames columns =
+    let rec collect =
+        function
+        | ForOrdinality name
+        | PathColumn(name, _, _, _, _)
+        | ExistsColumn(name, _, _) -> [ name ]
+        | NestedColumns(_, nested) -> nested |> List.collect collect
+
+    columns |> List.collect collect
+
+let private physicalSource store defaultDb (reference: TableRef) =
+    let database = reference.Database |> Option.defaultValue defaultDb
+
+    let columns =
+        match scan store database reference.Table with
+        | Ok(columns, _) -> columns |> List.map _.Name
+        | Error _ -> storedViewColumns store database reference.Table
+
+    { Qualifier = reference.Alias |> Option.defaultValue reference.Table
+      Columns = columns
+      Target = Some(database, reference.Table) }
+
+let private virtualSource qualifier columns =
+    { Qualifier = qualifier
+      Columns = columns
+      Target = None }
+
+let private sourceForItem store defaultDb ctes =
+    function
+    | FromTable reference when reference.Database.IsNone ->
+        ctes
+        |> Map.tryFind (reference.Table.ToLowerInvariant())
+        |> Option.map (virtualSource (reference.Alias |> Option.defaultValue reference.Table))
+        |> Option.defaultWith (fun () -> physicalSource store defaultDb reference)
+    | FromTable reference -> physicalSource store defaultDb reference
+    | FromSubquery(body, alias)
+    | FromLateral(body, alias) -> virtualSource alias (selectOrUnionProjectionNames body)
+    | FromJsonTable(_, _, columns, alias) -> virtualSource alias (jsonTableColumnNames columns)
+
+let private columnReferences aliases expression =
+    Expression.collect
+        (function
+        | Col name when not (Set.contains (name.ToLowerInvariant()) aliases) -> Some [ BareColumn name ]
+        | QualifiedCol(qualifier, column) -> Some [ QualifiedColumn(qualifier, column) ]
+        | MatchAgainst(columns, _, _) ->
+            columns
+            |> List.map (fun column ->
+                match column.Qualifier with
+                | Some qualifier -> QualifiedColumn(qualifier, column.Name)
+                | None -> BareColumn column.Name)
+            |> Some
+        | _ -> None)
+        expression
+    |> List.concat
+
+let private targetRequirement privilege target column =
+    privilege, OnColumn(fst target, snd target, column)
+
+let private allColumnsRequirement privilege target =
+    privilege, OnAllColumns(fst target, snd target)
+
+let private requirementsForReferences privilege localSources outerSources references =
+    let matchingColumn name sources =
+        sources
+        |> List.filter (fun source -> source.Columns |> List.exists (eqI name))
+
+    let targets sources = sources |> List.choose _.Target
+
+    references
+    |> List.collect (function
+        | BareColumn name ->
+            let local = matchingColumn name localSources
+            let resolved = if local.IsEmpty then matchingColumn name outerSources else local
+
+            let resolved =
+                if resolved.IsEmpty then
+                    match targets localSources with
+                    | [ target ] -> [ { Qualifier = ""; Columns = []; Target = Some target } ]
+                    | _ -> []
+                else
+                    resolved
+
+            resolved
+            |> List.choose _.Target
+            |> List.map (fun target -> targetRequirement privilege target name)
+        | QualifiedColumn(qualifier, column) ->
+            let find sources = sources |> List.filter (fun source -> eqI source.Qualifier qualifier)
+            let local = find localSources
+            let resolved = if local.IsEmpty then find outerSources else local
+
+            resolved
+            |> List.choose _.Target
+            |> List.map (fun target -> targetRequirement privilege target column)
+        | AllColumns -> targets localSources |> List.map (allColumnsRequirement privilege)
+        | QualifiedAllColumns qualifier ->
+            localSources
+            |> List.filter (fun source -> eqI source.Qualifier qualifier)
+            |> List.choose _.Target
+            |> List.map (allColumnsRequirement privilege))
+
+let private joinKeyRequirements outerSources leftSources right (join: Join) =
+    let columns =
+        if not join.Using.IsEmpty then
+            join.Using
+        elif
+            join.Kind = NaturalJoin
+            || join.Kind = NaturalLeftJoin
+            || join.Kind = NaturalRightJoin
+        then
+            let rightNames = right.Columns |> List.map _.ToLowerInvariant() |> Set.ofList
+
+            leftSources
+            |> List.collect _.Columns
+            |> List.filter (fun column -> Set.contains (column.ToLowerInvariant()) rightNames)
+            |> List.distinctBy _.ToLowerInvariant()
+        else
+            []
+
+    columns
+    |> List.collect (fun column ->
+        requirementsForReferences
+            "SELECT"
+            (leftSources @ [ right ])
+            outerSources
+            [ QualifiedColumn(right.Qualifier, column); BareColumn column ])
+
+let rec private selectColumnRequirements store defaultDb outerSources inheritedCtes (select: SelectStmt) =
+    let cteRequirements, ctes =
+        select.Ctes
+        |> List.fold
+            (fun (requirements, visible) cte ->
+                let name = cte.CteName.ToLowerInvariant()
+                let columns = if cte.CteColumns.IsEmpty then selectOrUnionProjectionNames cte.Body else cte.CteColumns
+                let bodyScope = if cte.Recursive then Map.add name columns visible else visible
+                let bodyRequirements = selectOrUnionColumnRequirements store defaultDb [] bodyScope cte.Body
+                requirements @ bodyRequirements, Map.add name columns visible)
+            ([], inheritedCtes)
+
+    let initialSources, fromRequirements =
+        match select.From with
+        | None -> [], []
+        | Some item ->
+            let source = sourceForItem store defaultDb ctes item
+            [ source ], fromItemColumnRequirements store defaultDb outerSources ctes [] item
+
+    let sources, joinRequirements =
+        select.Joins
+        |> List.fold
+            (fun (leftSources, requirements) join ->
+                let right = sourceForItem store defaultDb ctes join.Table
+                let visibleSources = leftSources @ [ right ]
+
+                let nested =
+                    fromItemColumnRequirements store defaultDb outerSources ctes leftSources join.Table
+
+                let onRequirements =
+                    expressionColumnRequirements store defaultDb visibleSources outerSources ctes Set.empty join.On
+
+                let usingRequirements = joinKeyRequirements outerSources leftSources right join
+
+                visibleSources, requirements @ nested @ onRequirements @ usingRequirements)
+            (initialSources, [])
+
+    let aliases =
+        select.Projections
+        |> List.choose snd
+        |> List.map _.ToLowerInvariant()
+        |> Set.ofList
+
+    let plain expression =
+        expressionColumnRequirements store defaultDb sources outerSources ctes Set.empty expression
+
+    let projectionRequirements (expression, _) =
+        let references =
+            match expression with
+            | Star None -> [ AllColumns ]
+            | Star(Some qualifier) -> [ QualifiedAllColumns qualifier ]
+            | _ -> []
+
+        requirementsForReferences "SELECT" sources outerSources references @ plain expression
+
+    let withAliases expression =
+        expressionColumnRequirements store defaultDb sources outerSources ctes aliases expression
+
+    cteRequirements
+    @ fromRequirements
+    @ joinRequirements
+    @ (select.Projections |> List.collect projectionRequirements)
+    @ (select.Where |> Option.map plain |> Option.defaultValue [])
+    @ (select.GroupBy |> List.collect withAliases)
+    @ (select.Having |> Option.map withAliases |> Option.defaultValue [])
+    @ (select.OrderBy |> List.collect (fst >> withAliases))
+    @ (select.Windows
+       |> List.collect (snd >> OverSpec >> Expression.overExpressions)
+       |> List.collect withAliases)
+    @ (select.Limit |> Option.map plain |> Option.defaultValue [])
+    @ (select.Offset |> Option.map plain |> Option.defaultValue [])
+
+and private selectOrUnionColumnRequirements store defaultDb outerSources ctes =
+    function
+    | PlainSelect select -> selectColumnRequirements store defaultDb outerSources ctes select
+    | UnionSelect(first, rest, orderBy, limit, offset) ->
+        let branchRequirements =
+            selectColumnRequirements store defaultDb outerSources ctes first
+            @ (rest
+               |> List.collect (fun (_, select) ->
+                   selectColumnRequirements store defaultDb outerSources ctes select))
+
+        let trailingExpressions =
+            (orderBy |> List.map fst) @ (limit |> Option.toList) @ (offset |> Option.toList)
+
+        branchRequirements
+        @ (trailingExpressions
+           |> List.collect (fun expression ->
+               Expression.collectSubqueries expression
+               |> List.collect (selectColumnRequirements store defaultDb outerSources ctes)))
+
+and private fromItemColumnRequirements store defaultDb outerSources ctes leftSources =
+    function
+    | FromTable _ -> []
+    | FromSubquery(body, _) -> selectOrUnionColumnRequirements store defaultDb [] ctes body
+    | FromLateral(body, _) -> selectOrUnionColumnRequirements store defaultDb (leftSources @ outerSources) ctes body
+    | FromJsonTable(source, _, _, _) ->
+        expressionColumnRequirements store defaultDb leftSources outerSources ctes Set.empty source
+
+and private expressionColumnRequirements store defaultDb localSources outerSources ctes aliases expression =
+    requirementsForReferences "SELECT" localSources outerSources (columnReferences aliases expression)
+    @ (Expression.collectSubqueries expression
+       |> List.collect (selectColumnRequirements store defaultDb (localSources @ outerSources) ctes))
+
+let private mutationJoinScope store defaultDb ctes (initial: PrivilegeSource) (joins: Join list) =
+    joins
+    |> List.fold
+        (fun (leftSources, requirements) (join: Join) ->
+            let right = sourceForItem store defaultDb ctes join.Table
+            let sources = leftSources @ [ right ]
+            let nested = fromItemColumnRequirements store defaultDb [] ctes leftSources join.Table
+            let predicate = expressionColumnRequirements store defaultDb sources [] ctes Set.empty join.On
+            let keys = joinKeyRequirements [] leftSources right join
+            sources, requirements @ nested @ predicate @ keys)
+        ([ initial ], [])
+
+let private targetColumns defaultDb (table: string) (columns: string list) privilege =
+    let database, table = splitQualified defaultDb table
+    let target = database, table
+
+    if columns.IsEmpty then
+        [ allColumnsRequirement privilege target ]
+    else
+        columns |> List.map (targetRequirement privilege target)
+
+let private updateColumnRequirements store defaultDb (update: UpdateStmt) =
+    let cteNames =
+        update.Ctes
+        |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), if cte.CteColumns.IsEmpty then selectOrUnionProjectionNames cte.Body else cte.CteColumns)
+        |> Map.ofList
+
+    let sources, joinRequirements =
+        mutationJoinScope store defaultDb cteNames (physicalSource store defaultDb update.From) update.Joins
+
+    let targetOf (assignment: Assignment) =
+        match assignment.Table with
+        | None -> Some(List.head sources)
+        | Some qualifier -> sources |> List.tryFind (fun source -> eqI source.Qualifier qualifier)
+
+    let writes =
+        update.Assignments
+        |> List.choose (fun assignment ->
+            targetOf assignment
+            |> Option.bind _.Target
+            |> Option.map (fun target -> targetRequirement "UPDATE" target assignment.Column))
+
+    let expressions =
+        (update.Assignments |> List.map _.Value)
+        @ (update.Where |> Option.toList)
+        @ (update.OrderBy |> List.map fst)
+        @ (update.Limit |> Option.toList)
+
+    writes
+    @ joinRequirements
+    @ (expressions
+       |> List.collect (expressionColumnRequirements store defaultDb sources [] cteNames Set.empty))
+    @ (update.Ctes
+       |> List.collect (fun cte -> selectOrUnionColumnRequirements store defaultDb [] Map.empty cte.Body))
+
+let private deleteColumnRequirements store defaultDb (delete: DeleteStmt) =
+    let cteNames =
+        delete.Ctes
+        |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), if cte.CteColumns.IsEmpty then selectOrUnionProjectionNames cte.Body else cte.CteColumns)
+        |> Map.ofList
+
+    let sources, joinRequirements =
+        mutationJoinScope store defaultDb cteNames (physicalSource store defaultDb delete.From) delete.Joins
+
+    let expressions =
+        (delete.Where |> Option.toList)
+        @ (delete.OrderBy |> List.map fst)
+        @ (delete.Limit |> Option.toList)
+
+    joinRequirements
+    @ (expressions
+     |> List.collect (expressionColumnRequirements store defaultDb sources [] cteNames Set.empty))
+    @ (delete.Ctes
+       |> List.collect (fun cte -> selectOrUnionColumnRequirements store defaultDb [] Map.empty cte.Body))
+
+let rec private statementColumnRequirements store defaultDb =
+    function
+    | Select select -> selectColumnRequirements store defaultDb [] Map.empty select
+    | Union(first, rest, _, _, _) ->
+        selectColumnRequirements store defaultDb [] Map.empty first
+        @ (rest
+           |> List.collect (fun (_, select) ->
+               selectColumnRequirements store defaultDb [] Map.empty select))
+    | Insert(table, columns, rows, onDuplicate, _) ->
+        let source = physicalSource store defaultDb { Database = None; Table = table; Alias = None; Partitions = [] }
+
+        targetColumns defaultDb table columns "INSERT"
+        @ (if onDuplicate.IsEmpty then [] else targetColumns defaultDb table (onDuplicate |> List.map fst) "UPDATE")
+        @ (rows
+           |> List.collect id
+           |> List.collect (expressionColumnRequirements store defaultDb [ source ] [] Map.empty Set.empty))
+        @ (onDuplicate
+           |> List.collect (snd >> expressionColumnRequirements store defaultDb [ source ] [] Map.empty Set.empty))
+    | InsertSelect(table, columns, select, onDuplicate, _) ->
+        let source = physicalSource store defaultDb { Database = None; Table = table; Alias = None; Partitions = [] }
+
+        targetColumns defaultDb table columns "INSERT"
+        @ (if onDuplicate.IsEmpty then [] else targetColumns defaultDb table (onDuplicate |> List.map fst) "UPDATE")
+        @ selectColumnRequirements store defaultDb [] Map.empty select
+        @ (onDuplicate
+           |> List.collect (snd >> expressionColumnRequirements store defaultDb [ source ] [] Map.empty Set.empty))
+    | Replace(table, columns, rows) ->
+        targetColumns defaultDb table columns "INSERT"
+        @ (rows
+           |> List.collect id
+           |> List.collect (expressionColumnRequirements store defaultDb [] [] Map.empty Set.empty))
+    | ReplaceSelect(table, columns, select) ->
+        targetColumns defaultDb table columns "INSERT"
+        @ selectColumnRequirements store defaultDb [] Map.empty select
+    | ReplaceSet(table, assignments) ->
+        targetColumns defaultDb table (assignments |> List.map fst) "INSERT"
+        @ (assignments
+           |> List.collect (snd >> expressionColumnRequirements store defaultDb [] [] Map.empty Set.empty))
+    | Update update -> updateColumnRequirements store defaultDb update
+    | Delete delete -> deleteColumnRequirements store defaultDb delete
+    | CreateTableAs(_, query, _) -> statementColumnRequirements store defaultDb query
+    | CreateView view ->
+        let database, _ = splitQualified defaultDb view.Name
+
+        match Parser.parseViewDefinition view.Definition with
+        | Ok definition -> statementColumnRequirements store database definition.Statement
+        | Error _ -> []
+    | Grant(privileges, level, _, _)
+    | Revoke(privileges, level, _) ->
+        match targetOfLevel defaultDb level with
+        | OnTable(database, table) ->
+            privileges
+            |> List.collect (fun privilege ->
+                privilege.Columns
+                |> List.map (fun column -> privilege.Name, OnColumn(database, table, column)))
+        | _ -> []
+    | Explain(_, statement) -> statementColumnRequirements store defaultDb statement
+    | _ -> []
+
 let requiredPrivilegesForExpression (defaultDb: string) (expression: Expr) : (string * PrivTarget) list =
     exprReadTables defaultDb expression
     |> List.map (fun (database, table) -> "SELECT", OnTable(database, table))
@@ -2018,22 +2450,26 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
 /// Adds privilege requirements whose target can only be resolved from the
 /// live catalog rather than from the statement shape alone.
 let requiredPrivilegesInStore (store: Store) (defaultDb: string) (stmt: Statement) : (string * PrivTarget) list =
-    match stmt with
-    | DropTrigger(name, _) ->
-        match scanList store "mysql" "triggers" with
-        | Ok(_, rows) ->
-            rows
-            |> List.tryPick (fun row ->
-                row
-                |> SystemCatalog.Trigger.tryRead
-                |> Option.bind (fun trigger ->
-                    if eqI trigger.Name name && eqI trigger.Schema defaultDb then
-                        Some [ "TRIGGER", OnTable(trigger.Schema, trigger.Table) ]
-                    else
-                        None))
-            |> Option.defaultValue []
-        | Error _ -> []
-    | _ -> requiredPrivileges defaultDb stmt
+    let statementRequirements =
+        match stmt with
+        | DropTrigger(name, _) ->
+            match scanList store "mysql" "triggers" with
+            | Ok(_, rows) ->
+                rows
+                |> List.tryPick (fun row ->
+                    row
+                    |> SystemCatalog.Trigger.tryRead
+                    |> Option.bind (fun trigger ->
+                        if eqI trigger.Name name && eqI trigger.Schema defaultDb then
+                            Some [ "TRIGGER", OnTable(trigger.Schema, trigger.Table) ]
+                        else
+                            None))
+                |> Option.defaultValue []
+            | Error _ -> []
+        | _ -> requiredPrivileges defaultDb stmt
+
+    statementRequirements @ statementColumnRequirements store defaultDb stmt
+    |> List.distinct
 
 /// Checks one selected account against every required privilege, denying with
 /// MySQL's
@@ -2195,7 +2631,8 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                         | Global -> false
                         | OnDb db -> hasDbGrantOption db
                         | OnTable(db, table)
-                        | OnColumn(db, table, _) -> hasDbGrantOption db || hasTableGrantOption db table)
+                        | OnColumn(db, table, _)
+                        | OnAllColumns(db, table) -> hasDbGrantOption db || hasTableGrantOption db table)
 
                 if allowed then
                     Ok()
@@ -2207,6 +2644,8 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                         Error(1142, sprintf "GRANT command denied to user '%s'@'localhost' for table '%s'" user table)
                     | OnColumn(_, table, column) ->
                         Error(1143, sprintf "GRANT command denied to user '%s'@'localhost' for column '%s' in table '%s'" user column table)
+                    | OnAllColumns(_, table) ->
+                        Error(1142, sprintf "GRANT command denied to user '%s'@'localhost' for table '%s'" user table)
             else
                 match privBySql privSql with
                 | None ->
@@ -2219,11 +2658,13 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                             | Global -> false
                             | OnDb db
                             | OnTable(db, _)
-                            | OnColumn(db, _, _) when eqI db "information_schema" && eqI privSql "SELECT" -> true
+                            | OnColumn(db, _, _)
+                            | OnAllColumns(db, _) when eqI db "information_schema" && eqI privSql "SELECT" -> true
                             | OnDb db -> hasDb def db
                             | OnTable(db, table) -> hasDb def db || hasTable def db table || hasAnyColumn def db table
                             | OnColumn(db, table, column) ->
-                                hasDb def db || hasTable def db table || hasColumn def db table column)
+                                hasDb def db || hasTable def db table || hasColumn def db table column
+                            | OnAllColumns(db, table) -> hasDb def db || hasTable def db table)
 
                     if allowed then
                         Ok()
@@ -2242,6 +2683,8 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                                 1143,
                                 sprintf "%s command denied to user '%s'@'localhost' for column '%s' in table '%s'" privSql user column table
                             )
+                        | OnAllColumns(_, table) ->
+                            Error(1142, sprintf "%s command denied to user '%s'@'localhost' for table '%s'" privSql user table)
 
         required |> traverse checkOne |> Result.map ignore
 
