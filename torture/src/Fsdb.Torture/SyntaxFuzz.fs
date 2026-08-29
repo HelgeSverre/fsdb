@@ -114,6 +114,18 @@ module SyntaxFuzz =
                "CREATE PROCEDURE syntax_proc_body_%s(IN value INT, OUT doubled INT) BEGIN DECLARE local_value INT DEFAULT value + 1; SET doubled = local_value * 2; SELECT local_value, doubled; END"
                suffix
            "procedure_call", "CALL syntax_callable(3, @syntax_output)"
+           "stored_function",
+           sprintf
+               "CREATE FUNCTION syntax_reader_%s(value INT) RETURNS INT DETERMINISTIC READS SQL DATA RETURN value + (SELECT COUNT(*) FROM syntax_target)"
+               suffix
+           "function_data_change",
+           sprintf
+               "CREATE FUNCTION syntax_writer_%s(value INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO syntax_function_log (marker) VALUES (CONCAT('created-', value)); RETURN value; END"
+               suffix
+           "function_write_select", "SELECT id, syntax_writer(id) FROM syntax_target ORDER BY id"
+           "function_write_dml", "UPDATE syntax_target SET n = syntax_writer(n) WHERE id = 1"
+           "function_metadata",
+           "SELECT ROUTINE_NAME, ROUTINE_TYPE, DATA_TYPE, IS_DETERMINISTIC, SQL_DATA_ACCESS FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = DATABASE() AND ROUTINE_NAME = 'syntax_writer'"
            "routine_parameters_metadata",
            "SELECT SPECIFIC_NAME, ORDINAL_POSITION, PARAMETER_MODE, PARAMETER_NAME, DATA_TYPE, DTD_IDENTIFIER, ROUTINE_TYPE FROM information_schema.PARAMETERS WHERE SPECIFIC_SCHEMA = DATABASE() AND SPECIFIC_NAME = 'syntax_callable' ORDER BY ORDINAL_POSITION"
            "scheduled_event",
@@ -182,6 +194,8 @@ module SyntaxFuzz =
            "CREATE TABLE syntax_partitioned (id INT) PARTITION BY HASH(id) PARTITIONS 2"
            "INSERT INTO syntax_partitioned VALUES (1), (2), (3)"
            "CREATE PROCEDURE syntax_callable(IN value INT, OUT doubled INT) BEGIN DECLARE local_value INT DEFAULT value + 1; SET doubled = local_value * 2; SELECT local_value, doubled; END"
+           "CREATE TABLE syntax_function_log (marker VARCHAR(40))"
+           "CREATE FUNCTION syntax_writer(value INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO syntax_function_log (marker) VALUES (CONCAT('value-', value)); RETURN value; END"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]
 
     let private cleanupStatement feature suffix =
@@ -202,6 +216,8 @@ module SyntaxFuzz =
         | "stored_procedure" -> Some(sprintf "DROP PROCEDURE syntax_proc_%s" suffix)
         | "procedure_parameter" -> Some(sprintf "DROP PROCEDURE syntax_proc_param_%s" suffix)
         | "procedure_compound" -> Some(sprintf "DROP PROCEDURE syntax_proc_body_%s" suffix)
+        | "stored_function" -> Some(sprintf "DROP FUNCTION syntax_reader_%s" suffix)
+        | "function_data_change" -> Some(sprintf "DROP FUNCTION syntax_writer_%s" suffix)
         | "scheduled_event" -> Some(sprintf "DROP EVENT syntax_event_%s" suffix)
         | "recurring_event" -> Some(sprintf "DROP EVENT syntax_recurring_%s" suffix)
         | "role_account" -> Some(sprintf "DROP ROLE IF EXISTS 'syntax_role_%s'@'%%', 'syntax_role_%s'@''" suffix suffix)
