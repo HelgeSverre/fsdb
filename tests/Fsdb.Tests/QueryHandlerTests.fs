@@ -5915,6 +5915,16 @@ let tests =
               | Err(1399, message) -> Expect.stringContains message "NON-EXISTING state" "no branch is associated"
               | other -> failtestf "expected XAER_RMFAIL without an associated branch, got %A" other
 
+              let session, _ = handle session "XA START X'00FF'"
+              let session, _ = handle session "XA END X'00FF'"
+              let session, _ = handle session "XA PREPARE X'00FF'"
+
+              match handle observer "XA RECOVER CONVERT XID" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "2"; Some "0"; Some "0x00FF" ] ]) -> ()
+              | other -> failtestf "expected a byte-exact converted XID, got %A" other
+
+              handle session "XA ROLLBACK X'00FF'" |> ignore
+
           testCase "XA statements are refused by the prepared protocol"
           <| fun _ ->
               match prepareStatement "XA START 'prepared'" with

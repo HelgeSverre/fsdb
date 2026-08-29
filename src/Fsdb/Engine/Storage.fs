@@ -619,7 +619,9 @@ let private prepareXaCommitEvents (xid: Xa.Xid) (store: Store) (snapshot: Store)
     | Some targetBuffer ->
         targetBuffer.Add(XaCommitted(xid, events))
         ignore
-    | None -> preparePublishedEvents store [ XaCommitted(xid, events) ] events
+    | None ->
+        let committed = XaCommitted(xid, events)
+        preparePublishedEvents store [ committed ] [ committed ]
 
 let private persistXaControl (store: Store) (event: CommitEvent) : unit =
     preparePublishedEvents store [ event ] [] |> fun acknowledge -> acknowledge ()
