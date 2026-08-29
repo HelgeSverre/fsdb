@@ -1620,8 +1620,10 @@ let private runXa (parserOptions: Parser.ParserOptions) (session: Session) sql =
     let executed, result =
         match Xa.parse parserOptions.NoBackslashEscapes charset sql with
         | Error detail -> session, parserError sql detail
-        | Ok(Xa.Start xid) -> startXa xid session
-        | Ok(Xa.End xid) -> endXa xid session
+        | Ok(Xa.Start(_, true))
+        | Ok(Xa.End(_, true)) -> session, Err(1398, "XAER_INVAL: Invalid arguments (or unsupported command)")
+        | Ok(Xa.Start(xid, false)) -> startXa xid session
+        | Ok(Xa.End(xid, false)) -> endXa xid session
         | Ok(Xa.Prepare xid) -> prepareXa xid session
         | Ok(Xa.Commit(xid, onePhase)) -> commitXa xid onePhase session
         | Ok(Xa.Rollback xid) -> rollbackXa xid session

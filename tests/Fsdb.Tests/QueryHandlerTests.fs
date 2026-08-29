@@ -5955,6 +5955,20 @@ let tests =
 
               handle replacement "XA ROLLBACK 'rules'" |> ignore
 
+              for sql in [ "XA START 'join' JOIN"; "XA START 'resume' RESUME" ] do
+                  match handle replacement sql |> snd with
+                  | Err(1398, message) -> Expect.stringContains message "XAER_INVAL" sql
+                  | other -> failtestf "expected XAER_INVAL for %s, got %A" sql other
+
+              let suspended, _ = handle replacement "XA START 'suspend'"
+
+              match handle suspended "XA END 'suspend' SUSPEND" |> snd with
+              | Err(1398, message) -> Expect.stringContains message "XAER_INVAL" "SUSPEND refusal"
+              | other -> failtestf "expected XAER_INVAL for SUSPEND, got %A" other
+
+              let suspended, _ = handle suspended "XA END 'suspend'"
+              handle suspended "XA ROLLBACK 'suspend'" |> ignore
+
           // -----------------------------------------------------------------
           // Session user identity + the built-in `mysql` system schema
           // -----------------------------------------------------------------

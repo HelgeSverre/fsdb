@@ -10,8 +10,8 @@ type Xid =
       FormatId: uint32 }
 
 type Command =
-    | Start of Xid
-    | End of Xid
+    | Start of Xid * joinOrResume: bool
+    | End of Xid * suspend: bool
     | Prepare of Xid
     | Commit of Xid * onePhase: bool
     | Rollback of Xid
@@ -102,8 +102,10 @@ let private command noBackslashEscapes charset =
 
     token "XA"
     >>. choice
-            [ (token "START" <|> token "BEGIN") >>. xid .>> opt (token "JOIN" <|> token "RESUME") |>> Start
-              token "END" >>. xid .>> opt (token "SUSPEND" >>. opt (token "FOR" >>. token "MIGRATE")) |>> End
+            [ (token "START" <|> token "BEGIN") >>. xid .>>. opt (token "JOIN" <|> token "RESUME")
+              |>> fun (value, option) -> Start(value, option.IsSome)
+              token "END" >>. xid .>>. opt (token "SUSPEND" >>. opt (token "FOR" >>. token "MIGRATE"))
+              |>> fun (value, option) -> End(value, option.IsSome)
               token "PREPARE" >>. xid |>> Prepare
               token "COMMIT" >>. xid .>>. opt (token "ONE" >>. token "PHASE") |>> fun (value, onePhase) -> Commit(value, onePhase.IsSome)
               token "ROLLBACK" >>. xid |>> Rollback
