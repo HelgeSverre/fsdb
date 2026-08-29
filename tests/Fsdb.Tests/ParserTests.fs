@@ -3070,6 +3070,22 @@ let tests =
                         (Revoke([ privilege "SELECT"; privilege "GRANT OPTION" ], (Some "shop", None), [ "bob", "%" ]))
                         "revoke with grant option"
 
+                testCase "column privilege lists retain their target columns"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "GRANT SELECT (id, total), UPDATE (status), REFERENCES(customer_id) ON shop.orders TO bob")
+                        (Grant(
+                            [ { Name = "SELECT"; Columns = [ "id"; "total" ] }
+                              { Name = "UPDATE"; Columns = [ "status" ] }
+                              { Name = "REFERENCES"; Columns = [ "customer_id" ] } ],
+                            (Some "shop", Some "orders"),
+                            [ "bob", "%" ],
+                            false
+                        ))
+                        "column grants"
+
+                    Expect.isError (parse "GRANT DELETE(id) ON shop.orders TO bob") "DELETE has no column form"
+
                 testCase "role grants defaults and activation parse"
                 <| fun _ ->
                     Expect.equal

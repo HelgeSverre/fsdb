@@ -4062,7 +4062,19 @@ let private privilegeName: Parser<string, unit> =
     choice ((attempt (keyword "ALL" >>. optional (keyword "PRIVILEGES") >>% "ALL")) :: (names |> List.map ofName))
     <|> (identifier |>> _.ToUpperInvariant())
 
-let private privilegeSpec = privilegeName |>> PrivilegeSpec.named
+let private columnPrivilegeNames = Set.ofList [ "SELECT"; "INSERT"; "UPDATE"; "REFERENCES" ]
+
+let private privilegeSpec =
+    privilegeName
+    .>>. opt (between (sym "(") (sym ")") (sepBy1 identOrString (sym ",")))
+    >>= fun (name, columns) ->
+        match columns with
+        | Some _ when not (Set.contains name columnPrivilegeNames) ->
+            fail "this privilege does not accept a column list"
+        | _ ->
+            preturn
+                { Name = name
+                  Columns = columns |> Option.defaultValue [] }
 
 /// `ON *.* | db.* | db.tbl | tbl` — see `Ast.Grant`'s doc for the encoding.
 let private grantLevel: Parser<string option * string option, unit> =

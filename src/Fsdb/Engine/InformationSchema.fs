@@ -12,6 +12,8 @@ open Fsdb.Storage
 open Fsdb.Engine
 open Fsdb.Sql
 
+let private eqI left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
+
 let private col (name: string) (ty: ColumnType) : ColumnDef =
     { Name = name
       Type = ty
@@ -1619,6 +1621,78 @@ let private tablePrivilegesRows (catalog: Catalog) : Value[] list =
                     [| vs grantee; vs "def"; vs (rowText row d); vs (rowText row tn); vs p.Sql; vs grantable |]))
         | _ -> []
 
+let private columnPrivilegesRows (catalog: Catalog) : Value[] list =
+    match mysqlTable catalog "columns_priv", mysqlTable catalog "tables_priv" with
+    | Some columnsTable, Some tablesTable ->
+        match
+            colIdx columnsTable "User",
+            colIdx columnsTable "Host",
+            colIdx columnsTable "Db",
+            colIdx columnsTable "Table_name",
+            colIdx columnsTable "Column_name",
+            colIdx columnsTable "Column_priv",
+            colIdx tablesTable "User",
+            colIdx tablesTable "Host",
+            colIdx tablesTable "Db",
+            colIdx tablesTable "Table_name",
+            colIdx tablesTable "Table_priv"
+        with
+        | Some userIndex,
+          Some hostIndex,
+          Some databaseIndex,
+          Some tableIndex,
+          Some columnIndex,
+          Some privilegesIndex,
+          Some tableUserIndex,
+          Some tableHostIndex,
+          Some tableDatabaseIndex,
+          Some tableNameIndex,
+          Some tablePrivilegesIndex ->
+            let ownOnly = restrictedTo "SELECT"
+
+            let isGrantable user host database table =
+                tablesTable.Rows
+                |> List.exists (fun row ->
+                    eqI (rowText row tableUserIndex) user
+                    && eqI (rowText row tableHostIndex) host
+                    && eqI (rowText row tableDatabaseIndex) database
+                    && eqI (rowText row tableNameIndex) table
+                    && (Fsdb.Auth.setMembers (rowText row tablePrivilegesIndex)
+                        |> List.exists (eqI "Grant")))
+
+            let privilegeOrder = [ "Insert"; "References"; "Select"; "Update" ]
+
+            columnsTable.Rows
+            |> List.filter (fun row ->
+                match ownOnly with
+                | Some account ->
+                    Fsdb.Auth.sameAccount
+                        (Fsdb.Auth.account (rowText row userIndex) (rowText row hostIndex))
+                        account
+                | None -> true)
+            |> List.collect (fun row ->
+                let user = rowText row userIndex
+                let host = rowText row hostIndex
+                let database = rowText row databaseIndex
+                let table = rowText row tableIndex
+                let column = rowText row columnIndex
+                let privileges = Fsdb.Auth.setMembers (rowText row privilegesIndex)
+                let grantable = if isGrantable user host database table then "YES" else "NO"
+                let grantee = sprintf "'%s'@'%s'" user host
+
+                privilegeOrder
+                |> List.filter (fun privilege -> privileges |> List.exists (eqI privilege))
+                |> List.map (fun privilege ->
+                    [| vs grantee
+                       vs "def"
+                       vs database
+                       vs table
+                       vs column
+                       vs (privilege.ToUpperInvariant())
+                       vs grantable |]))
+        | _ -> []
+    | _ -> []
+
 let private schemaPrivilegesColumns =
     [ strCol "GRANTEE"; strCol "TABLE_CATALOG"; strCol "TABLE_SCHEMA"; strCol "PRIVILEGE_TYPE"; strCol "IS_GRANTABLE" ]
 
@@ -1816,6 +1890,8 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
             |> List.tryPick columnIndex
 
         let tableIndex = [ "TABLE_NAME"; "EVENT_OBJECT_TABLE" ] |> List.tryPick columnIndex
+        let columnNameIndex = columnIndex "COLUMN_NAME"
+        let privilegesIndex = columnIndex "PRIVILEGES"
 
         let visibleSchema (row: Value[]) =
             schemaIndex
@@ -1843,7 +1919,20 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
                         (rowText row nameIndex)
                 | _ -> true
 
+            let visibleColumn =
+                match tableName, schemaIndex, tableIndex, columnNameIndex with
+                | "COLUMNS", Some dbIndex, Some nameIndex, Some columnIndex ->
+                    Fsdb.Auth.canSeeColumnForAccountWithRoles
+                        viewer.Store
+                        viewer.Account
+                        viewer.ActiveRoles
+                        (rowText row dbIndex)
+                        (rowText row nameIndex)
+                        (rowText row columnIndex)
+                | _ -> true
+
             visibleTable
+            && visibleColumn
             && (match tableName with
                 | "VIEWS" ->
                     Fsdb.Auth.checkForAccountWithRoles
@@ -1861,7 +1950,27 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
                     |> Result.isOk
                 | _ -> true)
 
-        rows |> List.filter (fun row -> visibleSchema row && visibleObject row)
+        rows
+        |> List.filter (fun row -> visibleSchema row && visibleObject row)
+        |> List.map (fun row ->
+            match tableName, schemaIndex, tableIndex, columnNameIndex, privilegesIndex with
+            | "COLUMNS", Some dbIndex, Some nameIndex, Some columnIndex, Some privilegeIndex ->
+                let scoped = Array.copy row
+
+                scoped.[privilegeIndex] <-
+                    Fsdb.Auth.columnPrivilegesForAccountWithRoles
+                        viewer.Store
+                        viewer.Account
+                        viewer.ActiveRoles
+                        (rowText row dbIndex)
+                        (rowText row nameIndex)
+                        (rowText row columnIndex)
+                    |> List.map _.ToLowerInvariant()
+                    |> String.concat ","
+                    |> vs
+
+                scoped
+            | _ -> row)
 
 
 /// Resolves one `information_schema` table name (case-insensitive) to its
@@ -1890,15 +1999,15 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "USER_PRIVILEGES" -> Some(userPrivilegesRows catalog)
         | "SCHEMA_PRIVILEGES" -> Some(schemaPrivilegesRows catalog)
         | "TABLE_PRIVILEGES" -> Some(tablePrivilegesRows catalog)
+        | "COLUMN_PRIVILEGES" -> Some(columnPrivilegesRows catalog)
         | "ENGINES" -> Some enginesRows
         | "ENABLED_ROLES" -> Some(enabledRolesRows ())
-        // Events remain a real empty set (COLUMN_PRIVILEGES too: no
-        // column-level grants exist).
+        // PARAMETERS remains empty until stored-program parameter metadata
+        // is exposed through information_schema.
         | "TRIGGERS" -> Some(triggersRows catalog)
         | "VIEWS" -> Some(viewsRows catalog)
         | "ROUTINES" -> Some(routinesRows catalog)
-        | "PARAMETERS"
-        | "COLUMN_PRIVILEGES" -> Some []
+        | "PARAMETERS" -> Some []
         | "EVENTS" -> Some(eventsRows catalog)
         | _ -> None
 
@@ -2100,7 +2209,34 @@ let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool
         let defaultCol (c: ColumnDef) = defaultText c
         let extra = extraText
 
-        let cols: ColumnDef list = columns |> List.filter (fun c -> likeFilter likeOpt c.Name)
+        let visibleColumn (column: ColumnDef) =
+            match currentViewer.Value with
+            | None -> true
+            | Some viewer ->
+                Fsdb.Auth.canSeeColumnForAccountWithRoles
+                    viewer.Store
+                    viewer.Account
+                    viewer.ActiveRoles
+                    dbName
+                    tableName
+                    column.Name
+
+        let privilegesOf (column: ColumnDef) =
+            match currentViewer.Value with
+            | None -> "select,insert,update,references"
+            | Some viewer ->
+                Fsdb.Auth.columnPrivilegesForAccountWithRoles
+                    viewer.Store
+                    viewer.Account
+                    viewer.ActiveRoles
+                    dbName
+                    tableName
+                    column.Name
+                |> String.concat ","
+
+        let cols: ColumnDef list =
+            columns
+            |> List.filter (fun column -> visibleColumn column && likeFilter likeOpt column.Name)
 
         if full then
             let rows =
@@ -2116,7 +2252,7 @@ let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool
                       Some(keyOf c)
                       defaultCol c
                       Some(extra c)
-                      Some "select,insert,update,references"
+                      Some(privilegesOf c)
                       Some c.Comment ])
 
             [ "Field"; "Type"; "Collation"; "Null"; "Key"; "Default"; "Extra"; "Privileges"; "Comment" ], rows

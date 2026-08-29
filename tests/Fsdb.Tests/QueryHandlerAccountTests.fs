@@ -1172,6 +1172,84 @@ let tests =
               | Err(1149, message) -> Expect.stringContains message "MADE_UP_ADMIN" "unknown privilege"
               | other -> failtestf "expected unknown privilege refusal, got %A" other
 
+          testCase "column grants persist and render through grant metadata"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE column_db"
+              let root, _ = handle root "CREATE TABLE column_db.orders (id INT, total INT, status INT, customer_id INT, hidden INT)"
+              let root, _ = handle root "CREATE USER column_reader"
+
+              let root, granted =
+                  handle
+                      root
+                      "GRANT SELECT(id, total), UPDATE(status), REFERENCES(customer_id) ON column_db.orders TO column_reader WITH GRANT OPTION"
+
+              Expect.equal granted (Affected 0UL) "grant succeeds"
+
+              match handle root "SHOW GRANTS FOR column_reader" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (List.head >> Option.get))
+                      [ "GRANT USAGE ON *.* TO `column_reader`@`%`"
+                        "GRANT SELECT (`id`, `total`), UPDATE (`status`), REFERENCES (`customer_id`) ON `column_db`.`orders` TO `column_reader`@`%` WITH GRANT OPTION" ]
+                      "column grants render by privilege"
+              | other -> failtestf "expected column grants, got %A" other
+
+              match
+                  handle
+                      root
+                      "SELECT Table_priv, Column_priv FROM mysql.tables_priv WHERE User = 'column_reader'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "Grant"; Some "Select,Update,References" ] ]) -> ()
+              | other -> failtestf "expected the table privilege summary, got %A" other
+
+              match
+                  handle
+                      root
+                      "SELECT Column_name, Column_priv FROM mysql.columns_priv WHERE User = 'column_reader' ORDER BY Column_name"
+                  |> snd
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "customer_id"; Some "References" ]
+                        [ Some "id"; Some "Select" ]
+                        [ Some "status"; Some "Update" ]
+                        [ Some "total"; Some "Select" ] ]
+                      "one row stores each column's privilege set"
+              | other -> failtestf "expected mysql.columns_priv rows, got %A" other
+
+              match
+                  handle
+                      root
+                      "SELECT COLUMN_NAME, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.COLUMN_PRIVILEGES WHERE GRANTEE = \"'column_reader'@'%'\" ORDER BY COLUMN_NAME, PRIVILEGE_TYPE"
+                  |> snd
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "customer_id"; Some "REFERENCES"; Some "YES" ]
+                        [ Some "id"; Some "SELECT"; Some "YES" ]
+                        [ Some "status"; Some "UPDATE"; Some "YES" ]
+                        [ Some "total"; Some "SELECT"; Some "YES" ] ]
+                      "information_schema exposes column grants"
+              | other -> failtestf "expected COLUMN_PRIVILEGES rows, got %A" other
+
+              let reader = { create 2 store with User = "column_reader" }
+
+              match handle reader "SHOW FULL COLUMNS FROM column_db.orders" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (fun row -> row.[0], row.[7]))
+                      [ Some "id", Some "select"
+                        Some "total", Some "select"
+                        Some "status", Some "update"
+                        Some "customer_id", Some "references" ]
+                      "only columns carrying a privilege are visible"
+              | other -> failtestf "expected scoped SHOW FULL COLUMNS, got %A" other
+
           testCase "table metadata probes require a privilege and listings hide inaccessible tables"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

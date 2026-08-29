@@ -3201,7 +3201,14 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let store = Session.currentStore session
         let viewColumns = Executor.viewColumns store (registryFor session)
         session,
-        InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) full dbName table (likeSuffix sql)
+        InformationSchema.withViewer store (accountOf session) session.ActiveRoles (fun () ->
+            InformationSchema.showColumns
+                (catalogWithOverlay session dbName table)
+                (Some viewColumns)
+                full
+                dbName
+                table
+                (likeSuffix sql))
         |> Result.map (fun (columns, rows) ->
             match showColumnsFieldFilter sql with
             | None -> columns, rows
@@ -3218,7 +3225,14 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let store = Session.currentStore session
         let viewColumns = Executor.viewColumns store (registryFor session)
         session,
-        InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) false dbName table None
+        InformationSchema.withViewer store (accountOf session) session.ActiveRoles (fun () ->
+            InformationSchema.showColumns
+                (catalogWithOverlay session dbName table)
+                (Some viewColumns)
+                false
+                dbName
+                table
+                None)
         |> showTableResult session dbName table
     | ShowIndex(name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase

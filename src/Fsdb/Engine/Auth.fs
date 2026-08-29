@@ -844,6 +844,7 @@ type PrivTarget =
     | Global
     | OnDb of db: string
     | OnTable of db: string * table: string
+    | OnColumn of db: string * table: string * column: string
 
 /// Resolves `Ast.Grant`/`Revoke`'s `(db, table)` level encoding against the
 /// session database (a bare `ON t` means the current db's table).
@@ -970,7 +971,8 @@ let private expandPrivs (privs: string list) (target: PrivTarget) : Result<Resol
         match target with
         | Global -> true
         | OnDb _ -> d.DbCol.IsSome
-        | OnTable _ -> d.TablePriv.IsSome
+        | OnTable _
+        | OnColumn _ -> d.TablePriv.IsSome
 
     if privs |> List.exists (fun p -> p = "ALL") then
         Ok
@@ -984,7 +986,8 @@ let private expandPrivs (privs: string list) (target: PrivTarget) : Result<Resol
             | Some d when atLevel d -> Result.Ok(Choice1Of2 d)
             | Some _ ->
                 match target with
-                | OnTable _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
+                | OnTable _
+                | OnColumn _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
                 | _ -> Result.Error(1221, "Incorrect usage of DB GRANT and GLOBAL PRIVILEGES")
             | None when Privileges.contains p ->
                 match target with
@@ -996,7 +999,7 @@ let private expandPrivs (privs: string list) (target: PrivTarget) : Result<Resol
               Dynamic = resolved |> List.choose (function Choice2Of2 privilege -> Some privilege | _ -> None) })
 
 let private privilegeNames (privileges: PrivilegeSpec list) =
-    privileges |> List.map _.Name
+    privileges |> List.map (fun privilege -> privilege.Name)
 
 /// One user's grant/revoke at one level. `yes` is `'Y'` for GRANT, `'N'`
 /// for REVOKE; table-level edits union/subtract the SET string instead.
@@ -1077,8 +1080,8 @@ let private applyAtLevel
         | Result.Error e -> Result.Error(toMySqlError e)
         | Result.Ok(cols, rows) ->
             let idx n = resolveColumn cols n |> Result.toOption
-            match idx "Db", idx "Table_name", idx "Table_priv" with
-            | Some d, Some t, Some tp ->
+            match idx "Db", idx "Table_name", idx "Table_priv", idx "Column_priv" with
+            | Some d, Some t, Some tp, Some cp ->
                 let matchesRow (r: Value[]) =
                     rowAccount cols r |> Option.exists (sameAccount (account name host))
                     && (match r.[d] with VString s -> eqI s db | _ -> false)
@@ -1091,6 +1094,11 @@ let private applyAtLevel
                     |> Option.map (fun r -> match r.[tp] with VString s -> setMembers s | _ -> [])
                     |> Option.defaultValue []
 
+                let currentColumnSet =
+                    existing
+                    |> Option.map (fun row -> match row.[cp] with VString value -> setMembers value | _ -> [])
+                    |> Option.defaultValue []
+
                 let newSet =
                     if granting then
                         currentSet @ (wanted |> List.filter (fun w -> not (currentSet |> List.exists (eqI w))))
@@ -1098,7 +1106,7 @@ let private applyAtLevel
                         currentSet |> List.filter (fun c -> not (wanted |> List.exists (eqI c)))
 
                 match existing with
-                | Some _ when newSet.IsEmpty && not granting ->
+                | Some _ when newSet.IsEmpty && currentColumnSet.IsEmpty && not granting ->
                     // Same as mysql.db above: MySQL removes a tables_priv row
                     // once its SET is empty.
                     deleteRows store "mysql" "tables_priv" (fun r -> Result.Ok(matchesRow r)) |> ignore
@@ -1128,6 +1136,7 @@ let private applyAtLevel
                     | Result.Error e -> Result.Error(toMySqlError e)
                 | None -> Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
             | _ -> Result.Error(1146, "Table 'tables_priv' doesn't exist")
+    | OnColumn _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
 
 let private applyDynamicPrivileges
     (store: Store)
@@ -1191,6 +1200,229 @@ let private applyResolvedPrivileges store name host resolved target withGrantOpt
     applyStatic
     |> Result.bind (fun () ->
         applyDynamicPrivileges store name host resolved.Dynamic withGrantOption granting)
+
+let private columnPrivilegeDefs =
+    staticPrivileges
+    |> List.filter (fun privilege ->
+        privilege.TablePriv
+        |> Option.exists (fun name -> [ "Select"; "Insert"; "Update"; "References" ] |> List.exists (eqI name)))
+
+let private canonicalColumnPrivilegeMembers members =
+    columnPrivilegeDefs
+    |> List.choose (fun privilege ->
+        privilege.TablePriv
+        |> Option.filter (fun name -> members |> List.exists (eqI name)))
+
+let private columnPrivilegeSetName name =
+    columnPrivilegeDefs
+    |> List.tryFind (fun privilege -> eqI privilege.Sql name)
+    |> Option.bind _.TablePriv
+
+let private validateColumnSpecifications store target (specifications: PrivilegeSpec list) =
+    match specifications, target with
+    | [], _ -> Ok []
+    | _, OnTable(database, table) ->
+        match scan store database table with
+        | Error error -> Error(toMySqlError error)
+        | Ok(columns, _) ->
+            specifications
+            |> traverse (fun specification ->
+                match columnPrivilegeSetName specification.Name with
+                | None ->
+                    Error(
+                        1144,
+                        "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used"
+                    )
+                | Some _ ->
+                    specification.Columns
+                    |> traverse (fun requested ->
+                        match columns |> List.tryFind (fun column -> eqI column.Name requested) with
+                        | Some column -> Ok column.Name
+                        | None -> Error(1054, sprintf "Unknown column '%s' in '%s'" requested table))
+                    |> Result.map (fun resolved -> { specification with Columns = resolved |> List.distinctBy _.ToLowerInvariant() }))
+    | _ ->
+        Error(
+            1144,
+            "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used"
+        )
+
+let private syncTableColumnPrivileges store wanted database table withGrantOption =
+    let columnMembers =
+        match scanList store "mysql" "columns_priv" with
+        | Error _ -> []
+        | Ok(columns, rows) ->
+            rows
+            |> List.filter (fun row ->
+                rowAccount columns row |> Option.exists (sameAccount wanted)
+                && eqI (userColumnText columns row "Db") database
+                && eqI (userColumnText columns row "Table_name") table)
+            |> List.collect (fun row -> setMembers (userColumnText columns row "Column_priv"))
+            |> canonicalColumnPrivilegeMembers
+
+    match scanList store "mysql" "tables_priv" with
+    | Error error -> Error(toMySqlError error)
+    | Ok(columns, rows) ->
+        let matches row =
+            rowAccount columns row |> Option.exists (sameAccount wanted)
+            && eqI (userColumnText columns row "Db") database
+            && eqI (userColumnText columns row "Table_name") table
+
+        match rows |> List.tryFind matches with
+        | Some row ->
+            let tableMembers = setMembers (userColumnText columns row "Table_priv")
+
+            let tableMembers =
+                if withGrantOption && not (tableMembers |> List.exists (eqI "Grant")) then
+                    tableMembers @ [ "Grant" ]
+                else
+                    tableMembers
+
+            if tableMembers.IsEmpty && columnMembers.IsEmpty then
+                deleteRows store "mysql" "tables_priv" (matches >> Ok)
+                |> Result.map ignore
+                |> Result.mapError toMySqlError
+            else
+                updateSystemRows
+                    store
+                    "tables_priv"
+                    (fun _ row -> matches row)
+                    [ "Table_priv", VString(String.concat "," tableMembers)
+                      "Column_priv", VString(String.concat "," columnMembers) ]
+                |> Result.map ignore
+        | None when columnMembers.IsEmpty -> Ok()
+        | None ->
+            insertRows
+                store
+                "mysql"
+                "tables_priv"
+                (Some [ "Host"; "Db"; "User"; "Table_name"; "Grantor"; "Table_priv"; "Column_priv" ])
+                [ [ VString wanted.Host
+                    VString database
+                    VString wanted.Name
+                    VString table
+                    VString "root@%"
+                    VString(if withGrantOption then "Grant" else "")
+                    VString(String.concat "," columnMembers) ] ]
+            |> Result.map ignore
+            |> Result.mapError toMySqlError
+
+let private applyColumnSpecifications
+    store
+    wanted
+    database
+    table
+    (specifications: PrivilegeSpec list)
+    withGrantOption
+    granting
+    =
+    let requested =
+        specifications
+        |> List.collect (fun specification ->
+            match columnPrivilegeSetName specification.Name with
+            | Some setName -> specification.Columns |> List.map (fun column -> column, setName)
+            | None -> [])
+        |> List.groupBy fst
+        |> List.map (fun (column, values) -> column, values |> List.map snd |> List.distinctBy _.ToLowerInvariant())
+
+    match scanList store "mysql" "columns_priv" with
+    | Error error -> Error(toMySqlError error)
+    | Ok(columns, rows) ->
+        let matches column row =
+            rowAccount columns row |> Option.exists (sameAccount wanted)
+            && eqI (userColumnText columns row "Db") database
+            && eqI (userColumnText columns row "Table_name") table
+            && eqI (userColumnText columns row "Column_name") column
+
+        let changes =
+            requested
+            |> List.map (fun (column, members) ->
+                let existing = rows |> List.tryFind (matches column)
+                let current = existing |> Option.map (userColumnText columns >> fun read -> read "Column_priv" |> setMembers) |> Option.defaultValue []
+
+                let updated =
+                    if granting then
+                        current @ (members |> List.filter (fun setName -> current |> List.exists (eqI setName) |> not))
+                    else
+                        current |> List.filter (fun setName -> members |> List.exists (eqI setName) |> not)
+
+                column, members, existing.IsSome, current, updated)
+
+        if
+            not granting
+            && changes
+               |> List.exists (fun (_, requested, _, current, _) ->
+                   requested |> List.exists (fun setName -> current |> List.exists (eqI setName) |> not))
+        then
+            Error(1147, sprintf "There is no such grant defined for user '%s' on host '%s' on table '%s'" wanted.Name wanted.Host table)
+        else
+            changes
+            |> traverse (fun (column, _, exists, _, updated) ->
+                match exists, updated with
+                | true, [] ->
+                    deleteRows store "mysql" "columns_priv" (matches column >> Ok)
+                    |> Result.map ignore
+                    |> Result.mapError toMySqlError
+                | true, _ ->
+                    updateSystemRows
+                        store
+                        "columns_priv"
+                        (fun _ row -> matches column row)
+                        [ "Column_priv", VString(String.concat "," updated) ]
+                    |> Result.map ignore
+                | false, _ ->
+                    insertRows
+                        store
+                        "mysql"
+                        "columns_priv"
+                        (Some [ "Host"; "Db"; "User"; "Table_name"; "Column_name"; "Column_priv" ])
+                        [ [ VString wanted.Host
+                            VString database
+                            VString wanted.Name
+                            VString table
+                            VString column
+                            VString(String.concat "," updated) ] ]
+                    |> Result.map ignore
+                    |> Result.mapError toMySqlError)
+            |> Result.bind (fun _ -> syncTableColumnPrivileges store wanted database table withGrantOption)
+
+let private revokeTablePrivilegesFromColumns store wanted database table (privileges: PrivilegeSpec list) =
+    let members =
+        if privileges |> List.exists (fun privilege -> privilege.Name = "ALL") then
+            columnPrivilegeDefs |> List.choose _.TablePriv
+        else
+            privileges
+            |> List.choose (fun privilege -> if privilege.Columns.IsEmpty then columnPrivilegeSetName privilege.Name else None)
+
+    if members.IsEmpty then
+        Ok()
+    else
+        match scanList store "mysql" "columns_priv" with
+        | Error error -> Error(toMySqlError error)
+        | Ok(columns, rows) ->
+            let matches row =
+                rowAccount columns row |> Option.exists (sameAccount wanted)
+                && eqI (userColumnText columns row "Db") database
+                && eqI (userColumnText columns row "Table_name") table
+
+            rows
+            |> List.filter matches
+            |> traverse (fun row ->
+                let column = userColumnText columns row "Column_name"
+                let current = setMembers (userColumnText columns row "Column_priv")
+                let updated = current |> List.filter (fun setName -> members |> List.exists (eqI setName) |> not)
+
+                if updated.IsEmpty then
+                    deleteRows store "mysql" "columns_priv" (fun candidate -> Ok(matches candidate && eqI (userColumnText columns candidate "Column_name") column))
+                    |> Result.map ignore
+                    |> Result.mapError toMySqlError
+                else
+                    updateSystemRows
+                        store
+                        "columns_priv"
+                        (fun _ candidate -> matches candidate && eqI (userColumnText columns candidate "Column_name") column)
+                        [ "Column_priv", VString(String.concat "," updated) ]
+                    |> Result.map ignore)
+            |> Result.bind (fun _ -> syncTableColumnPrivileges store wanted database table false)
 
 let private quotedAccount account = sprintf "`%s`@`%s`" account.Name account.Host
 
@@ -1437,15 +1669,30 @@ let grantSpecifications
     (users: (string * string) list)
     (withGrantOption: bool)
     : Result<unit, int * string> =
-    expandPrivs (privilegeNames privs) target
-    |> Result.bind (fun resolved ->
-        users
-        |> traverse (fun (name, host) ->
-            if (tryUserRowForAccount store (account name host)).IsNone then
-                Result.Error(1410, "You are not allowed to create a user with GRANT")
-            else
-                applyResolvedPrivileges store name host resolved target withGrantOption true)
-        |> Result.map ignore)
+    let columnSpecifications, wholeSpecifications = privs |> List.partition (fun privilege -> not privilege.Columns.IsEmpty)
+
+    validateColumnSpecifications store target columnSpecifications
+    |> Result.bind (fun columns ->
+        expandPrivs (privilegeNames wholeSpecifications) target
+        |> Result.bind (fun resolved ->
+            users
+            |> traverse (fun (name, host) ->
+                let wanted = account name host
+
+                if (tryUserRowForAccount store wanted).IsNone then
+                    Result.Error(1410, "You are not allowed to create a user with GRANT")
+                else
+                    (if wholeSpecifications.IsEmpty then
+                         Ok()
+                     else
+                         applyResolvedPrivileges store name host resolved target withGrantOption true)
+                    |> Result.bind (fun () ->
+                        match columns, target with
+                        | [], _ -> Ok()
+                        | columns, OnTable(database, table) ->
+                            applyColumnSpecifications store wanted database table columns withGrantOption true
+                        | _ -> Error(1144, "Illegal GRANT/REVOKE command")))
+            |> Result.map ignore))
 
 let grant store privileges target users withGrantOption =
     privileges
@@ -1461,16 +1708,37 @@ let revokeSpecifications
     : Result<unit, int * string> =
     let names = privilegeNames privs
     let revokesGrantOption = names |> List.exists (fun privilege -> privilege = "GRANT OPTION" || privilege = "ALL")
+    let columnSpecifications, wholeSpecifications = privs |> List.partition (fun privilege -> not privilege.Columns.IsEmpty)
 
-    expandPrivs (names |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target
-    |> Result.bind (fun resolved ->
-        users
-        |> traverse (fun (name, host) ->
-            if (tryUserRowForAccount store (account name host)).IsNone then
-                Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
-            else
-                applyResolvedPrivileges store name host resolved target revokesGrantOption false)
-        |> Result.map ignore)
+    validateColumnSpecifications store target columnSpecifications
+    |> Result.bind (fun columns ->
+        expandPrivs
+            (wholeSpecifications |> privilegeNames |> List.filter (fun privilege -> privilege <> "GRANT OPTION"))
+            target
+        |> Result.bind (fun resolved ->
+            users
+            |> traverse (fun (name, host) ->
+                let wanted = account name host
+
+                if (tryUserRowForAccount store wanted).IsNone then
+                    Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
+                else
+                    (if wholeSpecifications |> List.forall (fun privilege -> privilege.Name = "GRANT OPTION") then
+                         Ok()
+                     else
+                         applyResolvedPrivileges store name host resolved target revokesGrantOption false)
+                    |> Result.bind (fun () ->
+                        match target with
+                        | OnTable(database, table) ->
+                            revokeTablePrivilegesFromColumns store wanted database table wholeSpecifications
+                            |> Result.bind (fun () ->
+                                if columns.IsEmpty then
+                                    Ok()
+                                else
+                                    applyColumnSpecifications store wanted database table columns false false)
+                        | _ when columns.IsEmpty -> Ok()
+                        | _ -> Error(1144, "Illegal GRANT/REVOKE command")))
+            |> Result.map ignore))
 
 let revoke store privileges target users =
     privileges
@@ -1824,6 +2092,12 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                  | Result.Ok(cols, rows) -> Some(cols, rows)
                  | Result.Error _ -> None)
 
+        let columnPrivGrants =
+            lazy
+                (match scanList store "mysql" "columns_priv" with
+                 | Result.Ok(cols, rows) -> Some(cols, rows)
+                 | Result.Error _ -> None)
+
         // Every grant-table lookup below is the same question — "does some
         // row satisfy a predicate per named column?" — asked with different
         // columns. One matcher, three cell predicates.
@@ -1862,6 +2136,29 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                     (mine @ [ "Db", textIs db; "Table_name", textIs table; "Table_priv", hasSetMember setName ])
             | None -> false
 
+        let hasColumn (def: PrivDef) (db: string) (table: string) (column: string) =
+            match def.TablePriv with
+            | Some setName ->
+                rowExists
+                    columnPrivGrants.Value
+                    (mine
+                     @ [ "Db", textIs db
+                         "Table_name", textIs table
+                         "Column_name", textIs column
+                         "Column_priv", hasSetMember setName ])
+            | None -> false
+
+        let hasAnyColumn (def: PrivDef) (db: string) (table: string) =
+            match def.TablePriv, columnPrivGrants.Value with
+            | Some setName, Some(columns, rows) ->
+                rows
+                |> List.exists (fun row ->
+                    rowAccount columns row |> Option.exists (sameAccount wanted)
+                    && eqI (userColumnText columns row "Db") db
+                    && eqI (userColumnText columns row "Table_name") table
+                    && setMembers (userColumnText columns row "Column_priv") |> List.exists (eqI setName))
+            | _ -> false
+
         let hasGlobalGrantOption () =
             match userRow with
             | Some(cols, row) -> userColumnText cols row "Grant_priv" = "Y"
@@ -1897,7 +2194,8 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                     || (match target with
                         | Global -> false
                         | OnDb db -> hasDbGrantOption db
-                        | OnTable(db, table) -> hasDbGrantOption db || hasTableGrantOption db table)
+                        | OnTable(db, table)
+                        | OnColumn(db, table, _) -> hasDbGrantOption db || hasTableGrantOption db table)
 
                 if allowed then
                     Ok()
@@ -1907,6 +2205,8 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                     | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" user wanted.Host db)
                     | OnTable(_, table) ->
                         Error(1142, sprintf "GRANT command denied to user '%s'@'localhost' for table '%s'" user table)
+                    | OnColumn(_, table, column) ->
+                        Error(1143, sprintf "GRANT command denied to user '%s'@'localhost' for column '%s' in table '%s'" user column table)
             else
                 match privBySql privSql with
                 | None ->
@@ -1918,9 +2218,12 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                         || (match target with
                             | Global -> false
                             | OnDb db
-                            | OnTable(db, _) when eqI db "information_schema" && eqI privSql "SELECT" -> true
+                            | OnTable(db, _)
+                            | OnColumn(db, _, _) when eqI db "information_schema" && eqI privSql "SELECT" -> true
                             | OnDb db -> hasDb def db
-                            | OnTable(db, table) -> hasDb def db || hasTable def db table)
+                            | OnTable(db, table) -> hasDb def db || hasTable def db table || hasAnyColumn def db table
+                            | OnColumn(db, table, column) ->
+                                hasDb def db || hasTable def db table || hasColumn def db table column)
 
                     if allowed then
                         Ok()
@@ -1934,6 +2237,11 @@ let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTa
                         | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" user wanted.Host db)
                         | OnTable(_, table) ->
                             Error(1142, sprintf "%s command denied to user '%s'@'localhost' for table '%s'" privSql user table)
+                        | OnColumn(_, table, column) ->
+                            Error(
+                                1143,
+                                sprintf "%s command denied to user '%s'@'localhost' for column '%s' in table '%s'" privSql user column table
+                            )
 
         required |> traverse checkOne |> Result.map ignore
 
@@ -2063,13 +2371,13 @@ let canSeeDatabaseForAccount (store: Store) (wanted: Account) (db: string) : boo
         match scanList store "mysql" "tables_priv" with
         | Result.Error _ -> false
         | Result.Ok(cols, rows) ->
-            match resolveColumn cols "Db", resolveColumn cols "Table_priv" with
-            | Ok dbIdx, Ok privIdx ->
+            match resolveColumn cols "Db", resolveColumn cols "Table_priv", resolveColumn cols "Column_priv" with
+            | Ok dbIdx, Ok tablePrivIdx, Ok columnPrivIdx ->
                 rows
                 |> List.exists (fun row ->
                     rowAccount cols row |> Option.exists (sameAccount wanted)
                     && (match row.[dbIdx] with | VString value -> eqI value db | _ -> false)
-                    && row.[privIdx] <> VString "")
+                    && (row.[tablePrivIdx] <> VString "" || row.[columnPrivIdx] <> VString ""))
             | _ -> false
 
 let canSeeDatabase (store: Store) (user: string) (db: string) = canSeeDatabaseForAccount store (account user "%") db
@@ -2088,6 +2396,23 @@ let canSeeTableForAccountWithRoles store wanted activeRoles db table =
     |> List.exists (fun actor -> canSeeTableForAccount store actor db table)
 
 let canSeeTable (store: Store) (user: string) (db: string) (table: string) = canSeeTableForAccount store (account user "%") db table
+
+let canSeeColumnForAccount store wanted db table column =
+    staticPrivileges
+    |> List.exists (fun privilege ->
+        checkForAccount store wanted [ privilege.Sql, OnColumn(db, table, column) ]
+        |> Result.isOk)
+
+let canSeeColumnForAccountWithRoles store wanted activeRoles db table column =
+    effectiveAccounts store wanted activeRoles
+    |> List.exists (fun actor -> canSeeColumnForAccount store actor db table column)
+
+let columnPrivilegesForAccountWithRoles store wanted activeRoles db table column =
+    columnPrivilegeDefs
+    |> List.filter (fun privilege ->
+        checkForAccountWithRoles store wanted activeRoles [ privilege.Sql, OnColumn(db, table, column) ]
+        |> Result.isOk)
+    |> List.map (_.Sql >> _.ToLowerInvariant())
 
 /// A privilege list rendered MySQL-style: every static privilege → `ALL
 /// PRIVILEGES`, none → `USAGE`, otherwise the names in column order.
@@ -2192,35 +2517,81 @@ let renderGrantsForAccountUsing
                             (if hasOption then " WITH GRANT OPTION" else ""))
 
             let tableLines =
-                match scanList store "mysql" "tables_priv" with
-                | Result.Error _ -> []
-                | Result.Ok(columns, rows) ->
-                    rows
-                    |> List.filter (belongsToActor columns)
-                    |> List.groupBy (fun row ->
-                        userColumnText columns row "Db", userColumnText columns row "Table_name")
-                    |> List.sortBy fst
-                    |> List.map (fun ((database, table), grants) ->
-                        let members =
-                            grants
-                            |> List.collect (fun row -> setMembers (userColumnText columns row "Table_priv"))
+                let tableGrants =
+                    match scanList store "mysql" "tables_priv" with
+                    | Result.Error _ -> []
+                    | Result.Ok(columns, rows) ->
+                        rows
+                        |> List.filter (belongsToActor columns)
+                        |> List.map (fun row ->
+                            (userColumnText columns row "Db", userColumnText columns row "Table_name"),
+                            setMembers (userColumnText columns row "Table_priv"))
 
-                        let hasMember name = members |> List.exists (eqI name)
+                let columnGrants =
+                    match scanList store "mysql" "columns_priv" with
+                    | Result.Error _ -> []
+                    | Result.Ok(columns, rows) ->
+                        rows
+                        |> List.filter (belongsToActor columns)
+                        |> List.map (fun row ->
+                            (userColumnText columns row "Db", userColumnText columns row "Table_name"),
+                            userColumnText columns row "Column_name",
+                            setMembers (userColumnText columns row "Column_priv"))
 
-                        let granted =
-                            staticPrivileges
-                            |> List.filter (fun privilege -> privilege.TablePriv |> Option.exists hasMember)
+                let keys =
+                    (tableGrants |> List.map fst) @ (columnGrants |> List.map (fun (key, _, _) -> key))
+                    |> List.distinct
+                    |> List.sort
 
-                        let privText =
-                            if granted.IsEmpty then "USAGE" else granted |> List.map _.Sql |> String.concat ", "
+                keys
+                |> List.choose (fun ((database, table) as key) ->
+                    let members =
+                        tableGrants
+                        |> List.choose (fun (candidate, privileges) -> if candidate = key then Some privileges else None)
+                        |> List.concat
 
-                        sprintf
-                            "GRANT %s ON `%s`.`%s` TO %s%s"
-                            privText
-                            database
-                            table
-                            quoted
-                            (if hasMember "Grant" then " WITH GRANT OPTION" else ""))
+                    let hasMember name = members |> List.exists (eqI name)
+
+                    let tablePrivileges =
+                        staticPrivileges
+                        |> List.filter (fun privilege -> privilege.TablePriv |> Option.exists hasMember)
+                        |> List.map _.Sql
+
+                    let columnPrivileges =
+                        columnPrivilegeDefs
+                        |> List.choose (fun privilege ->
+                            let setName = privilege.TablePriv |> Option.defaultValue ""
+
+                            let columns =
+                                columnGrants
+                                |> List.choose (fun (candidate, column, privileges) ->
+                                    if candidate = key && privileges |> List.exists (eqI setName) then
+                                        Some column
+                                    else
+                                        None)
+                                |> List.distinctBy _.ToLowerInvariant()
+                                |> List.sortBy _.ToLowerInvariant()
+
+                            if columns.IsEmpty then
+                                None
+                            else
+                                let rendered = columns |> List.map (fun column -> "`" + column.Replace("`", "``") + "`")
+                                Some(sprintf "%s (%s)" privilege.Sql (String.concat ", " rendered)))
+
+                    let privileges = tablePrivileges @ columnPrivileges
+
+                    if privileges.IsEmpty then
+                        None
+                    else
+                        Some(
+                            sprintf
+                                "GRANT %s ON `%s`.`%s` TO %s%s"
+                                (String.concat ", " privileges)
+                                database
+                                table
+                                quoted
+                                (if hasMember "Grant" then " WITH GRANT OPTION" else "")
+                        ))
 
             let roleLines =
                 directRoleGrantsForAccount store wanted
