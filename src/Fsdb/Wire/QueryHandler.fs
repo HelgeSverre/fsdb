@@ -884,10 +884,6 @@ let private setNames = Regex(@"^NAMES\s+'?(\w+)'?(?:\s+COLLATE\s+'?(\w+)'?)?", R
 let private setVar =
     Regex(@"^(SESSION\s+|GLOBAL\s+|@@SESSION\.|@@GLOBAL\.|@@)?(`[^`]+`|\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
 
-/// Best-effort name extraction for the "this looks like an assignment but
-/// neither `setVar` nor the user-variable parser matched it" error below.
-let private setVarNameForError = Regex(@"^(?:SESSION\s+|GLOBAL\s+)?(\S+?)\s*=", RegexOptions.IgnoreCase)
-
 let private quotedSetLiteral = Regex("^(['\"])(.*)\\1$", RegexOptions.Singleline)
 let private bareSetIdentifier = Regex("^\\w+$")
 
@@ -1152,9 +1148,7 @@ let private parseSetFragment
                     | Ok(VNull, _) -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
                     | Ok(value, sideEffects) -> Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
             else
-                match setVarNameForError.Match fragment with
-                | m when m.Success -> Error(Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value))
-                | _ -> Error(syntaxError sql)
+                Error(syntaxError sql)
 
 /// Applies one parsed `SetAction`, including store settings derived from
 /// `foreign_key_checks` and `sql_mode`.

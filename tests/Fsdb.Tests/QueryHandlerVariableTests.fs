@@ -20,12 +20,29 @@ let tests =
               let session, result = handle session "SET SESSION sql_mode='ANSI_QUOTES', bad-name=1"
 
               match result with
-              | Err(1193, _) -> ()
-              | other -> failtestf "expected a 1193 error, got %A" other
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected malformed SET syntax, got %A" other
 
               match handle session "SELECT @@sql_mode" |> snd with
               | ResultSet(_, [ [ Some mode ] ]) -> Expect.stringContains mode "STRICT_TRANS_TABLES" "sql_mode is unchanged from its default"
               | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "malformed system-variable assignments fail as syntax before name resolution"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql in
+                  [ "SET GLOBAL mandatory_roles ="
+                    "SET GLOBAL mandatory_roles = 'root@%' unexpected_token"
+                    "SET unknown_variable ="
+                    "SET-- fuzz\nGLOBAL-- fuzz\nmandatory_roles-- fuzz\n=-- fuzz\n'root@%'-- fuzz\nunexpected_token" ] do
+                  match handle session sql |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected malformed SET syntax for %s, got %A" sql other
+
+              match handle session "SET unknown_variable = 1" |> snd with
+              | Err(1193, _) -> ()
+              | other -> failtestf "expected a valid unknown-variable assignment to return 1193, got %A" other
 
           testCase "SET @user_var = 1 defines a user variable, readable back via SELECT @user_var"
           <| fun _ ->
