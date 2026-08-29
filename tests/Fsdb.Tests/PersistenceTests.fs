@@ -352,6 +352,61 @@ let tests =
               snapshotNow dir store
               Expect.equal (rowsOf (load dir) defaultDatabase "times") [ [| value |] ] "snapshot replay"
 
+          testCase "prepared XA branches survive restart and defer snapshots"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let run session sql =
+                  let next, result = handle session sql
+
+                  match result with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> next
+
+              let session = Fsdb.Session.create 1 store
+              let session = run session "CREATE TABLE xa_durable (id INT PRIMARY KEY)"
+              let session = run session "XA START 'durable', 'commit', 42"
+              let session = run session "INSERT INTO xa_durable VALUES (1)"
+              let session = run session "XA END 'durable', 'commit', 42"
+              let _ = run session "XA PREPARE 'durable', 'commit', 42"
+
+              snapshotNow dir store
+              let recovered = load dir
+              attach dir recovered
+              let recoverySession = Fsdb.Session.create 2 recovered
+
+              match handle recoverySession "XA RECOVER CONVERT XID" |> snd with
+              | ResultSet(_, [ [ Some "42"; Some "7"; Some "6"; Some "0x64757261626C65636F6D6D6974" ] ]) -> ()
+              | other -> failtestf "expected the prepared branch after restart, got %A" other
+
+              match handle recoverySession "SELECT COUNT(*) FROM xa_durable" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected prepared rows to remain invisible, got %A" other
+
+              let recoverySession = run recoverySession "XA COMMIT 'durable', 'commit', 42"
+              let committed = load dir
+
+              match rowsOf committed defaultDatabase "xa_durable" with
+              | [ [| VInt 1L |] ] -> ()
+              | other -> failtestf "expected the committed XA row after another restart, got %A" other
+
+              attach dir committed
+              let rollbackSession = Fsdb.Session.create 3 committed
+              let rollbackSession = run rollbackSession "XA START 'durable', 'rollback'"
+              let rollbackSession = run rollbackSession "INSERT INTO xa_durable VALUES (2)"
+              let rollbackSession = run rollbackSession "XA END 'durable', 'rollback'"
+              let _ = run rollbackSession "XA PREPARE 'durable', 'rollback'"
+              let recoveredRollback = load dir
+              attach dir recoveredRollback
+              let rollbackRecovery = Fsdb.Session.create 4 recoveredRollback
+              let _ = run rollbackRecovery "XA ROLLBACK 'durable', 'rollback'"
+
+              match rowsOf (load dir) defaultDatabase "xa_durable" with
+              | [ [| VInt 1L |] ] -> ()
+              | other -> failtestf "expected rollback recovery to discard the second row, got %A" other
+
           testCase "attach + reload preserves BIT(64) boundary values"
           <| fun _ ->
               let dir = tempDataDir ()

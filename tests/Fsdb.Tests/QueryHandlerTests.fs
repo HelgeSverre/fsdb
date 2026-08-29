@@ -5914,6 +5914,47 @@ let tests =
               | Result.Error(1295, message) -> Expect.stringContains message "prepared statement protocol" "prepared refusal"
               | other -> failtestf "expected XA prepare refusal, got %A" other
 
+          testCase "XA rejects local transactions implicit commits temporary tables and unauthorized recovery"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE TABLE xa_rules (id INT)"
+              let root, _ = handle root "CREATE TEMPORARY TABLE xa_temp (id INT)"
+              let local, _ = handle root "BEGIN"
+
+              match handle local "XA START 'outside'" |> snd with
+              | Err(1400, message) -> Expect.stringContains message "XAER_OUTSIDE" "local transaction refusal"
+              | other -> failtestf "expected XAER_OUTSIDE, got %A" other
+
+              let root, _ = handle local "ROLLBACK"
+              let root, _ = handle root "XA START 'rules'"
+
+              match handle root "CREATE TABLE xa_forbidden (id INT)" |> snd with
+              | Err(1399, message) -> Expect.stringContains message "ACTIVE state" "DDL refusal"
+              | other -> failtestf "expected XAER_RMFAIL for DDL, got %A" other
+
+              match handle root "INSERT INTO xa_temp VALUES (1)" |> snd with
+              | Err(4091, message) -> Expect.stringContains message "Temporary tables" "temporary-table refusal"
+              | other -> failtestf "expected XA temporary-table refusal, got %A" other
+
+              closeSession root
+              let replacement = create 2 store
+
+              match handle replacement "XA START 'rules'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected disconnect to release the active XID, got %A" other
+
+              let replacement, _ = handle replacement "XA END 'rules'"
+              let replacement, _ = handle replacement "XA PREPARE 'rules'"
+              let replacement, _ = handle replacement "CREATE USER 'xa_limited'@'%'"
+              let limited = { create 3 store with User = "xa_limited"; AccountHost = "%" }
+
+              match handle limited "XA RECOVER" |> snd with
+              | Err(1227, message) -> Expect.stringContains message "XA_RECOVER_ADMIN" "recovery privilege"
+              | other -> failtestf "expected XA_RECOVER_ADMIN refusal, got %A" other
+
+              handle replacement "XA ROLLBACK 'rules'" |> ignore
+
           // -----------------------------------------------------------------
           // Session user identity + the built-in `mysql` system schema
           // -----------------------------------------------------------------

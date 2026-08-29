@@ -278,6 +278,9 @@ type CommitEvent =
     | SchemaChanged of db: string * Statement
     | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
     | TransactionCommitted of CommitEvent list
+    | XaPrepared of xid: Xa.Xid * validateWholeSnapshot: bool * events: CommitEvent list
+    | XaCommitted of xid: Xa.Xid * events: CommitEvent list
+    | XaRolledBack of xid: Xa.Xid
 
 type DurableCommitSink =
     { DataDirectory: string
@@ -330,6 +333,13 @@ type AccountResourceUsage =
       mutable Connections: uint64
       mutable ActiveConnections: uint32 }
 
+type PreparedXa =
+    { BaseCatalog: Catalog
+      Catalog: Catalog
+      Events: CommitEvent list
+      ValidateWholeSnapshot: bool
+      TransactionLocks: TransactionLockContext option }
+
 let private rowLockStripeCount = 4096
 
 let private createRowLockStripe () =
@@ -379,6 +389,9 @@ type Store =
       /// Ephemeral per-account counters are shared by every session and
       /// transaction snapshot, but deliberately reset on server restart.
       AccountResources: ConcurrentDictionary<string, AccountResourceUsage>
+      /// Detached XA branches remain shared across session clones and are
+      /// reconstructed from WAL during recovery.
+      PreparedXas: ConcurrentDictionary<Xa.Xid, PreparedXa>
       RowLockSequence: int64 array
       TransactionLocks: TransactionLockContext option }
 
@@ -476,6 +489,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       RowLocks = store.RowLocks
       KeyLocks = store.KeyLocks
       AccountResources = store.AccountResources
+      PreparedXas = store.PreparedXas
       RowLockSequence = store.RowLockSequence
       TransactionLocks = store.TransactionLocks }
 
@@ -579,15 +593,60 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
 
             reraise ()
 
+let private transactionEvents (snapshot: Store) =
+    snapshot.PendingEvents
+    |> Option.map List.ofSeq
+    |> Option.defaultValue []
+
 let private prepareTransactionEvents (store: Store) (snapshot: Store) : unit -> unit =
-    match snapshot.PendingEvents with
-    | Some buffer when buffer.Count > 0 ->
+    match transactionEvents snapshot with
+    | events when not events.IsEmpty ->
         match store.PendingEvents with
         | Some targetBuffer ->
-            targetBuffer.AddRange buffer
+            targetBuffer.AddRange events
             ignore
-        | None -> prepareEvents store [ TransactionCommitted(List.ofSeq buffer) ]
+        | None -> prepareEvents store [ TransactionCommitted events ]
     | _ -> ignore
+
+let private prepareXaCommitEvents (xid: Xa.Xid) (store: Store) (snapshot: Store) : unit -> unit =
+    let events = transactionEvents snapshot
+
+    match store.PendingEvents with
+    | Some targetBuffer ->
+        targetBuffer.Add(XaCommitted(xid, events))
+        ignore
+    | None ->
+        let durableAction, observerError =
+            lock store.CommitLock (fun () ->
+                let action =
+                    store.Durability.Sink
+                    |> Option.map (fun sink -> sink.Enqueue [ XaCommitted(xid, events) ])
+                    |> Option.defaultValue ignore
+
+                let error =
+                    try
+                        for event in events do
+                            for observer in store.OnCommit do
+                                observer event
+
+                        None
+                    with error ->
+                        Some error
+
+                action, error)
+
+        fun () ->
+            durableAction ()
+            observerError |> Option.iter raise
+
+let private persistXaControl (store: Store) (event: CommitEvent) : unit =
+    let acknowledge =
+        lock store.CommitLock (fun () ->
+            match store.Durability.Sink with
+            | Some sink -> sink.Enqueue [ event ]
+            | None -> ignore)
+
+    acknowledge ()
 
 let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
@@ -3007,6 +3066,7 @@ let create () : Store =
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       AccountResources = ConcurrentDictionary()
+      PreparedXas = ConcurrentDictionary()
       RowLockSequence = [| 0L |]
       TransactionLocks = None }
 
@@ -6776,6 +6836,7 @@ let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalo
 let private commitCatalogIntoWith
     (timeout: TimeSpan)
     (validateWholeSnapshot: bool)
+    (prepareCommit: Store -> Store -> (unit -> unit))
     (store: Store)
     (baseCatalog: Catalog)
     (snapshot: Store)
@@ -6786,7 +6847,7 @@ let private commitCatalogIntoWith
     match store.PendingEvents, validateWholeSnapshot with
     | Some _, false ->
         mergeCatalogIntoWithTimeoutCore timeout store baseCatalog snapshot.Catalog
-        prepareTransactionEvents store snapshot |> fun acknowledge -> acknowledge ()
+        prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
     | _ ->
         let changedKeys =
             Set.union (keysOf baseCatalog) (keysOf batchCatalog)
@@ -6872,7 +6933,7 @@ let private commitCatalogIntoWith
                             mergeDatabaseSlot timeout dbName slot baseDb batchDb
                         | None, None -> ()
 
-                    prepareTransactionEvents store snapshot)
+                    prepareCommit store snapshot)
 
             let acknowledge =
                 if needsCatalogLock then lock store.Lock publish else publish ()
@@ -6881,19 +6942,87 @@ let private commitCatalogIntoWith
 
 let commitCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
-        commitCatalogIntoWith timeout false store baseCatalog snapshot)
+        commitCatalogIntoWith timeout false prepareTransactionEvents store baseCatalog snapshot)
 
 let commitCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
-        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false store baseCatalog snapshot)
+        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false prepareTransactionEvents store baseCatalog snapshot)
 
 let commitSerializableCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
-        commitCatalogIntoWith timeout true store baseCatalog snapshot)
+        commitCatalogIntoWith timeout true prepareTransactionEvents store baseCatalog snapshot)
 
 let commitSerializableCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
-        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) true store baseCatalog snapshot)
+        commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) true prepareTransactionEvents store baseCatalog snapshot)
+
+let prepareXa
+    (store: Store)
+    (xid: Xa.Xid)
+    (validateWholeSnapshot: bool)
+    (baseCatalog: Catalog)
+    (snapshot: Store)
+    : bool =
+    let prepared =
+        { BaseCatalog = baseCatalog
+          Catalog = snapshot.Catalog
+          Events = transactionEvents snapshot
+          ValidateWholeSnapshot = validateWholeSnapshot
+          TransactionLocks = snapshot.TransactionLocks }
+
+    if store.PreparedXas.TryAdd(xid, prepared) then
+        try
+            persistXaControl store (XaPrepared(xid, validateWholeSnapshot, prepared.Events))
+            true
+        with error ->
+            store.PreparedXas.TryRemove xid |> ignore
+            raise error
+    else
+        false
+
+let preparedXas (store: Store) : (Xa.Xid * PreparedXa) list =
+    lock store.PreparedXas (fun () ->
+        store.PreparedXas
+        |> Seq.map (fun entry -> entry.Key, entry.Value)
+        |> List.ofSeq)
+
+let commitPreparedXaWithTimeout (timeout: TimeSpan) (store: Store) (xid: Xa.Xid) : bool =
+    lock store.PreparedXas (fun () ->
+        match store.PreparedXas.TryGetValue xid with
+        | false, _ -> false
+        | true, prepared ->
+            let pending = ResizeArray(prepared.Events)
+
+            let snapshot =
+                { transactionSnapshotFromCatalog store prepared.Catalog with
+                    PendingEvents = Some pending
+                    TransactionLocks = prepared.TransactionLocks }
+
+            withReferentialSchemaLock ExclusiveAccess store (fun () ->
+                commitCatalogIntoWith
+                    timeout
+                    prepared.ValidateWholeSnapshot
+                    (prepareXaCommitEvents xid)
+                    store
+                    prepared.BaseCatalog
+                    snapshot)
+
+            store.PreparedXas.TryRemove xid |> ignore
+            releaseTransactionLocks snapshot
+            true)
+
+let rollbackPreparedXa (store: Store) (xid: Xa.Xid) : PreparedXa option =
+    lock store.PreparedXas (fun () ->
+        match store.PreparedXas.TryGetValue xid with
+        | false, _ -> None
+        | true, prepared ->
+            persistXaControl store (XaRolledBack xid)
+            store.PreparedXas.TryRemove xid |> ignore
+
+            prepared.TransactionLocks
+            |> Option.iter (fun locks -> releaseTransactionLocks { store with TransactionLocks = Some locks })
+
+            Some prepared)
 
 let private withPointUpdateDatabase
     (store: Store)

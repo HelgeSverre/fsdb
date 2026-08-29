@@ -814,6 +814,33 @@ let private KindSchemaChangedV4 = 0x0Buy
 let private KindSchemaChangedAtV4 = 0x0Cuy
 let private KindSchemaChangedV5 = 0x0Duy
 let private KindSchemaChangedAtV5 = 0x0Euy
+let private KindXaPrepared = 0x0Fuy
+let private KindXaCommitted = 0x10uy
+let private KindXaRolledBack = 0x11uy
+
+let private encodeXid (w: Writer) (xid: Xa.Xid) =
+    w.WriteUInt32LE xid.FormatId
+    w.WriteInt32LE xid.GlobalId.Length
+    w.WriteBytes(List.toArray xid.GlobalId)
+    w.WriteInt32LE xid.BranchQualifier.Length
+    w.WriteBytes(List.toArray xid.BranchQualifier)
+
+let private decodeXid (r: #IReader) : Xa.Xid =
+    let formatId = uint32 (r.ReadInt32LE())
+    let globalLength = r.ReadInt32LE()
+
+    if globalLength < 0 || globalLength > 64 then
+        failwith "Persistence: invalid XA global identifier length"
+
+    let globalId = r.ReadBytes globalLength |> List.ofArray
+    let branchLength = r.ReadInt32LE()
+
+    if branchLength < 0 || branchLength > 64 then
+        failwith "Persistence: invalid XA branch identifier length"
+
+    { GlobalId = globalId
+      BranchQualifier = r.ReadBytes branchLength |> List.ofArray
+      FormatId = formatId }
 
 let private encodeRowBin (w: Writer) (row: Value[]) : unit =
     w.WriteInt32LE row.Length
@@ -866,6 +893,24 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
 
         for e in events do
             encodeEvent w e
+    | XaPrepared(xid, validateWholeSnapshot, events) ->
+        w.WriteByte KindXaPrepared
+        encodeXid w xid
+        writeBool w validateWholeSnapshot
+        w.WriteInt32LE events.Length
+
+        for event in events do
+            encodeEvent w event
+    | XaCommitted(xid, events) ->
+        w.WriteByte KindXaCommitted
+        encodeXid w xid
+        w.WriteInt32LE events.Length
+
+        for event in events do
+            encodeEvent w event
+    | XaRolledBack xid ->
+        w.WriteByte KindXaRolledBack
+        encodeXid w xid
 
 let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
     if depth > maxDecodeDepth then
@@ -921,6 +966,16 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
     | k when k = KindSchemaChangedAtV5 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement currentSnapshotFormat r, DateTime(r.ReadInt64LE()))
+    | k when k = KindXaPrepared ->
+        let xid = decodeXid r
+        let validateWholeSnapshot = readBool r
+        let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r)
+        XaPrepared(xid, validateWholeSnapshot, events)
+    | k when k = KindXaCommitted ->
+        let xid = decodeXid r
+        XaCommitted(xid, List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r))
+    | k when k = KindXaRolledBack ->
+        XaRolledBack(decodeXid r)
     | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
 
 let private decodeEvent (r: #IReader) : CommitEvent = decodeEventAt 0 r
@@ -1002,6 +1057,21 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         | Truncate name -> setTableCreateTimeForReplay store db name createTime (Log.diagnostic "fsdb: WAL replay warning: %s")
         | _ -> Log.diagnostic "fsdb: WAL replay warning (SchemaChangedAt): unexpected statement %A" stmt
     | TransactionCommitted events -> events |> List.iter (applyEventAt (depth + 1) store)
+    | XaPrepared(xid, validateWholeSnapshot, events) ->
+        let baseCatalog = store.Catalog
+        let snapshot = beginTransactionSnapshotFromCatalog store baseCatalog
+        events |> List.iter (applyEventAt (depth + 1) snapshot)
+
+        store.PreparedXas.[xid] <-
+            { BaseCatalog = baseCatalog
+              Catalog = snapshot.Catalog
+              Events = events
+              ValidateWholeSnapshot = validateWholeSnapshot
+              TransactionLocks = None }
+    | XaCommitted(xid, events) ->
+        events |> List.iter (applyEventAt (depth + 1) store)
+        store.PreparedXas.TryRemove xid |> ignore
+    | XaRolledBack xid -> store.PreparedXas.TryRemove xid |> ignore
 
 let private applyEvent (store: Store) (event: CommitEvent) : unit = applyEventAt 0 store event
 
@@ -1229,16 +1299,17 @@ let private writeSnapshotAndTruncate (dataDir: string) (catalog: Catalog) : unit
 let snapshotNow (dataDir: string) (store: Store) : unit =
     let dataDir = Path.GetFullPath dataDir
 
-    let checkpoint =
-        lock store.CommitLock (fun () ->
-            match store.Durability.Sink with
-            | Some sink when String.Equals(sink.DataDirectory, dataDir, StringComparison.Ordinal) ->
-                Some(sink.EnqueueCheckpoint())
-            | _ -> None)
+    if store.PreparedXas.IsEmpty then
+        let checkpoint =
+            lock store.CommitLock (fun () ->
+                match store.Durability.Sink with
+                | Some sink when String.Equals(sink.DataDirectory, dataDir, StringComparison.Ordinal) ->
+                    Some(sink.EnqueueCheckpoint())
+                | _ -> None)
 
-    match checkpoint with
-    | Some wait -> wait ()
-    | None -> lock store.Lock (fun () -> writeSnapshotAndTruncate dataDir store.Catalog)
+        match checkpoint with
+        | Some wait -> wait ()
+        | None -> lock store.Lock (fun () -> writeSnapshotAndTruncate dataDir store.Catalog)
 
 /// Loads a verified snapshot followed by its valid WAL prefix.
 let load (dataDir: string) : Store =
@@ -1314,9 +1385,15 @@ let attach (dataDir: string) (store: Store) : unit =
     setCatalog replica store.Catalog
     replica.ForeignKeyChecks <- false
 
-    let rotateFromReplica () =
-        reindexAllForReplay replica
-        writeSnapshotAndTruncate dataDir replica.Catalog
+    let tryRotateFromReplica () =
+        if replica.PreparedXas.IsEmpty then
+            reindexAllForReplay replica
+            writeSnapshotAndTruncate dataDir replica.Catalog
+            true
+        else
+            false
+
+    let rotateFromReplica () = tryRotateFromReplica () |> ignore
 
     let appendBatch (events: CommitEvent list) =
         let walSize =
@@ -1338,8 +1415,10 @@ let attach (dataDir: string) (store: Store) : unit =
 
         entryCount := !entryCount + events.Length
 
-        if walSize > Limits.walRotateBytes || !entryCount > Limits.walRotateEntries then
-            rotateFromReplica ()
+        if
+            (walSize > Limits.walRotateBytes || !entryCount > Limits.walRotateEntries)
+            && tryRotateFromReplica ()
+        then
             entryCount := 0
 
     let commits =

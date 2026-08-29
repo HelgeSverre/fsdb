@@ -1321,22 +1321,18 @@ type private DirtyTransactionView =
 let private dirtyTransactionViews =
     ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<int, DirtyTransactionView>>()
 
-type private XaEntry =
-    | Associated of connectionId: int
-    | PreparedBranch of Transaction
-
 let private xaTransactions =
-    ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<Xa.Xid, XaEntry>>()
+    ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<Xa.Xid, int>>()
 
 let private xaEntries (store: Store) =
-    xaTransactions.GetValue(store.Databases, fun _ -> ConcurrentDictionary<Xa.Xid, XaEntry>())
+    xaTransactions.GetValue(store.Databases, fun _ -> ConcurrentDictionary<Xa.Xid, int>())
 
 let private removeXaAssociation (session: Session) xid =
     let entries = xaEntries session.Store
 
     lock entries (fun () ->
         match entries.TryGetValue xid with
-        | true, Associated owner when owner = session.ConnectionId -> entries.TryRemove xid |> ignore
+        | true, owner when owner = session.ConnectionId -> entries.TryRemove xid |> ignore
         | _ -> ())
 
 let private transactionViews (store: Store) =
@@ -1513,10 +1509,15 @@ let private startXa xid session =
         let entries = xaEntries session.Store
 
         lock entries (fun () ->
-            if entries.Keys |> Seq.exists (Xa.sameBranch xid) then
+            let duplicate =
+                entries.Keys |> Seq.exists (Xa.sameBranch xid)
+                || Storage.preparedXas session.Store
+                   |> List.exists (fst >> Xa.sameBranch xid)
+
+            if duplicate then
                 session, Err(1440, "XAER_DUPID: The XID already exists")
             else
-                entries.[xid] <- Associated session.ConnectionId
+                entries.[xid] <- session.ConnectionId
                 let started = beginTransaction false session
 
                 match started.Tx with
@@ -1535,42 +1536,30 @@ let private endXa xid session =
 let private prepareXa xid session =
     match session.Tx, xaAssociation session with
     | Some transaction, Some(current, Idle) when current = xid ->
-        let entries = xaEntries session.Store
+        let validateWholeSnapshot = transaction.Isolation = Serializable
 
-        lock entries (fun () -> entries.[xid] <- PreparedBranch transaction)
-        removeTransactionView session
-        { session with Tx = None; Cursors = Map.empty }, Affected 0UL
+        if Storage.prepareXa session.Store xid validateWholeSnapshot transaction.BaseCatalog transaction.Snapshot then
+            removeXaAssociation session xid
+            removeTransactionView session
+            { session with Tx = None; Cursors = Map.empty }, Affected 0UL
+        else
+            session, Err(1440, "XAER_DUPID: The XID already exists")
     | _, Some(current, _) when current <> xid -> session, xaUnknown
     | _, Some(_, state) -> session, xaRmFail (xaStateName state)
     | _ -> session, xaRmFail "NON-EXISTING"
 
 let private completePreparedXa commit xid session =
-    let entries = xaEntries session.Store
-
-    let prepared =
-        lock entries (fun () ->
-            match entries.TryGetValue xid with
-            | true, PreparedBranch transaction ->
-                entries.TryRemove xid |> ignore
-                Some transaction
-            | _ -> None)
-
-    match prepared with
-    | None -> session, xaUnknown
-    | Some transaction ->
-        try
-            if commit then
-                publishTransaction session transaction
-            else
-                if transaction.Seeded then
-                    Storage.bumpAutoIncrementsInto session.Store transaction.Snapshot.Catalog
-
-                Storage.releaseTransactionLocks transaction.Snapshot
-
+    if commit then
+        if Storage.commitPreparedXaWithTimeout (lockWaitTimeout session) session.Store xid then
             session, Affected 0UL
-        with error ->
-            lock entries (fun () -> entries.TryAdd(xid, PreparedBranch transaction) |> ignore)
-            raise error
+        else
+            session, xaUnknown
+    else
+        match Storage.rollbackPreparedXa session.Store xid with
+        | Some prepared ->
+            Storage.bumpAutoIncrementsInto session.Store prepared.Catalog
+            session, Affected 0UL
+        | None -> session, xaUnknown
 
 let private commitXa xid onePhase session =
     match session.Tx, xaAssociation session with
@@ -1599,13 +1588,12 @@ let private rollbackXa xid session =
     | _ -> completePreparedXa false xid session
 
 let private recoverXa convertXid session =
-    let rows =
-        xaEntries session.Store
-        |> Seq.choose (fun entry ->
-            match entry.Value with
-            | Associated _ -> None
-            | PreparedBranch _ ->
-                let xid = entry.Key
+    if not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER") then
+        session, Err(1227, "Access denied; you need (at least one of) the XA_RECOVER_ADMIN privilege(s) for this operation")
+    else
+        let rows =
+            Storage.preparedXas session.Store
+            |> Seq.map (fun (xid, _) ->
                 let bytes = Xa.data xid
                 let data =
                     if convertXid then
@@ -1613,15 +1601,14 @@ let private recoverXa convertXid session =
                     else
                         Text.Encoding.Latin1.GetString bytes
 
-                Some
-                    [ Some(string xid.FormatId)
-                      Some(string xid.GlobalId.Length)
-                      Some(string xid.BranchQualifier.Length)
-                      Some data ])
-        |> Seq.sortBy (fun row -> row.[3])
-        |> List.ofSeq
+                [ Some(string xid.FormatId)
+                  Some(string xid.GlobalId.Length)
+                  Some(string xid.BranchQualifier.Length)
+                  Some data ])
+            |> Seq.sortBy (fun row -> row.[3])
+            |> List.ofSeq
 
-    session, ResultSet([ "formatID"; "gtrid_length"; "bqual_length"; "data" ], rows)
+        session, ResultSet([ "formatID"; "gtrid_length"; "bqual_length"; "data" ], rows)
 
 let private runXa (parserOptions: Parser.ParserOptions) (session: Session) sql =
     let charset =
@@ -2297,7 +2284,9 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
     let usesTemporary = action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt
 
     let executed, result =
-        if usesTemporary then
+        if usesTemporary && xaAssociation session |> Option.isSome then
+            session, Err(4091, "XA: Temporary tables cannot be accessed inside XA transactions when xa_detach_on_prepare=ON")
+        elif usesTemporary then
             executeWithTemporaryCatalog action session stmt
         elif causesImplicitCommit stmt && xaAssociation session |> Option.isSome then
             let state = xaAssociation session |> Option.map (snd >> xaStateName) |> Option.defaultValue "NON-EXISTING"
@@ -2468,6 +2457,19 @@ type private Probe =
     | FlushLogs
     | LockTables
     | UnlockTables
+
+let private probeCausesImplicitCommit = function
+    | SetPassword _
+    | MaintainTables _
+    | AlterKeysNoop _
+    | FlushPrivileges
+    | FlushUserResources
+    | FlushStatus
+    | FlushTables
+    | FlushLogs
+    | LockTables
+    | UnlockTables -> true
+    | _ -> false
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -5334,11 +5336,13 @@ and private dispatchNormalized session rawSql parserOptions sql =
         | Ok(Some diagnostics) -> runTextDiagnostics session diagnostics
         | Ok None ->
             match Event.tryCommand parserOptions (validEventBody parserOptions) sql with
+            | Some _ when xaAssociation session |> Option.isSome -> session, xaRmFail "ACTIVE"
             | Some command -> runTextEvent (commitSession session) command
             | None ->
                 match tryTextRoutineCommand sql with
                 | Some(CallProcedure _ as command) ->
                     withStoredFunctionRegistry session (fun current -> runTextRoutine current command)
+                | Some _ when xaAssociation session |> Option.isSome -> session, xaRmFail "ACTIVE"
                 | Some command -> runTextRoutine (commitSession session) command
                 | None ->
                     match tryTextPreparedCommand sql with
@@ -5351,6 +5355,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         session, syntaxError sql
                     | Ok None ->
                         match tryProbe sql with
+                        | Some probe when probeCausesImplicitCommit probe && xaAssociation session |> Option.isSome ->
+                            session, xaRmFail "ACTIVE"
                         | Some probe ->
                             // Probe results contain rendered strings rather than
                             // values from which descriptors can be inferred.
