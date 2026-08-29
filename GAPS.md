@@ -39,8 +39,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Deadlock victim selection and remaining coarse write shapes |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
-| Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound condition-handling bodies | Complex views, procedure calls, and multi-table DML firing |
-| Routines & events | Typed procedures, read-only stored functions, and persisted definer-context event scheduling | Data-changing stored functions and procedure calls from triggers |
+| Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound condition-handling bodies with procedure calls | Complex views and multi-table DML firing |
+| Routines & events | Typed procedures, trigger-invoked procedure calls, read-only stored functions, and persisted definer-context event scheduling | Data-changing stored functions |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
@@ -311,7 +311,8 @@ Triggers working: ordered multiple BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH
 ROW triggers with OLD/NEW row images, BEFORE SET NEW assignments,
 FOLLOWS/PRECEDES, and `BEGIN ... END` sequences of DML, local declarations and
 assignments, nested IF/ELSEIF/ELSE and CASE branches, labeled blocks, WHILE,
-REPEAT, and LOOP statements with LEAVE/ITERATE, and SET NEW statements;
+REPEAT, and LOOP statements with LEAVE/ITERATE, SET NEW statements, and nested
+procedure calls with typed local or user-variable output targets;
 statement atomicity and 1442 cycle/self-write detection,
 definer-based privilege checks per fire, lifecycle maintenance, and SHOW
 TRIGGERS/I_S.TRIGGERS metadata. The creation-time SQL mode, client charset,
@@ -325,7 +326,6 @@ trigger is created.
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 | VIEW_DEFINITION rendering | fully-qualified canonical expression text | SHOW CREATE VIEW renders the stored declaration envelope, but its SELECT body and I_S.VIEWS.VIEW_DEFINITION retain the user's original text | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table INSERT/UPDATE/DELETE/REPLACE fire their row timings atomically; multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
-| Compound trigger language | BEGIN…END with variables, conditions, handlers, cursors, procedure calls, and control flow | ordered DML, local DECLARE/SET, read-only cursors, scalar-subquery assignment, condition handlers, SIGNAL/RESIGNAL, branches, labeled loops, LEAVE/ITERATE, and SET NEW are covered; calls to stored procedures remain absent | medium | refusal |
 
 ## 10. Stored routines, events, schedulers
 
@@ -536,9 +536,9 @@ implementation effort:
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements
    wait and rebase, but deadlock victim selection and the remaining transaction
    write shapes are not implemented.
-3. Complex join-derived updatable views, data-changing stored functions, and procedure calls
-   from triggers. Procedures cover nested calls with local OUT/INOUT targets;
-   procedures and triggers cover typed locals, condition handlers,
+3. Complex join-derived updatable views and data-changing stored functions.
+   Procedures and triggers cover nested calls with local OUT/INOUT targets,
+   typed locals, condition handlers,
    SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential statements.
 4. Spatial indexes, overlay/buffer operations, and geographic SRS behavior.
    The common planar topology family includes equality and convex hull.

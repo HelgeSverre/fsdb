@@ -192,8 +192,9 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
   timing/event slot.
 - Bodies accept one statement or a `BEGIN ... END` sequence of `INSERT`,
   `REPLACE`, `UPDATE`, `DELETE`, local `DECLARE`/`SET`, nested
-  `IF`/`ELSEIF`/`ELSE`, and `SET NEW` statements. Local assignments may read a
-  scalar subquery.
+  `IF`/`ELSEIF`/`ELSE`, `CALL`, and `SET NEW` statements. Local assignments
+  may read a scalar subquery. Procedure calls support nested calls and typed
+  local or user-variable `OUT`/`INOUT` targets.
 - `OLD.column` and `NEW.column` bind the applicable row images. A `BEFORE`
   trigger may assign `NEW.column`; generated columns cannot be referenced.
 - Multi-row statements fire once per affected row. Ignored candidates do not
@@ -202,8 +203,12 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
 - The source write and every trigger effect are one atomic statement. A body
   error rolls all of them back, and effects participate normally in explicit
   transaction commit or rollback.
-- Trigger writes may fire another table's trigger. Cycles and self-writes
-  return error 1442; long acyclic chains continue normally.
+- Trigger and called-procedure writes may fire another table's trigger. Their
+  dependencies enter the invoking statement's lock plan; cycles and
+  self-writes return error 1442, while long acyclic chains continue normally.
+- Procedures cannot return result sets from a trigger, and dynamic SQL in a
+  trigger call chain is rejected with the corresponding MySQL errors. Either
+  failure rolls back the source row and all preceding body effects.
 - Bodies run after a definer-privilege check, reject DirectOnly extension
   functions, persist through the ordinary WAL/snapshot path, and appear in
   `SHOW TRIGGERS` and `information_schema.TRIGGERS`.
@@ -211,9 +216,9 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
   table or its database removes the stored trigger definition.
 
 `REPLACE` fires BEFORE INSERT, each conflicting row's DELETE pair, and AFTER
-INSERT in row order; every phase rolls back together on failure. Remaining
-trigger gaps are procedure calls and multi-table DML firing. Compound bodies
-support CASE and labeled loops, scoped conditions, read-only cursors, handlers,
+INSERT in row order; every phase rolls back together on failure. Multi-table
+UPDATE/DELETE firing remains unsupported. Compound bodies support CASE and
+labeled loops, scoped conditions, read-only cursors, handlers,
 SIGNAL/RESIGNAL, and GET CURRENT/STACKED DIAGNOSTICS. The full MySQL surface is
 documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
