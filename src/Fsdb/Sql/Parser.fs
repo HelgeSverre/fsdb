@@ -3123,21 +3123,6 @@ let private withClause: Parser<CommonTableExpr list, unit> =
                    Body = body })
             (sym ",")
 
-/// Reduces any number of parentheses around one `SELECT` to its `SelectStmt`.
-/// UNION branches and top-level SELECTs share this parser.
-let private parenSelect, parenSelectRef = createParserForwardedToRef<SelectStmt, unit> ()
-parenSelectRef.Value <-
-    attempt (sym "(" >>. parenSelect .>> sym ")")
-    <|> (withClause .>>. selectStmtRecord |>> fun (ctes, select) -> { select with Ctes = ctes })
-    <|> selectStmtRecord
-
-/// `parenSelect`, paired with whether this particular branch was actually
-/// wrapped in parens — `selectOrUnionBranches` needs that to decide whose
-/// `ORDER BY`/`LIMIT` a union's final branch contributes (see its doc).
-let private parenSelectFlag: Parser<SelectStmt * bool, unit> =
-    (attempt (sym "(" >>. parenSelect .>> sym ")") |>> fun s -> s, true)
-    <|> (selectStmtRecord |>> fun s -> s, false)
-
 /// `UNION`/`INTERSECT`/`EXCEPT`, each `[ALL|DISTINCT]`, between two
 /// `SELECT`s — `ALL` keeps duplicates, the bare operator (or an explicit
 /// `DISTINCT`) dedupes, matching MySQL's default for all three. Precedence
@@ -3153,22 +3138,42 @@ let private unionOp: Parser<SetOp, unit> =
 /// One `SELECT`, or a `UNION`-chained sequence of them — shared between a
 /// top-level statement (`selectOrUnionStmt`) and a derived table's body
 /// (`derivedTable`), since MySQL allows `UNION` in both places and each
-/// branch may be individually parenthesized (`parenSelectFlag`).
+/// branch may be individually parenthesized (`parenthesizedSetBranch`).
 let private selectOrUnionBranches, selectOrUnionBranchesRef =
     createParserForwardedToRef<(SelectStmt * bool) * (SetOp * (SelectStmt * bool)) list, unit> ()
+
+let private expressionSelect =
+    function
+    | PlainSelect select -> select
+    | (UnionSelect _ as body) ->
+        { Projections = [ Star None, None ]
+          IntoVariables = []
+          Distinct = false
+          CalculateFoundRows = false
+          StraightJoin = false
+          From = Some(FromLateral(body, "__fsdb_set_expression"))
+          Joins = []
+          Where = None
+          GroupBy = []
+          Rollup = false
+          Windows = []
+          Ctes = []
+          Having = None
+          OrderBy = []
+          Limit = None
+          Offset = None
+          Locking = [] }
+
+let private parenthesizedSetBranch: Parser<SelectStmt * bool, unit> =
+    attempt (sym "(" >>. selectQuery .>> sym ")")
+    |>> fun body -> expressionSelect body, true
 
 /// A whole set operation wrapped in one more layer of parens and standing on
 /// its own — `((SELECT ...) EXCEPT ALL (SELECT ...)) ORDER BY x`, the shape a
 /// set operation with a trailing `ORDER BY` has to be written in. The group's
-/// branches splice straight into the enclosing list, which is only sound
-/// while nothing follows the group: `(A UNION B) INTERSECT C` would flatten
-/// into `A UNION B INTERSECT C`, and INTERSECT's tighter binding (see
-/// `Ast.SetOp`) then regroups it wrongly. `notFollowedBy unionOp` is what
-/// keeps that case out — it falls through and fails the parse rather than
-/// answering the wrong grouping.
-///
-/// A nested set-expression tree in `Ast` is the upgrade path
-/// if a workload ever writes an operator after a parenthesized group.
+/// branches splice straight into the enclosing list only while nothing
+/// follows the group. When another set operator follows, `parenthesizedSetBranch`
+/// keeps the group atomic through the existing derived-set representation.
 let private parenSetGroup: Parser<(SelectStmt * bool) * (SetOp * (SelectStmt * bool)) list, unit> =
     attempt (
         sym "("
@@ -3182,9 +3187,13 @@ let private parenSetGroup: Parser<(SelectStmt * bool) * (SetOp * (SelectStmt * b
         .>> notFollowedBy unionOp
     )
 
+let private setBranch =
+    parenthesizedSetBranch
+    <|> (selectStmtRecord |>> fun select -> select, false)
+
 selectOrUnionBranchesRef.Value <-
     parenSetGroup
-    <|> (parenSelectFlag .>>. many (unionOp .>>. parenSelectFlag))
+    <|> (setBranch .>>. many (unionOp .>>. setBranch))
 
 /// A trailing union-level `ORDER BY`/`LIMIT`, tried only once at least one
 /// `UNION` branch has parsed — what `MySqlGrammar::compileUnionOrders`/
@@ -3605,28 +3614,6 @@ selectQueryRef.Value <-
         match rest with
         | [] -> preturn (PlainSelect(fst first))
         | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect
-
-let private expressionSelect =
-    function
-    | PlainSelect select -> select
-    | (UnionSelect _ as body) ->
-        { Projections = [ Star None, None ]
-          IntoVariables = []
-          Distinct = false
-          CalculateFoundRows = false
-          StraightJoin = false
-          From = Some(FromLateral(body, "__fsdb_set_expression"))
-          Joins = []
-          Where = None
-          GroupBy = []
-          Rollup = false
-          Windows = []
-          Ctes = []
-          Having = None
-          OrderBy = []
-          Limit = None
-          Offset = None
-          Locking = [] }
 
 selectWithCtesRef.Value <-
     selectQuery |>> expressionSelect

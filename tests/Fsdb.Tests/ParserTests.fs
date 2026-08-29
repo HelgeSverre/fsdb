@@ -2679,6 +2679,16 @@ let tests =
                     | Union(_, [ (OpUnion false, _) ], _, _, _) -> ()
                     | other -> failtestf "expected a two-branch Union, got %A" other
 
+                testCase "parenthesized set-operation groups remain atomic operands"
+                <| fun _ ->
+                    match parseOk "(SELECT a FROM t UNION SELECT a FROM u) INTERSECT SELECT a FROM v" with
+                    | Union({ From = Some(FromLateral(UnionSelect(_, [ (OpUnion false, _) ], _, _, _), _)) }, [ (OpIntersect false, _) ], _, _, _) -> ()
+                    | other -> failtestf "expected an atomic left-hand UNION group, got %A" other
+
+                    match parseOk "SELECT a FROM t INTERSECT (SELECT a FROM u UNION SELECT a FROM v)" with
+                    | Union(_, [ (OpIntersect false, { From = Some(FromLateral(UnionSelect(_, [ (OpUnion false, _) ], _, _, _), _)) }) ], _, _, _) -> ()
+                    | other -> failtestf "expected an atomic right-hand UNION group, got %A" other
+
                 testCase "FROM ((SELECT ...) UNION (SELECT ...)) AS alias — a UNION as a derived table"
                 <| fun _ ->
                     // Laravel's `unionAll(...)->paginate()` compiles to exactly

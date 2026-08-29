@@ -59,6 +59,7 @@ module SyntaxFuzz =
            "set_scalar_subquery", "SELECT (SELECT 1 UNION SELECT 1)"
            "set_exists_subquery", "SELECT EXISTS (SELECT 1 UNION ALL SELECT 2)"
            "set_in_subquery", "SELECT 2 IN (SELECT 1 UNION ALL SELECT 2)"
+           "set_group_precedence", "(SELECT 1 AS n UNION SELECT 2) INTERSECT SELECT 2 ORDER BY n"
            "planned_join",
            "SELECT t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1 ORDER BY t.id"
            "straight_join",

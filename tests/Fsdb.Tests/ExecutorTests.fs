@@ -7124,11 +7124,22 @@ let tests =
                     // fold would intersect {1,2} with {3} and answer nothing.
                     expectIds "SELECT 1 UNION SELECT 2 INTERSECT SELECT 3" [ "1" ]
 
-                testCase "a set operator after a parenthesized group is refused, not misgrouped"
+                testCase "parenthesized set groups override precedence"
                 <| fun _ ->
-                    match Fsdb.Parser.parse "(SELECT 1 UNION SELECT 2) INTERSECT SELECT 2" with
-                    | Result.Error _ -> ()
-                    | Result.Ok other -> failtestf "expected a parse refusal, got %A" other
+                    expectIds "(SELECT 1 AS id UNION SELECT 2) INTERSECT SELECT 2 ORDER BY id" [ "2" ]
+                    expectIds "SELECT 1 AS id INTERSECT (SELECT 1 UNION SELECT 2) ORDER BY id" [ "1" ]
+
+                    expectIds
+                        "((SELECT 1 AS id UNION SELECT 2) INTERSECT (SELECT 2 UNION SELECT 3)) UNION SELECT 4 ORDER BY id"
+                        [ "2"; "4" ]
+
+                    expectIds "(SELECT 2 AS id UNION SELECT 1 ORDER BY id LIMIT 1) UNION SELECT 3 ORDER BY id" [ "1"; "3" ]
+
+                    expectIds
+                        "SELECT id FROM ((SELECT 1 AS id UNION SELECT 2) INTERSECT SELECT 2) AS grouped"
+                        [ "2" ]
+
+                    expectIds "SELECT ((SELECT 1 UNION SELECT 2) INTERSECT SELECT 2)" [ "2" ]
 
                 testCase "VALUES ROW(...) is a table, joinable, with column_N default names"
                 <| fun _ ->

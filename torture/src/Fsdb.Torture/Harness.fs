@@ -1148,6 +1148,8 @@ module ScenarioProbes =
                "(SELECT id FROM scalar_matrix WHERE id <= 20) INTERSECT (SELECT id FROM scalar_matrix WHERE id >= 15) ORDER BY id"
                "except_set_operation",
                "(SELECT id FROM scalar_matrix WHERE id <= 20) EXCEPT (SELECT id FROM scalar_matrix WHERE id MOD 2 = 0) ORDER BY id"
+               "parenthesized_set_group_precedence",
+               "(SELECT id FROM scalar_matrix WHERE id <= 20 UNION SELECT id FROM scalar_matrix WHERE id >= 90) INTERSECT SELECT id FROM scalar_matrix WHERE id BETWEEN 15 AND 95 ORDER BY id"
 
                // ICU regexp builtins including the match-type flag argument.
                "regexp_replace_substr_instr",
