@@ -158,6 +158,140 @@ let tests =
 
               Expect.equal (rows store "SELECT COUNT(*) FROM procedure_source") [ [ Some "0" ] ] "self-write failure rolls back"
 
+          testCase "multi-table UPDATE fires each changed table's triggers"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              session <- step session "CREATE TABLE multi_update_a (id INT PRIMARY KEY, n INT)"
+              session <- step session "CREATE TABLE multi_update_b (id INT PRIMARY KEY, a_id INT, n INT)"
+              session <- step session "CREATE TABLE multi_update_audit (tag VARCHAR(10), id INT, old_n INT, new_n INT)"
+              session <- step session "INSERT INTO multi_update_a VALUES (1, 10)"
+              session <- step session "INSERT INTO multi_update_b VALUES (2, 1, 100)"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER multi_a_before BEFORE UPDATE ON multi_update_a FOR EACH ROW BEGIN INSERT INTO multi_update_audit VALUES ('a_before', OLD.id, OLD.n, NEW.n); SET NEW.n = NEW.n + 10; END"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER multi_a_after AFTER UPDATE ON multi_update_a FOR EACH ROW INSERT INTO multi_update_audit VALUES ('a_after', OLD.id, OLD.n, NEW.n)"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER multi_b_before BEFORE UPDATE ON multi_update_b FOR EACH ROW BEGIN INSERT INTO multi_update_audit VALUES ('b_before', OLD.id, OLD.n, NEW.n); SET NEW.n = NEW.n + 20; END"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER multi_b_after AFTER UPDATE ON multi_update_b FOR EACH ROW INSERT INTO multi_update_audit VALUES ('b_after', OLD.id, OLD.n, NEW.n)"
+
+              match
+                  handle
+                      session
+                      "UPDATE multi_update_a AS a JOIN multi_update_b AS b ON b.a_id = a.id SET a.n = a.n + 1, b.n = b.n + 2"
+                  |> snd
+              with
+              | Affected 2UL -> ()
+              | other -> failtestf "expected two changed physical rows, got %A" other
+
+              Expect.equal (rows store "SELECT n FROM multi_update_a") [ [ Some "21" ] ] "first target BEFORE value"
+              Expect.equal (rows store "SELECT n FROM multi_update_b") [ [ Some "122" ] ] "second target BEFORE value"
+
+              Expect.equal
+                  (rows store "SELECT tag, old_n, new_n FROM multi_update_audit ORDER BY tag")
+                  [ [ Some "a_after"; Some "10"; Some "21" ]
+                    [ Some "a_before"; Some "10"; Some "11" ]
+                    [ Some "b_after"; Some "100"; Some "122" ]
+                    [ Some "b_before"; Some "100"; Some "102" ] ]
+                  "each target's OLD and NEW images"
+
+              session <- step session "DROP TRIGGER multi_a_after"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER multi_a_after AFTER UPDATE ON multi_update_a FOR EACH ROW UPDATE multi_update_b SET n = n + 1 WHERE a_id = NEW.id"
+
+              match
+                  handle
+                      session
+                      "UPDATE multi_update_a AS a JOIN multi_update_b AS b ON b.a_id = a.id SET a.n = a.n + 1, b.n = b.n + 1"
+                  |> snd
+              with
+              | Err(1442, message) -> Expect.stringContains message "multi_update_b" "all statement targets are protected"
+              | other -> failtestf "expected protected target refusal, got %A" other
+
+              Expect.equal (rows store "SELECT n FROM multi_update_a") [ [ Some "21" ] ] "failed statement restores first target"
+              Expect.equal (rows store "SELECT n FROM multi_update_b") [ [ Some "122" ] ] "failed statement restores second target"
+              Expect.equal (rows store "SELECT COUNT(*) FROM multi_update_audit") [ [ Some "4" ] ] "failed trigger effects roll back"
+
+          testCase "multi-table DELETE fires triggers and rolls every target back on failure"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              session <- step session "CREATE TABLE multi_delete_a (id INT PRIMARY KEY)"
+              session <- step session "CREATE TABLE multi_delete_b (id INT PRIMARY KEY, a_id INT)"
+              session <- step session "CREATE TABLE multi_delete_audit (tag VARCHAR(10), id INT)"
+              session <- step session "INSERT INTO multi_delete_a VALUES (1), (2)"
+              session <- step session "INSERT INTO multi_delete_b VALUES (10, 1), (20, 2)"
+              session <- step session "CREATE TRIGGER multi_a_delete AFTER DELETE ON multi_delete_a FOR EACH ROW INSERT INTO multi_delete_audit VALUES ('a_after', OLD.id)"
+              session <- step session "CREATE TRIGGER multi_b_delete AFTER DELETE ON multi_delete_b FOR EACH ROW INSERT INTO multi_delete_audit VALUES ('b_after', OLD.id)"
+
+              match
+                  handle session "DELETE a, b FROM multi_delete_a AS a JOIN multi_delete_b AS b ON b.a_id = a.id WHERE a.id = 1"
+                  |> snd
+              with
+              | Affected 2UL -> ()
+              | other -> failtestf "expected two deleted physical rows, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT tag, id FROM multi_delete_audit ORDER BY tag")
+                  [ [ Some "a_after"; Some "1" ]; [ Some "b_after"; Some "10" ] ]
+                  "both targets fire"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER multi_b_before BEFORE DELETE ON multi_delete_b FOR EACH ROW BEGIN SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO = 60001, MESSAGE_TEXT = 'stop delete'; END"
+
+              match
+                  handle session "DELETE a, b FROM multi_delete_a AS a JOIN multi_delete_b AS b ON b.a_id = a.id WHERE a.id = 2"
+                  |> snd
+              with
+              | Err(60001, "stop delete") -> ()
+              | other -> failtestf "expected trigger signal, got %A" other
+
+              Expect.equal (rows store "SELECT id FROM multi_delete_a") [ [ Some "2" ] ] "first target restored"
+              Expect.equal (rows store "SELECT id FROM multi_delete_b") [ [ Some "20" ] ] "second target restored"
+              Expect.equal (rows store "SELECT COUNT(*) FROM multi_delete_audit") [ [ Some "2" ] ] "failed trigger effects rolled back"
+
+              session <- step session "DROP TRIGGER multi_b_before"
+              session <- step session "DROP TRIGGER multi_a_delete"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER multi_a_delete AFTER DELETE ON multi_delete_a FOR EACH ROW UPDATE multi_delete_b SET a_id = a_id WHERE a_id = OLD.id"
+
+              match
+                  handle session "DELETE a FROM multi_delete_a AS a JOIN multi_delete_b AS b ON b.a_id = a.id WHERE a.id = 999"
+                  |> snd
+              with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected unmatched delete to skip triggers, got %A" other
+
+              match
+                  handle session "DELETE a FROM multi_delete_a AS a JOIN multi_delete_b AS b ON b.a_id = a.id WHERE a.id = 2"
+                  |> snd
+              with
+              | Err(1442, message) -> Expect.stringContains message "multi_delete_b" "joined tables are protected"
+              | other -> failtestf "expected joined-table refusal, got %A" other
+
+              Expect.equal (rows store "SELECT id FROM multi_delete_a") [ [ Some "2" ] ] "joined-table refusal restores delete"
+
           testCase "conditional trigger bodies execute only when their predicate is true"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
