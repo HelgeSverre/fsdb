@@ -312,7 +312,7 @@ path; passwords are mysql_native_password hashes verified at the handshake
 account locks, TLS requirements, explicit password lifetimes, the
 expired-password reset sandbox, and per-hour/per-connection resource limits
 are enforced;
-statements are privilege-checked at global, database, and table scope with
+statements are privilege-checked at global, database, table, and column scope with
 MySQL's 1045/1142/1044/1227 error shapes. `SHOW GRANTS [FOR user]`,
 `SHOW PRIVILEGES` (8.4's 73 rows), `information_schema.USER_PRIVILEGES`, and
 `FLUSH PRIVILEGES` (no-op OK) are served; `DROP DATABASE mysql` is 3552.
@@ -339,8 +339,8 @@ Deliberate divergences (each marked `ponytail:` at its code site):
   and CTEs. Text-probed account, process, database, and table metadata forms
   carry scoped checks; SET, USE, and server-wide SHOW forms remain outside
   the common privilege gate.
-- Column-level privileges, proxy users, auth-plugin selection,
-  password history/reuse/current policy, and a mutable global
+- Proxy users, auth-plugin selection, password history/reuse/current policy,
+  and a mutable global
   default password lifetime are absent. Thirteen of MySQL's roughly 38
   `mysql.*` tables exist, including fsdb's row-backed role/default-role,
   constraint, trigger, view, routine, function, and event catalogs.

@@ -574,6 +574,7 @@ let tests =
                           "role_metadata"
                           "role_revoke"
                           "dynamic_privilege"
+                          "column_privilege"
                           "locked_user"
                           "account_requirements"
                           "read_uncommitted"

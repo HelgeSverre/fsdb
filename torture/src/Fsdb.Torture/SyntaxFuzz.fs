@@ -128,6 +128,8 @@ module SyntaxFuzz =
            "activate_all_roles", "SET GLOBAL activate_all_roles_on_login = ON"
            "role_revoke", "REVOKE 'syntax_parent'@'%' FROM 'syntax_role_user'@'%'"
            "dynamic_privilege", "GRANT XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* TO 'syntax_dynamic'@'%' WITH GRANT OPTION"
+           "column_privilege",
+           "GRANT SELECT(id), INSERT(n), UPDATE(label), REFERENCES(id) ON syntax_target TO 'syntax_dynamic'@'%' WITH GRANT OPTION"
            "locked_user", sprintf "CREATE USER 'syntax_user_%s'@'%%' ACCOUNT LOCK" suffix
            "account_requirements",
            sprintf
@@ -206,6 +208,8 @@ module SyntaxFuzz =
         | "activate_all_roles" -> Some "SET GLOBAL activate_all_roles_on_login = OFF"
         | "role_revoke" -> Some "GRANT 'syntax_parent'@'%' TO 'syntax_role_user'@'%' WITH ADMIN OPTION"
         | "dynamic_privilege" -> Some "REVOKE XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* FROM 'syntax_dynamic'@'%'"
+        | "column_privilege" ->
+            Some "REVOKE SELECT(id), INSERT(n), UPDATE(label), REFERENCES(id) ON syntax_target FROM 'syntax_dynamic'@'%'"
         | "locked_user" -> Some(sprintf "DROP USER IF EXISTS 'syntax_user_%s'@'%%', 'syntax_user_%s'@''" suffix suffix)
         | "account_requirements" -> Some(sprintf "DROP USER IF EXISTS 'syntax_secure_%s'@'%%', 'syntax_secure_%s'@''" suffix suffix)
         | _ -> None
