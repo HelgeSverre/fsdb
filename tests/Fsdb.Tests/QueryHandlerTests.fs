@@ -1905,6 +1905,21 @@ let tests =
               | Err(1100, _) -> ()
               | other -> failtestf "expected a temporary-only lock list to restrict permanent tables, got %A" other
 
+          testCase "information schema remains accessible in explicit lock mode"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE information_schema_lock_target (id INT PRIMARY KEY)"
+              let session, _ = handle session "LOCK TABLES information_schema_lock_target READ"
+
+              match handle session "SELECT table_name FROM information_schema.tables WHERE table_name='information_schema_lock_target'" |> snd with
+              | ResultSet(_, [ [ Some "information_schema_lock_target" ] ]) -> ()
+              | other -> failtestf "expected INFORMATION_SCHEMA to remain readable, got %A" other
+
+              match handle session "SELECT user FROM mysql.user" |> snd with
+              | Err(1100, _) -> ()
+              | other -> failtestf "expected ordinary system tables to remain subject to the lock list, got %A" other
+
           testCase "view locks include base tables without exposing their names"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

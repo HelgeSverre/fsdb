@@ -545,6 +545,10 @@ let private isTemporary (catalog: Catalog) access =
     |> Map.tryFind (normalize access.Database)
     |> Option.exists (Map.containsKey (normalizeTableName access.Table))
 
+let private requiresOwnership temporaryCatalog access =
+    not (access.Database.Equals("information_schema", StringComparison.OrdinalIgnoreCase))
+    && not (isTemporary temporaryCatalog access)
+
 let accessesForStatement store temporaryCatalog defaultDb statement =
     let direct = directStatementAccesses defaultDb statement
     let represented = direct |> List.map (fun access -> tableKey access.Database access.Table) |> Set.ofList
@@ -554,7 +558,7 @@ let accessesForStatement store temporaryCatalog defaultDb statement =
         |> List.filter (fun access -> not (Set.contains (tableKey access.Database access.Table) represented))
 
     direct @ fallback
-    |> List.filter (isTemporary temporaryCatalog >> not)
+    |> List.filter (requiresOwnership temporaryCatalog)
     |> mergeAccesses
     |> expandDependencies store
 
