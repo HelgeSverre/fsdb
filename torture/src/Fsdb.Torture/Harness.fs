@@ -195,6 +195,20 @@ module CommitEvents =
             sprintf "schema_changed db=%s statement=%s create_time=%s" db (AstKind.ofStatement statement) (createTime.ToString("O", CultureInfo.InvariantCulture))
         | TransactionCommitted events ->
             sprintf "transaction_committed count=%d hash=%s" events.Length (events |> Seq.map summarize |> Hashing.combine)
+        | XaPrepared(xid, validateWholeSnapshot, events) ->
+            sprintf
+                "xa_prepared format=%u snapshot=%b count=%d hash=%s"
+                xid.FormatId
+                validateWholeSnapshot
+                events.Length
+                (events |> Seq.map summarize |> Hashing.combine)
+        | XaCommitted(xid, events) ->
+            sprintf
+                "xa_committed format=%u count=%d hash=%s"
+                xid.FormatId
+                events.Length
+                (events |> Seq.map summarize |> Hashing.combine)
+        | XaRolledBack xid -> sprintf "xa_rolled_back format=%u" xid.FormatId
 
 type FsdbSubject(?captureEvents: bool) =
     let store = Fsdb.Storage.create ()

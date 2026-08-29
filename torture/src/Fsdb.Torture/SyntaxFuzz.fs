@@ -365,7 +365,7 @@ module SyntaxFuzz =
         let mutations =
             seedStatements
             |> Array.collect (fun (feature, sql) ->
-                mutationTrees depth sql
+                (if feature = "xa_start" then Seq.empty else mutationTrees depth sql)
                 |> Seq.distinctBy snd
                 |> Seq.map (fun (path, mutated) ->
                     let mutation = String.concat "+" path

@@ -467,6 +467,7 @@ let tests =
                           "table_lock"
                           "commented_table_lock"
                           "handler_open"
+                          "xa_start"
                           "stored_procedure"
                           "procedure_parameter"
                           "procedure_compound"
@@ -480,6 +481,12 @@ let tests =
                              |> Array.filter (fun candidate -> candidate.Feature = feature)
                              |> Array.forall (fun candidate -> candidate.CleanupSql.IsSome))
                             feature
+
+                    Expect.isTrue
+                        (candidates
+                         |> Array.filter (fun candidate -> candidate.Feature = "xa_start")
+                         |> Array.forall _.Baseline)
+                        "stateful XA START is exercised only as a baseline"
 
                     let accountCleanup =
                         candidates
