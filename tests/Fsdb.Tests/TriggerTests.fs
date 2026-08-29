@@ -95,6 +95,32 @@ let tests =
 
               Expect.equal (Map.tryFind "trigger_output" executed.UserVariables) (Some(VInt 18L)) "OUT variable"
 
+              let prepared =
+                  match prepareStatementForSession executed "INSERT INTO procedure_source VALUES (?, ?)" with
+                  | Ok(Some ast, 2) ->
+                      let statement: Fsdb.Session.PreparedStmt =
+                          { Ast = Some ast
+                            Sql = "INSERT INTO procedure_source VALUES (?, ?)"
+                            ParamCount = 2
+                            LastParamTypes = None }
+
+                      let prepared, result = executePrepared executed statement [ VInt 2L; VInt 11L ]
+                      expectOk result "prepared trigger procedure call"
+                      Expect.equal (Map.tryFind "trigger_output" prepared.UserVariables) (Some(VInt 22L)) "prepared OUT variable"
+                      prepared
+                  | other -> failtestf "expected prepared trigger insert, got %A" other
+
+              session <- step prepared "CREATE TABLE local_output_source (id INT PRIMARY KEY, n INT)"
+              session <- step session "CREATE PROCEDURE double_value(IN value INT, OUT doubled INT) SET doubled = value * 2"
+
+              session <-
+                  step
+                      session
+                      "CREATE TRIGGER local_output BEFORE INSERT ON local_output_source FOR EACH ROW BEGIN DECLARE doubled INT; CALL double_value(NEW.n, doubled); SET NEW.n = doubled; END"
+
+              session <- step session "INSERT INTO local_output_source VALUES (1, 7)"
+              Expect.equal (rows store "SELECT n FROM local_output_source") [ [ Some "14" ] ] "typed local OUT target"
+
           testCase "trigger procedure resultsets and dynamic SQL fail atomically"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -122,6 +148,15 @@ let tests =
               | other -> failtestf "expected trigger dynamic SQL refusal, got %A" other
 
               Expect.equal (rows store "SELECT COUNT(*) FROM procedure_source") [ [ Some "0" ] ] "dynamic SQL failure rolls back"
+              session <- step session "DROP TRIGGER dynamic_trigger"
+              session <- step session "CREATE PROCEDURE mutate_source(IN value INT) UPDATE procedure_source SET id = value"
+              session <- step session "CREATE TRIGGER self_write AFTER INSERT ON procedure_source FOR EACH ROW CALL mutate_source(NEW.id)"
+
+              match handle session "INSERT INTO procedure_source VALUES (3)" |> snd with
+              | Err(1442, message) -> Expect.stringContains message "procedure_source" "protected table named"
+              | other -> failtestf "expected trigger self-write refusal, got %A" other
+
+              Expect.equal (rows store "SELECT COUNT(*) FROM procedure_source") [ [ Some "0" ] ] "self-write failure rolls back"
 
           testCase "conditional trigger bodies execute only when their predicate is true"
           <| fun _ ->

@@ -60,6 +60,14 @@ type RoutineVariable =
     { Column: ColumnDef
       Value: Value }
 
+type internal TriggerTextExecution =
+    { TriggerStore: Store
+      TriggerRegistry: Registry
+      TriggerDatabase: string
+      TriggerAccount: Auth.Account
+      TriggerProtectedTables: Set<string * string>
+      TriggerUserVariables: Map<string, Value> ref }
+
 type private TriggerRowScope =
     { Columns: ColumnDef list
       Old: Value[] option
@@ -181,6 +189,7 @@ let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
+let private triggerTextExecutor = System.Threading.AsyncLocal<(TriggerTextExecution -> string -> QueryResult) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
@@ -201,6 +210,9 @@ let currentRoutineVariables () = routineVariables.Value |> Option.map _.Value
 
 let replaceRoutineVariables variables =
     routineVariables.Value |> Option.iter (fun current -> current.Value <- variables)
+
+let internal withTriggerTextExecutor executor body =
+    DynamicScope.withValue triggerTextExecutor (Some executor) body
 
 let private currentVariableContext () = variableContext.Value
 
@@ -12777,16 +12789,16 @@ let rec executeAs
                 // transaction the way an escaped exception would.
                 let runBody (oldRow: Value[] option) (newRow: Value[] option) (statements: TriggerStatement list, account: Auth.Account) : QueryResult =
                     let definerRegistry = registryForDefiner account shadowed
-                    let locals = ref Map.empty<string, Value>
+                    let locals = ref Map.empty<string, RoutineVariable>
                     let cursors = ref Map.empty<string, StoredProgram.Cursor>
                     let currentDiagnostics: StoredProgram.DiagnosticsSnapshot ref =
                         ref
                             { Conditions = []
                               RowCount = 0L }
 
-                    let localColumn name =
+                    let localColumn name columnType =
                         { Name = name
-                          Type = TText
+                          Type = columnType
                           NumericDisplay = None
                           Nullable = true
                           Default = None
@@ -12801,15 +12813,18 @@ let rec executeAs
 
                     let localContext () =
                         let bindings = locals.Value |> Map.toList
-                        let columns = bindings |> List.map (fst >> localColumn)
-                        let values = bindings |> List.map snd |> Array.ofList
+                        let columns = bindings |> List.map (snd >> _.Column)
+                        let values = bindings |> List.map (snd >> _.Value) |> Array.ofList
                         contextFactory runStore definerRegistry db (columnIndexOf columns) Map.empty None values
 
-                    let localVariables () =
-                        locals.Value
-                        |> Map.map (fun name value ->
-                            { Column = localColumn name
-                              Value = value })
+                    let setLocal name value =
+                        match Map.tryFind name locals.Value with
+                        | None -> Error(Err(1327, sprintf "Undeclared variable: %s" name))
+                        | Some local ->
+                            coerceValue runStore.ExecutionSettings.SqlMode.Strict local.Column value
+                            |> Result.mapError storageErr
+                            |> Result.map (fun value ->
+                                locals.Value <- Map.add name { local with Value = value } locals.Value)
 
                     withTriggerRowScope
                         { Columns = columns
@@ -12817,7 +12832,7 @@ let rec executeAs
                           New = newRow }
                         (fun () ->
                             let runDml statement =
-                                withRoutineVariables (localVariables ()) (fun () ->
+                                withRoutineVariableState locals (fun () ->
                                     match statement with
                                     | SetTriggerNew(column, expression) ->
                                         match timing, event, newRow, resolveColumn columns column with
@@ -12880,8 +12895,26 @@ let rec executeAs
                             and runStatement scope =
                                 function
                                 | StoredProgram.Sql statement -> runDml statement |> complete
-                                | StoredProgram.TextSql _ ->
-                                    Err(1235, "Text-only statements are not supported in triggers") |> complete
+                                | StoredProgram.TextSql sql ->
+                                    match triggerTextExecutor.Value, currentVariableContext () with
+                                    | Some execute, Some variables ->
+                                        let execution =
+                                            { TriggerStore = runStore
+                                              TriggerRegistry = definerRegistry
+                                              TriggerDatabase = db
+                                              TriggerAccount = account
+                                              TriggerProtectedTables = self :: chain |> Set.ofList
+                                              TriggerUserVariables = variables.UserVariables }
+
+                                        withRoutineVariableState locals (fun () -> execute execution sql)
+                                        |> function
+                                            | ResultSet _
+                                            | MultipleResults _ ->
+                                                Err(1415, "Not allowed to return a result set from a trigger")
+                                            | result -> result
+                                        |> complete
+                                    | _ ->
+                                        Err(1235, "Text-only statements are not supported in triggers") |> complete
                                 | StoredProgram.DeclareCondition _
                                 | StoredProgram.DeclareHandler _ -> complete (Affected 0UL)
                                 | StoredProgram.Signal(condition, information) ->
@@ -12922,11 +12955,11 @@ let rec executeAs
                                         with
                                         | Some(target, _) -> complete (Err(1327, sprintf "Undeclared variable: %s" target))
                                         | None ->
-                                            locals.Value <-
-                                                List.zip targets (Array.toList row)
-                                                |> List.fold (fun values (target, value) -> Map.add target value values) locals.Value
-
-                                            complete (Affected 0UL)
+                                            List.zip targets (Array.toList row)
+                                            |> traverse (fun (target, value) -> setLocal target value)
+                                            |> function
+                                                | Ok _ -> complete (Affected 0UL)
+                                                | Error error -> complete error
                                 | StoredProgram.CloseCursor name ->
                                     match StoredProgram.tryCloseCursor name cursors.Value with
                                     | Result.Error error -> complete (ErrInfo error)
@@ -12935,22 +12968,31 @@ let rec executeAs
                                         complete (Affected 0UL)
                                 | StoredProgram.GetDiagnostics diagnostics -> runDiagnostics scope diagnostics
                                 | StoredProgram.Declare declaration ->
-                                    match declaration.InitialValue with
-                                    | None ->
-                                        locals.Value <- Map.add declaration.Name VNull locals.Value
-                                        complete (Affected 0UL)
-                                    | Some expression ->
-                                        match evalExpr (localContext ()) expression with
-                                        | Error(code, message) -> complete (Err(code, message))
+                                    let column = localColumn declaration.Name declaration.ColumnType
+
+                                    let value =
+                                        match declaration.InitialValue with
+                                        | None -> Ok VNull
+                                        | Some expression -> evalExpr (localContext ()) expression |> Result.mapError Err
+
+                                    value
+                                    |> Result.bind (fun value ->
+                                        coerceValue runStore.ExecutionSettings.SqlMode.Strict column value
+                                        |> Result.mapError storageErr)
+                                    |> function
+                                        | Error error -> complete error
                                         | Ok value ->
-                                            locals.Value <- Map.add declaration.Name value locals.Value
+                                            locals.Value <-
+                                                Map.add declaration.Name { Column = column; Value = value } locals.Value
+
                                             complete (Affected 0UL)
                                 | StoredProgram.SetLocal(name, expression) ->
                                     match evalExpr (localContext ()) expression with
                                     | Error(code, message) -> complete (Err(code, message))
                                     | Ok value ->
-                                        locals.Value <- Map.add name value locals.Value
-                                        complete (Affected 0UL)
+                                        match setLocal name value with
+                                        | Ok() -> complete (Affected 0UL)
+                                        | Error error -> complete error
                                 | StoredProgram.Return _ ->
                                     complete (Err(1313, "RETURN is only allowed in a FUNCTION"))
                                 | StoredProgram.Block(label, body) ->
@@ -13096,8 +13138,7 @@ let rec executeAs
                                     function
                                     | [] -> Ok()
                                     | (StoredProgram.LocalVariable name, value) :: rest ->
-                                        locals.Value <- Map.add name value locals.Value
-                                        apply rest
+                                        setLocal name value |> Result.bind (fun () -> apply rest)
                                     | (StoredProgram.UserVariable variable, value) :: rest ->
                                         match currentVariableContext () with
                                         | None -> Error(Err(1105, "User-variable context is unavailable"))

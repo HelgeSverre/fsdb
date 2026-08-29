@@ -22,6 +22,11 @@ type QueryResult = Fsdb.Executor.QueryResult
 
 open Fsdb.Executor
 
+let private triggerProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
+
+let private triggerTableKey (database: string) table =
+    database.ToLowerInvariant(), normalizeTableName table
+
 let private syntaxError (sql: string) =
     // Truncate: this message gets echoed straight into an ERR packet, and an
     // unbounded echo of the query text is a reachable way to blow past
@@ -2209,22 +2214,38 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
     let store = Session.currentStore session
     let database = session.Database |> Option.defaultValue defaultDatabase
     let accesses = TableLocks.accessesForStatement store session.TemporaryCatalog database stmt
+    let protectedTables = DynamicScope.valueOrDefault Set.empty triggerProtectedTables
 
     match
-        TableLocks.withStatementAccess
-            (lockWaitTimeout session)
-            session.Store
-            session.ConnectionId
-            accesses
-            (fun () ->
-                InformationSchema.withViewer
-                    store
-                    (accountOf session)
-                    session.ActiveRoles
-                    (fun () -> executeParsedStatement session stmt))
+        accesses
+        |> List.tryFind (fun access ->
+            access.Mode = TableLocks.WriteAccess
+            && Set.contains (triggerTableKey access.Database access.Table) protectedTables)
     with
-    | Ok result -> result
-    | Error(code, message) -> session, Err(code, message)
+    | Some access ->
+        session,
+        Err(
+            1442,
+            sprintf
+                "Can't update table '%s' in stored function/trigger because it is already used by statement which invoked this stored function/trigger."
+                access.Table
+        )
+    | None ->
+        match
+            TableLocks.withStatementAccess
+                (lockWaitTimeout session)
+                session.Store
+                session.ConnectionId
+                accesses
+                (fun () ->
+                    InformationSchema.withViewer
+                        store
+                        (accountOf session)
+                        session.ActiveRoles
+                        (fun () -> executeParsedStatement session stmt))
+        with
+        | Ok result -> result
+        | Error(code, message) -> session, Err(code, message)
 
 type private TemporaryAction =
     | CreateTemporary
@@ -4900,7 +4921,31 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
     let parserOptions = parserOptionsForSession session
     let sql = normalizeDispatchedSql parserOptions rawSql
 
-    dispatchNormalized session rawSql parserOptions sql
+    withTriggerTextExecution session (fun () ->
+        dispatchNormalized session rawSql parserOptions sql)
+
+and private withTriggerTextExecution session body =
+    let executeTriggerText (context: Executor.TriggerTextExecution) sql =
+        let triggerSession =
+            { session with
+                User = context.TriggerAccount.Name
+                AccountHost = context.TriggerAccount.Host
+                ActiveRoles = []
+                Database = Some context.TriggerDatabase
+                UserVariables = context.TriggerUserVariables.Value
+                Store = context.TriggerStore
+                Tx = None
+                CustomFunctions = context.TriggerRegistry
+                RoutineStack = ("TRIGGER", context.TriggerDatabase, "") :: session.RoutineStack }
+
+        let executed, result =
+            DynamicScope.withValue triggerProtectedTables context.TriggerProtectedTables (fun () ->
+                dispatch triggerSession sql)
+
+        context.TriggerUserVariables.Value <- executed.UserVariables
+        result
+
+    Executor.withTriggerTextExecutor executeTriggerText body
 
 and private dispatchNormalized session rawSql parserOptions sql =
 
@@ -5555,6 +5600,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 | None ->
                     match tryTextPreparedCommand sql with
                     | Error result -> session, result
+                    | Ok(Some _) when session.RoutineStack |> List.exists (fun (kind, _, _) -> kind = "TRIGGER") ->
+                        session, Err(1336, "Dynamic SQL is not allowed in stored function or trigger")
                     | Ok(Some command) -> runTextPrepared command
                     | Ok None when not (placeholderPositionsWithOptions parserOptions sql |> List.isEmpty) ->
                         // A `?` outside a string/comment is a bind parameter, only
@@ -5838,7 +5885,9 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                 | Error(code, message) -> session, Err(code, message)
                 | Ok() ->
                     try
-                        let executed, result = dispatchNormalized session rawSql parserOptions sql
+                        let executed, result =
+                            withTriggerTextExecution session (fun () ->
+                                dispatchNormalized session rawSql parserOptions sql)
                         let executed =
                             if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                 { executed with PasswordExpired = false }
@@ -5864,24 +5913,25 @@ let executeEventBody (session: Session) (body: string) : Session * QueryResult =
     match StoredProgram.parseRoutine options (isSupportedStoredProgramText options) body with
     | Error _ -> session, syntaxError body
     | Ok statements ->
-        withStoredFunctionRegistry session (fun current ->
-            let outcome =
-                runRoutineStatements
-                    (Session.currentStore current)
-                    executeParsed
-                    dispatch
-                    current
-                    Map.empty
-                    statements
+        withTriggerTextExecution session (fun () ->
+            withStoredFunctionRegistry session (fun current ->
+                let outcome =
+                    runRoutineStatements
+                        (Session.currentStore current)
+                        executeParsed
+                        dispatch
+                        current
+                        Map.empty
+                        statements
 
-            let result =
-                match outcome.Results, outcome.Error with
-                | [], Some error -> error
-                | results, Some error -> MultipleResults(results @ [ error, [] ])
-                | [], None -> Affected outcome.AffectedRows
-                | results, None -> MultipleResults(results @ [ Affected outcome.AffectedRows, [] ])
+                let result =
+                    match outcome.Results, outcome.Error with
+                    | [], Some error -> error
+                    | results, Some error -> MultipleResults(results @ [ error, [] ])
+                    | [], None -> Affected outcome.AffectedRows
+                    | results, None -> MultipleResults(results @ [ Affected outcome.AffectedRows, [] ])
 
-            rollbackSession outcome.Session, result)
+                rollbackSession outcome.Session, result))
 
 /// Parses and authorizes a LOCAL INFILE command before the server asks the
 /// client to send bytes. The file name is never resolved by the server.
@@ -5962,7 +6012,8 @@ let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value li
     let executed, result =
         recordDiagnostics session false (fun () ->
             try
-                withStoredFunctionRegistry session (fun current -> executeParsed current statement)
+                withTriggerTextExecution session (fun () ->
+                    withStoredFunctionRegistry session (fun current -> executeParsed current statement))
             with
             | :? OperationCanceledException -> reraise ()
             | ex -> recoverExecutionError session "LOAD DATA LOCAL INFILE" ex)
@@ -6018,7 +6069,8 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
                         | Error(code, message) -> session, Err(code, message)
                         | Ok() ->
                             let executed, result =
-                                withStoredFunctionRegistry session (fun current -> executeParsed current statement)
+                                withTriggerTextExecution session (fun () ->
+                                    withStoredFunctionRegistry session (fun current -> executeParsed current statement))
 
                             (if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                  { executed with PasswordExpired = false }

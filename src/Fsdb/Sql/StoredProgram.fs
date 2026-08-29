@@ -1356,11 +1356,17 @@ let private parseWithFallback
                     | Some label -> Ok [ Block(Some label, statements) ]
                     | None -> Ok statements)
     else
-        let returned = returnPattern.Match(body.Trim())
+        let body = body.Trim()
+        let returned = returnPattern.Match body
+        let assignment = assignmentPattern.Match body
 
         if returned.Success then
             Parser.parseExpressionWithOptions options returned.Groups.["value"].Value
             |> Result.map (fun value -> [ Return value ])
+        elif assignment.Success then
+            Parser.parseExpressionWithOptions options assignment.Groups.["value"].Value
+            |> Result.map (fun value ->
+                [ SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value) ])
         else
             match Parser.parseStoredStatementWithOptions options body with
             | Ok statement -> Ok [ Sql statement ]
