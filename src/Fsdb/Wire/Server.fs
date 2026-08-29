@@ -102,6 +102,7 @@ type private Command =
     | ProcessKill of connectionId: int64
     | Debug
     | Ping
+    | ChangeUser of ChangeUserRequest
     | FieldList of table: string
     | StmtPrepare of sql: string
     /// Payload with the COM_STMT_EXECUTE command byte already stripped —
@@ -138,7 +139,7 @@ let private stmtLongDataHeaderLength = 6
 /// clients never send one). A non-empty payload always decodes to `Some`,
 /// falling back to `Malformed` if the command byte's own payload is too
 /// short to parse — see that case's doc.
-let private parseCommand (payload: byte[]) : Command option =
+let private parseCommand (capabilities: uint32) (payload: byte[]) : Command option =
     if payload.Length = 0 then
         None
     else
@@ -158,6 +159,7 @@ let private parseCommand (payload: byte[]) : Command option =
                 | 0x0cuy -> ProcessKill(int64 (Reader(restBytes ()).ReadInt32LE()))
                 | 0x0duy -> Debug
                 | 0x0euy -> Ping
+                | 0x11uy -> ChangeUser(parseChangeUserRequest capabilities (restBytes ()))
                 | 0x16uy -> StmtPrepare(sql ())
                 | 0x17uy -> StmtExecute(restBytes ())
                 | 0x18uy -> StmtSendLongData(restBytes ())
@@ -929,15 +931,10 @@ let private authSwitchPayload (authData: byte[]) : byte[] =
     w.WriteByte 0uy
     w.ToArray()
 
-/// Authenticates a parsed handshake response against `mysql.user`: the
-/// account must exist, and its credential must match: a non-empty stored
-/// hash is verified as mysql_native_password over `authData`'s scramble; an
-/// empty stored hash (no password set) accepts only an *empty* offered
-/// password, exactly like real MySQL — offering one is `1045 (using
-/// password: YES)`. Writes the 1045 ERR itself on denial and returns `None`; returns
-/// `Some(seqId, account, passwordExpired)` on success — `firstSeq + 1` more when an
-/// AuthSwitch round trip happened.
-let private authenticateHandshake
+/// Authenticates a wire response against `mysql.user`. `forceAuthSwitch`
+/// starts a fresh challenge before account lookup so COM_CHANGE_USER does
+/// not reveal account existence or reuse the connection's first scramble.
+let private authenticateAccount
     (client: TcpClient)
     (stream: IO.Stream)
     (capabilities: uint32)
@@ -947,6 +944,7 @@ let private authenticateHandshake
     (clientHost: string option)
     (encryptedTransport: bool)
     (clientCertificate: bool)
+    (forceAuthSwitch: bool)
     (firstSeq: byte)
     : Async<(byte * Auth.Account * bool) option> =
     async {
@@ -977,53 +975,59 @@ let private authenticateHandshake
                     return Some(seqId, selected, expired)
             }
 
-        match clientHost |> Option.bind (Auth.resolveAccount store resp.Username) with
-        | None -> return! deny firstSeq (resp.AuthResponse.Length > 0)
-        | Some(_, cols, row) when Auth.isAccountLocked cols row ->
-            let message =
-                sprintf
-                    "Access denied for user '%s'@'%s'. Account is locked."
-                    resp.Username
-                    (clientHost |> Option.defaultValue "unknown")
-
-            do! writePacketAsync stream { SeqId = firstSeq; Payload = errPayload capabilities 3118 message } |> Async.Ignore
-            return None
-        | Some(_, cols, row) when
-            not (
-                Auth.transportSatisfiesAccount
-                    { Encrypted = encryptedTransport
-                      ClientCertificateValidated = clientCertificate }
-                    cols
-                    row
-            ) ->
-            return! deny firstSeq (resp.AuthResponse.Length > 0)
-        | Some(selected, cols, row) ->
-            let stored = Auth.storedPasswordHash cols row
-
-            if stored = "" then
-                // No password set: only an empty offered password matches
-                // (every auth plugin sends a zero-length response for an
-                // empty password, so no AuthSwitch round trip is needed).
-                if resp.AuthResponse.Length = 0 then
-                    return! accept firstSeq selected cols row
-                else
-                    return! deny firstSeq true
-            elif Auth.verifyNative stored authData resp.AuthResponse then
-                return! accept firstSeq selected cols row
-            elif resp.ClientPlugin = Some "mysql_native_password" then
-                // Right plugin, wrong password — no switch will fix it.
-                return! deny firstSeq (resp.AuthResponse.Length > 0)
+        let! offered =
+            if forceAuthSwitch then
+                async {
+                    do! writePacketAsync stream { SeqId = firstSeq; Payload = authSwitchPayload authData } |> Async.Ignore
+                    let! response = readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream
+                    return response |> Option.map (fun response -> response.SeqId + 1uy, response.Payload)
+                }
             else
-                // The client answered with another plugin (mysql CLI 8.x
-                // defaults to caching_sha2_password) or nothing; ask it to
-                // redo the same scramble with mysql_native_password.
-                do! writePacketAsync stream { SeqId = firstSeq; Payload = authSwitchPayload authData } |> Async.Ignore
+                async { return Some(firstSeq, resp.AuthResponse) }
 
-                match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
-                | None -> return None // client gave up; nothing to reply to
-                | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
-                    return! accept (switchResp.SeqId + 1uy) selected cols row
-                | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
+        match offered with
+        | None -> return None
+        | Some(authSeq, authResponse) ->
+            match clientHost |> Option.bind (Auth.resolveAccount store resp.Username) with
+            | None -> return! deny authSeq (authResponse.Length > 0)
+            | Some(_, cols, row) when Auth.isAccountLocked cols row ->
+                let message =
+                    sprintf
+                        "Access denied for user '%s'@'%s'. Account is locked."
+                        resp.Username
+                        (clientHost |> Option.defaultValue "unknown")
+
+                do! writePacketAsync stream { SeqId = authSeq; Payload = errPayload capabilities 3118 message } |> Async.Ignore
+                return None
+            | Some(_, cols, row) when
+                not (
+                    Auth.transportSatisfiesAccount
+                        { Encrypted = encryptedTransport
+                          ClientCertificateValidated = clientCertificate }
+                        cols
+                        row
+                ) ->
+                return! deny authSeq (authResponse.Length > 0)
+            | Some(selected, cols, row) ->
+                let stored = Auth.storedPasswordHash cols row
+
+                if stored = "" then
+                    if authResponse.Length = 0 then
+                        return! accept authSeq selected cols row
+                    else
+                        return! deny authSeq true
+                elif Auth.verifyNative stored authData authResponse then
+                    return! accept authSeq selected cols row
+                elif forceAuthSwitch || resp.ClientPlugin = Some "mysql_native_password" then
+                    return! deny authSeq (authResponse.Length > 0)
+                else
+                    do! writePacketAsync stream { SeqId = authSeq; Payload = authSwitchPayload authData } |> Async.Ignore
+
+                    match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
+                    | None -> return None
+                    | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
+                        return! accept (switchResp.SeqId + 1uy) selected cols row
+                    | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
     }
 
 let private accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =
@@ -1049,6 +1053,28 @@ let private discardLongData (statementId: int) (session: Session) : Session =
         LongData = retained
         LongDataBytes = retainedBytes
         LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (id, _) -> id <> statementId) }
+
+let private resolveChangeUserCharacterSet (characterSet: int option) =
+    characterSet
+    |> Option.bind (fun id ->
+        Collation.tryFindById id
+        |> Option.orElseWith (fun () -> Collation.tryFind "utf8mb4_0900_ai_ci"))
+
+let private applyChangeUserCharacterSet (collation: Collation.Collation option) (session: Session) =
+    match collation with
+    | None -> session
+    | Some collation ->
+        let charset = Collation.charsetOfCollation collation.Name
+        Storage.setConnectionCharset session.Store charset
+        Storage.setConnectionCollation session.Store collation
+
+        { session with
+            Variables =
+                session.Variables
+                |> Map.add "character_set_client" (Some charset)
+                |> Map.add "character_set_connection" (Some charset)
+                |> Map.add "character_set_results" (Some charset)
+                |> Map.add "collation_connection" (Some collation.Name) }
 
 let private handleConnection
     (connectionId: int)
@@ -1208,7 +1234,7 @@ let private handleConnection
                     else
                         let validatedClientCertificate = false
 
-                        authenticateHandshake
+                        authenticateAccount
                             client
                             stream
                             capabilities
@@ -1218,6 +1244,7 @@ let private handleConnection
                             clientHost
                             tlsVersion.IsSome
                             validatedClientCertificate
+                            false
                             (handshakeResp.SeqId + 1uy)
                 let! authOkSeq =
                     async {
@@ -1240,21 +1267,23 @@ let private handleConnection
 
                 let passwordExpired = authOkSeq |> Option.exists (fun (_, _, expired) -> expired)
 
-                let session =
+                let createSessionFor (account: Auth.Account) loginUser passwordExpired database =
                     { Session.create connectionId store with
-                        User = selectedAccount.Name
-                        AccountHost = selectedAccount.Host
-                        ActiveRoles = Session.initialRoles store selectedAccount
+                        User = account.Name
+                        AccountHost = account.Host
+                        ActiveRoles = Session.initialRoles store account
                         PasswordExpired = passwordExpired
-                        LoginUser = resp.Username
+                        LoginUser = loginUser
                         ClientHost = displayHost
-                        Database = resp.Database
+                        Database = database
                         CustomFunctions = customFunctions
                         Capabilities = capabilities
                         MultiStatementsEnabled = capabilities &&& ClientMultiStatements <> 0u
                         TlsVersion = tlsVersion
                         TlsCipher = tlsCipher
                         TransportMetrics = metrics }
+
+                let session = createSessionFor selectedAccount resp.Username passwordExpired resp.Database
 
                 activeSession <- Some session
 
@@ -1264,7 +1293,8 @@ let private handleConnection
                 // Registered even when auth is about to deny — the command
                 // loop below never runs then, and the connection teardown's
                 // `unregisterProcess` removes the short-lived entry.
-                let processEntry = InformationSchema.registerProcessAs (int64 connectionId) selectedAccount resp.Username remoteHost
+                let mutable processEntry =
+                    InformationSchema.registerProcessAs (int64 connectionId) selectedAccount resp.Username remoteHost
                 processEntry.Db <- resp.Database
                 // `KILL CONNECTION <id>`: closing the socket makes this
                 // connection's next read fail, which ends its command loop.
@@ -1333,7 +1363,7 @@ let private handleConnection
                         | Some cmdPacket ->
                             let seqId = cmdPacket.SeqId + 1uy
 
-                            match parseCommand cmdPacket.Payload with
+                            match parseCommand capabilities cmdPacket.Payload with
                             | None
                             | Some Quit -> ()
                             | Some Ping ->
@@ -1345,6 +1375,93 @@ let private handleConnection
                                     |> Async.Ignore
 
                                 return! loop session
+                            | Some(ChangeUser request) ->
+                                let supportsPluginAuth = capabilities &&& ClientPluginAuth <> 0u
+                                let changeAuthData = if supportsPluginAuth then randomAuthPluginData () else authData
+
+                                let response =
+                                    { Capabilities = capabilities
+                                      Username = request.Username
+                                      AuthResponse = request.AuthResponse
+                                      ClientPlugin = request.ClientPlugin
+                                      Database = request.Database }
+
+                                let! authenticated =
+                                    authenticateAccount
+                                        client
+                                        stream
+                                        capabilities
+                                        store
+                                        changeAuthData
+                                        response
+                                        clientHost
+                                        tlsVersion.IsSome
+                                        false
+                                        supportsPluginAuth
+                                        seqId
+
+                                match authenticated with
+                                | None -> ()
+                                | Some(okSeq, selected, expired) ->
+                                    let validated =
+                                        match request.Database with
+                                        | Some db when not (Storage.databaseExists store db) ->
+                                            let code, message = Storage.toMySqlError (Storage.NoSuchDatabase db)
+                                            Error(code, message)
+                                        | _ -> Ok()
+
+                                    match validated with
+                                    | Error(code, message) ->
+                                        do!
+                                            writePacketAsync stream { SeqId = okSeq; Payload = errPayload capabilities code message }
+                                            |> Async.Ignore
+                                    | Ok() ->
+                                        let currentAccount = Auth.account session.User session.AccountHost
+
+                                        let acquired =
+                                            if Auth.sameAccount currentAccount selected then
+                                                Ok None
+                                            else
+                                                Auth.tryAcquireAccountConnection store selected |> Result.map Some
+
+                                        match acquired with
+                                        | Error(code, message) ->
+                                            do!
+                                                writePacketAsync stream { SeqId = okSeq; Payload = errPayload capabilities code message }
+                                                |> Async.Ignore
+                                        | Ok newLease ->
+                                            QueryHandler.closeSession session
+
+                                            let session =
+                                                createSessionFor selected request.Username expired request.Database
+                                                |> applyChangeUserCharacterSet (resolveChangeUserCharacterSet request.CharacterSet)
+
+                                            match newLease with
+                                            | None -> ()
+                                            | Some lease ->
+                                                releaseAccountLease ()
+                                                accountLease <- Some lease
+
+                                            let replacement =
+                                                InformationSchema.registerProcessAs
+                                                    (int64 connectionId)
+                                                    selected
+                                                    request.Username
+                                                    remoteHost
+
+                                            replacement.Db <- request.Database
+                                            replacement.CloseConnection <- processEntry.CloseConnection
+                                            processEntry <- replacement
+                                            activeSession <- Some session
+
+                                            do!
+                                                writePacketAsync
+                                                    stream
+                                                    { SeqId = okSeq
+                                                      Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                                                |> Async.Ignore
+
+                                            return! loop session
                             | Some(InitDb db) ->
                                 if Storage.databaseExists (Session.currentStore session) db then
                                     let session =
@@ -2005,20 +2122,11 @@ let private handleConnection
                                 QueryHandler.closeSession session
 
                                 let session =
-                                    { Session.create session.ConnectionId session.Store with
-                                        User = session.User
-                                        AccountHost = session.AccountHost
-                                        ActiveRoles = Session.initialRoles session.Store (Auth.account session.User session.AccountHost)
-                                        PasswordExpired = session.PasswordExpired
-                                        LoginUser = session.LoginUser
-                                        ClientHost = session.ClientHost
-                                        Database = session.Database
-                                        CustomFunctions = session.CustomFunctions
-                                        Capabilities = session.Capabilities
-                                        MultiStatementsEnabled = capabilities &&& ClientMultiStatements <> 0u
-                                        TlsVersion = session.TlsVersion
-                                        TlsCipher = session.TlsCipher
-                                        TransportMetrics = session.TransportMetrics }
+                                    createSessionFor
+                                        (Auth.account session.User session.AccountHost)
+                                        session.LoginUser
+                                        session.PasswordExpired
+                                        session.Database
 
                                 activeSession <- Some session
 

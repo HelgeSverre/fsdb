@@ -198,6 +198,24 @@ let tests =
               let response = parseHandshakeResponse (w.ToArray())
               Expect.equal response.Database None "empty database names do not request USE"
 
+          testCase "parseChangeUserRequest follows negotiated field layout"
+          <| fun _ ->
+              let capabilities = ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+              let writer = Writer()
+              writer.WriteNullTerminatedString "changed"
+              writer.WriteByte 3uy
+              writer.WriteBytes [| 1uy; 2uy; 3uy |]
+              writer.WriteNullTerminatedString "application"
+              writer.WriteInt16LE 8
+              writer.WriteNullTerminatedString "mysql_native_password"
+
+              let request = parseChangeUserRequest capabilities (writer.ToArray())
+              Expect.equal request.Username "changed" "username"
+              Expect.sequenceEqual request.AuthResponse [| 1uy; 2uy; 3uy |] "auth response"
+              Expect.equal request.Database (Some "application") "database"
+              Expect.equal request.CharacterSet (Some 8) "character set"
+              Expect.equal request.ClientPlugin (Some "mysql_native_password") "plugin"
+
           testCase "parseHandshakeResponse rejects an auth length above Int32.MaxValue"
           <| fun _ ->
               let w = Writer()

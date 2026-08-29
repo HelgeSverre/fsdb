@@ -202,6 +202,13 @@ type HandshakeResponse =
       ClientPlugin: string option
       Database: string option }
 
+type ChangeUserRequest =
+    { Username: string
+      AuthResponse: byte[]
+      Database: string option
+      CharacterSet: int option
+      ClientPlugin: string option }
+
 let private boundedLen (len: uint64) : int =
     if len > uint64 Int32.MaxValue then
         failwith "length-encoded value length out of range"
@@ -270,6 +277,55 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
       AuthResponse = authResponse
       ClientPlugin = clientPlugin
       Database = database }
+
+/// Parses the COM_CHANGE_USER payload after its command byte. Optional
+/// fields follow the capabilities negotiated during the initial handshake.
+let parseChangeUserRequest (capabilities: uint32) (payload: byte[]) : ChangeUserRequest =
+    let reader = Reader(payload)
+
+    let readNullTerminatedBytes () =
+        let bytes = ResizeArray<byte>()
+        let mutable value = reader.ReadByte()
+
+        while value <> 0uy do
+            bytes.Add value
+            value <- reader.ReadByte()
+
+        bytes.ToArray()
+
+    let username = reader.ReadNullTerminatedString()
+
+    let authResponse =
+        if capabilities &&& ClientSecureConnection <> 0u then
+            reader.ReadBytes(int (reader.ReadByte()))
+        else
+            readNullTerminatedBytes ()
+
+    let database =
+        match reader.ReadNullTerminatedString() with
+        | "" -> None
+        | name -> Some name
+
+    let characterSet =
+        if capabilities &&& ClientProtocol41 <> 0u && reader.Remaining > 0 then
+            Some(reader.ReadInt16LE())
+        else
+            None
+
+    let clientPlugin =
+        if capabilities &&& ClientPluginAuth <> 0u && reader.Remaining > 0 then
+            Some(reader.ReadNullTerminatedString())
+        else
+            None
+
+    if reader.Remaining <> 0 then
+        invalidArg (nameof payload) "unexpected COM_CHANGE_USER payload data"
+
+    { Username = username
+      AuthResponse = authResponse
+      Database = database
+      CharacterSet = characterSet
+      ClientPlugin = clientPlugin }
 
 let private okPayloadWithHeader
     (header: byte)

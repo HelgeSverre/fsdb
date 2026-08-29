@@ -26,13 +26,33 @@ let private passwordlessHandshakeResponse (capabilities: uint32) (username: stri
     writer.WriteByte 0uy
     writer.ToArray()
 
+let private nativePasswordResponse (password: string) (scramble: byte[]) =
+    let stage1 = SHA1.HashData(Text.Encoding.UTF8.GetBytes password)
+    let mask = SHA1.HashData(Array.append scramble (SHA1.HashData stage1))
+    Array.map2 (^^^) stage1 mask
+
+let private changeUserPayload (username: string) (authResponse: byte[]) (database: string) characterSet plugin =
+    let writer = Writer()
+    writer.WriteByte 0x11uy
+    writer.WriteNullTerminatedString username
+    writer.WriteByte(byte authResponse.Length)
+    writer.WriteBytes authResponse
+    writer.WriteNullTerminatedString database
+    writer.WriteInt16LE characterSet
+    plugin |> Option.iter writer.WriteNullTerminatedString
+    writer.ToArray()
+
 let private selfSignedCertificate () =
     use key = RSA.Create 2048
     let request = CertificateRequest("CN=localhost", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
     request.CertificateExtensions.Add(X509BasicConstraintsExtension(false, false, 0, false))
     request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1.0), DateTimeOffset.UtcNow.AddDays(1.0))
 
-let private connectRawAsWithCapabilities (port: int) (username: string) (capabilities: uint32) : Async<Net.Sockets.TcpClient * IO.Stream> =
+let private connectRawAsWithCapabilitiesAndScramble
+    (port: int)
+    (username: string)
+    (capabilities: uint32)
+    : Async<Net.Sockets.TcpClient * IO.Stream * byte[]> =
     async {
         let client = new Net.Sockets.TcpClient()
         do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
@@ -40,12 +60,31 @@ let private connectRawAsWithCapabilities (port: int) (username: string) (capabil
 
         let! handshake = readPacketAsync stream
         let handshakeSeq = handshake.Value.SeqId
+        let reader = Reader(handshake.Value.Payload)
+        reader.ReadByte() |> ignore
+        reader.ReadNullTerminatedString() |> ignore
+        reader.ReadInt32LE() |> ignore
+        let authPart1 = reader.ReadBytes 8
+        reader.ReadByte() |> ignore
+        reader.ReadInt16LE() |> ignore
+        reader.ReadByte() |> ignore
+        reader.ReadInt16LE() |> ignore
+        reader.ReadInt16LE() |> ignore
+        reader.ReadByte() |> ignore
+        reader.ReadBytes 10 |> ignore
+        let scramble = Array.append authPart1 (reader.ReadBytes 12)
 
         let helloResponse = passwordlessHandshakeResponse capabilities username
 
         let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
         let! _ = readPacketAsync stream // connection OK
-        return client, (stream :> IO.Stream)
+        return client, (stream :> IO.Stream), scramble
+    }
+
+let private connectRawAsWithCapabilities (port: int) (username: string) (capabilities: uint32) : Async<Net.Sockets.TcpClient * IO.Stream> =
+    async {
+        let! client, stream, _ = connectRawAsWithCapabilitiesAndScramble port username capabilities
+        return client, stream
     }
 
 let private connectRawAs (port: int) (username: string) = connectRawAsWithCapabilities port username ClientProtocol41
@@ -3316,6 +3355,176 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "COM_CHANGE_USER reauthenticates and replaces connection state"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+
+                  match Fsdb.Storage.createDatabase store "change_wire" with
+                  | Ok() -> ()
+                  | Error error -> failtestf "create database failed: %A" error
+
+                  Fsdb.Auth.createUser store "changed" "localhost" (Some "secret")
+                  |> Result.mapError snd
+                  |> Result.defaultWith failtest
+
+                  Fsdb.Auth.grant store [ "SELECT" ] (Fsdb.Auth.OnDb "change_wire") [ "changed", "localhost" ] false
+                  |> Result.mapError snd
+                  |> Result.defaultWith failtest
+
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  let capabilities = ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+                  let! client, stream = connectRawAsWithCapabilities server.Port "root" capabilities
+                  use client = client
+
+                  let command (payload: byte[]) =
+                      async {
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          return! readPacketAsync stream
+                      }
+
+                  let queryOk (sql: string) =
+                      async {
+                          let! reply = command (Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql))
+                          Expect.equal reply.Value.Payload.[0] 0uy (sprintf "%s succeeds" sql)
+                      }
+
+                  let queryRow (sql: string) =
+                      async {
+                          let! head = command (Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql))
+                          let columnCount = Reader(head.Value.Payload).ReadLenEncInt() |> Option.map int |> Option.defaultValue 0
+
+                          for _ in 1 .. columnCount do
+                              let! _ = readPacketAsync stream
+                              ()
+
+                          let! _ = readPacketAsync stream
+                          let! row = readPacketAsync stream
+                          let! _ = readPacketAsync stream
+                          let reader = Reader(row.Value.Payload)
+                          return [ for _ in 1 .. columnCount -> reader.ReadLenEncString() ]
+                      }
+
+                  let! initDb = command (Array.append [| 0x02uy |] (Text.Encoding.UTF8.GetBytes "change_wire"))
+                  Expect.equal initDb.Value.Payload.[0] 0uy "initial database selected"
+                  do! queryOk "CREATE TABLE change_rows (n INT)"
+                  do! queryOk "SET @state = 'old'"
+                  do! queryOk "CREATE TEMPORARY TABLE tmp_change (n INT)"
+                  do! queryOk "START TRANSACTION"
+                  do! queryOk "INSERT INTO change_rows VALUES (1)"
+
+                  let! _ =
+                      writePacketAsync
+                          stream
+                          { SeqId = 0uy
+                            Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+
+                  let! statementId, _, _ = readPreparedReply stream
+
+                  let! _ =
+                      writePacketAsync
+                          stream
+                          { SeqId = 0uy
+                            Payload = changeUserPayload "changed" [||] "change_wire" 8 (Some "mysql_native_password") }
+
+                  let! authSwitch = readPacketAsync stream
+                  let authReader = Reader(authSwitch.Value.Payload)
+                  Expect.equal (authReader.ReadByte()) 0xfeuy "change-user starts a fresh authentication exchange"
+                  Expect.equal (authReader.ReadNullTerminatedString()) "mysql_native_password" "server authentication plugin"
+                  let scramble = authReader.ReadBytes 20
+                  let response = nativePasswordResponse "secret" scramble
+                  let! _ = writePacketAsync stream { SeqId = authSwitch.Value.SeqId + 1uy; Payload = response }
+                  let! changed = readPacketAsync stream
+                  Expect.equal changed.Value.Payload.[0] 0uy "new credentials accepted"
+
+                  let! state = queryRow "SELECT CURRENT_USER(), DATABASE(), @state, @@collation_connection"
+
+                  Expect.sequenceEqual
+                      state
+                      [ Some "changed@localhost"; Some "change_wire"; None; Some "latin1_swedish_ci" ]
+                      "identity, schema, variables, and character set are replaced"
+
+                  let! rows = queryRow "SELECT COUNT(*) FROM change_rows"
+                  Expect.sequenceEqual rows [ Some "0" ] "the previous transaction was rolled back"
+
+                  let! temporary = command (Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT * FROM tmp_change"))
+                  Expect.equal (Reader(temporary.Value.Payload.[1..]).ReadInt16LE()) 1146 "temporary tables are dropped"
+
+                  let execute = Writer()
+                  execute.WriteByte 0x17uy
+                  execute.WriteInt32LE statementId
+                  execute.WriteByte 0uy
+                  execute.WriteInt32LE 1
+                  let! oldStatement = command (execute.ToArray())
+                  Expect.equal (Reader(oldStatement.Value.Payload.[1..]).ReadInt16LE()) 1243 "prepared statements are dropped"
+              }
+              |> Async.RunSynchronously
+
+          testCase "COM_CHANGE_USER accepts the original challenge response from non-plugin clients"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+
+                  Fsdb.Auth.createUser store "legacy_change" "localhost" (Some "secret")
+                  |> Result.mapError snd
+                  |> Result.defaultWith failtest
+
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  let capabilities = ClientProtocol41 ||| ClientSecureConnection
+                  let! client, stream, scramble =
+                      connectRawAsWithCapabilitiesAndScramble server.Port "root" capabilities
+
+                  use client = client
+                  let response = nativePasswordResponse "secret" scramble
+
+                  let! _ =
+                      writePacketAsync
+                          stream
+                          { SeqId = 0uy
+                            Payload = changeUserPayload "legacy_change" response "" 999 None }
+
+                  let! changed = readPacketAsync stream
+                  Expect.equal changed.Value.Payload.[0] 0uy "the response embedded in the command is verified"
+
+                  let query = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT @@collation_connection")
+                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = query }
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! row = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+
+                  Expect.equal
+                      (Reader(row.Value.Payload).ReadLenEncString())
+                      (Some "utf8mb4_0900_ai_ci")
+                      "unknown ids use the server default"
+              }
+              |> Async.RunSynchronously
+
+          testCase "COM_CHANGE_USER failure returns 1045 and closes the connection"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let capabilities = ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+                  let! client, stream = connectRawAsWithCapabilities server.Port "root" capabilities
+                  use client = client
+
+                  let! _ =
+                      writePacketAsync
+                          stream
+                          { SeqId = 0uy
+                            Payload = changeUserPayload "missing" [||] "" 45 (Some "mysql_native_password") }
+
+                  let! authSwitch = readPacketAsync stream
+                  Expect.equal authSwitch.Value.Payload.[0] 0xfeuy "unknown accounts receive the same authentication challenge"
+                  let! _ = writePacketAsync stream { SeqId = authSwitch.Value.SeqId + 1uy; Payload = [||] }
+                  let! denied = readPacketAsync stream
+                  Expect.equal (Reader(denied.Value.Payload.[1..]).ReadInt16LE()) 1045 "access denied"
+                  let! closed = readPacketAsync stream
+                  Expect.isNone closed "authentication failure ends the command phase"
+              }
+              |> Async.RunSynchronously
+
           testCase "an unsupported command byte replies ERR 1047 and the connection stays usable"
           <| fun _ ->
               async {
@@ -3325,8 +3534,7 @@ let tests =
                   let! client, stream = connectRaw port
                   use client = client
 
-                  // 0x11 = COM_CHANGE_USER, never implemented by this server.
-                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x11uy |] }
+                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x20uy |] }
                   let! unsupportedErr = readPacketAsync stream
                   Expect.equal unsupportedErr.Value.Payload.[0] 0xffuy "unsupported command byte replies ERR"
                   Expect.equal (Reader(unsupportedErr.Value.Payload.[1..]).ReadInt16LE()) 1047 "1047 unknown command"

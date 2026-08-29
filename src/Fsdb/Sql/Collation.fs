@@ -480,6 +480,11 @@ let tryFind (name: string) : Collation option =
 
     Map.tryFind canonical registry
 
+let tryFindById (id: int) : Collation option =
+    idAndSortlen
+    |> Seq.tryPick (fun (KeyValue(name, (candidate, _))) ->
+        if candidate = id then tryFind name else None)
+
 /// The charset a collation name belongs to — the prefix before the suffix
 /// MySQL appends (`binary` is its own one-collation pseudo charset).
 let charsetOfCollation (name: string) : string =
