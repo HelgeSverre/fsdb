@@ -466,6 +466,59 @@ let tests =
                   }
                   |> Async.RunSynchronously)
 
+          TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE transforms user-variable fields"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
+                  async {
+                      let store = Fsdb.Storage.create ()
+                      use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                      let! client, stream = connectRawAsWithCapabilities server.Port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                      use client = client
+
+                      let query (sql: string) =
+                          writePacketAsync
+                              stream
+                              { SeqId = 0uy
+                                Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      do!
+                          query
+                              "CREATE TABLE transformed_load (id INT, name VARCHAR(20), doubled INT, label VARCHAR(40), untouched INT DEFAULT 9)"
+                          |> Async.Ignore
+
+                      let! _ = readPacketAsync stream
+
+                      do!
+                          query
+                              "LOAD DATA LOCAL INFILE 'transformed.tsv' INTO TABLE transformed_load (@raw_id, name) SET id = CAST(@raw_id AS UNSIGNED), doubled = id * 2, label = CONCAT(name, ':', doubled)"
+                          |> Async.Ignore
+
+                      let! request = readPacketAsync stream
+                      Expect.equal request.Value.Payload.[0] 0xfbuy "LOCAL request"
+                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "01\tAda\n2\tGrace\n" } |> Async.Ignore
+                      do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                      let! loaded = readPacketAsync stream
+                      Expect.equal loaded.Value.Payload.[0] 0uy "LOAD succeeds"
+
+                      match Fsdb.Storage.scanList store "fsdb" "transformed_load" with
+                      | Ok(_, rows) ->
+                          Expect.sequenceEqual
+                              (rows |> List.map Array.toList)
+                              [ [ VInt 1L; VString "Ada"; VInt 2L; VString "Ada:2"; VInt 9L ]
+                                [ VInt 2L; VString "Grace"; VInt 4L; VString "Grace:4"; VInt 9L ] ]
+                              "coerced and sequential SET values"
+                      | Error error -> failtestf "table scan failed: %A" error
+
+                      do! query "SELECT @raw_id" |> Async.Ignore
+                      let! _ = readPacketAsync stream
+                      let! _ = readPacketAsync stream
+                      let! _ = readPacketAsync stream
+                      let! variable = readPacketAsync stream
+                      let! _ = readPacketAsync stream
+                      Expect.equal (Reader(variable.Value.Payload).ReadLenEncString()) (Some "2") "last input variable persists"
+                  }
+                  |> Async.RunSynchronously)
+
           testCase "LOAD DATA LOCAL INFILE rejects disabled and prepared commands"
           <| fun _ ->
               async {
