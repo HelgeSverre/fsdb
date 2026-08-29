@@ -39,7 +39,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Deadlock victim selection and remaining coarse write shapes |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
-| Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound condition-handling bodies with procedure calls | Complex views and multi-table DML firing |
+| Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
 | Routines & events | Typed procedures, trigger-invoked procedure calls, read-only stored functions, and persisted definer-context event scheduling | Data-changing stored functions |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
@@ -313,7 +313,8 @@ FOLLOWS/PRECEDES, and `BEGIN ... END` sequences of DML, local declarations and
 assignments, nested IF/ELSEIF/ELSE and CASE branches, labeled blocks, WHILE,
 REPEAT, and LOOP statements with LEAVE/ITERATE, SET NEW statements, and nested
 procedure calls with typed local or user-variable output targets;
-statement atomicity and 1442 cycle/self-write detection,
+single- and multi-table UPDATE/DELETE row firing, statement atomicity, and
+1442 protection for every target and joined table in the invoking statement,
 definer-based privilege checks per fire, lifecycle maintenance, and SHOW
 TRIGGERS/I_S.TRIGGERS metadata. The creation-time SQL mode, client charset,
 and connection collation are stored and restored while each body runs.
@@ -325,7 +326,6 @@ trigger is created.
 | Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | single-table, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; one mergeable component updates or inserts at a time | medium | refusal |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 | VIEW_DEFINITION rendering | fully-qualified canonical expression text | SHOW CREATE VIEW renders the stored declaration envelope, but its SELECT body and I_S.VIEWS.VIEW_DEFINITION retain the user's original text | low | divergence |
-| Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table INSERT/UPDATE/DELETE/REPLACE fire their row timings atomically; multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
 
 ## 10. Stored routines, events, schedulers
 

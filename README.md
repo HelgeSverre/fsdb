@@ -237,7 +237,8 @@ JSON paths and `JSON_TABLE`, multi-table `UPDATE`/`DELETE`, `REPLACE`,
 system variables in expressions, direct single-table updatable views,
 view `WITH CHECK OPTION`,
 `BEFORE`/`AFTER` triggers for `INSERT`/`UPDATE`/`DELETE` with compound bodies
-and nested procedure calls, and user accounts
+and nested procedure calls, including multi-table UPDATE/DELETE targets, and
+user accounts
 with real `CREATE USER`/`GRANT`/`REVOKE` privilege enforcement.
 
 The introspection surface GUI clients lean on is served with real data:
