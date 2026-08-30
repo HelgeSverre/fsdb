@@ -4254,18 +4254,22 @@ let private runRoutineStatements
                         rest
                         (Err(1222, "The used SELECT statements have a different number of columns"))
                 | ResultSet(_, []) ->
-                    let warning: Diagnostics.Condition =
-                        { Level = Diagnostics.Warning
-                          Code = 1329
-                          State = "02000"
-                          Message = "No data - zero rows fetched, selected, or processed"
-                          Information = Map.empty }
+                    let noData =
+                        SqlState.createWithState
+                            1329
+                            "02000"
+                            "No data - zero rows fetched, selected, or processed"
 
-                    currentDiagnostics.Value <-
-                        { Conditions = [ warning ]
-                          RowCount = 0L }
-                    propagatedConditions.Add warning
-                    run scope next locals results affectedRows rest
+                    match StoredProgram.tryHandler scope.Conditions scope.Statements noData with
+                    | Some _ -> handleCondition scope next locals results affectedRows rest noData
+                    | None ->
+                        let warning = Diagnostics.fromWarning noData
+
+                        currentDiagnostics.Value <-
+                            { Conditions = [ warning ]
+                              RowCount = 0L }
+                        propagatedConditions.Add warning
+                        run scope next locals results affectedRows rest
                 | ResultSet(_, [ row ]) ->
                     let values = valuesOfResultRow next row
                     let assigned, generated = Diagnostics.capture (fun () -> assignSelectedValues targets values locals)

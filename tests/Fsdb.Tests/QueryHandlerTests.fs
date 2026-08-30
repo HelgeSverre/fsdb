@@ -3514,6 +3514,15 @@ let tests =
 
               TestSupport.Sql.expectOk
                   (execute
+                      "CREATE FUNCTION selected_handled() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT DEFAULT 9; DECLARE CONTINUE HANDLER FOR NOT FOUND SET selected = 8; SELECT value INTO selected FROM selected_source WHERE value = 99; RETURN selected; END")
+                  "create handled selector"
+
+              match execute "SELECT selected_handled()" with
+              | ResultSet(_, [ [ Some "8" ] ]) -> ()
+              | other -> failtestf "expected NOT FOUND handler assignment, got %A" other
+
+              TestSupport.Sql.expectOk
+                  (execute
                       "CREATE FUNCTION selected_many() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT; SELECT value INTO selected FROM selected_source; RETURN selected; END")
                   "create multi-row selector"
 
