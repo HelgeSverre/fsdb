@@ -3503,6 +3503,21 @@ let tests =
               | other -> failtestf "expected selected table value, got %A" other
 
               TestSupport.Sql.expectOk
+                  (execute "CREATE TABLE selected_bits (value BIT(64))")
+                  "create bit source"
+              TestSupport.Sql.expectOk
+                  (execute "INSERT INTO selected_bits VALUES (b'1000000000000000000000000000000000000000000000000000000000000000')")
+                  "seed bit source"
+              TestSupport.Sql.expectOk
+                  (execute
+                      "CREATE FUNCTION selected_bit() RETURNS BIT(64) READS SQL DATA BEGIN DECLARE selected BIT(64); SELECT value INTO selected FROM selected_bits; RETURN selected; END")
+                  "create bit selector"
+
+              match execute "SELECT HEX(selected_bit())" with
+              | ResultSet(_, [ [ Some "8000000000000000" ] ]) -> ()
+              | other -> failtestf "expected exact BIT value, got %A" other
+
+              TestSupport.Sql.expectOk
                   (execute
                       "CREATE FUNCTION selected_empty() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT DEFAULT 9; SELECT value INTO selected FROM selected_source WHERE value = 99; RETURN selected; END")
                   "create empty selector"

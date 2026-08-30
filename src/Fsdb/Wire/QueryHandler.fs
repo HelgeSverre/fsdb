@@ -4167,7 +4167,8 @@ let private runRoutineStatements
                 when metadata.Flags &&& BinaryFlag <> 0us
                      && (metadata.TypeId = TypeString
                          || metadata.TypeId = TypeVarString
-                         || metadata.TypeId = TypeBlob) ->
+                         || metadata.TypeId = TypeBlob)
+                     || metadata.TypeId = TypeBit ->
                 VBytes(Encoding.Latin1.GetBytes text)
             | Some text, _ -> VString text
             | None, _ -> VNull
