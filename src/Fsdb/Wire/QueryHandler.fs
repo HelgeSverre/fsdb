@@ -25,6 +25,11 @@ open Fsdb.Executor
 let private storedProgramProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
 let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
 let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
+let private creatingTable = System.Threading.AsyncLocal<(string * string) option>()
+
+let private insideFunctionOrTrigger (session: Session) =
+    session.RoutineStack
+    |> List.exists (fun (kind, _, _) -> kind = "FUNCTION" || kind = "TRIGGER")
 
 let private triggerTableKey (database: string) table =
     database.ToLowerInvariant(), normalizeTableName table
@@ -2226,37 +2231,47 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
         |> List.map (fun access -> triggerTableKey access.Database access.Table)
         |> Set.ofList
 
-    match
-        accesses
-        |> List.tryFind (fun access ->
-            access.Mode = TableLocks.WriteAccess
-            && Set.contains (triggerTableKey access.Database access.Table) protectedTables)
-    with
-    | Some access ->
+    let writtenTable = accesses |> List.tryFind (fun access -> access.Mode = TableLocks.WriteAccess)
+
+    match creatingTable.Value, insideFunctionOrTrigger session, writtenTable with
+    | Some(_, target), true, Some access ->
         session,
         Err(
-            1442,
-            sprintf
-                "Can't update table '%s' in stored function/trigger because it is already used by statement which invoked this stored function/trigger."
-                access.Table
+            1746,
+            sprintf "Can't update table '%s' while '%s' is being created." access.Table target
         )
-    | None ->
-        match
-            TableLocks.withStatementAccess
-                (lockWaitTimeout session)
-                session.Store
-                session.ConnectionId
-                accesses
-                (fun () ->
-                    DynamicScope.withValue storedProgramProtectedTables (Set.union protectedTables statementTables) (fun () ->
-                        InformationSchema.withViewer
-                            store
-                            (accountOf session)
-                            session.ActiveRoles
-                            (fun () -> executeParsedStatement session stmt)))
-        with
-        | Ok result -> result
-        | Error(code, message) -> session, Err(code, message)
+    | _ ->
+      match
+          accesses
+          |> List.tryFind (fun access ->
+              access.Mode = TableLocks.WriteAccess
+              && Set.contains (triggerTableKey access.Database access.Table) protectedTables)
+      with
+      | Some access ->
+          session,
+          Err(
+              1442,
+              sprintf
+                  "Can't update table '%s' in stored function/trigger because it is already used by statement which invoked this stored function/trigger."
+                  access.Table
+          )
+      | None ->
+          match
+              TableLocks.withStatementAccess
+                  (lockWaitTimeout session)
+                  session.Store
+                  session.ConnectionId
+                  accesses
+                  (fun () ->
+                      DynamicScope.withValue storedProgramProtectedTables (Set.union protectedTables statementTables) (fun () ->
+                          InformationSchema.withViewer
+                              store
+                              (accountOf session)
+                              session.ActiveRoles
+                              (fun () -> executeParsedStatement session stmt)))
+          with
+          | Ok result -> result
+          | Error(code, message) -> session, Err(code, message)
 
 type private TemporaryAction =
     | CreateTemporary
@@ -2310,10 +2325,6 @@ let private startsTransaction = function
 
 let private autocommitDisabled (session: Session) =
     lookupVar session "autocommit" |> Option.flatten = Some "0"
-
-let private insideFunctionOrTrigger (session: Session) =
-    session.RoutineStack
-    |> List.exists (fun (kind, _, _) -> kind = "FUNCTION" || kind = "TRIGGER")
 
 let private implicitCommitDatabases dbName stmt =
     Auth.requiredPrivileges dbName stmt
@@ -2475,14 +2486,20 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
             let session = commitSession session
             TableLocks.releaseExplicit session.Store session.ConnectionId
 
-            if changesCatalogMembership stmt then
-                executeParsedCore session stmt
-            else
-                Storage.withDatabaseLocks
-                    (lockWaitTimeout session)
-                    session.Store
-                    (implicitCommitDatabases dbName stmt)
-                    (fun () -> executeParsedCore session stmt)
+            let execute () =
+                if changesCatalogMembership stmt then
+                    executeParsedCore session stmt
+                else
+                    Storage.withDatabaseLocks
+                        (lockWaitTimeout session)
+                        session.Store
+                        (implicitCommitDatabases dbName stmt)
+                        (fun () -> executeParsedCore session stmt)
+
+            match stmt with
+            | CreateTableAs(name, _, _) ->
+                DynamicScope.withValue creatingTable (Some(splitQualified dbName name)) execute
+            | _ -> execute ()
         else
             let session =
                 if session.Tx.IsNone && autocommitDisabled session && startsTransaction stmt then
