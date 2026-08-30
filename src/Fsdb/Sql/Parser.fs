@@ -4503,29 +4503,21 @@ let splitStatements (sql: string) : Result<string list, string> =
         let prefix = sql.[start .. at - 1]
 
         let options = System.Text.RegularExpressions.RegexOptions.IgnoreCase
-        let matchesPrefix pattern =
-            System.Text.RegularExpressions.Regex.IsMatch(prefix, pattern, options)
+        let createHeader objectType requiredClause =
+            let definer = @"(?:DEFINER\s*=\s*[\s\S]+?\s+)?"
+            let required = requiredClause |> Option.map (fun clause -> @"[\s\S]*\b" + clause + @"\b") |> Option.defaultValue ""
 
-        // A stored program header ends here, so the semicolons that follow
-        // belong to its body and cannot separate multi-statement buffers.
-        let definer = @"(?:DEFINER\s*=\s*\S+\s+)?"
+            System.Text.RegularExpressions.Regex.IsMatch(
+                prefix,
+                @"^\s*CREATE\s+" + definer + objectType + @"\b" + required + @"[\s\S]*$",
+                options
+            )
 
-        matchesPrefix (
-            @"^\s*CREATE\s+"
-            + definer
-            + @"TRIGGER\b[\s\S]*\bFOR\s+EACH\s+ROW(?:\s+(?:FOLLOWS|PRECEDES)\s+(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*))?\s*$"
-        )
-        || matchesPrefix (
-            @"^\s*CREATE\s+"
-            + definer
-            + @"PROCEDURE\s+\S+\s*\((?:[^()]|\([^()]*\))*\)\s*(?:SQL\s+SECURITY\s+(?:INVOKER|DEFINER)\s*)?$"
-        )
-        || matchesPrefix (
-            @"^\s*CREATE\s+"
-            + definer
-            + @"FUNCTION\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s*\((?:[^()]|\([^()]*\))*\)\s+RETURNS\s+[A-Za-z]+(?:\s*\([^)]*\))?(?:\s+UNSIGNED)?\s*"
-            + @"(?:(?:LANGUAGE\s+SQL|(?:NOT\s+)?DETERMINISTIC|SQL\s+SECURITY\s+(?:DEFINER|INVOKER)|NO\s+SQL|CONTAINS\s+SQL|READS\s+SQL\s+DATA|MODIFIES\s+SQL\s+DATA|COMMENT\s+'(?:''|\\.|[^'])*')\s*)*$"
-        )
+        // Detailed header validity belongs to the object parser; splitting
+        // only needs to recognize which CREATE statement owns this BEGIN.
+        createHeader "TRIGGER" (Some @"FOR\s+EACH\s+ROW")
+        || createHeader "PROCEDURE" None
+        || createHeader "FUNCTION" (Some "RETURNS")
 
     let addStatement stop =
         if stop > start then
