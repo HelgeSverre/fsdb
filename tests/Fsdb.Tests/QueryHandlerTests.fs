@@ -3385,6 +3385,50 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected no effects for an empty input, got %A" other
 
+              match execute "UPDATE function_source SET id = record_value(id) WHERE id = 1" with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected a no-op update, got %A" other
+
+              match execute "SELECT marker FROM function_effects ORDER BY id" with
+              | ResultSet(_, [ [ Some "value-1" ] ]) -> ()
+              | other -> failtestf "expected only the updated row to invoke the function, got %A" other
+
+              expectAffected "TRUNCATE TABLE function_effects"
+
+              match execute "DELETE FROM function_source WHERE record_value(id) = 999" with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected no rows to be deleted, got %A" other
+
+              match execute "SELECT marker FROM function_effects ORDER BY id" with
+              | ResultSet(_, [ [ Some "value-1" ]; [ Some "value-2" ] ]) -> ()
+              | other -> failtestf "expected one predicate invocation per row, got %A" other
+
+              expectAffected "TRUNCATE TABLE function_effects"
+
+              match execute "SELECT record_value(COUNT(*)) FROM function_source" with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the aggregate function value, got %A" other
+
+              match execute "SELECT marker FROM function_effects ORDER BY id" with
+              | ResultSet(_, [ [ Some "value-2" ] ]) -> ()
+              | other -> failtestf "expected only the aggregate output to invoke the function, got %A" other
+
+              expectAffected "TRUNCATE TABLE function_effects"
+
+              match execute "CREATE TABLE function_copy AS SELECT record_value(id) AS id FROM function_source" with
+              | Err(1746, message) ->
+                  Expect.stringContains message "function_effects" "written table named"
+                  Expect.stringContains message "function_copy" "created table named"
+              | other -> failtestf "expected CTAS function-write refusal, got %A" other
+
+              match execute "SELECT COUNT(*) FROM function_effects" with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected rejected CTAS effects to be absent, got %A" other
+
+              match execute "SELECT * FROM function_copy" with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected rejected CTAS target to be absent, got %A" other
+
               expectAffected "INSERT INTO function_targets VALUES (2)"
 
               match execute "INSERT INTO function_targets SELECT record_value(id) FROM function_source ORDER BY id" with
@@ -3426,6 +3470,21 @@ let tests =
               match execute "SELECT call_result_procedure()" with
               | Err(1415, _) -> ()
               | other -> failtestf "expected function result-set refusal, got %A" other
+
+          testCase "stored functions select into typed local variables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match
+                  handle
+                      session
+                      "CREATE FUNCTION selected_value() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT; SELECT 7 INTO selected; RETURN selected; END"
+              with
+              | session, Affected 0UL ->
+                  match handle session "SELECT selected_value()" |> snd with
+                  | ResultSet(_, [ [ Some "7" ] ]) -> ()
+                  | other -> failtestf "expected selected local value, got %A" other
+              | _, other -> failtestf "expected function creation, got %A" other
 
           testCase "stored procedures call procedures with local outputs"
           <| fun _ ->
