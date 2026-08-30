@@ -25,7 +25,7 @@ open Fsdb.Executor
 let private storedProgramProtectedTables = System.Threading.AsyncLocal<Set<string * string>>()
 let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
 let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
-let private creatingTable = System.Threading.AsyncLocal<(string * string) option>()
+let private creatingTable = System.Threading.AsyncLocal<string option>()
 
 let private insideFunctionOrTrigger (session: Session) =
     session.RoutineStack
@@ -2232,46 +2232,44 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
         |> Set.ofList
 
     let writtenTable = accesses |> List.tryFind (fun access -> access.Mode = TableLocks.WriteAccess)
+    let protectedWrite =
+        accesses
+        |> List.tryFind (fun access ->
+            access.Mode = TableLocks.WriteAccess
+            && Set.contains (triggerTableKey access.Database access.Table) protectedTables)
 
-    match creatingTable.Value, insideFunctionOrTrigger session, writtenTable with
-    | Some(_, target), true, Some access ->
+    match creatingTable.Value, insideFunctionOrTrigger session, writtenTable, protectedWrite with
+    | Some target, true, Some access, _ ->
         session,
         Err(
             1746,
             sprintf "Can't update table '%s' while '%s' is being created." access.Table target
         )
+    | _, _, _, Some access ->
+        session,
+        Err(
+            1442,
+            sprintf
+                "Can't update table '%s' in stored function/trigger because it is already used by statement which invoked this stored function/trigger."
+                access.Table
+        )
     | _ ->
-      match
-          accesses
-          |> List.tryFind (fun access ->
-              access.Mode = TableLocks.WriteAccess
-              && Set.contains (triggerTableKey access.Database access.Table) protectedTables)
-      with
-      | Some access ->
-          session,
-          Err(
-              1442,
-              sprintf
-                  "Can't update table '%s' in stored function/trigger because it is already used by statement which invoked this stored function/trigger."
-                  access.Table
-          )
-      | None ->
-          match
-              TableLocks.withStatementAccess
-                  (lockWaitTimeout session)
-                  session.Store
-                  session.ConnectionId
-                  accesses
-                  (fun () ->
-                      DynamicScope.withValue storedProgramProtectedTables (Set.union protectedTables statementTables) (fun () ->
-                          InformationSchema.withViewer
-                              store
-                              (accountOf session)
-                              session.ActiveRoles
-                              (fun () -> executeParsedStatement session stmt)))
-          with
-          | Ok result -> result
-          | Error(code, message) -> session, Err(code, message)
+        match
+            TableLocks.withStatementAccess
+                (lockWaitTimeout session)
+                session.Store
+                session.ConnectionId
+                accesses
+                (fun () ->
+                    DynamicScope.withValue storedProgramProtectedTables (Set.union protectedTables statementTables) (fun () ->
+                        InformationSchema.withViewer
+                            store
+                            (accountOf session)
+                            session.ActiveRoles
+                            (fun () -> executeParsedStatement session stmt)))
+        with
+        | Ok result -> result
+        | Error(code, message) -> session, Err(code, message)
 
 type private TemporaryAction =
     | CreateTemporary
@@ -2498,7 +2496,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
 
             match stmt with
             | CreateTableAs(name, _, _) ->
-                DynamicScope.withValue creatingTable (Some(splitQualified dbName name)) execute
+                DynamicScope.withValue creatingTable (Some(splitQualified dbName name |> snd)) execute
             | _ -> execute ()
         else
             let session =
