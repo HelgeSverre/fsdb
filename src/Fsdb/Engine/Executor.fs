@@ -8919,11 +8919,16 @@ and private runGroupedSelect
     | Error(code, message) -> Err(code, message), [], []
     | Ok() ->
 
-    match matches (probeRow columns)
-          |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr (ctxFor (probeRow columns))) |> Result.map ignore)
-          |> Result.bind (fun _ -> havingOk probeRewrite [])
-          |> Result.bind (fun _ -> projectGroup probeRewrite [])
-          |> Result.bind (fun probeProjected -> orderKeysOf probeRewrite probeProjected [] |> Result.map (fun _ -> probeProjected)) with
+    match
+        withMetadataProbe (fun () ->
+            matches (probeRow columns)
+            |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr (ctxFor (probeRow columns))) |> Result.map ignore)
+            |> Result.bind (fun _ -> havingOk probeRewrite [])
+            |> Result.bind (fun _ -> projectGroup probeRewrite [])
+            |> Result.bind (fun probeProjected ->
+                orderKeysOf probeRewrite probeProjected []
+                |> Result.map (fun _ -> probeProjected)))
+    with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjected ->
         let colNames = probeProjected |> List.map fst
@@ -10354,14 +10359,8 @@ and private runSelect
                     |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols))))) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjection when limit = Some 0 ->
-        // `LIMIT 0` is the standard "column metadata, no rows" probe
-        // (PDO/Doctrine's `getColumnMeta` and friends) — MySQL, and this
-        // engine, both answer it by evaluating every
-        // matched row's projection once rather than short-circuiting to
-        // nothing, so wire types (and a row-level error) come out the same
-        // as any other query would give them. No row ever needs to cross
-        // the wire either way, so the scan doesn't cost the thing a
-        // `LIMIT 0` caller actually asked for.
+        // `LIMIT 0` still resolves row-dependent result metadata, but stored
+        // program bodies cannot run for a statement that returns no rows.
         let colNames = probeProjection |> List.map fst
 
         match
@@ -15144,7 +15143,11 @@ let rec executeAs
                 // unknown column/function is a schema error, not a data
                 // one, and shouldn't depend on whether any row happens to
                 // match (or exist at all).
-                match whereMatches ctxFor probePredicate (probeRow columns) |> Result.bind (fun _ -> checkAssignments (probeRow columns)) with
+                match
+                    withMetadataProbe (fun () ->
+                        whereMatches ctxFor probePredicate (probeRow columns)
+                        |> Result.bind (fun _ -> checkAssignments (probeRow columns)))
+                with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
                     match selectMutationTargets ctxFor (List.ofSeq rows) check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
@@ -15533,7 +15536,7 @@ let rec executeAs
                 |> Option.map _.ProbePredicate
                 |> Option.orElse deleteStmt.Where
 
-            match whereMatches ctxFor probePredicate (probeRow columns) with
+            match withMetadataProbe (fun () -> whereMatches ctxFor probePredicate (probeRow columns)) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
                 match selectMutationTargets ctxFor (List.ofSeq rows) check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
