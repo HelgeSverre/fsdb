@@ -75,7 +75,7 @@ refuses it through the prepared-statement protocol.
 
 | Statement family | Impact | Class |
 |---|---|---|
-| Procedures support typed `IN`/`OUT`/`INOUT` parameters, nested calls with local output targets, scoped variables, read-only cursors, dynamic `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE`, compound control flow, condition handlers, `SIGNAL`/`RESIGNAL`, `GET CURRENT/STACKED DIAGNOSTICS`, and multi-result CALL. Stored functions support typed parameters/results, cursors, handlers, control flow, nested calls and procedure calls, INSERT/REPLACE/UPDATE/DELETE/DO bodies, SQL SECURITY, prepared invocation, and metadata; `max_sp_recursion_depth` cannot be raised above 0 | low | subset |
+| Procedures support typed `IN`/`OUT`/`INOUT` parameters, nested calls with local output targets, scoped variables, read-only cursors, dynamic `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE`, compound control flow, condition handlers, `SIGNAL`/`RESIGNAL`, `GET CURRENT/STACKED DIAGNOSTICS`, and multi-result CALL. Stored functions support typed parameters/results, cursors, handlers, control flow, local `SELECT … INTO`, nested calls and procedure calls, INSERT/REPLACE/UPDATE/DELETE/DO bodies, SQL SECURITY, prepared invocation, and metadata; `max_sp_recursion_depth` cannot be raised above 0 | low | subset |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
 | `ALTER TABLE` accepts `ALGORITHM` and `LOCK` execution hints but does not enforce the requested online-DDL strategy | low | divergence |
@@ -341,7 +341,8 @@ mode, client charset, and connection collation. INFORMATION_SCHEMA.PARAMETERS
 reports procedure arguments and function return/argument rows with declared
 type, ordinal, mode, charset, and collation metadata.
 Stored functions support typed parameters and return coercion, `RETURN`,
-compound control flow, handlers, cursors and subqueries, nested
+compound control flow, handlers, cursors, subqueries, typed local
+`SELECT … INTO`, nested
 function and procedure calls, DEFINER/INVOKER execution, native-function name
 precedence, prepared execution, SHOW metadata, and WAL/snapshot catalog
 persistence.
@@ -350,7 +351,9 @@ restored while each body runs. `INSERT`, `REPLACE`, `UPDATE`, `DELETE`, and
 `DO` bodies write through the invoking statement's transaction, so a failed
 statement discards its function effects, error 1442 protects every table the
 invoking statement reads or writes, and metadata-only probes such as
-`LIMIT 0` never invoke the body. One-time and recurring event declarations
+`LIMIT 0` never invoke the body. Synthetic validation rows cannot invoke the
+body, and function writes during `CREATE TABLE … AS SELECT` are rejected with
+MySQL's 1746. One-time and recurring event declarations
 support CREATE/DROP, schedule/status/body/name alteration, SHOW CREATE EVENT,
 SHOW EVENTS, persisted EVENTS metadata, and definer-context execution of
 one-time and recurring schedules. CREATE ROUTINE,
@@ -358,7 +361,7 @@ ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, diagnostics, and the statement forms permitted in each routine kind | procedures cover typed parameters, nested calls, local OUT/INOUT targets, dynamic SQL, sequential statements, and multi-result CALL; functions cover typed scalar returns, nested function and procedure calls, handlers, cursors, and INSERT/REPLACE/UPDATE/DELETE/DO bodies. Result-set statements (1415), dynamic SQL (1336), and commit-causing statements (1422) are refused as MySQL refuses them, but recursion cannot be enabled because `max_sp_recursion_depth` is fixed at 0 | low | subset |
+| Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, diagnostics, and the statement forms permitted in each routine kind | procedures cover typed parameters, nested calls, local OUT/INOUT targets, dynamic SQL, sequential statements, and multi-result CALL; functions cover typed scalar returns, local `SELECT … INTO`, nested function and procedure calls, handlers, cursors, and INSERT/REPLACE/UPDATE/DELETE/DO bodies. Result-set statements (1415), dynamic SQL (1336), and commit-causing statements (1422) are refused as MySQL refuses them, but recursion cannot be enabled because `max_sp_recursion_depth` is fixed at 0 | low | subset |
 
 ## 11. Full-text search
 

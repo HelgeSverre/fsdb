@@ -12907,6 +12907,9 @@ let rec executeAs
                             and runStatement scope =
                                 function
                                 | StoredProgram.Sql statement -> runDml statement |> complete
+                                | StoredProgram.SelectInto _ ->
+                                    Err(1235, "SELECT INTO local variables is not supported in triggers")
+                                    |> complete
                                 | StoredProgram.TextSql sql ->
                                     match triggerTextExecutor.Value, currentVariableContext () with
                                     | Some execute, Some variables ->

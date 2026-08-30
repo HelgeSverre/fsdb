@@ -3908,24 +3908,27 @@ let private parseFunctionDefinition options parameters returnType body =
         StoredProgram.validateFunction parsedParameters statements
         |> Result.mapError routineValidationError
         |> Result.bind (fun () ->
-            statements
-            |> List.collect StoredProgram.executableSqlStatements
-            |> List.tryPick (function
-                | Select _
-                | Union _ -> Some(Err(1415, "Not allowed to return a result set from a function"))
-                | Insert _
-                | InsertSelect _
-                | Replace _
-                | ReplaceSelect _
-                | ReplaceSet _
-                | LoadData _
-                | Update _
-                | Delete _
-                | Do _ -> None
-                | _ -> Some(Err(1422, "Explicit or implicit commit is not allowed in stored function or trigger.")))
-            |> function
-                | Some error -> Error error
-                | None -> Ok(parsedParameters, parsedReturnType, statements))
+            if statements |> List.collect StoredProgram.resultSetStatements |> List.isEmpty |> not then
+                Error(Err(1415, "Not allowed to return a result set from a function"))
+            else
+                statements
+                |> List.collect StoredProgram.executableSqlStatements
+                |> List.tryPick (function
+                    | Select _
+                    | Union _
+                    | Insert _
+                    | InsertSelect _
+                    | Replace _
+                    | ReplaceSelect _
+                    | ReplaceSet _
+                    | LoadData _
+                    | Update _
+                    | Delete _
+                    | Do _ -> None
+                    | _ -> Some(Err(1422, "Explicit or implicit commit is not allowed in stored function or trigger.")))
+                |> function
+                    | Some error -> Error error
+                    | None -> Ok(parsedParameters, parsedReturnType, statements))
     | Error _, _, _ -> Error(syntaxError parameters)
     | _, Error _, _ -> Error(syntaxError returnType)
     | _, _, Error _ when Regex.IsMatch(body, @"\b(?:PREPARE|EXECUTE|DEALLOCATE\s+PREPARE)\b", RegexOptions.IgnoreCase) ->
@@ -4159,6 +4162,33 @@ let private runRoutineStatements
         generated |> List.iter propagatedConditions.Add
         next, result
 
+    let valuesOfResultRow (session: Session) (row: string option list) =
+        let valueAt index (value: string option) =
+            match value, List.tryItem index session.LastResultColumnMetadata with
+            | Some text, Some metadata
+                when metadata.Flags &&& BinaryFlag <> 0us
+                     && (metadata.TypeId = TypeString
+                         || metadata.TypeId = TypeVarString
+                         || metadata.TypeId = TypeBlob) ->
+                VBytes(Encoding.Latin1.GetBytes text)
+            | Some text, _ -> VString text
+            | None, _ -> VNull
+
+        row |> List.mapi valueAt
+
+    let assignSelectedValues targets values locals =
+        List.zip targets values
+        |> List.fold
+            (fun assigned (target, value) ->
+                assigned
+                |> Result.bind (fun locals ->
+                    match Map.tryFind target locals with
+                    | None -> Error(Err(1327, sprintf "Undeclared variable: %s" target))
+                    | Some local ->
+                        coerceRoutineValue store local.Column value
+                        |> Result.map (fun value -> Map.add target { local with Value = value } locals)))
+            (Ok locals)
+
     let clearDiagnostics () =
         currentDiagnostics.Value <-
             { Conditions = []
@@ -4208,6 +4238,57 @@ let private runRoutineStatements
                 executeWithDiagnostics current (fun () ->
                     Executor.withRoutineVariables locals (fun () -> executeSql current sql))
                 ||> continueAfterSql scope locals results affectedRows rest
+            | StoredProgram.SelectInto(sql, targets) ->
+                let next, selected =
+                    executeWithDiagnostics current (fun () ->
+                        Executor.withRoutineVariables locals (fun () -> executeSql current sql))
+
+                match selected with
+                | ResultSet(columns, _) when columns.Length <> targets.Length ->
+                    handleQueryResult
+                        scope
+                        next
+                        locals
+                        results
+                        affectedRows
+                        rest
+                        (Err(1222, "The used SELECT statements have a different number of columns"))
+                | ResultSet(_, []) ->
+                    let warning: Diagnostics.Condition =
+                        { Level = Diagnostics.Warning
+                          Code = 1329
+                          State = "02000"
+                          Message = "No data - zero rows fetched, selected, or processed"
+                          Information = Map.empty }
+
+                    currentDiagnostics.Value <-
+                        { Conditions = [ warning ]
+                          RowCount = 0L }
+                    propagatedConditions.Add warning
+                    run scope next locals results affectedRows rest
+                | ResultSet(_, [ row ]) ->
+                    let values = valuesOfResultRow next row
+                    let assigned, generated = Diagnostics.capture (fun () -> assignSelectedValues targets values locals)
+
+                    match assigned with
+                    | Ok locals ->
+                        updateDiagnostics generated (Affected 0UL)
+                        generated |> List.iter propagatedConditions.Add
+                        run scope next locals results affectedRows rest
+                    | Error error ->
+                        updateDiagnostics generated error
+                        generated |> List.iter propagatedConditions.Add
+                        handleQueryResult scope next locals results affectedRows rest error
+                | ResultSet _ ->
+                    handleQueryResult
+                        scope
+                        next
+                        locals
+                        results
+                        affectedRows
+                        rest
+                        (Err(1172, "Result consisted of more than one row"))
+                | error -> handleQueryResult scope next locals results affectedRows rest error
             | StoredProgram.TextSql sql ->
                 let routineState = ref locals
 
@@ -4248,20 +4329,9 @@ let private runRoutineStatements
 
                     match opened with
                     | ResultSet(columns, rows) ->
-                        let binaryValue index (value: string option) =
-                            match value, List.tryItem index next.LastResultColumnMetadata with
-                            | Some text, Some metadata
-                                when metadata.Flags &&& BinaryFlag <> 0us
-                                     && (metadata.TypeId = TypeString
-                                         || metadata.TypeId = TypeVarString
-                                         || metadata.TypeId = TypeBlob) ->
-                                VBytes(Encoding.Latin1.GetBytes text)
-                            | Some text, _ -> VString text
-                            | None, _ -> VNull
-
                         let rows =
                             rows
-                            |> List.map (List.mapi binaryValue >> List.toArray)
+                            |> List.map (valuesOfResultRow next >> List.toArray)
                             |> List.toArray
 
                         cursors.Value <- StoredProgram.setCursorRows name columns.Length rows cursors.Value

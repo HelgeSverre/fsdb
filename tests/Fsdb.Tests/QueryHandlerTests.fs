@@ -3473,18 +3473,69 @@ let tests =
 
           testCase "stored functions select into typed local variables"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
+              let mutable session = create 1 (Fsdb.Storage.create ())
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              TestSupport.Sql.expectOk (execute "CREATE TABLE selected_source (value INT)") "create source"
+              TestSupport.Sql.expectOk (execute "INSERT INTO selected_source VALUES (4), (5)") "seed source"
 
               match
-                  handle
-                      session
-                      "CREATE FUNCTION selected_value() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT; SELECT 7 INTO selected; RETURN selected; END"
+                  execute
+                      "CREATE FUNCTION selected_value() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT; SELECT/* projection */7 INTO/* target */selected; RETURN selected; END"
               with
-              | session, Affected 0UL ->
-                  match handle session "SELECT selected_value()" |> snd with
+              | Affected 0UL ->
+                  match execute "SELECT selected_value()" with
                   | ResultSet(_, [ [ Some "7" ] ]) -> ()
                   | other -> failtestf "expected selected local value, got %A" other
-              | _, other -> failtestf "expected function creation, got %A" other
+              | other -> failtestf "expected function creation, got %A" other
+
+              TestSupport.Sql.expectOk
+                  (execute
+                      "CREATE FUNCTION selected_row() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT; SELECT value INTO selected FROM selected_source WHERE value = 4; RETURN selected; END")
+                  "create row selector"
+
+              match execute "SELECT selected_row()" with
+              | ResultSet(_, [ [ Some "4" ] ]) -> ()
+              | other -> failtestf "expected selected table value, got %A" other
+
+              TestSupport.Sql.expectOk
+                  (execute
+                      "CREATE FUNCTION selected_empty() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT DEFAULT 9; SELECT value INTO selected FROM selected_source WHERE value = 99; RETURN selected; END")
+                  "create empty selector"
+
+              match execute "SELECT selected_empty()" with
+              | ResultSet(_, [ [ Some "9" ] ]) ->
+                  Expect.equal (session.Diagnostics |> List.map _.Code) [ 1329 ] "empty SELECT INTO warning"
+              | other -> failtestf "expected unchanged local after an empty selection, got %A" other
+
+              TestSupport.Sql.expectOk
+                  (execute
+                      "CREATE FUNCTION selected_many() RETURNS INT READS SQL DATA BEGIN DECLARE selected INT; SELECT value INTO selected FROM selected_source; RETURN selected; END")
+                  "create multi-row selector"
+
+              match execute "SELECT selected_many()" with
+              | Err(1172, _) -> ()
+              | other -> failtestf "expected multi-row SELECT INTO error, got %A" other
+
+              TestSupport.Sql.expectOk
+                  (execute
+                      "CREATE FUNCTION selected_width() RETURNS INT BEGIN DECLARE selected INT; SELECT 1, 2 INTO selected; RETURN selected; END")
+                  "create width mismatch"
+
+              match execute "SELECT selected_width()" with
+              | Err(1222, _) -> ()
+              | other -> failtestf "expected SELECT INTO width error, got %A" other
+
+              match
+                  execute
+                      "CREATE FUNCTION selected_unknown() RETURNS INT BEGIN SELECT 1 INTO missing; RETURN 1; END"
+              with
+              | Err(1327, _) -> ()
+              | other -> failtestf "expected undeclared SELECT INTO target error, got %A" other
 
           testCase "stored procedures call procedures with local outputs"
           <| fun _ ->

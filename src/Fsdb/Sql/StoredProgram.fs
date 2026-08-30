@@ -63,6 +63,7 @@ type Cursor =
 
 type Statement =
     | Sql of Ast.Statement
+    | SelectInto of query: Ast.Statement * targets: string list
     | TextSql of string
     | Block of label: string option * body: Statement list
     | If of condition: Expr * whenTrue: Statement list * whenFalse: Statement list
@@ -149,7 +150,8 @@ let validationError =
 
 let rec private collectSqlStatements includeCursors =
     function
-    | Sql statement -> [ statement ]
+    | Sql statement
+    | SelectInto(statement, _) -> [ statement ]
     | DeclareCursor(_, query) when includeCursors -> [ query ]
     | DeclareCursor _ -> []
     | TextSql _ -> []
@@ -179,6 +181,20 @@ let rec private collectSqlStatements includeCursors =
 let sqlStatements = collectSqlStatements true
 let executableSqlStatements = collectSqlStatements false
 
+let rec resultSetStatements =
+    function
+    | Sql((Ast.Select _ | Ast.Union _) as statement) -> [ statement ]
+    | Block(_, body)
+    | Loop(_, body) -> body |> List.collect resultSetStatements
+    | While(_, _, body)
+    | Repeat(_, body, _) -> body |> List.collect resultSetStatements
+    | If(_, whenTrue, whenFalse) -> (whenTrue @ whenFalse) |> List.collect resultSetStatements
+    | Case(_, branches, otherwise) ->
+        (branches |> List.collect (snd >> List.collect resultSetStatements))
+        @ (otherwise |> Option.defaultValue [] |> List.collect resultSetStatements)
+    | DeclareHandler(_, _, body) -> resultSetStatements body
+    | _ -> []
+
 let rec textSqlStatements =
     function
     | TextSql sql -> [ sql ]
@@ -196,6 +212,7 @@ let rec textSqlStatements =
 let rec expressions =
     function
     | Sql _
+    | SelectInto _
     | DeclareCursor _
     | TextSql _ -> []
     | Block(_, body)
@@ -526,6 +543,7 @@ type private Boundary =
     | Do
     | When
     | Until
+    | Into
     | ElseIf
     | Else
     | EndIf
@@ -567,7 +585,8 @@ let private keywordBoundaries =
       When, "WHEN"
       Then, "THEN"
       Do, "DO"
-      Until, "UNTIL" ]
+      Until, "UNTIL"
+      Into, "INTO" ]
 
 let private parameterPattern =
     Regex(
@@ -1033,6 +1052,38 @@ let private findBoundary boundaries (text: string) start =
 
     found
 
+let private selectIntoTargets =
+    Regex(
+        sprintf @"\G(?<target>%s)(?:%s,%s(?<target>%s))*" labelPattern triviaPattern triviaPattern labelPattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private tryParseSelectInto (options: Parser.ParserOptions) (text: string) =
+    if not (wordAt text (skipTrivia text 0) "SELECT") then
+        Ok None
+    else
+        match findBoundary (Set.singleton Into) text 0 with
+        | None -> Ok None
+        | Some(intoStart, afterInto, _) ->
+            let targetStart = skipTrivia text afterInto
+            let matched = selectIntoTargets.Match(text, targetStart)
+
+            if not matched.Success || matched.Index <> targetStart then
+                Ok None
+            else
+                let targets =
+                    matched.Groups.["target"].Captures
+                    |> Seq.cast<Capture>
+                    |> Seq.map (_.Value >> normalizeLabel)
+                    |> List.ofSeq
+
+                let queryText = text.Remove(intoStart, matched.Index + matched.Length - intoStart)
+
+                Parser.parseStoredStatementWithOptions options queryText
+                |> Result.bind (function
+                    | (Ast.Select _ | Ast.Union _) as query -> Ok(Some(SelectInto(query, targets)))
+                    | _ -> Error "SELECT INTO requires a SELECT statement")
+
 let parseParameters (options: Parser.ParserOptions) (text: string) : Result<Parameter list, string> =
     let parseOne value =
         let matched = parameterPattern.Match value
@@ -1072,6 +1123,7 @@ let parseArguments (options: Parser.ParserOptions) (text: string) : Result<Expr 
 
 let private parseWithFallback
     (options: Parser.ParserOptions)
+    (allowLocalSelectInto: bool)
     (isSupportedText: string -> bool)
     (body: string)
     : Result<Statement list, string> =
@@ -1351,10 +1403,14 @@ let private parseWithFallback
                     parseSignalInformation options resignal.Groups.["information"].Value
                     |> Result.map (fun information -> Resignal(condition, information)))
             | Ok None ->
-                match Parser.parseStoredStatementWithOptions options text with
-                | Ok statement -> Ok(Sql statement)
-                | Error _ when isSupportedText text -> Ok(TextSql text)
+                match if allowLocalSelectInto then tryParseSelectInto options text else Ok None with
+                | Ok(Some statement) -> Ok statement
                 | Error error -> Error error
+                | Ok None ->
+                    match Parser.parseStoredStatementWithOptions options text with
+                    | Ok statement -> Ok(Sql statement)
+                    | Error _ when isSupportedText text -> Ok(TextSql text)
+                    | Error error -> Error error
 
         match rootLabel, rootEndLabel with
         | None, Some actual -> Error(sprintf "End label '%s' has no matching start label" actual)
@@ -1382,16 +1438,20 @@ let private parseWithFallback
             |> Result.map (fun value ->
                 [ SetLocal(assignment.Groups.["name"].Value.ToLowerInvariant(), value) ])
         else
-            match Parser.parseStoredStatementWithOptions options body with
-            | Ok statement -> Ok [ Sql statement ]
-            | Error _
-                when not (body.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase))
-                     && isSupportedText body ->
-                Ok [ TextSql body ]
+            match if allowLocalSelectInto then tryParseSelectInto options body else Ok None with
+            | Ok(Some statement) -> Ok [ statement ]
             | Error error -> Error error
+            | Ok None ->
+                match Parser.parseStoredStatementWithOptions options body with
+                | Ok statement -> Ok [ Sql statement ]
+                | Error _
+                    when not (body.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase))
+                         && isSupportedText body ->
+                    Ok [ TextSql body ]
+                | Error error -> Error error
 
 let parse (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
-    parseWithFallback options (fun _ -> false) body
+    parseWithFallback options false (fun _ -> false) body
 
 let private callIdentifier = @"(?:`(?:``|[^`])+`|[A-Za-z_$][A-Za-z0-9_$]*)"
 
@@ -1414,10 +1474,10 @@ let tryCall (options: Parser.ParserOptions) (sql: string) =
         None
 
 let parseTrigger (options: Parser.ParserOptions) (body: string) : Result<Statement list, string> =
-    parseWithFallback options (tryCall options >> Option.isSome) body
+    parseWithFallback options false (tryCall options >> Option.isSome) body
 
 let parseRoutine (options: Parser.ParserOptions) isSupportedText body =
-    parseWithFallback options isSupportedText body
+    parseWithFallback options true isSupportedText body
 
 let private validateProgram allowReturn (parameters: Parameter list) (statements: Statement list) =
     let rec addParameters names =
@@ -1458,6 +1518,12 @@ let private validateProgram allowReturn (parameters: Parameter list) (statements
         | [] -> Ok scope
         | Sql _ :: rest
         | TextSql _ :: rest -> validateStatements afterStatement rest
+        | SelectInto(_, targets) :: _ when targets |> List.exists (fun name -> not (Set.contains name scope.Names)) ->
+            targets
+            |> List.find (fun name -> not (Set.contains name scope.Names))
+            |> UndeclaredVariable
+            |> Error
+        | SelectInto _ :: rest -> validateStatements afterStatement rest
         | Declare _ :: _ when scope.HasExecutableStatement -> Error DeclarationAfterStatement
         | Declare _ :: _ when scope.HasCursorDeclaration || scope.HasHandlerDeclaration ->
             Error VariableAfterCursorOrHandler
