@@ -11406,7 +11406,8 @@ let evaluateRowPredicate
     |> Result.map (truthy >> (=) (Some true))
     |> Result.mapError Err
 
-/// The physical rows a single-table `UPDATE`/`DELETE` actually mutates:
+/// The physical rows a single-table `UPDATE`/`DELETE` actually mutates,
+/// retaining their stable identifiers for the storage write:
 /// every row `matches` (the `WHERE`, or everything when there's none),
 /// ordered by `orderBy` and capped at `limit` — computed up front, against
 /// each row's original values, so `ORDER BY`/`LIMIT` see a stable snapshot
@@ -11418,13 +11419,13 @@ let evaluateRowPredicate
 /// legitimate a choice as any.
 let private selectMutationTargets
     (ctxFor: Value[] -> EvalContext)
-    (rows: Value[] list)
+    (rows: (RowId * Value[]) list)
     (matches: Value[] -> Result<bool, EvalError>)
     (orderBy: OrderKey list)
     (limit: int option)
-    : Result<Value[] list, EvalError> =
+    : Result<(RowId * Value[]) list, EvalError> =
     rows
-    |> traverse (fun row -> matches row |> Result.map (fun m -> m, row))
+    |> traverse (fun ((_, row) as positioned) -> matches row |> Result.map (fun matched -> matched, positioned))
     |> Result.bind (fun flagged ->
         let matched = flagged |> List.filter fst |> List.map snd
 
@@ -11434,15 +11435,25 @@ let private selectMutationTargets
             let dirs = orderBy |> List.map snd
 
             matched
-            |> traverse (fun row ->
+            |> traverse (fun ((_, row) as positioned) ->
                 orderBy
                 |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
-                |> Result.map (fun keys -> keys, row))
+                |> Result.map (fun keys -> keys, positioned))
             |> Result.map (fun keyed -> keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) |> List.map snd))
     |> Result.map (fun ordered ->
         match limit with
         | Some l -> ordered |> List.truncate (max 0 l)
         | None -> ordered)
+
+let private mutationCandidateRows
+    (tableResult: Result<Table, StorageError>)
+    (narrowed: (ColumnDef list * (RowId * Value[]) list) option)
+    : Result<ColumnDef list * (RowId * Value[]) list, StorageError> =
+    narrowed
+    |> Option.map Ok
+    |> Option.defaultWith (fun () ->
+        tableResult
+        |> Result.map (fun table -> table.Columns, table.RowsArray.Indexed |> List.ofSeq))
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, left-to-right — each right-hand side is evaluated against the row
@@ -16006,7 +16017,8 @@ let rec executeAs
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
         let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
 
-        let tableRoot = tableSnapshot store db table |> Result.toOption
+        let tableRootResult = tableSnapshot store db table
+        let tableRoot = tableRootResult |> Result.toOption
         let fullTextPlanResult =
             match tableRoot, updateStmt.Where with
             | Some table, Some predicate -> fullTextPredicatePlan table predicate
@@ -16022,15 +16034,12 @@ let rec executeAs
             |> Option.orElseWith (fun () -> tryIndexedLookup store dbName updateStmt.From updateStmt.Where)
             |> Option.orElseWith (fun () -> tryRangeLookup store dbName updateStmt.From updateStmt.Where)
 
-        let scanned =
-            narrowed
-            |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd |> Seq.ofList))
-            |> Option.defaultWith (fun () -> scan store db table)
+        let candidateRowsResult = mutationCandidateRows tableRootResult narrowed
 
-        match fullTextPlanResult, scanned with
+        match fullTextPlanResult, candidateRowsResult with
         | Error(code, message), _ -> ids, Err(code, message)
         | Ok _, Error e -> ids, storageErr e
-        | Ok _, Ok(columns, rows) ->
+        | Ok _, Ok(columns, positionedRows) ->
             let columnIndex = columnIndexOf columns
 
             match updateStmt.Assignments |> traverse (fun a -> resolveAssignableColumn columns table a.Column |> Result.map (fun i -> i, a.Value)) with
@@ -16075,10 +16084,10 @@ let rec executeAs
                 with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
-                    match selectMutationTargets ctxFor (List.ofSeq rows) check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
+                    match selectMutationTargets ctxFor positionedRows check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
-                        let targetSet = referenceSet targetRows
+                        let targetSet = targetRows |> List.map snd |> referenceSet
                         let beforeTriggers = triggersFor store db table "BEFORE" "UPDATE"
                         let afterTriggers = triggersFor store db table "AFTER" "UPDATE"
                         let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
@@ -16121,9 +16130,7 @@ let rec executeAs
                                         Ok candidate
                             | Error error -> Error error
 
-                        let candidates = narrowed |> Option.map snd
-
-                        match updateRows targetStore db table candidates predicate updater with
+                        match updateRows targetStore db table (Some targetRows) predicate updater with
                         | Ok changed ->
                             match fireTriggers targetStore db table After TriggerUpdate afterTriggers (List.ofSeq changedRows) with
                             | Some error -> ids, error
@@ -16414,7 +16421,8 @@ let rec executeAs
         let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
         let baseCatalog, targetStore =
             if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
-        let tableRoot = tableSnapshot targetStore db table |> Result.toOption
+        let tableRootResult = tableSnapshot targetStore db table
+        let tableRoot = tableRootResult |> Result.toOption
         let fullTextPlanResult =
             match tableRoot, deleteStmt.Where with
             | Some table, Some predicate -> fullTextPredicatePlan table predicate
@@ -16428,15 +16436,12 @@ let rec executeAs
             |> Option.orElseWith (fun () -> tryIndexedLookup targetStore dbName deleteStmt.From deleteStmt.Where)
             |> Option.orElseWith (fun () -> tryRangeLookup targetStore dbName deleteStmt.From deleteStmt.Where)
 
-        let scanned =
-            narrowed
-            |> Option.map (fun (columns, rows) -> Ok(columns, rows |> List.map snd |> Seq.ofList))
-            |> Option.defaultWith (fun () -> scan targetStore db table)
+        let candidateRowsResult = mutationCandidateRows tableRootResult narrowed
 
-        match fullTextPlanResult, scanned with
+        match fullTextPlanResult, candidateRowsResult with
         | Error(code, message), _ -> ids, Err(code, message)
         | Ok _, Error e -> ids, storageErr e
-        | Ok _, Ok(columns, rows) ->
+        | Ok _, Ok(columns, positionedRows) ->
             let columnIndex = columnIndexOf columns
 
             let ctxFor = contextFactory store registry dbName columnIndex (singleQualifier tableAlias columns) None
@@ -16464,11 +16469,11 @@ let rec executeAs
             match withMetadataProbe (fun () -> whereMatches ctxFor probePredicate (probeRow columns)) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
-                match selectMutationTargets ctxFor (List.ofSeq rows) check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
+                match selectMutationTargets ctxFor positionedRows check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
-                    let targetSet = referenceSet targetRows
-                    let deletedRows = targetRows |> List.map (fun row -> Some row, None)
+                    let targetSet = targetRows |> List.map snd |> referenceSet
+                    let deletedRows = targetRows |> List.map (fun (_, row) -> Some row, None)
 
                     let predicate row =
                         match fullTextPlan, narrowed with
@@ -16479,16 +16484,10 @@ let rec executeAs
                             |> Result.map (fun matches -> matches && targetSet.Contains row)
                         | None, None -> Ok(targetSet.Contains row)
 
-                    let candidates = narrowed |> Option.map snd
-
                     match fireTriggers targetStore db table Before TriggerDelete beforeTriggers deletedRows with
                     | Some error -> ids, error
                     | None ->
-                        match
-                            candidates
-                            |> Option.map (fun rows -> deleteRowsCandidates targetStore db table rows predicate)
-                            |> Option.defaultWith (fun () -> deleteRows targetStore db table predicate)
-                        with
+                        match deleteRowsCandidates targetStore db table targetRows predicate with
                         | Error e -> ids, storageErr e
                         | Ok affected ->
                             match fireTriggers targetStore db table After TriggerDelete afterTriggers deletedRows with

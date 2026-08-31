@@ -100,6 +100,19 @@ let tests =
                   Expect.equal rows [ [ Some "3" ]; [ Some "4" ]; [ Some "101" ]; [ Some "102" ] ] "only the two smallest rows changed"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "UPDATE LIMIT keeps duplicate physical rows distinct"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE t (n INT)" |> ignore
+              runDefault store "INSERT INTO t VALUES (7), (7)" |> ignore
+
+              Expect.equal (runDefault store "UPDATE t SET n = 8 WHERE n = 7 LIMIT 1") (Affected 1UL) "one physical row changes"
+
+              match runDefault store "SELECT n, COUNT(*) FROM t GROUP BY n ORDER BY n" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "7"; Some "1" ]; [ Some "8"; Some "1" ] ] "the duplicate remains independently addressable"
+              | other -> failtestf "expected grouped rows, got %A" other
+
           testCase "DELETE ... ORDER BY ... LIMIT removes the first n rows in that order"
           <| fun _ ->
               let store = newStore ()
