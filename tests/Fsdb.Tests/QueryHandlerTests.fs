@@ -2010,6 +2010,41 @@ let tests =
               | ResultSet(_, [ [ Some "11" ] ]) -> ()
               | other -> failtestf "expected the waiting reader to succeed, got %A" other
 
+          testCase "a queued table writer has priority over later readers"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE lock_priority (id INT PRIMARY KEY)"
+              let holder, _ = handle (create 2 store) "LOCK TABLES lock_priority READ"
+
+              let waitingWriter =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 3 store) "LOCK TABLES lock_priority WRITE")
+
+              Expect.isFalse (waitingWriter.Wait(TimeSpan.FromMilliseconds 100.0)) "the writer waits for the existing reader"
+
+              let laterReader =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 4 store) "LOCK TABLES lock_priority READ")
+
+              let readerBarged = laterReader.Wait(TimeSpan.FromMilliseconds 100.0)
+
+              if readerBarged then
+                  handle (fst laterReader.Result) "UNLOCK TABLES" |> ignore
+
+              handle holder "UNLOCK TABLES" |> ignore
+              Expect.isTrue (waitingWriter.Wait(TimeSpan.FromSeconds 2.0)) "the queued writer acquires after the holder releases"
+
+              let writer, result = waitingWriter.Result
+              Expect.equal result (Affected 0UL) "the queued writer acquired its table lock"
+
+              if not readerBarged then
+                  Expect.isFalse (laterReader.Wait(TimeSpan.FromMilliseconds 100.0)) "the later reader waits behind the queued writer"
+
+              handle writer "UNLOCK TABLES" |> ignore
+              Expect.isTrue (laterReader.Wait(TimeSpan.FromSeconds 2.0)) "the later reader acquires after the writer releases"
+              handle (fst laterReader.Result) "UNLOCK TABLES" |> ignore
+              Expect.isFalse readerBarged "the later reader did not bypass the queued writer"
+
           testCase "ordinary statements overlap while explicit acquisition waits"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
