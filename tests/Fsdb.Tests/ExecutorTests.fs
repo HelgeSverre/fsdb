@@ -3330,6 +3330,13 @@ let tests =
                             "an index leading with the group column sorts, unlike the unindexed case above"
                     | other -> failtestf "expected code-sorted groups, got %A" other
 
+                    match runDefault store "EXPLAIN SELECT code, COUNT(*) AS c FROM t GROUP BY code" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "index") "the grouping path reads the index"
+                        Expect.equal row.[6] (Some "idx_code") "the grouping index is reported"
+                        Expect.isFalse (row.[11].Value.Contains("temporary")) "ordered groups do not use a temporary table"
+                    | other -> failtestf "expected an indexed GROUP BY plan, got %A" other
+
                 testCase "GROUP BY sorts through a composite index once WHERE pins every column ahead of the group key"
                 <| fun _ ->
                     let store = newStore ()
@@ -3362,6 +3369,12 @@ let tests =
                             [ [ Some "DE"; Some "1" ]; [ Some "GB"; Some "1" ]; [ Some "NL"; Some "1" ]; [ Some "NO"; Some "1" ] ]
                             "the WHERE-pinned composite index sorts, matching MySQL's GROUP BY-using-an-index optimization"
                     | other -> failtestf "expected code-sorted groups, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT code, COUNT(*) AS c FROM t WHERE is_published = 1 GROUP BY code" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "index") "the pinned prefix feeds the grouping path"
+                        Expect.equal row.[6] (Some "idx_pub_code_city") "the composite grouping index is reported"
+                    | other -> failtestf "expected a composite indexed GROUP BY plan, got %A" other
 
                 testCase "ORDER BY an aggregate not in the SELECT list, over a grouped query"
                 <| fun _ ->
