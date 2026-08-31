@@ -204,8 +204,8 @@ primary, unique, and secondary B-trees and report `range` in `EXPLAIN`.
 whole-column left prefix of a composite index, or a suffix whose preceding
 keys are fixed by literal equalities, including `LIMIT`, `OFFSET`, and literal
 bounds. A matching single-part `LOWER(column)` or `UPPER(column)` index also
-streams that expression's order; other expression orderings and full-value
-ordering through a prefix key still sort. Equality
+streams that expression's ordering and grouping; other expression orderings
+and full-value ordering through a prefix key still sort. Equality
 buckets and ordered entries are separate derived
 structures, deliberately trading memory and write work for efficient equality
 buckets and bounded range seeks. Equi-joins hash-join; everything else is a
