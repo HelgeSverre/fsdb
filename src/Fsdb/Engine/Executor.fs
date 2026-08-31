@@ -5587,7 +5587,7 @@ and private tryIndexedJoinProbe
     (equiKeys: (int * int) list)
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
-    | (InnerJoin | LeftJoin), [], Some table, _ :: _
+    | (InnerJoin | NaturalJoin | LeftJoin | NaturalLeftJoin), _, Some table, _ :: _
         when storedValuesMatchReadValues store
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         let rightNames = equiKeys |> List.map (fun (_, rightIndex) -> rightColumns.[rightIndex].Name)
@@ -6084,7 +6084,7 @@ and private applyResolvedJoin
                     |> Option.defaultValue joinRows
 
                 match join.Kind, exactKey, residualConjuncts with
-                | InnerJoin, true, [] ->
+                | (InnerJoin | NaturalJoin), true, [] ->
                     let candidates =
                         seq {
                             for left in rowsSoFar do
@@ -6093,7 +6093,7 @@ and private applyResolvedJoin
                         }
 
                     Ok(newSources, candidates, coalesceNames)
-                | InnerJoin, _, _ ->
+                | (InnerJoin | NaturalJoin), _, _ ->
                     seq {
                         for left in rowsSoFar do
                             for right in rightRowsFor left do
@@ -6107,7 +6107,7 @@ and private applyResolvedJoin
                         (fun combined -> candidateHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
                     |> Result.mapError Err
                     |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
-                | LeftJoin, true, [] ->
+                | (LeftJoin | NaturalLeftJoin), true, [] ->
                     let candidates =
                         seq {
                             for left in rowsSoFar do
@@ -6122,7 +6122,7 @@ and private applyResolvedJoin
                         }
 
                     Ok(newSources, candidates, coalesceNames)
-                | LeftJoin, _, _ ->
+                | (LeftJoin | NaturalLeftJoin), _, _ ->
                     seq {
                         for leftIndex, left in leftIndexed.Value do
                             for rightIndex, right in rightRowsFor left |> Seq.indexed do
@@ -11310,21 +11310,36 @@ let private indexedJoinExplainPlans
                                 |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
                                 |> Option.map (fun columnIndex -> offset + columnIndex, columns.[columnIndex].Type))
 
-                        let equiKeys, residual = extractEquiKeys resolveQualified leftColumns.Length join.On
+                        let coalesceNames =
+                            match join.Kind with
+                            | NaturalJoin
+                            | NaturalLeftJoin
+                            | NaturalRightJoin -> naturalCommonNames leftColumns rightColumns
+                            | _ -> join.Using
 
-                        tryIndexedJoinProbe store join leftColumns rightColumns (Some table) equiKeys
-                        |> Option.map (fun probe ->
-                            joinIndex + 1,
-                            { Table = probe.Table
-                              KeyName = probe.Index.Name
-                              ColumnIndices = probe.Index.ColumnIndices
-                              PrefixLengths = probe.Index.PrefixLengths
-                              Unique = probe.Index.Unique
-                              References = probe.LeftIndices |> List.map (leftColumnReference leftSources)
-                              HasResidual =
-                                not residual.IsEmpty
-                                || (probe.Index.PrefixLengths |> List.exists Option.isSome)
-                                || (probe.Index.Transforms |> List.exists Option.isSome) })
+                        let accessKeys =
+                            if coalesceNames.IsEmpty then
+                                Some(extractEquiKeys resolveQualified leftColumns.Length join.On)
+                            else
+                                namedEquiKeys leftColumns rightColumns coalesceNames
+                                |> Result.toOption
+                                |> Option.map (fun keys -> keys, [])
+
+                        accessKeys
+                        |> Option.bind (fun (equiKeys, residual) ->
+                            tryIndexedJoinProbe store join leftColumns rightColumns (Some table) equiKeys
+                            |> Option.map (fun probe ->
+                                joinIndex + 1,
+                                { Table = probe.Table
+                                  KeyName = probe.Index.Name
+                                  ColumnIndices = probe.Index.ColumnIndices
+                                  PrefixLengths = probe.Index.PrefixLengths
+                                  Unique = probe.Index.Unique
+                                  References = probe.LeftIndices |> List.map (leftColumnReference leftSources)
+                                  HasResidual =
+                                    not residual.IsEmpty
+                                    || (probe.Index.PrefixLengths |> List.exists Option.isSome)
+                                    || (probe.Index.Transforms |> List.exists Option.isSome) }))
                     | _ -> None
 
                 let sources' =
