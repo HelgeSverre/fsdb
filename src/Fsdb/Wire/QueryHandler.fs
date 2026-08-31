@@ -2495,7 +2495,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
 
     let working = Storage.beginTransactionSnapshotFromCatalog baseStore combined
     let workingSession = { session with Store = working; Tx = None }
-    let executed, result = executeParsedCore workingSession stmt
+    let executed, result = executeParsedCoreUnderLock workingSession stmt
 
     match result with
     | Err _ -> { executed with Store = session.Store; Tx = session.Tx }, result
@@ -2541,11 +2541,19 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let usesTemporary = action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt
 
+    let statementAccesses () =
+        TableLocks.accessesForStatement
+            (Session.currentStore session)
+            session.TemporaryCatalog
+            dbName
+            stmt
+
     let executed, result =
         if usesTemporary && xaAssociation session |> Option.isSome then
             session, Err(4091, "XA: Temporary tables cannot be accessed inside XA transactions when xa_detach_on_prepare=ON")
         elif usesTemporary then
-            executeWithTemporaryCatalog action session stmt
+            executeWithStatementAccess session (statementAccesses ()) (fun () ->
+                executeWithTemporaryCatalog action session stmt)
         elif causesImplicitCommit stmt && xaAssociation session |> Option.isSome then
             let state = xaAssociation session |> Option.map (snd >> xaStateName) |> Option.defaultValue "NON-EXISTING"
             session, xaRmFail state
@@ -2593,14 +2601,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
                         rollbackSession working |> ignore
                         reraise ()
 
-                let accesses =
-                    TableLocks.accessesForStatement
-                        (Session.currentStore session)
-                        session.TemporaryCatalog
-                        dbName
-                        stmt
-
-                executeWithStatementAccess session accesses executeAutocommit
+                executeWithStatementAccess session (statementAccesses ()) executeAutocommit
 
     TableHandler.invalidate session stmt executed result, result
 
