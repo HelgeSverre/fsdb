@@ -2088,7 +2088,9 @@ let tests =
                     "CREATE TABLE lookup_names (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_lower_name ((LOWER(name))))"
                     "INSERT INTO lookup_names VALUES (1, 'Reference'), (2, 'REFERENCE')"
                     "CREATE TABLE lookup_upper (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_upper_name ((UPPER(name))))"
-                    "INSERT INTO lookup_upper VALUES (1, 'Reference'), (2, 'REFERENCE')" ]
+                    "INSERT INTO lookup_upper VALUES (1, 'Reference'), (2, 'REFERENCE')"
+                    "CREATE TABLE lookup_composite (id INT PRIMARY KEY, tenant_id INT, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_tenant_upper (tenant_id, (UPPER(name))))"
+                    "INSERT INTO lookup_composite VALUES (1, 1, 'zeta'), (2, 1, 'Alpha'), (3, 2, 'beta')" ]
                   |> List.fold run session
 
               ignore session
@@ -2134,6 +2136,16 @@ let tests =
 
               Expect.equal recoveredOrderPlan.AccessType (Some "index") "recovery rebuilds transformed order entries"
               Expect.equal recoveredOrderPlan.Key (Some "ix_upper_name") "the recovered functional order reports its key"
+
+              let recoveredCompositePlan =
+                  handle
+                      (Fsdb.Session.create 6 reloaded)
+                      "EXPLAIN SELECT id FROM lookup_composite WHERE tenant_id = 1 ORDER BY UPPER(name)"
+                  |> snd
+                  |> TestSupport.Sql.explainRow
+
+              Expect.equal recoveredCompositePlan.AccessType (Some "index") "recovery rebuilds composite transformed entries"
+              Expect.equal recoveredCompositePlan.Key (Some "ix_tenant_upper") "the recovered composite order reports its key"
 
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->
