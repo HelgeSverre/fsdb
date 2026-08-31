@@ -4965,6 +4965,20 @@ let tests =
                     | other -> failtestf "expected a functional ref plan, got %A" other
 
                     calls <- 0
+
+                    match query "indexed" "LOWER(name) IN ('reference', 'missing', NULL)", query "scanned" "LOWER(name) IN ('reference', 'missing', NULL)" with
+                    | ResultSet(_, indexedRows), ResultSet(_, scannedRows) ->
+                        Expect.equal indexedRows scannedRows "functional IN candidates agree with a scan"
+                        Expect.equal indexedRows [ [ Some "499" ]; [ Some "500" ] ] "the literal list retains transformed matches"
+                    | indexed, scanned -> failtestf "expected functional IN resultsets, got %A and %A" indexed scanned
+
+                    Expect.isLessThan calls 510 "the functional IN buckets limit residual evaluation"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE LOWER(name) IN ('reference', 'missing')" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "ix_lower"; Some "ix_lower"; Some "123"; None; Some "2"; Some "100.00"; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected a functional literal-IN range plan, got %A" other
+
+                    calls <- 0
                     Expect.equal (query "indexed" "name = 'reference'") (ResultSet([ "id" ], [])) "the original binary column remains case-sensitive"
 
                     match runDefault store "EXPLAIN SELECT id FROM indexed WHERE name = 'reference'" with

@@ -7395,10 +7395,6 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
                           Unique = index.Unique
                           Rows = rows }))))
 
-and private tryEqualityLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
-    tryEqualityAccess store dbName tref whereExpr
-    |> Option.map (fun plan -> plan.Columns, plan.Rows)
-
 and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : EqualityAccessPlan option =
     if not (storedValuesMatchReadValues store) then
         None
