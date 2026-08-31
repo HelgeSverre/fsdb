@@ -2277,7 +2277,23 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
         executed, result
     | None -> execute session
 
-let private executeParsedCore (session: Session) (stmt: Statement) : Session * QueryResult =
+let private executeWithStatementAccess session accesses execute =
+    match
+        TableLocks.withStatementAccess
+            (lockWaitTimeout session)
+            session.Store
+            session.ConnectionId
+            accesses
+            execute
+    with
+    | Ok result -> result
+    | Error(code, message) -> session, Err(code, message)
+
+type private StatementLockBoundary =
+    | AcquireStatementLock
+    | StatementLockHeld
+
+let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Statement) : Session * QueryResult =
     let store = Session.currentStore session
     let database = session.Database |> Option.defaultValue defaultDatabase
     let accesses = TableLocks.accessesForStatement store session.TemporaryCatalog database stmt
@@ -2310,22 +2326,20 @@ let private executeParsedCore (session: Session) (stmt: Statement) : Session * Q
                 access.Table
         )
     | _ ->
-        match
-            TableLocks.withStatementAccess
-                (lockWaitTimeout session)
-                session.Store
-                session.ConnectionId
-                accesses
-                (fun () ->
-                    DynamicScope.withValue storedProgramProtectedTables (Set.union protectedTables statementTables) (fun () ->
-                        InformationSchema.withViewer
-                            store
-                            (accountOf session)
-                            session.ActiveRoles
-                            (fun () -> executeParsedStatement session stmt)))
-        with
-        | Ok result -> result
-        | Error(code, message) -> session, Err(code, message)
+        let execute () =
+            DynamicScope.withValue storedProgramProtectedTables (Set.union protectedTables statementTables) (fun () ->
+                InformationSchema.withViewer
+                    store
+                    (accountOf session)
+                    session.ActiveRoles
+                    (fun () -> executeParsedStatement session stmt))
+
+        match lockBoundary with
+        | AcquireStatementLock -> executeWithStatementAccess session accesses execute
+        | StatementLockHeld -> execute ()
+
+let private executeParsedCore session stmt = executeParsedCoreWith AcquireStatementLock session stmt
+let private executeParsedCoreUnderLock session stmt = executeParsedCoreWith StatementLockHeld session stmt
 
 type private TemporaryAction =
     | CreateTemporary
@@ -2567,16 +2581,26 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
             else
                 let mutable working = beginTransaction (configuredReadOnly session) session
 
-                try
-                    let executed, result = executeParsedCore working stmt
-                    working <- executed
+                let executeAutocommit () =
+                    try
+                        let executed, result = executeParsedCoreUnderLock working stmt
+                        working <- executed
 
-                    match terminalErrorInfo result with
-                    | Some _ -> rollbackSession executed, result
-                    | None -> commitSessionWith true executed, result
-                with _ ->
-                    rollbackSession working |> ignore
-                    reraise ()
+                        match terminalErrorInfo result with
+                        | Some _ -> rollbackSession executed, result
+                        | None -> commitSessionWith true executed, result
+                    with _ ->
+                        rollbackSession working |> ignore
+                        reraise ()
+
+                let accesses =
+                    TableLocks.accessesForStatement
+                        (Session.currentStore session)
+                        session.TemporaryCatalog
+                        dbName
+                        stmt
+
+                executeWithStatementAccess session accesses executeAutocommit
 
     TableHandler.invalidate session stmt executed result, result
 

@@ -284,6 +284,15 @@ let holdsExplicit store owner =
     let manager = managerFor store
     lock manager.SyncRoot (fun () -> manager.Explicit.ContainsKey owner)
 
+let internal waitingWriterCount store database table =
+    let manager = managerFor store
+    let key = tableKey database table
+
+    lock manager.SyncRoot (fun () ->
+        match manager.Tables.TryGetValue key with
+        | true, state -> state.WaitingWriters.Count
+        | false, _ -> 0)
+
 let private validateExplicitAccess (context: ExplicitContext) (access: Access) =
     let requiredKey = tableKey access.Database access.Table
 

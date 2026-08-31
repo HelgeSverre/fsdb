@@ -2020,7 +2020,12 @@ let tests =
                   System.Threading.Tasks.Task.Run(fun () ->
                       handle (create 3 store) "LOCK TABLES lock_priority WRITE")
 
-              Expect.isFalse (waitingWriter.Wait(TimeSpan.FromMilliseconds 100.0)) "the writer waits for the existing reader"
+              Expect.isTrue
+                  (Threading.SpinWait.SpinUntil(
+                      (fun () -> Fsdb.TableLocks.waitingWriterCount store Fsdb.Storage.defaultDatabase "lock_priority" = 1),
+                      TimeSpan.FromSeconds 2.0
+                  ))
+                  "the writer entered the table queue"
 
               let laterReader =
                   System.Threading.Tasks.Task.Run(fun () ->
@@ -2056,7 +2061,12 @@ let tests =
                   System.Threading.Tasks.Task.Run(fun () ->
                       handle (create 3 store) "UPDATE statement_priority SET n=11 WHERE id=1")
 
-              Expect.isFalse (waitingWriter.Wait(TimeSpan.FromMilliseconds 100.0)) "the update waits for the table reader"
+              Expect.isTrue
+                  (Threading.SpinWait.SpinUntil(
+                      (fun () -> Fsdb.TableLocks.waitingWriterCount store Fsdb.Storage.defaultDatabase "statement_priority" = 1),
+                      TimeSpan.FromSeconds 2.0
+                  ))
+                  "the update entered the table queue"
 
               let laterReader =
                   System.Threading.Tasks.Task.Run(fun () ->
