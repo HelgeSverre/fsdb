@@ -201,9 +201,10 @@ exactly as MySQL's do. Scalar and composite-row literal `IN` lists, along with
 direct literal ranges in single-table reads and writes, can seek matching
 primary, unique, and secondary B-trees and report `range` in `EXPLAIN`.
 `ORDER BY` and compatible `GROUP BY` operations can stream a
-whole-column left prefix of a composite index, including `LIMIT`, `OFFSET`,
-and literal bounds; expression orderings and full-value ordering through a
-prefix key still sort. Equality
+whole-column left prefix of a composite index, or a suffix whose preceding
+keys are fixed by literal equalities, including `LIMIT`, `OFFSET`, and literal
+bounds; expression orderings and full-value ordering through a prefix key
+still sort. Equality
 buckets and ordered entries are separate derived
 structures, deliberately trading memory and write work for efficient equality
 buckets and bounded range seeks. Equi-joins hash-join; everything else is a
