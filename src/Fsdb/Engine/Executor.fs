@@ -7912,13 +7912,7 @@ and private tryIndexOrder
                           EstimatedRows = count
                           Rows = rows }
 
-            let plainColumns =
-                orderedColumns
-                |> traverse (fun term ->
-                    match term.Transform with
-                    | None -> Ok(term.Column, term.Direction)
-                    | Some _ -> Error())
-                |> Result.toOption
+            let plainColumns = tryStoredColumnOrders orderedColumns
 
             let direct =
                 match orderedColumns, plainColumns with
@@ -8861,16 +8855,25 @@ and private resolveOrderKey
         | [] -> evalOrderKey ctx (Col name)
     | e -> evalOrderKey ctx e
 
-/// Only direct columns can map a GROUP BY key to a stored index key.
-and private groupByColumnNames (groupExprs: Expr list) : string list option =
-    let asColumnName =
-        function
-        | Col name
-        | QualifiedCol(_, name) -> Some name
-        | _ -> None
+and private groupByIndexTerms (tref: TableRef) (groupExprs: Expr list) : IndexOrderTerm list option =
+    groupExprs
+    |> traverse (fun expression ->
+        match indexedColumnFor tref expression with
+        | Some(column, transform) ->
+            Ok
+                { Column = column
+                  Transform = transform
+                  Direction = Asc }
+        | None -> Error())
+    |> Result.toOption
 
-    let names = groupExprs |> List.map asColumnName
-    if names |> List.forall Option.isSome then Some(names |> List.map Option.get) else None
+and private tryStoredColumnOrders (terms: IndexOrderTerm list) : (string * Direction) list option =
+    terms
+    |> traverse (fun term ->
+        match term.Transform with
+        | None -> Ok(term.Column, term.Direction)
+        | Some _ -> Error())
+    |> Result.toOption
 
 /// Only literal equalities prove that a preceding index key is constant.
 and private whereEqualityPinnedColumns (whereExpr: Expr option) : Set<string> =
@@ -8976,28 +8979,38 @@ and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) 
     if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
         None
     else
-        groupByColumnNames select.GroupBy
-        |> Option.bind (fun groupColumns ->
+        groupByIndexTerms tref select.GroupBy
+        |> Option.bind (fun groupTerms ->
             let tableDb = tref.Database |> Option.defaultValue dbName
 
-            InformationSchema.findTable store.Catalog tableDb tref.Table
-            |> Result.toOption
-            |> Option.bind (fun table ->
-                let pinned = whereEqualityPinnedColumns select.Where
-                let groupColumns = groupColumns |> List.map (fun column -> column.ToLowerInvariant())
-                orderedIndexCandidates table
-                |> List.choose (fun candidate ->
-                    tryIndexPrefix pinned groupColumns candidate.Columns
-                    |> Option.map (fun matched ->
-                        matched.Columns
-                        |> List.map (fun column -> column, Asc)))
-                |> List.tryPick (Storage.tryCompositeOrderedLookup store tableDb tref.Table))
-            |> Option.map (fun lookup ->
-                { KeyName = lookup.OrderedIndexName
-                  ColumnIndices = lookup.OrderedColumnIndices
-                  Columns = lookup.OrderedColumns
-                  EstimatedRows = lookup.OrderedRowCount
-                  Rows = lookup.OrderedRows }))
+            match groupTerms, tryStoredColumnOrders groupTerms with
+            | [ { Transform = Some transform } as term ], _ ->
+                Storage.tryFunctionalOrderedLookup store tableDb tref.Table term.Column transform Asc
+                |> Option.map (fun (keyName, columnIndex, columns, count, rows) ->
+                    { KeyName = keyName
+                      ColumnIndices = [ columnIndex ]
+                      Columns = columns
+                      EstimatedRows = count
+                      Rows = rows })
+            | _, Some groupColumns ->
+                InformationSchema.findTable store.Catalog tableDb tref.Table
+                |> Result.toOption
+                |> Option.bind (fun table ->
+                    let pinned = whereEqualityPinnedColumns select.Where
+                    let groupColumns = groupColumns |> List.map (fst >> _.ToLowerInvariant())
+
+                    orderedIndexCandidates table
+                    |> List.choose (fun candidate ->
+                        tryIndexPrefix pinned groupColumns candidate.Columns
+                        |> Option.map (fun matched -> matched.Columns |> List.map (fun column -> column, Asc)))
+                    |> List.tryPick (Storage.tryCompositeOrderedLookup store tableDb tref.Table))
+                |> Option.map (fun lookup ->
+                    { KeyName = lookup.OrderedIndexName
+                      ColumnIndices = lookup.OrderedColumnIndices
+                      Columns = lookup.OrderedColumns
+                      EstimatedRows = lookup.OrderedRowCount
+                      Rows = lookup.OrderedRows })
+            | _ -> None)
 
 and private validateOnlyFullGroupBy
     (store: Store)
