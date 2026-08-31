@@ -5268,6 +5268,44 @@ let tests =
                     | ResultSet(_, []) -> ()
                     | other -> failtestf "expected the updated row to leave its transformed bucket, got %A" other
 
+                testCase "case-folding expression indexes stream matching orders"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, keep_row INT, KEY ix_upper ((UPPER(name))))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, keep_row INT)"
+                    |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault
+                            store
+                            $"INSERT INTO {table} VALUES (1, 'beta', 1), (2, 'Alpha', 1), (3, NULL, 1), (4, 'gamma', 0), (5, 'delta', 1)"
+                        |> ignore
+
+                    let rows table direction =
+                        match
+                            runDefault
+                                store
+                                $"SELECT id, UPPER(name) FROM {table} WHERE keep_row = 1 ORDER BY UPPER(name) {direction}"
+                        with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected functionally ordered rows, got %A" other
+
+                    for direction in [ "ASC"; "DESC" ] do
+                        Expect.equal (rows "indexed" direction) (rows "scanned" direction) $"{direction} agrees with a filesort"
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed WHERE keep_row = 1 ORDER BY UPPER(name)"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "the functional index streams the transformed order"
+                    Expect.equal plan.Key (Some "ix_upper") "the transformed key is reported"
+                    Expect.isFalse (plan.Extra |> Option.exists (_.Contains("filesort"))) "the functional plan avoids a filesort"
+
                 testCase "invisible indexes enforce constraints without entering query plans"
                 <| fun _ ->
                     let store = newStore ()
