@@ -114,6 +114,7 @@ module SyntaxFuzz =
                "CREATE PROCEDURE syntax_proc_body_%s(IN value INT, OUT doubled INT) BEGIN DECLARE local_value INT DEFAULT value + 1; SET doubled = local_value * 2; SELECT local_value, doubled; END"
                suffix
            "procedure_call", "CALL syntax_callable(3, @syntax_output)"
+           "procedure_recursion", "CALL syntax_recursive(1, @syntax_recursive_output)"
            "stored_function",
            sprintf
                "CREATE FUNCTION syntax_reader_%s(value INT) RETURNS INT DETERMINISTIC READS SQL DATA RETURN value + (SELECT COUNT(*) FROM syntax_target)"
@@ -194,6 +195,8 @@ module SyntaxFuzz =
            "CREATE TABLE syntax_partitioned (id INT) PARTITION BY HASH(id) PARTITIONS 2"
            "INSERT INTO syntax_partitioned VALUES (1), (2), (3)"
            "CREATE PROCEDURE syntax_callable(IN value INT, OUT doubled INT) BEGIN DECLARE local_value INT DEFAULT value + 1; SET doubled = local_value * 2; SELECT local_value, doubled; END"
+           "SET SESSION max_sp_recursion_depth = 1"
+           "CREATE PROCEDURE syntax_recursive(IN n INT, OUT total INT) BEGIN DECLARE nested INT DEFAULT 0; IF n = 0 THEN SET total = 1; ELSE CALL syntax_recursive(n - 1, nested); SET total = nested + 1; END IF; END"
            "CREATE TABLE syntax_function_log (marker VARCHAR(40))"
            "CREATE FUNCTION syntax_writer(value INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN INSERT INTO syntax_function_log (marker) VALUES (CONCAT('value-', value)); RETURN value; END"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]

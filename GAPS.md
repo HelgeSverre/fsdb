@@ -40,7 +40,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Deadlock victim selection and remaining coarse write shapes |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
-| Routines & events | Typed procedures, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | `max_sp_recursion_depth` is fixed at 0, so recursive routines cannot be enabled |
+| Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap currently inventoried |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
@@ -75,7 +75,6 @@ refuses it through the prepared-statement protocol.
 
 | Statement family | Impact | Class |
 |---|---|---|
-| Procedures support typed `IN`/`OUT`/`INOUT` parameters, nested calls with local output targets, scoped variables, read-only cursors, dynamic `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE`, compound control flow, condition handlers, `SIGNAL`/`RESIGNAL`, `GET CURRENT/STACKED DIAGNOSTICS`, and multi-result CALL. Stored functions support typed parameters/results, cursors, handlers, control flow, local `SELECT … INTO`, nested calls and procedure calls, INSERT/REPLACE/UPDATE/DELETE/DO bodies, SQL SECURITY, prepared invocation, and metadata; `max_sp_recursion_depth` cannot be raised above 0 | low | subset |
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
 | `ALTER TABLE` accepts `ALGORITHM` and `LOCK` execution hints but does not enforce the requested online-DDL strategy | low | divergence |
@@ -340,12 +339,15 @@ INVOKER bodies use the corresponding account, routine schema, and captured SQL
 mode, client charset, and connection collation. INFORMATION_SCHEMA.PARAMETERS
 reports procedure arguments and function return/argument rows with declared
 type, ordinal, mode, charset, and collation metadata.
+Procedure recursion follows the GLOBAL and SESSION
+`max_sp_recursion_depth` setting, including MySQL's 0–255 bounds and
+per-routine counting for mutual recursion.
 Stored functions support typed parameters and return coercion, `RETURN`,
 compound control flow, handlers, cursors, subqueries, typed local
 `SELECT … INTO`, nested
 function and procedure calls, DEFINER/INVOKER execution, native-function name
 precedence, prepared execution, SHOW metadata, and WAL/snapshot catalog
-persistence.
+persistence. Stored functions retain MySQL's 1424 recursion refusal.
 Their creation-time SQL mode, client charset, and connection collation are
 restored while each body runs. `INSERT`, `REPLACE`, `UPDATE`, `DELETE`, and
 `DO` bodies write through the invoking statement's transaction, so a failed
@@ -358,10 +360,6 @@ support CREATE/DROP, schedule/status/body/name alteration, SHOW CREATE EVENT,
 SHOW EVENTS, persisted EVENTS metadata, and definer-context execution of
 one-time and recurring schedules. CREATE ROUTINE,
 ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
-
-| Gap | MySQL 8.4 | fsdb | Impact | Class |
-|---|---|---|---|---|
-| Routine language | procedures/functions, compound bodies, handlers, cursors, loops, CASE, SIGNAL, diagnostics, and the statement forms permitted in each routine kind | procedures cover typed parameters, nested calls, local OUT/INOUT targets, dynamic SQL, sequential statements, and multi-result CALL; functions cover typed scalar returns, local `SELECT … INTO`, nested function and procedure calls, handlers, cursors, and INSERT/REPLACE/UPDATE/DELETE/DO bodies. Result-set statements (1415), dynamic SQL (1336), and commit-causing statements (1422) are refused as MySQL refuses them, but recursion cannot be enabled because `max_sp_recursion_depth` is fixed at 0 | low | subset |
 
 ## 11. Full-text search
 
@@ -482,7 +480,7 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | The complete corpus matches native MySQL 8.4.11 across 101 baselines. Account requirements, typed/compound procedures, CALL, HANDLER, XA control, HASH partition selection/growth, all four transaction isolation settings, and data-changing stored functions invoked from SELECT and UPDATE now pass. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-29 |
+| Executable gap baselines | The complete corpus matches native MySQL 8.4.11 across 102 baselines. Account requirements, typed/compound and recursive procedures, CALL, HANDLER, XA control, HASH partition selection/growth, all four transaction isolation settings, and data-changing stored functions invoked from SELECT and UPDATE now pass. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-31 |
 | Depth-three syntax stress | Three 10,000-mutation seeds over the earlier corpus produced no crash, timeout, protocol fault, or invariant failure. A 2,000-mutation depth-three seed over the stored-function corpus matched 1,687 errors and 238 accepted mutations with no difference. The current baseline-only rerun has no differences; executable-comment/error-contract edges remain mutation targets rather than declared baseline gaps. Fuzz-found incomplete procedure blocks and reserved row, partition, and window-function aliases reject with 1064 | baseline inventory resolved; mutation stress retained 2026-08-29 |
 | Same-row transaction contention | The original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts. Row-delta publication removed whole-table copy/reindex work. A 64x200 campaign then completed all 12,800 prepared transactions with exact parity and zero failures. After unique-key claims landed, a separate 32x100 hot-account campaign matched all 3,200 MySQL outcomes with zero failures; fsdb reached 267 tx/s at p99 373 ms versus MySQL's 132 tx/s at p99 871 ms on the same host | correctness resolved; constant-factor and higher-contention performance open |
 | Multi-database scaling | Single-capture snapshots, deferred transaction catalogs, and per-database lock namespaces prevent cross-database conflicts. A 12-database, 19,200-transaction campaign preserved every database independently with no cross-database bleed; wall time was 0.38x the serial projection against a 0.80 ceiling | correctness and scaling threshold resolved 2026-08-27 |
