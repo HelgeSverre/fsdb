@@ -200,14 +200,15 @@ the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
 exactly as MySQL's do. Scalar and composite-row literal `IN` lists, along with
 direct literal ranges in single-table reads and writes, can seek matching
 primary, unique, and secondary B-trees and report `range` in `EXPLAIN`.
-Compatible composite `ORDER BY` and `GROUP BY` operations can stream that
-index when preceding keys are fixed, including `LIMIT`, `OFFSET`, and literal
-bounds; unconstrained multi-key ordering remains a scan. Equality
+Bounded `ORDER BY` and compatible `GROUP BY` operations can stream a
+whole-column left prefix of a composite index, including `LIMIT`, `OFFSET`,
+and literal bounds; expression orderings and full-value ordering through a
+prefix key still sort. Equality
 buckets and ordered entries are separate derived
 structures, deliberately trading memory and write work for efficient equality
 buckets and bounded range seeks. Equi-joins hash-join; everything else is a
-scan, except a physical inner or left-join right side whose complete indexed
-key is bound by the outer row, including `USING` and natural joins.
+scan, except a physical inner/left/right-join target whose complete indexed
+key is bound by the rows already in scope, including `USING` and natural joins.
 
 ### Collations & charsets
 
