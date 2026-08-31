@@ -9816,6 +9816,8 @@ and private runWindowedSelect
     match rows |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok matched ->
+        let matchedByIndex = lazy (Array.ofList matched)
+        let mutable streamedRowOrder: int[] option = None
 
         // One partitioned-and-ordered pass per distinct window function.
         // Original row indexes break equal ORDER BY keys so peers retain
@@ -10039,6 +10041,43 @@ and private runWindowedSelect
                         ordered)
                     |> List.ofSeq
 
+                let rememberRowNumberOrder () =
+                    let windowAlias =
+                        select.Projections
+                        |> List.tryPick (fun (expression, alias) ->
+                            if expression = windowFunc then alias else None)
+
+                    let matchesFinalOrder alias =
+                        if select.OrderBy.Length <> partitionBy.Length + 1 then
+                            false
+                        else
+                            match List.splitAt partitionBy.Length select.OrderBy with
+                            | partitionTerms, [ (Col name, Asc) ]
+                                when System.String.Equals(name, alias, System.StringComparison.OrdinalIgnoreCase) ->
+                                List.forall2
+                                    (fun expected (actual, direction) -> expected = actual && direction = Asc)
+                                    partitionBy
+                                    partitionTerms
+                            | _ -> false
+
+                    match windowAlias with
+                    | Some alias when windowFuncs = [ windowFunc ] && matchesFinalOrder alias ->
+                        let partitionDirections = List.replicate partitionBy.Length Asc
+
+                        let partitionOrderKey (group: WindowRow[]) =
+                            let _, (key, _, _) = group.[0]
+                            List.map2 (fun value collation -> value, Some collation) key partitionCollations
+
+                        streamedRowOrder <-
+                            partitions
+                            |> List.sortWith (fun left right ->
+                                compareByOrderKeys partitionDirections (partitionOrderKey left) (partitionOrderKey right))
+                            |> Seq.collect id
+                            |> Seq.map fst
+                            |> Array.ofSeq
+                            |> Some
+                    | _ -> ()
+
                 // `RANK`'s number for each row in an ORDER BY-sorted partition
                 // group: the 1-based position of the first row in its tie
                 // group (so ties share a rank and the next distinct value
@@ -10253,7 +10292,9 @@ and private runWindowedSelect
                     frameRows group pos |> Result.bind (fun rows -> evalAggregate registry ctxFor rows name args)
 
                 match fn with
-                | WinRowNumber -> perRow (fun _ pos -> Ok(VInt(int64 pos + 1L)))
+                | WinRowNumber ->
+                    rememberRowNumberOrder ()
+                    perRow (fun _ pos -> Ok(VInt(int64 pos + 1L)))
                 | WinRank dense ->
                     partitions
                     |> List.collect (fun group ->
@@ -10422,8 +10463,15 @@ and private runWindowedSelect
             let extendedColumns = columns @ syntheticColumns
 
             let extendedRows =
-                matched
-                |> Seq.mapi (fun idx row -> Array.append row (computedColumns |> List.map (fun col -> col.[idx]) |> Array.ofList))
+                match streamedRowOrder with
+                | Some order ->
+                    order
+                    |> Seq.map (fun index ->
+                        Array.append matchedByIndex.Value.[index] (computedColumns |> List.map (fun column -> column.[index]) |> Array.ofList))
+                | None ->
+                    matched
+                    |> Seq.mapi (fun index row ->
+                        Array.append row (computedColumns |> List.map (fun column -> column.[index]) |> Array.ofList))
 
             let rewriteProjection (expr: Expr, aliasOpt: string option) : (Expr * string option) list =
                 match expr with
@@ -10452,7 +10500,11 @@ and private runWindowedSelect
             let select' =
                 { select with
                     Projections = select.Projections |> List.collect rewriteProjection
-                    OrderBy = select.OrderBy |> List.map (fun (e, dir) -> substituteWindowFuncs synthetic e, dir) }
+                    Where = None
+                    OrderBy =
+                        match streamedRowOrder with
+                        | Some _ -> []
+                        | None -> select.OrderBy |> List.map (fun (e, dir) -> substituteWindowFuncs synthetic e, dir) }
 
             let extendedQualifiers =
                 qualifiers

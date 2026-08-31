@@ -4082,6 +4082,34 @@ let tests =
                             "each session's messages numbered newest-first, restarting per session"
                     | other -> failtestf "expected numbered rows, got %A" other
 
+                testCase "WHERE is evaluated once before window rows are projected"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.tryHead |> Option.defaultValue VNull)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE msgs (session_id INT, created_at INT)" |> ignore
+                    runDefault store "INSERT INTO msgs VALUES (2, 1), (1, 2), (1, 1), (2, 2)" |> ignore
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT session_id, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at) AS rn FROM msgs WHERE TOUCH(session_id) > 0 ORDER BY session_id, rn LIMIT 3"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ] ]
+                            "window order reaches LIMIT unchanged"
+                        Expect.equal calls 4 "WHERE is not repeated by the post-window projection pass"
+                    | other -> failtestf "expected limited window rows, got %A" other
+
                 testCase "SELECT * alongside ROW_NUMBER() OVER (...) doesn't leak the synthetic column into *"
                 <| fun _ ->
                     let store = newStore ()
