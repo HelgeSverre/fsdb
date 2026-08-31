@@ -1642,6 +1642,7 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
 type private EvalContext =
     { Registry: Registry
       ColumnIndex: Map<string, int list>
+      ColumnsByPosition: ColumnDef option array
       /// Per-source-table resolution for `QualifiedCol`: lowercased alias-
       /// or-table-name -> that source's own column list plus the offset its
       /// columns start at within `Row` (`Row` is one table's columns for a
@@ -1699,9 +1700,28 @@ let private contextFactory
     (qualifiers: Map<string, ColumnDef list * int>)
     (outer: EvalContext option)
     : Value[] -> EvalContext =
+    let columnsByPosition =
+        if Map.isEmpty qualifiers then
+            [||]
+        else
+            let length =
+                qualifiers
+                |> Map.values
+                |> Seq.map (fun (columns, offset) -> offset + columns.Length)
+                |> Seq.max
+
+            let positions = Array.create length None
+
+            for columns, offset in Map.values qualifiers do
+                columns
+                |> List.iteri (fun index column -> positions.[offset + index] <- Some column)
+
+            positions
+
     fun row ->
         { Registry = registry
           ColumnIndex = columnIndex
+          ColumnsByPosition = columnsByPosition
           Qualifiers = qualifiers
           Row = row
           Store = store
@@ -1710,11 +1730,10 @@ let private contextFactory
           Clause = FieldList }
 
 let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
-    ctx.Qualifiers
-    |> Map.toSeq
-    |> Seq.tryPick (fun (_, (columns, offset)) ->
-        let relative = index - offset
-        if relative >= 0 && relative < columns.Length then Some columns.[relative] else None)
+    if index >= 0 && index < ctx.ColumnsByPosition.Length then
+        ctx.ColumnsByPosition.[index]
+    else
+        None
 
 let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : Value =
     match store.ExecutionSettings.SqlMode.PadCharToFullLength, column.Type, value with
