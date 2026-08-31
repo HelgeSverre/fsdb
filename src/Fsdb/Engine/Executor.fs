@@ -3233,6 +3233,39 @@ let private quantifiedComparisonResult
         op
         right
 
+let private equalityMembershipResult
+    (ctx: EvalContext)
+    (leftExpression: Expr)
+    (leftValue: Value)
+    (rightOperand: QuantifiedOperand)
+    (subquery: ExpressionSubqueryResult)
+    : Value option =
+    match leftValue with
+    | VNull -> Some(if subquery.Rows.IsEmpty then VInt 0L else VNull)
+    | _ ->
+        subquery.EqualityMembership
+        |> Option.bind (fun membership ->
+            let key =
+                match membership.Domain with
+                | TextMembership expected ->
+                    comparisonCollation
+                        ctx
+                        "="
+                        leftExpression
+                        (tryColumnDefForExpr ctx leftExpression)
+                        rightOperand.Expression
+                        rightOperand.Column
+                    |> Result.toOption
+                    |> Option.filter (fun actual -> actual.Name = expected.Name)
+                    |> Option.bind (fun _ -> equalityMembershipKey membership.Domain leftValue)
+                | _ -> equalityMembershipKey membership.Domain leftValue
+
+            key
+            |> Option.map (fun key ->
+                if membership.Values.Contains key then VInt 1L
+                elif membership.ContainsNull then VNull
+                else VInt 0L))
+
 let private sourceHasQualifier (qualifier: string) = function
     | FromTable table ->
         table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
@@ -3893,30 +3926,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(_, _) ->
                 let rightOperand = subqueryProjectionOperand ctx select
 
-                let membershipKey =
-                    subquery.EqualityMembership
-                    |> Option.bind (fun membership ->
-                        match membership.Domain with
-                        | TextMembership expected ->
-                            comparisonCollation
-                                ctx
-                                "="
-                                e
-                                (tryColumnDefForExpr ctx e)
-                                rightOperand.Expression
-                                rightOperand.Column
-                            |> Result.toOption
-                            |> Option.filter (fun actual -> actual.Name = expected.Name)
-                            |> Option.bind (fun _ -> equalityMembershipKey membership.Domain ve)
-                        | _ -> equalityMembershipKey membership.Domain ve)
-
-                match ve, membershipKey, subquery.EqualityMembership with
-                | VNull, _, _ -> if subquery.Rows.IsEmpty then Ok(VInt 0L) else Ok VNull
-                | _, Some key, Some membership ->
-                    if membership.Values.Contains key then Ok(VInt 1L)
-                    elif membership.ContainsNull then Ok VNull
-                    else Ok(VInt 0L)
-                | _ ->
+                match equalityMembershipResult ctx e ve rightOperand subquery with
+                | Some result -> Ok result
+                | None ->
                     subquery.Rows
                     |> List.map (Array.tryHead >> Option.defaultValue VNull)
                     |> traverse (quantifiedComparisonResult ctx e ve rightOperand Eq)
@@ -3937,23 +3949,23 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(_, _) ->
                 let rightOperand = subqueryProjectionOperand ctx select
 
-                let comparisons =
+                match op, quantifier, equalityMembershipResult ctx e left rightOperand subquery with
+                | Eq, Any, Some result -> Ok result
+                | _ ->
                     subquery.Rows
                     |> traverse (fun row ->
                         let right = row |> Array.tryHead |> Option.defaultValue VNull
                         quantifiedComparisonResult ctx e left rightOperand op right)
-
-                comparisons
-                |> Result.map (fun values ->
-                    match quantifier with
-                    | Any ->
-                        if values |> List.exists (fun value -> value = VInt 1L) then VInt 1L
-                        elif values |> List.exists (fun value -> value = VNull) then VNull
-                        else VInt 0L
-                    | All ->
-                        if values |> List.exists (fun value -> value = VInt 0L) then VInt 0L
-                        elif values |> List.exists (fun value -> value = VNull) then VNull
-                        else VInt 1L))
+                    |> Result.map (fun values ->
+                        match quantifier with
+                        | Any ->
+                            if values |> List.exists (fun value -> value = VInt 1L) then VInt 1L
+                            elif values |> List.exists (fun value -> value = VNull) then VNull
+                            else VInt 0L
+                        | All ->
+                            if values |> List.exists (fun value -> value = VInt 0L) then VInt 0L
+                            elif values |> List.exists (fun value -> value = VNull) then VNull
+                            else VInt 1L))
     | Distinct e
     | OrderBy(e, _) -> eval e
     | Case(subject, whens, elseBranch) ->
@@ -7168,7 +7180,8 @@ and private tryIndexedSemiJoin
 
         let classify =
             function
-            | InSubquery(expression, subquery) ->
+            | InSubquery(expression, subquery)
+            | QuantifiedComparison(expression, Eq, Any, subquery) ->
                 let expressions =
                     match expression with
                     | Row values -> values
