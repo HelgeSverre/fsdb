@@ -2002,13 +2002,14 @@ let private indexesWholeColumns group =
     && group.Transforms |> List.forall Option.isNone
 
 let private supportsOrderedAccess group =
-    group.PrefixLengths |> List.forall Option.isNone
-    && (group.Transforms
-        |> List.forall (function
-            | None
-            | Some Lowercase
-            | Some Uppercase -> true
-            | Some(Expression _) -> false))
+    let supportedKey =
+        match group.Transforms with
+        | transforms when transforms |> List.forall Option.isNone -> true
+        | [ Some Lowercase ]
+        | [ Some Uppercase ] -> true
+        | _ -> false
+
+    group.PrefixLengths |> List.forall Option.isNone && supportedKey
 
 let private visibleGroups groups = groups |> List.filter _.Visible
 
