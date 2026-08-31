@@ -4704,6 +4704,65 @@ let tests =
                         ()
                     | other -> failtestf "expected a composite ordered-index plan, got %A" other
 
+                testCase "a wider composite B-tree streams ORDER BY left prefixes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, tenant_id INT, priority INT, created_at INT, keep_row INT, KEY ix_tenant_priority_created (tenant_id, priority, created_at))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, tenant_id INT, priority INT, created_at INT, keep_row INT)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault
+                            store
+                            (sprintf
+                                "INSERT INTO %s VALUES (1, 2, 1, 30, 1), (2, 1, 2, 40, 1), (3, 2, 1, 10, 0), (4, 1, 1, 20, 1), (5, 2, 1, 10, 1), (6, NULL, 3, 50, 1)"
+                                table)
+                        |> ignore
+
+                    let rows table order =
+                        match runDefault store (sprintf "SELECT id, tenant_id, priority FROM %s WHERE keep_row = 1 ORDER BY %s LIMIT 10" table order) with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected ordered rows, got %A" other
+
+                    let projectedKeys indices (values: string option list list) =
+                        values |> List.map (fun row -> indices |> List.map (fun index -> row.[index]))
+
+                    Expect.equal
+                        (rows "indexed" "tenant_id" |> projectedKeys [ 1 ])
+                        (rows "scanned" "tenant_id" |> projectedKeys [ 1 ])
+                        "the one-column prefix order agrees with a scan"
+
+                    for order in [ "tenant_id, priority"; "tenant_id DESC, priority DESC" ] do
+                        Expect.equal
+                            (rows "indexed" order |> projectedKeys [ 1; 2 ])
+                            (rows "scanned" order |> projectedKeys [ 1; 2 ])
+                            $"{order} agrees with a scan"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY tenant_id, priority LIMIT 4" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "index") "a leading prefix streams the wider index"
+                        Expect.equal row.[6] (Some "ix_tenant_priority_created") "the wider composite key is reported"
+                    | other -> failtestf "expected a leading-prefix index plan, got %A" other
+
+                testCase "composite prefix indexes do not claim full-value ORDER BY"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, label VARCHAR(20), KEY ix_label_id (label(2), id))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, label VARCHAR(20))" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES (1, 'abz'), (2, 'aba'), (3, 'abc'), (4, 'aaa')" table) |> ignore
+
+                    let rows table =
+                        match runDefault store (sprintf "SELECT id, label FROM %s ORDER BY label, id LIMIT 4" table) with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected ordered rows, got %A" other
+
+                    Expect.equal (rows "indexed") (rows "scanned") "the full string order ignores truncated index keys"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY label, id LIMIT 4" with
+                    | ResultSet(_, [ row ]) -> Expect.stringContains row.[11].Value "filesort" "the prefix index is not advertised as full ordering"
+                    | other -> failtestf "expected a filesort plan, got %A" other
+
                 testCase "a point equality stays ahead of secondary index ordering"
                 <| fun _ ->
                     let mutable calls = 0
