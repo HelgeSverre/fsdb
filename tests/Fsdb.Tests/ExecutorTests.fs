@@ -3376,6 +3376,23 @@ let tests =
                         Expect.equal row.[6] (Some "idx_pub_code_city") "the composite grouping index is reported"
                     | other -> failtestf "expected a composite indexed GROUP BY plan, got %A" other
 
+                testCase "prefix indexes do not feed full-value grouping"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, label VARCHAR(20), KEY ix_label (label(2)))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 'aba'), (2, 'abz'), (3, 'aba')" |> ignore
+
+                    match runDefault store "SELECT label, COUNT(*) AS c FROM t GROUP BY label ORDER BY label" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "aba"; Some "2" ]; [ Some "abz"; Some "1" ] ] "truncated keys do not split a full-value group"
+                    | other -> failtestf "expected full-value groups, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT label, COUNT(*) AS c FROM t GROUP BY label" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "ALL") "a prefix key does not claim full-value grouping"
+                        Expect.isTrue (row.[11] |> Option.exists (_.Contains("temporary"))) "the fallback uses ordinary grouping"
+                    | other -> failtestf "expected a scan grouping plan, got %A" other
+
                 testCase "ORDER BY an aggregate not in the SELECT list, over a grouped query"
                 <| fun _ ->
                     let store = newStore ()
