@@ -21,6 +21,7 @@ open Fsdb.Engine
 /// it as MySQL error 1205 so callers can retry the transaction.
 exception LockWaitTimeout of dbName: string
 exception LockNowait of dbName: string
+exception DeadlockVictim of dbName: string
 
 /// Storage-layer failures, mapped to MySQL error codes by `toMySqlError`.
 /// `ExpressionError` carries an already-formed MySQL (code, message) pair
@@ -326,6 +327,10 @@ type TransactionLockContext =
     { Owner: int64
       HeldStripes: Collections.Generic.HashSet<RowLockStripe> }
 
+type LockWaitGraph =
+    { SyncRoot: obj
+      Edges: Dictionary<int64, HashSet<int64>> }
+
 type AccountResourceUsage =
     { Gate: obj
       mutable WindowStartedUtc: DateTime
@@ -387,6 +392,8 @@ type Store =
       RowLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
       /// A separate namespace prevents key hashes from aliasing held rows.
       KeyLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
+      /// Active row/key waits used for cycle detection.
+      LockWaits: LockWaitGraph
       /// Ephemeral per-account counters are shared by every session and
       /// transaction snapshot, but deliberately reset on server restart.
       AccountResources: ConcurrentDictionary<string, AccountResourceUsage>
@@ -496,6 +503,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       AccountResources = store.AccountResources
       PreparedXas = store.PreparedXas
       RowLockSequence = store.RowLockSequence
+      LockWaits = store.LockWaits
       TransactionLocks = store.TransactionLocks }
 
 let beginTransactionSnapshot (store: Store) : Store =
@@ -2539,8 +2547,45 @@ type private StripeWaitPolicy =
     | FailIfUnavailable
     | SkipIfUnavailable
 
+let private stripeBlockers owner mode (stripe: RowLockStripe) =
+    seq {
+        match stripe.ExclusiveOwner with
+        | Some blocker when blocker <> owner -> yield blocker
+        | _ -> ()
+
+        if mode = ExclusiveStripe then
+            yield! stripe.SharedOwners |> Seq.filter ((<>) owner)
+    }
+    |> HashSet
+
+let private registerLockWait (graph: LockWaitGraph) owner blockers =
+    lock graph.SyncRoot (fun () ->
+        graph.Edges.[owner] <- blockers
+
+        let rec reaches target visited current =
+            if current = target then
+                true
+            elif Set.contains current visited then
+                false
+            else
+                match graph.Edges.TryGetValue current with
+                | false, _ -> false
+                | true, next ->
+                    let visited = Set.add current visited
+                    next |> Seq.exists (reaches target visited)
+
+        if blockers |> Seq.exists (reaches owner Set.empty) then
+            graph.Edges.Remove owner |> ignore
+            false
+        else
+            true)
+
+let private clearLockWait (graph: LockWaitGraph) owner =
+    lock graph.SyncRoot (fun () -> graph.Edges.Remove owner |> ignore)
+
 let private acquireStripe
     (deadline: DateTime)
+    (waits: LockWaitGraph)
     (dbName: string)
     (context: TransactionLockContext)
     (mode: StripeLockMode)
@@ -2573,8 +2618,19 @@ let private acquireStripe
                 | WaitUntilAvailable ->
                     let remaining = deadline - DateTime.UtcNow
 
-                    if remaining <= TimeSpan.Zero || not (Threading.Monitor.Wait(stripe.SyncRoot, remaining)) then
+                    if remaining <= TimeSpan.Zero then
                         raise (LockWaitTimeout dbName)
+
+                    let blockers = stripeBlockers context.Owner mode stripe
+
+                    if not (registerLockWait waits context.Owner blockers) then
+                        raise (DeadlockVictim dbName)
+
+                    try
+                        if not (Threading.Monitor.Wait(stripe.SyncRoot, remaining)) then
+                            raise (LockWaitTimeout dbName)
+                    finally
+                        clearLockWait waits context.Owner
 
                     acquire ()
 
@@ -2630,7 +2686,7 @@ let private withWriteLocksFor
             stripes
             |> List.iter (fun stripe ->
                 let _, newlyHeld =
-                    acquireStripe deadline dbName context ExclusiveStripe WaitUntilAvailable stripe
+                    acquireStripe deadline store.LockWaits dbName context ExclusiveStripe WaitUntilAvailable stripe
 
                 if newlyHeld then
                     claimed.Add stripe)
@@ -2702,7 +2758,7 @@ let acquireTransactionReadTargets
             |> List.sortBy fst
             |> List.collect (fun (index, rows) ->
                 let stripe = rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ()))
-                let acquired, newlyHeld = acquireStripe deadline dbName context mode waitPolicy stripe
+                let acquired, newlyHeld = acquireStripe deadline store.LockWaits dbName context mode waitPolicy stripe
 
                 if newlyHeld then
                     claimed.Add stripe
@@ -3099,6 +3155,9 @@ let create () : Store =
       CommitLock = obj ()
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
+      LockWaits =
+        { SyncRoot = obj ()
+          Edges = Dictionary() }
       AccountResources = ConcurrentDictionary()
       PreparedXas = ConcurrentDictionary()
       RowLockSequence = [| 0L |]

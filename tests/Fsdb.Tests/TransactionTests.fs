@@ -804,9 +804,12 @@ let tests =
               Expect.equal firstResult (Affected 1UL) "the surviving transaction acquires row two"
               Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the survivor commits"
 
-              match deadlock with
-              | Err(1213, _) -> Expect.isNone second.Tx "the deadlock victim transaction is gone"
-              | other -> failtestf "expected a 1213 deadlock victim, got %A" other
+              match Fsdb.Executor.errorInfo deadlock with
+              | Some error when error.Code = 1213 ->
+                  Expect.equal error.State "40001" "deadlocks use MySQL's transaction-rollback SQLSTATE"
+                  Expect.equal error.Message "Deadlock found when trying to get lock; try restarting transaction" "deadlock message"
+                  Expect.isNone second.Tx "the deadlock victim transaction is gone"
+              | _ -> failtestf "expected a 1213 deadlock victim, got %A" deadlock
 
           testCase "a timed-out multi-row wait releases its partial claims"
           <| fun _ ->

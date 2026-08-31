@@ -5876,6 +5876,9 @@ let private abortTransaction (session: Session) =
 
 let private recoverExecutionError (session: Session) (description: string) (error: exn) : Session * QueryResult =
     match error with
+    | Storage.DeadlockVictim dbName ->
+        Log.diagnostic "fsdb: ERR 1213 deadlock on database %s -- %s" dbName description
+        abortTransaction session, Err(1213, "Deadlock found when trying to get lock; try restarting transaction")
     | Storage.LockNowait dbName ->
         Log.diagnostic "fsdb: ERR 3572 lock unavailable on database %s -- %s" dbName description
         session, Err(3572, "Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.")
