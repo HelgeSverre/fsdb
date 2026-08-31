@@ -3369,6 +3369,35 @@ let tests =
                     Expect.equal plan.Key (Some "ix_upper") "the functional grouping key is reported"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "contiguous functional groups avoid a temporary table"
 
+                testCase "GROUP BY streams composite functional keys and fixed-prefix suffixes"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE t (id INT PRIMARY KEY, tenant_id INT, name VARCHAR(30) COLLATE utf8mb4_bin, KEY ix_tenant_upper (tenant_id, (UPPER(name))))"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO t VALUES (1, 2, 'beta'), (2, 1, 'zeta'), (3, 1, 'Alpha'), (4, 2, 'alpha'), (5, 1, 'beta')"
+                    |> ignore
+
+                    let compositePlan =
+                        runDefault store "EXPLAIN SELECT tenant_id, UPPER(name), COUNT(*) FROM t GROUP BY tenant_id, UPPER(name)"
+                        |> explainRow
+
+                    Expect.equal compositePlan.AccessType (Some "index") "the complete functional key feeds grouping"
+                    Expect.equal compositePlan.Key (Some "ix_tenant_upper") "the composite grouping key is reported"
+
+                    let suffixPlan =
+                        runDefault store "EXPLAIN SELECT UPPER(name), COUNT(*) FROM t WHERE tenant_id = 1 GROUP BY UPPER(name)"
+                        |> explainRow
+
+                    Expect.equal suffixPlan.AccessType (Some "index") "the fixed prefix exposes functional grouping"
+                    Expect.equal suffixPlan.Key (Some "ix_tenant_upper") "the fixed-prefix grouping key is reported"
+                    Expect.isFalse (suffixPlan.Extra |> Option.exists (_.Contains("temporary"))) "functional suffix groups stay contiguous"
+
                 testCase "GROUP BY sorts through a composite index once WHERE pins every column ahead of the group key"
                 <| fun _ ->
                     let store = newStore ()
@@ -5353,6 +5382,40 @@ let tests =
                         runDefault store $"DELETE FROM {table} WHERE id = 2" |> ignore
 
                     Expect.equal (rows "indexed" "ASC") (rows "scanned" "ASC") "updates and deletes maintain transformed order"
+
+                testCase "a fixed stored prefix exposes a functional ordering suffix"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed (id INT PRIMARY KEY, tenant_id INT, name VARCHAR(30) COLLATE utf8mb4_bin, KEY ix_tenant_upper (tenant_id, (UPPER(name))))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, tenant_id INT, name VARCHAR(30) COLLATE utf8mb4_bin)"
+                    |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault
+                            store
+                            $"INSERT INTO {table} VALUES (1, 2, 'beta'), (2, 1, 'zeta'), (3, 1, 'Alpha'), (4, 2, 'alpha'), (5, 1, 'beta')"
+                        |> ignore
+
+                    let rows table direction =
+                        match runDefault store $"SELECT id FROM {table} WHERE tenant_id = 1 ORDER BY UPPER(name) {direction}" with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected composite functional ordering, got %A" other
+
+                    for direction in [ "ASC"; "DESC" ] do
+                        Expect.equal (rows "indexed" direction) (rows "scanned" direction) $"the {direction} suffix order matches a filesort"
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed WHERE tenant_id = 1 ORDER BY UPPER(name)"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "the equality prefix exposes the functional suffix"
+                    Expect.equal plan.Key (Some "ix_tenant_upper") "the composite functional key is reported"
+                    Expect.isFalse (plan.Extra |> Option.exists (_.Contains("filesort"))) "the suffix order avoids a filesort"
 
                 testCase "invisible indexes enforce constraints without entering query plans"
                 <| fun _ ->
