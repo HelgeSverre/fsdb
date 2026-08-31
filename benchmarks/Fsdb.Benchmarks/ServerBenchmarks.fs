@@ -285,6 +285,12 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.QuantifiedMembership() =
+        this.Query
+            "SELECT COUNT(*) FROM users u WHERE u.id <> ALL (SELECT o.user_id FROM orders o WHERE o.id <= 100)"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedOrderCount() =
         this.Query "SELECT u.id, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) FROM users u WHERE u.id <= 100"
 
