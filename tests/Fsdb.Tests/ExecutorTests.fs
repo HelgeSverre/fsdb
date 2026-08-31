@@ -5189,6 +5189,31 @@ let tests =
                     | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_parent"; Some "ix_parent"; Some "5"; Some "p.id"; Some "1"; Some "100.00"; Some "Using where" ] ]) -> ()
                     | other -> failtestf "expected an indexed LEFT JOIN plan, got %A" other
 
+                testCase "indexed USING and NATURAL LEFT joins retain their coalesced rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE join_parent (id INT PRIMARY KEY, parent_name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE join_child (child_id INT PRIMARY KEY, id INT, child_name VARCHAR(20), KEY ix_id (id))" |> ignore
+                    runDefault store "INSERT INTO join_parent VALUES (1, 'one'), (2, 'two'), (3, 'three')" |> ignore
+                    runDefault store "INSERT INTO join_child VALUES (10, 1, 'first'), (11, 1, 'second'), (12, 2, 'third')" |> ignore
+
+                    let expected =
+                        [ [ Some "1"; Some "one"; Some "10"; Some "first" ]
+                          [ Some "1"; Some "one"; Some "11"; Some "second" ]
+                          [ Some "2"; Some "two"; Some "12"; Some "third" ]
+                          [ Some "3"; Some "three"; None; None ] ]
+
+                    for joinSql in [ "LEFT JOIN join_child USING (id)"; "NATURAL LEFT JOIN join_child" ] do
+                        match runDefault store $"SELECT id, parent_name, child_id, child_name FROM join_parent {joinSql} ORDER BY id, child_id" with
+                        | ResultSet(_, rows) -> Expect.equal rows expected $"{joinSql} rows"
+                        | other -> failtestf "expected rows for %s, got %A" joinSql other
+
+                    match runDefault store "EXPLAIN SELECT * FROM join_parent p LEFT JOIN join_child c USING (id)" with
+                    | ResultSet(_, [ _; row ]) ->
+                        Expect.equal row.[4] (Some "ref") "USING selects indexed ref access"
+                        Expect.equal row.[6] (Some "ix_id") "USING selects the right-side key"
+                    | other -> failtestf "expected an indexed USING plan, got %A" other
+
                 testCase "an indexed INNER JOIN probes a composite equality key"
                 <| fun _ ->
                     let store = newStore ()
