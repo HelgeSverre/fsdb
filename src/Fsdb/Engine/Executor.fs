@@ -8849,7 +8849,7 @@ and private groupByIndexPrefix (pinned: Set<string>) (groupColumns: string list)
         None
 
 and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
-    if not (storedValuesMatchReadValues store) then
+    if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
         None
     else
         groupByColumnNames select.GroupBy
