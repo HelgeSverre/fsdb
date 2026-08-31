@@ -5737,7 +5737,7 @@ and private tryIndexedJoinProbe
     (equiKeys: (int * int) list)
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
-    | (InnerJoin | NaturalJoin | LeftJoin | NaturalLeftJoin), _, Some table, _ :: _
+    | (InnerJoin | NaturalJoin | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin), _, Some table, _ :: _
         when storedValuesMatchReadValues store
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         let rightNames = equiKeys |> List.map (fun (_, rightIndex) -> rightColumns.[rightIndex].Name)
@@ -6230,15 +6230,15 @@ and private applyResolvedJoin
                     probe.LeftIndices
                     |> List.map (fun leftIndex -> left.[leftIndex])
                     |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
-                    |> Option.map (Seq.map snd)
-                    |> Option.defaultValue joinRows
+                    |> Option.map Seq.ofList
+                    |> Option.defaultValue probe.Table.RowsArray.Indexed
 
                 match join.Kind, exactKey, residualConjuncts with
                 | (InnerJoin | NaturalJoin), true, [] ->
                     let candidates =
                         seq {
                             for left in rowsSoFar do
-                                for right in rightRowsFor left do
+                                for _, right in rightRowsFor left do
                                     yield Array.append left right
                         }
 
@@ -6246,7 +6246,7 @@ and private applyResolvedJoin
                 | (InnerJoin | NaturalJoin), _, _ ->
                     seq {
                         for left in rowsSoFar do
-                            for right in rightRowsFor left do
+                            for _, right in rightRowsFor left do
                                 yield Array.append left right
                     }
                     |> traverseSeqWithLimit
@@ -6263,7 +6263,7 @@ and private applyResolvedJoin
                             for left in rowsSoFar do
                                 let mutable matched = false
 
-                                for right in rightRowsFor left do
+                                for _, right in rightRowsFor left do
                                     matched <- true
                                     yield Array.append left right
 
@@ -6275,7 +6275,7 @@ and private applyResolvedJoin
                 | (LeftJoin | NaturalLeftJoin), _, _ ->
                     seq {
                         for leftIndex, left in leftIndexed.Value do
-                            for rightIndex, right in rightRowsFor left |> Seq.indexed do
+                            for rightIndex, (_, right) in rightRowsFor left |> Seq.indexed do
                                 yield leftIndex, rightIndex, Array.append left right
                     }
                     |> traverseSeqWithLimit
@@ -6288,6 +6288,28 @@ and private applyResolvedJoin
                             |> Result.map (fun matches -> if matches then Some candidate else None))
                     |> Result.mapError Err
                     |> Result.map (buildCombinedRows [] >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
+                | (RightJoin | NaturalRightJoin), _, _ ->
+                    let positionedRight = probe.Table.RowsArray.Indexed |> Seq.indexed |> List.ofSeq
+                    let rightPositions = positionedRight |> List.map (fun (index, (rowId, _)) -> rowId, index) |> Map.ofList
+                    let rightIndexed = positionedRight |> List.map (fun (index, (_, row)) -> index, row)
+
+                    seq {
+                        for leftIndex, left in leftIndexed.Value do
+                            for rowId, right in rightRowsFor left do
+                                match Map.tryFind rowId rightPositions with
+                                | Some rightIndex -> yield leftIndex, rightIndex, Array.append left right
+                                | None -> ()
+                    }
+                    |> traverseSeqWithLimit
+                        (Some(
+                            maxJoinCandidateRows,
+                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                        ))
+                        (fun ((_, _, combined) as candidate) ->
+                            candidateHolds combined
+                            |> Result.map (fun matches -> if matches then Some candidate else None))
+                    |> Result.mapError Err
+                    |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
                 | _ -> failwith "indexed join kind"
             | None when hashEligible ->
                 let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
