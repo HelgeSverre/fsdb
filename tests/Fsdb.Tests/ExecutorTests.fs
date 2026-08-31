@@ -5642,7 +5642,7 @@ let tests =
                     | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_parent"; Some "ix_parent"; Some "5"; Some "p.id"; Some "1"; Some "100.00"; Some "Using where" ] ]) -> ()
                     | other -> failtestf "expected an indexed LEFT JOIN plan, got %A" other
 
-                testCase "an indexed RIGHT JOIN probes the right side and preserves unmatched rows"
+                testCase "an indexed RIGHT JOIN reverse-probes the left side and preserves unmatched rows"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE parent (id INT PRIMARY KEY, minimum_score INT)" |> ignore
@@ -5670,6 +5670,18 @@ let tests =
                         (rows "indexed_child")
                         [ [ Some "1"; Some "1" ]; [ None; Some "2" ]; [ Some "2"; Some "3" ]; [ None; Some "4" ]; [ None; Some "5" ] ]
                         "failed residuals and NULL keys retain the right row"
+
+                    match
+                        runDefault
+                            store
+                            "SELECT p.id, c.id FROM parent p RIGHT JOIN indexed_child c ON p.id = c.parent_id AND p.minimum_score < 20 LIMIT 3"
+                    with
+                    | ResultSet(_, values) ->
+                        Expect.equal
+                            values
+                            [ [ Some "1"; Some "1" ]; [ Some "1"; Some "2" ]; [ None; Some "3" ] ]
+                            "a left-only residual preserves right order and unmatched rows under LIMIT"
+                    | other -> failtestf "expected a limited RIGHT JOIN result, got %A" other
 
                     match runDefault store "EXPLAIN SELECT * FROM parent p RIGHT JOIN indexed_child c ON p.id = c.parent_id AND c.score >= p.minimum_score" with
                     | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_parent"; Some "ix_parent"; Some "5"; Some "p.id"; Some "1"; Some "100.00"; Some "Using where" ] ]) -> ()

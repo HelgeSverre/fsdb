@@ -140,7 +140,7 @@ type private IndexedJoinPlan =
 type private IndexedJoinProbe =
     { Table: Table
       Index: EqualityIndex
-      LeftIndices: int list }
+      ProbeIndices: int list }
 
 type private FullTextPredicatePlan =
     { Rows: (RowId * Value[]) list
@@ -5758,6 +5758,26 @@ and private sameIndexSemantics (left: ColumnDef) (right: ColumnDef) : bool =
         (not (InformationSchema.isStringy left.Type)
          || (left.Charset = right.Charset && left.Collation = right.Collation && left.Collation.IsSome))
 
+and private tryIndexProbe
+    (table: Table)
+    (indexedColumns: ColumnDef list)
+    (indexToProbe: (int * int) list)
+    : IndexedJoinProbe option =
+    let indexedNames = indexToProbe |> List.map (fun (indexedIndex, _) -> indexedColumns.[indexedIndex].Name)
+
+    Storage.tryEqualityIndexForColumns table indexedNames
+    |> Option.bind (fun index ->
+        index.ColumnIndices
+        |> traverse (fun indexedIndex ->
+            indexToProbe
+            |> List.tryPick (fun (candidate, probeIndex) -> if candidate = indexedIndex then Some probeIndex else None)
+            |> function Some probeIndex -> Ok probeIndex | None -> Error())
+        |> Result.toOption
+        |> Option.map (fun probeIndices ->
+            { Table = table
+              Index = index
+              ProbeIndices = probeIndices }))
+
 and private tryIndexedJoinProbe
     (store: Store)
     (join: Join)
@@ -5770,20 +5790,22 @@ and private tryIndexedJoinProbe
     | (InnerJoin | NaturalJoin | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin), _, Some table, _ :: _
         when storedValuesMatchReadValues store
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
-        let rightNames = equiKeys |> List.map (fun (_, rightIndex) -> rightColumns.[rightIndex].Name)
+        equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe table rightColumns
+    | _ -> None
 
-        Storage.tryEqualityIndexForColumns table rightNames
-        |> Option.bind (fun index ->
-            index.ColumnIndices
-            |> traverse (fun rightIndex ->
-                equiKeys
-                |> List.tryPick (fun (leftIndex, candidate) -> if candidate = rightIndex then Some leftIndex else None)
-                |> function Some leftIndex -> Ok leftIndex | None -> Error())
-            |> Result.toOption
-            |> Option.map (fun leftIndices ->
-                { Table = table
-                  Index = index
-                  LeftIndices = leftIndices }))
+and private tryIndexedPreservedRightProbe
+    (store: Store)
+    (join: Join)
+    (leftColumns: ColumnDef list)
+    (rightColumns: ColumnDef list)
+    (physicalTable: Table option)
+    (equiKeys: (int * int) list)
+    : IndexedJoinProbe option =
+    match join.Kind, join.Using, physicalTable, equiKeys with
+    | (RightJoin | NaturalRightJoin), _, Some table, _ :: _
+        when storedValuesMatchReadValues store
+             && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
+        equiKeys |> tryIndexProbe table leftColumns
     | _ -> None
 
 /// Early split on the join target: `JSON_TABLE` is lateral (its source
@@ -5796,13 +5818,14 @@ and private applyJoin
     (dbName: string)
     (outer: EvalContext option)
     (sourceOverrides: JoinSourceOverrides)
+    (leftPhysicalTable: Table option)
     (state: (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Table with
     | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName outer state join source path columns alias
     | FromLateral(body, alias) -> applyLateralJoin store registry dbName outer state join body alias
-    | _ -> applyResolvedJoin store registry dbName outer sourceOverrides state join
+    | _ -> applyResolvedJoin store registry dbName outer sourceOverrides leftPhysicalTable state join
 
 /// `applyJoin`'s LATERAL branch — the derived table re-runs once per left
 /// row, with that row (over the columns joined so far) as its outer context,
@@ -6094,6 +6117,7 @@ and private applyResolvedJoin
     (dbName: string)
     (outer: EvalContext option)
     (sourceOverrides: JoinSourceOverrides)
+    (leftPhysicalTable: Table option)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
@@ -6227,6 +6251,27 @@ and private applyResolvedJoin
                 |> Result.map (List.forall (fun v -> truthy v = Some true))
 
             let indexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns physicalTable equiKeys
+            let preservedRightProbe =
+                tryIndexedPreservedRightProbe store join combinedColumnsSoFar joinColumns leftPhysicalTable equiKeys
+
+            let leftQualifiers = sourcesSoFar |> List.map (fst >> _.ToLowerInvariant()) |> Set.ofList
+
+            let rec safeLeftFilter =
+                function
+                | Lit _ -> true
+                | QualifiedCol(qualifier, column) ->
+                    leftQualifiers |> Set.contains (qualifier.ToLowerInvariant())
+                    && (resolveQualified qualifier column
+                        |> Option.exists (fun (index, columnType) ->
+                            index < combinedColumnsSoFar.Length && not (InformationSchema.isStringy columnType)))
+                | Not expression
+                | IsNull expression
+                | IsNotNull expression
+                | IsTrue expression
+                | IsFalse expression -> safeLeftFilter expression
+                | BinOp((And | Or | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
+                    safeLeftFilter left && safeLeftFilter right
+                | _ -> false
 
             let hashEligible =
                 storedValuesMatchReadValues store
@@ -6243,8 +6288,32 @@ and private applyResolvedJoin
                 | BinOp(Eq, Lit left, Lit right) -> Value.equals left right = Some true
                 | _ -> false
 
-            match indexedJoinProbe with
-            | Some probe ->
+            match preservedRightProbe, indexedJoinProbe with
+            | Some probe, _
+                when probe.Index.PrefixLengths |> List.forall Option.isNone
+                     && probe.Index.Transforms |> List.forall Option.isNone
+                     && residualConjuncts |> List.forall safeLeftFilter ->
+                let leftRowsFor (right: Value[]) =
+                    probe.ProbeIndices
+                    |> List.map (fun rightIndex -> right.[rightIndex])
+                    |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
+                    |> Option.defaultValue []
+                    |> List.filter (fun (_, left) ->
+                        match residualHolds (Array.append left rightNullPadding) with
+                        | Ok matches -> matches
+                        | Error(code, message) -> raise (SqlError(code, message)))
+
+                let rows =
+                    seq {
+                        for right in joinRows do
+                            match leftRowsFor right with
+                            | [] -> yield Array.append leftNullPadding right
+                            | matches ->
+                                for _, left in matches do
+                                    yield Array.append left right
+                    }
+                Ok(newSources, rows, coalesceNames)
+            | _, Some probe ->
                 let exactKey =
                     probe.Index.PrefixLengths |> List.forall Option.isNone
                     && probe.Index.Transforms |> List.forall Option.isNone
@@ -6257,7 +6326,7 @@ and private applyResolvedJoin
                         |> Result.map (truthy >> (=) (Some true))
 
                 let rightRowsFor (left: Value[]) =
-                    probe.LeftIndices
+                    probe.ProbeIndices
                     |> List.map (fun leftIndex -> left.[leftIndex])
                     |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
                     |> Option.map Seq.ofList
@@ -6341,7 +6410,7 @@ and private applyResolvedJoin
                     |> Result.mapError Err
                     |> Result.map (buildCombinedRows rightIndexed >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
                 | _ -> failwith "indexed join kind"
-            | None when hashEligible ->
+            | _, None when hashEligible ->
                 let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
                 let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
                 let rightCount = joinRows |> Seq.length
@@ -6390,7 +6459,7 @@ and private applyResolvedJoin
                             |> Result.map (fun matches -> if matches then Some candidate else None))
                     |> Result.mapError Err
                     |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
-            | None ->
+            | _, None ->
                 let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
                 match join.Kind, isConstantTrue effectiveOn with
@@ -7466,24 +7535,30 @@ and private runUnlockedSelectStmt
     | _ when not matchNodes.IsEmpty -> runFullTextSelect store registry dbName select matchNodes outer
     | None -> runSelect store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
     | Some fromItem ->
-        let runResolved groupInputOrder (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
+        let runResolved
+            groupInputOrder
+            (baseColumns: ColumnDef list)
+            (baseRows: Value[] seq)
+            (basePhysicalTable: Table option)
+            (select: SelectStmt)
+            =
             let baseQualifier = fromItemQualifier fromItem
 
-            let initial : Result<((string * ColumnDef list) list * Value[] seq) * string list list, QueryResult> =
-                Ok(([ baseQualifier, baseColumns ], baseRows), [])
+            let initial : Result<((string * ColumnDef list) list * Value[] seq * Table option) * string list list, QueryResult> =
+                Ok(([ baseQualifier, baseColumns ], baseRows, basePhysicalTable), [])
 
             match
                 planJoinOrder store dbName select
                 |> List.fold
                     (fun acc join ->
                         acc
-                        |> Result.bind (fun ((sources, rows), namesPerJoin) ->
-                            applyJoin store registry dbName outer Map.empty (sources, rows) join
-                            |> Result.map (fun (sources', rows', names) -> (sources', rows'), names :: namesPerJoin)))
+                        |> Result.bind (fun ((sources, rows, leftPhysicalTable), namesPerJoin) ->
+                            applyJoin store registry dbName outer Map.empty leftPhysicalTable (sources, rows) join
+                            |> Result.map (fun (sources', rows', names) -> (sources', rows', None), names :: namesPerJoin)))
                     initial
             with
             | Error e -> e, [], []
-            | Ok((sources, rows), namesPerJoinRev) ->
+            | Ok((sources, rows, _), namesPerJoinRev) ->
                 let namesPerJoin = List.rev namesPerJoinRev
 
                 let select' =
@@ -7494,30 +7569,43 @@ and private runUnlockedSelectStmt
 
                 runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select' outer
 
-        let runArbitrary columns (rows: Value[] seq) resolvedSelect =
-            runResolved ArbitraryGroupRows columns rows resolvedSelect
+        let runArbitrary columns (rows: Value[] seq) physicalTable resolvedSelect =
+            runResolved ArbitraryGroupRows columns rows physicalTable resolvedSelect
+
+        let resolveBase () =
+            match fromItem with
+            | FromTable tableRef ->
+                tryPhysicalTableRef store dbName tableRef
+                |> Result.bind (function
+                    | Some table -> Ok(table.Columns, table.RowsArray :> Value[] seq, Some table)
+                    | None ->
+                        resolveFromItem store registry dbName fromItem
+                        |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None))
+            | _ ->
+                resolveFromItem store registry dbName fromItem
+                |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
 
         match fromItem, select.Joins with
         | FromTable _, _ when not select.Locking.IsEmpty ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []
-            | Ok(columns, rows) -> runArbitrary columns rows select
+            | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, [] ->
             match tryGroupIndexOrder store dbName tref select with
-            | Some plan -> runResolved ContiguousGroupRows plan.Columns plan.Rows select
+            | Some plan -> runResolved ContiguousGroupRows plan.Columns plan.Rows None select
             | None ->
                 match tryIndexedSemiJoin store registry dbName select tref with
                 | Error error -> error, [], []
-                | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows narrowed
+                | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows None narrowed
                 | Ok None ->
                   match tryIndexedLookup store dbName tref select.Where with
-                  | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) select
+                  | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                   | None ->
                     match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
-                    | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) select
+                    | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                     | None ->
                         match tryIndexOrder store registry dbName tref select with
-                        | Some plan -> runArbitrary plan.Columns plan.Rows { select with OrderBy = [] }
+                        | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
                         | None ->
                             let resolved =
                                 tryRangeLookup store dbName tref select.Where
@@ -7527,7 +7615,7 @@ and private runUnlockedSelectStmt
 
                             match resolved with
                             | Error e -> e, [], []
-                            | Ok(columns, rows) -> runArbitrary columns rows select
+                            | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then
@@ -7536,19 +7624,19 @@ and private runUnlockedSelectStmt
                     tryQualifiedRangeLookup store dbName tref select.Where
 
             match rangeLookup with
-            | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) select
+            | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
             | None ->
-                match resolveFromItem store registry dbName fromItem with
+                match resolveBase () with
                 | Error e -> e, [], []
-                | Ok(columns, rows) -> runArbitrary columns rows select
+                | Ok(columns, rows, physicalTable) -> runArbitrary columns rows physicalTable select
         | FromLateral _, _ ->
             match resolveFromSubquery store registry dbName fromItem outer with
             | Error e -> e, [], []
-            | Ok(columns, rows) -> runArbitrary columns rows select
+            | Ok(columns, rows) -> runArbitrary columns rows None select
         | _ ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []
-            | Ok(columns, rows) -> runArbitrary columns rows select
+            | Ok(columns, rows) -> runArbitrary columns rows None select
 
 /// Flattens a top-level `AND` chain into conjuncts.
 and private flattenAnd (expr: Expr) : Expr list =
@@ -10633,7 +10721,7 @@ and private runFullTextSelect
                                 |> Result.bind (fun ((resolved, rows), namesPerJoin) ->
                                     let rewrittenJoin = { join with On = sub join.On }
 
-                                    applyJoin store registry dbName outer overrides (resolved, rows) rewrittenJoin
+                                    applyJoin store registry dbName outer overrides None (resolved, rows) rewrittenJoin
                                     |> Result.map (fun (sources, rows, names) -> (sources, rows), names :: namesPerJoin)))
                             initial
 
@@ -11711,7 +11799,7 @@ let private indexedJoinExplainPlans
                                   ColumnIndices = probe.Index.ColumnIndices
                                   PrefixLengths = probe.Index.PrefixLengths
                                   Unique = probe.Index.Unique
-                                  References = probe.LeftIndices |> List.map (leftColumnReference leftSources)
+                                  References = probe.ProbeIndices |> List.map (leftColumnReference leftSources)
                                   HasResidual =
                                     not residual.IsEmpty
                                     || (probe.Index.PrefixLengths |> List.exists Option.isSome)
