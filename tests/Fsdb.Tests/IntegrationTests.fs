@@ -486,12 +486,12 @@ let tests =
 
                       do!
                           query
-                              "LOAD DATA LOCAL INFILE 'string-separated.txt' INTO TABLE string_separated_load FIELDS TERMINATED BY '::' LINES TERMINATED BY '||'"
+                              "LOAD DATA LOCAL INFILE 'string-separated.txt' INTO TABLE string_separated_load CHARACTER SET utf8mb4 FIELDS TERMINATED BY '::' LINES TERMINATED BY '💥'"
                           |> Async.Ignore
 
                       let! request = readPacketAsync stream
                       Expect.equal request.Value.Payload.[0] 0xfbuy "LOCAL request"
-                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "1::alpha||2::beta||" } |> Async.Ignore
+                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "1::alpha💥2::beta💥" } |> Async.Ignore
                       do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
                       let! loaded = readPacketAsync stream
                       Expect.equal loaded.Value.Payload.[0] 0uy "LOAD succeeds"

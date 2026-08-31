@@ -3663,11 +3663,11 @@ let tests =
           <| fun _ ->
               match
                   parseLocalLoad
-                      "LOAD DATA LOCAL INFILE 'x' INTO TABLE t FIELDS TERMINATED BY '::' LINES TERMINATED BY '||'"
+                      "LOAD DATA LOCAL INFILE 'x' INTO TABLE t FIELDS TERMINATED BY '::' LINES TERMINATED BY '💥'"
               with
               | Ok load ->
                   Expect.equal load.FieldTerminator "::" "field terminator"
-                  Expect.equal load.LineTerminator "||" "line terminator"
+                  Expect.equal load.LineTerminator "💥" "line terminator"
               | Error error -> failtestf "unexpected parse error: %s" error
 
           testCase "LOAD DATA LOCAL INFILE retains custom and empty escape settings"

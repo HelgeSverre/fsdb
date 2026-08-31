@@ -4379,17 +4379,12 @@ let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<Lo
 
     withParserState options sql (runWithDepthLimit parser)
     |> Result.bind (fun load ->
-        let validSeparator value = value = "" || value.Length = 1
+        let validCharacter value = value = "" || value.Length = 1
 
-        if
-            validSeparator load.FieldTerminator
-            && validSeparator load.LineTerminator
-            && (load.EnclosedBy |> Option.forall validSeparator)
-            && (load.Escape |> Option.forall validSeparator)
-        then
+        if (load.EnclosedBy |> Option.forall validCharacter) && (load.Escape |> Option.forall validCharacter) then
             Result.Ok load
         else
-            Result.Error "LOAD DATA delimiters must be empty or one character")
+            Result.Error "LOAD DATA enclosure and escape markers must be empty or one character")
 
 let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
     parseLocalLoadWithOptions defaultOptions sql
