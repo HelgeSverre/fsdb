@@ -453,7 +453,7 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected the lower recursion bound, got %A" other
 
-              for invalid in [ "'2'"; "1.5"; "NULL" ] do
+              for invalid in [ "'2'"; "1.5"; "NULL"; "b'1'" ] do
                   match handle low ("SET SESSION max_sp_recursion_depth = " + invalid) |> snd with
                   | Err(1232, message) ->
                       Expect.stringContains message "max_sp_recursion_depth" "the variable is named"

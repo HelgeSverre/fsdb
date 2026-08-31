@@ -3284,6 +3284,9 @@ let tests =
               let session, created = handle session "CREATE FUNCTION recursive_function() RETURNS INT RETURN recursive_function()"
               Expect.equal created (Affected 0UL) "created recursive function"
 
+              let session, recursionEnabled = handle session "SET SESSION max_sp_recursion_depth = 5"
+              Expect.equal recursionEnabled (Affected 0UL) "enabled procedure recursion"
+
               match handle session "SELECT one_argument()" |> snd with
               | Err(1318, _) -> ()
               | other -> failtestf "expected argument-count error, got %A" other

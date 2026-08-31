@@ -302,6 +302,7 @@ let private numericSystemVariables =
           "max_connections"
           "max_heap_table_size"
           "max_prepared_stmt_count"
+          "max_sp_recursion_depth"
           "net_read_timeout"
           "net_write_timeout"
           "performance_schema"
@@ -991,6 +992,7 @@ type private TransactionIsolationScope =
 type private SetAction =
     | SetNamesAction of charset: string * collation: string option
     | SetVarAction of name: string * value: string option * isGlobal: bool
+    | SetRoutineRecursionDepthAction of depth: int * isGlobal: bool * warning: string option
     | SetTransactionIsolationAction of scope: TransactionIsolationScope * isolation: TransactionIsolation
     | SetUserVarAction of name: string * value: Value
 
@@ -1016,6 +1018,24 @@ let private captureRoutineVariableChanges body =
 
 let private connectionVariableNames =
     [ "character_set_client"; "character_set_connection"; "character_set_results"; "collation_connection" ]
+
+let private normalizeRoutineRecursionDepth =
+    let bounded original value =
+        let depth = min value 255UL |> int
+        let warning =
+            if uint64 depth = value then
+                None
+            else
+                Some(sprintf "Truncated incorrect max_sp_recursion_depth value: '%s'" original)
+
+        Ok(depth, warning)
+
+    function
+    | VInt value when value < 0L ->
+        Ok(0, Some(sprintf "Truncated incorrect max_sp_recursion_depth value: '%d'" value))
+    | VInt value -> bounded (string value) (uint64 value)
+    | VUInt value -> bounded (string value) value
+    | _ -> Error(Err(1232, "Incorrect argument type to variable 'max_sp_recursion_depth'"))
 
 let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
     markRoutineVariables connectionVariableNames
@@ -1121,14 +1141,38 @@ let private parseSetFragment
                     let rhs = varMatch.Groups.[3].Value
                     let usesDefault = rhs.Trim().Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
 
-                    match resolveSystemSetRhs session userVariables sql rhs with
+                    let resolved =
+                        if name = "max_sp_recursion_depth" && not usesDefault then
+                            resolveUserSetRhs session userVariables sql rhs
+                        else
+                            resolveSystemSetRhs session userVariables sql rhs
+
+                    match resolved with
                     | Error result -> Error result
+                    | Ok(_, sideEffects) when usesDefault && name = "max_sp_recursion_depth" ->
+                        let depth =
+                            if isGlobal then
+                                0
+                            else
+                                Session.tryGlobalVariable session.Store name
+                                |> Option.flatten
+                                |> Option.bind (fun value ->
+                                    match Int32.TryParse value with
+                                    | true, depth -> Some depth
+                                    | false, _ -> None)
+                                |> Option.defaultValue 0
+
+                        Ok(SetRoutineRecursionDepthAction(depth, isGlobal, None), sideEffects)
                     | Ok(_, sideEffects)
                         when usesDefault
                              && (name = "activate_all_roles_on_login"
                                  || name = "event_scheduler"
                                  || name = "mandatory_roles") ->
                         Ok(SetVarAction(name, Session.defaultVariables.[name], isGlobal), sideEffects)
+                    | Ok(value, sideEffects) when name = "max_sp_recursion_depth" ->
+                        normalizeRoutineRecursionDepth value
+                        |> Result.map (fun (depth, warning) ->
+                            SetRoutineRecursionDepthAction(depth, isGlobal, warning), sideEffects)
                     | Ok(VString value, sideEffects) when name = "block_encryption_mode" ->
                         match Functions.tryBlockEncryptionMode value with
                         | Some canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
@@ -1189,6 +1233,16 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
         | _ -> Session.setGlobalVariable session.Store name value
 
         session
+    | SetRoutineRecursionDepthAction(depth, true, warning) ->
+        warning |> Option.iter (Diagnostics.warning 1292)
+        Session.setGlobalVariable session.Store "max_sp_recursion_depth" (Some(string depth))
+        session
+    | SetRoutineRecursionDepthAction(depth, false, warning) ->
+        warning |> Option.iter (Diagnostics.warning 1292)
+        markRoutineVariables [ "max_sp_recursion_depth" ]
+
+        { session with
+            Variables = Map.add "max_sp_recursion_depth" (Some(string depth)) session.Variables }
     | SetVarAction(name, value, false) ->
         markRoutineVariables [ name ]
 
@@ -1230,6 +1284,8 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1568, "Transaction characteristics can't be changed while a transaction is in progress"))
     | SetTransactionIsolationAction(_, (ReadUncommitted | ReadCommitted | RepeatableRead | Serializable)) -> Ok()
     | SetVarAction(_, _, true) when not (hasSessionGlobalPrivilege session "SUPER") ->
+        Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
+    | SetRoutineRecursionDepthAction(_, true, _) when not (hasSessionGlobalPrivilege session "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
@@ -5287,25 +5343,35 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         session, Err(code, message)
         | CallProcedure(qualifiedName, arguments) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-            let recursive =
+            let activeCalls =
                 session.RoutineStack
-                |> List.exists (fun (activeType, activeDatabase, activeName) ->
+                |> List.filter (fun (activeType, activeDatabase, activeName) ->
                     activeType = "PROCEDURE"
-                    &&
-                    activeDatabase.Equals(database, StringComparison.OrdinalIgnoreCase)
+                    && activeDatabase.Equals(database, StringComparison.OrdinalIgnoreCase)
                     && activeName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                |> List.length
 
-            match recursive, routineEntries () |> List.tryFind (SystemCatalog.Routine.matches database name) with
-            | true, _ ->
+            let recursionLimit =
+                lookupVar session "max_sp_recursion_depth"
+                |> Option.flatten
+                |> Option.bind (fun value ->
+                    match Int32.TryParse value with
+                    | true, depth -> Some depth
+                    | false, _ -> None)
+                |> Option.defaultValue 0
+
+            match routineEntries () |> List.tryFind (SystemCatalog.Routine.matches database name) with
+            | Some _ when activeCalls > recursionLimit ->
                 session,
                 Err(
                     1456,
                     sprintf
-                        "Recursive limit 0 (as set by the max_sp_recursion_depth variable) was exceeded for routine %s"
+                        "Recursive limit %d (as set by the max_sp_recursion_depth variable) was exceeded for routine %s"
+                        recursionLimit
                         name
                 )
-            | false, None -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
-            | false, Some routine ->
+            | None -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
+            | Some routine ->
                 match authorize "EXECUTE" database with
                 | Error(code, message) -> session, Err(code, message)
                 | Ok() ->

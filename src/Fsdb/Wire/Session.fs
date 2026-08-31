@@ -46,6 +46,7 @@ let defaultVariables: Map<string, string option> =
           "init_connect", ""
           "license", "GPL"
           "group_concat_max_len", "1024"
+          "max_sp_recursion_depth", "0"
           "max_heap_table_size", "16777216"
           "tmp_table_size", "16777216"
           "performance_schema", "0"
