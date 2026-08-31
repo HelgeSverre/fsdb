@@ -4442,6 +4442,42 @@ let tests =
                     Expect.equal (rows "SELECT id FROM indexed WHERE category = 'books'") [ [ Some "2" ] ] "deleted rows leave their bucket"
                     Expect.equal (rows "SELECT id FROM indexed WHERE category = NULL") [] "NULL equality has no matches"
 
+                testCase "literal IN lists use one-column secondary indexes without changing predicate semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, category VARCHAR(20), score INT, KEY ix_category (category))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, category VARCHAR(20), score INT)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store $"INSERT INTO {table} VALUES (1, 'Books', 10), (2, 'books', 30), (3, 'music', 40), (4, 'other', 50), (5, NULL, 60)"
+                        |> ignore
+
+                    let rows table projection predicate =
+                        match runDefault store $"SELECT {projection} FROM {table} WHERE {predicate} ORDER BY id" with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected rows from %s, got %A" table other
+
+                    let predicate = "category IN ('books', 'music', 'books', NULL) AND score >= 30"
+                    Expect.equal (rows "indexed" "id" predicate) (rows "scanned" "id" predicate) "indexed candidates match a scan"
+                    Expect.equal (rows "indexed" "id" predicate) [ [ Some "2" ]; [ Some "3" ] ] "duplicates and NULL do not add matches"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE category IN ('books', 'music', NULL)" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "ix_category"; Some "ix_category"; Some "83"; None; Some "3"; Some "100.00"; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected the secondary literal-IN range plan, got %A" other
+
+                    Expect.equal
+                        (runDefault store "UPDATE indexed SET score = score + 1 WHERE category IN ('books', 'music')")
+                        (runDefault store "UPDATE scanned SET score = score + 1 WHERE category IN ('books', 'music')")
+                        "indexed and scanned updates affect the same rows"
+
+                    Expect.equal (rows "indexed" "id, score" "id IN (1, 2, 3, 4, 5)") (rows "scanned" "id, score" "id IN (1, 2, 3, 4, 5)") "updated values agree"
+                    Expect.equal (runDefault store "DELETE FROM indexed WHERE category IN ('music', NULL)") (runDefault store "DELETE FROM scanned WHERE category IN ('music', NULL)") "indexed and scanned deletes agree"
+                    Expect.equal (rows "indexed" "id" "id IN (1, 2, 3, 4, 5)") (rows "scanned" "id" "id IN (1, 2, 3, 4, 5)") "remaining rows agree"
+
+                    match runDefault store "SELECT id FROM indexed WHERE id IN (1 + 0, 4) ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "4" ] ]) -> ()
+                    | other -> failtestf "expected a nonliteral IN member to retain scan semantics, got %A" other
+
                 testCase "a composite B-tree narrows fully-bound equality predicates"
                 <| fun _ ->
                     let mutable calls = 0

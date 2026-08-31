@@ -5896,6 +5896,10 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected the unselected row to remain available, got %A" other
 
+              match handle contender "SELECT id FROM lock_queue WHERE id IN (1, 3) FOR UPDATE NOWAIT" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected the literal-IN candidates to avoid the held row, got %A" other
+
               match handle contender "SELECT id FROM lock_queue WHERE id = 2 FOR UPDATE NOWAIT" |> snd with
               | Err(3572, _) -> ()
               | other -> failtestf "expected NOWAIT to reject the held row, got %A" other

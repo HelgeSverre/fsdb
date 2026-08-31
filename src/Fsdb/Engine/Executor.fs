@@ -101,6 +101,11 @@ type private PointEquality =
       Transform: IndexTransform option
       Value: Value }
 
+type private LiteralInProbe =
+    { Column: string
+      Transform: IndexTransform option
+      Values: Value list }
+
 type private IndexOrderPlan =
     { KeyName: string
       ColumnIndices: int list
@@ -7074,6 +7079,9 @@ and private prepareLockingRead
                         tryEqualityAccess store dbName source.Reference select.Where
                         |> Option.map (fun plan -> plan.Rows |> List.map fst)
                         |> Option.orElseWith (fun () ->
+                            tryLiteralInAccess store dbName source.Reference select.Where
+                            |> Option.map (fun plan -> plan.Rows |> List.map fst))
+                        |> Option.orElseWith (fun () ->
                             tryRangeLookup store dbName source.Reference select.Where
                             |> Option.map (fun (_, rows) -> rows |> List.map fst))
                         |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
@@ -7206,7 +7214,7 @@ and private runUnlockedSelectStmt
             | Error error -> error, [], []
             | Ok(Some(columns, rows, narrowed)) -> runResolved columns rows narrowed
             | Ok None ->
-              match tryEqualityLookup store dbName tref select.Where with
+              match tryIndexedLookup store dbName tref select.Where with
               | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
               | None ->
                 match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
@@ -7257,31 +7265,51 @@ and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : Po
     match whereExpr with
     | None -> []
     | Some whereExpr ->
-        let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
-
-        let indexedColumn = function
-            | Col name -> Some(name, None)
-            | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
-                Some(name, None)
-            | FuncCall(name, [ Col column ]) when name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase) ->
-                Some(column, Some Lowercase)
-            | FuncCall(name, [ QualifiedCol(qualifier, column) ])
-                when
-                    name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase)
-                    && System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
-                Some(column, Some Lowercase)
-            | _ -> None
-
         flattenAnd whereExpr
         |> List.choose (function
             | BinOp(Eq, indexed, Lit value)
             | BinOp(Eq, Lit value, indexed) ->
-                indexedColumn indexed
+                indexedColumnFor tref indexed
                 |> Option.map (fun (column, transform) ->
                     { Column = column
                       Transform = transform
                       Value = value })
             | _ -> None)
+
+and private indexedColumnFor (tref: TableRef) =
+    let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
+
+    function
+    | Col name -> Some(name, None)
+    | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+        Some(name, None)
+    | FuncCall(name, [ Col column ]) when name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase) ->
+        Some(column, Some Lowercase)
+    | FuncCall(name, [ QualifiedCol(qualifier, column) ])
+        when
+            name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase)
+            && System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+        Some(column, Some Lowercase)
+    | _ -> None
+
+and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralInProbe list =
+    whereExpr
+    |> Option.toList
+    |> List.collect flattenAnd
+    |> List.choose (function
+        | In(indexed, candidates) ->
+            let values =
+                candidates
+                |> List.map (function Lit value -> Some value | _ -> None)
+
+            match indexedColumnFor tref indexed with
+            | Some(column, transform) when values |> List.forall Option.isSome ->
+                Some
+                    { Column = column
+                      Transform = transform
+                      Values = values |> List.choose id }
+            | _ -> None
+        | _ -> None)
 
 and private rangeLookupBounds (scope: RangeColumnScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
     match whereExpr with
@@ -7369,6 +7397,47 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
 
 and private tryEqualityLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
+    |> Option.map (fun plan -> plan.Columns, plan.Rows)
+
+and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : EqualityAccessPlan option =
+    if not (storedValuesMatchReadValues store) then
+        None
+    else
+        let tableDb = tref.Database |> Option.defaultValue dbName
+
+        literalInProbes tref whereExpr
+        |> List.tryPick (fun probe ->
+            let values = probe.Values |> List.filter ((<>) VNull) |> List.distinct
+
+            values
+            |> List.tryHead
+            |> Option.bind (fun first ->
+                Storage.tryEqualityKeyProbeForTransform store tableDb tref.Table probe.Column probe.Transform first
+                |> Option.bind (fun (table, index) ->
+                    let lookup value =
+                        if probe.Transform.IsSome then
+                            Storage.tryProjectedEqualityLookupForIndex store table index [ value ]
+                        else
+                            Storage.tryEqualityLookupForIndex store table index [ value ]
+
+                    let lookups =
+                        values
+                        |> List.map lookup
+
+                    if lookups |> List.forall Option.isSome then
+                        Some
+                            { KeyName = index.Name
+                              ColumnIndices = index.ColumnIndices
+                              PrefixLengths = index.PrefixLengths
+                              Columns = table.Columns
+                              Unique = index.Unique
+                              Rows = lookups |> List.choose id |> List.collect id |> List.distinctBy fst |> List.sortBy fst }
+                    else
+                        None)))
+
+and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
+    tryEqualityAccess store dbName tref whereExpr
+    |> Option.orElseWith (fun () -> tryLiteralInAccess store dbName tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows)
 
 and private tryCorrelatedEqualityLookup
@@ -10094,7 +10163,7 @@ and private runFullTextSelect
                                 | None ->
                                     match source.Item with
                                     | FromTable tableRef when select.Joins.IsEmpty && select.Locking.IsEmpty ->
-                                        tryEqualityLookup store dbName tableRef select.Where
+                                        tryIndexedLookup store dbName tableRef select.Where
                                         |> Option.map snd
                                         |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> List.ofSeq)
                                     | _ -> source.Table.RowsArray.Indexed |> List.ofSeq
@@ -11270,10 +11339,7 @@ let rec private explainJoinBlock
               Rows = rowCount
               Extra = (if idx = tableCount - 1 then extra else []) }
 
-    /// A single-table block whose WHERE contains an equality index probe.
-    /// Unique probes report MySQL's `const` shape; ordinary B-tree probes
-    /// report `ref`. Both share the executor's probe predicates.
-    let tryExplainEqualityIndex (tref: TableRef) : bool =
+    let tryExplainIndexedAccess (tref: TableRef) : bool =
         if tableCount <> 1 then
             false
         else
@@ -11305,46 +11371,60 @@ let rec private explainJoinBlock
 
                 true
             | None ->
-                match indexOrderPlan with
+                match tryLiteralInAccess store dbName tref whereOpt with
                 | Some plan ->
-                    let hasBounds =
-                        match plan.ColumnIndices with
-                        | [ index ] ->
-                            rangeLookupBounds BareOrQualifiedRange tref whereOpt
-                            |> List.exists (fun bounds ->
-                                System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
-                        | _ -> false
-
                     acc.Add
                         { Id = Some id
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                          Type = Some(if hasBounds then "range" else "index")
-                          Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
+                          Type = Some "range"
+                          Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
                           Ref = None
-                          Rows = Some(uint64 plan.EstimatedRows)
+                          Rows = Some(uint64 plan.Rows.Length)
                           Extra = extra }
 
                     true
                 | None ->
-                    rangeLookupBounds BareOrQualifiedRange tref whereOpt
-                    |> List.tryPick (fun bounds ->
-                        Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper)
-                    |> Option.map (fun lookup ->
+                    match indexOrderPlan with
+                    | Some plan ->
+                        let hasBounds =
+                            match plan.ColumnIndices with
+                            | [ index ] ->
+                                rangeLookupBounds BareOrQualifiedRange tref whereOpt
+                                |> List.exists (fun bounds ->
+                                    System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
+                            | _ -> false
+
                         acc.Add
                             { Id = Some id
                               SelectType = selectType
                               Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                              Type = Some "range"
-                              Key =
-                                Some(
-                                    lookup.RangeIndexName,
-                                    explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
-                                )
+                              Type = Some(if hasBounds then "range" else "index")
+                              Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
                               Ref = None
-                              Rows = Some(uint64 lookup.RangeRows.Length)
-                              Extra = extra })
-                    |> Option.isSome
+                              Rows = Some(uint64 plan.EstimatedRows)
+                              Extra = extra }
+
+                        true
+                    | None ->
+                        rangeLookupBounds BareOrQualifiedRange tref whereOpt
+                        |> List.tryPick (fun bounds ->
+                            Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper)
+                        |> Option.map (fun lookup ->
+                            acc.Add
+                                { Id = Some id
+                                  SelectType = selectType
+                                  Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                                  Type = Some "range"
+                                  Key =
+                                    Some(
+                                        lookup.RangeIndexName,
+                                        explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
+                                    )
+                                  Ref = None
+                                  Rows = Some(uint64 lookup.RangeRows.Length)
+                                  Extra = extra })
+                        |> Option.isSome
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
@@ -11367,7 +11447,7 @@ let rec private explainJoinBlock
                               (if idx = tableCount - 1 then extra else [])
                               @ (if plan.HasResidual then [ "Using where" ] else [])
                               |> List.distinct }
-                | None when not (tryExplainEqualityIndex tref) ->
+                | None when not (tryExplainIndexedAccess tref) ->
                     emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty
                 | None -> ())
         | FromSubquery(PlainSelect sub, _alias)
@@ -11439,7 +11519,7 @@ and private explainSelectBlock
 
     let indexOrderPlan =
         match select.From, joins with
-        | Some(FromTable tref), [] when tryEqualityLookup store dbName tref select.Where |> Option.isNone ->
+        | Some(FromTable tref), [] when tryIndexedLookup store dbName tref select.Where |> Option.isNone ->
             tryIndexOrder store registry dbName tref select
         | _ -> None
 
@@ -15097,7 +15177,7 @@ let rec executeAs
         let narrowed =
             fullTextPlan
             |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
-            |> Option.orElseWith (fun () -> tryEqualityLookup store dbName updateStmt.From updateStmt.Where)
+            |> Option.orElseWith (fun () -> tryIndexedLookup store dbName updateStmt.From updateStmt.Where)
             |> Option.orElseWith (fun () -> tryRangeLookup store dbName updateStmt.From updateStmt.Where)
 
         let scanned =
@@ -15503,7 +15583,7 @@ let rec executeAs
         let narrowed =
             fullTextPlan
             |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
-            |> Option.orElseWith (fun () -> tryEqualityLookup targetStore dbName deleteStmt.From deleteStmt.Where)
+            |> Option.orElseWith (fun () -> tryIndexedLookup targetStore dbName deleteStmt.From deleteStmt.Where)
             |> Option.orElseWith (fun () -> tryRangeLookup targetStore dbName deleteStmt.From deleteStmt.Where)
 
         let scanned =
@@ -15686,7 +15766,7 @@ let transactionWriteTargets (store: Store) (dbName: string) (statement: Statemen
     let targets (tableRef: TableRef) predicate =
         let database = tableRef.Database |> Option.defaultValue dbName
 
-        tryEqualityLookup store dbName tableRef predicate
+        tryIndexedLookup store dbName tableRef predicate
         |> Option.orElseWith (fun () -> tryRangeLookup store dbName tableRef predicate)
         |> Option.map (fun (_, rows) ->
             database,
