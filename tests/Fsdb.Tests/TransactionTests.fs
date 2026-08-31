@@ -284,6 +284,42 @@ let tests =
               | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some "2"; Some "committed" ] ]) -> ()
               | result -> failtestf "expected both reserved identities, got %A" result
 
+          testCase "transactions reserve distinct auto-increment identities from one snapshot"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_auto_reservations (id INT AUTO_INCREMENT PRIMARY KEY, note VARCHAR(20) UNIQUE)"
+
+              let prepared =
+                  [| 1 .. 8 |]
+                  |> Array.map (fun id ->
+                      let baseCatalog, snapshot = Fsdb.Storage.beginTransactionSnapshotWithBase store
+
+                      match
+                          Fsdb.Storage.insertRows
+                              snapshot
+                              Fsdb.Storage.defaultDatabase
+                              "tx_auto_reservations"
+                              (Some [ "note" ])
+                              [ [ VString(sprintf "row-%d" id) ] ]
+                      with
+                      | Ok _ -> baseCatalog, snapshot
+                      | Error error -> failtestf "expected transaction %d to insert privately, got %A" id error)
+
+              prepared
+              |> Array.iter (fun (_, snapshot) -> Fsdb.Storage.bumpAutoIncrementsInto store snapshot.Catalog)
+
+              prepared
+              |> Array.iter (fun (baseCatalog, snapshot) -> Fsdb.Storage.commitCatalogInto store baseCatalog snapshot)
+
+              match handle setup "SELECT id, note FROM tx_auto_reservations ORDER BY id" |> snd with
+              | ResultSet(_, rows) ->
+                  let expected =
+                      [ for id in 1 .. prepared.Length -> [ Some(string id); Some(sprintf "row-%d" id) ] ]
+
+                  Expect.equal rows expected "each transaction retains its reserved identity"
+              | result -> failtestf "expected committed auto-increment rows, got %A" result
+
           testCase "READ COMMITTED savepoint rollback retains concurrent committed rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

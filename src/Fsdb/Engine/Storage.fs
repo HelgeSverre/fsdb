@@ -352,6 +352,10 @@ type PreparedXa =
       ValidateWholeSnapshot: bool
       TransactionLocks: TransactionLockContext option }
 
+type AutoIncrementCounter =
+    { SyncRoot: obj
+      mutable NextValue: int64 }
+
 let private rowLockStripeCount = 4096
 
 let private createRowLockStripe () =
@@ -398,6 +402,9 @@ type Store =
       RowLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
       /// A separate namespace prevents key hashes from aliasing held rows.
       KeyLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
+      /// Transaction snapshots share identity reservation state so concurrent
+      /// inserts cannot assign the same value from an older table root.
+      AutoIncrementCounters: ConcurrentDictionary<string, AutoIncrementCounter>
       /// Active row/key waits used for cycle detection.
       LockWaits: LockWaitGraph
       /// Ephemeral per-account counters are shared by every session and
@@ -506,6 +513,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       CommitLock = store.CommitLock
       RowLocks = store.RowLocks
       KeyLocks = store.KeyLocks
+      AutoIncrementCounters = store.AutoIncrementCounters
       AccountResources = store.AccountResources
       PreparedXas = store.PreparedXas
       RowLockSequence = store.RowLockSequence
@@ -723,6 +731,16 @@ let normalizeTableName (name: string) = name.ToLowerInvariant()
 let private lockNamespaceKey (databaseName: string) (tableName: string) =
     databaseName.ToLowerInvariant() + "\u0000" + normalizeTableName tableName
 
+let private invalidateAutoIncrementCounter (store: Store) databaseName tableName =
+    store.AutoIncrementCounters.TryRemove(lockNamespaceKey databaseName tableName) |> ignore
+
+let private invalidateDatabaseAutoIncrementCounters (store: Store) (databaseName: string) =
+    let prefix = databaseName.ToLowerInvariant() + "\u0000"
+
+    store.AutoIncrementCounters.Keys
+    |> Seq.filter (_.StartsWith(prefix, StringComparison.Ordinal))
+    |> Seq.iter (fun key -> store.AutoIncrementCounters.TryRemove key |> ignore)
+
 let private catalogHasQualifiedForeignKeys (catalog: Catalog) =
     catalog
     |> Seq.exists (fun (KeyValue(_, database)) ->
@@ -768,6 +786,7 @@ let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> 
             lock store.Lock (fun () ->
                 lock slot (fun () ->
                     if store.Databases.TryAdd(dbName, slot) then
+                        invalidateDatabaseAutoIncrementCounters store dbName
                         Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false)) ])
                     else
                         Error(DatabaseExists dbName))))
@@ -817,7 +836,9 @@ let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
                                 )
                             | _ ->
                                 match store.Databases.TryRemove dbName with
-                                | true, _ -> Ok(prepareEvents store [ SchemaChanged(dbName, DropDatabase(dbName, false)) ])
+                                | true, _ ->
+                                    invalidateDatabaseAutoIncrementCounters store dbName
+                                    Ok(prepareEvents store [ SchemaChanged(dbName, DropDatabase(dbName, false)) ])
                                 | false, _ -> Error(NoSuchDatabase dbName))))
 
         published |> Result.map (fun acknowledge -> acknowledge ())
@@ -3228,6 +3249,7 @@ let create () : Store =
       CommitLock = obj ()
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
+      AutoIncrementCounters = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       LockWaits =
         { SyncRoot = obj ()
           Edges = Dictionary() }
@@ -4539,6 +4561,7 @@ let createTableSeeded
                                               FullTextIndexes = Map.empty }
 
                                         let database = Map.add key (reindexTable table) db
+                                        invalidateAutoIncrementCounter store dbName tableName
                                         Ok(setCatalogDatabase dbName database catalog, (createTime, columns))
 
                 withReferentialCatalogPublishing
@@ -4648,6 +4671,9 @@ let dropTables
                                 | None -> state) catalog
 
                         let dropped = existing |> List.map (fun (database, table, _) -> database, table)
+                        dropped
+                        |> List.iter (fun (database, table) -> invalidateAutoIncrementCounter store database table)
+
                         Ok(updatedCatalog, dropped)))
 
 let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
@@ -4682,6 +4708,7 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
                     let createTime = DateTime.Now
                     let table = reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }
                     let database = Map.add address.Table table db
+                    invalidateAutoIncrementCounter store dbName tableName
                     Ok(setCatalogDatabase address.Database database catalog, createTime)))
     |> Result.map ignore
 
@@ -5327,6 +5354,8 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 |> Result.map (fun (finalKey, finalTable) ->
                     let database = Map.remove origKey db |> Map.add finalKey (reindexTable finalTable)
                     let updatedCatalog = setCatalogDatabase dbName database catalog
+                    invalidateAutoIncrementCounter store dbName origKey
+                    invalidateAutoIncrementCounter store dbName finalKey
 
                     if finalKey = origKey then
                         updatedCatalog, ()
@@ -5362,7 +5391,15 @@ let renameTables (store: Store) (dbName: string) (pairs: (string * string) list)
 
                             updatedCatalog, tryCatalogDatabase dbName updatedCatalog |> Option.get)))
 
-            pairs |> List.fold step (Ok(catalog, db)) |> Result.map (fun (catalog, _) -> catalog, ()))
+            pairs
+            |> List.fold step (Ok(catalog, db))
+            |> Result.map (fun (catalog, _) ->
+                pairs
+                |> List.iter (fun (oldName, newName) ->
+                    invalidateAutoIncrementCounter store dbName oldName
+                    invalidateAutoIncrementCounter store dbName newName)
+
+                catalog, ()))
 
 /// One column's value for one row being inserted, threaded through
 /// `processRow`'s fold: the column's final coerced value, the updated
@@ -5384,6 +5421,54 @@ let private generatesAutoValue
         | Ok(VInt 0L)
         | Ok(VUInt 0UL) -> true
         | _ -> false
+
+let private autoIncrementCounter (store: Store) dbName tableName minimum =
+    let key = lockNamespaceKey dbName tableName
+
+    store.AutoIncrementCounters.GetOrAdd(
+        key,
+        fun _ ->
+            { SyncRoot = obj ()
+              NextValue = minimum }
+    )
+
+let private reserveAutoIncrementRange store dbName tableName minimum count =
+    if count = 0L then
+        minimum, minimum
+    else
+        let counter = autoIncrementCounter store dbName tableName minimum
+
+        lock counter.SyncRoot (fun () ->
+            let first = max minimum counter.NextValue
+            let next = first + count
+            counter.NextValue <- next
+            first, next)
+
+let private advanceAutoIncrementCounter store dbName tableName nextValue =
+    let counter = autoIncrementCounter store dbName tableName nextValue
+    lock counter.SyncRoot (fun () -> counter.NextValue <- max counter.NextValue nextValue)
+
+let private generatedAutoValueCount
+    mode
+    generateAutoOnZero
+    (table: Table)
+    (indices: int list)
+    (deferred: Set<int>)
+    (rows: Value list list)
+    =
+    match table.Columns |> List.tryFindIndex _.AutoIncrement with
+    | None -> 0L
+    | Some autoIndex ->
+        let valueIndex = indices |> List.tryFindIndex ((=) autoIndex)
+        let column = table.Columns.[autoIndex]
+
+        rows
+        |> List.sumBy (fun values ->
+            match valueIndex with
+            | None -> 1L
+            | Some index when index < values.Length && not (Set.contains autoIndex deferred) ->
+                if generatesAutoValue mode generateAutoOnZero column values.[index] then 1L else 0L
+            | Some _ -> 1L)
 
 let private processRow
     (mode: TemporalCoercionMode)
@@ -5515,13 +5600,18 @@ let private prepareInsertCandidateCore
             if values.Length <> indices.Length then
                 Error(ColumnCountMismatch(indices.Length, values.Length))
             else
+                let mode = temporalCoercionMode store
+                let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
+                let reservationCount = generatedAutoValueCount mode generateAutoOnZero table indices deferred [ values ]
+                let firstReserved, reservedNext =
+                    reserveAutoIncrementRange store dbName tableName table.NextAutoId reservationCount
                 let supplied = List.zip indices values |> Map.ofList
                 let raw = table.Columns |> List.mapi (fun index _ -> Map.tryFind index supplied)
 
                 processRow
-                    (temporalCoercionMode store)
-                    (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
-                    table.NextAutoId
+                    mode
+                    generateAutoOnZero
+                    firstReserved
                     raw
                     table.Columns
                     deferred
@@ -5533,14 +5623,17 @@ let private prepareInsertCandidateCore
                     |> Result.map (fun candidate ->
                         let nextAutoId, assignedAutoId =
                             finalizePreparedAutoValue
-                                (temporalCoercionMode store)
-                                (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
+                                mode
+                                generateAutoOnZero
                                 table
                                 deferred
                                 before
                                 candidate
                                 nextAutoId
                                 assignedAutoId
+
+                        let nextAutoId = max nextAutoId reservedNext
+                        advanceAutoIncrementCounter store dbName tableName nextAutoId
 
                         { Values = candidate
                           NextAutoId = nextAutoId
@@ -5630,25 +5723,9 @@ let private insertCore
     let uniqueGroups = uniqueKeyGroups table
     let secondaryGroups = secondaryKeyGroups table
 
-    let reservedAutoNext =
-        if not ignoreErrors then
-            table.NextAutoId
-        else
-            match table.Columns |> List.tryFindIndex _.AutoIncrement with
-            | None -> table.NextAutoId
-            | Some autoIndex ->
-                let generatedAttempts =
-                    rowsIn
-                    |> List.sumBy (fun values ->
-                        match idxs |> List.tryFindIndex ((=) autoIndex) with
-                        | None -> 1L
-                        | Some valueIndex when valueIndex < values.Length ->
-                            let value = values.[valueIndex]
-                            let column = table.Columns.[autoIndex]
-                            if generatesAutoValue mode generateAutoOnZero column value then 1L else 0L
-                        | _ -> 0L)
-
-                table.NextAutoId + generatedAttempts
+    let reservationCount = generatedAutoValueCount mode generateAutoOnZero table idxs deferred rowsIn
+    let firstReserved, reservedAutoNext =
+        reserveAutoIncrementRange store dbName table.OriginalName table.NextAutoId reservationCount
 
     // Parent keys are immutable for the duration of this INSERT (except a
     // self-FK, see below). Build one compact lookup per ordinary FK instead
@@ -5808,15 +5885,17 @@ let private insertCore
     |> List.fold
         (fun state (rowNumber, rowValues) ->
             Diagnostics.withRowNumber (rowNumber + 1) (fun () -> step rowNumber state rowValues))
-        (Ok([], [], table.NextAutoId, None, None, table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder))
+        (Ok([], [], firstReserved, None, None, table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder))
     |> Result.map (fun (acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto, lastExplicit, index, secondaryIndex, secondaryOrder) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
+        let nextAutoId' = max nextAutoId' reservedAutoNext
+        advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId'
         let table' =
             publishRows table
                 { table with
                     RowsArray = rows.DrainToImmutable()
-                    NextAutoId = max nextAutoId' reservedAutoNext
+                    NextAutoId = nextAutoId'
                     UniqueIndex = index
                     SecondaryIndex = secondaryIndex
                     SecondaryOrder = secondaryOrder }
@@ -6301,6 +6380,11 @@ and private upsertRowsInTable
 
                 indices
                 |> Result.bind (fun idxs ->
+                    let mode = temporalCoercionMode store
+                    let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
+                    let reservationCount = generatedAutoValueCount mode generateAutoOnZero table idxs Set.empty rowsIn
+                    let firstReserved, reservedAutoNext =
+                        reserveAutoIncrementRange store dbName table.OriginalName table.NextAutoId reservationCount
                     let uniqueGroups = uniqueKeyGroups table
                     let secondaryGroups = secondaryKeyGroups table
 
@@ -6338,8 +6422,8 @@ and private upsertRowsInTable
                                     let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                                     processRow
-                                        (temporalCoercionMode store)
-                                        (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
+                                        mode
+                                        generateAutoOnZero
                                         nextAutoId
                                         rawRow
                                         table.Columns
@@ -6479,9 +6563,11 @@ and private upsertRowsInTable
 
                     rowsIn
                     |> List.indexed
-                    |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, catalog, Map.empty, Map.empty))
+                    |> foldWithCancellation step (Ok(firstReserved, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, catalog, Map.empty, Map.empty))
                     |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, secondaryIndex, secondaryOrder, cascadeCatalog, _visited, cascaded) ->
                         let finalRows = rows.DrainToImmutable()
+                        let nextAutoId' = max nextAutoId' reservedAutoNext
+                        advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId'
 
                         let updatedTable = publishRows table { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
                         setCatalogTable (tableAddress dbName key) updatedTable cascadeCatalog,
@@ -6659,6 +6745,11 @@ let private replaceRowsCore
             |> Result.bind (fun initialTable ->
                 resolveInsertColumns initialTable columns
                 |> Result.bind (fun idxs ->
+                    let mode = temporalCoercionMode store
+                    let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
+                    let reservationCount = generatedAutoValueCount mode generateAutoOnZero initialTable idxs deferred rowsIn
+                    let firstReserved, reservedAutoNext =
+                        reserveAutoIncrementRange store dbName initialTable.OriginalName initialTable.NextAutoId reservationCount
                     let commitEvents
                         (removed: Map<TableAddress, Value[] list>)
                         (blanked: Map<TableAddress, (Value[] * Value[]) list>)
@@ -6695,8 +6786,8 @@ let private replaceRowsCore
                                 let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                                 processRow
-                                    (temporalCoercionMode store)
-                                    (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
+                                    mode
+                                    generateAutoOnZero
                                     nextAutoId
                                     rawRow
                                     table.Columns
@@ -6709,8 +6800,8 @@ let private replaceRowsCore
                                     |> Result.bind (fun candidate ->
                                         let nextAutoId', assigned =
                                             finalizePreparedAutoValue
-                                                (temporalCoercionMode store)
-                                                (not store.ExecutionSettings.SqlMode.NoAutoValueOnZero)
+                                                mode
+                                                generateAutoOnZero
                                                 table
                                                 deferred
                                                 before
@@ -6825,8 +6916,9 @@ let private replaceRowsCore
                     |> List.indexed
                     |> foldWithCancellation
                         step
-                        (Ok(initialCatalog, initialTable.NextAutoId, None, None, 0, [], []))
-                    |> Result.map (fun (catalog, _, firstAuto, lastExplicit, affected, inserted, events) ->
+                        (Ok(initialCatalog, firstReserved, None, None, 0, [], []))
+                    |> Result.map (fun (catalog, nextAutoId, firstAuto, lastExplicit, affected, inserted, events) ->
+                        advanceAutoIncrementCounter store dbName initialTable.OriginalName (max nextAutoId reservedAutoNext)
                         let outcome =
                             { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
                               GeneratedId = firstAuto
