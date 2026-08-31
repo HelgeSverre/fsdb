@@ -4799,6 +4799,52 @@ let tests =
                         Expect.isFalse (row.[11].Value.Contains("filesort")) "the plan does not report a filesort"
                     | other -> failtestf "expected an unbounded index-order plan, got %A" other
 
+                testCase "literal equalities unlock a composite index ORDER BY suffix"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed (id INT PRIMARY KEY, tenant_id INT, priority INT, created_at INT, keep_row INT, KEY ix_tenant_priority_created (tenant_id, priority DESC, created_at DESC))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, tenant_id INT, priority INT, created_at INT, keep_row INT)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault
+                            store
+                            (sprintf
+                                "INSERT INTO %s VALUES (1, 2, 1, 30, 1), (2, 1, 2, 40, 1), (3, 2, 1, 10, 0), (4, 2, 3, 20, 1), (5, 2, 1, 10, 1), (6, 3, 4, 50, 1)"
+                                table)
+                        |> ignore
+
+                    let rows table direction =
+                        match
+                            runDefault
+                                store
+                                (sprintf
+                                    "SELECT id, priority, created_at FROM %s WHERE tenant_id = 2 AND keep_row = 1 ORDER BY priority %s, created_at %s"
+                                    table
+                                    direction
+                                    direction)
+                        with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected ordered suffix rows, got %A" other
+
+                    for direction in [ "ASC"; "DESC" ] do
+                        Expect.equal (rows "indexed" direction) (rows "scanned" direction) $"the {direction} suffix agrees with a filesort"
+
+                    match
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM indexed WHERE tenant_id = 2 AND keep_row = 1 ORDER BY priority DESC, created_at DESC"
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "index") "the fixed prefix streams the ordered suffix"
+                        Expect.equal row.[6] (Some "ix_tenant_priority_created") "the composite key is reported"
+                        Expect.isFalse (row.[11] |> Option.exists (_.Contains("filesort"))) "the suffix plan avoids a filesort"
+                    | other -> failtestf "expected a fixed-prefix index plan, got %A" other
+
                 testCase "composite prefix indexes do not claim full-value ORDER BY"
                 <| fun _ ->
                     let store = newStore ()
