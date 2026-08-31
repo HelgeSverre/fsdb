@@ -24,7 +24,9 @@ type private TableState =
     { ExplicitReaders: HashSet<int>
       mutable ExplicitWriter: int option
       StatementReaders: HashSet<int>
-      StatementWriters: HashSet<int> }
+      StatementWriters: HashSet<int>
+      WaitingWriters: HashSet<int>
+      PrioritizedWriters: HashSet<int> }
 
 type private ExplicitContext =
     { Names: Map<string, Access>
@@ -73,16 +75,26 @@ let private stateFor (manager: Manager) key =
             { ExplicitReaders = HashSet()
               ExplicitWriter = None
               StatementReaders = HashSet()
-              StatementWriters = HashSet() }
+              StatementWriters = HashSet()
+              WaitingWriters = HashSet()
+              PrioritizedWriters = HashSet() }
 
         manager.Tables.Add(key, state)
         state
+
+let private hasNoOtherOwner owner (owners: HashSet<int>) =
+    owners.Count = 0 || (owners.Count = 1 && owners.Contains owner)
+
+let private readerGateOpen owner (state: TableState) =
+    hasNoOtherOwner owner state.WaitingWriters
+    && hasNoOtherOwner owner state.PrioritizedWriters
 
 let private explicitlyAvailable owner mode (state: TableState) =
     match mode with
     | ReadAccess ->
         state.ExplicitWriter |> Option.forall ((=) owner)
         && (state.StatementWriters.Count = 0 || (state.StatementWriters.Count = 1 && state.StatementWriters.Contains owner))
+        && readerGateOpen owner state
     | WriteAccess ->
         state.ExplicitWriter |> Option.forall ((=) owner)
         && (state.ExplicitReaders.Count = 0
@@ -95,10 +107,49 @@ let private explicitAvailable owner mode (manager: Manager) key =
     | false, _ -> true
     | true, state -> explicitlyAvailable owner mode state
 
-let private statementAvailable mode (state: TableState) =
+let private statementAvailable owner mode (state: TableState) =
     match mode with
-    | ReadAccess -> state.ExplicitWriter.IsNone
+    | ReadAccess -> state.ExplicitWriter.IsNone && readerGateOpen owner state
     | WriteAccess -> state.ExplicitWriter.IsNone && state.ExplicitReaders.Count = 0
+
+let private stateIsIdle (state: TableState) =
+    state.ExplicitWriter.IsNone
+    && state.ExplicitReaders.Count = 0
+    && state.StatementReaders.Count = 0
+    && state.StatementWriters.Count = 0
+    && state.WaitingWriters.Count = 0
+    && state.PrioritizedWriters.Count = 0
+
+let private removeIdleState (manager: Manager) key state =
+    if stateIsIdle state then
+        manager.Tables.Remove key |> ignore
+
+let private markWriter owner writersOf (manager: Manager) physical =
+    for KeyValue(key, mode) in physical do
+        if mode = WriteAccess then
+            let state = stateFor manager key
+            (writersOf state: HashSet<int>).Add owner |> ignore
+
+let private unmarkWaitingWriter owner (manager: Manager) physical =
+    for KeyValue(key, mode) in physical do
+        if mode = WriteAccess then
+            match manager.Tables.TryGetValue key with
+            | false, _ -> ()
+            | true, state ->
+                state.WaitingWriters.Remove owner |> ignore
+                removeIdleState manager key state
+
+let private markWaitingWriter owner = markWriter owner _.WaitingWriters
+let private markPrioritizedWriter owner = markWriter owner _.PrioritizedWriters
+
+let private trackWaitingWriter owner (manager: Manager) physical action =
+    markWaitingWriter owner manager physical
+
+    try
+        action ()
+    finally
+        unmarkWaitingWriter owner manager physical
+        Monitor.PulseAll manager.SyncRoot
 
 let private acquirePhysical owner (manager: Manager) physical =
     for KeyValue(key, mode) in physical do
@@ -118,48 +169,37 @@ let private releasePhysical owner (manager: Manager) physical =
             | WriteAccess when state.ExplicitWriter = Some owner -> state.ExplicitWriter <- None
             | WriteAccess -> ()
 
-            if
-                state.ExplicitWriter.IsNone
-                && state.ExplicitReaders.Count = 0
-                && state.StatementReaders.Count = 0
-                && state.StatementWriters.Count = 0
-            then
-                manager.Tables.Remove key |> ignore
+            removeIdleState manager key state
+
+let private waitUntil timeout syncRoot ready =
+    let deadline = DateTime.UtcNow + timeout
+
+    let rec wait () =
+        if ready () then
+            true
+        else
+            let remaining = deadline - DateTime.UtcNow
+            remaining > TimeSpan.Zero && Monitor.Wait(syncRoot, remaining) && wait ()
+
+    wait ()
 
 let private waitForPhysical timeout owner (manager: Manager) physical =
+    waitUntil timeout manager.SyncRoot (fun () ->
+        physical
+        |> Map.forall (fun key mode -> explicitAvailable owner mode manager key))
+
+let private waitForStatement timeout owner (manager: Manager) physical =
     let deadline = DateTime.UtcNow + timeout
 
-    let rec wait () =
-        let ready =
-            physical
-            |> Map.forall (fun key mode -> explicitAvailable owner mode manager key)
+    let ready () =
+        physical
+        |> Map.forall (fun key mode ->
+            match manager.Tables.TryGetValue key with
+            | false, _ -> true
+            | true, state -> statementAvailable owner mode state)
 
-        if ready then
-            true
-        else
-            let remaining = deadline - DateTime.UtcNow
-            remaining > TimeSpan.Zero && Monitor.Wait(manager.SyncRoot, remaining) && wait ()
-
-    wait ()
-
-let private waitForStatement timeout (manager: Manager) physical =
-    let deadline = DateTime.UtcNow + timeout
-
-    let rec wait () =
-        let ready =
-            physical
-            |> Map.forall (fun key mode ->
-                match manager.Tables.TryGetValue key with
-                | false, _ -> true
-                | true, state -> statementAvailable mode state)
-
-        if ready then
-            true
-        else
-            let remaining = deadline - DateTime.UtcNow
-            remaining > TimeSpan.Zero && Monitor.Wait(manager.SyncRoot, remaining) && wait ()
-
-    wait ()
+    let waited = not (ready ())
+    waitUntil (deadline - DateTime.UtcNow) manager.SyncRoot ready, waited
 
 let private acquireStatement owner (manager: Manager) physical =
     for KeyValue(key, mode) in physical do
@@ -176,15 +216,11 @@ let private releaseStatement owner (manager: Manager) physical =
         | true, state ->
             match mode with
             | ReadAccess -> state.StatementReaders.Remove owner |> ignore
-            | WriteAccess -> state.StatementWriters.Remove owner |> ignore
+            | WriteAccess ->
+                state.StatementWriters.Remove owner |> ignore
+                state.PrioritizedWriters.Remove owner |> ignore
 
-            if
-                state.ExplicitWriter.IsNone
-                && state.ExplicitReaders.Count = 0
-                && state.StatementReaders.Count = 0
-                && state.StatementWriters.Count = 0
-            then
-                manager.Tables.Remove key |> ignore
+            removeIdleState manager key state
 
 let private accessName (access: Access) =
     access.ReferenceName |> Option.defaultValue access.Table
@@ -226,7 +262,11 @@ let acquireExplicit timeout store owner accesses =
             if released then
                 Monitor.PulseAll manager.SyncRoot
 
-            if waitForPhysical timeout owner manager physical then
+            let acquired =
+                trackWaitingWriter owner manager physical (fun () ->
+                    waitForPhysical timeout owner manager physical)
+
+            if acquired then
                 acquirePhysical owner manager physical
                 manager.Explicit.[owner] <- { Names = names; Physical = physical }
                 Ok()
@@ -275,10 +315,20 @@ let withStatementAccess timeout store owner accesses body =
                     (fun result access -> result |> Result.bind (fun () -> validateExplicitAccess context access))
                     (Ok())
                 |> Result.map (fun () -> false)
-            | false, _ when waitForStatement timeout manager physical ->
-                acquireStatement owner manager physical
-                Ok true
-            | false, _ -> Error(1205, "Lock wait timeout exceeded; try restarting transaction"))
+            | false, _ ->
+                let acquired, waited =
+                    trackWaitingWriter owner manager physical (fun () ->
+                        waitForStatement timeout owner manager physical)
+
+                if acquired then
+                    acquireStatement owner manager physical
+
+                    if waited then
+                        markPrioritizedWriter owner manager physical
+
+                    Ok true
+                else
+                    Error(1205, "Lock wait timeout exceeded; try restarting transaction"))
 
     match acquired with
     | Error error -> Error error

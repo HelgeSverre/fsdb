@@ -2045,6 +2045,38 @@ let tests =
               handle (fst laterReader.Result) "UNLOCK TABLES" |> ignore
               Expect.isFalse readerBarged "the later reader did not bypass the queued writer"
 
+          testCase "an ordinary queued writer has priority over later reads"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE statement_priority (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO statement_priority VALUES (1, 10)"
+              let holder, _ = handle (create 2 store) "LOCK TABLES statement_priority READ"
+
+              let waitingWriter =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 3 store) "UPDATE statement_priority SET n=11 WHERE id=1")
+
+              Expect.isFalse (waitingWriter.Wait(TimeSpan.FromMilliseconds 100.0)) "the update waits for the table reader"
+
+              let laterReader =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 4 store) "SELECT n FROM statement_priority")
+
+              let readerBarged = laterReader.Wait(TimeSpan.FromMilliseconds 100.0)
+              handle holder "UNLOCK TABLES" |> ignore
+              Expect.isTrue (waitingWriter.Wait(TimeSpan.FromSeconds 2.0)) "the queued update runs after the holder releases"
+              Expect.isTrue (laterReader.Wait(TimeSpan.FromSeconds 2.0)) "the later reader runs after the queued update"
+
+              match waitingWriter.Result |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected one updated row, got %A" other
+
+              match laterReader.Result |> snd with
+              | ResultSet(_, [ [ Some "11" ] ]) -> ()
+              | other -> failtestf "expected the reader to observe the queued update, got %A" other
+
+              Expect.isFalse readerBarged "the later reader did not bypass the queued update"
+
           testCase "ordinary statements overlap while explicit acquisition waits"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
