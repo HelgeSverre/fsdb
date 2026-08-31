@@ -122,11 +122,10 @@ type private GroupInputOrder =
     | ContiguousGroupRows
 
 type private OrderedIndexCandidate =
-    { Columns: string list
-      Directions: Direction list }
+    { Terms: IndexOrderTerm list }
 
 type private IndexPrefixMatch =
-    { Columns: string list
+    { Terms: IndexOrderTerm list
       PinnedCount: int }
 
 type private IndexedJoinPlan =
@@ -7912,38 +7911,33 @@ and private tryIndexOrder
                           EstimatedRows = count
                           Rows = rows }
 
-            let plainColumns = tryStoredColumnOrders orderedColumns
+            let planLookup (lookup: Storage.OrderedLookup) =
+                plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows
+
+            let completeIndexOrder () =
+                orderedColumns
+                |> storageOrderTerms
+                |> Storage.tryOrderedIndexLookup store tableDb tref.Table
+                |> Option.bind planLookup
 
             let direct =
-                match orderedColumns, plainColumns with
-                | [ { Transform = Some transform } as term ], _ ->
-                    Storage.tryFunctionalOrderedLookup store tableDb tref.Table term.Column transform term.Direction
-                    |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
-                | _, Some [ column, direction ] ->
+                match orderedColumns with
+                | [ { Transform = None } as term ] ->
                     let lower, upper =
                         rangeLookupBounds BareOrQualifiedRange tref select.Where
-                        |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
+                        |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, term.Column, System.StringComparison.OrdinalIgnoreCase))
                         |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
                         |> Option.defaultValue (None, None)
 
-                    Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
+                    Storage.trySecondaryOrderedLookup store tableDb tref.Table term.Column lower upper term.Direction
                     |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
-                    |> Option.orElseWith (fun () ->
-                        Storage.tryCompositeOrderedLookup store tableDb tref.Table [ column, direction ]
-                        |> Option.bind (fun lookup ->
-                            plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows))
-                | _, Some columns ->
-                    Storage.tryCompositeOrderedLookup store tableDb tref.Table columns
-                    |> Option.bind (fun lookup ->
-                        plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows)
-                | _ -> None
+                    |> Option.orElseWith completeIndexOrder
+                | _ -> completeIndexOrder ()
 
             direct
             |> Option.orElseWith (fun () ->
-                plainColumns
-                |> Option.bind (tryFixedPrefixIndexOrder store dbName tref select.Where)
-                |> Option.bind (fun lookup ->
-                    plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows)))
+                tryFixedPrefixIndexOrder store dbName tref select.Where orderedColumns
+                |> Option.bind planLookup))
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -8867,14 +8861,6 @@ and private groupByIndexTerms (tref: TableRef) (groupExprs: Expr list) : IndexOr
         | None -> Error())
     |> Result.toOption
 
-and private tryStoredColumnOrders (terms: IndexOrderTerm list) : (string * Direction) list option =
-    terms
-    |> traverse (fun term ->
-        match term.Transform with
-        | None -> Ok(term.Column, term.Direction)
-        | Some _ -> Error())
-    |> Result.toOption
-
 /// Only literal equalities prove that a preceding index key is constant.
 and private whereEqualityPinnedColumns (whereExpr: Expr option) : Set<string> =
     let rec walk expr acc =
@@ -8893,12 +8879,15 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
         if
             index.Visible
             && index.Kind = BTree
-            && (index.KeyColumns
-                |> List.forall (fun column -> column.Name <> "" && column.PrefixLength.IsNone && column.Transform.IsNone))
+            && (index.KeyColumns |> List.forall (fun column -> column.Name <> "" && column.PrefixLength.IsNone))
         then
             Some
-                { Columns = index.Columns
-                  Directions = index.KeyColumns |> List.map _.Direction }
+                { Terms =
+                    index.KeyColumns
+                    |> List.map (fun column ->
+                        { Column = column.Name
+                          Transform = column.Transform
+                          Direction = column.Direction }) }
         else
             None
 
@@ -8913,8 +8902,12 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
                 None
             else
                 Some
-                    { Columns = columns
-                      Directions = List.replicate columns.Length Asc })
+                    { Terms =
+                        columns
+                        |> List.map (fun column ->
+                            { Column = column
+                              Transform = None
+                              Direction = Asc }) })
 
     let secondary =
         table.Indexes
@@ -8923,30 +8916,40 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
 
     Option.toList primary @ secondary
 
-and private tryIndexPrefix (pinned: Set<string>) (suffixColumns: string list) (indexColumns: string list) : IndexPrefixMatch option =
-    let normalized = indexColumns |> List.map (fun column -> column.ToLowerInvariant())
+and private tryIndexPrefix (pinned: Set<string>) (suffix: IndexOrderTerm list) (indexTerms: IndexOrderTerm list) : IndexPrefixMatch option =
+    let sameKey left right =
+        left.Transform = right.Transform
+        && left.Column.Equals(right.Column, System.StringComparison.OrdinalIgnoreCase)
 
     let rec pinnedCount count =
         function
-        | column :: rest when Set.contains column pinned -> pinnedCount (count + 1) rest
+        | term :: rest when term.Transform.IsNone && Set.contains (term.Column.ToLowerInvariant()) pinned -> pinnedCount (count + 1) rest
         | _ -> count
 
-    let leadingPinned = pinnedCount 0 normalized
-    let remaining = List.skip leadingPinned normalized
+    let leadingPinned = pinnedCount 0 indexTerms
+    let remaining = List.skip leadingPinned indexTerms
+    let matchedSuffix = List.length remaining >= List.length suffix && List.forall2 sameKey suffix (List.take suffix.Length remaining)
 
-    if List.length remaining >= List.length suffixColumns && List.take suffixColumns.Length remaining = suffixColumns then
+    if matchedSuffix then
         Some
-            { Columns = List.take (leadingPinned + suffixColumns.Length) indexColumns
+            { Terms = List.take (leadingPinned + suffix.Length) indexTerms
               PinnedCount = leadingPinned }
     else
         None
+
+and private storageOrderTerms (terms: IndexOrderTerm list) : Storage.OrderedKeyTerm list =
+    terms
+    |> List.map (fun term ->
+        { OrderedColumnName = term.Column
+          OrderedTransform = term.Transform
+          OrderedDirection = term.Direction })
 
 and private tryFixedPrefixIndexOrder
     (store: Store)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
-    (orderedColumns: (string * Direction) list)
+    (orderedTerms: IndexOrderTerm list)
     : Storage.OrderedLookup option =
     let invert = function Asc -> Desc | Desc -> Asc
     let tableDb = tref.Database |> Option.defaultValue dbName
@@ -8955,15 +8958,14 @@ and private tryFixedPrefixIndexOrder
     |> Result.toOption
     |> Option.bind (fun table ->
         let pinned = whereEqualityPinnedColumns whereExpr
-        let requestedNames = orderedColumns |> List.map (fun (name, _) -> name.ToLowerInvariant())
-        let requestedDirections = orderedColumns |> List.map snd
+        let requestedDirections = orderedTerms |> List.map _.Direction
 
         orderedIndexCandidates table
         |> List.tryPick (fun candidate ->
-            tryIndexPrefix pinned requestedNames candidate.Columns
+            tryIndexPrefix pinned orderedTerms candidate.Terms
             |> Option.filter (fun matched -> matched.PinnedCount > 0)
             |> Option.bind (fun matched ->
-                let stored = candidate.Directions |> List.take matched.Columns.Length
+                let stored = matched.Terms |> List.map _.Direction
                 let storedSuffix = stored |> List.skip matched.PinnedCount
 
                 let traversal =
@@ -8973,7 +8975,31 @@ and private tryFixedPrefixIndexOrder
 
                 traversal
                 |> Option.bind (fun directions ->
-                    Storage.tryCompositeOrderedLookup store tableDb tref.Table (List.zip matched.Columns directions)))))
+                    List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
+                    |> storageOrderTerms
+                    |> Storage.tryOrderedIndexLookup store tableDb tref.Table))))
+
+and private tryGroupingIndexOrder
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    (groupTerms: IndexOrderTerm list)
+    : Storage.OrderedLookup option =
+    let tableDb = tref.Database |> Option.defaultValue dbName
+
+    InformationSchema.findTable store.Catalog tableDb tref.Table
+    |> Result.toOption
+    |> Option.bind (fun table ->
+        let pinned = whereEqualityPinnedColumns whereExpr
+
+        orderedIndexCandidates table
+        |> List.tryPick (fun candidate ->
+            tryIndexPrefix pinned groupTerms candidate.Terms
+            |> Option.bind (fun matched ->
+                matched.Terms
+                |> storageOrderTerms
+                |> Storage.tryOrderedIndexLookup store tableDb tref.Table)))
 
 and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
     if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
@@ -8981,36 +9007,13 @@ and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) 
     else
         groupByIndexTerms tref select.GroupBy
         |> Option.bind (fun groupTerms ->
-            let tableDb = tref.Database |> Option.defaultValue dbName
-
-            match groupTerms, tryStoredColumnOrders groupTerms with
-            | [ { Transform = Some transform } as term ], _ ->
-                Storage.tryFunctionalOrderedLookup store tableDb tref.Table term.Column transform Asc
-                |> Option.map (fun (keyName, columnIndex, columns, count, rows) ->
-                    { KeyName = keyName
-                      ColumnIndices = [ columnIndex ]
-                      Columns = columns
-                      EstimatedRows = count
-                      Rows = rows })
-            | _, Some groupColumns ->
-                InformationSchema.findTable store.Catalog tableDb tref.Table
-                |> Result.toOption
-                |> Option.bind (fun table ->
-                    let pinned = whereEqualityPinnedColumns select.Where
-                    let groupColumns = groupColumns |> List.map (fst >> _.ToLowerInvariant())
-
-                    orderedIndexCandidates table
-                    |> List.choose (fun candidate ->
-                        tryIndexPrefix pinned groupColumns candidate.Columns
-                        |> Option.map (fun matched -> matched.Columns |> List.map (fun column -> column, Asc)))
-                    |> List.tryPick (Storage.tryCompositeOrderedLookup store tableDb tref.Table))
-                |> Option.map (fun lookup ->
-                    { KeyName = lookup.OrderedIndexName
-                      ColumnIndices = lookup.OrderedColumnIndices
-                      Columns = lookup.OrderedColumns
-                      EstimatedRows = lookup.OrderedRowCount
-                      Rows = lookup.OrderedRows })
-            | _ -> None)
+            tryGroupingIndexOrder store dbName tref select.Where groupTerms
+            |> Option.map (fun lookup ->
+                { KeyName = lookup.OrderedIndexName
+                  ColumnIndices = lookup.OrderedColumnIndices
+                  Columns = lookup.OrderedColumns
+                  EstimatedRows = lookup.OrderedRowCount
+                  Rows = lookup.OrderedRows }))
 
 and private validateOnlyFullGroupBy
     (store: Store)

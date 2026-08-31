@@ -2003,11 +2003,12 @@ let private indexesWholeColumns group =
 
 let private supportsOrderedAccess group =
     let supportedKey =
-        match group.Transforms with
-        | transforms when transforms |> List.forall Option.isNone -> true
-        | [ Some Lowercase ]
-        | [ Some Uppercase ] -> true
-        | _ -> false
+        group.Transforms
+        |> List.forall (function
+            | None
+            | Some Lowercase
+            | Some Uppercase -> true
+            | Some(Expression _) -> false)
 
     group.PrefixLengths |> List.forall Option.isNone && supportedKey
 
@@ -3797,19 +3798,6 @@ let trySecondaryOrderedLookup
     : (string * int * ColumnDef list * int * Value[] seq) option =
     tryOrderedLookup store dbName tableName columnName None lower upper direction
 
-let tryFunctionalOrderedLookup
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (columnName: string)
-    (transform: IndexTransform)
-    (direction: Direction)
-    : (string * int * ColumnDef list * int * Value[] seq) option =
-    match transform with
-    | Lowercase
-    | Uppercase -> tryOrderedLookup store dbName tableName columnName (Some transform) None None direction
-    | Expression _ -> None
-
 type OrderedLookup =
     { OrderedIndexName: string
       OrderedColumnIndices: int list
@@ -3817,16 +3805,22 @@ type OrderedLookup =
       OrderedRowCount: int
       OrderedRows: Value[] seq }
 
-let tryCompositeOrderedLookup
+type OrderedKeyTerm =
+    { OrderedColumnName: string
+      OrderedTransform: IndexTransform option
+      OrderedDirection: Direction }
+
+let tryOrderedIndexLookup
     (store: Store)
     (dbName: string)
     (tableName: string)
-    (columnOrders: (string * Direction) list)
+    (terms: OrderedKeyTerm list)
     : OrderedLookup option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
-        let columnNames = columnOrders |> List.map fst
-        let directions = columnOrders |> List.map snd
+        let columnNames = terms |> List.map _.OrderedColumnName
+        let transforms = terms |> List.map _.OrderedTransform
+        let directions = terms |> List.map _.OrderedDirection
 
         columnNames
         |> traverse (resolveColumn table.Columns)
@@ -3839,7 +3833,7 @@ let tryCompositeOrderedLookup
                     let indexedPrefix = List.take indices.Length group.Indices
                     let transformedPrefix = List.take indices.Length group.Transforms
 
-                    if indexedPrefix = indices && transformedPrefix |> List.forall Option.isNone then
+                    if indexedPrefix = indices && transformedPrefix = transforms then
                         tryIndexTraversal directions (List.take indices.Length group.Directions)
                         |> Option.map (fun traversal -> group, traversal)
                     else
@@ -3866,6 +3860,19 @@ let tryCompositeOrderedLookup
                       OrderedRows =
                         orderedEntries traversal slice
                         |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId) }))))
+
+let tryCompositeOrderedLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnOrders: (string * Direction) list)
+    : OrderedLookup option =
+    columnOrders
+    |> List.map (fun (columnName, direction) ->
+        { OrderedColumnName = columnName
+          OrderedTransform = None
+          OrderedDirection = direction })
+    |> tryOrderedIndexLookup store dbName tableName
 
 let tryEqualityKeyProbeForTransform
     (store: Store)

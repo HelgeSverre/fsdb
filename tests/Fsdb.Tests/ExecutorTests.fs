@@ -3383,6 +3383,26 @@ let tests =
                         "INSERT INTO t VALUES (1, 2, 'beta'), (2, 1, 'zeta'), (3, 1, 'Alpha'), (4, 2, 'alpha'), (5, 1, 'beta')"
                     |> ignore
 
+                    match runDefault store "SELECT tenant_id, UPPER(name), COUNT(*) FROM t GROUP BY tenant_id, UPPER(name)" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "ALPHA"; Some "1" ]
+                              [ Some "1"; Some "BETA"; Some "1" ]
+                              [ Some "1"; Some "ZETA"; Some "1" ]
+                              [ Some "2"; Some "ALPHA"; Some "1" ]
+                              [ Some "2"; Some "BETA"; Some "1" ] ]
+                            "the composite functional key keeps every group contiguous"
+                    | other -> failtestf "expected composite functional groups, got %A" other
+
+                    match runDefault store "SELECT UPPER(name), COUNT(*) FROM t WHERE tenant_id = 1 GROUP BY UPPER(name)" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "ALPHA"; Some "1" ]; [ Some "BETA"; Some "1" ]; [ Some "ZETA"; Some "1" ] ]
+                            "the fixed prefix leaves the functional suffix contiguous"
+                    | other -> failtestf "expected fixed-prefix functional groups, got %A" other
+
                     let compositePlan =
                         runDefault store "EXPLAIN SELECT tenant_id, UPPER(name), COUNT(*) FROM t GROUP BY tenant_id, UPPER(name)"
                         |> explainRow
@@ -5408,6 +5428,12 @@ let tests =
 
                     for direction in [ "ASC"; "DESC" ] do
                         Expect.equal (rows "indexed" direction) (rows "scanned" direction) $"the {direction} suffix order matches a filesort"
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store $"UPDATE {table} SET name = 'aardvark' WHERE id = 2" |> ignore
+                        runDefault store $"DELETE FROM {table} WHERE id = 3" |> ignore
+
+                    Expect.equal (rows "indexed" "ASC") (rows "scanned" "ASC") "composite functional entries follow mutations"
 
                     let plan =
                         runDefault store "EXPLAIN SELECT id FROM indexed WHERE tenant_id = 1 ORDER BY UPPER(name)"
