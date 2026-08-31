@@ -5273,6 +5273,13 @@ let tests =
                     | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_parent"; Some "ix_parent"; Some "5"; Some "p.id"; Some "1"; Some "100.00"; Some "Using where" ] ]) -> ()
                     | other -> failtestf "expected an indexed RIGHT JOIN plan, got %A" other
 
+                    runDefault store "DELETE FROM parent" |> ignore
+
+                    Expect.equal
+                        (rows "indexed_child")
+                        [ [ None; Some "1" ]; [ None; Some "2" ]; [ None; Some "3" ]; [ None; Some "4" ]; [ None; Some "5" ] ]
+                        "an empty left side preserves every indexed right row"
+
                 testCase "indexed USING and NATURAL outer joins retain their coalesced rows"
                 <| fun _ ->
                     let store = newStore ()
