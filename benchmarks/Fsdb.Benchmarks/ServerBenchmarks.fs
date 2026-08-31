@@ -260,6 +260,16 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.IndexedStringInSubquery() =
+        this.Query "SELECT u.id, u.name FROM users u WHERE u.email IN (SELECT email FROM users WHERE id <= 100)"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.DecimalInSubquery() =
+        this.Query "SELECT o.id FROM orders o WHERE o.total IN (SELECT total FROM orders WHERE id <= 100)"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedOrderCount() =
         this.Query "SELECT u.id, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) FROM users u WHERE u.id <= 100"
 
