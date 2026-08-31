@@ -5578,7 +5578,7 @@ and private sameIndexSemantics (left: ColumnDef) (right: ColumnDef) : bool =
         (not (InformationSchema.isStringy left.Type)
          || (left.Charset = right.Charset && left.Collation = right.Collation && left.Collation.IsSome))
 
-and private tryIndexedInnerProbe
+and private tryIndexedJoinProbe
     (store: Store)
     (join: Join)
     (leftColumns: ColumnDef list)
@@ -5587,7 +5587,7 @@ and private tryIndexedInnerProbe
     (equiKeys: (int * int) list)
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
-    | InnerJoin, [], Some table, _ :: _
+    | (InnerJoin | LeftJoin), [], Some table, _ :: _
         when storedValuesMatchReadValues store
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         let rightNames = equiKeys |> List.map (fun (_, rightIndex) -> rightColumns.[rightIndex].Name)
@@ -6046,11 +6046,11 @@ and private applyResolvedJoin
                 |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
                 |> Result.map (List.forall (fun v -> truthy v = Some true))
 
-            let indexedInnerProbe = tryIndexedInnerProbe store join combinedColumnsSoFar joinColumns physicalTable equiKeys
+            let indexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns physicalTable equiKeys
 
             let hashEligible =
                 storedValuesMatchReadValues store
-                && indexedInnerProbe.IsNone
+                && indexedJoinProbe.IsNone
                 && not equiKeys.IsEmpty
                 && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                 && keyClasses |> List.forall Option.isSome
@@ -6063,7 +6063,7 @@ and private applyResolvedJoin
                 | BinOp(Eq, Lit left, Lit right) -> Value.equals left right = Some true
                 | _ -> false
 
-            match indexedInnerProbe with
+            match indexedJoinProbe with
             | Some probe ->
                 let exactKey =
                     probe.Index.PrefixLengths |> List.forall Option.isNone
@@ -6076,24 +6076,29 @@ and private applyResolvedJoin
                         evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
                         |> Result.map (truthy >> (=) (Some true))
 
-                let candidates =
+                let rightRowsFor (left: Value[]) =
+                    probe.LeftIndices
+                    |> List.map (fun leftIndex -> left.[leftIndex])
+                    |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
+                    |> Option.map (Seq.map snd)
+                    |> Option.defaultValue joinRows
+
+                match join.Kind, exactKey, residualConjuncts with
+                | InnerJoin, true, [] ->
+                    let candidates =
+                        seq {
+                            for left in rowsSoFar do
+                                for right in rightRowsFor left do
+                                    yield Array.append left right
+                        }
+
+                    Ok(newSources, candidates, coalesceNames)
+                | InnerJoin, _, _ ->
                     seq {
                         for left in rowsSoFar do
-                            let rightRows =
-                                probe.LeftIndices
-                                |> List.map (fun leftIndex -> left.[leftIndex])
-                                |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
-                                |> Option.map (Seq.map snd)
-                                |> Option.defaultValue joinRows
-
-                            for right in rightRows do
+                            for right in rightRowsFor left do
                                 yield Array.append left right
                     }
-
-                match exactKey, residualConjuncts with
-                | true, [] -> Ok(newSources, candidates, coalesceNames)
-                | _ ->
-                    candidates
                     |> traverseSeqWithLimit
                         (Some(
                             maxJoinCandidateRows,
@@ -6102,6 +6107,23 @@ and private applyResolvedJoin
                         (fun combined -> candidateHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
                     |> Result.mapError Err
                     |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
+                | LeftJoin, _, _ ->
+                    seq {
+                        for leftIndex, left in leftIndexed.Value do
+                            for rightIndex, right in rightRowsFor left |> Seq.indexed do
+                                yield leftIndex, rightIndex, Array.append left right
+                    }
+                    |> traverseSeqWithLimit
+                        (Some(
+                            maxJoinCandidateRows,
+                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                        ))
+                        (fun ((_, _, combined) as candidate) ->
+                            candidateHolds combined
+                            |> Result.map (fun matches -> if matches then Some candidate else None))
+                    |> Result.mapError Err
+                    |> Result.map (buildCombinedRows [] >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
+                | _ -> failwith "indexed join kind"
             | None when hashEligible ->
                 let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
                 let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
@@ -11275,7 +11297,7 @@ let private indexedJoinExplainPlans
 
                         let equiKeys, residual = extractEquiKeys resolveQualified leftColumns.Length join.On
 
-                        tryIndexedInnerProbe store join leftColumns rightColumns (Some table) equiKeys
+                        tryIndexedJoinProbe store join leftColumns rightColumns (Some table) equiKeys
                         |> Option.map (fun probe ->
                             joinIndex + 1,
                             { Table = probe.Table

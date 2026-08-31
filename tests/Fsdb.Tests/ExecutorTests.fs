@@ -5120,6 +5120,11 @@ let tests =
                         ()
                     | other -> failtestf "expected an indexed prefix join plan, got %A" other
 
+                    match runDefault store "SELECT p.id, c.id FROM parent p LEFT JOIN child c ON p.label = c.label ORDER BY p.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "10" ]; [ Some "2"; None ]; [ Some "3"; Some "12" ] ] "a prefix collision without an exact match produces one padded row"
+                    | other -> failtestf "expected prefix LEFT JOIN rows, got %A" other
+
                 testCase "an indexed INNER JOIN preserves NULL and residual ON semantics against a scan twin"
                 <| fun _ ->
                     let store = newStore ()
