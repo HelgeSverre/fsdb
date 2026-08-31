@@ -102,9 +102,8 @@ type private PointEquality =
       Value: Value }
 
 type private LiteralInProbe =
-    { Column: string
-      Transform: IndexTransform option
-      Values: Value list }
+    { Columns: (string * IndexTransform option) list
+      Values: Value list list }
 
 type private IndexOrderPlan =
     { KeyName: string
@@ -7335,17 +7334,33 @@ and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralI
     |> List.collect flattenAnd
     |> List.choose (function
         | In(indexed, candidates) ->
-            let values =
-                candidates
-                |> List.map (function Lit value -> Some value | _ -> None)
+            let indexedExpressions =
+                match indexed with
+                | Row expressions -> expressions
+                | expression -> [ expression ]
 
-            match indexedColumnFor tref indexed with
-            | Some(column, transform) when values |> List.forall Option.isSome ->
+            let candidateExpressions =
+                candidates
+                |> List.map (fun candidate ->
+                    match indexedExpressions, candidate with
+                    | [ _ ], expression -> [ expression ]
+                    | _ :: _ :: _, Row expressions -> expressions
+                    | _ -> [])
+
+            let columns = indexedExpressions |> List.map (indexedColumnFor tref)
+
+            let values =
+                candidateExpressions
+                |> List.map (List.map (function Lit value -> Some value | _ -> None))
+
+            match columns with
+            | _ when columns |> List.exists Option.isNone -> None
+            | _ when candidateExpressions |> List.exists (fun expressions -> expressions.Length <> indexedExpressions.Length) -> None
+            | _ when values |> List.collect id |> List.exists Option.isNone -> None
+            | _ ->
                 Some
-                    { Column = column
-                      Transform = transform
-                      Values = values |> List.choose id }
-            | _ -> None
+                    { Columns = columns |> List.choose id
+                      Values = values |> List.map (List.choose id) }
         | _ -> None)
 
 and private rangeLookupBounds (scope: RangeColumnScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
@@ -7440,33 +7455,61 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
 
         literalInProbes tref whereExpr
         |> List.tryPick (fun probe ->
-            let values = probe.Values |> List.filter ((<>) VNull) |> List.distinct
+            let values =
+                probe.Values
+                |> List.filter (List.contains VNull >> not)
+                |> List.distinct
 
             values
             |> List.tryHead
             |> Option.bind (fun first ->
-                Storage.tryEqualityKeyProbeForTransform store tableDb tref.Table probe.Column probe.Transform first
+                let access =
+                    match probe.Columns, first with
+                    | [ (column, transform) ], [ value ] when transform.IsSome ->
+                        Storage.tryEqualityKeyProbeForTransform store tableDb tref.Table column transform value
+                    | columns, _ when columns |> List.forall (snd >> Option.isNone) ->
+                        tableSnapshot store tableDb tref.Table
+                        |> Result.toOption
+                        |> Option.bind (fun table ->
+                            Storage.tryEqualityIndexForColumns table (columns |> List.map fst)
+                            |> Option.map (fun index -> table, index))
+                    | _ -> None
+
+                access
                 |> Option.bind (fun (table, index) ->
-                    let lookup value =
-                        if probe.Transform.IsSome then
-                            Storage.tryProjectedEqualityLookupForIndex store table index [ value ]
+                    let requestedIndices =
+                        probe.Columns
+                        |> traverse (fst >> resolveColumn table.Columns)
+                        |> Result.toOption
+
+                    match requestedIndices with
+                    | Some requested ->
+                        let lookup (tuple: Value list) =
+                            let ordered =
+                                index.ColumnIndices
+                                |> List.map (fun columnIndex ->
+                                    requested
+                                    |> List.findIndex ((=) columnIndex)
+                                    |> fun valueIndex -> tuple.[valueIndex])
+
+                            if probe.Columns |> List.exists (snd >> Option.isSome) then
+                                Storage.tryProjectedEqualityLookupForIndex store table index ordered
+                            else
+                                Storage.tryEqualityLookupForIndex store table index ordered
+
+                        let lookups = values |> List.map lookup
+
+                        if lookups |> List.forall Option.isSome then
+                            Some
+                                { KeyName = index.Name
+                                  ColumnIndices = index.ColumnIndices
+                                  PrefixLengths = index.PrefixLengths
+                                  Columns = table.Columns
+                                  Unique = index.Unique
+                                  Rows = lookups |> List.choose id |> List.collect id |> List.distinctBy fst |> List.sortBy fst }
                         else
-                            Storage.tryEqualityLookupForIndex store table index [ value ]
-
-                    let lookups =
-                        values
-                        |> List.map lookup
-
-                    if lookups |> List.forall Option.isSome then
-                        Some
-                            { KeyName = index.Name
-                              ColumnIndices = index.ColumnIndices
-                              PrefixLengths = index.PrefixLengths
-                              Columns = table.Columns
-                              Unique = index.Unique
-                              Rows = lookups |> List.choose id |> List.collect id |> List.distinctBy fst |> List.sortBy fst }
-                    else
-                        None)))
+                            None
+                    | None -> None)))
 
 and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
