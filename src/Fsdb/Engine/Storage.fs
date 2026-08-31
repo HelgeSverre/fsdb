@@ -2075,6 +2075,9 @@ let private supportsRangeAccess group =
     group.Transforms |> List.forall Option.isNone
     && (indexesWholeColumns group || group.Indices.Length = 1)
 
+let private usesSecondaryOrder group =
+    supportsRangeAccess group || supportsOrderedAccess group
+
 let private rangeKeyGroups (table: Table) : IndexKeyGroup list =
     uniqueKeyGroups table @ secondaryKeyGroups table
     |> List.filter supportsRangeAccess
@@ -2304,7 +2307,8 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
     |> Map.ofList
 
 let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
-    orderedKeyGroups table
+    uniqueKeyGroups table @ secondaryKeyGroups table
+    |> List.filter usesSecondaryOrder
     |> List.map (fun group ->
         let entries: ImmutableSortedSet<SecondaryOrderEntry> =
             table.RowsArray.Indexed
@@ -2408,7 +2412,7 @@ let private reindexRow
 
     let secondaryOrder =
         let orderedGroups =
-            uniqueGroups @ secondaryGroups |> List.filter supportsOrderedAccess
+            uniqueGroups @ secondaryGroups |> List.filter usesSecondaryOrder
 
         orderedGroups
         |> List.fold
