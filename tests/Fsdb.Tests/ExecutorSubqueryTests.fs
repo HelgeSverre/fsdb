@@ -405,6 +405,18 @@ let tests =
                   run
                       store
                       registry
+                      "SELECT id FROM outer_rows WHERE code = ANY (SELECT code FROM inner_rows) AND TOUCH(id) = id ORDER BY id"
+              with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ]; [ Some "81" ] ] "ANY candidates match"
+              | other -> failtestf "expected indexed ANY matches, got %A" other
+
+              Expect.isLessThan touches 5 "ANY shares the string index probe"
+              touches <- 0
+
+              match
+                  run
+                      store
+                      registry
                       "SELECT id FROM outer_rows WHERE amount IN (SELECT amount FROM inner_rows) AND TOUCH(id) = id ORDER BY id"
               with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ]; [ Some "81" ] ] "decimal candidates match"
