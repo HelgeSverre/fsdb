@@ -3341,6 +3341,34 @@ let tests =
                     Expect.equal plan.Key (Some "idx_code") "the grouping index is reported"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "ordered groups do not use a temporary table"
 
+                testCase "GROUP BY streams a matching case-folding expression index"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, KEY ix_upper ((UPPER(name))))"
+                    |> ignore
+
+                    runDefault store "INSERT INTO t VALUES (1, 'beta'), (2, 'Alpha'), (3, 'alpha'), (4, 'gamma')"
+                    |> ignore
+
+                    match runDefault store "SELECT UPPER(name), COUNT(*) FROM t GROUP BY UPPER(name)" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "ALPHA"; Some "2" ]; [ Some "BETA"; Some "1" ]; [ Some "GAMMA"; Some "1" ] ]
+                            "the functional key keeps equal groups contiguous in index order"
+                    | other -> failtestf "expected case-folded groups, got %A" other
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT UPPER(name), COUNT(*) FROM t GROUP BY UPPER(name)"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "functional grouping reads the matching index"
+                    Expect.equal plan.Key (Some "ix_upper") "the functional grouping key is reported"
+                    Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "contiguous functional groups avoid a temporary table"
+
                 testCase "GROUP BY sorts through a composite index once WHERE pins every column ahead of the group key"
                 <| fun _ ->
                     let store = newStore ()
