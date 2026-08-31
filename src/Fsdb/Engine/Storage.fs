@@ -2073,6 +2073,9 @@ let private secondaryKeyGroups (table: Table) : IndexKeyGroup list =
     |> List.filter (fun index -> index.Kind = BTree && not index.Unique)
     |> List.choose (tryIndexKeyGroup table)
 
+let private indexKeyGroups table =
+    uniqueKeyGroups table @ secondaryKeyGroups table
+
 let private supportsRangeAccess group =
     group.Transforms |> List.forall Option.isNone
     && (indexesWholeColumns group || group.Indices.Length = 1)
@@ -2081,12 +2084,10 @@ let private usesSecondaryOrder group =
     supportsRangeAccess group || supportsOrderedAccess group
 
 let private rangeKeyGroups (table: Table) : IndexKeyGroup list =
-    uniqueKeyGroups table @ secondaryKeyGroups table
-    |> List.filter supportsRangeAccess
+    indexKeyGroups table |> List.filter supportsRangeAccess
 
 let private orderedKeyGroups (table: Table) : IndexKeyGroup list =
-    uniqueKeyGroups table @ secondaryKeyGroups table
-    |> List.filter supportsOrderedAccess
+    indexKeyGroups table |> List.filter supportsOrderedAccess
 
 type private FullTextKeyGroup =
     { Name: string
@@ -2309,7 +2310,7 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
     |> Map.ofList
 
 let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
-    uniqueKeyGroups table @ secondaryKeyGroups table
+    indexKeyGroups table
     |> List.filter usesSecondaryOrder
     |> List.map (fun group ->
         let entries: ImmutableSortedSet<SecondaryOrderEntry> =
