@@ -6107,6 +6107,21 @@ and private applyResolvedJoin
                         (fun combined -> candidateHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
                     |> Result.mapError Err
                     |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
+                | LeftJoin, true, [] ->
+                    let candidates =
+                        seq {
+                            for left in rowsSoFar do
+                                let mutable matched = false
+
+                                for right in rightRowsFor left do
+                                    matched <- true
+                                    yield Array.append left right
+
+                                if not matched then
+                                    yield Array.append left rightNullPadding
+                        }
+
+                    Ok(newSources, candidates, coalesceNames)
                 | LeftJoin, _, _ ->
                     seq {
                         for leftIndex, left in leftIndexed.Value do
