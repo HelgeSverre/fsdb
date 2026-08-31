@@ -5171,6 +5171,11 @@ let tests =
                         Expect.equal rows [ [ Some "1"; Some "10" ]; [ Some "2"; None ]; [ Some "3"; Some "12" ] ] "a prefix collision without an exact match produces one padded row"
                     | other -> failtestf "expected prefix LEFT JOIN rows, got %A" other
 
+                    match runDefault store "SELECT p.id, c.id FROM parent p RIGHT JOIN child c ON p.label = c.label ORDER BY c.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "10" ]; [ None; Some "11" ]; [ Some "3"; Some "12" ] ] "a prefix collision without an exact match preserves the right row"
+                    | other -> failtestf "expected prefix RIGHT JOIN rows, got %A" other
+
                 testCase "an indexed INNER JOIN preserves NULL and residual ON semantics against a scan twin"
                 <| fun _ ->
                     let store = newStore ()
@@ -5235,13 +5240,46 @@ let tests =
                     | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_parent"; Some "ix_parent"; Some "5"; Some "p.id"; Some "1"; Some "100.00"; Some "Using where" ] ]) -> ()
                     | other -> failtestf "expected an indexed LEFT JOIN plan, got %A" other
 
-                testCase "indexed USING and NATURAL LEFT joins retain their coalesced rows"
+                testCase "an indexed RIGHT JOIN probes the right side and preserves unmatched rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (id INT PRIMARY KEY, minimum_score INT)" |> ignore
+                    runDefault store "CREATE TABLE indexed_child (id INT PRIMARY KEY, parent_id INT, score INT, KEY ix_parent (parent_id))" |> ignore
+                    runDefault store "CREATE TABLE scanned_child (id INT PRIMARY KEY, parent_id INT, score INT)" |> ignore
+                    runDefault store "INSERT INTO parent VALUES (1, 10), (2, 30), (3, 20)" |> ignore
+
+                    for table in [ "indexed_child"; "scanned_child" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES (1, 1, 10), (2, 1, 9), (3, 2, 35), (4, 2, 20), (5, NULL, 99)" table) |> ignore
+
+                    let rows table =
+                        match
+                            runDefault
+                                store
+                                (sprintf
+                                    "SELECT p.id, c.id FROM parent p RIGHT JOIN %s c ON p.id = c.parent_id AND c.score >= p.minimum_score ORDER BY c.id"
+                                    table)
+                        with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected RIGHT JOIN rows, got %A" other
+
+                    Expect.equal (rows "indexed_child") (rows "scanned_child") "the indexed outer join agrees with a scan"
+
+                    Expect.equal
+                        (rows "indexed_child")
+                        [ [ Some "1"; Some "1" ]; [ None; Some "2" ]; [ Some "2"; Some "3" ]; [ None; Some "4" ]; [ None; Some "5" ] ]
+                        "failed residuals and NULL keys retain the right row"
+
+                    match runDefault store "EXPLAIN SELECT * FROM parent p RIGHT JOIN indexed_child c ON p.id = c.parent_id AND c.score >= p.minimum_score" with
+                    | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_parent"; Some "ix_parent"; Some "5"; Some "p.id"; Some "1"; Some "100.00"; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected an indexed RIGHT JOIN plan, got %A" other
+
+                testCase "indexed USING and NATURAL outer joins retain their coalesced rows"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE join_parent (id INT PRIMARY KEY, parent_name VARCHAR(20))" |> ignore
                     runDefault store "CREATE TABLE join_child (child_id INT PRIMARY KEY, id INT, child_name VARCHAR(20), KEY ix_id (id))" |> ignore
                     runDefault store "INSERT INTO join_parent VALUES (1, 'one'), (2, 'two'), (3, 'three')" |> ignore
-                    runDefault store "INSERT INTO join_child VALUES (10, 1, 'first'), (11, 1, 'second'), (12, 2, 'third')" |> ignore
+                    runDefault store "INSERT INTO join_child VALUES (10, 1, 'first'), (11, 1, 'second'), (12, 2, 'third'), (13, 4, 'fourth')" |> ignore
 
                     let expected =
                         [ [ Some "1"; Some "one"; Some "10"; Some "first" ]
@@ -5254,11 +5292,28 @@ let tests =
                         | ResultSet(_, rows) -> Expect.equal rows expected $"{joinSql} rows"
                         | other -> failtestf "expected rows for %s, got %A" joinSql other
 
+                    let rightExpected =
+                        [ [ Some "1"; Some "one"; Some "10"; Some "first" ]
+                          [ Some "1"; Some "one"; Some "11"; Some "second" ]
+                          [ Some "2"; Some "two"; Some "12"; Some "third" ]
+                          [ Some "4"; None; Some "13"; Some "fourth" ] ]
+
+                    for joinSql in [ "RIGHT JOIN join_child USING (id)"; "NATURAL RIGHT JOIN join_child" ] do
+                        match runDefault store $"SELECT id, parent_name, child_id, child_name FROM join_parent {joinSql} ORDER BY id, child_id" with
+                        | ResultSet(_, rows) -> Expect.equal rows rightExpected $"{joinSql} rows"
+                        | other -> failtestf "expected rows for %s, got %A" joinSql other
+
                     match runDefault store "EXPLAIN SELECT * FROM join_parent p LEFT JOIN join_child c USING (id)" with
                     | ResultSet(_, [ _; row ]) ->
                         Expect.equal row.[4] (Some "ref") "USING selects indexed ref access"
                         Expect.equal row.[6] (Some "ix_id") "USING selects the right-side key"
                     | other -> failtestf "expected an indexed USING plan, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT * FROM join_parent p RIGHT JOIN join_child c USING (id)" with
+                    | ResultSet(_, [ _; row ]) ->
+                        Expect.equal row.[4] (Some "ref") "RIGHT USING selects indexed ref access"
+                        Expect.equal row.[6] (Some "ix_id") "RIGHT USING selects the right-side key"
+                    | other -> failtestf "expected an indexed RIGHT USING plan, got %A" other
 
                 testCase "an indexed INNER JOIN probes a composite equality key"
                 <| fun _ ->
