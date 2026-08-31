@@ -5640,42 +5640,37 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             let created = DateTime.Now
                             let sqlMode, timeZone, characterSetClient, collationConnection, databaseCollation = executionContext ()
                             let executeAt, intervalValue, intervalField, starts, ends = Event.timingFields timing
-                            let dateValue = Option.map VDateTime >> Option.defaultValue VNull
-                            let textValue = Option.map VString >> Option.defaultValue VNull
+                            let entry: SystemCatalog.Event.Entry =
+                                { Schema = database
+                                  Name = name
+                                  Schedule = creation.Schedule
+                                  Definition = creation.Body
+                                  Created = Some created
+                                  Definer = Auth.formatAccount definer
+                                  Status = status
+                                  OnCompletion = creation.OnCompletion
+                                  Comment = creation.Comment
+                                  LastAltered = Some created
+                                  LastExecuted = None
+                                  SqlMode = sqlMode
+                                  TimeZone = timeZone
+                                  CharacterSetClient = characterSetClient
+                                  CollationConnection = collationConnection
+                                  DatabaseCollation = databaseCollation
+                                  Originator = 1L
+                                  ExecuteAt = executeAt
+                                  IntervalValue = intervalValue
+                                  IntervalField = intervalField
+                                  Starts = starts
+                                  Ends = ends }
 
                             match
                                 Storage.insertRows
                                     next.Store
                                     "mysql"
                                     "events"
-                                    (Some
-                                        [ "event_schema"; "event_name"; "schedule_definition"; "event_definition"; "created"
-                                          "definer"; "status"; "on_completion"; "event_comment"; "last_altered"; "last_executed"
-                                          "sql_mode"; "time_zone"; "character_set_client"; "collation_connection"
-                                          "database_collation"; "originator"; "execute_at"; "interval_value"; "interval_field"
-                                          "starts"; "ends" ])
-                                    [ [ VString database
-                                        VString name
-                                        VString creation.Schedule
-                                        VString creation.Body
-                                        VDateTime created
-                                        VString(Auth.formatAccount definer)
-                                        (status |> Event.statusText |> VString)
-                                        VString creation.OnCompletion
-                                        VString creation.Comment
-                                        VDateTime created
-                                        VNull
-                                        VString sqlMode
-                                        VString timeZone
-                                        VString characterSetClient
-                                        VString collationConnection
-                                        VString databaseCollation
-                                        VUInt 1UL
-                                        dateValue executeAt
-                                        textValue intervalValue
-                                        textValue intervalField
-                                        dateValue starts
-                                        dateValue ends ] ]
+                                    None
+                                    [ entry |> SystemCatalog.Event.toRow |> Array.toList ]
                             with
                             | Ok _ -> next, Affected 0UL
                             | Error error ->
@@ -5748,33 +5743,38 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         let sqlMode, timeZone, characterSetClient, collationConnection, databaseCollation = executionContext ()
 
                         let update (row: Value[]) =
-                            let updated = Array.copy row
-                            updated.[0] <- VString renamedDatabase
-                            updated.[1] <- VString renamedName
-                            alteration.Schedule |> Option.iter (fun value -> updated.[2] <- VString value)
-                            alteration.Body |> Option.iter (fun value -> updated.[3] <- VString value)
-                            updated.[5] <- VString(Auth.formatAccount definer)
-                            status |> Option.iter (Event.statusText >> VString >> fun value -> updated.[6] <- value)
-                            alteration.OnCompletion |> Option.iter (fun value -> updated.[7] <- VString value)
-                            alteration.Comment |> Option.iter (fun value -> updated.[8] <- VString value)
-                            updated.[9] <- VDateTime DateTime.Now
-                            updated.[11] <- VString sqlMode
-                            updated.[12] <- VString timeZone
-                            updated.[13] <- VString characterSetClient
-                            updated.[14] <- VString collationConnection
-                            updated.[15] <- VString databaseCollation
+                            row
+                            |> SystemCatalog.Event.mapRow (fun current ->
+                                let updated =
+                                    { current with
+                                        Schema = renamedDatabase
+                                        Name = renamedName
+                                        Schedule = alteration.Schedule |> Option.defaultValue current.Schedule
+                                        Definition = alteration.Body |> Option.defaultValue current.Definition
+                                        Definer = Auth.formatAccount definer
+                                        Status = status |> Option.defaultValue current.Status
+                                        OnCompletion = alteration.OnCompletion |> Option.defaultValue current.OnCompletion
+                                        Comment = alteration.Comment |> Option.defaultValue current.Comment
+                                        LastAltered = Some DateTime.Now
+                                        SqlMode = sqlMode
+                                        TimeZone = timeZone
+                                        CharacterSetClient = characterSetClient
+                                        CollationConnection = collationConnection
+                                        DatabaseCollation = databaseCollation }
 
-                            timing
-                            |> Option.iter (fun value ->
-                                let executeAt, intervalValue, intervalField, starts, ends = Event.timingFields value
-                                updated.[10] <- VNull
-                                updated.[17] <- executeAt |> Option.map VDateTime |> Option.defaultValue VNull
-                                updated.[18] <- intervalValue |> Option.map VString |> Option.defaultValue VNull
-                                updated.[19] <- intervalField |> Option.map VString |> Option.defaultValue VNull
-                                updated.[20] <- starts |> Option.map VDateTime |> Option.defaultValue VNull
-                                updated.[21] <- ends |> Option.map VDateTime |> Option.defaultValue VNull)
+                                match timing with
+                                | None -> updated
+                                | Some value ->
+                                    let executeAt, intervalValue, intervalField, starts, ends = Event.timingFields value
 
-                            Ok updated
+                                    { updated with
+                                        LastExecuted = None
+                                        ExecuteAt = executeAt
+                                        IntervalValue = intervalValue
+                                        IntervalField = intervalField
+                                        Starts = starts
+                                        Ends = ends })
+                            |> Ok
 
                         match
                             Storage.updateRows

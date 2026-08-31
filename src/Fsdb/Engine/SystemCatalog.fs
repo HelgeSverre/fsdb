@@ -215,6 +215,33 @@ module Event =
           Starts: DateTime option
           Ends: DateTime option }
 
+    let toRow (entry: Entry) : Value[] =
+        let dateTimeValue = Option.map VDateTime >> Option.defaultValue VNull
+        let textValue = Option.map VString >> Option.defaultValue VNull
+
+        [| VString entry.Schema
+           VString entry.Name
+           VString entry.Schedule
+           VString entry.Definition
+           dateTimeValue entry.Created
+           VString entry.Definer
+           VString(Fsdb.Sql.Event.statusText entry.Status)
+           VString entry.OnCompletion
+           VString entry.Comment
+           dateTimeValue entry.LastAltered
+           dateTimeValue entry.LastExecuted
+           VString entry.SqlMode
+           VString entry.TimeZone
+           VString entry.CharacterSetClient
+           VString entry.CollationConnection
+           VString entry.DatabaseCollation
+           VUInt(uint64 entry.Originator)
+           dateTimeValue entry.ExecuteAt
+           textValue entry.IntervalValue
+           textValue entry.IntervalField
+           dateTimeValue entry.Starts
+           dateTimeValue entry.Ends |]
+
     let tryRead (row: Value[]) : Entry option =
         readCompleteRow 7
             (fun row ->
@@ -241,6 +268,12 @@ module Event =
                   Starts = dateTimeAt 20 row
                   Ends = dateTimeAt 21 row })
             row
+
+    let mapRow transform row =
+        row
+        |> tryRead
+        |> Option.map (transform >> toRow)
+        |> Option.defaultWith (fun () -> Array.copy row)
 
     let timing (entry: Entry) =
         match entry.ExecuteAt, entry.IntervalValue, entry.IntervalField, entry.Starts with

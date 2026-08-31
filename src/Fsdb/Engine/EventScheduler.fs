@@ -43,9 +43,11 @@ let private claim (store: Storage.Store) (entry: SystemCatalog.Event.Entry) due 
     let started = Functions.truncateToSecond DateTime.Now
 
     let update (row: Value[]) =
-        let updated = Array.copy row
-        updated.[10] <- VDateTime started
-        Ok updated
+        row
+        |> SystemCatalog.Event.mapRow (fun current ->
+            { current with
+                LastExecuted = Some started })
+        |> Ok
 
     match
         Storage.updateRows
@@ -80,9 +82,11 @@ let private complete (store: Storage.Store) (entry: SystemCatalog.Event.Entry) (
     if final then
         if entry.OnCompletion = "PRESERVE" then
             let disable (row: Value[]) =
-                let updated = Array.copy row
-                updated.[6] <- VString(Event.statusText Event.Status.Disabled)
-                Ok updated
+                row
+                |> SystemCatalog.Event.mapRow (fun current ->
+                    { current with
+                        Status = Event.Status.Disabled })
+                |> Ok
 
             Storage.updateRows store "mysql" "events" None (claimedOccurrence entry started >> Ok) disable
             |> logCompletionError entry "disable"
