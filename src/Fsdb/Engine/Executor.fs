@@ -155,18 +155,31 @@ type private LockingReadSource =
 
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
-type private Int64Membership =
-    { Values: Set<int64>
-      ContainsNull: bool }
+type private EqualityMembershipDomain =
+    | SignedIntegerMembership
+    | DecimalMembership
+    | TextMembership of Collation.Collation
+
+type private EqualityMembership =
+    { Values: Set<Value>
+      ContainsNull: bool
+      Domain: EqualityMembershipDomain }
 
 type private ExpressionSubqueryResult =
     { Result: QueryResult
       Rows: Value[] list
-      Int64Membership: Int64Membership option }
+      EqualityMembership: EqualityMembership option }
 
 type private MemoizedSubquery =
     | MemoizedSubquery of ExpressionSubqueryResult
     | UnmemoizedSubquery
+
+let private equalityMembershipKey domain value =
+    match domain, value with
+    | SignedIntegerMembership, VInt _
+    | DecimalMembership, VDecimal _ -> Some value
+    | TextMembership collation, VString text -> Some(VString(collation.KeyOf text))
+    | _ -> None
 
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
@@ -3819,10 +3832,27 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(_, _) ->
                 let rightOperand = subqueryProjectionOperand ctx select
 
-                match ve, subquery.Int64Membership with
-                | VNull, _ -> if subquery.Rows.IsEmpty then Ok(VInt 0L) else Ok VNull
-                | VInt value, Some membership ->
-                    if membership.Values.Contains value then Ok(VInt 1L)
+                let membershipKey =
+                    subquery.EqualityMembership
+                    |> Option.bind (fun membership ->
+                        match membership.Domain with
+                        | TextMembership expected ->
+                            comparisonCollation
+                                ctx
+                                "="
+                                e
+                                (tryColumnDefForExpr ctx e)
+                                rightOperand.Expression
+                                rightOperand.Column
+                            |> Result.toOption
+                            |> Option.filter (fun actual -> actual.Name = expected.Name)
+                            |> Option.bind (fun _ -> equalityMembershipKey membership.Domain ve)
+                        | _ -> equalityMembershipKey membership.Domain ve)
+
+                match ve, membershipKey, subquery.EqualityMembership with
+                | VNull, _, _ -> if subquery.Rows.IsEmpty then Ok(VInt 0L) else Ok VNull
+                | _, Some key, Some membership ->
+                    if membership.Values.Contains key then Ok(VInt 1L)
                     elif membership.ContainsNull then Ok VNull
                     else Ok(VInt 0L)
                 | _ ->
@@ -4259,33 +4289,63 @@ and private runExpressionSubquery
     : ExpressionSubqueryResult =
     let memo = (currentStatementMemo ()).ExpressionSubqueries
 
-    let int64Membership rows =
-        let values =
-            rows
-            |> List.choose (Array.tryHead >> Option.bind (function VInt value -> Some value | _ -> None))
-
+    let equalityMembership rows =
         let containsNull = rows |> List.exists (Array.tryHead >> Option.exists ((=) VNull))
+        let values = rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
 
-        let hasOther =
-            rows
-            |> List.exists (Array.tryHead >> Option.exists (function VInt _ | VNull -> false | _ -> true))
+        let domain =
+            match selectProjectionColumns ctx.Store ctx.DbName select with
+            | [ Some column ] ->
+                match column.Type with
+                | TTinyInt _
+                | TBool
+                | TSmallInt _
+                | TMediumInt _
+                | TInt _
+                | TBigInt false -> Some SignedIntegerMembership
+                | TDecimal _ -> Some DecimalMembership
+                | TChar _
+                | TVarchar _
+                | TTinyText
+                | TText
+                | TMediumText
+                | TLongText ->
+                    column.Collation
+                    |> Option.bind Collation.tryFind
+                    |> Option.orElseWith (fun () -> Some ctx.Store.ExecutionSettings.ConnectionCollation)
+                    |> Option.map TextMembership
+                | _ -> None
+            | _ -> None
 
-        if hasOther then None
-        else Some { Values = Set.ofList values; ContainsNull = containsNull }
+        domain
+        |> Option.bind (fun domain ->
+            let rec keys found =
+                function
+                | [] -> Some found
+                | VNull :: rest -> keys found rest
+                | value :: rest ->
+                    equalityMembershipKey domain value
+                    |> Option.bind (fun key -> keys (key :: found) rest)
+
+            keys [] values
+            |> Option.map (fun values ->
+                { Values = Set.ofList values
+                  ContainsNull = containsNull
+                  Domain = domain }))
 
     let execute outer =
         let result, _, rows = runSelectStmt ctx.Store ctx.Registry ctx.DbName select outer
 
         { Result = result
           Rows = rows
-          Int64Membership = None }
+          EqualityMembership = None }
 
     match memo.TryGetValue cacheKey with
     | true, MemoizedSubquery result -> result
     | true, UnmemoizedSubquery -> execute (Some ctx)
     | _ when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
         let result = execute None
-        let result = { result with Int64Membership = int64Membership result.Rows }
+        let result = { result with EqualityMembership = equalityMembership result.Rows }
         memo.[cacheKey] <- MemoizedSubquery result
         result
     | _ ->
