@@ -327,6 +327,25 @@ let tests =
                       "memoized membership retains three-valued IN behavior"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "memoized string and decimal IN preserves collation and NULL semantics"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE ci_values (v VARCHAR(20) COLLATE utf8mb4_0900_ai_ci)" |> ignore
+              runDefault store "CREATE TABLE bin_values (v VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "CREATE TABLE decimals (v DECIMAL(10,2))" |> ignore
+              runDefault store "INSERT INTO ci_values VALUES ('alpha'), (NULL)" |> ignore
+              runDefault store "INSERT INTO bin_values VALUES ('alpha'), (NULL)" |> ignore
+              runDefault store "INSERT INTO decimals VALUES (1.20), (NULL)" |> ignore
+
+              match
+                  runDefault
+                      store
+                      "SELECT 'ALPHA' IN (SELECT v FROM ci_values), 'ALPHA' IN (SELECT v FROM bin_values), 1.2 IN (SELECT v FROM decimals), 2.0 IN (SELECT v FROM decimals)"
+              with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "1"; None; Some "1"; None ] "typed membership follows comparison semantics"
+              | other -> failtestf "expected one typed-membership row, got %A" other
+
           testCase "stable integer IN narrows an indexed outer table"
           <| fun _ ->
               let store = newStore ()
