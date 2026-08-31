@@ -811,6 +811,39 @@ let tests =
                   Expect.isNone second.Tx "the deadlock victim transaction is gone"
               | _ -> failtestf "expected a 1213 deadlock victim, got %A" deadlock
 
+          testCase "deadlock detection chooses the transaction with less row ownership"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE tx_deadlock_cost (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO tx_deadlock_cost VALUES (1, 0), (2, 0), (3, 0), (4, 0)"
+              let smaller, _ = handle (create 2 store) "BEGIN"
+              let larger, _ = handle (create 3 store) "BEGIN"
+              let smaller, _ = handle smaller "UPDATE tx_deadlock_cost SET n = 1 WHERE id = 1"
+              let larger, _ = handle larger "UPDATE tx_deadlock_cost SET n = 2 WHERE id = 2"
+              let larger, _ = handle larger "UPDATE tx_deadlock_cost SET n = 2 WHERE id = 3"
+              let larger, _ = handle larger "UPDATE tx_deadlock_cost SET n = 2 WHERE id = 4"
+
+              let smallerWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle smaller "UPDATE tx_deadlock_cost SET n = 1 WHERE id = 2")
+
+              Expect.isFalse (smallerWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the smaller transaction waits for row two"
+              let larger, largerResult = handle larger "UPDATE tx_deadlock_cost SET n = 2 WHERE id = 1"
+              Expect.isTrue (smallerWaiting.Wait(TimeSpan.FromSeconds 2.0)) "the selected victim releases its row"
+              let smaller, smallerResult = smallerWaiting.Result
+
+              if smaller.Tx.IsSome then
+                  handle smaller "ROLLBACK" |> ignore
+
+              if larger.Tx.IsSome then
+                  handle larger "ROLLBACK" |> ignore
+
+              match Fsdb.Executor.errorInfo smallerResult with
+              | Some error -> Expect.equal error.Code 1213 "the smaller transaction is the victim"
+              | None -> failtestf "expected the smaller transaction to deadlock, got %A" smallerResult
+
+              Expect.equal largerResult (Affected 1UL) "the larger transaction survives and acquires row one"
+
           testCase "a timed-out multi-row wait releases its partial claims"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
