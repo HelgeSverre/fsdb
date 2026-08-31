@@ -778,6 +778,36 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected both serialized increments, got %A" result
 
+          testCase "a row-lock cycle returns 1213 and rolls back the victim"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE tx_deadlock (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO tx_deadlock VALUES (1, 0), (2, 0)"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 1"
+              let second, _ = handle second "BEGIN"
+              let first, _ = handle first "UPDATE tx_deadlock SET n = 1 WHERE id = 1"
+              let second, _ = handle second "UPDATE tx_deadlock SET n = 2 WHERE id = 2"
+
+              let firstWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle first "UPDATE tx_deadlock SET n = 1 WHERE id = 2")
+
+              Expect.isFalse (firstWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the first transaction waits for row two"
+              let second, deadlock = handle second "UPDATE tx_deadlock SET n = 2 WHERE id = 1"
+
+              if second.Tx.IsSome then
+                  handle second "ROLLBACK" |> ignore
+
+              Expect.isTrue (firstWaiting.Wait(TimeSpan.FromSeconds 2.0)) "releasing the victim lets the survivor continue"
+              let first, firstResult = firstWaiting.Result
+              Expect.equal firstResult (Affected 1UL) "the surviving transaction acquires row two"
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the survivor commits"
+
+              match deadlock with
+              | Err(1213, _) -> Expect.isNone second.Tx "the deadlock victim transaction is gone"
+              | other -> failtestf "expected a 1213 deadlock victim, got %A" other
+
           testCase "a timed-out multi-row wait releases its partial claims"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
