@@ -7842,15 +7842,14 @@ and private tryIndexOrder
     : IndexOrderPlan option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    let canStream =
-        select.Limit.IsSome
-        && not select.Distinct
+    let canUseIndexOrder =
+        not select.Distinct
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
         && not (select.Projections |> List.exists (fst >> containsAggregate registry))
         && not (select.Projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not))
 
-    if not (storedValuesMatchReadValues store) || not canStream then
+    if not (storedValuesMatchReadValues store) || not canUseIndexOrder then
         None
     else
         directOrderColumns tref select
