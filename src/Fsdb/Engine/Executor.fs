@@ -6986,7 +6986,21 @@ and private materializeCte
             | Some err -> Error err
             | None -> Ok(columns, List.ofSeq accumulated))
 
-and private tryIntegerSemiJoin
+and private compatibleSemiJoinColumns (left: ColumnDef) (right: ColumnDef) =
+    left.Type = right.Type
+    &&
+    match left.Type with
+    | TChar _
+    | TVarchar _
+    | TTinyText
+    | TText
+    | TMediumText
+    | TLongText
+    | TEnum _
+    | TSet _ -> left.Charset = right.Charset && left.Collation = right.Collation
+    | _ -> true
+
+and private tryIndexedSemiJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -6995,36 +7009,40 @@ and private tryIntegerSemiJoin
     : Result<(ColumnDef list * Value[] seq * SelectStmt) option, QueryResult> =
     let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
 
-    let columnName =
-        match select.Where with
-        | Some(InSubquery(Col name, _)) -> Some name
-        | Some(InSubquery(QualifiedCol(owner, name), _))
-            when System.String.Equals(owner, qualifier, System.StringComparison.OrdinalIgnoreCase) ->
-            Some name
-        | _ -> None
+    let inPredicate =
+        let classify =
+            function
+            | InSubquery(Col name, subquery) -> Some(name, subquery)
+            | InSubquery(QualifiedCol(owner, name), subquery)
+                when System.String.Equals(owner, qualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                Some(name, subquery)
+            | _ -> None
 
-    match columnName, select.Where with
-    | Some name, Some(InSubquery(_, subquery)) ->
+        select.Where
+        |> Option.toList
+        |> List.collect flattenAnd
+        |> List.tryPick classify
+
+    match inPredicate with
+    | Some(name, subquery) ->
         tryPhysicalTableRef store dbName tableRef
         |> Result.bind (function
             | None -> Ok None
             | Some table ->
-                let indexedInteger =
+                let outerColumn =
                     table.Columns
                     |> List.tryFind (fun column -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
-                    |> Option.exists (fun column ->
-                        match column.Type with
-                        | TTinyInt _
-                        | TBool
-                        | TSmallInt _
-                        | TMediumInt _
-                        | TInt _
-                        | TBigInt false -> Storage.tryEqualityLookupInTable store table name (VInt 0L) |> Option.isSome
-                        | _ -> false)
+
+                let rightColumn =
+                    match selectProjectionColumns store dbName subquery with
+                    | [ Some column ] -> Some column
+                    | _ -> None
+
+                let index = Storage.tryEqualityIndex table name
 
                 if
-                    not indexedInteger
-                    || not (isStatementStableSelect store registry dbName emptySubqueryScope subquery)
+                    not (isStatementStableSelect store registry dbName emptySubqueryScope subquery)
+                    || not (Option.map2 compatibleSemiJoinColumns outerColumn rightColumn |> Option.defaultValue false)
                 then
                     Ok None
                 else
@@ -7039,23 +7057,28 @@ and private tryIntegerSemiJoin
                     | ResultSet(_, _) ->
                         let values = materialized.Rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
 
-                        if values |> List.exists (function VInt _ | VNull -> false | _ -> true) then
-                            Ok None
-                        else
-                            let rows =
-                                values
-                                |> List.choose (function VInt value -> Some value | VNull -> None | _ -> None)
-                                |> Set.ofList
-                                |> Seq.collect (fun value ->
-                                    Storage.tryEqualityLookupInTable store table name (VInt value)
-                                    |> Option.map snd
-                                    |> Option.defaultValue [])
-                                |> Map.ofSeq
-                                |> Map.toSeq
-                                |> Seq.map snd
+                        match index with
+                        | None -> Ok None
+                        | Some index ->
+                            let rec probe acc =
+                                function
+                                | [] -> Some acc
+                                | VNull :: rest -> probe acc rest
+                                | value :: rest ->
+                                    Storage.tryEqualityLookupForIndex store table index [ value ]
+                                    |> Option.bind (fun rows -> probe (List.fold (fun found row -> row :: found) acc rows) rest)
 
-                            Ok(Some(table.Columns, rows, { select with Where = None })))
-    | _ -> Ok None
+                            match probe [] values with
+                            | None -> Ok None
+                            | Some candidates ->
+                                let rows =
+                                    candidates
+                                    |> Map.ofList
+                                    |> Map.toSeq
+                                    |> Seq.map snd
+
+                                Ok(Some(table.Columns, rows, select)))
+    | None -> Ok None
 
 and private prepareLockingRead
     (store: Store)
@@ -7246,7 +7269,7 @@ and private runUnlockedSelectStmt
             | Error e -> e, [], []
             | Ok(columns, rows) -> runResolved columns rows select
         | FromTable tref, [] ->
-            match tryIntegerSemiJoin store registry dbName select tref with
+            match tryIndexedSemiJoin store registry dbName select tref with
             | Error error -> error, [], []
             | Ok(Some(columns, rows, narrowed)) -> runResolved columns rows narrowed
             | Ok None ->
