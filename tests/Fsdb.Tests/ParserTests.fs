@@ -2242,6 +2242,10 @@ let tests =
                     | CreateIndex("ix_lower", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Lowercase; Direction = Asc } ], true, BTree, true) -> ()
                     | other -> failtestf "expected a lowercase functional key part, got %A" other
 
+                    match parseOk "CREATE INDEX ix_upper ON t ((UPPER(external_id)) DESC)" with
+                    | CreateIndex("ix_upper", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Uppercase; Direction = Desc } ], false, BTree, true) -> ()
+                    | other -> failtestf "expected an uppercase functional key part, got %A" other
+
                     match
                         parseOk
                             "CREATE TABLE companies (name VARCHAR(255), rating BIGINT, firm_name VARCHAR(255), firm_id BIGINT, client_of BIGINT, INDEX company_name_index USING btree (name), INDEX company_expression_index ((CASE WHEN rating > 0 THEN lower(name) END) DESC), INDEX full_name_index ((CONCAT_WS(firm_name, name, _utf8mb4' '))), INDEX company_disabled_index (firm_id, client_of) INVISIBLE)"

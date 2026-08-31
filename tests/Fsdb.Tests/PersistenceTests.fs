@@ -2086,7 +2086,9 @@ let tests =
                     "CREATE INDEX ix_gone ON new_name (id)"
                     "DROP INDEX ix_gone ON new_name" // 0x08
                     "CREATE TABLE lookup_names (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_lower_name ((LOWER(name))))"
-                    "INSERT INTO lookup_names VALUES (1, 'Reference'), (2, 'REFERENCE')" ]
+                    "INSERT INTO lookup_names VALUES (1, 'Reference'), (2, 'REFERENCE')"
+                    "CREATE TABLE lookup_upper (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_upper_name ((UPPER(name))))"
+                    "INSERT INTO lookup_upper VALUES (1, 'Reference'), (2, 'REFERENCE')" ]
                   |> List.fold run session
 
               ignore session
@@ -2120,6 +2122,10 @@ let tests =
               match handle (Fsdb.Session.create 3 reloaded) "SELECT id FROM lookup_names WHERE LOWER(name) = 'reference' ORDER BY id" |> snd with
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "the recovered functional bucket returns both rows"
               | other -> failtestf "expected recovered functional lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 4 reloaded) "SELECT id FROM lookup_upper WHERE UPPER(name) = 'REFERENCE' ORDER BY id" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "the recovered uppercase bucket returns both rows"
+              | other -> failtestf "expected recovered uppercase lookup rows, got %A" other
 
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->

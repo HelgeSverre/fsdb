@@ -543,6 +543,7 @@ let tests =
           <| fun _ ->
               let store = setup ()
               run store "CREATE UNIQUE INDEX ix_lower_name ON users ((LOWER(name)))" |> ignore
+              run store "CREATE INDEX ix_upper_email ON users ((UPPER(email)))" |> ignore
 
               match
                   run
@@ -552,10 +553,20 @@ let tests =
               | ResultSet(_, [ [ None; Some "lower(`name`)" ] ]) -> ()
               | other -> failtestf "expected functional index expression metadata, got %A" other
 
+              match
+                  run
+                      store
+                      "SELECT column_name, expression FROM information_schema.statistics WHERE table_schema = 'fsdb' AND table_name = 'users' AND index_name = 'ix_upper_email'"
+              with
+              | ResultSet(_, [ [ None; Some "upper(`email`)" ] ]) -> ()
+              | other -> failtestf "expected uppercase index expression metadata, got %A" other
+
               let session = Fsdb.Session.create 1 store
 
               match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE users" |> snd with
-              | ResultSet(_, [ [ _; Some ddl ] ]) -> Expect.stringContains ddl "UNIQUE KEY `ix_lower_name` ((lower(`name`)))" "functional key DDL"
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "UNIQUE KEY `ix_lower_name` ((lower(`name`)))" "lowercase functional key DDL"
+                  Expect.stringContains ddl "KEY `ix_upper_email` ((upper(`email`)))" "uppercase functional key DDL"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
               match Fsdb.QueryHandler.handle session "SHOW INDEX FROM users WHERE key_name = 'ix_lower_name'" |> snd with
