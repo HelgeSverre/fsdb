@@ -410,6 +410,62 @@ let tests =
                   | ResultSet(_, [ [ Some "1" ] ]) -> ()
                   | other -> failtestf "expected the limited session to retain its own value, got %A" other)
 
+          testCase "max_sp_recursion_depth is scoped, bounded, and resettable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let original = create 1 store
+
+              match handle original "SELECT @@GLOBAL.max_sp_recursion_depth, @@SESSION.max_sp_recursion_depth" |> snd with
+              | ResultSet(_, [ [ Some "0"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected the zero recursion defaults, got %A" other
+
+              let original, setGlobal = handle original "SET GLOBAL max_sp_recursion_depth = 3"
+              Expect.equal setGlobal (Affected 0UL) "the global default is writable"
+
+              let inherited = create 2 store
+
+              match handle inherited "SELECT @@SESSION.max_sp_recursion_depth" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected a new session to inherit the global depth, got %A" other
+
+              let inherited, setLocal = handle inherited "SET SESSION max_sp_recursion_depth = 1"
+              Expect.equal setLocal (Affected 0UL) "the session override is writable"
+              let inherited, resetLocal = handle inherited "SET SESSION max_sp_recursion_depth = DEFAULT"
+              Expect.equal resetLocal (Affected 0UL) "the session default is accepted"
+
+              match handle inherited "SELECT @@SESSION.max_sp_recursion_depth" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected SESSION DEFAULT to inherit GLOBAL, got %A" other
+
+              let high, clampedHigh = handle inherited "SET SESSION max_sp_recursion_depth = 256"
+              Expect.equal clampedHigh (Affected 0UL) "the high value is clamped"
+              Expect.equal (high.Diagnostics |> List.map _.Code) [ 1292 ] "the high clamp warns"
+
+              match handle high "SELECT @@SESSION.max_sp_recursion_depth" |> snd with
+              | ResultSet(_, [ [ Some "255" ] ]) -> ()
+              | other -> failtestf "expected the upper recursion bound, got %A" other
+
+              let low, clampedLow = handle high "SET SESSION max_sp_recursion_depth = -1"
+              Expect.equal clampedLow (Affected 0UL) "the low value is clamped"
+              Expect.equal (low.Diagnostics |> List.map _.Code) [ 1292 ] "the low clamp warns"
+
+              match handle low "SELECT @@SESSION.max_sp_recursion_depth" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected the lower recursion bound, got %A" other
+
+              for invalid in [ "'2'"; "1.5"; "NULL" ] do
+                  match handle low ("SET SESSION max_sp_recursion_depth = " + invalid) |> snd with
+                  | Err(1232, message) ->
+                      Expect.stringContains message "max_sp_recursion_depth" "the variable is named"
+                  | other -> failtestf "expected %s to be rejected, got %A" invalid other
+
+              let original, resetGlobal = handle original "SET GLOBAL max_sp_recursion_depth = DEFAULT"
+              Expect.equal resetGlobal (Affected 0UL) "the compiled global default is accepted"
+
+              match handle original "SELECT @@GLOBAL.max_sp_recursion_depth" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected GLOBAL DEFAULT to restore zero, got %A" other
+
           // `max_allowed_packet` is what the wire actually enforces
           // (`Packet.readPacketAsync`), so a client that reads the variable
           // and a client that gets 1153'd must see the same number. Two

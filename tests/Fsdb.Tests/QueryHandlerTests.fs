@@ -3605,6 +3605,71 @@ let tests =
               | Err(1456, message) -> Expect.stringContains message "Recursive limit 0" "recursion limit"
               | other -> failtestf "expected recursive CALL refusal, got %A" other
 
+          testCase "procedures honor direct and mutual recursion depth"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              [ """CREATE PROCEDURE recursive_value(IN n INT, OUT result INT)
+                     BEGIN
+                       DECLARE nested INT DEFAULT 0;
+                       IF n = 0 THEN
+                         SET result = 1;
+                       ELSE
+                         CALL recursive_value(n - 1, nested);
+                         SET result = nested + 1;
+                       END IF;
+                     END"""
+                """CREATE PROCEDURE mutual_a(IN n INT, OUT result INT)
+                     BEGIN
+                       DECLARE nested INT DEFAULT 0;
+                       IF n = 0 THEN SET result = 1;
+                       ELSE CALL mutual_b(n - 1, nested); SET result = nested + 1;
+                       END IF;
+                     END"""
+                """CREATE PROCEDURE mutual_b(IN n INT, OUT result INT)
+                     BEGIN
+                       DECLARE nested INT DEFAULT 0;
+                       IF n = 0 THEN SET result = 1;
+                       ELSE CALL mutual_a(n - 1, nested); SET result = nested + 1;
+                       END IF;
+                     END""" ]
+              |> List.iter (fun definition ->
+                  TestSupport.Sql.expectOk (execute definition) "create recursive procedure")
+
+              match execute "CALL recursive_value(1, @result)" with
+              | Err(1456, message) -> Expect.stringContains message "Recursive limit 0" "default limit"
+              | other -> failtestf "expected default recursion refusal, got %A" other
+
+              TestSupport.Sql.expectOk
+                  (execute "SET SESSION max_sp_recursion_depth = 1")
+                  "enable one recursive re-entry"
+              TestSupport.Sql.expectOk (execute "CALL recursive_value(1, @result)") "call one level"
+
+              match execute "SELECT @result" with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected direct recursive result, got %A" other
+
+              match execute "CALL recursive_value(2, @result)" with
+              | Err(1456, message) -> Expect.stringContains message "Recursive limit 1" "direct limit"
+              | other -> failtestf "expected direct depth refusal, got %A" other
+
+              TestSupport.Sql.expectOk (execute "CALL mutual_a(2, @result)") "call mutual recursion"
+
+              match execute "SELECT @result" with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected mutual recursive result, got %A" other
+
+              match execute "CALL mutual_a(4, @result)" with
+              | Err(1456, message) ->
+                  Expect.stringContains message "Recursive limit 1" "mutual limit"
+                  Expect.stringContains message "mutual_a" "limited routine"
+              | other -> failtestf "expected mutual depth refusal, got %A" other
+
           testCase "nested procedure errors retain prior results and reach handlers"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
