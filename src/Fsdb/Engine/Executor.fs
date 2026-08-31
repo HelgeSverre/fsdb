@@ -159,6 +159,10 @@ type private FullTextSourcePlan =
       Columns: ColumnDef list
       Rows: Value[] seq }
 
+type private FullTextCandidates =
+    | ScoredCandidates of Map<RowId, float>
+    | CombinedCandidates of Set<RowId>
+
 type private MutationSource =
     { Qualifier: string
       PhysicalTable: TableRef option
@@ -10542,11 +10546,16 @@ and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
 
     matchNodes |> traverse scoreNode
 
-and private fullTextCandidateIds (computed: (Expr * MatchMode * Map<RowId, float>) list) expression =
+and private fullTextCandidates (computed: (Expr * MatchMode * Map<RowId, float>) list) expression =
     let scoreMap node =
         computed
         |> List.tryFind (fun (candidate, _, _) -> candidate = node)
-        |> Option.map (fun (_, _, scores) -> scores |> Map.keys |> Set.ofSeq)
+        |> Option.map (fun (_, _, scores) -> ScoredCandidates scores)
+
+    let ids =
+        function
+        | ScoredCandidates scores -> scores |> Map.keys |> Set.ofSeq
+        | CombinedCandidates candidates -> candidates
 
     let rec candidates expression =
         match scoreMap expression with
@@ -10555,17 +10564,24 @@ and private fullTextCandidateIds (computed: (Expr * MatchMode * Map<RowId, float
             match expression with
             | BinOp(And, left, right) ->
                 match candidates left, candidates right with
-                | Some left, Some right -> Some(Set.intersect left right)
+                | Some left, Some right -> Some(CombinedCandidates(Set.intersect (ids left) (ids right)))
                 | Some candidates, None
                 | None, Some candidates -> Some candidates
                 | None, None -> None
             | BinOp(Or, left, right) ->
                 match candidates left, candidates right with
-                | Some left, Some right -> Some(Set.union left right)
+                | Some left, Some right -> Some(CombinedCandidates(Set.union (ids left) (ids right)))
                 | _ -> None
             | _ -> None
 
     candidates expression
+
+and private fullTextCandidateIds (candidates: FullTextCandidates) : RowId seq =
+    seq {
+        match candidates with
+        | ScoredCandidates scores -> yield! Map.keys scores
+        | CombinedCandidates candidates -> yield! Set.toSeq candidates
+    }
 
 and private fullTextPredicatePlan (table: Table) (predicate: Expr) =
     let matchNodes = collectMatchAgainst predicate |> List.distinct
@@ -10581,14 +10597,15 @@ and private fullTextPredicatePlan (table: Table) (predicate: Expr) =
                 |> fun replacements -> substituteExprs replacements predicate
 
             let rowIds =
-                fullTextCandidateIds computed predicate
-                |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.map fst |> Set.ofSeq)
+                fullTextCandidates computed predicate
+                |> Option.map fullTextCandidateIds
+                |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.map fst)
 
             Some
                 { Rows =
                     rowIds
-                    |> Set.toList
-                    |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                    |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                    |> List.ofSeq
                   PredicateFor = fun rowId -> rewrite (fun scores -> scores |> Map.tryFind rowId |> Option.defaultValue 0.0)
                   ProbePredicate = rewrite (fun _ -> 0.0) })
 
@@ -10701,19 +10718,23 @@ and private runFullTextSelect
                                     let index = matchNodes |> List.findIndex ((=) node)
                                     node, sprintf "__fsdb_match_%d__" index)
 
-                            let rowsForExecution =
-                                match select.Where |> Option.bind (fullTextCandidateIds computed) with
+                            let candidateIds =
+                                match select.Where |> Option.bind (fullTextCandidates computed) with
                                 | Some candidates ->
-                                    candidates
-                                    |> Set.toList
-                                    |> List.choose (fun rowId -> source.Table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                                    fullTextCandidateIds candidates
                                 | None ->
                                     match source.Item with
                                     | FromTable tableRef when select.Joins.IsEmpty && select.Locking.IsEmpty ->
                                         tryIndexedLookup store dbName tableRef select.Where
-                                        |> Option.map snd
-                                        |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> List.ofSeq)
-                                    | _ -> source.Table.RowsArray.Indexed |> List.ofSeq
+                                        |> Option.map (snd >> Seq.map fst)
+                                        |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst)
+                                    | _ -> source.Table.RowsArray.Indexed |> Seq.map fst
+
+                            let rowsForExecution =
+                                candidateIds
+                                |> Seq.choose (fun rowId ->
+                                    source.Table.RowsArray.TryFind rowId
+                                    |> Option.map (fun row -> rowId, row))
 
                             let columns = source.Table.Columns @ (synthetic |> List.map (fun (_, name) -> syntheticColumn name (TDouble false) false))
                             let rows =
