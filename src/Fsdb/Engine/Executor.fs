@@ -7462,13 +7462,7 @@ and private runUnlockedSelectStmt
     | _ when not matchNodes.IsEmpty -> runFullTextSelect store registry dbName select matchNodes outer
     | None -> runSelect store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
     | Some fromItem ->
-        // A single real table, no `JOIN`, narrows to its PK/UNIQUE index's
-        // candidates instead of a full `resolveFromItem` scan when the
-        // WHERE clause allows it (see `tryPointLookup`'s doc) — pure
-        // narrowing, so everything below (`applyJoin`, `runSelect`'s own
-        // WHERE/ORDER BY/LIMIT/GROUP BY) runs completely unmodified over
-        // whatever this produces.
-        let runResolvedWithGroupOrder groupInputOrder (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
+        let runResolved groupInputOrder (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
             let baseQualifier = fromItemQualifier fromItem
 
             let initial : Result<((string * ColumnDef list) list * Value[] seq) * string list list, QueryResult> =
@@ -7496,30 +7490,30 @@ and private runUnlockedSelectStmt
 
                 runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select' outer
 
-        let runResolved columns (rows: Value[] seq) resolvedSelect =
-            runResolvedWithGroupOrder ArbitraryGroupRows columns rows resolvedSelect
+        let runArbitrary columns (rows: Value[] seq) resolvedSelect =
+            runResolved ArbitraryGroupRows columns rows resolvedSelect
 
         match fromItem, select.Joins with
         | FromTable _, _ when not select.Locking.IsEmpty ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []
-            | Ok(columns, rows) -> runResolved columns rows select
+            | Ok(columns, rows) -> runArbitrary columns rows select
         | FromTable tref, [] ->
             match tryGroupIndexOrder store dbName tref select with
-            | Some plan -> runResolvedWithGroupOrder ContiguousGroupRows plan.Columns plan.Rows select
+            | Some plan -> runResolved ContiguousGroupRows plan.Columns plan.Rows select
             | None ->
                 match tryIndexedSemiJoin store registry dbName select tref with
                 | Error error -> error, [], []
-                | Ok(Some(columns, rows, narrowed)) -> runResolved columns rows narrowed
+                | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows narrowed
                 | Ok None ->
                   match tryIndexedLookup store dbName tref select.Where with
-                  | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
+                  | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) select
                   | None ->
                     match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
-                    | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
+                    | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) select
                     | None ->
                         match tryIndexOrder store registry dbName tref select with
-                        | Some plan -> runResolved plan.Columns plan.Rows { select with OrderBy = [] }
+                        | Some plan -> runArbitrary plan.Columns plan.Rows { select with OrderBy = [] }
                         | None ->
                             let resolved =
                                 tryRangeLookup store dbName tref select.Where
@@ -7529,7 +7523,7 @@ and private runUnlockedSelectStmt
 
                             match resolved with
                             | Error e -> e, [], []
-                            | Ok(columns, rows) -> runResolved columns rows select
+                            | Ok(columns, rows) -> runArbitrary columns rows select
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then
@@ -7538,19 +7532,19 @@ and private runUnlockedSelectStmt
                     tryQualifiedRangeLookup store dbName tref select.Where
 
             match rangeLookup with
-            | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
+            | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) select
             | None ->
                 match resolveFromItem store registry dbName fromItem with
                 | Error e -> e, [], []
-                | Ok(columns, rows) -> runResolved columns rows select
+                | Ok(columns, rows) -> runArbitrary columns rows select
         | FromLateral _, _ ->
             match resolveFromSubquery store registry dbName fromItem outer with
             | Error e -> e, [], []
-            | Ok(columns, rows) -> runResolved columns rows select
+            | Ok(columns, rows) -> runArbitrary columns rows select
         | _ ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []
-            | Ok(columns, rows) -> runResolved columns rows select
+            | Ok(columns, rows) -> runArbitrary columns rows select
 
 /// Flattens a top-level `AND` chain into conjuncts.
 and private flattenAnd (expr: Expr) : Expr list =
