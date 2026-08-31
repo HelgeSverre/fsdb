@@ -912,6 +912,38 @@ let tests =
               handle waiter "ROLLBACK" |> ignore
               handle owner "ROLLBACK" |> ignore
 
+          testCase "literal IN updates claim every indexed row before execution"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE tx_in_claims (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO tx_in_claims VALUES (1, 0), (2, 0), (3, 0)"
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, ownerUpdate = handle owner "UPDATE tx_in_claims SET n = 10 WHERE id = 2"
+              Expect.equal ownerUpdate (Affected 1UL) "the owner claims row two"
+              let waiter, _ = handle (create 3 store) "BEGIN"
+              use started = new Threading.ManualResetEventSlim(false)
+
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle waiter "UPDATE tx_in_claims SET n = n + 1 WHERE id IN (1, 2)")
+
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the competing update starts"
+              let blocked = not (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+              let ownerCommit = handle owner "COMMIT" |> snd
+              Expect.equal ownerCommit (Affected 0UL) "the owner commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "the IN update continues after row two is released"
+              let waiter, waiterUpdate = waiting.Result
+              let waiterCommit = handle waiter "COMMIT" |> snd
+
+              Expect.isTrue blocked "the IN update waits before reading any claimed row"
+              Expect.equal waiterUpdate (Affected 2UL) "both listed rows are updated"
+              Expect.equal waiterCommit (Affected 0UL) "the serialized update commits"
+
+              match handle (create 4 store) "SELECT id, n FROM tx_in_claims ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "11" ]; [ Some "3"; Some "0" ] ]) -> ()
+              | result -> failtestf "expected the serialized literal-IN values, got %A" result
+
           testCase "concurrent transactions merge updates to different rows in the same table"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

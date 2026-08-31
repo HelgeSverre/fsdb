@@ -919,6 +919,17 @@ let tests =
                         ()
                     | other -> failtestf "expected a const plan for the alias-qualified lookup, got %A" other
 
+                testCase "EXPLAIN reports a primary-key literal IN list as a range"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY, v INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 10), (2, 20), (3, 30)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE id IN (1, 3, 99)" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "users"; None; Some "range"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; None; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a primary-key IN range plan, got %A" other
+
                 testCase "EXPLAIN UPDATE/DELETE by primary key report the same const row a SELECT does"
                 <| fun _ ->
                     let store = newStore ()
