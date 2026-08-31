@@ -4920,6 +4920,18 @@ let tests =
                         ()
                     | other -> failtestf "expected a point lookup plan, got %A" other
 
+                    runDefault
+                        store
+                        "CREATE TABLE competing (id INT PRIMARY KEY, tenant_id INT, priority INT, KEY ix_tenant (tenant_id), KEY ix_tenant_priority (tenant_id, priority))"
+                    |> ignore
+
+                    match runDefault store "EXPLAIN SELECT id FROM competing WHERE tenant_id = 2 ORDER BY priority" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "ref") "the equality probe retains priority"
+                        Expect.equal row.[6] (Some "ix_tenant") "the selected equality key is reported"
+                        Expect.isTrue (row.[11] |> Option.exists (_.Contains("filesort"))) "EXPLAIN reports the remaining sort"
+                    | other -> failtestf "expected an equality plan with filesort, got %A" other
+
                 testCase "primary and unique ranges narrow SELECT UPDATE and DELETE"
                 <| fun _ ->
                     let mutable calls = 0

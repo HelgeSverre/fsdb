@@ -7895,24 +7895,31 @@ and private tryIndexOrder
                           EstimatedRows = count
                           Rows = rows }
 
-            match orderedColumns with
-            | [ column, direction ] ->
-                let lower, upper =
-                    rangeLookupBounds BareOrQualifiedRange tref select.Where
-                    |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
-                    |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
-                    |> Option.defaultValue (None, None)
+            let direct =
+                match orderedColumns with
+                | [ column, direction ] ->
+                    let lower, upper =
+                        rangeLookupBounds BareOrQualifiedRange tref select.Where
+                        |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
+                        |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
+                        |> Option.defaultValue (None, None)
 
-                Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
-                |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
-                |> Option.orElseWith (fun () ->
-                    Storage.tryCompositeOrderedLookup store tableDb tref.Table [ column, direction ]
+                    Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
+                    |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
+                    |> Option.orElseWith (fun () ->
+                        Storage.tryCompositeOrderedLookup store tableDb tref.Table [ column, direction ]
+                        |> Option.bind (fun lookup ->
+                            plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows))
+                | columns ->
+                    Storage.tryCompositeOrderedLookup store tableDb tref.Table columns
                     |> Option.bind (fun lookup ->
-                        plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows))
-            | columns ->
-                Storage.tryCompositeOrderedLookup store tableDb tref.Table columns
+                        plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows)
+
+            direct
+            |> Option.orElseWith (fun () ->
+                tryFixedPrefixIndexOrder store dbName tref select.Where orderedColumns
                 |> Option.bind (fun lookup ->
-                    plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows))
+                    plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows)))
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -8848,7 +8855,7 @@ and private whereEqualityPinnedColumns (whereExpr: Expr option) : Set<string> =
 
     whereExpr |> Option.map (fun e -> walk e Set.empty) |> Option.defaultValue Set.empty
 
-and private groupByIndexPrefix (pinned: Set<string>) (groupColumns: string list) (indexColumns: string list) : string list option =
+and private indexPrefixThrough (pinned: Set<string>) (suffixColumns: string list) (indexColumns: string list) : string list option =
     let normalized = indexColumns |> List.map (fun column -> column.ToLowerInvariant())
 
     let rec pinnedCount count =
@@ -8859,10 +8866,61 @@ and private groupByIndexPrefix (pinned: Set<string>) (groupColumns: string list)
     let leadingPinned = pinnedCount 0 normalized
     let remaining = List.skip leadingPinned normalized
 
-    if List.length remaining >= List.length groupColumns && List.take groupColumns.Length remaining = groupColumns then
-        Some(List.take (leadingPinned + groupColumns.Length) indexColumns)
+    if List.length remaining >= List.length suffixColumns && List.take suffixColumns.Length remaining = suffixColumns then
+        Some(List.take (leadingPinned + suffixColumns.Length) indexColumns)
     else
         None
+
+and private tryFixedPrefixIndexOrder
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    (orderedColumns: (string * Direction) list)
+    : Storage.OrderedLookup option =
+    let invert = function Asc -> Desc | Desc -> Asc
+    let tableDb = tref.Database |> Option.defaultValue dbName
+
+    InformationSchema.findTable store.Catalog tableDb tref.Table
+    |> Result.toOption
+    |> Option.bind (fun table ->
+        let pinned = whereEqualityPinnedColumns whereExpr
+        let requestedNames = orderedColumns |> List.map (fun (name, _) -> name.ToLowerInvariant())
+        let requestedDirections = orderedColumns |> List.map snd
+
+        let primaryColumns = Storage.primaryKeyColumns table
+        let primary =
+            if primaryColumns.IsEmpty then
+                []
+            else
+                [ primaryColumns, List.replicate primaryColumns.Length Asc ]
+
+        let secondary =
+            table.Indexes
+            |> List.filter (fun index ->
+                index.Visible
+                && index.Kind = BTree
+                && (index.KeyColumns
+                    |> List.forall (fun column -> column.Name <> "" && column.PrefixLength.IsNone && column.Transform.IsNone)))
+            |> List.map (fun index -> index.Columns, index.KeyColumns |> List.map _.Direction)
+
+        primary @ secondary
+        |> List.tryPick (fun (indexColumns, indexDirections) ->
+            indexPrefixThrough pinned requestedNames indexColumns
+            |> Option.filter (fun prefix -> prefix.Length > requestedNames.Length)
+            |> Option.bind (fun prefix ->
+                let leading = prefix.Length - requestedNames.Length
+                let stored = indexDirections |> List.take prefix.Length
+                let storedSuffix = stored |> List.skip leading
+
+                let traversal =
+                    if storedSuffix = requestedDirections then Some stored
+                    elif storedSuffix |> List.map invert = requestedDirections then Some(stored |> List.map invert)
+                    else None
+
+                traversal
+                |> Option.bind (fun directions ->
+                    Storage.tryCompositeOrderedLookup store tableDb tref.Table (List.zip prefix directions)))))
 
 and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
     if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
@@ -8886,7 +8944,7 @@ and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) 
                     |> List.map _.Columns
 
                 primary @ secondary
-                |> List.choose (groupByIndexPrefix pinned groupColumns)
+                |> List.choose (indexPrefixThrough pinned groupColumns)
                 |> List.tryPick (fun prefix ->
                     Storage.tryCompositeOrderedLookup store tableDb tref.Table (prefix |> List.map (fun column -> column, Asc))))
             |> Option.map (fun lookup ->
@@ -11818,8 +11876,10 @@ and private explainSelectBlock
     let indexOrderPlan =
         match select.From, joins with
         | Some(FromTable tref), [] ->
-            tryIndexOrder store registry dbName tref select
-            |> Option.orElseWith (fun () -> tryGroupIndexOrder store dbName tref select)
+            match tryGroupIndexOrder store dbName tref select with
+            | Some plan -> Some plan
+            | None when tryIndexedLookup store dbName tref select.Where |> Option.isNone -> tryIndexOrder store registry dbName tref select
+            | None -> None
         | _ -> None
 
     let extra =
