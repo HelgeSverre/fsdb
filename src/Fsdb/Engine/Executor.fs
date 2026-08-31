@@ -11275,18 +11275,22 @@ and private runSelect
         // Shared by both `ORDER BY` branches below: evaluates `WHERE`, the
         // projection, and the sort keys for one row, in that order, short-
         // circuiting to `None` on a `WHERE` miss without projecting it.
-        // Collation-aware DISTINCT key: string output columns fold to
-        // their collation's canonical key, so åge/age dedupe under ai_ci
-        // while the emitted text stays the first row's original value.
-        let dedupeKeyOf (row: Value[]) (outputCols: (string * Value) list) : string option list =
-            let ctx = ctxFor row
+        // A DISTINCT query's collation-aware key folds string output columns
+        // to their canonical form, so åge/age dedupe under ai_ci while the
+        // emitted text stays the first row's original value. Non-DISTINCT
+        // paths skip the key entirely.
+        let distinctKeyOf (row: Value[]) (outputCols: (string * Value) list) : string option list =
+            if not select.Distinct then
+                []
+            else
+                let ctx = ctxFor row
 
-            outputCols
-            |> List.filter (fun (name, _) -> not (name.StartsWith(insertSelectSourceAliasPrefix, System.StringComparison.Ordinal)))
-            |> List.map (fun (name, v) ->
-                match v with
-                | VString text -> Some((keyCollation ctx (Col name)).KeyOf text)
-                | _ -> Value.toText v)
+                outputCols
+                |> List.filter (fun (name, _) -> not (name.StartsWith(insertSelectSourceAliasPrefix, System.StringComparison.Ordinal)))
+                |> List.map (fun (name, v) ->
+                    match v with
+                    | VString text -> Some((keyCollation ctx (Col name)).KeyOf text)
+                    | _ -> Value.toText v)
 
         let evalKeyed (row: Value[]) : Result<((Value * Collation.Collation option) list * (string option list * Value[]) * (string option list)) option, EvalError> =
             matches row
@@ -11296,7 +11300,7 @@ and private runSelect
                 else
                     projectRow row
                     |> Result.bind (fun outputCols ->
-                        orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols, dedupeKeyOf row outputCols))))
+                        orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols, distinctKeyOf row outputCols))))
 
         // No `ORDER BY`: `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET` stream lazily
         // through `streamLimited`, which stops pulling rows the moment
@@ -11311,7 +11315,7 @@ and private runSelect
                 matches row
                 |> Result.bind (fun keep ->
                     if keep then
-                        projectRow row |> Result.map (fun outputCols -> dedupeKeyOf row outputCols, pairOf outputCols) |> Result.map Some
+                        projectRow row |> Result.map (fun outputCols -> distinctKeyOf row outputCols, pairOf outputCols) |> Result.map Some
                     else
                         Ok None)
 
