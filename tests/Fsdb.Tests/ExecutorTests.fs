@@ -3722,6 +3722,12 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected multi-column scalar-subquery comparison, got %A" other
 
+                    runDefault store "INSERT INTO allowed VALUES (1, NULL), (9, NULL)" |> ignore
+
+                    match runDefault store "SELECT (1, 2) IN (SELECT a, b FROM allowed), (1, 3) IN (SELECT a, b FROM allowed), (2, 3) IN (SELECT a, b FROM allowed)" with
+                    | ResultSet(_, [ [ Some "1"; None; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected row-membership TRUE, UNKNOWN, and FALSE, got %A" other
+
                     runDefault store "CREATE TABLE binary_pairs (value VARCHAR(10))" |> ignore
                     runDefault store "INSERT INTO binary_pairs VALUES ('A')" |> ignore
 

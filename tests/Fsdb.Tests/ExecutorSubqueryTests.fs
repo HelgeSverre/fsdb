@@ -424,6 +424,47 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the full IN predicate filters prefix candidates"
               | other -> failtestf "expected only the full string match, got %A" other
 
+          testCase "stable row IN subqueries narrow composite indexes"
+          <| fun _ ->
+              let mutable touches = 0
+
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+
+              runDefault
+                  store
+                  "CREATE TABLE outer_rows (id INT PRIMARY KEY, tenant_id INT, status VARCHAR(20), INDEX ix_tenant_status (tenant_id, status))"
+              |> ignore
+
+              runDefault store "CREATE TABLE inner_rows (tenant_id INT, status VARCHAR(20))" |> ignore
+
+              [ 1 .. 100 ]
+              |> List.map (fun id -> sprintf "(%d, %d, 'status-%03d')" id (id % 5) id)
+              |> String.concat ", "
+              |> sprintf "INSERT INTO outer_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              runDefault
+                  store
+                  "INSERT INTO inner_rows VALUES (2, 'status-007'), (1, 'status-081'), (2, 'status-007'), (NULL, 'status-010'), (0, NULL)"
+              |> ignore
+
+              match
+                  run
+                      store
+                      registry
+                      "SELECT id FROM outer_rows WHERE (status, tenant_id) IN (SELECT status, tenant_id FROM inner_rows) AND TOUCH(id) = id ORDER BY id"
+              with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ]; [ Some "81" ] ] "composite candidates match"
+              | other -> failtestf "expected indexed composite matches, got %A" other
+
+              Expect.isLessThan touches 5 "the composite index avoids evaluating every outer row"
+
           testCase "EXISTS stops after its first matching row"
           <| fun _ ->
               let mutable touches = 0
