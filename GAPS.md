@@ -199,8 +199,6 @@ maintained for constraints while staying out of ordinary plans.
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, prefix-key candidates with full residual checks, matching physical inner-join keys, direct literal SELECT/UPDATE/DELETE ranges, compatible grouping, and bounded composite index ordering; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; outer joins and unconstrained ordering remain scans | high (scale) | divergence |
 | Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | DDL, persistence, size validation, SHOW, INFORMATION_SCHEMA, UNIQUE enforcement, and equality/range probes for SELECT/DML/inner joins use character- or byte-prefix keys with complete residual checks; full-value ordering still sorts | low | divergence |
 | Expression indexes | functional key parts participate in physical access and uniqueness | `LOWER(column)` indexes maintain physical equality buckets for matching SELECT/DML predicates and enforce uniqueness; other non-unique expressions retain DDL, persistence, and metadata but use scan fallback, while other unique expressions are refused | low | divergence/refusal |
-| AUTO_INCREMENT | counter persists across restart via redo | burned ids survive rollback (InnoDB-like), but the counter rebuild after crash depends on replayed row events; ALTER can only move it forward | low | divergence |
-
 ## 6. Charsets and collations
 
 Working: ICU-backed registry covering the utf8mb4 0900 attribute matrix,
@@ -228,7 +226,8 @@ validation, unique-key claims for literal VALUES inserts/upserts, merged-result 
 savepoints with MySQL establishment-order semantics,
 autocommit implicit transactions, read-only transactions never blocking
 writers, per-database sharding for databases not linked by qualified foreign keys,
-4,096-stripe row ownership, and InnoDB-style burned AUTO_INCREMENT on rollback.
+4,096-stripe row ownership, and redo-backed InnoDB-style AUTO_INCREMENT burns
+that survive rollback and restart.
 `READ UNCOMMITTED` composes the immutable deltas of active transactions into a
 fresh statement view without publishing them; rolled-back deltas disappear on
 the next statement, while stronger isolation levels never consult that view.
