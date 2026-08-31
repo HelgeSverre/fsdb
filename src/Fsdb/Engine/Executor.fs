@@ -165,10 +165,16 @@ type private EqualityMembership =
       ContainsNull: bool
       Domain: EqualityMembershipDomain }
 
+type private RowEqualityMembership =
+    { Values: Set<Value list>
+      ContainsNullableRows: bool
+      Domains: EqualityMembershipDomain list }
+
 type private ExpressionSubqueryResult =
     { Result: QueryResult
       Rows: Value[] list
-      EqualityMembership: EqualityMembership option }
+      EqualityMembership: EqualityMembership option
+      RowEqualityMembership: RowEqualityMembership option }
 
 type private MemoizedSubquery =
     | MemoizedSubquery of ExpressionSubqueryResult
@@ -179,6 +185,27 @@ let private equalityMembershipKey domain value =
     | SignedIntegerMembership, VInt _
     | DecimalMembership, VDecimal _ -> Some value
     | TextMembership collation, VString text -> Some(VString(collation.KeyOf text))
+    | _ -> None
+
+let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
+    match column.Type with
+    | TTinyInt _
+    | TBool
+    | TSmallInt _
+    | TMediumInt _
+    | TInt _
+    | TBigInt false -> Some SignedIntegerMembership
+    | TDecimal _ -> Some DecimalMembership
+    | TChar _
+    | TVarchar _
+    | TTinyText
+    | TText
+    | TMediumText
+    | TLongText ->
+        column.Collation
+        |> Option.bind Collation.tryFind
+        |> Option.orElseWith (fun () -> Some store.ExecutionSettings.ConnectionCollation)
+        |> Option.map TextMembership
     | _ -> None
 
 type private StatementMemo =
@@ -3801,17 +3828,51 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Affected _ -> Ok VNull
             | MultipleResults _ -> Error nestedSubqueryResultsError
             | ResultSet(_, _) ->
-                subquery.Rows
-                |> traverse (fun row ->
-                    subqueryRowOperand ctx select row
-                    |> rowComparisonResult ctx Eq value)
-                |> Result.map (fun results ->
-                    if results |> List.exists ((=) (VInt 1L)) then
-                        VInt 1L
-                    elif results |> List.exists ((=) VNull) then
-                        VNull
-                    else
-                        VInt 0L))
+                let membershipKey =
+                    match subquery.RowEqualityMembership, value with
+                    | Some membership, RowValues leftValues ->
+                        let right = subqueryRowOperand ctx select (Array.create leftValues.Length VNull)
+
+                        match right with
+                        | RowValues rightValues when leftValues.Length = membership.Domains.Length && rightValues.Length = leftValues.Length ->
+                            let rec keys found domains left right =
+                                match domains, left, right with
+                                | [], [], [] -> Some(List.rev found)
+                                | domain :: restDomains,
+                                  RowScalar(leftExpr, leftColumn, leftValue) :: restLeft,
+                                  RowScalar(rightExpr, rightColumn, _) :: restRight ->
+                                    let key =
+                                        match domain with
+                                        | TextMembership expected ->
+                                            comparisonCollation ctx "=" leftExpr leftColumn rightExpr rightColumn
+                                            |> Result.toOption
+                                            |> Option.filter (fun actual -> actual.Name = expected.Name)
+                                            |> Option.bind (fun _ -> equalityMembershipKey domain leftValue)
+                                        | _ -> equalityMembershipKey domain leftValue
+
+                                    key
+                                    |> Option.bind (fun value -> keys (value :: found) restDomains restLeft restRight)
+                                | _ -> None
+
+                            keys [] membership.Domains leftValues rightValues
+                        | _ -> None
+                    | _ -> None
+
+                match membershipKey, subquery.RowEqualityMembership with
+                | Some key, Some membership when membership.Values.Contains key -> Ok(VInt 1L)
+                | Some _, Some membership when not membership.ContainsNullableRows -> Ok(VInt 0L)
+                | _ ->
+                    subquery.Rows
+                    |> traverse (fun row ->
+                        subqueryRowOperand ctx select row
+                        |> rowComparisonResult ctx Eq value)
+                    |> Result.map (fun results ->
+                        if results |> List.exists ((=) (VInt 1L)) then
+                            VInt 1L
+                        elif results |> List.exists ((=) VNull) then
+                            VNull
+                        else
+                            VInt 0L))
     | InSubquery(e, select) ->
         // `ve = NULL` can't short-circuit before running the subquery the
         // way the literal-list `In` case above does: `NULL IN (<empty
@@ -4295,26 +4356,7 @@ and private runExpressionSubquery
 
         let domain =
             match selectProjectionColumns ctx.Store ctx.DbName select with
-            | [ Some column ] ->
-                match column.Type with
-                | TTinyInt _
-                | TBool
-                | TSmallInt _
-                | TMediumInt _
-                | TInt _
-                | TBigInt false -> Some SignedIntegerMembership
-                | TDecimal _ -> Some DecimalMembership
-                | TChar _
-                | TVarchar _
-                | TTinyText
-                | TText
-                | TMediumText
-                | TLongText ->
-                    column.Collation
-                    |> Option.bind Collation.tryFind
-                    |> Option.orElseWith (fun () -> Some ctx.Store.ExecutionSettings.ConnectionCollation)
-                    |> Option.map TextMembership
-                | _ -> None
+            | [ Some column ] -> equalityMembershipDomain ctx.Store column
             | _ -> None
 
         domain
@@ -4333,19 +4375,56 @@ and private runExpressionSubquery
                   ContainsNull = containsNull
                   Domain = domain }))
 
+    let rowEqualityMembership (rows: Value[] list) =
+        let domains =
+            selectProjectionColumns ctx.Store ctx.DbName select
+            |> List.map (Option.bind (equalityMembershipDomain ctx.Store))
+
+        if domains.Length < 2 || domains |> List.exists Option.isNone then
+            None
+        else
+            let domains = domains |> List.choose id
+
+            let rec tupleKeys found domains values =
+                match domains, values with
+                | [], [] -> Some(List.rev found)
+                | domain :: restDomains, value :: restValues ->
+                    equalityMembershipKey domain value
+                    |> Option.bind (fun key -> tupleKeys (key :: found) restDomains restValues)
+                | _ -> None
+
+            let rec rowsWithKeys (found: Value list list) containsNullableRows (remaining: Value[] list) =
+                match remaining with
+                | [] ->
+                    Some
+                        { Values = Set.ofList found
+                          ContainsNullableRows = containsNullableRows
+                          Domains = domains }
+                | row :: rest when row.Length <> domains.Length -> None
+                | row :: rest when row |> Array.contains VNull -> rowsWithKeys found true rest
+                | row :: rest ->
+                    tupleKeys [] domains (Array.toList row)
+                    |> Option.bind (fun key -> rowsWithKeys (key :: found) containsNullableRows rest)
+
+            rowsWithKeys [] false rows
+
     let execute outer =
         let result, _, rows = runSelectStmt ctx.Store ctx.Registry ctx.DbName select outer
 
         { Result = result
           Rows = rows
-          EqualityMembership = None }
+          EqualityMembership = None
+          RowEqualityMembership = None }
 
     match memo.TryGetValue cacheKey with
     | true, MemoizedSubquery result -> result
     | true, UnmemoizedSubquery -> execute (Some ctx)
     | _ when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
         let result = execute None
-        let result = { result with EqualityMembership = equalityMembership result.Rows }
+        let result =
+            { result with
+                EqualityMembership = equalityMembership result.Rows
+                RowEqualityMembership = rowEqualityMembership result.Rows }
         memo.[cacheKey] <- MemoizedSubquery result
         result
     | _ ->
@@ -7060,6 +7139,15 @@ and private compatibleSemiJoinColumns (left: ColumnDef) (right: ColumnDef) =
     | TSet _ -> left.Charset = right.Charset && left.Collation = right.Collation
     | _ -> true
 
+and private orderedEqualityValues (table: Table) (index: Storage.EqualityIndex) (columnNames: string list) (values: Value list) =
+    columnNames
+    |> traverse (resolveColumn table.Columns)
+    |> Result.toOption
+    |> Option.bind (fun requested ->
+        let byColumn = List.zip requested values |> Map.ofList
+        let ordered = index.ColumnIndices |> List.choose (fun columnIndex -> Map.tryFind columnIndex byColumn)
+        if ordered.Length = index.ColumnIndices.Length then Some ordered else None)
+
 and private tryIndexedSemiJoin
     (store: Store)
     (registry: Registry)
@@ -7070,12 +7158,24 @@ and private tryIndexedSemiJoin
     let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
 
     let inPredicate =
+        let directColumn =
+            function
+            | Col name -> Some name
+            | QualifiedCol(owner, name)
+                when System.String.Equals(owner, qualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                Some name
+            | _ -> None
+
         let classify =
             function
-            | InSubquery(Col name, subquery) -> Some(name, subquery)
-            | InSubquery(QualifiedCol(owner, name), subquery)
-                when System.String.Equals(owner, qualifier, System.StringComparison.OrdinalIgnoreCase) ->
-                Some(name, subquery)
+            | InSubquery(expression, subquery) ->
+                let expressions =
+                    match expression with
+                    | Row values -> values
+                    | value -> [ value ]
+
+                let columns = expressions |> List.choose directColumn
+                if columns.Length = expressions.Length then Some(columns, subquery) else None
             | _ -> None
 
         select.Where
@@ -7084,25 +7184,32 @@ and private tryIndexedSemiJoin
         |> List.tryPick classify
 
     match inPredicate with
-    | Some(name, subquery) ->
+    | Some(columnNames, subquery) ->
         tryPhysicalTableRef store dbName tableRef
         |> Result.bind (function
             | None -> Ok None
             | Some table ->
-                let outerColumn =
-                    table.Columns
-                    |> List.tryFind (fun column -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
+                let outerColumns =
+                    columnNames
+                    |> List.map (fun name ->
+                        table.Columns
+                        |> List.tryFind (fun column -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase)))
 
-                let rightColumn =
-                    match selectProjectionColumns store dbName subquery with
-                    | [ Some column ] -> Some column
-                    | _ -> None
+                let rightColumns = selectProjectionColumns store dbName subquery
 
-                let index = Storage.tryEqualityIndex table name
+                let compatible =
+                    outerColumns.Length = rightColumns.Length
+                    && List.forall2
+                        (fun left right -> Option.map2 compatibleSemiJoinColumns left right |> Option.defaultValue false)
+                        outerColumns
+                        rightColumns
+
+                let index = Storage.tryEqualityIndexForColumns table columnNames
 
                 if
-                    not (isStatementStableSelect store registry dbName emptySubqueryScope subquery)
-                    || not (Option.map2 compatibleSemiJoinColumns outerColumn rightColumn |> Option.defaultValue false)
+                    not (storedValuesMatchReadValues store)
+                    || not (isStatementStableSelect store registry dbName emptySubqueryScope subquery)
+                    || not compatible
                 then
                     Ok None
                 else
@@ -7113,9 +7220,9 @@ and private tryIndexedSemiJoin
                     | Err(code, message) -> Error(Err(code, message))
                     | Affected _ -> Ok None
                     | MultipleResults _ -> Error(nestedResultsError "an IN subquery")
-                    | ResultSet(columns, _) when columns.Length <> 1 -> Error(Err(1241, "Operand should contain 1 column(s)"))
+                    | ResultSet(columns, _) when columns.Length <> columnNames.Length -> Ok None
                     | ResultSet(_, _) ->
-                        let values = materialized.Rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
+                        let values = materialized.Rows |> List.map Array.toList
 
                         match index with
                         | None -> Ok None
@@ -7123,9 +7230,10 @@ and private tryIndexedSemiJoin
                             let rec probe acc =
                                 function
                                 | [] -> Some acc
-                                | VNull :: rest -> probe acc rest
-                                | value :: rest ->
-                                    Storage.tryEqualityLookupForIndex store table index [ value ]
+                                | tuple :: rest when tuple |> List.contains VNull -> probe acc rest
+                                | tuple :: rest ->
+                                    orderedEqualityValues table index columnNames tuple
+                                    |> Option.bind (Storage.tryEqualityLookupForIndex store table index)
                                     |> Option.bind (fun rows -> probe (List.fold (fun found row -> row :: found) acc rows) rest)
 
                             match probe [] values with
@@ -7560,39 +7668,26 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
 
                 access
                 |> Option.bind (fun (table, index) ->
-                    let requestedIndices =
-                        probe.Columns
-                        |> traverse (fst >> resolveColumn table.Columns)
-                        |> Result.toOption
-
-                    match requestedIndices with
-                    | Some requested ->
-                        let lookup (tuple: Value list) =
-                            let ordered =
-                                index.ColumnIndices
-                                |> List.map (fun columnIndex ->
-                                    requested
-                                    |> List.findIndex ((=) columnIndex)
-                                    |> fun valueIndex -> tuple.[valueIndex])
-
+                    let lookup (tuple: Value list) =
+                        orderedEqualityValues table index (probe.Columns |> List.map fst) tuple
+                        |> Option.bind (fun ordered ->
                             if probe.Columns |> List.exists (snd >> Option.isSome) then
                                 Storage.tryProjectedEqualityLookupForIndex store table index ordered
                             else
-                                Storage.tryEqualityLookupForIndex store table index ordered
+                                Storage.tryEqualityLookupForIndex store table index ordered)
 
-                        let lookups = values |> List.map lookup
+                    let lookups = values |> List.map lookup
 
-                        if lookups |> List.forall Option.isSome then
-                            Some
-                                { KeyName = index.Name
-                                  ColumnIndices = index.ColumnIndices
-                                  PrefixLengths = index.PrefixLengths
-                                  Columns = table.Columns
-                                  Unique = index.Unique
-                                  Rows = lookups |> List.choose id |> List.collect id |> List.distinctBy fst |> List.sortBy fst }
-                        else
-                            None
-                    | None -> None)))
+                    if lookups |> List.forall Option.isSome then
+                        Some
+                            { KeyName = index.Name
+                              ColumnIndices = index.ColumnIndices
+                              PrefixLengths = index.PrefixLengths
+                              Columns = table.Columns
+                              Unique = index.Unique
+                              Rows = lookups |> List.choose id |> List.collect id |> List.distinctBy fst |> List.sortBy fst }
+                    else
+                        None)))
 
 and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
