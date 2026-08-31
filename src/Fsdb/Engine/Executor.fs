@@ -297,9 +297,6 @@ let internal isMetadataProbe () = metadataProbe.Value
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
     DynamicScope.withValue triggerRowScope (Some scope) body
 
-let private currentLockingReadRows () =
-    DynamicScope.valueOrDefault Map.empty lockingReadRows
-
 let withLockingReadStore (store: unit -> Store) (timeout: System.TimeSpan) (body: unit -> 'a) : 'a =
     DynamicScope.withValue lockingReadStore (Some store) (fun () ->
         DynamicScope.withValue lockingReadTimeout (Some timeout) body)
@@ -4638,10 +4635,13 @@ and private resolveTableRef
                     cteScope.Value <- savedCtes
         | None ->
             if tableRef.Partitions.IsEmpty then
-                tryPhysicalTableRef store dbName tableRef
-                |> Result.bind (function
-                    | Some table -> Ok(table.Columns, table.RowsArray |> List.ofSeq)
-                    | None -> scanList store tableDb tableRef.Table |> Result.mapError storageErr)
+                match tryLockingReadRows tableRef with
+                | None -> scanList store tableDb tableRef.Table |> Result.mapError storageErr
+                | Some _ ->
+                    tryPhysicalTableRef store dbName tableRef
+                    |> Result.bind (function
+                        | Some table -> Ok(table.Columns, table.RowsArray |> List.ofSeq)
+                        | None -> scanList store tableDb tableRef.Table |> Result.mapError storageErr)
             else
                 match tableSnapshot store tableDb tableRef.Table with
                 | Error e -> Error(storageErr e)
@@ -5766,13 +5766,20 @@ and private joinKeyCollationsCompatible
     equiKeys
     |> List.forall (fun (li, ri) -> joinKeyCollation left.[li] right.[ri] |> Result.isOk)
 
+and private tryLockingReadRows (tableRef: TableRef) =
+    let lockedRows = lockingReadRows.Value
+
+    if obj.ReferenceEquals(lockedRows, null) then
+        None
+    else
+        let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table |> fun value -> value.ToLowerInvariant()
+        Map.tryFind qualifier lockedRows
+
 /// A physical table can retain one immutable root for both an equality probe
 /// and a scan fallback. Views, CTEs, and virtual relations have their own
 /// resolution rules and stay on the ordinary path.
 and private filterLockingReadTable (tableRef: TableRef) (table: Table) =
-    let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table |> fun value -> value.ToLowerInvariant()
-
-    match currentLockingReadRows () |> Map.tryFind qualifier with
+    match tryLockingReadRows tableRef with
     | None -> table
     | Some allowed ->
         let rows = table.RowsArray.ToBuilder()
