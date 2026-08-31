@@ -2127,6 +2127,14 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "the recovered uppercase bucket returns both rows"
               | other -> failtestf "expected recovered uppercase lookup rows, got %A" other
 
+              let recoveredOrderPlan =
+                  handle (Fsdb.Session.create 5 reloaded) "EXPLAIN SELECT id FROM lookup_upper ORDER BY UPPER(name)"
+                  |> snd
+                  |> TestSupport.Sql.explainRow
+
+              Expect.equal recoveredOrderPlan.AccessType (Some "index") "recovery rebuilds transformed order entries"
+              Expect.equal recoveredOrderPlan.Key (Some "ix_upper_name") "the recovered functional order reports its key"
+
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->
               // `encodeOp`/`encodeAlterAction` are reachable from ordinary SQL

@@ -5274,7 +5274,7 @@ let tests =
 
                     runDefault
                         store
-                        "CREATE TABLE indexed (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, keep_row INT, KEY ix_upper ((UPPER(name))))"
+                        "CREATE TABLE indexed (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, keep_row INT, KEY ix_upper ((UPPER(name))), KEY ix_lower ((LOWER(name))))"
                     |> ignore
 
                     runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, keep_row INT)"
@@ -5305,6 +5305,26 @@ let tests =
                     Expect.equal plan.AccessType (Some "index") "the functional index streams the transformed order"
                     Expect.equal plan.Key (Some "ix_upper") "the transformed key is reported"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("filesort"))) "the functional plan avoids a filesort"
+
+                    let lowerPlan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY LOWER(name) DESC"
+                        |> explainRow
+
+                    Expect.equal lowerPlan.AccessType (Some "index") "LOWER uses its functional order"
+                    Expect.equal lowerPlan.Key (Some "ix_lower") "LOWER reports its matching key"
+
+                    let rawPlan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY name"
+                        |> explainRow
+
+                    Expect.equal rawPlan.AccessType (Some "ALL") "the transformed index does not order the stored value"
+                    Expect.isTrue (rawPlan.Extra |> Option.exists (_.Contains("filesort"))) "raw values still use a filesort"
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store $"UPDATE {table} SET name = 'aardvark' WHERE id = 5" |> ignore
+                        runDefault store $"DELETE FROM {table} WHERE id = 2" |> ignore
+
+                    Expect.equal (rows "indexed" "ASC") (rows "scanned" "ASC") "updates and deletes maintain transformed order"
 
                 testCase "invisible indexes enforce constraints without entering query plans"
                 <| fun _ ->

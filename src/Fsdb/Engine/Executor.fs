@@ -112,6 +112,11 @@ type private IndexOrderPlan =
       EstimatedRows: int
       Rows: Value[] seq }
 
+type private IndexOrderTerm =
+    { Column: string
+      Transform: IndexTransform option
+      Direction: Direction }
+
 type private GroupInputOrder =
     | ArbitraryGroupRows
     | ContiguousGroupRows
@@ -7835,7 +7840,7 @@ and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: Table
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows))
 
-and private directOrderColumns (tref: TableRef) (select: SelectStmt) : (string * Direction) list option =
+and private indexOrderTerms (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
     let directBareColumn name =
@@ -7849,15 +7854,21 @@ and private directOrderColumns (tref: TableRef) (select: SelectStmt) : (string *
 
         if directProjections |> List.forall ((<>) 2) && List.sum directProjections <= 1 then Some name else None
 
-    let directColumn = function
-        | Col name -> directBareColumn name
-        | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
-        | _ -> None
+    let directColumn expression =
+        match expression with
+        | Col name -> directBareColumn name |> Option.map (fun column -> column, None)
+        | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+            Some(name, None)
+        | _ -> indexedColumnFor tref expression
 
     select.OrderBy
     |> traverse (fun (expression, direction) ->
         match directColumn expression with
-        | Some column -> Ok(column, direction)
+        | Some(column, transform) ->
+            Ok
+                { Column = column
+                  Transform = transform
+                  Direction = direction }
         | None -> Error())
     |> Result.toOption
 
@@ -7880,7 +7891,7 @@ and private tryIndexOrder
     if not (storedValuesMatchReadValues store) || not canUseIndexOrder then
         None
     else
-        directOrderColumns tref select
+        indexOrderTerms tref select
         |> Option.bind (fun orderedColumns ->
             let plan (keyName: string) (indices: int list) (columns: ColumnDef list) (count: int) (rows: Value[] seq) =
                 let unsupported =
@@ -7901,9 +7912,20 @@ and private tryIndexOrder
                           EstimatedRows = count
                           Rows = rows }
 
+            let plainColumns =
+                orderedColumns
+                |> traverse (fun term ->
+                    match term.Transform with
+                    | None -> Ok(term.Column, term.Direction)
+                    | Some _ -> Error())
+                |> Result.toOption
+
             let direct =
-                match orderedColumns with
-                | [ column, direction ] ->
+                match orderedColumns, plainColumns with
+                | [ { Transform = Some transform } as term ], _ ->
+                    Storage.tryFunctionalOrderedLookup store tableDb tref.Table term.Column transform term.Direction
+                    |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
+                | _, Some [ column, direction ] ->
                     let lower, upper =
                         rangeLookupBounds BareOrQualifiedRange tref select.Where
                         |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
@@ -7916,14 +7938,16 @@ and private tryIndexOrder
                         Storage.tryCompositeOrderedLookup store tableDb tref.Table [ column, direction ]
                         |> Option.bind (fun lookup ->
                             plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows))
-                | columns ->
+                | _, Some columns ->
                     Storage.tryCompositeOrderedLookup store tableDb tref.Table columns
                     |> Option.bind (fun lookup ->
                         plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows)
+                | _ -> None
 
             direct
             |> Option.orElseWith (fun () ->
-                tryFixedPrefixIndexOrder store dbName tref select.Where orderedColumns
+                plainColumns
+                |> Option.bind (tryFixedPrefixIndexOrder store dbName tref select.Where)
                 |> Option.bind (fun lookup ->
                     plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows)))
 

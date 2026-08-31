@@ -2001,6 +2001,15 @@ let private indexesWholeColumns group =
     group.PrefixLengths |> List.forall Option.isNone
     && group.Transforms |> List.forall Option.isNone
 
+let private supportsOrderedAccess group =
+    group.PrefixLengths |> List.forall Option.isNone
+    && (group.Transforms
+        |> List.forall (function
+            | None
+            | Some Lowercase
+            | Some Uppercase -> true
+            | Some(Expression _) -> false))
+
 let private visibleGroups groups = groups |> List.filter _.Visible
 
 let private trySingleColumnKeyGroup group =
@@ -2071,7 +2080,8 @@ let private rangeKeyGroups (table: Table) : IndexKeyGroup list =
     |> List.filter supportsRangeAccess
 
 let private orderedKeyGroups (table: Table) : IndexKeyGroup list =
-    rangeKeyGroups table |> List.filter indexesWholeColumns
+    uniqueKeyGroups table @ secondaryKeyGroups table
+    |> List.filter supportsOrderedAccess
 
 type private FullTextKeyGroup =
     { Name: string
@@ -2294,7 +2304,7 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
     |> Map.ofList
 
 let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
-    rangeKeyGroups table
+    orderedKeyGroups table
     |> List.map (fun group ->
         let entries: ImmutableSortedSet<SecondaryOrderEntry> =
             table.RowsArray.Indexed
@@ -2398,7 +2408,7 @@ let private reindexRow
 
     let secondaryOrder =
         let orderedGroups =
-            uniqueGroups @ secondaryGroups |> List.filter supportsRangeAccess
+            uniqueGroups @ secondaryGroups |> List.filter supportsOrderedAccess
 
         orderedGroups
         |> List.fold
@@ -3579,6 +3589,7 @@ let private trySecondaryOrderSliceInTable
     (store: Store)
     (table: Table)
     (columnName: string)
+    (transform: IndexTransform option)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     (requireBound: bool)
@@ -3593,10 +3604,11 @@ let private trySecondaryOrderSliceInTable
                 |> List.choose trySingleColumnKeyGroup
                 |> List.filter (fun group ->
                     group.ColumnIndex = index
+                    && group.Transform = transform
                     && Map.containsKey group.Group.Name table.SecondaryOrder)
 
             candidates
-            |> List.tryFind (fun group -> group.PrefixLength.IsNone && group.Transform.IsNone)
+            |> List.tryFind (fun group -> group.PrefixLength.IsNone)
             |> Option.orElseWith (fun () -> List.tryHead candidates)
             |> Option.map (fun group -> index, group))
 
@@ -3688,7 +3700,7 @@ let private trySecondaryRangeLookupInTable
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     : RangeLookup option =
-    trySecondaryOrderSliceInTable store table columnName lower upper true
+    trySecondaryOrderSliceInTable store table columnName None lower upper true
     |> Option.bind (fun slice ->
         slice.ColumnIndices
         |> List.tryExactlyOne
@@ -3743,18 +3755,19 @@ let private orderedEntries (traversal: IndexTraversal) (slice: SecondaryOrderSli
                 after <- first
         }
 
-let trySecondaryOrderedLookup
+let private tryOrderedLookup
     (store: Store)
     (dbName: string)
     (tableName: string)
     (columnName: string)
+    (transform: IndexTransform option)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     (direction: Direction)
     : (string * int * ColumnDef list * int * Value[] seq) option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
-        trySecondaryOrderSliceInTable store table columnName lower upper false
+        trySecondaryOrderSliceInTable store table columnName transform lower upper false
         |> Option.bind (fun slice ->
             slice.ColumnIndices
             |> List.tryExactlyOne
@@ -3767,6 +3780,30 @@ let trySecondaryOrderedLookup
                     |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
 
                 slice.IndexName, columnIndex, table.Columns, max 0 (slice.AfterLast - slice.First), rows)))
+
+let trySecondaryOrderedLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
+    (direction: Direction)
+    : (string * int * ColumnDef list * int * Value[] seq) option =
+    tryOrderedLookup store dbName tableName columnName None lower upper direction
+
+let tryFunctionalOrderedLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (transform: IndexTransform)
+    (direction: Direction)
+    : (string * int * ColumnDef list * int * Value[] seq) option =
+    match transform with
+    | Lowercase
+    | Uppercase -> tryOrderedLookup store dbName tableName columnName (Some transform) None None direction
+    | Expression _ -> None
 
 type OrderedLookup =
     { OrderedIndexName: string
@@ -3793,9 +3830,15 @@ let tryCompositeOrderedLookup
             orderedKeyGroups table
             |> visibleGroups
             |> List.tryPick (fun group ->
-                if indices.Length > 0 && indices.Length <= group.Indices.Length && List.take indices.Length group.Indices = indices then
-                    tryIndexTraversal directions (List.take indices.Length group.Directions)
-                    |> Option.map (fun traversal -> group, traversal)
+                if indices.Length > 0 && indices.Length <= group.Indices.Length then
+                    let indexedPrefix = List.take indices.Length group.Indices
+                    let transformedPrefix = List.take indices.Length group.Transforms
+
+                    if indexedPrefix = indices && transformedPrefix |> List.forall Option.isNone then
+                        tryIndexTraversal directions (List.take indices.Length group.Directions)
+                        |> Option.map (fun traversal -> group, traversal)
+                    else
+                        None
                 else
                     None)
             |> Option.bind (fun (group, traversal) ->
