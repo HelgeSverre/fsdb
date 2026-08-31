@@ -466,6 +466,46 @@ let tests =
                   }
                   |> Async.RunSynchronously)
 
+          TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE accepts string field and line terminators"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
+                  async {
+                      let store = Fsdb.Storage.create ()
+                      use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                      let! client, stream = connectRawAsWithCapabilities server.Port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                      use client = client
+
+                      let query (sql: string) =
+                          writePacketAsync
+                              stream
+                              { SeqId = 0uy
+                                Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      do! query "CREATE TABLE string_separated_load (id INT PRIMARY KEY, name VARCHAR(20))" |> Async.Ignore
+                      let! _ = readPacketAsync stream
+
+                      do!
+                          query
+                              "LOAD DATA LOCAL INFILE 'string-separated.txt' INTO TABLE string_separated_load FIELDS TERMINATED BY '::' LINES TERMINATED BY '||'"
+                          |> Async.Ignore
+
+                      let! request = readPacketAsync stream
+                      Expect.equal request.Value.Payload.[0] 0xfbuy "LOCAL request"
+                      do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "1::alpha||2::beta||" } |> Async.Ignore
+                      do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                      let! loaded = readPacketAsync stream
+                      Expect.equal loaded.Value.Payload.[0] 0uy "LOAD succeeds"
+
+                      match Fsdb.Storage.scanList store "fsdb" "string_separated_load" with
+                      | Ok(_, rows) ->
+                          Expect.sequenceEqual
+                              (rows |> List.map Array.toList)
+                              [ [ VInt 1L; VString "alpha" ]; [ VInt 2L; VString "beta" ] ]
+                              "string delimiters split uploaded rows"
+                      | Error error -> failtestf "table scan failed: %A" error
+                  }
+                  |> Async.RunSynchronously)
+
           TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE transforms user-variable fields"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
