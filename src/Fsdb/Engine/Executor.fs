@@ -1797,6 +1797,22 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
             | Some parent -> resolveQualifiedCol parent table col
             | None -> Error(unknownColumn (sprintf "%s.%s" table col))
 
+let private tryDirectColumnForExpr (ctx: EvalContext) (expr: Expr) : (int * ColumnDef) option =
+    match expr with
+    | Col name when tryRoutineVariable name |> Option.isNone ->
+        Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex
+        |> Option.bind (function
+            | [ index ] -> tryColumnDefAt ctx index |> Option.map (fun column -> index, column)
+            | _ -> None)
+    | QualifiedCol(table, col) ->
+        Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers
+        |> Option.bind (fun (columns, offset) ->
+            columns
+            |> List.tryFindIndex (fun column ->
+                System.String.Equals(column.Name, col, System.StringComparison.OrdinalIgnoreCase))
+            |> Option.map (fun index -> offset + index, columns.[index]))
+    | _ -> None
+
 /// Recovers the declared column behind a bare/qualified expression without
 /// changing expression evaluation itself. This type context is needed only
 /// by ORDER BY: ENUM values are stored as their labels for display and
@@ -2560,8 +2576,12 @@ let private collationKeyOf (ctx: EvalContext) (expr: Expr) (value: Value) : Valu
 /// sort must use. The original row/projection value remains a string; only
 /// the private sort key changes. Invalid labels cannot normally reach
 /// storage, but ordinal 0 mirrors MySQL's sentinel ordering if one does.
-let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : Value * Collation.Collation option =
-    match tryColumnDefForExpr ctx expr, value with
+let private orderValueFor
+    (column: ColumnDef option)
+    (collation: Collation.Collation)
+    (value: Value)
+    : Value * Collation.Collation option =
+    match column, value with
     | Some { Type = TEnum declared }, VString label ->
         let ordinal =
             declared
@@ -2571,8 +2591,13 @@ let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : V
         ordinal, None
     | _ ->
         match value with
-        | VString _ -> value, Some(keyCollation ctx expr)
+        | VString _ -> value, Some collation
         | _ -> value, None
+
+let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : Value * Collation.Collation option =
+    match value with
+    | VString _ -> orderValueFor (tryColumnDefForExpr ctx expr) (keyCollation ctx expr) value
+    | _ -> value, None
 
 /// `Star(Some qualifier)` (`t.*`) resolution — same shape as
 /// `resolveQualifiedCol`, but hands back every one of that qualifier's own
@@ -8120,6 +8145,161 @@ and private compareByOrderKeys (dirs: Direction list) (ka: (Value * Collation.Co
 
     compare dirs ka kb
 
+/// Repeated text keys otherwise pay for a full collation comparison at every
+/// sort comparison. Dense ranks preserve the exact order and allow a stable
+/// bucket pass when a window has one low-cardinality ordering term.
+and private tryRankRepeatedStringOrderKey
+    (keys: (Value * Collation.Collation option) list list)
+    : (Value * Collation.Collation option) list list option =
+    let cells =
+        keys
+        |> List.map (function
+            | [ cell ] -> Some cell
+            | _ -> None)
+
+    match
+        cells
+        |> List.tryPick (function
+            | Some(VString _, Some collation) -> Some collation
+            | _ -> None)
+    with
+    | None -> None
+    | Some expectedCollation
+        when cells
+             |> List.forall (function
+                 | Some(VNull, _) -> true
+                 | Some(VString _, Some actualCollation) -> actualCollation.Name = expectedCollation.Name
+                 | _ -> false) ->
+        let distinct = HashSet<string>(System.StringComparer.Ordinal)
+
+        for cell in cells do
+            match cell with
+            | Some(VString text, _) -> distinct.Add text |> ignore
+            | _ -> ()
+
+        if distinct.Count = 0 || distinct.Count > keys.Length / 4 then
+            None
+        else
+            let ordered = distinct |> Seq.toArray
+            ordered |> Array.sortInPlaceWith expectedCollation.Compare
+
+            let ranks = Dictionary<string, int>(System.StringComparer.Ordinal)
+            let mutable rank = 0
+            let mutable previous = None
+
+            for text in ordered do
+                match previous with
+                | Some prior when expectedCollation.Compare prior text <> 0 -> rank <- rank + 1
+                | _ -> ()
+
+                ranks.Add(text, rank)
+                previous <- Some text
+
+            cells
+            |> List.map (function
+                | Some(VString text, _) -> [ VInt(int64 ranks.[text]), None ]
+                | _ -> [ VNull, None ])
+            |> Some
+    | _ -> None
+
+and private tryOrderDenseRanks (direction: Direction) (group: WindowRow[]) : WindowRow[] option =
+    let mutable highestRank = -1
+    let mutable compatible = true
+
+    for _, (_, key, _) in group do
+        match key with
+        | [ (VInt rank, None) ] when rank >= 0L && rank <= int64 System.Int32.MaxValue ->
+            highestRank <- max highestRank (int rank)
+        | [ (VNull, None) ] -> ()
+        | _ -> compatible <- false
+
+    if not compatible || highestRank < 0 || highestRank > group.Length / 4 then
+        None
+    else
+        let nulls = ResizeArray<WindowRow>()
+        let buckets = Array.init (highestRank + 1) (fun _ -> ResizeArray<WindowRow>())
+
+        for item as (_, (_, key, _)) in group do
+            match key with
+            | [ (VInt rank, None) ] -> buckets.[int rank].Add item
+            | _ -> nulls.Add item
+
+        let ordered = ResizeArray<WindowRow>(group.Length)
+
+        let append (items: ResizeArray<WindowRow>) =
+            for item in items do
+                ordered.Add item
+
+        if direction = Asc then
+            append nulls
+
+            for bucket in buckets do
+                append bucket
+        else
+            for index in buckets.Length - 1 .. -1 .. 0 do
+                append buckets.[index]
+
+            append nulls
+
+        Some(ordered.ToArray())
+
+and private tryCumeDistDenseRanks
+    (direction: Direction)
+    (groups: ResizeArray<ResizeArray<WindowRow>>)
+    : (int * Value)[] option =
+    let compatible =
+        groups
+        |> Seq.collect id
+        |> Seq.forall (fun (_, (_, key, _)) ->
+            match key with
+            | [ (VInt rank, None) ] -> rank >= 0L && rank <= int64 System.Int32.MaxValue
+            | [ (VNull, None) ] -> true
+            | _ -> false)
+
+    if not compatible then
+        None
+    else
+        let output = ResizeArray<int * Value>()
+
+        for group in groups do
+            let counts = Dictionary<int, int>()
+            let mutable nullCount = 0
+
+            for _, (_, key, _) in group do
+                match key with
+                | [ (VInt rank, None) ] ->
+                    let rank = int rank
+
+                    match counts.TryGetValue rank with
+                    | true, count -> counts.[rank] <- count + 1
+                    | false, _ -> counts.Add(rank, 1)
+                | _ -> nullCount <- nullCount + 1
+
+            let ranks = counts.Keys |> Seq.toArray
+            Array.sortInPlace ranks
+
+            if direction = Desc then
+                System.Array.Reverse ranks
+
+            let cumulative = Dictionary<int, int>()
+            let mutable seen = if direction = Asc then nullCount else 0
+
+            for rank in ranks do
+                seen <- seen + counts.[rank]
+                cumulative.Add(rank, seen)
+
+            let total = float group.Count
+
+            for originalIndex, (_, key, _) in group do
+                let count =
+                    match key with
+                    | [ (VInt rank, None) ] -> cumulative.[int rank]
+                    | _ -> if direction = Asc then nullCount else group.Count
+
+                output.Add(originalIndex, VDouble(float count / total))
+
+        Some(output.ToArray())
+
 /// A `UNION` statement's combined resultset, plus its column types —
 /// pulled out of `execute`'s `Union` arm (which just calls this and
 /// discards the second half) so `QueryHandler.executeStatement` can call
@@ -10027,8 +10207,25 @@ and private runWindowedSelect
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
                 exprs |> traverse (evalExpr (ctxFor row))
 
-            let orderKeyOf (exprs: Expr list) (row: Value[]) : Result<(Value * Collation.Collation option) list, EvalError> =
-                exprs |> traverse (evalOrderKey (ctxFor row))
+            let orderTerms =
+                let context = ctxFor (probeRow columns)
+
+                windowOrderBy
+                |> List.map (fun (expression, _) ->
+                    expression,
+                    tryColumnDefForExpr context expression,
+                    keyCollation context expression,
+                    tryDirectColumnForExpr context expression)
+
+            let orderKeyOf (row: Value[]) : Result<(Value * Collation.Collation option) list, EvalError> =
+                let context = { ctxFor row with Clause = OrderClause }
+
+                orderTerms
+                |> traverse (fun (expression, column, collation, directColumn) ->
+                    directColumn
+                    |> Option.map (fun (index, directColumn) -> Ok(readColumnValue context.Store directColumn row.[index]))
+                    |> Option.defaultWith (fun () -> evalExpr context expression)
+                    |> Result.map (orderValueFor column collation))
 
             validateFrame ()
             |> Result.bind validateRangeOrderType
@@ -10037,8 +10234,18 @@ and private runWindowedSelect
             |> traverse (fun row ->
                 keyOf partitionBy row
                 |> Result.bind (fun partKey ->
-                    orderKeyOf (windowOrderBy |> List.map fst) row |> Result.map (fun ordKey -> partKey, ordKey, row)))
+                    orderKeyOf row |> Result.map (fun ordKey -> partKey, ordKey, row)))
             |> Result.bind (fun keyed ->
+                let rankedOrderKeys =
+                    keyed
+                    |> List.map (fun (_, orderKey, _) -> orderKey)
+                    |> tryRankRepeatedStringOrderKey
+
+                let keyed =
+                    rankedOrderKeys
+                    |> Option.map (List.map2 (fun (partitionKey, _, row) orderKey -> partitionKey, orderKey, row) keyed)
+                    |> Option.defaultValue keyed
+
                 let partitionCollations = partitionBy |> List.map (keyCollation (ctxFor (probeRow columns)))
                 let partitionIndex = Dictionary<Value[], int>(SqlValueKeyComparer(partitionCollations, false))
                 let grouped = ResizeArray<ResizeArray<WindowRow>>()
@@ -10055,18 +10262,28 @@ and private runWindowedSelect
                         partitionIndex.Add(key, grouped.Count)
                         grouped.Add group
 
-                let partitions =
-                    grouped
-                    |> Seq.map (fun group ->
-                        let ordered = group.ToArray()
+                let denseCumeDist =
+                    match fn, rankedOrderKeys, dirs with
+                    | WinCumeDist, Some _, [ direction ] -> tryCumeDistDenseRanks direction grouped
+                    | _ -> None
 
-                        ordered
+                let sortGroup (group: ResizeArray<WindowRow>) =
+                    let source = group.ToArray()
+
+                    let comparisonSort () =
+                        source
                         |> Array.sortInPlaceWith (fun (leftIndex, (_, leftKey, _)) (rightIndex, (_, rightKey, _)) ->
                             let compared = compareByOrderKeys dirs leftKey rightKey
                             if compared <> 0 then compared else Operators.compare leftIndex rightIndex)
 
-                        ordered)
-                    |> List.ofSeq
+                        source
+
+                    match rankedOrderKeys, dirs with
+                    | Some _, [ direction ] -> tryOrderDenseRanks direction source |> Option.defaultWith comparisonSort
+                    | _ -> comparisonSort ()
+
+                let partitions =
+                    if denseCumeDist.IsSome then [] else grouped |> Seq.map sortGroup |> List.ofSeq
 
                 let rememberRowNumberOrder () =
                     let windowAlias =
@@ -10364,7 +10581,10 @@ and private runWindowedSelect
                 | WinCumeDist ->
                     // Rows at or before the current row's peer group, over
                     // the partition size — so every peer shares one value.
-                    perRow (fun group pos -> Ok(VDouble(float (peerHigh group pos + 1) / float (Array.length group))))
+                    denseCumeDist
+                    |> Option.map Ok
+                    |> Option.defaultWith (fun () ->
+                        perRow (fun group pos -> Ok(VDouble(float (peerHigh group pos + 1) / float (Array.length group)))))
                 | WinNTile buckets ->
                     constantInt "ntile" buckets
                     |> Result.bind (fun buckets ->

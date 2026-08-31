@@ -8076,6 +8076,41 @@ let tests =
                           [ Some "5"; Some "0.8"; Some "1"; Some "3" ]
                           [ Some "6"; Some "0.8"; Some "1"; Some "3" ] ]
 
+                testCase "CUME_DIST preserves low-cardinality text peers in either direction"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE status_rows (id INT, status VARCHAR(8) COLLATE utf8mb4_bin)" |> ignore
+
+                    runDefault
+                        store
+                        ("INSERT INTO status_rows VALUES (1,NULL),(2,'a'),(3,'a'),(4,'a'),(5,'a'),"
+                         + "(6,'b'),(7,'b'),(8,'b'),(9,'b'),(10,'c'),(11,'c'),(12,'c')")
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            ("SELECT id, ROUND(CUME_DIST() OVER (ORDER BY status), 4), "
+                             + "ROUND(CUME_DIST() OVER (ORDER BY status DESC), 4) FROM status_rows ORDER BY id")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "0.0833"; Some "1" ]
+                              [ Some "2"; Some "0.4167"; Some "0.9167" ]
+                              [ Some "3"; Some "0.4167"; Some "0.9167" ]
+                              [ Some "4"; Some "0.4167"; Some "0.9167" ]
+                              [ Some "5"; Some "0.4167"; Some "0.9167" ]
+                              [ Some "6"; Some "0.75"; Some "0.5833" ]
+                              [ Some "7"; Some "0.75"; Some "0.5833" ]
+                              [ Some "8"; Some "0.75"; Some "0.5833" ]
+                              [ Some "9"; Some "0.75"; Some "0.5833" ]
+                              [ Some "10"; Some "1"; Some "0.25" ]
+                              [ Some "11"; Some "1"; Some "0.25" ]
+                              [ Some "12"; Some "1"; Some "0.25" ] ]
+                            "NULLs and text peers retain their directed cumulative distribution"
+                    | other -> failtestf "expected cumulative text distributions, got %A" other
+
                 testCase "an aggregate window over grouped rows runs after the GROUP BY"
                 <| fun _ ->
                     expectRows
