@@ -4,14 +4,19 @@
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4.svg)](global.json)
 [![MySQL 8.4 wire protocol](https://img.shields.io/badge/MySQL-8.4%20wire%20protocol-4479A1.svg)](docs/compatibility.md)
 
-A MySQL-compatible database server in idiomatic F#, speaking the MySQL wire
-protocol so clients like `mysql`, PDO, and MySqlConnector work without a
-custom adapter. An in-memory engine built as a pipeline: bytes → command →
-AST → logical plan → lazy `seq`.
+A MySQL-compatible database server in idiomatic F#. It speaks the MySQL wire
+protocol, so clients such as `mysql`, PDO, and MySqlConnector connect without
+an fsdb-specific adapter. Internally, a query follows one readable pipeline:
+bytes → command → AST → logical plan → lazy `seq`.
+
+MySQL 8.4 is the compatibility oracle; SQLite is not. Readable F# is the
+primary design constraint, ahead of raw performance. The default server is
+in-memory, with an opt-in binary WAL and snapshots for durable use.
 
 ## Contents
 
 - [Quick start](#quick-start)
+- [Configuration](#configuration)
 - [How it works](#how-it-works)
 - [SQL surface](#sql-surface)
 - [Persistence format](#persistence-format)
@@ -87,6 +92,8 @@ OPTIONS:
     --help                display this list of options.
 ```
 
+## Configuration
+
 fsdb reads `/etc/my.cnf`, `/etc/mysql/my.cnf`, `$MYSQL_HOME/my.cnf`, and
 `~/.my.cnf` when present. `--defaults-file` reads only the named file instead.
 The parser follows MySQL's format rather than a generic ini dialect:
@@ -100,9 +107,13 @@ on one.
 ```ini
 [mysqld]
 max_connections          = 2000
+max_prepared_stmt_count  = 16382
 max_allowed_packet       = 64M
+local_infile             = OFF
+max_load_data_bytes      = 64M
 wait_timeout             = 600
 net_read_timeout         = 30
+net_write_timeout        = 60
 innodb_lock_wait_timeout = 50
 cte_max_recursion_depth  = 1000
 loose-skip-name-resolve            # an option fsdb has no knob for
@@ -113,10 +124,11 @@ require-secure-transport = ON
 
 Defaults-file settings apply at startup as process-wide defaults. The standard
 files are auto-discovered unless `--defaults-file` selects one explicitly.
-`max_connections`, `max_allowed_packet`,
-`wait_timeout`, `net_read_timeout`, `innodb_lock_wait_timeout`, and
-`cte_max_recursion_depth` can
-also be changed with `SET GLOBAL`; see
+`max_connections`, `max_prepared_stmt_count`, `max_allowed_packet`,
+`local_infile`, `wait_timeout`, `net_read_timeout`, `net_write_timeout`,
+`innodb_lock_wait_timeout`, and `cte_max_recursion_depth` can also be changed
+with `SET GLOBAL`. `max_load_data_bytes` and the `wal_*` settings are
+configuration-only fsdb limits rather than MySQL system variables. See
 [the compatibility guide](docs/compatibility.md) for the complete behavior and
 deliberate divergences.
 
@@ -174,6 +186,8 @@ top-(n+offset) set instead of materializing the full sort.
 
 ### Engine
 
+#### Transactions
+
 Databases and tables live in a value-swapped catalog. Repeatable-read
 transactions establish a snapshot on their first database statement;
 read-committed transactions refresh from committed roots per statement;
@@ -185,6 +199,9 @@ statements wait for an existing row owner and rebase before applying their
 change. Remaining overlapping write shapes fail with MySQL's retryable 1205
 error. Immutable row pages let the merge inspect only pages changed from the
 transaction snapshot and maintain indexes incrementally.
+
+#### Locks
+
 `FOR UPDATE`, `FOR SHARE`, and `LOCK IN SHARE MODE` use current committed row
 versions and retain shared or exclusive row-stripe ownership until transaction
 end. `OF`, `NOWAIT`, and `SKIP LOCKED` follow MySQL's transaction behavior;
@@ -195,6 +212,9 @@ alias restrictions, temporary-table exception, atomic replacement lists, and
 implicit locks for view and trigger dependencies. Ordinary statements acquire
 compatible table ownership only for their execution, so explicit locks also
 coordinate with sessions that never issue `LOCK TABLES`.
+
+#### Indexes and joins
+
 PK/UNIQUE and composite secondary equality lookups go through maps keyed by
 the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
 exactly as MySQL's do. Scalar and composite-row literal `IN` lists, along with
@@ -206,12 +226,12 @@ keys are fixed by literal equalities, including `LIMIT`, `OFFSET`, and literal
 bounds. Composite keys can include `LOWER(column)` or `UPPER(column)` parts
 for matching ordering and grouping prefixes, including a functional suffix
 after stored keys fixed by literal equalities. Other expression orderings and
-full-value ordering through a prefix key still sort. Equality
-buckets and ordered entries are separate derived
-structures, deliberately trading memory and write work for efficient equality
-buckets and bounded range seeks. Equi-joins hash-join; everything else is a
-scan, except a physical inner/left/right-join target whose complete indexed
-key is bound by the rows already in scope, including `USING` and natural joins.
+full-value ordering through a prefix key still sort. Equality buckets and
+ordered entries are separate derived structures, deliberately trading memory
+and write work for efficient equality buckets and bounded range seeks.
+Equi-joins use a hash join. A physical inner, left, or right join can instead
+probe an index when the rows already in scope bind its complete key, including
+joins expressed with `USING` or `NATURAL JOIN`.
 
 ### Collations & charsets
 
@@ -229,22 +249,29 @@ introducers.
 `COM_STMT_PREPARE`/`COM_STMT_EXECUTE` bind parameter `Value`s into the
 parsed AST (`?` → `Placeholder` → `Lit`), so a bound value keeps its real
 type for every statement the grammar parses; only the text-probed `SET`/
-`SHOW` forms still re-splice literals.
+`SHOW` forms still re-splice literals. Forward-only prepared cursors and zlib
+protocol compression are supported as well.
 
 ## SQL surface
 
-The grammar covers the core used by MySQL-backed applications: `SELECT` with
-joins (`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
-functions, `UNION [ALL]`, expression subqueries, ordinary and recursive CTEs
-at top level and inside subqueries, derived tables, and INSERT/REPLACE sources,
-JSON paths and `JSON_TABLE`, multi-table `UPDATE`/`DELETE`, `REPLACE`,
-`EXPLAIN`, enforced and `NOT ENFORCED` `CHECK` constraints, typed user and
-system variables in expressions, direct single-table updatable views,
-view `WITH CHECK OPTION`,
-`BEFORE`/`AFTER` triggers for `INSERT`/`UPDATE`/`DELETE` with compound bodies
-and nested procedure calls, including multi-table UPDATE/DELETE targets, and
-user accounts
-with real `CREATE USER`/`GRANT`/`REVOKE` privilege enforcement.
+The implemented surface targets statements used by MySQL-backed
+applications:
+
+- Queries: joins including `NATURAL`/`USING`, derived and lateral tables,
+  `GROUP BY`/`HAVING`, window functions, `UNION [ALL]`, expression subqueries,
+  ordinary and recursive CTEs, JSON paths, and `JSON_TABLE`.
+- Writes and schema: `INSERT`, `INSERT ... SELECT`, `REPLACE`, multi-table
+  `UPDATE`/`DELETE`, generated columns, foreign keys, HASH partition metadata,
+  `EXPLAIN`, and enforced or `NOT ENFORCED` `CHECK` constraints.
+- Stored objects: views and `WITH CHECK OPTION`, procedures, functions,
+  scheduled events, and `BEFORE`/`AFTER` triggers with compound bodies and
+  nested procedure calls.
+- Accounts: `CREATE USER`, roles, `GRANT`/`REVOKE`, password and resource
+  policy, plus database-, table-, and column-level privilege enforcement.
+- Bulk and batched work: `CLIENT_MULTI_STATEMENTS`/`CLIENT_MULTI_RESULTS` and
+  client-side `LOAD DATA LOCAL INFILE`, including target columns, user
+  variables, and ordered `SET` transformations. Local infile is disabled by
+  default and bounded by `max_load_data_bytes`.
 
 The introspection surface GUI clients lean on is served with real data:
 25 `information_schema` tables whose column sets are diffed against a live
@@ -319,182 +346,315 @@ thresholds.
 
 ## Embedding & extensibility
 
-Every function call — including built-ins like `CONCAT` and `JSON_EXTRACT` —
-resolves through one registry, SQLite-style. Embed fsdb in your own program and
-register a function before you start listening:
+The [`Fsdb.Db` facade](src/Fsdb/Db.fs) owns an engine instance, its extension
+registry, and its transport settings. Register extensions before opening
+connections or serving traffic.
+
+| API | Purpose |
+|---|---|
+| `Db.registerScalar` | Add a context-free scalar function. |
+| `Db.registerAggregate` | Fold one SQL expression over a group. |
+| `Db.registerFunction` | Add a context-aware scalar with execution metadata. |
+| `Db.registerTable` | Expose host data as a read-only table in the `fsdb` schema. |
+| `Db.onCommit` | Subscribe to committed row and schema changes. |
+| `Db.connect` | Open a stateful in-process SQL session without a socket. |
+| `Db.serve` | Start a background, stoppable MySQL listener. |
+| `Db.listen` | Run a MySQL listener until its returned `Async` stops. |
+
+### Create an embedded host
+
+Inside this checkout, create an F# console project and reference fsdb:
+
+```sh
+dotnet new console --language F# --framework net10.0 --output examples/MyHost
+dotnet add examples/MyHost/MyHost.fsproj reference src/Fsdb/Fsdb.fsproj
+```
+
+This complete `Program.fs` registers `SLUGIFY` and starts a listener on an
+available local port:
 
 ```fsharp
+module MyHost.Program
+
+open System
+open System.Net
+open System.Text.RegularExpressions
 open Fsdb
+open Fsdb.Functions
 open Fsdb.Value
 
-let slug (s: string) =
-    System.Text.RegularExpressions.Regex.Replace(s.ToLowerInvariant(), "[^a-z0-9]+", "-").Trim '-'
+let slugify =
+    function
+    | [ VNull ] -> VNull
+    | [ VString text ] ->
+        Regex.Replace(text.ToLowerInvariant(), "[^a-z0-9]+", "-")
+        |> fun slug -> slug.Trim '-'
+        |> VString
+    | _ -> raise (SqlError(1582, "slugify expects one string"))
 
 [<EntryPoint>]
 let main _ =
-    Db.create ()
-    |> Db.registerScalar "slugify" (function
-        | [ VString s ] -> VString(slug s)
-        | _ -> VNull)
-    |> Db.listen System.Net.IPAddress.Loopback 3307
-    |> Async.RunSynchronously
+    let db = Db.create () |> Db.registerScalar "SLUGIFY" slugify
 
+    use server = db |> Db.serve IPAddress.Loopback 0
+    printfn "fsdb listening on 127.0.0.1:%d" server.Port
+    Console.ReadLine() |> ignore
     0
 ```
 
-`Db.registerAggregate` works the same way for aggregate functions — the fold
-receives every non-NULL row's value and returns one:
+Function names are case-insensitive. A host registration can override a
+built-in, while session-bound functions such as `DATABASE()` and
+`CURRENT_USER()` retain precedence. Arguments and results use the
+[`Value` discriminated union](src/Fsdb/Sql/Value.fs), so extensions keep SQL
+types instead of receiving preformatted strings.
+
+Arity is expressed by pattern matching, not by registration metadata. Handle
+`VNull` explicitly: fsdb evaluates expressions against an all-NULL probe row
+before scanning real rows, and SQL functions normally propagate NULL where
+appropriate. Raise `SqlError(code, message)` for a deliberate client-visible
+failure; any other exception becomes error 1105. An exception from an
+extension aborts the current transaction.
+
+The remaining snippets use the same `Fsdb`, `Fsdb.Functions`, and `Fsdb.Value`
+opens as the complete host above.
+
+### Register an aggregate
+
+A custom aggregate takes one SQL expression. It receives the non-NULL value
+from every row in the group after `DISTINCT`, when present, has been applied.
+The engine returns NULL for an empty group.
 
 ```fsharp
 let median (values: Value list) =
-    let sorted = values |> List.choose (function VInt i -> Some(float i) | _ -> None) |> List.sort
+    let sorted =
+        values
+        |> List.choose (function
+            | VInt value -> Some(float value)
+            | VDouble value -> Some value
+            | _ -> None)
+        |> List.sort
 
     match sorted with
     | [] -> VNull
-    | _ ->
-        let mid = sorted.Length / 2
+    | values ->
+        let middle = values.Length / 2
 
-        if sorted.Length % 2 = 0 then
-            VDouble((sorted.[mid - 1] + sorted.[mid]) / 2.0)
+        if values.Length % 2 = 0 then
+            VDouble((values.[middle - 1] + values.[middle]) / 2.0)
         else
-            VDouble sorted.[mid]
+            VDouble values.[middle]
 
 let db =
     Db.create ()
     |> Db.registerAggregate "MEDIAN" median
+
+let connection = Db.connect db
+connection.Query "CREATE TABLE scores (score INT)" |> ignore
+connection.Query "INSERT INTO scores VALUES (1), (9), (3), (2)" |> ignore
+
+match connection.Query "SELECT MEDIAN(score) AS median FROM scores" with
+| Executor.ResultSet([ "median" ], [ [ Some value ] ]) -> printfn "median = %s" value
+| Executor.Err(code, message) -> failwithf "query failed (%d): %s" code message
+| result -> failwithf "unexpected result: %A" result
 ```
 
-A custom function can override a built-in of the same name — the registry
-doesn't distinguish "shipped with fsdb" from "registered by the embedder",
-though session-bound functions like `DATABASE()` always shadow both:
+The wire-level integration test in
+[`IntegrationTests.fs`](tests/Fsdb.Tests/IntegrationTests.fs) exercises both
+`SLUGIFY` and `MEDIAN` through a real MySqlConnector client.
+
+### Use query context and cancellation
+
+`Db.registerFunction` supplies a `QueryContext` for extensions that depend on
+the current session or perform external work:
+
+- `Database` is the current schema and agrees with `DATABASE()`.
+- `User` is the authenticated account name, without the host part displayed by
+  `CURRENT_USER()`.
+- `Cancellation` is signalled when the client disconnects, cancels, or is
+  killed. Pass it into blocking I/O.
+
+`ScalarFunction.create` produces a deterministic function that is allowed in
+stored expressions. `ScalarFunction.effectful` marks it non-deterministic and
+direct-only. Direct-only functions are rejected where fsdb would invoke them
+indirectly later, including generated columns, functional defaults and indexes,
+CHECK constraints, and trigger bodies.
 
 ```fsharp
-// Deterministic timestamps for reproducible tests.
+open System.Net.Http
+
+let http = new HttpClient()
+
+let httpGet (context: QueryContext) =
+    function
+    | [ VNull ] -> VNull
+    | [ VString url ] ->
+        try
+            http.GetStringAsync(url, context.Cancellation)
+                .GetAwaiter()
+                .GetResult()
+            |> VString
+        with
+        | :? OperationCanceledException -> reraise ()
+        | error -> raise (SqlError(1296, sprintf "HTTP request failed: %s" error.Message))
+    | _ -> raise (SqlError(1582, "http_get expects one URL"))
+
+let db =
+    Db.create ()
+    |> Db.registerFunction (
+        ScalarFunction.create "HTTP_GET" httpGet
+        |> ScalarFunction.effectful)
+```
+
+Scalar execution is synchronous. A slow HTTP call blocks its connection's
+query, so cancellation and host-side timeouts still matter.
+
+### Expose host data as a virtual table
+
+Virtual tables are read-only overlays in the reserved `fsdb` schema. Their row
+provider runs once per referencing statement before SQL filtering, so it
+should return a bounded snapshot rather than an unbounded stream.
+
+```fsharp
+let models =
+    [ "embed", "http://localhost:11434/v1", "nomic-embed-text"
+      "chat", "http://localhost:11434/v1", "llama3.2" ]
+
+let modelTable =
+    VirtualTable.create
+        "models"
+        [ VirtualTable.text "alias"
+          VirtualTable.text "endpoint"
+          VirtualTable.text "model" ]
+        (fun () ->
+            [ for alias, endpoint, model in models ->
+                  [| VString alias; VString endpoint; VString model |] ])
+
+let db =
+    Db.create ()
+    |> Db.registerTable modelTable
+
+let connection = Db.connect db
+connection.Query "SELECT alias, model FROM fsdb.models ORDER BY alias" |> ignore
+```
+
+The provider must return one `Value` per declared column. Re-registering a
+name replaces it case-insensitively, and a virtual table shadows a physical
+table with the same name. `VirtualTable.text`, `int`, `bigint`, and `double`
+create nullable columns with the server defaults; other types can use an
+`Ast.ColumnDef`. Writes to the virtual table are rejected. Call `registerTable`
+after `withDataDir`, because `withDataDir` replaces the store.
+
+### Consume committed changes
+
+`Db.onCommit` is a multi-subscriber change feed over the same physical events
+used by persistence. Inserts contain stored rows after defaults, coercion, and
+auto-increment assignment; updates contain `(before, after)` pairs; deletes
+contain removed rows. Explicit transactions arrive as one
+`TransactionCommitted` event. Failed statements and rollbacks emit nothing.
+
+```fsharp
+open System.Collections.Concurrent
+
+let committed = ConcurrentQueue<Storage.CommitEvent>()
+
+let db =
+    Db.create ()
+    |> Db.withDataDir "./fsdb-data"
+    |> Db.onCommit (fun event -> committed.Enqueue event)
+
+let rec insertedDocs =
+    function
+    | Storage.RowsInserted("fsdb", "docs", rows) -> rows
+    | Storage.TransactionCommitted events -> events |> List.collect insertedDocs
+    | _ -> []
+
+let drain () =
+    let mutable event = Unchecked.defaultof<Storage.CommitEvent>
+
+    while committed.TryDequeue &event do
+        for row in insertedDocs event do
+            printfn "committed doc row: %A" row
+```
+
+Handlers run synchronously under the commit-ordering lock. Keep them fast,
+avoid blocking, and never write back to the database from a handler; re-entry
+deadlocks. Queue events and process them after the originating statement
+returns. A thrown handler exception can make that statement report an error,
+but cannot roll back data that has already been published, so handlers should
+capture their own failures.
+
+### Run SQL in-process or over the wire
+
+`Db.connect` creates a stateful session without a socket. The selected
+database, variables, temporary tables, and open transaction persist between
+`Query` calls:
+
+```fsharp
+let connection = Db.connect db
+connection.Query "USE app" |> ignore
+connection.Query "SET @request_id = 'abc-123'" |> ignore
+
+match connection.Query "SELECT @request_id" with
+| Executor.ResultSet(columns, rows) -> printfn "%A %A" columns rows
+| Executor.Affected count -> printfn "%d rows affected" count
+| Executor.Err(code, message) -> eprintfn "ERR %d: %s" code message
+| Executor.MultipleResults results -> printfn "%d results" results.Length
+```
+
+`Db.serve` starts a background server and returns the actual bound port plus a
+stop function. `Db.listen` returns a foreground `Async<unit>` instead:
+
+```fsharp
+use server = db |> Db.serve System.Net.IPAddress.Loopback 0
+printfn "listening on %d" server.Port
+
 Db.create ()
-|> Db.registerScalar "NOW" (fun _ -> VDateTime(System.DateTime(2026, 1, 1)))
+|> Db.listen System.Net.IPAddress.Loopback 3307
+|> Async.RunSynchronously
 ```
 
-`--data-dir` durability works the same way when embedding:
+Durability, logging, and TLS are builder-style options too. Configure the
+store before registering virtual tables or commit subscribers:
 
 ```fsharp
-Db.create () |> Db.withDataDir "./fsdb-data" |> Db.listen System.Net.IPAddress.Loopback 3307
+let db =
+    Db.create ()
+    |> Db.withDataDir "./fsdb-data"
+    |> Db.withLogger (fun message -> printfn "[fsdb] %s" message)
+    |> Db.withTlsCertificate certificate
+    |> Db.requireSecureTransport
 ```
 
-Embedding hosts enable TLS with an `X509Certificate2` that already contains
-its private key:
+The logger is process-global. The TLS certificate must be an
+`X509Certificate2` that contains its private key.
 
-```fsharp
-Db.create ()
-|> Db.withTlsCertificate certificate
-|> Db.requireSecureTransport
-|> Db.listen System.Net.IPAddress.Any 3307
-```
+### Included examples
 
-`Db.withLogger` hooks a log sink in the same style. See
-`tests/Fsdb.Tests/IntegrationTests.fs` for the full round-trip test
-(`SLUGIFY`/`MEDIAN`) against a real client over the wire.
-
-### The rich extension API
-
-`registerScalar` is the sugar for context-free functions. A function that
-calls the network (or needs to know who's asking) uses the rich form:
-
-```fsharp
-Db.create ()
-|> Db.registerFunction (
-    ScalarFunction.create "LLM_EMBED" (fun ctx args -> embed ctx.Cancellation args)
-    |> ScalarFunction.effectful)
-```
-
-- **`QueryContext`** — what the function sees about the executing query:
-  `Database` (current schema, matches `DATABASE()`), `User` (matches
-  `CURRENT_USER()`), and `Cancellation`, the killed-client token — hand it
-  to `HttpClient` so a network call stops when its client vanishes.
-- **`ScalarFunction.create name fn`** builds the default shape:
-  deterministic, callable anywhere. **`ScalarFunction.effectful`** is the
-  network-calling shape in one word: non-deterministic plus direct-only.
-  Direct-only functions are rejected inside generated-column definitions
-  (SQLite's DIRECTONLY rationale: the engine — not the user's statement —
-  would re-invoke them on every later write); the deterministic flag is
-  carried metadata for host-side caches.
-- **`SqlError`** — `raise (SqlError(1210, "no such model"))` reaches the
-  client as exactly that code/message instead of the generic 1105
-  catch-all. A throwing function still aborts the transaction like any
-  other failure.
-- **Arity is a pattern match**, not a registration parameter — one function
-  handles all its shapes: `function [p] -> ... | [m; p] -> ... | _ -> raise ...`.
-  Handle `VNull` arguments too: the executor type-checks expressions
-  against an all-NULL probe row before touching real rows, so return
-  `VNull` for NULL inputs like every builtin does.
-- **Blocking, honestly**: there is no async executor. A scalar blocks its
-  connection thread for as long as it runs — a slow HTTP call is a slow
-  query, on that connection only.
-
-`Db.registerTable` exposes host state as a read-only table in the reserved
-`fsdb` schema, and `Db.onCommit` subscribes to the committed-write feed
-(the same CDC feed the WAL rides, multi-subscriber):
-
-```fsharp
-db
-|> Db.registerTable (
-    VirtualTable.create "models" [ VirtualTable.text "name"; VirtualTable.text "endpoint" ] listModels)
-|> Db.onCommit (fun event -> queue.Enqueue event)
-```
-
-The `onCommit` contract: handlers run synchronously under the commit lock,
-so keep them fast, and never write back into the database from inside one —
-re-entry deadlocks. Queue what you saw and act after the statement returns
-(see the auto-embedding loop in the example below). Subscribe after
-`withDataDir`, which replaces the store.
-
-`Db.connect` opens an in-process connection (no socket — `USE`, variables,
-and transactions persist across `Query` calls), and `Db.serve` starts a
-stoppable wire server (`RunningServer.Port` matters when you pass port 0):
-
-```fsharp
-let conn = Db.connect db
-conn.Query "SELECT * FROM fsdb.models" |> ignore
-
-use running = db |> Db.serve System.Net.IPAddress.Loopback 0
-printfn "listening on %d" running.Port
-```
-
-`examples/LlmSearch` puts all of it together — `llm_complete`/`llm_embed`
-against any OpenAI-compatible endpoint (Ollama by default), a `fsdb.models`
-virtual table, auto-embedding on insert via `onCommit`, and semantic search
-with `ORDER BY DISTANCE(..., 'COSINE')`. Run it without a model server:
+[`examples/LlmSearch`](examples/LlmSearch/Program.fs) registers cancellable
+`llm_complete` and `llm_embed` functions for an OpenAI-compatible endpoint,
+exposes a `fsdb.models` virtual table, queues inserted documents with
+`onCommit`, and runs semantic search with `DISTANCE(..., 'COSINE')`:
 
 ```sh
 just example -- --dry-run
 ```
 
-`examples/ReceiptPipeline` goes further: PDFs in, relational rows out, with
-the work in SQL rather than host code. The host registers `ocr` (pdftotext)
-and `llm_schema` (structured extraction), then six statements do the rest —
-two cancellable batch `UPDATE`s, an `INSERT ... SELECT ... ON DUPLICATE KEY
-UPDATE` vendor upsert, `INSERT IGNORE` against a unique key as the receipt
-dedupe, and `JSON_TABLE` exploding `$.items[*]` into line-item rows. CHECK
-constraints guard totals, confidence, quantities, prices, and queue states. A
-live aggregate view reports vendor spend. Three `AFTER INSERT` audit triggers
-feed an audit log, whose own trigger maintains an insert-only rollup and
-exercises a two-level trigger chain.
+[`examples/ReceiptPipeline`](examples/ReceiptPipeline/Program.fs) registers
+`ocr` and `llm_schema`, then uses SQL for batching, extraction, upserts,
+deduplication, `JSON_TABLE`, constraints, views, and chained audit triggers:
 
 ```sh
-just receipts -- --dry-run                       # offline fixtures
+just receipts -- --dry-run
+
 RECEIPT_ENDPOINT=https://api.openai.com/v1 \
 RECEIPT_MODEL=gpt-5-mini RECEIPT_API_KEY=$OPENAI_API_KEY \
-  just receipts -- --dump ~/receipts/*.pdf       # real PDFs, real model
+  just receipts -- --dump ~/receipts/*.pdf
 ```
 
-Two things that example teaches the hard way. **Constrain formats in the
-schema, not the prompt**: without a `"ISO 8601 YYYY-MM-DD"` description on
-the date field, a live run returned `25/01/2026` for two receipts, which
-doesn't coerce to `DATE` — and `INSERT IGNORE`, being both the dedupe and the
-failure sink, dropped them silently. **Dedupe in two layers**: a `UNIQUE` sha
-on the queue catches byte-identical resubmissions before spending an LLM
-call, while the unique key on `receipts` catches the same receipt arriving as
-different bytes. Keying dedupe solely on model output makes it only as stable
-as the model.
+The receipt schema constrains model-produced dates and numeric ranges before
+they reach relational tables. A unique file hash prevents repeated OCR and
+model calls for identical bytes, while relational unique keys catch rescans
+whose bytes differ but extracted identity is the same.
 
 ## Benchmarking
 
@@ -508,7 +668,7 @@ just bench-quick        # ShortRun job for fast local iteration, no results file
 just bench-durable      # durability-matched: fsdb WAL vs MySQL fsync/no-fsync
 just bench-scale        # latency suite at 100k users / 500k orders
 just bench-load         # N-writer throughput under concurrency (ops/sec)
-just bench-load-scale    # throughput at 1/2/4/8/16 workers
+just bench-load-scale   # throughput at 1/2/4/8/16 workers
 just bench-comprehensive # all latency, durability, scale, and load suites
 ```
 
