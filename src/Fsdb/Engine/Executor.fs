@@ -181,12 +181,12 @@ type private EqualityMembershipDomain =
     | TextMembership of Collation.Collation
 
 type private EqualityMembership =
-    { Values: Set<Value>
+    { Values: HashSet<Value>
       ContainsNull: bool
       Domain: EqualityMembershipDomain }
 
 type private RowEqualityMembership =
-    { Values: Set<Value list>
+    { Values: HashSet<Value list>
       ContainsNullableRows: bool
       Domains: EqualityMembershipDomain list }
 
@@ -3286,7 +3286,7 @@ let private quantifiedEqualityMembershipResult
             key
             |> Option.map (fun key ->
                 let containsEqual = membership.Values.Contains key
-                let containsDifferent = membership.Values |> Set.exists ((<>) key)
+                let containsDifferent = membership.Values.Count > (if containsEqual then 1 else 0)
 
                 match op, quantifier with
                 | Eq, Any ->
@@ -4417,7 +4417,7 @@ and private runExpressionSubquery
 
             keys [] values
             |> Option.map (fun values ->
-                { Values = Set.ofList values
+                { Values = HashSet(values)
                   ContainsNull = containsNull
                   Domain = domain }))
 
@@ -4443,7 +4443,7 @@ and private runExpressionSubquery
                 match remaining with
                 | [] ->
                     Some
-                        { Values = Set.ofList found
+                        { Values = HashSet(found)
                           ContainsNullableRows = containsNullableRows
                           Domains = domains }
                 | row :: rest when row.Length <> domains.Length -> None
