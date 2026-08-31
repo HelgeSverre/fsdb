@@ -200,7 +200,7 @@ the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
 exactly as MySQL's do. Scalar and composite-row literal `IN` lists, along with
 direct literal ranges in single-table reads and writes, can seek matching
 primary, unique, and secondary B-trees and report `range` in `EXPLAIN`.
-Bounded `ORDER BY` and compatible `GROUP BY` operations can stream a
+`ORDER BY` and compatible `GROUP BY` operations can stream a
 whole-column left prefix of a composite index, including `LIMIT`, `OFFSET`,
 and literal bounds; expression orderings and full-value ordering through a
 prefix key still sort. Equality
