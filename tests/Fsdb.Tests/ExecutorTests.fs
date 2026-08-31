@@ -5165,6 +5165,43 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "500" ] ] "updates move rows between transformed buckets"
                     | other -> failtestf "expected updated functional rows, got %A" other
 
+                testCase "UPPER expression indexes enforce uniqueness and narrow predicates"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            "CREATE TABLE names (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, UNIQUE INDEX uq_upper ((UPPER(name))))"
+                    with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected an UPPER functional index, got %A" other
+
+                    runDefault store "INSERT INTO names VALUES (1, 'Reference'), (2, 'Other')" |> ignore
+
+                    match runDefault store "INSERT INTO names VALUES (3, 'REFERENCE')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected transformed uniqueness, got %A" other
+
+                    match runDefault store "SELECT id FROM names WHERE UPPER(name) = 'REFERENCE'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected an UPPER index lookup, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id FROM names WHERE UPPER(name) = 'REFERENCE'" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "const") "the unique transformed key is a const lookup"
+                        Expect.equal row.[6] (Some "uq_upper") "the transformed key is reported"
+                    | other -> failtestf "expected an UPPER index plan, got %A" other
+
+                    Expect.equal
+                        (runDefault store "UPDATE names SET name = 'Different' WHERE UPPER(name) = 'REFERENCE'")
+                        (Affected 1UL)
+                        "transformed candidates drive UPDATE"
+
+                    match runDefault store "SELECT id FROM names WHERE UPPER(name) = 'REFERENCE'" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected the updated row to leave its transformed bucket, got %A" other
+
                 testCase "invisible indexes enforce constraints without entering query plans"
                 <| fun _ ->
                     let store = newStore ()
