@@ -7884,6 +7884,10 @@ and private tryIndexOrder
 
                 Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
                 |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
+                |> Option.orElseWith (fun () ->
+                    Storage.tryCompositeOrderedLookup store tableDb tref.Table [ column, direction ]
+                    |> Option.bind (fun lookup ->
+                        plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows))
             | columns ->
                 Storage.tryCompositeOrderedLookup store tableDb tref.Table columns
                 |> Option.bind (fun lookup ->

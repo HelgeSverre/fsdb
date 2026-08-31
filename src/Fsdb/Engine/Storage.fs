@@ -3792,8 +3792,8 @@ let tryCompositeOrderedLookup
             orderedKeyGroups table
             |> visibleGroups
             |> List.tryPick (fun group ->
-                if group.Indices = indices && indices.Length > 1 then
-                    tryIndexTraversal directions group.Directions
+                if indices.Length > 0 && indices.Length <= group.Indices.Length && List.take indices.Length group.Indices = indices then
+                    tryIndexTraversal directions (List.take indices.Length group.Directions)
                     |> Option.map (fun traversal -> group, traversal)
                 else
                     None)
