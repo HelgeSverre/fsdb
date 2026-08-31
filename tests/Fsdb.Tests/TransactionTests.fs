@@ -839,10 +839,52 @@ let tests =
                   handle larger "ROLLBACK" |> ignore
 
               match Fsdb.Executor.errorInfo smallerResult with
-              | Some error -> Expect.equal error.Code 1213 "the smaller transaction is the victim"
+              | Some error ->
+                  Expect.equal error.Code 1213 "the smaller transaction is the victim"
+                  Expect.equal error.State "40001" "the selected victim keeps the deadlock SQLSTATE"
+                  Expect.isNone smaller.Tx "the selected victim is rolled back"
               | None -> failtestf "expected the smaller transaction to deadlock, got %A" smallerResult
 
               Expect.equal largerResult (Affected 1UL) "the larger transaction survives and acquires row one"
+
+          testCase "deadlock detection follows cycles longer than two transactions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE tx_deadlock_three (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO tx_deadlock_three VALUES (1, 0), (2, 0), (3, 0)"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "BEGIN"
+              let third, _ = handle (create 4 store) "BEGIN"
+              let first, _ = handle first "UPDATE tx_deadlock_three SET n = 1 WHERE id = 1"
+              let second, _ = handle second "UPDATE tx_deadlock_three SET n = 2 WHERE id = 2"
+              let third, _ = handle third "UPDATE tx_deadlock_three SET n = 3 WHERE id = 3"
+
+              let firstWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle first "UPDATE tx_deadlock_three SET n = 1 WHERE id = 2")
+
+              Expect.isFalse (firstWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the first transaction waits for the second"
+
+              let secondWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle second "UPDATE tx_deadlock_three SET n = 2 WHERE id = 3")
+
+              Expect.isFalse (secondWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the second transaction waits for the third"
+              let third, thirdResult = handle third "UPDATE tx_deadlock_three SET n = 3 WHERE id = 1"
+
+              match Fsdb.Executor.errorInfo thirdResult with
+              | Some error -> Expect.equal error.Code 1213 "the newest equal-cost transaction closes and loses the cycle"
+              | None -> failtestf "expected the third transaction to deadlock, got %A" thirdResult
+
+              Expect.isNone third.Tx "the third transaction is rolled back"
+              Expect.isTrue (secondWaiting.Wait(TimeSpan.FromSeconds 2.0)) "the second transaction continues after row three is released"
+              let second, secondResult = secondWaiting.Result
+              Expect.equal secondResult (Affected 1UL) "the second transaction acquires row three"
+              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the second transaction commits"
+              Expect.isTrue (firstWaiting.Wait(TimeSpan.FromSeconds 2.0)) "the first transaction continues after row two is released"
+              let first, firstResult = firstWaiting.Result
+              Expect.equal firstResult (Affected 1UL) "the first transaction acquires row two"
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first transaction commits"
 
           testCase "a timed-out multi-row wait releases its partial claims"
           <| fun _ ->

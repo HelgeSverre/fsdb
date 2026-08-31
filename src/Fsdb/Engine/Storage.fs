@@ -325,11 +325,17 @@ type RowLockStripe =
 
 type TransactionLockContext =
     { Owner: int64
-      HeldStripes: Collections.Generic.HashSet<RowLockStripe> }
+      HeldStripes: Collections.Generic.HashSet<RowLockStripe>
+      mutable DeadlockVictim: bool }
+
+type LockWait =
+    { Blockers: HashSet<int64>
+      Context: TransactionLockContext
+      Stripe: RowLockStripe }
 
 type LockWaitGraph =
     { SyncRoot: obj
-      Edges: Dictionary<int64, HashSet<int64>> }
+      Edges: Dictionary<int64, LockWait> }
 
 type AccountResourceUsage =
     { Gate: obj
@@ -526,7 +532,8 @@ let beginTransactionContext (store: Store) : Store =
         TransactionLocks =
             Some
                 { Owner = owner
-                  HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference) } }
+                  HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
+                  DeadlockVictim = false } }
 
 let beginTransactionWithBase (store: Store) : Catalog * Store =
     let catalog, snapshot = beginTransactionSnapshotWithBase store
@@ -537,7 +544,8 @@ let beginTransactionWithBase (store: Store) : Catalog * Store =
         TransactionLocks =
             Some
                 { Owner = owner
-                  HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference) } }
+                  HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
+                  DeadlockVictim = false } }
 
 let carryTransactionLocks (source: Store) (snapshot: Store) : Store =
     { snapshot with TransactionLocks = source.TransactionLocks }
@@ -2558,30 +2566,67 @@ let private stripeBlockers owner mode (stripe: RowLockStripe) =
     }
     |> HashSet
 
-let private registerLockWait (graph: LockWaitGraph) owner blockers =
-    lock graph.SyncRoot (fun () ->
-        graph.Edges.[owner] <- blockers
+type private LockWaitDecision =
+    | WaitRegistered
+    | CurrentDeadlockVictim
+    | WakeDeadlockVictim of RowLockStripe
 
-        let rec reaches target visited current =
+let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockContext) stripe blockers =
+    lock graph.SyncRoot (fun () ->
+        graph.Edges.[context.Owner] <-
+            { Blockers = blockers
+              Context = context
+              Stripe = stripe }
+
+        let rec tryPath target visited current =
             if current = target then
-                true
+                Some [ current ]
             elif Set.contains current visited then
-                false
+                None
             else
                 match graph.Edges.TryGetValue current with
-                | false, _ -> false
-                | true, next ->
+                | false, _ -> None
+                | true, wait ->
                     let visited = Set.add current visited
-                    next |> Seq.exists (reaches target visited)
+                    wait.Blockers
+                    |> Seq.tryPick (fun blocker ->
+                        tryPath target visited blocker
+                        |> Option.map (fun path -> current :: path))
 
-        if blockers |> Seq.exists (reaches owner Set.empty) then
-            graph.Edges.Remove owner |> ignore
-            false
-        else
-            true)
+        let cycle =
+            blockers
+            |> Seq.tryPick (tryPath context.Owner Set.empty)
+            |> Option.map (fun path -> context.Owner :: path |> List.distinct)
+
+        match cycle with
+        | None -> WaitRegistered
+        | Some owners ->
+            let rollbackCost owner =
+                let waiting = graph.Edges.[owner]
+                lock waiting.Context.HeldStripes (fun () -> waiting.Context.HeldStripes.Count)
+
+            let victim =
+                owners
+                |> List.minBy (fun owner -> rollbackCost owner, -owner)
+
+            let victimWait = graph.Edges.[victim]
+            victimWait.Context.DeadlockVictim <- true
+            graph.Edges.Remove victim |> ignore
+
+            if victim = context.Owner then
+                CurrentDeadlockVictim
+            else
+                WakeDeadlockVictim victimWait.Stripe)
 
 let private clearLockWait (graph: LockWaitGraph) owner =
     lock graph.SyncRoot (fun () -> graph.Edges.Remove owner |> ignore)
+
+let private wakeLockWaiter (stripe: RowLockStripe) =
+    Threading.ThreadPool.QueueUserWorkItem(
+        Threading.WaitCallback(fun _ ->
+            lock stripe.SyncRoot (fun () -> Threading.Monitor.PulseAll stripe.SyncRoot))
+    )
+    |> ignore
 
 let private acquireStripe
     (deadline: DateTime)
@@ -2623,14 +2668,23 @@ let private acquireStripe
 
                     let blockers = stripeBlockers context.Owner mode stripe
 
-                    if not (registerLockWait waits context.Owner blockers) then
-                        raise (DeadlockVictim dbName)
+                    match registerLockWait waits context stripe blockers with
+                    | CurrentDeadlockVictim -> raise (DeadlockVictim dbName)
+                    | WakeDeadlockVictim victimStripe -> wakeLockWaiter victimStripe
+                    | WaitRegistered -> ()
+
+                    let mutable signaled = false
 
                     try
-                        if not (Threading.Monitor.Wait(stripe.SyncRoot, remaining)) then
-                            raise (LockWaitTimeout dbName)
+                        signaled <- Threading.Monitor.Wait(stripe.SyncRoot, remaining)
                     finally
                         clearLockWait waits context.Owner
+
+                    if context.DeadlockVictim then
+                        raise (DeadlockVictim dbName)
+
+                    if not signaled then
+                        raise (LockWaitTimeout dbName)
 
                     acquire ()
 
@@ -2675,7 +2729,8 @@ let private withWriteLocksFor
         | Some context -> context, false
         | None ->
             { Owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
-              HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference) },
+              HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
+              DeadlockVictim = false },
             true
 
     let deadline = DateTime.UtcNow + timeout
