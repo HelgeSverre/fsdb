@@ -7138,27 +7138,31 @@ and private materializeCte
             | None -> Ok(columns, List.ofSeq accumulated))
 
 and private compatibleSemiJoinColumns (left: ColumnDef) (right: ColumnDef) =
-    left.Type = right.Type
-    &&
-    match left.Type with
-    | TChar _
-    | TVarchar _
-    | TTinyText
-    | TText
-    | TMediumText
-    | TLongText
-    | TEnum _
-    | TSet _ -> left.Charset = right.Charset && left.Collation = right.Collation
-    | _ -> true
+    let sameTextDomain =
+        match left.Type with
+        | TChar _
+        | TVarchar _
+        | TTinyText
+        | TText
+        | TMediumText
+        | TLongText
+        | TEnum _
+        | TSet _ -> left.Charset = right.Charset && left.Collation = right.Collation
+        | _ -> true
+
+    left.Type = right.Type && sameTextDomain
 
 and private orderedEqualityValues (table: Table) (index: Storage.EqualityIndex) (columnNames: string list) (values: Value list) =
-    columnNames
-    |> traverse (resolveColumn table.Columns)
-    |> Result.toOption
-    |> Option.bind (fun requested ->
-        let byColumn = List.zip requested values |> Map.ofList
-        let ordered = index.ColumnIndices |> List.choose (fun columnIndex -> Map.tryFind columnIndex byColumn)
-        if ordered.Length = index.ColumnIndices.Length then Some ordered else None)
+    if columnNames.Length <> values.Length then
+        None
+    else
+        columnNames
+        |> traverse (resolveColumn table.Columns)
+        |> Result.toOption
+        |> Option.bind (fun requested ->
+            let byColumn = List.zip requested values |> Map.ofList
+            let ordered = index.ColumnIndices |> List.choose (fun columnIndex -> Map.tryFind columnIndex byColumn)
+            if ordered.Length = index.ColumnIndices.Length then Some ordered else None)
 
 and private tryIndexedSemiJoin
     (store: Store)
