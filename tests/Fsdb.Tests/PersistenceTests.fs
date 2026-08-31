@@ -706,6 +706,37 @@ let tests =
               let reloaded = load dir
               Expect.isEmpty (rowsOf reloaded defaultDatabase "t") "the rolled-back row never made it in"
 
+          testCase "WAL recovery preserves an AUTO_INCREMENT id burned by rollback"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let mutable session = Fsdb.Session.create 1 store
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+
+                  match result with
+                  | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | _ -> result
+
+              execute "CREATE TABLE burned_ids (id BIGINT AUTO_INCREMENT PRIMARY KEY, note VARCHAR(20))"
+              |> ignore
+              execute "BEGIN" |> ignore
+              execute "INSERT INTO burned_ids(note) VALUES ('rolled-back')" |> ignore
+              execute "ROLLBACK" |> ignore
+
+              let recovered = load dir
+              let recoveredSession = Fsdb.Session.create 2 recovered
+
+              match handle recoveredSession "INSERT INTO burned_ids(note) VALUES ('after-crash')" with
+              | recoveredSession, Affected 1UL ->
+                  match handle recoveredSession "SELECT id, note FROM burned_ids" |> snd with
+                  | ResultSet(_, [ [ Some "2"; Some "after-crash" ] ]) -> ()
+                  | other -> failtestf "expected the burned id to remain unavailable, got %A" other
+              | _, other -> failtestf "expected the post-recovery insert, got %A" other
+
           testCase "a torn WAL record doesn't poison future appends: writes after a kill -9 restart still survive a second restart"
           <| fun _ ->
               let dir = tempDataDir ()
