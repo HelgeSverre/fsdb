@@ -197,9 +197,9 @@ compatible table ownership only for their execution, so explicit locks also
 coordinate with sessions that never issue `LOCK TABLES`.
 PK/UNIQUE and composite secondary equality lookups go through maps keyed by
 the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
-exactly as MySQL's do. One-column literal `IN` lists and direct literal ranges
-in single-table reads and writes can seek matching primary, unique, and
-secondary B-trees and report `range` in `EXPLAIN`.
+exactly as MySQL's do. Scalar and composite-row literal `IN` lists, along with
+direct literal ranges in single-table reads and writes, can seek matching
+primary, unique, and secondary B-trees and report `range` in `EXPLAIN`.
 Compatible composite `ORDER BY` and `GROUP BY` operations can stream that
 index when preceding keys are fixed, including `LIMIT`, `OFFSET`, and literal
 bounds; right joins and unconstrained multi-key ordering remain scans. Equality
