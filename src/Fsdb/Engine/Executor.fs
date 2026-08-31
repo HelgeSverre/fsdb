@@ -3233,16 +3233,19 @@ let private quantifiedComparisonResult
         op
         right
 
-let private equalityMembershipResult
+let private quantifiedEqualityMembershipResult
     (ctx: EvalContext)
     (leftExpression: Expr)
     (leftValue: Value)
     (rightOperand: QuantifiedOperand)
     (subquery: ExpressionSubqueryResult)
+    (op: Op)
+    (quantifier: Quantifier)
     : Value option =
-    match leftValue with
-    | VNull -> Some(if subquery.Rows.IsEmpty then VInt 0L else VNull)
-    | _ ->
+    match op, subquery.Rows, leftValue with
+    | (Eq | Neq), [], _ -> Some(if quantifier = Any then VInt 0L else VInt 1L)
+    | (Eq | Neq), _, VNull -> Some VNull
+    | (Eq | Neq), _, _ ->
         subquery.EqualityMembership
         |> Option.bind (fun membership ->
             let key =
@@ -3262,9 +3265,20 @@ let private equalityMembershipResult
 
             key
             |> Option.map (fun key ->
-                if membership.Values.Contains key then VInt 1L
-                elif membership.ContainsNull then VNull
-                else VInt 0L))
+                let containsEqual = membership.Values.Contains key
+                let containsDifferent = membership.Values |> Set.exists ((<>) key)
+
+                match op, quantifier with
+                | Eq, Any ->
+                    if containsEqual then VInt 1L elif membership.ContainsNull then VNull else VInt 0L
+                | Eq, All ->
+                    if containsDifferent then VInt 0L elif membership.ContainsNull then VNull else VInt 1L
+                | Neq, Any ->
+                    if containsDifferent then VInt 1L elif membership.ContainsNull then VNull else VInt 0L
+                | Neq, All ->
+                    if containsEqual then VInt 0L elif membership.ContainsNull then VNull else VInt 1L
+                | _ -> VNull))
+    | _ -> None
 
 let private sourceHasQualifier (qualifier: string) = function
     | FromTable table ->
@@ -3926,7 +3940,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(_, _) ->
                 let rightOperand = subqueryProjectionOperand ctx select
 
-                match equalityMembershipResult ctx e ve rightOperand subquery with
+                match quantifiedEqualityMembershipResult ctx e ve rightOperand subquery Eq Any with
                 | Some result -> Ok result
                 | None ->
                     subquery.Rows
@@ -3949,9 +3963,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(_, _) ->
                 let rightOperand = subqueryProjectionOperand ctx select
 
-                match op, quantifier, equalityMembershipResult ctx e left rightOperand subquery with
-                | Eq, Any, Some result -> Ok result
-                | _ ->
+                match quantifiedEqualityMembershipResult ctx e left rightOperand subquery op quantifier with
+                | Some result -> Ok result
+                | None ->
                     subquery.Rows
                     |> traverse (fun row ->
                         let right = row |> Array.tryHead |> Option.defaultValue VNull
