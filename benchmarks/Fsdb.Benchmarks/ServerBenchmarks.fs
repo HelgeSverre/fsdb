@@ -270,6 +270,12 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CompositeInSubquery() =
+        this.Query
+            "SELECT o.id FROM orders o WHERE (o.status, o.user_id) IN (SELECT status, user_id FROM orders WHERE id <= 100)"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedOrderCount() =
         this.Query "SELECT u.id, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) FROM users u WHERE u.id <= 100"
 
