@@ -193,6 +193,7 @@ type private RowEqualityMembership =
 type private ExpressionSubqueryResult =
     { Result: QueryResult
       Rows: Value[] list
+      ProjectionColumns: ColumnDef option list
       EqualityMembership: EqualityMembership option
       RowEqualityMembership: RowEqualityMembership option }
 
@@ -3409,8 +3410,8 @@ and private selectProjectionColumns (store: Store) (dbName: string) (select: Sel
             | Some value, Some name -> Some { value with Name = name }
             | _ -> column))
 
-let private subqueryProjectionOperand (ctx: EvalContext) (select: SelectStmt) : QuantifiedOperand =
-    match select.Projections, selectProjectionColumns ctx.Store ctx.DbName select with
+let private subqueryProjectionOperand (select: SelectStmt) (columns: ColumnDef option list) : QuantifiedOperand =
+    match select.Projections, columns with
     | [ (Collate(_, collation), _) ], [ column ] ->
         { Expression = Collate(Lit VNull, collation)
           Column = column }
@@ -3421,9 +3422,7 @@ let private subqueryProjectionOperand (ctx: EvalContext) (select: SelectStmt) : 
         { Expression = Lit VNull
           Column = None }
 
-let private subqueryRowOperand (ctx: EvalContext) (select: SelectStmt) (values: Value[]) : RowOperand =
-    let columns = selectProjectionColumns ctx.Store ctx.DbName select
-
+let private subqueryRowOperand (select: SelectStmt) (columns: ColumnDef option list) (values: Value[]) : RowOperand =
     let expressions =
         match select.Projections, columns with
         | [ (Star _, _) ], columns -> List.replicate columns.Length (Lit VNull)
@@ -3898,7 +3897,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let membershipKey =
                     match subquery.RowEqualityMembership, value with
                     | Some membership, RowValues leftValues ->
-                        let right = subqueryRowOperand ctx select (Array.create leftValues.Length VNull)
+                        let right =
+                            Array.create leftValues.Length VNull
+                            |> subqueryRowOperand select subquery.ProjectionColumns
 
                         match right with
                         | RowValues rightValues when leftValues.Length = membership.Domains.Length && rightValues.Length = leftValues.Length ->
@@ -3931,7 +3932,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | _ ->
                     subquery.Rows
                     |> traverse (fun row ->
-                        subqueryRowOperand ctx select row
+                        subqueryRowOperand select subquery.ProjectionColumns row
                         |> rowComparisonResult ctx Eq value)
                     |> Result.map (fun results ->
                         if results |> List.exists ((=) (VInt 1L)) then
@@ -3958,7 +3959,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | MultipleResults _ -> Error nestedSubqueryResultsError
             | ResultSet(columns, _) when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _) ->
-                let rightOperand = subqueryProjectionOperand ctx select
+                let rightOperand = subqueryProjectionOperand select subquery.ProjectionColumns
 
                 match quantifiedEqualityMembershipResult ctx e ve rightOperand subquery Eq Any with
                 | Some result -> Ok result
@@ -3981,7 +3982,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | MultipleResults _ -> Error nestedSubqueryResultsError
             | ResultSet(columns, _) when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _) ->
-                let rightOperand = subqueryProjectionOperand ctx select
+                let rightOperand = subqueryProjectionOperand select subquery.ProjectionColumns
 
                 match quantifiedEqualityMembershipResult ctx e left rightOperand subquery op quantifier with
                 | Some result -> Ok result
@@ -4363,8 +4364,10 @@ and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, 
         | Err(code, message), _ -> Error(code, message)
         | Affected _, _ -> Ok(RowValues [])
         | MultipleResults _, _ -> Error nestedSubqueryResultsError
-        | ResultSet(columns, _), [] -> Ok(subqueryRowOperand ctx select (Array.create columns.Length VNull))
-        | ResultSet(_, [ _ ]), [ row ] -> Ok(subqueryRowOperand ctx select row)
+        | ResultSet(columns, _), [] ->
+            Ok(subqueryRowOperand select subquery.ProjectionColumns (Array.create columns.Length VNull))
+        | ResultSet(_, [ _ ]), [ row ] ->
+            Ok(subqueryRowOperand select subquery.ProjectionColumns row)
         | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
     | _ ->
         evalExpr ctx expr
@@ -4396,12 +4399,12 @@ and private runExpressionSubquery
     : ExpressionSubqueryResult =
     let memo = (currentStatementMemo ()).ExpressionSubqueries
 
-    let equalityMembership rows =
+    let equalityMembership columns rows =
         let containsNull = rows |> List.exists (Array.tryHead >> Option.exists ((=) VNull))
         let values = rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
 
         let domain =
-            match selectProjectionColumns ctx.Store ctx.DbName select with
+            match columns with
             | [ Some column ] -> equalityMembershipDomain ctx.Store column
             | _ -> None
 
@@ -4421,9 +4424,9 @@ and private runExpressionSubquery
                   ContainsNull = containsNull
                   Domain = domain }))
 
-    let rowEqualityMembership (rows: Value[] list) =
+    let rowEqualityMembership columns (rows: Value[] list) =
         let domains =
-            selectProjectionColumns ctx.Store ctx.DbName select
+            columns
             |> List.map (Option.bind (equalityMembershipDomain ctx.Store))
 
         if domains.Length < 2 || domains |> List.exists Option.isNone then
@@ -4459,6 +4462,7 @@ and private runExpressionSubquery
 
         { Result = result
           Rows = rows
+          ProjectionColumns = selectProjectionColumns ctx.Store ctx.DbName select
           EqualityMembership = None
           RowEqualityMembership = None }
 
@@ -4469,8 +4473,8 @@ and private runExpressionSubquery
         let result = execute None
         let result =
             { result with
-                EqualityMembership = equalityMembership result.Rows
-                RowEqualityMembership = rowEqualityMembership result.Rows }
+                EqualityMembership = equalityMembership result.ProjectionColumns result.Rows
+                RowEqualityMembership = rowEqualityMembership result.ProjectionColumns result.Rows }
         memo.[cacheKey] <- MemoizedSubquery result
         result
     | _ ->
