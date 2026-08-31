@@ -4517,6 +4517,46 @@ let tests =
                         (Affected 1UL)
                         "DELETE consumes composite candidates"
 
+                testCase "composite literal row IN lists probe matching B-trees"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, tenant_id INT NOT NULL, status VARCHAR(20) NOT NULL, score INT, KEY ix_tenant_status (tenant_id, status))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, tenant_id INT NOT NULL, status VARCHAR(20) NOT NULL, score INT)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store $"INSERT INTO {table} VALUES (1, 1, 'open', 10), (2, 1, 'done', 20), (3, 2, 'open', 30), (4, 2, 'done', 40), (5, 3, 'open', 50)"
+                        |> ignore
+
+                    let rows table predicate =
+                        match runDefault store $"SELECT id FROM {table} WHERE {predicate} ORDER BY id" with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected rows from %s, got %A" table other
+
+                    let predicate = "(tenant_id, status) IN ((1, 'open'), (2, 'done'), (1, 'open'), (3, NULL)) AND score >= 10"
+                    Expect.equal (rows "indexed" predicate) (rows "scanned" predicate) "composite candidates agree with a scan"
+                    Expect.equal (rows "indexed" predicate) [ [ Some "1" ]; [ Some "4" ] ] "duplicates and partial NULL tuples add no matches"
+
+                    Expect.equal
+                        (rows "indexed" "(status, tenant_id) IN (('open', 1), ('done', 2))")
+                        [ [ Some "1" ]; [ Some "4" ] ]
+                        "expression order is mapped to index order"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE (tenant_id, status) IN ((1, 'open'), (2, 'done'), (9, 'missing'))" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "range") "row IN reports range access"
+                        Expect.equal row.[6] (Some "ix_tenant_status") "row IN reports the composite key"
+                        Expect.equal row.[9] (Some "2") "only existing candidates contribute to the estimate"
+                    | other -> failtestf "expected a composite row-IN plan, got %A" other
+
+                    Expect.equal
+                        (runDefault store "UPDATE indexed SET score = score + 1 WHERE (tenant_id, status) IN ((1, 'open'), (2, 'done'))")
+                        (Affected 2UL)
+                        "composite candidates drive UPDATE"
+
+                    match runDefault store "SELECT id FROM indexed WHERE (tenant_id, status) IN ((1 + 0, 'open'), (2, 'done')) ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "4" ] ]) -> ()
+                    | other -> failtestf "expected nonliteral row members to retain scan semantics, got %A" other
+
                 testCase "a composite unique key produces a const lookup"
                 <| fun _ ->
                     let store = newStore ()
