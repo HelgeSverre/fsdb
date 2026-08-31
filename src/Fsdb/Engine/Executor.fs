@@ -7565,17 +7565,19 @@ and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : Po
 and private indexedColumnFor (tref: TableRef) =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
+    let caseTransform (name: string) =
+        if name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase) then Some Lowercase
+        elif name.Equals("UPPER", System.StringComparison.OrdinalIgnoreCase) then Some Uppercase
+        else None
+
     function
     | Col name -> Some(name, None)
     | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
         Some(name, None)
-    | FuncCall(name, [ Col column ]) when name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase) ->
-        Some(column, Some Lowercase)
+    | FuncCall(name, [ Col column ]) -> caseTransform name |> Option.map (fun transform -> column, Some transform)
     | FuncCall(name, [ QualifiedCol(qualifier, column) ])
-        when
-            name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase)
-            && System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
-        Some(column, Some Lowercase)
+        when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+        caseTransform name |> Option.map (fun transform -> column, Some transform)
     | _ -> None
 
 and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralInProbe list =

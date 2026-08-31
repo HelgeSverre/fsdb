@@ -2156,6 +2156,7 @@ let private projectIndexValue prefixLength transform value =
     let transformed =
         match transform, value with
         | Some Lowercase, VString text -> VString(text.ToLowerInvariant())
+        | Some Uppercase, VString text -> VString(text.ToUpperInvariant())
         | _ -> value
 
     match prefixLength, transformed with
@@ -4142,12 +4143,12 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
 
     let partLength (index: IndexDef) (column: IndexColumn) =
         match column.Transform with
-        | Some(Expression _) when index.Unique -> Error(ExpressionError(1235, "This version of fsdb doesn't yet support unique expression indexes other than LOWER(column)"))
+        | Some(Expression _) when index.Unique -> Error(ExpressionError(1235, "This version of fsdb doesn't yet support this unique expression index"))
         | Some(Expression _) -> Ok 0
         | _ ->
             match columns |> List.tryFind (fun definition -> String.Equals(definition.Name, column.Name, StringComparison.OrdinalIgnoreCase)) with
             | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column.Name))
-            | Some definition when column.Transform = Some Lowercase ->
+            | Some definition when column.Transform = Some Lowercase || column.Transform = Some Uppercase ->
                 match definition.Type with
                 | TChar _
                 | TVarchar _ -> fullLength definition |> Option.defaultValue 0 |> Ok

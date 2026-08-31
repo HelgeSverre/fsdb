@@ -2274,13 +2274,13 @@ let private indexedColumn: Parser<IndexColumn, unit> =
               Transform = None
               Direction = direction }
 
-    let lowerColumn =
-        between (sym "(") (sym ")") (keyword "LOWER" >>. between (sym "(") (sym ")") identifier)
+    let caseColumn functionName transform =
+        between (sym "(") (sym ")") (keyword functionName >>. between (sym "(") (sym ")") identifier)
         .>>. indexDirection
         |>> fun (name, direction) ->
             { Name = name
               PrefixLength = None
-              Transform = Some Lowercase
+              Transform = Some transform
               Direction = direction }
 
     let expressionColumn =
@@ -2292,7 +2292,10 @@ let private indexedColumn: Parser<IndexColumn, unit> =
               Transform = Some(Expression expression)
               Direction = direction }
 
-    attempt lowerColumn <|> attempt expressionColumn <|> storedColumn
+    attempt (caseColumn "LOWER" Lowercase)
+    <|> attempt (caseColumn "UPPER" Uppercase)
+    <|> attempt expressionColumn
+    <|> storedColumn
 
 /// `[UNIQUE] KEY|INDEX name (cols)` — `UNIQUE` alone (no `KEY`/`INDEX`) is
 /// also legal MySQL, so the `KEY`/`INDEX` keyword itself is optional once
