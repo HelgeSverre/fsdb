@@ -5155,6 +5155,35 @@ let tests =
                         ()
                     | other -> failtestf "expected the unique right side to report eq_ref, got %A" other
 
+                testCase "an indexed LEFT JOIN probes the right side and preserves unmatched rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (id INT PRIMARY KEY, minimum_score INT)" |> ignore
+                    runDefault store "CREATE TABLE indexed_child (id INT PRIMARY KEY, parent_id INT, score INT, KEY ix_parent (parent_id))" |> ignore
+                    runDefault store "CREATE TABLE scanned_child (id INT PRIMARY KEY, parent_id INT, score INT)" |> ignore
+                    runDefault store "INSERT INTO parent VALUES (1, 10), (2, 30), (3, 20)" |> ignore
+
+                    for table in [ "indexed_child"; "scanned_child" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES (1, 1, 10), (2, 1, 9), (3, 2, 35), (4, 2, 20), (5, NULL, 99)" table) |> ignore
+
+                    let rows table =
+                        match
+                            runDefault
+                                store
+                                (sprintf
+                                    "SELECT p.id, c.id FROM parent p LEFT JOIN %s c ON p.id = c.parent_id AND c.score >= p.minimum_score ORDER BY p.id, c.id"
+                                    table)
+                        with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected LEFT JOIN rows, got %A" other
+
+                    Expect.equal (rows "indexed_child") (rows "scanned_child") "the indexed outer join agrees with a scan"
+                    Expect.equal (rows "indexed_child") [ [ Some "1"; Some "1" ]; [ Some "2"; Some "3" ]; [ Some "3"; None ] ] "failed residuals still produce one padded row"
+
+                    match runDefault store "EXPLAIN SELECT * FROM parent p LEFT JOIN indexed_child c ON p.id = c.parent_id AND c.score >= p.minimum_score" with
+                    | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_parent"; Some "ix_parent"; Some "5"; Some "p.id"; Some "1"; Some "100.00"; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected an indexed LEFT JOIN plan, got %A" other
+
                 testCase "an indexed INNER JOIN probes a composite equality key"
                 <| fun _ ->
                     let store = newStore ()
