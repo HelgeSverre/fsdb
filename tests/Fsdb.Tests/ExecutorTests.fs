@@ -4743,6 +4743,32 @@ let tests =
                         Expect.equal row.[6] (Some "ix_tenant_priority_created") "the wider composite key is reported"
                     | other -> failtestf "expected a leading-prefix index plan, got %A" other
 
+                testCase "an index streams unbounded ORDER BY results"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, tenant_id INT, priority INT, keep_row INT, KEY ix_tenant_priority (tenant_id, priority))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, tenant_id INT, priority INT, keep_row INT)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES (1, 2, 2, 1), (2, 1, 3, 1), (3, 2, 1, 0), (4, 1, 1, 1), (5, NULL, 2, 1)" table) |> ignore
+
+                    let rows table order =
+                        match runDefault store (sprintf "SELECT id, tenant_id, priority FROM %s WHERE keep_row = 1 ORDER BY %s" table order) with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected ordered rows, got %A" other
+
+                    Expect.equal
+                        (rows "indexed" "tenant_id, priority")
+                        (rows "scanned" "tenant_id, priority")
+                        "an unbounded composite order agrees with a filesort"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE keep_row = 1 ORDER BY tenant_id" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row.[4] (Some "index") "the unbounded order streams the index"
+                        Expect.equal row.[6] (Some "ix_tenant_priority") "the ordered key is reported"
+                        Expect.isFalse (row.[11].Value.Contains("filesort")) "the plan does not report a filesort"
+                    | other -> failtestf "expected an unbounded index-order plan, got %A" other
+
                 testCase "composite prefix indexes do not claim full-value ORDER BY"
                 <| fun _ ->
                     let store = newStore ()
