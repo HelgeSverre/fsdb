@@ -195,6 +195,8 @@ module CommitEvents =
             sprintf "rows_updated db=%s table=%s count=%d hash=%s" db table changes.Length (Hashing.combine hashes)
         | RowsDeleted(db, table, rows) ->
             sprintf "rows_deleted db=%s table=%s count=%d hash=%s" db table rows.Length (rows |> Seq.map rowHash |> Hashing.combine)
+        | AutoIncrementAdvanced(db, table, nextId) ->
+            sprintf "auto_increment_advanced db=%s table=%s next=%d" db table nextId
         | SchemaChanged(db, statement) -> sprintf "schema_changed db=%s statement=%s" db (AstKind.ofStatement statement)
         | SchemaChangedAt(db, statement, createTime) ->
             sprintf "schema_changed db=%s statement=%s create_time=%s" db (AstKind.ofStatement statement) (createTime.ToString("O", CultureInfo.InvariantCulture))

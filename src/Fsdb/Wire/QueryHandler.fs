@@ -2448,7 +2448,8 @@ let rec private filterTemporaryEvent keys event =
     match event with
     | RowsInserted(db, table, _)
     | RowsUpdated(db, table, _)
-    | RowsDeleted(db, table, _) when isTemporary db table -> None
+    | RowsDeleted(db, table, _)
+    | AutoIncrementAdvanced(db, table, _) when isTemporary db table -> None
     | SchemaChanged(db, statement)
     | SchemaChangedAt(db, statement, _) ->
         let touchesTemporary =

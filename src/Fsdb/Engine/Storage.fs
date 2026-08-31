@@ -275,6 +275,7 @@ type CommitEvent =
     | RowsInserted of db: string * table: string * rows: Value[] list
     | RowsUpdated of db: string * table: string * changes: (Value[] * Value[]) list
     | RowsDeleted of db: string * table: string * rows: Value[] list
+    | AutoIncrementAdvanced of db: string * table: string * nextId: int64
     | SchemaChanged of db: string * Statement
     | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
     | TransactionCommitted of CommitEvent list
@@ -981,25 +982,12 @@ let withDatabaseLocks (timeout: TimeSpan) (store: Store) (dbNames: string seq) (
 /// per-database merges all need.
 let private keysOf (m: Map<string, 'a>) : Set<string> = m |> Map.toList |> List.map fst |> Set.ofList
 
-/// Bumps the live catalog's AUTO_INCREMENT counters up to a discarded
-/// transaction's snapshot wherever it ran one ahead — MySQL never rolls
-/// back a burned id (see `QueryHandler.rollbackSession`'s doc) — leaving
-/// everything else (rows, schema) exactly as the live catalog has it. Under
-/// `store.Lock`, same as `mergeCatalogInto` and for the same reason (a true
-/// store-wide critical section for the relatively rare merge/bump step, not
-/// the per-row write hot path) — `ROLLBACK` is rarer still than `COMMIT`, so
-/// this is even cheaper to serialize.
+/// Publishes monotonic AUTO_INCREMENT advances from a private snapshot.
+/// MySQL retains allocated ids across rollback and crash recovery.
 let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
-    // `snapshotCatalog` is always a *whole-store* snapshot (`Store.Catalog`,
-    // taken at BEGIN), so it holds every database, not just the one(s) the
-    // rolled-back transaction actually wrote to. Only ever touch a
-    // database's slot when some table in it genuinely needs bumping
-    // (`mergedDb` differs from what's live, checked by reference — the
-    // `Map.fold` below only calls `Map.add` on an actual bump) — touching an
-    // untouched database's slot (and its lock) for no reason is exactly the
-    // unrelated-database work sharding `Store.Databases` exists to avoid.
-    let bumpSlot (slot: Database ref) (snapshotDb: Database) =
-        // Same per-database `lock slot` as `withDatabase`/`mergeDatabaseSlot`.
+    let advances = ResizeArray<CommitEvent>()
+
+    let bumpSlot dbName (slot: Database ref) (snapshotDb: Database) =
         lock slot (fun () ->
             let liveDb = slot.Value
 
@@ -1009,6 +997,9 @@ let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
                     (fun acc tableName (snapshotTable: Table) ->
                         match Map.tryFind tableName acc with
                         | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
+                            advances.Add(
+                                AutoIncrementAdvanced(dbName, liveTable.OriginalName, snapshotTable.NextAutoId)
+                            )
                             Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
                         | _ -> acc)
                     liveDb
@@ -1018,8 +1009,13 @@ let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
 
     for KeyValue(dbName, snapshotDb) in snapshotCatalog do
         match store.Databases.TryGetValue dbName with
-        | false, _ -> () // dropped since the snapshot was taken — nothing to bump
-        | true, slot -> bumpSlot slot snapshotDb
+        | false, _ -> ()
+        | true, slot -> bumpSlot dbName slot snapshotDb
+
+    advances
+    |> List.ofSeq
+    |> prepareEvents store
+    |> fun acknowledge -> acknowledge ()
 
 /// Pure catalog-level version of `bumpAutoIncrementsInto`'s "never roll back
 /// a burned AUTO_INCREMENT id" rule — returns `target` with every table's

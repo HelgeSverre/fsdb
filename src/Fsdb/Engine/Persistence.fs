@@ -825,6 +825,7 @@ let private KindSchemaChangedAtV5 = 0x0Euy
 let private KindXaPrepared = 0x0Fuy
 let private KindXaCommitted = 0x10uy
 let private KindXaRolledBack = 0x11uy
+let private KindAutoIncrementAdvanced = 0x12uy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -886,6 +887,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
 
         for row in rows do
             encodeRowBin w row
+    | AutoIncrementAdvanced(db, table, nextId) ->
+        w.WriteByte KindAutoIncrementAdvanced
+        w.WriteLenEncString db
+        w.WriteLenEncString table
+        w.WriteInt64LE nextId
     | SchemaChanged(db, stmt) ->
         w.WriteByte KindSchemaChangedV5
         w.WriteLenEncString db
@@ -942,6 +948,8 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
         let table = str ()
         let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
         RowsDeleted(db, table, rows)
+    | k when k = KindAutoIncrementAdvanced ->
+        AutoIncrementAdvanced(str (), str (), r.ReadInt64LE())
     | k when k = KindSchemaChanged ->
         let db = str ()
         SchemaChanged(db, decodeStatement legacySnapshotFormat r)
@@ -1055,6 +1063,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
             appendRowsForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
     | RowsUpdated(db, table, changes) -> updateRowsForReplay store db table changes (Log.diagnostic "fsdb: WAL replay warning: %s")
     | RowsDeleted(db, table, rows) -> deleteRowsForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
+    | AutoIncrementAdvanced(db, table, nextId) ->
+        warn "AutoIncrementAdvanced" (alterTable store db table [ SetAutoIncrement nextId ])
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
     | SchemaChangedAt(db, stmt, createTime) ->
         applyDdl store db stmt
