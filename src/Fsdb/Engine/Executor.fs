@@ -112,6 +112,18 @@ type private IndexOrderPlan =
       EstimatedRows: int
       Rows: Value[] seq }
 
+type private GroupInputOrder =
+    | ArbitraryGroupRows
+    | ContiguousGroupRows
+
+type private OrderedIndexCandidate =
+    { Columns: string list
+      Directions: Direction list }
+
+type private IndexPrefixMatch =
+    { Columns: string list
+      PinnedCount: int }
+
 type private IndexedJoinPlan =
     { Table: Table
       KeyName: string
@@ -7448,7 +7460,7 @@ and private runUnlockedSelectStmt
 
     match select.From with
     | _ when not matchNodes.IsEmpty -> runFullTextSelect store registry dbName select matchNodes outer
-    | None -> runSelect store registry dbName [] Map.empty [ [||] ] false select outer
+    | None -> runSelect store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
     | Some fromItem ->
         // A single real table, no `JOIN`, narrows to its PK/UNIQUE index's
         // candidates instead of a full `resolveFromItem` scan when the
@@ -7456,7 +7468,7 @@ and private runUnlockedSelectStmt
         // narrowing, so everything below (`applyJoin`, `runSelect`'s own
         // WHERE/ORDER BY/LIMIT/GROUP BY) runs completely unmodified over
         // whatever this produces.
-        let runResolvedWithGroupOrder groupInputOrdered (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
+        let runResolvedWithGroupOrder groupInputOrder (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
             let baseQualifier = fromItemQualifier fromItem
 
             let initial : Result<((string * ColumnDef list) list * Value[] seq) * string list list, QueryResult> =
@@ -7482,10 +7494,10 @@ and private runUnlockedSelectStmt
                     else
                         rewriteNaturalSelect select sources select.Joins namesPerJoin
 
-                runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrdered select' outer
+                runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select' outer
 
         let runResolved columns (rows: Value[] seq) resolvedSelect =
-            runResolvedWithGroupOrder false columns rows resolvedSelect
+            runResolvedWithGroupOrder ArbitraryGroupRows columns rows resolvedSelect
 
         match fromItem, select.Joins with
         | FromTable _, _ when not select.Locking.IsEmpty ->
@@ -7494,7 +7506,7 @@ and private runUnlockedSelectStmt
             | Ok(columns, rows) -> runResolved columns rows select
         | FromTable tref, [] ->
             match tryGroupIndexOrder store dbName tref select with
-            | Some plan -> runResolvedWithGroupOrder true plan.Columns plan.Rows select
+            | Some plan -> runResolvedWithGroupOrder ContiguousGroupRows plan.Columns plan.Rows select
             | None ->
                 match tryIndexedSemiJoin store registry dbName select tref with
                 | Error error -> error, [], []
@@ -8855,7 +8867,42 @@ and private whereEqualityPinnedColumns (whereExpr: Expr option) : Set<string> =
 
     whereExpr |> Option.map (fun e -> walk e Set.empty) |> Option.defaultValue Set.empty
 
-and private indexPrefixThrough (pinned: Set<string>) (suffixColumns: string list) (indexColumns: string list) : string list option =
+and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
+    let tryCandidate (index: IndexDef) =
+        if
+            index.Visible
+            && index.Kind = BTree
+            && (index.KeyColumns
+                |> List.forall (fun column -> column.Name <> "" && column.PrefixLength.IsNone && column.Transform.IsNone))
+        then
+            Some
+                { Columns = index.Columns
+                  Directions = index.KeyColumns |> List.map _.Direction }
+        else
+            None
+
+    let primary =
+        table.Indexes
+        |> List.tryFind (fun index -> index.Name.Equals("PRIMARY", System.StringComparison.OrdinalIgnoreCase))
+        |> Option.bind tryCandidate
+        |> Option.orElseWith (fun () ->
+            let columns = Storage.primaryKeyColumns table
+
+            if columns.IsEmpty then
+                None
+            else
+                Some
+                    { Columns = columns
+                      Directions = List.replicate columns.Length Asc })
+
+    let secondary =
+        table.Indexes
+        |> List.filter (fun index -> not (index.Name.Equals("PRIMARY", System.StringComparison.OrdinalIgnoreCase)))
+        |> List.choose tryCandidate
+
+    Option.toList primary @ secondary
+
+and private tryIndexPrefix (pinned: Set<string>) (suffixColumns: string list) (indexColumns: string list) : IndexPrefixMatch option =
     let normalized = indexColumns |> List.map (fun column -> column.ToLowerInvariant())
 
     let rec pinnedCount count =
@@ -8867,7 +8914,9 @@ and private indexPrefixThrough (pinned: Set<string>) (suffixColumns: string list
     let remaining = List.skip leadingPinned normalized
 
     if List.length remaining >= List.length suffixColumns && List.take suffixColumns.Length remaining = suffixColumns then
-        Some(List.take (leadingPinned + suffixColumns.Length) indexColumns)
+        Some
+            { Columns = List.take (leadingPinned + suffixColumns.Length) indexColumns
+              PinnedCount = leadingPinned }
     else
         None
 
@@ -8888,30 +8937,13 @@ and private tryFixedPrefixIndexOrder
         let requestedNames = orderedColumns |> List.map (fun (name, _) -> name.ToLowerInvariant())
         let requestedDirections = orderedColumns |> List.map snd
 
-        let primaryColumns = Storage.primaryKeyColumns table
-        let primary =
-            if primaryColumns.IsEmpty then
-                []
-            else
-                [ primaryColumns, List.replicate primaryColumns.Length Asc ]
-
-        let secondary =
-            table.Indexes
-            |> List.filter (fun index ->
-                index.Visible
-                && index.Kind = BTree
-                && (index.KeyColumns
-                    |> List.forall (fun column -> column.Name <> "" && column.PrefixLength.IsNone && column.Transform.IsNone)))
-            |> List.map (fun index -> index.Columns, index.KeyColumns |> List.map _.Direction)
-
-        primary @ secondary
-        |> List.tryPick (fun (indexColumns, indexDirections) ->
-            indexPrefixThrough pinned requestedNames indexColumns
-            |> Option.filter (fun prefix -> prefix.Length > requestedNames.Length)
-            |> Option.bind (fun prefix ->
-                let leading = prefix.Length - requestedNames.Length
-                let stored = indexDirections |> List.take prefix.Length
-                let storedSuffix = stored |> List.skip leading
+        orderedIndexCandidates table
+        |> List.tryPick (fun candidate ->
+            tryIndexPrefix pinned requestedNames candidate.Columns
+            |> Option.filter (fun matched -> matched.PinnedCount > 0)
+            |> Option.bind (fun matched ->
+                let stored = candidate.Directions |> List.take matched.Columns.Length
+                let storedSuffix = stored |> List.skip matched.PinnedCount
 
                 let traversal =
                     if storedSuffix = requestedDirections then Some stored
@@ -8920,7 +8952,7 @@ and private tryFixedPrefixIndexOrder
 
                 traversal
                 |> Option.bind (fun directions ->
-                    Storage.tryCompositeOrderedLookup store tableDb tref.Table (List.zip prefix directions)))))
+                    Storage.tryCompositeOrderedLookup store tableDb tref.Table (List.zip matched.Columns directions)))))
 
 and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
     if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
@@ -8935,18 +8967,13 @@ and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) 
             |> Option.bind (fun table ->
                 let pinned = whereEqualityPinnedColumns select.Where
                 let groupColumns = groupColumns |> List.map (fun column -> column.ToLowerInvariant())
-                let primaryColumns = Storage.primaryKeyColumns table
-                let primary = if primaryColumns.IsEmpty then [] else [ primaryColumns ]
-
-                let secondary =
-                    table.Indexes
-                    |> List.filter (fun index -> not (System.String.Equals(index.Name, "PRIMARY", System.StringComparison.OrdinalIgnoreCase)))
-                    |> List.map _.Columns
-
-                primary @ secondary
-                |> List.choose (indexPrefixThrough pinned groupColumns)
-                |> List.tryPick (fun prefix ->
-                    Storage.tryCompositeOrderedLookup store tableDb tref.Table (prefix |> List.map (fun column -> column, Asc))))
+                orderedIndexCandidates table
+                |> List.choose (fun candidate ->
+                    tryIndexPrefix pinned groupColumns candidate.Columns
+                    |> Option.map (fun matched ->
+                        matched.Columns
+                        |> List.map (fun column -> column, Asc)))
+                |> List.tryPick (Storage.tryCompositeOrderedLookup store tableDb tref.Table))
             |> Option.map (fun lookup ->
                 { KeyName = lookup.OrderedIndexName
                   ColumnIndices = lookup.OrderedColumnIndices
@@ -9185,7 +9212,7 @@ and private runGroupedSelect
     (columns: ColumnDef list)
     (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] list)
-    (groupInputOrdered: bool)
+    (groupInputOrder: GroupInputOrder)
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
@@ -9396,7 +9423,9 @@ and private runGroupedSelect
                             | Error error -> failure <- Some error
                             | Ok values ->
                                 let key = Array.ofList values
-                                if groupInputOrdered then addOrdered key row else addUnordered key row
+                                match groupInputOrder with
+                                | ContiguousGroupRows -> addOrdered key row
+                                | ArbitraryGroupRows -> addUnordered key row
 
                     match failure with
                     | Some error -> Error error
@@ -9526,7 +9555,7 @@ and private runGroupedWindowSelect
     (columns: ColumnDef list)
     (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] list)
-    (groupInputOrdered: bool)
+    (groupInputOrder: GroupInputOrder)
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
@@ -9564,7 +9593,7 @@ and private runGroupedWindowSelect
             Offset = None
             GroupBy = groupExprs }
 
-    let grouped = runGroupedSelect store registry dbName columns qualifiers rows groupInputOrdered innerSelect outer
+    let grouped = runGroupedSelect store registry dbName columns qualifiers rows groupInputOrder innerSelect outer
 
     match grouped with
     | Err(code, message), _, _ -> Err(code, message), [], []
@@ -10302,7 +10331,7 @@ and private runWindowedSelect
                 qualifiers
                 |> Map.add "__fsdb_window__" (syntheticColumns, columns.Length)
 
-            runSelect store registry dbName extendedColumns extendedQualifiers extendedRows false select' outer
+            runSelect store registry dbName extendedColumns extendedQualifiers extendedRows ArbitraryGroupRows select' outer
 
 and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
     let indexColumns =
@@ -10639,7 +10668,7 @@ and private runFullTextSelect
                             (resolvedSources |> List.collect snd)
                             (qualifierRanges resolvedSources)
                             rows
-                            false
+                            ArbitraryGroupRows
                             rewritten
                             outer
 
@@ -10650,7 +10679,7 @@ and private runSelect
     (columns: ColumnDef list)
     (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] seq)
-    (groupInputOrdered: bool)
+    (groupInputOrder: GroupInputOrder)
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
@@ -10699,7 +10728,7 @@ and private runSelect
             || projections |> List.exists (fst >> collectAggregateCalls registry >> List.isEmpty >> not)
 
         if grouping then
-            runGroupedWindowSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrdered select outer
+            runGroupedWindowSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrder select outer
         else
             runWindowedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
     elif
@@ -10708,7 +10737,7 @@ and private runSelect
         || projections |> List.exists (fst >> containsAggregate registry)
         || orderBy |> List.exists (fst >> containsAggregate registry)
     then
-        runGroupedSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrdered select outer
+        runGroupedSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrder select outer
     else
 
     let columnIndex = columnIndexOf columns
