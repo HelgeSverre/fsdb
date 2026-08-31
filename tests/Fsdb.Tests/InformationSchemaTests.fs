@@ -675,6 +675,7 @@ let tests =
               // that must not over-filter.
               let store = setup ()
               run store "CREATE TABLE narrow_probe (id INT PRIMARY KEY, body TEXT)" |> ignore
+              run store "CREATE VIEW narrow_view AS SELECT id FROM narrow_probe" |> ignore
 
               // Different case than the stored names — both the pre-filter
               // and the WHERE proper are case-insensitive.
@@ -682,6 +683,18 @@ let tests =
               | ResultSet(_, rows) ->
                   Expect.equal rows [ [ Some "id" ]; [ Some "body" ] ] "case-insensitive match survives the narrow"
               | other -> failtestf "expected the narrow_probe columns, got %A" other
+
+              match run store "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'FSDB' AND TABLE_NAME = 'NARROW_VIEW'" with
+              | ResultSet(_, [ [ Some "fsdb"; Some "narrow_view"; Some "id" ] ]) -> ()
+              | other -> failtestf "expected stored-view columns through the narrow path, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'information_schema' AND TABLE_NAME = 'COLUMNS'"
+              with
+              | ResultSet(_, [ [ Some count ] ]) -> Expect.isGreaterThan (int count) 20 "the virtual COLUMNS table describes itself"
+              | other -> failtestf "expected information_schema's own columns, got %A" other
 
               // An OR of equalities must NOT be treated as conjuncts.
               match run store "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_NAME = 'narrow_probe' OR TABLE_NAME = 'nope'" with

@@ -5232,7 +5232,19 @@ and private tryInformationSchemaNarrow
                 else
                     store.Catalog
 
-            InformationSchema.scan catalog tableRef.Table (Some(describeStoredViewColumns store registry))
+            let scan =
+                match tableRef.Table.ToUpperInvariant(), eqFor "TABLE_SCHEMA", eqFor "TABLE_NAME" with
+                | "COLUMNS", Some schemaName, Some tableName ->
+                    Some(
+                        InformationSchema.scanColumnsForTable
+                            store.Catalog
+                            schemaName
+                            tableName
+                            (Some(describeStoredViewColumns store registry))
+                    )
+                | _ -> InformationSchema.scan catalog tableRef.Table (Some(describeStoredViewColumns store registry))
+
+            scan
             |> Option.map (fun (cols, rows) ->
                 let filters =
                     eqs |> List.choose (fun (name, v) -> resolveColumn cols name |> Result.toOption |> Option.map (fun i -> i, v))

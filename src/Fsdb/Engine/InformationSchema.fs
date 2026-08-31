@@ -2199,6 +2199,52 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         |> List.tryFind (fst >> (=) upper)
         |> Option.map (fun (_, cols) -> cols, scopeRowsToViewer upper cols rows))
 
+/// Projects one table's COLUMNS rows without constructing the rest of the
+/// catalog or the entire information_schema self-description.
+let scanColumnsForTable
+    (catalog: Catalog)
+    (schemaName: string)
+    (tableName: string)
+    (viewColumns: ViewColumns option)
+    : ColumnDef list * Value[] list =
+    let equals left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
+
+    let tableRows =
+        catalog
+        |> Map.toSeq
+        |> Seq.tryFind (fst >> equals schemaName)
+        |> Option.bind (fun (databaseName, database) ->
+            database
+            |> Map.tryFind (tableName.ToLowerInvariant())
+            |> Option.map (fun table -> databaseName, table))
+        |> Option.map (fun (databaseName, table) ->
+            table.Columns
+            |> List.mapi (fun index column -> columnRow databaseName table.OriginalName index (columnKey table column) column))
+        |> Option.defaultValue []
+
+    let viewRows =
+        viewCatalogEntries catalog
+        |> List.tryFind (fun view -> equals view.Schema schemaName && equals view.Name tableName)
+        |> Option.bind (fun view ->
+            viewColumns
+            |> Option.bind (fun resolve -> resolve view.Schema view.Name)
+            |> Option.map (List.mapi (fun index column -> columnRow view.Schema view.Name index "" column)))
+        |> Option.defaultValue []
+
+    let selfRows =
+        if equals schemaName "information_schema" then
+            virtualTableDefs
+            |> List.tryFind (fst >> equals tableName)
+            |> Option.map (fun (name, columns) ->
+                columns
+                |> List.mapi (fun index column -> columnRowWith "select" "information_schema" name index "" column))
+            |> Option.defaultValue []
+        else
+            []
+
+    let rows = tableRows @ viewRows @ selfRows
+    columnsColumns, scopeRowsToViewer "COLUMNS" columnsColumns rows
+
 // ---------------------------------------------------------------------------
 // `SHOW TABLES / DATABASES / COLUMNS / CREATE TABLE / INDEX / TABLE STATUS`,
 // and `DESCRIBE` — MySQL's older, differently-shaped sibling of the
