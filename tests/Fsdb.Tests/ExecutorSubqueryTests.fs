@@ -208,6 +208,29 @@ let tests =
               | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
               | other -> failtestf "expected every quantified comparison operator to agree with MySQL, got %A" other
 
+          testCase "typed equality quantifiers preserve exact values and NULL dominance"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE typed_values (i BIGINT, d DECIMAL(30,10), s VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+
+              runDefault
+                  store
+                  "INSERT INTO typed_values VALUES (9007199254740992, 1.0000000001, 'A'), (9007199254740993, 1.0000000002, 'a'), (NULL, NULL, NULL)"
+              |> ignore
+
+              match
+                  runDefault
+                      store
+                      ("SELECT 9007199254740992 = ALL (SELECT i FROM typed_values), "
+                       + "9007199254740992 <> ANY (SELECT i FROM typed_values), "
+                       + "9007199254740992 <> ALL (SELECT i FROM typed_values), "
+                       + "CAST(1.0000000001 AS DECIMAL(30,10)) = ALL (SELECT d FROM typed_values WHERE d IS NOT NULL), "
+                       + "'A' <> ANY (SELECT s FROM typed_values), "
+                       + "'A' = ALL (SELECT s FROM typed_values WHERE s = 'A')")
+              with
+              | ResultSet(_, [ [ Some "0"; Some "1"; Some "0"; Some "0"; Some "1"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected typed quantified equality semantics, got %A" other
+
           testCase "scalar subquery: (SELECT ...) used as a value, zero rows is NULL, one row is that value"
           <| fun _ ->
               let store = newStore ()
