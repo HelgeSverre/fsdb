@@ -4377,20 +4377,23 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | Affected _ -> Ok VNull
         | MultipleResults _ -> Error nestedSubqueryResultsError
     | Subquery select ->
-        // Reads the subquery's own typed `Value`, not a `VString` re-wrap
-        // of its text resultset — a bare-text round trip would make e.g.
-        // `(SELECT MAX(n) FROM t) > (SELECT MIN(n) FROM t)` compare
-        // lexicographically instead of numerically.
-        let subquery = runExpressionSubquery ctx select select
+        match tryCorrelatedCount ctx select with
+        | Some result -> result
+        | None ->
+            // Reads the subquery's own typed `Value`, not a `VString` re-wrap
+            // of its text resultset — a bare-text round trip would make e.g.
+            // `(SELECT MAX(n) FROM t) > (SELECT MIN(n) FROM t)` compare
+            // lexicographically instead of numerically.
+            let subquery = runExpressionSubquery ctx select select
 
-        match subquery.Result, subquery.Rows with
-        | Err(code, message), _ -> Error(code, message)
-        | Affected _, _ -> Ok VNull
-        | MultipleResults _, _ -> Error nestedSubqueryResultsError
-        | ResultSet(cols, _), _ when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
-        | ResultSet(_, []), _ -> Ok VNull
-        | ResultSet(_, [ _ ]), [ row ] -> Ok(row |> Array.tryHead |> Option.defaultValue VNull)
-        | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
+            match subquery.Result, subquery.Rows with
+            | Err(code, message), _ -> Error(code, message)
+            | Affected _, _ -> Ok VNull
+            | MultipleResults _, _ -> Error nestedSubqueryResultsError
+            | ResultSet(cols, _), _ when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
+            | ResultSet(_, []), _ -> Ok VNull
+            | ResultSet(_, [ _ ]), [ row ] -> Ok(row |> Array.tryHead |> Option.defaultValue VNull)
+            | ResultSet(_, _), _ -> Error(1242, "Subquery returns more than 1 row")
 
 and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, EvalError> =
     match expr with
@@ -4521,6 +4524,54 @@ and private runExpressionSubquery
     | _ ->
         memo.[cacheKey] <- UnmemoizedSubquery
         execute (Some ctx)
+
+and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
+    let countStar =
+        match select.Projections with
+        | [ FuncCall(name, [ Star None ]), _ ] -> name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
+        | _ -> false
+
+    match select.From with
+    | Some(FromTable tableRef)
+        when countStar
+             && select.Joins.IsEmpty
+             && select.GroupBy.IsEmpty
+             && select.Having.IsNone
+             && select.OrderBy.IsEmpty
+             && select.Limit.IsNone
+             && select.Offset.IsNone
+             && select.Windows.IsEmpty
+             && select.Ctes.IsEmpty
+             && select.IntoVariables.IsEmpty
+             && select.Locking.IsEmpty
+             && not select.Distinct
+             && not select.CalculateFoundRows
+             && not select.Rollup ->
+        tryCorrelatedEqualityLookup outer.Store outer.DbName tableRef select.Where (Some outer)
+        |> Option.map (fun (columns, rows) ->
+            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+
+            let context =
+                contextFactory
+                    outer.Store
+                    outer.Registry
+                    outer.DbName
+                    (columnIndexOf columns)
+                    (singleQualifier qualifier columns)
+                    (Some outer)
+
+            withMetadataProbe (fun () -> whereMatches context select.Where (probeRow columns))
+            |> Result.bind (fun _ ->
+                rows
+                |> List.fold
+                    (fun countResult (_, row) ->
+                        countResult
+                        |> Result.bind (fun count ->
+                            whereMatches context select.Where row
+                            |> Result.map (fun matches -> if matches then count + 1L else count)))
+                    (Ok 0L)
+                |> Result.map VInt))
+    | _ -> None
 
 and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
     let orderCtx = { ctx with Clause = OrderClause }

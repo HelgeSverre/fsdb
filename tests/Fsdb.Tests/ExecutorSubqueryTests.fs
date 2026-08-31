@@ -246,6 +246,31 @@ let tests =
                   Expect.equal rows [ [ Some "alice"; Some "2" ]; [ Some "bob"; Some "0" ] ] "correlated scalar subquery per row"
               | other -> failtestf "expected a per-row correlated count, got %A" other
 
+          testCase "correlated COUNT rechecks residual predicates and empty inputs"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE users (id INT PRIMARY KEY)" |> ignore
+              runDefault store "CREATE TABLE posts (id INT PRIMARY KEY, user_id INT, KEY ix_user (user_id))" |> ignore
+              runDefault store "INSERT INTO users VALUES (1), (2), (3)" |> ignore
+              runDefault store "INSERT INTO posts VALUES (1, 1), (2, 1), (3, 2)" |> ignore
+
+              match
+                  runDefault
+                      store
+                      "SELECT u.id, (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id AND p.id >= 2) FROM users u ORDER BY u.id"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ] "the complete predicate determines each count"
+              | other -> failtestf "expected correlated counts, got %A" other
+
+              match
+                  runDefault
+                      store
+                      "SELECT (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id AND missing = 1) FROM users u WHERE u.id = 3"
+              with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected an unknown-column error for an empty correlated input, got %A" other
+
           testCase "scalar subquery returning more than one row is MySQL error 1242"
           <| fun _ ->
               let store = newStore ()
