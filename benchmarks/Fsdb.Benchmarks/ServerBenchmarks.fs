@@ -245,6 +245,15 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.RightJoinUsersOrders() =
+        this.Query(
+            "SELECT u.id, u.name, o.id, o.total, o.status "
+            + "FROM users u RIGHT JOIN orders o ON o.user_id = u.id AND u.age > 30 "
+            + "LIMIT 50"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.ReorderedIndexedJoin() =
         this.Query(
             "SELECT u.id, o.total, a.title "

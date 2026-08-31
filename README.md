@@ -202,7 +202,7 @@ direct literal ranges in single-table reads and writes, can seek matching
 primary, unique, and secondary B-trees and report `range` in `EXPLAIN`.
 Compatible composite `ORDER BY` and `GROUP BY` operations can stream that
 index when preceding keys are fixed, including `LIMIT`, `OFFSET`, and literal
-bounds; right joins and unconstrained multi-key ordering remain scans. Equality
+bounds; unconstrained multi-key ordering remains a scan. Equality
 buckets and ordered entries are separate derived
 structures, deliberately trading memory and write work for efficient equality
 buckets and bounded range seeks. Equi-joins hash-join; everything else is a
