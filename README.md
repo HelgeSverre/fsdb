@@ -197,12 +197,13 @@ compatible table ownership only for their execution, so explicit locks also
 coordinate with sessions that never issue `LOCK TABLES`.
 PK/UNIQUE and composite secondary equality lookups go through maps keyed by
 the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
-exactly as MySQL's do. Direct literal ranges in a single-table `SELECT` can
-seek a matching non-unique secondary B-tree and report `range` in `EXPLAIN`.
+exactly as MySQL's do. One-column literal `IN` lists and direct literal ranges
+in single-table reads and writes can seek matching primary, unique, and
+secondary B-trees and report `range` in `EXPLAIN`.
 Compatible composite `ORDER BY` and `GROUP BY` operations can stream that
 index when preceding keys are fixed, including `LIMIT`, `OFFSET`, and literal
-bounds; unique/PK ranges, DML ranges, outer joins, and unconstrained multi-key
-ordering remain scans. Equality buckets and ordered entries are separate derived
+bounds; outer joins and unconstrained multi-key ordering remain scans. Equality
+buckets and ordered entries are separate derived
 structures, deliberately trading memory and write work for efficient equality
 buckets and bounded range seeks. Equi-joins hash-join; everything else is a
 scan, except a physical inner side whose complete indexed key is bound by the

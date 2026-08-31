@@ -131,6 +131,13 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, name, email, age, meta, created_at FROM users WHERE id = {randomUserId ()}"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "LiteralIn")>]
+    member this.FilterByPrimaryKeyList() =
+        let first = rng.Next(1, max 2 (Schema.userCount - 7))
+        let ids = [ first .. first + 7 ] |> List.map string |> String.concat ","
+        this.Query $"SELECT id, name, age FROM users WHERE id IN ({ids})"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.FilterScanOrderLimit() =
         this.Query
