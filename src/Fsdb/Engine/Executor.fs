@@ -7434,7 +7434,7 @@ and private runUnlockedSelectStmt
 
     match select.From with
     | _ when not matchNodes.IsEmpty -> runFullTextSelect store registry dbName select matchNodes outer
-    | None -> runSelect store registry dbName [] Map.empty [ [||] ] select outer
+    | None -> runSelect store registry dbName [] Map.empty [ [||] ] false select outer
     | Some fromItem ->
         // A single real table, no `JOIN`, narrows to its PK/UNIQUE index's
         // candidates instead of a full `resolveFromItem` scan when the
@@ -7442,7 +7442,7 @@ and private runUnlockedSelectStmt
         // narrowing, so everything below (`applyJoin`, `runSelect`'s own
         // WHERE/ORDER BY/LIMIT/GROUP BY) runs completely unmodified over
         // whatever this produces.
-        let runResolved (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
+        let runResolvedWithGroupOrder groupInputOrdered (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
             let baseQualifier = fromItemQualifier fromItem
 
             let initial : Result<((string * ColumnDef list) list * Value[] seq) * string list list, QueryResult> =
@@ -7468,7 +7468,10 @@ and private runUnlockedSelectStmt
                     else
                         rewriteNaturalSelect select sources select.Joins namesPerJoin
 
-                runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select' outer
+                runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrdered select' outer
+
+        let runResolved columns (rows: Value[] seq) resolvedSelect =
+            runResolvedWithGroupOrder false columns rows resolvedSelect
 
         match fromItem, select.Joins with
         | FromTable _, _ when not select.Locking.IsEmpty ->
@@ -7476,28 +7479,31 @@ and private runUnlockedSelectStmt
             | Error e -> e, [], []
             | Ok(columns, rows) -> runResolved columns rows select
         | FromTable tref, [] ->
-            match tryIndexedSemiJoin store registry dbName select tref with
-            | Error error -> error, [], []
-            | Ok(Some(columns, rows, narrowed)) -> runResolved columns rows narrowed
-            | Ok None ->
-              match tryIndexedLookup store dbName tref select.Where with
-              | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
-              | None ->
-                match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
-                | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
-                | None ->
-                    match tryIndexOrder store registry dbName tref select with
-                    | Some plan -> runResolved plan.Columns plan.Rows { select with OrderBy = [] }
+            match tryGroupIndexOrder store dbName tref select with
+            | Some plan -> runResolvedWithGroupOrder true plan.Columns plan.Rows select
+            | None ->
+                match tryIndexedSemiJoin store registry dbName select tref with
+                | Error error -> error, [], []
+                | Ok(Some(columns, rows, narrowed)) -> runResolved columns rows narrowed
+                | Ok None ->
+                  match tryIndexedLookup store dbName tref select.Where with
+                  | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
+                  | None ->
+                    match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
+                    | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
                     | None ->
-                        let resolved =
-                            tryRangeLookup store dbName tref select.Where
-                            |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
-                            |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store registry dbName tref select.Where |> Option.map Ok)
-                            |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+                        match tryIndexOrder store registry dbName tref select with
+                        | Some plan -> runResolved plan.Columns plan.Rows { select with OrderBy = [] }
+                        | None ->
+                            let resolved =
+                                tryRangeLookup store dbName tref select.Where
+                                |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
+                                |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store registry dbName tref select.Where |> Option.map Ok)
+                                |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
 
-                        match resolved with
-                        | Error e -> e, [], []
-                        | Ok(columns, rows) -> runResolved columns rows select
+                            match resolved with
+                            | Error e -> e, [], []
+                            | Ok(columns, rows) -> runResolved columns rows select
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then
@@ -8802,23 +8808,7 @@ and private resolveOrderKey
         | [] -> evalOrderKey ctx (Col name)
     | e -> evalOrderKey ctx e
 
-/// The `GROUP BY`/aggregate path: `select.GroupBy` (resolved through
-/// `resolvePositionalOrAlias` for positional/alias references first)
-/// partitions the `WHERE`-filtered rows into groups — structural equality on
-/// each row's evaluated `Value list` key is already exactly SQL's "NULLs
-/// group together" rule, so no custom comparer is needed — and an empty
-/// `GroupBy` collapses everything into one synthetic group (even an empty
-/// one, so `SELECT COUNT(*) FROM t` on an empty `t` still returns one row
-/// with `0` rather than no rows, matching a real whole-table aggregate; a
-/// real `GROUP BY` with nothing to group correctly produces zero rows
-/// instead). Every projection/`HAVING`/`ORDER BY` expression runs through
-/// `rewriteAggregates` per group before evaluating what's left against that
-/// group's first row. `validateOnlyFullGroupBy` permits that fallback only
-/// when the session disables the mode or the expression is deterministic.
-/// Whether a `GROUP BY` key is a plain column list — real MySQL's own
-/// "GROUP BY optimization using an index" (see `groupByIsIndexOrdered`
-/// below) only ever applies to grouping by actual columns, never by an
-/// expression.
+/// Only direct columns can map a GROUP BY key to a stored index key.
 and private groupByColumnNames (groupExprs: Expr list) : string list option =
     let asColumnName =
         function
@@ -8829,13 +8819,7 @@ and private groupByColumnNames (groupExprs: Expr list) : string list option =
     let names = groupExprs |> List.map asColumnName
     if names |> List.forall Option.isSome then Some(names |> List.map Option.get) else None
 
-/// Column names pinned to a constant by a top-level `WHERE col = <literal>`
-/// equality, recursing through `AND` — the only shape MySQL's own GROUP BY
-/// index optimization looks for. An `OR`, a non-`=` comparison, or an
-/// equality against anything but a literal doesn't pin its column, which
-/// only ever makes `indexSortsGroupBy` below miss a real optimization
-/// opportunity (fsdb stays unsorted where MySQL would've sorted), never
-/// the other way around.
+/// Only literal equalities prove that a preceding index key is constant.
 and private whereEqualityPinnedColumns (whereExpr: Expr option) : Set<string> =
     let rec walk expr acc =
         match expr with
@@ -8848,55 +8832,53 @@ and private whereEqualityPinnedColumns (whereExpr: Expr option) : Set<string> =
 
     whereExpr |> Option.map (fun e -> walk e Set.empty) |> Option.defaultValue Set.empty
 
-/// Whether `groupCols` (lowercased, in `GROUP BY` order) sits right after
-/// `indexCols`' (lowercased, in index-declaration order) longest leading
-/// run of columns every one of which is in `pinned` — mirrors real MySQL's
-/// documented "GROUP BY optimization using an index": an equality
-/// condition on every index column before the grouped ones lets an ordered
-/// index/range scan feed rows already sorted by the group key, skipping
-/// the temp-table pass that would otherwise dedupe them in whatever order
-/// the table scan happened to visit them (fsdb's own first-occurrence
-/// default, since it never does real index-accelerated access — see
-/// `Storage.Table.Indexes`'s doc).
-and private indexSortsGroupBy (pinned: Set<string>) (groupCols: string list) (indexCols: string list) : bool =
-    let rec dropPinnedPrefix cols =
-        match cols with
-        | c :: rest when Set.contains c pinned -> dropPinnedPrefix rest
-        | _ -> cols
+and private groupByIndexPrefix (pinned: Set<string>) (groupColumns: string list) (indexColumns: string list) : string list option =
+    let normalized = indexColumns |> List.map (fun column -> column.ToLowerInvariant())
 
-    let remaining = indexCols |> List.map (fun c -> c.ToLowerInvariant()) |> dropPinnedPrefix
+    let rec pinnedCount count =
+        function
+        | column :: rest when Set.contains column pinned -> pinnedCount (count + 1) rest
+        | _ -> count
 
-    List.length remaining >= List.length groupCols
-    && List.truncate (List.length groupCols) remaining = groupCols
+    let leadingPinned = pinnedCount 0 normalized
+    let remaining = List.skip leadingPinned normalized
 
-/// Whether a bare `GROUP BY` (no `ORDER BY` to override it) comes back
-/// sorted by the group key ascending, the way real MySQL 8.4 does whenever
-/// an index makes that free (`indexSortsGroupBy`) — checked once per query
-/// rather than per group. Conservatively `false` (fsdb's oracle-verified
-/// default: first-occurrence order) for anything this simple index-metadata
-/// check can't answer: a join, a derived table, or a `GROUP BY` on
-/// something other than a plain column list. Verified against real MySQL
-/// 8.4: an unindexed key keeps first-occurrence order, a single-column
-/// index leading with the group column (or a composite one, once a WHERE
-/// equality pins every column ahead of it) sorts ascending.
-and private groupByIsIndexOrdered (store: Store) (dbName: string) (select: SelectStmt) (groupExprs: Expr list) : bool =
-    match select.From, select.Joins, groupByColumnNames groupExprs with
-    | Some(FromTable tref), [], Some groupCols ->
-        let groupColsLower = groupCols |> List.map (fun c -> c.ToLowerInvariant())
-        let tableDb = tref.Database |> Option.defaultValue dbName
+    if List.length remaining >= List.length groupColumns && List.take groupColumns.Length remaining = groupColumns then
+        Some(List.take (leadingPinned + groupColumns.Length) indexColumns)
+    else
+        None
 
-        match InformationSchema.findTable store.Catalog tableDb tref.Table with
-        | Error _ -> false
-        | Ok table ->
-            let pinned = whereEqualityPinnedColumns select.Where
-            let pkColumns = Storage.primaryKeyColumns table
-            let secondaryIndexes =
-                table.Indexes
-                |> List.filter (fun index -> not (System.String.Equals(index.Name, "PRIMARY", System.StringComparison.OrdinalIgnoreCase)))
+and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
+    if not (storedValuesMatchReadValues store) then
+        None
+    else
+        groupByColumnNames select.GroupBy
+        |> Option.bind (fun groupColumns ->
+            let tableDb = tref.Database |> Option.defaultValue dbName
 
-            (if pkColumns.IsEmpty then [] else [ pkColumns ]) @ (secondaryIndexes |> List.map _.Columns)
-            |> List.exists (indexSortsGroupBy pinned groupColsLower)
-    | _ -> false
+            InformationSchema.findTable store.Catalog tableDb tref.Table
+            |> Result.toOption
+            |> Option.bind (fun table ->
+                let pinned = whereEqualityPinnedColumns select.Where
+                let groupColumns = groupColumns |> List.map (fun column -> column.ToLowerInvariant())
+                let primaryColumns = Storage.primaryKeyColumns table
+                let primary = if primaryColumns.IsEmpty then [] else [ primaryColumns ]
+
+                let secondary =
+                    table.Indexes
+                    |> List.filter (fun index -> not (System.String.Equals(index.Name, "PRIMARY", System.StringComparison.OrdinalIgnoreCase)))
+                    |> List.map _.Columns
+
+                primary @ secondary
+                |> List.choose (groupByIndexPrefix pinned groupColumns)
+                |> List.tryPick (fun prefix ->
+                    Storage.tryCompositeOrderedLookup store tableDb tref.Table (prefix |> List.map (fun column -> column, Asc))))
+            |> Option.map (fun lookup ->
+                { KeyName = lookup.OrderedIndexName
+                  ColumnIndices = lookup.OrderedColumnIndices
+                  Columns = lookup.OrderedColumns
+                  EstimatedRows = lookup.OrderedRowCount
+                  Rows = lookup.OrderedRows }))
 
 and private validateOnlyFullGroupBy
     (store: Store)
@@ -9129,6 +9111,7 @@ and private runGroupedSelect
     (columns: ColumnDef list)
     (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] list)
+    (groupInputOrdered: bool)
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
@@ -9301,33 +9284,37 @@ and private runGroupedSelect
         match rows |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
         | Error(code, message) -> Err(code, message), [], []
         | Ok matched ->
-
-            // A bare `GROUP BY` with no `ORDER BY` isn't sorted by the SQL
-            // standard, but real MySQL sorts by the group key ascending
-            // whenever an index makes that free (see `groupByIsIndexOrdered`)
-            // — checked once here rather than per group, since it only
-            // depends on the query's shape, not any row's data.
-            let indexOrdered =
-                select.OrderBy.IsEmpty
-                && not groupExprs.IsEmpty
-                // WITH ROLLUP already emits in key order, with each subtotal
-                // placed after its own group — re-sorting by the key alone
-                // would scatter the subtotal rows (their key is a prefix).
-                && not select.Rollup
-                && groupByIsIndexOrdered store dbName select groupExprs
-
-            // Each group carries its own key alongside its rows so the
-            // `indexOrdered` branch below can sort by it; with an explicit
-            // `ORDER BY`, or when `indexOrdered` is false, `orderKeysOf`'s
-            // keys decide instead and this key goes unused.
             let buildGroups () : Result<(Value list * Value[] list) list, EvalError> =
                 if groupExprs.IsEmpty then
                     Ok [ [], matched ]
                 else
                     let collations = groupExprs |> List.map (keyCollation (ctxFor (probeRow columns)))
-                    let groupIndex = Dictionary<Value[], int>(SqlValueKeyComparer(collations, false))
+                    let comparer = SqlValueKeyComparer(collations, false)
+                    let equalityComparer = comparer :> IEqualityComparer<Value[]>
+                    let groupIndex = Dictionary<Value[], int>(comparer)
                     let groups = ResizeArray<Value[] * ResizeArray<Value[]>>()
                     let mutable failure = None
+
+                    let addGroup key row =
+                        let groupRows = ResizeArray()
+                        groupRows.Add row
+                        groups.Add(key, groupRows)
+
+                    let addOrdered key row =
+                        if groups.Count > 0 && equalityComparer.Equals(fst groups.[groups.Count - 1], key) then
+                            let _, groupRows = groups.[groups.Count - 1]
+                            groupRows.Add row
+                        else
+                            addGroup key row
+
+                    let addUnordered key row =
+                        match groupIndex.TryGetValue key with
+                        | true, index ->
+                            let _, groupRows = groups.[index]
+                            groupRows.Add row
+                        | false, _ ->
+                            groupIndex.Add(key, groups.Count)
+                            addGroup key row
 
                     for row in matched do
                         if failure.IsNone then
@@ -9335,16 +9322,7 @@ and private runGroupedSelect
                             | Error error -> failure <- Some error
                             | Ok values ->
                                 let key = Array.ofList values
-
-                                match groupIndex.TryGetValue key with
-                                | true, index ->
-                                    let _, rows = groups.[index]
-                                    rows.Add row
-                                | false, _ ->
-                                    let rows = ResizeArray()
-                                    rows.Add row
-                                    groupIndex.Add(key, groups.Count)
-                                    groups.Add(key, rows)
+                                if groupInputOrdered then addOrdered key row else addUnordered key row
 
                     match failure with
                     | Some error -> Error error
@@ -9413,17 +9391,7 @@ and private runGroupedSelect
                 | Ok kept ->
 
                     let sorted =
-                        if indexOrdered then
-                            kept
-                            |> List.sortWith (fun (_, _, ka) (_, _, kb) ->
-                                // The index order path sorts by the GROUP
-                                // BY key itself — tag it with the same
-                                // collation/ordinal rules the full order
-                                // path uses.
-                                let probeCtx = ctxFor (probeRow columns)
-                                let tagged keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
-                                compareByOrderKeys (groupExprs |> List.map (fun _ -> Asc)) (tagged ka) (tagged kb))
-                        elif select.OrderBy.IsEmpty then
+                        if select.OrderBy.IsEmpty then
                             // Same reasoning as the plain-`SELECT` `sortRows`
                             // above: an empty `ORDER BY` makes every
                             // comparison a no-op, so skip the sort outright.
@@ -9484,6 +9452,7 @@ and private runGroupedWindowSelect
     (columns: ColumnDef list)
     (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] list)
+    (groupInputOrdered: bool)
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
@@ -9521,7 +9490,7 @@ and private runGroupedWindowSelect
             Offset = None
             GroupBy = groupExprs }
 
-    let grouped = runGroupedSelect store registry dbName columns qualifiers rows innerSelect outer
+    let grouped = runGroupedSelect store registry dbName columns qualifiers rows groupInputOrdered innerSelect outer
 
     match grouped with
     | Err(code, message), _, _ -> Err(code, message), [], []
@@ -10259,7 +10228,7 @@ and private runWindowedSelect
                 qualifiers
                 |> Map.add "__fsdb_window__" (syntheticColumns, columns.Length)
 
-            runSelect store registry dbName extendedColumns extendedQualifiers extendedRows select' outer
+            runSelect store registry dbName extendedColumns extendedQualifiers extendedRows false select' outer
 
 and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
     let indexColumns =
@@ -10596,6 +10565,7 @@ and private runFullTextSelect
                             (resolvedSources |> List.collect snd)
                             (qualifierRanges resolvedSources)
                             rows
+                            false
                             rewritten
                             outer
 
@@ -10606,6 +10576,7 @@ and private runSelect
     (columns: ColumnDef list)
     (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] seq)
+    (groupInputOrdered: bool)
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
@@ -10654,7 +10625,7 @@ and private runSelect
             || projections |> List.exists (fst >> collectAggregateCalls registry >> List.isEmpty >> not)
 
         if grouping then
-            runGroupedWindowSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
+            runGroupedWindowSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrdered select outer
         else
             runWindowedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
     elif
@@ -10663,7 +10634,7 @@ and private runSelect
         || projections |> List.exists (fst >> containsAggregate registry)
         || orderBy |> List.exists (fst >> containsAggregate registry)
     then
-        runGroupedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
+        runGroupedSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrdered select outer
     else
 
     let columnIndex = columnIndexOf columns
@@ -11830,14 +11801,15 @@ and private explainSelectBlock
 
     let indexOrderPlan =
         match select.From, joins with
-        | Some(FromTable tref), [] when tryIndexedLookup store dbName tref select.Where |> Option.isNone ->
+        | Some(FromTable tref), [] ->
             tryIndexOrder store registry dbName tref select
+            |> Option.orElseWith (fun () -> tryGroupIndexOrder store dbName tref select)
         | _ -> None
 
     let extra =
         [ if select.Where.IsSome then "Using where"
           if not select.OrderBy.IsEmpty && indexOrderPlan.IsNone then "Using filesort"
-          if not select.GroupBy.IsEmpty || select.Distinct then "Using temporary" ]
+          if (not select.GroupBy.IsEmpty && indexOrderPlan.IsNone) || select.Distinct then "Using temporary" ]
 
     explainJoinBlock store registry dbName nextId acc id selectType select.From joins select.Where extra (selectSubqueryExprs select) indexOrderPlan
 

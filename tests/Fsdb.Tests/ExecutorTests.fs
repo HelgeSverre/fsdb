@@ -3334,7 +3334,7 @@ let tests =
                     | ResultSet(_, [ row ]) ->
                         Expect.equal row.[4] (Some "index") "the grouping path reads the index"
                         Expect.equal row.[6] (Some "idx_code") "the grouping index is reported"
-                        Expect.isFalse (row.[11].Value.Contains("temporary")) "ordered groups do not use a temporary table"
+                        Expect.isFalse (row.[11] |> Option.exists (_.Contains("temporary"))) "ordered groups do not use a temporary table"
                     | other -> failtestf "expected an indexed GROUP BY plan, got %A" other
 
                 testCase "GROUP BY sorts through a composite index once WHERE pins every column ahead of the group key"
