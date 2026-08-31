@@ -340,6 +340,71 @@ let tests =
                   Expect.equal rows [ [ Some "1"; Some "one" ]; [ Some "3"; Some "three" ] ] "outer index candidates retain set semantics"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "stable string and decimal IN subqueries narrow indexed outer rows"
+          <| fun _ ->
+              let mutable touches = 0
+
+              let touch values =
+                  touches <- touches + 1
+                  List.head values
+
+              let registry = registerScalar "TOUCH" touch builtins
+              let store = newStore ()
+
+              runDefault
+                  store
+                  "CREATE TABLE outer_rows (id INT PRIMARY KEY, code VARCHAR(20) COLLATE utf8mb4_bin, amount DECIMAL(10,2), INDEX ix_code (code), INDEX ix_amount (amount))"
+              |> ignore
+
+              runDefault
+                  store
+                  "CREATE TABLE inner_rows (code VARCHAR(20) COLLATE utf8mb4_bin, amount DECIMAL(10,2))"
+              |> ignore
+
+              [ 1 .. 100 ]
+              |> List.map (fun id -> sprintf "(%d, 'code-%03d', %d.25)" id id id)
+              |> String.concat ", "
+              |> sprintf "INSERT INTO outer_rows VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              runDefault store "INSERT INTO inner_rows VALUES ('code-007', 81.25), ('code-081', 7.25), (NULL, NULL)" |> ignore
+
+              match
+                  run
+                      store
+                      registry
+                      "SELECT id FROM outer_rows WHERE code IN (SELECT code FROM inner_rows) AND TOUCH(id) = id ORDER BY id"
+              with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ]; [ Some "81" ] ] "string candidates match"
+              | other -> failtestf "expected indexed string matches, got %A" other
+
+              Expect.isLessThan touches 5 "the string index avoids evaluating every outer row"
+              touches <- 0
+
+              match
+                  run
+                      store
+                      registry
+                      "SELECT id FROM outer_rows WHERE amount IN (SELECT amount FROM inner_rows) AND TOUCH(id) = id ORDER BY id"
+              with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ]; [ Some "81" ] ] "decimal candidates match"
+              | other -> failtestf "expected indexed decimal matches, got %A" other
+
+              Expect.isLessThan touches 5 "the decimal index avoids evaluating every outer row"
+
+          testCase "indexed string IN rechecks prefix collisions"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_rows (id INT PRIMARY KEY, code VARCHAR(20), INDEX ix_code (code(2)))" |> ignore
+              runDefault store "CREATE TABLE inner_rows (code VARCHAR(20))" |> ignore
+              runDefault store "INSERT INTO outer_rows VALUES (1, 'ab-target'), (2, 'ab-other'), (3, 'different')" |> ignore
+              runDefault store "INSERT INTO inner_rows VALUES ('ab-target')" |> ignore
+
+              match runDefault store "SELECT id FROM outer_rows WHERE code IN (SELECT code FROM inner_rows) ORDER BY id" with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the full IN predicate filters prefix candidates"
+              | other -> failtestf "expected only the full string match, got %A" other
+
           testCase "EXISTS stops after its first matching row"
           <| fun _ ->
               let mutable touches = 0
