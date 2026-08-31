@@ -207,7 +207,7 @@ buckets and ordered entries are separate derived
 structures, deliberately trading memory and write work for efficient equality
 buckets and bounded range seeks. Equi-joins hash-join; everything else is a
 scan, except a physical inner or left-join right side whose complete indexed
-key is bound by the outer row.
+key is bound by the outer row, including `USING` and natural joins.
 
 ### Collations & charsets
 
