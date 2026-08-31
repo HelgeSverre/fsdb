@@ -49,9 +49,9 @@ let tests =
                   + "JOIN small_rows ON small_rows.base_id = base_rows.id"
 
               let explainedTables query =
-                  match runDefault store ("EXPLAIN " + query) with
-                  | ResultSet(_, rows) -> rows |> List.choose (List.item 2)
-                  | other -> failtestf "expected EXPLAIN rows, got %A" other
+                  runDefault store ("EXPLAIN " + query)
+                  |> TestSupport.Sql.explainRows
+                  |> List.choose _.Table
 
               Expect.equal
                   (explainedTables sql)

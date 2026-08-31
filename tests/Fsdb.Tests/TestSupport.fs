@@ -28,6 +28,32 @@ let processGlobalCase name body =
     testCase name body |> testSequenced
 
 module Sql =
+    type ExplainPlan =
+        { Id: string option
+          SelectType: string option
+          Table: string option
+          AccessType: string option
+          PossibleKeys: string option
+          Key: string option
+          KeyLength: string option
+          Reference: string option
+          EstimatedRows: string option
+          Filtered: string option
+          Extra: string option }
+
+    let private explainPlan row =
+        { Id = List.item 0 row
+          SelectType = List.item 1 row
+          Table = List.item 2 row
+          AccessType = List.item 4 row
+          PossibleKeys = List.item 5 row
+          Key = List.item 6 row
+          KeyLength = List.item 7 row
+          Reference = List.item 8 row
+          EstimatedRows = List.item 9 row
+          Filtered = List.item 10 row
+          Extra = List.item 11 row }
+
     let execute (store: Store) (registry: Registry) (sql: string) : QueryResult =
         match Fsdb.Parser.parse sql with
         | Error message -> failtestf "expected %s to parse, got error: %s" sql message
@@ -50,6 +76,15 @@ module Sql =
         match executeDefault store sql with
         | ResultSet(_, result) -> result
         | other -> failtestf "expected rows from %s, got %A" sql other
+
+    let explainRows = function
+        | ResultSet(_, rows) -> rows |> List.map explainPlan
+        | other -> failtestf "expected EXPLAIN rows, got %A" other
+
+    let explainRow result =
+        match explainRows result with
+        | [ row ] -> row
+        | rows -> failtestf "expected one EXPLAIN row, got %d" rows.Length
 
 module SqlCommentMutation =
     let whitespaceRuns (sql: string) =

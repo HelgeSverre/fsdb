@@ -10,6 +10,8 @@ open Fsdb.Executor
 
 let private run = TestSupport.Sql.execute
 let private runDefault = TestSupport.Sql.executeDefault
+let private explainRow = TestSupport.Sql.explainRow
+let private explainRows = TestSupport.Sql.explainRows
 
 let private newStore () = create ()
 
@@ -999,17 +1001,14 @@ let tests =
                     runDefault store "CREATE TABLE t1 (id INT)" |> ignore
                     runDefault store "CREATE TABLE t2 (t1_id INT)" |> ignore
 
-                    match
+                    let plans =
                         runDefault
                             store
                             "EXPLAIN SELECT * FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.t1_id = t1.id)"
-                    with
-                    | ResultSet(_, rows) ->
-                        let selectTypes = rows |> List.map (fun r -> r.[1])
-                        Expect.contains selectTypes (Some "DEPENDENT SUBQUERY") "the correlated subquery is flagged dependent"
-                        let ids = rows |> List.map (fun r -> r.[0])
-                        Expect.equal (ids |> List.distinct |> List.length) 2 "outer and subquery are different id blocks"
-                    | other -> failtestf "expected a resultset, got %A" other
+                        |> explainRows
+
+                    Expect.contains (plans |> List.map _.SelectType) (Some "DEPENDENT SUBQUERY") "the correlated subquery is flagged dependent"
+                    Expect.equal (plans |> List.map _.Id |> List.distinct |> List.length) 2 "outer and subquery are different id blocks"
 
                 testCase "EXPLAIN SELECT with an uncorrelated subquery is plain SUBQUERY"
                 <| fun _ ->
@@ -1017,22 +1016,22 @@ let tests =
                     runDefault store "CREATE TABLE t1 (id INT)" |> ignore
                     runDefault store "CREATE TABLE t2 (id INT)" |> ignore
 
-                    match runDefault store "EXPLAIN SELECT * FROM t1 WHERE id IN (SELECT id FROM t2)" with
-                    | ResultSet(_, rows) ->
-                        let selectTypes = rows |> List.map (fun r -> r.[1])
-                        Expect.contains selectTypes (Some "SUBQUERY") "the uncorrelated subquery is plain SUBQUERY"
-                    | other -> failtestf "expected a resultset, got %A" other
+                    let plans =
+                        runDefault store "EXPLAIN SELECT * FROM t1 WHERE id IN (SELECT id FROM t2)"
+                        |> explainRows
+
+                    Expect.contains (plans |> List.map _.SelectType) (Some "SUBQUERY") "the uncorrelated subquery is plain SUBQUERY"
 
                 testCase "EXPLAIN finds a subquery inside a window function"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT)" |> ignore
 
-                    match runDefault store "EXPLAIN SELECT SUM((SELECT id FROM t)) OVER ()" with
-                    | ResultSet(_, rows) ->
-                        let selectTypes = rows |> List.map (fun row -> row.[1])
-                        Expect.contains selectTypes (Some "SUBQUERY") "the window argument subquery has its own plan block"
-                    | other -> failtestf "expected a resultset, got %A" other
+                    let plans =
+                        runDefault store "EXPLAIN SELECT SUM((SELECT id FROM t)) OVER ()"
+                        |> explainRows
+
+                    Expect.contains (plans |> List.map _.SelectType) (Some "SUBQUERY") "the window argument subquery has its own plan block"
 
                 testCase "EXPLAIN SELECT with a quantified comparison plans its subquery"
                 <| fun _ ->
@@ -1040,11 +1039,11 @@ let tests =
                     runDefault store "CREATE TABLE t1 (id INT)" |> ignore
                     runDefault store "CREATE TABLE t2 (id INT)" |> ignore
 
-                    match runDefault store "EXPLAIN SELECT * FROM t1 WHERE id = ANY (SELECT id FROM t2)" with
-                    | ResultSet(_, rows) ->
-                        let selectTypes = rows |> List.map (fun r -> r.[1])
-                        Expect.contains selectTypes (Some "SUBQUERY") "the quantified subquery has its own plan block"
-                    | other -> failtestf "expected a resultset, got %A" other
+                    let plans =
+                        runDefault store "EXPLAIN SELECT * FROM t1 WHERE id = ANY (SELECT id FROM t2)"
+                        |> explainRows
+
+                    Expect.contains (plans |> List.map _.SelectType) (Some "SUBQUERY") "the quantified subquery has its own plan block"
 
                 testCase "EXPLAIN SELECT with a derived table is DERIVED"
                 <| fun _ ->
@@ -1052,44 +1051,48 @@ let tests =
                     runDefault store "CREATE TABLE t (n INT)" |> ignore
                     runDefault store "INSERT INTO t VALUES (1), (2)" |> ignore
 
-                    match runDefault store "EXPLAIN SELECT * FROM (SELECT n FROM t) AS d" with
-                    | ResultSet(_, rows) ->
-                        let selectTypes = rows |> List.map (fun r -> r.[1])
-                        Expect.contains selectTypes (Some "DERIVED") "the derived table gets its own DERIVED block"
-                        let tables = rows |> List.map (fun r -> r.[2])
-                        Expect.contains tables (Some "<derived2>") "the outer row references it by its derived id"
-                    | other -> failtestf "expected a resultset, got %A" other
+                    let plans =
+                        runDefault store "EXPLAIN SELECT * FROM (SELECT n FROM t) AS d"
+                        |> explainRows
+
+                    Expect.contains (plans |> List.map _.SelectType) (Some "DERIVED") "the derived table gets its own DERIVED block"
+                    Expect.contains (plans |> List.map _.Table) (Some "<derived2>") "the outer row references it by its derived id"
 
                 testCase "EXPLAIN SELECT with GROUP BY notes Using temporary"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (g INT)" |> ignore
 
-                    match runDefault store "EXPLAIN SELECT g, COUNT(*) FROM t GROUP BY g" with
-                    | ResultSet(_, [ row ]) -> Expect.stringContains (row.[11] |> Option.defaultValue "") "Using temporary" "GROUP BY notes Using temporary"
-                    | other -> failtestf "expected one row, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT g, COUNT(*) FROM t GROUP BY g"
+                        |> explainRow
+
+                    Expect.stringContains (plan.Extra |> Option.defaultValue "") "Using temporary" "GROUP BY notes Using temporary"
 
                 testCase "EXPLAIN SELECT with ORDER BY notes Using filesort"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (n INT)" |> ignore
 
-                    match runDefault store "EXPLAIN SELECT n FROM t ORDER BY n" with
-                    | ResultSet(_, [ row ]) -> Expect.stringContains (row.[11] |> Option.defaultValue "") "Using filesort" "ORDER BY notes Using filesort"
-                    | other -> failtestf "expected one row, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT n FROM t ORDER BY n"
+                        |> explainRow
+
+                    Expect.stringContains (plan.Extra |> Option.defaultValue "") "Using filesort" "ORDER BY notes Using filesort"
 
                 testCase "EXPLAIN on a UNION includes PRIMARY, UNION, and a UNION RESULT row"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (n INT)" |> ignore
 
-                    match runDefault store "EXPLAIN SELECT n FROM t UNION SELECT n FROM t" with
-                    | ResultSet(_, rows) ->
-                        let selectTypes = rows |> List.choose (fun r -> r.[1])
-                        Expect.contains selectTypes "PRIMARY" "first branch is PRIMARY"
-                        Expect.contains selectTypes "UNION" "second branch is UNION"
-                        Expect.contains selectTypes "UNION RESULT" "a UNION RESULT row combines them"
-                    | other -> failtestf "expected a resultset, got %A" other
+                    let selectTypes =
+                        runDefault store "EXPLAIN SELECT n FROM t UNION SELECT n FROM t"
+                        |> explainRows
+                        |> List.choose _.SelectType
+
+                    Expect.contains selectTypes "PRIMARY" "first branch is PRIMARY"
+                    Expect.contains selectTypes "UNION" "second branch is UNION"
+                    Expect.contains selectTypes "UNION RESULT" "a UNION RESULT row combines them"
 
                 testCase "EXPLAIN UPDATE describes the target table with select_type UPDATE"
                 <| fun _ ->
@@ -3330,12 +3333,13 @@ let tests =
                             "an index leading with the group column sorts, unlike the unindexed case above"
                     | other -> failtestf "expected code-sorted groups, got %A" other
 
-                    match runDefault store "EXPLAIN SELECT code, COUNT(*) AS c FROM t GROUP BY code" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "index") "the grouping path reads the index"
-                        Expect.equal row.[6] (Some "idx_code") "the grouping index is reported"
-                        Expect.isFalse (row.[11] |> Option.exists (_.Contains("temporary"))) "ordered groups do not use a temporary table"
-                    | other -> failtestf "expected an indexed GROUP BY plan, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT code, COUNT(*) AS c FROM t GROUP BY code"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "the grouping path reads the index"
+                    Expect.equal plan.Key (Some "idx_code") "the grouping index is reported"
+                    Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "ordered groups do not use a temporary table"
 
                 testCase "GROUP BY sorts through a composite index once WHERE pins every column ahead of the group key"
                 <| fun _ ->
@@ -3349,9 +3353,6 @@ let tests =
 
                     runDefault store "CREATE INDEX idx_pub_code_city ON t (is_published, code, city)" |> ignore
 
-                    // Without the WHERE pinning `is_published`, the group
-                    // column isn't a leading run of the index by itself, so
-                    // this stays unsorted (first-occurrence).
                     match runDefault store "SELECT code, COUNT(*) AS c FROM t GROUP BY code" with
                     | ResultSet([ "code"; "c" ], rows) ->
                         Expect.equal
@@ -3360,8 +3361,6 @@ let tests =
                             "no WHERE pin means the composite index doesn't apply, so groups stay unsorted"
                     | other -> failtestf "expected unsorted groups, got %A" other
 
-                    // With the equality WHERE, `is_published` is pinned and
-                    // `code` becomes the index's next column — sorted.
                     match runDefault store "SELECT code, COUNT(*) AS c FROM t WHERE is_published = 1 GROUP BY code" with
                     | ResultSet([ "code"; "c" ], rows) ->
                         Expect.equal
@@ -3370,11 +3369,12 @@ let tests =
                             "the WHERE-pinned composite index sorts, matching MySQL's GROUP BY-using-an-index optimization"
                     | other -> failtestf "expected code-sorted groups, got %A" other
 
-                    match runDefault store "EXPLAIN SELECT code, COUNT(*) AS c FROM t WHERE is_published = 1 GROUP BY code" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "index") "the pinned prefix feeds the grouping path"
-                        Expect.equal row.[6] (Some "idx_pub_code_city") "the composite grouping index is reported"
-                    | other -> failtestf "expected a composite indexed GROUP BY plan, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT code, COUNT(*) AS c FROM t WHERE is_published = 1 GROUP BY code"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "the pinned prefix feeds the grouping path"
+                    Expect.equal plan.Key (Some "idx_pub_code_city") "the composite grouping index is reported"
 
                 testCase "prefix indexes do not feed full-value grouping"
                 <| fun _ ->
@@ -3387,11 +3387,12 @@ let tests =
                         Expect.equal rows [ [ Some "aba"; Some "2" ]; [ Some "abz"; Some "1" ] ] "truncated keys do not split a full-value group"
                     | other -> failtestf "expected full-value groups, got %A" other
 
-                    match runDefault store "EXPLAIN SELECT label, COUNT(*) AS c FROM t GROUP BY label" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "ALL") "a prefix key does not claim full-value grouping"
-                        Expect.isTrue (row.[11] |> Option.exists (_.Contains("temporary"))) "the fallback uses ordinary grouping"
-                    | other -> failtestf "expected a scan grouping plan, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT label, COUNT(*) AS c FROM t GROUP BY label"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "ALL") "a prefix key does not claim full-value grouping"
+                    Expect.isTrue (plan.Extra |> Option.exists (_.Contains("temporary"))) "the fallback uses ordinary grouping"
 
                 testCase "ORDER BY an aggregate not in the SELECT list, over a grouped query"
                 <| fun _ ->
@@ -4577,12 +4578,13 @@ let tests =
                         [ [ Some "1" ]; [ Some "4" ] ]
                         "expression order is mapped to index order"
 
-                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE (tenant_id, status) IN ((1, 'open'), (2, 'done'), (9, 'missing'))" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "range") "row IN reports range access"
-                        Expect.equal row.[6] (Some "ix_tenant_status") "row IN reports the composite key"
-                        Expect.equal row.[9] (Some "2") "only existing candidates contribute to the estimate"
-                    | other -> failtestf "expected a composite row-IN plan, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed WHERE (tenant_id, status) IN ((1, 'open'), (2, 'done'), (9, 'missing'))"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "range") "row IN reports range access"
+                    Expect.equal plan.Key (Some "ix_tenant_status") "row IN reports the composite key"
+                    Expect.equal plan.EstimatedRows (Some "2") "only existing candidates contribute to the estimate"
 
                     Expect.equal
                         (runDefault store "UPDATE indexed SET score = score + 1 WHERE (tenant_id, status) IN ((1, 'open'), (2, 'done'))")
@@ -4767,11 +4769,12 @@ let tests =
                             (rows "scanned" order |> projectedKeys [ 1; 2 ])
                             $"{order} agrees with a scan"
 
-                    match runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY tenant_id, priority LIMIT 4" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "index") "a leading prefix streams the wider index"
-                        Expect.equal row.[6] (Some "ix_tenant_priority_created") "the wider composite key is reported"
-                    | other -> failtestf "expected a leading-prefix index plan, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY tenant_id, priority LIMIT 4"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "a leading prefix streams the wider index"
+                    Expect.equal plan.Key (Some "ix_tenant_priority_created") "the wider composite key is reported"
 
                 testCase "an index streams unbounded ORDER BY results"
                 <| fun _ ->
@@ -4792,12 +4795,13 @@ let tests =
                         (rows "scanned" "tenant_id, priority")
                         "an unbounded composite order agrees with a filesort"
 
-                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE keep_row = 1 ORDER BY tenant_id" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "index") "the unbounded order streams the index"
-                        Expect.equal row.[6] (Some "ix_tenant_priority") "the ordered key is reported"
-                        Expect.isFalse (row.[11].Value.Contains("filesort")) "the plan does not report a filesort"
-                    | other -> failtestf "expected an unbounded index-order plan, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed WHERE keep_row = 1 ORDER BY tenant_id"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "the unbounded order streams the index"
+                    Expect.equal plan.Key (Some "ix_tenant_priority") "the ordered key is reported"
+                    Expect.isFalse (plan.Extra |> Option.exists (_.Contains("filesort"))) "the plan does not report a filesort"
 
                 testCase "literal equalities unlock a composite index ORDER BY suffix"
                 <| fun _ ->
@@ -4834,16 +4838,15 @@ let tests =
                     for direction in [ "ASC"; "DESC" ] do
                         Expect.equal (rows "indexed" direction) (rows "scanned" direction) $"the {direction} suffix agrees with a filesort"
 
-                    match
+                    let plan =
                         runDefault
                             store
                             "EXPLAIN SELECT id FROM indexed WHERE tenant_id = 2 AND keep_row = 1 ORDER BY priority DESC, created_at DESC"
-                    with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "index") "the fixed prefix streams the ordered suffix"
-                        Expect.equal row.[6] (Some "ix_tenant_priority_created") "the composite key is reported"
-                        Expect.isFalse (row.[11] |> Option.exists (_.Contains("filesort"))) "the suffix plan avoids a filesort"
-                    | other -> failtestf "expected a fixed-prefix index plan, got %A" other
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "the fixed prefix streams the ordered suffix"
+                    Expect.equal plan.Key (Some "ix_tenant_priority_created") "the composite key is reported"
+                    Expect.isFalse (plan.Extra |> Option.exists (_.Contains("filesort"))) "the suffix plan avoids a filesort"
 
                 testCase "composite prefix indexes do not claim full-value ORDER BY"
                 <| fun _ ->
@@ -4861,9 +4864,11 @@ let tests =
 
                     Expect.equal (rows "indexed") (rows "scanned") "the full string order ignores truncated index keys"
 
-                    match runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY label, id LIMIT 4" with
-                    | ResultSet(_, [ row ]) -> Expect.stringContains row.[11].Value "filesort" "the prefix index is not advertised as full ordering"
-                    | other -> failtestf "expected a filesort plan, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY label, id LIMIT 4"
+                        |> explainRow
+
+                    Expect.stringContains plan.Extra.Value "filesort" "the prefix index is not advertised as full ordering"
 
                 testCase "a point equality stays ahead of secondary index ordering"
                 <| fun _ ->
@@ -4925,12 +4930,13 @@ let tests =
                         "CREATE TABLE competing (id INT PRIMARY KEY, tenant_id INT, priority INT, KEY ix_tenant (tenant_id), KEY ix_tenant_priority (tenant_id, priority))"
                     |> ignore
 
-                    match runDefault store "EXPLAIN SELECT id FROM competing WHERE tenant_id = 2 ORDER BY priority" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "ref") "the equality probe retains priority"
-                        Expect.equal row.[6] (Some "ix_tenant") "the selected equality key is reported"
-                        Expect.isTrue (row.[11] |> Option.exists (_.Contains("filesort"))) "EXPLAIN reports the remaining sort"
-                    | other -> failtestf "expected an equality plan with filesort, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM competing WHERE tenant_id = 2 ORDER BY priority"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "ref") "the equality probe retains priority"
+                    Expect.equal plan.Key (Some "ix_tenant") "the selected equality key is reported"
+                    Expect.isTrue (plan.Extra |> Option.exists (_.Contains("filesort"))) "EXPLAIN reports the remaining sort"
 
                 testCase "primary and unique ranges narrow SELECT UPDATE and DELETE"
                 <| fun _ ->
@@ -5200,11 +5206,12 @@ let tests =
                     calls <- 0
                     Expect.equal (query "indexed" "name = 'reference'") (ResultSet([ "id" ], [])) "the original binary column remains case-sensitive"
 
-                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE name = 'reference'" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "ALL") "a raw-column predicate keeps its scan plan"
-                        Expect.equal row.[6] None "the functional key is not reported for the raw column"
-                    | other -> failtestf "expected a scan plan, got %A" other
+                    let rawColumnPlan =
+                        runDefault store "EXPLAIN SELECT id FROM indexed WHERE name = 'reference'"
+                        |> explainRow
+
+                    Expect.equal rawColumnPlan.AccessType (Some "ALL") "a raw-column predicate keeps its scan plan"
+                    Expect.equal rawColumnPlan.Key None "the functional key is not reported for the raw column"
 
                     calls <- 0
 
@@ -5245,11 +5252,12 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected an UPPER index lookup, got %A" other
 
-                    match runDefault store "EXPLAIN SELECT id FROM names WHERE UPPER(name) = 'REFERENCE'" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "const") "the unique transformed key is a const lookup"
-                        Expect.equal row.[6] (Some "uq_upper") "the transformed key is reported"
-                    | other -> failtestf "expected an UPPER index plan, got %A" other
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM names WHERE UPPER(name) = 'REFERENCE'"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "const") "the unique transformed key is a const lookup"
+                    Expect.equal plan.Key (Some "uq_upper") "the transformed key is reported"
 
                     Expect.equal
                         (runDefault store "UPDATE names SET name = 'Different' WHERE UPPER(name) = 'REFERENCE'")
@@ -5270,18 +5278,21 @@ let tests =
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected invisible uniqueness enforcement, got %A" other
 
-                    match runDefault store "EXPLAIN SELECT id FROM hidden WHERE code = 'alpha'" with
-                    | ResultSet(_, [ row ]) when row.[4] = Some "ALL" && row.[6].IsNone -> ()
-                    | ResultSet(_, [ row ]) -> failtestf "expected a scan plan without uq_code, got %A" row
-                    | other -> failtestf "expected a scan plan, got %A" other
+                    let hiddenPlan =
+                        runDefault store "EXPLAIN SELECT id FROM hidden WHERE code = 'alpha'"
+                        |> explainRow
+
+                    Expect.equal hiddenPlan.AccessType (Some "ALL") "an invisible index leaves scan access"
+                    Expect.equal hiddenPlan.Key None "the invisible key is not reported"
 
                     runDefault store "ALTER TABLE hidden ALTER INDEX uq_code VISIBLE" |> ignore
 
-                    match runDefault store "EXPLAIN SELECT id FROM hidden WHERE code = 'alpha'" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "const") "the visible unique index is planned"
-                        Expect.equal row.[6] (Some "uq_code") "the visible key is reported"
-                    | other -> failtestf "expected a point plan, got %A" other
+                    let visiblePlan =
+                        runDefault store "EXPLAIN SELECT id FROM hidden WHERE code = 'alpha'"
+                        |> explainRow
+
+                    Expect.equal visiblePlan.AccessType (Some "const") "the visible unique index is planned"
+                    Expect.equal visiblePlan.Key (Some "uq_code") "the visible key is reported"
 
                 testCase "mixed descending indexes stream compatible orders"
                 <| fun _ ->
@@ -5297,25 +5308,29 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ]; [ Some "6" ]; [ Some "4" ]; [ Some "5" ] ] "reverse direction"
                     | other -> failtestf "expected reverse-ordered rows, got %A" other
 
-                    match runDefault store "EXPLAIN SELECT id FROM ranked ORDER BY priority ASC, created_at DESC LIMIT 4" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "index") "compatible directions stream the index"
-                        Expect.equal row.[6] (Some "ix_ranked") "the mixed-direction key is reported"
-                    | other -> failtestf "expected an index-order plan, got %A" other
+                    let compatiblePlan =
+                        runDefault store "EXPLAIN SELECT id FROM ranked ORDER BY priority ASC, created_at DESC LIMIT 4"
+                        |> explainRow
 
-                    match runDefault store "EXPLAIN SELECT id FROM ranked ORDER BY priority ASC, created_at ASC LIMIT 4" with
-                    | ResultSet(_, [ row ]) -> Expect.equal row.[11] (Some "Using filesort") "incompatible directions sort"
-                    | other -> failtestf "expected a filesort plan, got %A" other
+                    Expect.equal compatiblePlan.AccessType (Some "index") "compatible directions stream the index"
+                    Expect.equal compatiblePlan.Key (Some "ix_ranked") "the mixed-direction key is reported"
+
+                    let incompatiblePlan =
+                        runDefault store "EXPLAIN SELECT id FROM ranked ORDER BY priority ASC, created_at ASC LIMIT 4"
+                        |> explainRow
+
+                    Expect.equal incompatiblePlan.Extra (Some "Using filesort") "incompatible directions sort"
 
                     match runDefault store "SELECT id FROM ranked WHERE created_at >= 15 AND created_at < 30 ORDER BY id" with
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ]; [ Some "5" ]; [ Some "6" ] ] "descending range"
                     | other -> failtestf "expected descending range rows, got %A" other
 
-                    match runDefault store "EXPLAIN SELECT id FROM ranked WHERE created_at >= 15 AND created_at < 30" with
-                    | ResultSet(_, [ row ]) ->
-                        Expect.equal row.[4] (Some "range") "descending index range plan"
-                        Expect.equal row.[6] (Some "ix_created") "descending range key"
-                    | other -> failtestf "expected a descending range plan, got %A" other
+                    let rangePlan =
+                        runDefault store "EXPLAIN SELECT id FROM ranked WHERE created_at >= 15 AND created_at < 30"
+                        |> explainRow
+
+                    Expect.equal rangePlan.AccessType (Some "range") "descending index range plan"
+                    Expect.equal rangePlan.Key (Some "ix_created") "descending range key"
 
                     runDefault store "CREATE TABLE primary_ranked (priority INT, created_at INT, PRIMARY KEY (priority ASC, created_at DESC))" |> ignore
                     runDefault store "INSERT INTO primary_ranked VALUES (1, 10), (1, 30), (1, 20), (2, 10)" |> ignore
@@ -5324,9 +5339,11 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "30" ]; [ Some "20" ]; [ Some "10" ] ] "primary-key direction"
                     | other -> failtestf "expected primary-key ordered rows, got %A" other
 
-                    match runDefault store "EXPLAIN SELECT created_at FROM primary_ranked ORDER BY priority ASC, created_at DESC LIMIT 3" with
-                    | ResultSet(_, [ row ]) -> Expect.equal row.[6] (Some "PRIMARY") "primary key serves the order"
-                    | other -> failtestf "expected a primary-key order plan, got %A" other
+                    let primaryPlan =
+                        runDefault store "EXPLAIN SELECT created_at FROM primary_ranked ORDER BY priority ASC, created_at DESC LIMIT 3"
+                        |> explainRow
+
+                    Expect.equal primaryPlan.Key (Some "PRIMARY") "primary key serves the order"
 
                 testCase "composite prefix probes survive mutations"
                 <| fun _ ->
@@ -5520,17 +5537,21 @@ let tests =
                         | ResultSet(_, rows) -> Expect.equal rows rightExpected $"{joinSql} rows"
                         | other -> failtestf "expected rows for %s, got %A" joinSql other
 
-                    match runDefault store "EXPLAIN SELECT * FROM join_parent p LEFT JOIN join_child c USING (id)" with
-                    | ResultSet(_, [ _; row ]) ->
-                        Expect.equal row.[4] (Some "ref") "USING selects indexed ref access"
-                        Expect.equal row.[6] (Some "ix_id") "USING selects the right-side key"
-                    | other -> failtestf "expected an indexed USING plan, got %A" other
+                    let leftPlan =
+                        runDefault store "EXPLAIN SELECT * FROM join_parent p LEFT JOIN join_child c USING (id)"
+                        |> explainRows
+                        |> List.item 1
 
-                    match runDefault store "EXPLAIN SELECT * FROM join_parent p RIGHT JOIN join_child c USING (id)" with
-                    | ResultSet(_, [ _; row ]) ->
-                        Expect.equal row.[4] (Some "ref") "RIGHT USING selects indexed ref access"
-                        Expect.equal row.[6] (Some "ix_id") "RIGHT USING selects the right-side key"
-                    | other -> failtestf "expected an indexed RIGHT USING plan, got %A" other
+                    Expect.equal leftPlan.AccessType (Some "ref") "USING selects indexed ref access"
+                    Expect.equal leftPlan.Key (Some "ix_id") "USING selects the right-side key"
+
+                    let rightPlan =
+                        runDefault store "EXPLAIN SELECT * FROM join_parent p RIGHT JOIN join_child c USING (id)"
+                        |> explainRows
+                        |> List.item 1
+
+                    Expect.equal rightPlan.AccessType (Some "ref") "RIGHT USING selects indexed ref access"
+                    Expect.equal rightPlan.Key (Some "ix_id") "RIGHT USING selects the right-side key"
 
                 testCase "an indexed INNER JOIN probes a composite equality key"
                 <| fun _ ->
