@@ -234,6 +234,8 @@ the next statement, while stronger isolation levels never consult that view.
 `SERIALIZABLE` uses conservative whole-catalog validation for writing
 transactions, preventing write skew while keeping read-only transactions
 lock-free.
+Queued table writers close the reader gate until acquisition and release,
+preventing later readers from starving them.
 XA branches use the same private snapshots and conflict validation. Prepared
 branches detach from their sessions, survive WAL recovery, remain invisible
 until completion, and defer snapshot truncation until every prepared branch
@@ -244,7 +246,6 @@ has resolved.
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads use the latest committed row versions and retain row ownership until transaction end | low | partial |
 | Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
-| Table-lock wait scheduling | queued writes take priority over later reads | explicit and statement-duration table lock waiters wake together and race to acquire compatible ownership | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes, while literal VALUES inserts/upserts claim supplied unique keys and existing duplicate rows; generated/default keys, INSERT SELECT, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize their catalog-wide referential actions; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 1.06x | medium | partial |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
