@@ -37,7 +37,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, PK/unique/secondary range, grouping, and bounded index-order probes | Outer-join, unconstrained composite ordering, and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
-| Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Deadlock victim selection and remaining coarse write shapes |
+| Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Remaining coarse write shapes |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
 | Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap currently inventoried |
@@ -236,6 +236,8 @@ transactions, preventing write skew while keeping read-only transactions
 lock-free.
 Queued table writers close the reader gate until acquisition and release,
 preventing later readers from starving them.
+Row- and key-stripe waits participate in a shared wait-for graph; the request
+that closes a cycle aborts its transaction with MySQL error 1213/SQLSTATE 40001.
 XA branches use the same private snapshots and conflict validation. Prepared
 branches detach from their sessions, survive WAL recovery, remain invisible
 until completion, and defer snapshot truncation until every prepared branch
@@ -245,7 +247,7 @@ has resolved.
 |---|---|---|---|---|
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads use the latest committed row versions and retain row ownership until transaction end | low | partial |
-| Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
+| Deadlock victim choice | chooses a victim using rollback cost | row/key cycles return 1213 immediately, aborting the request that closes the cycle | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes, while literal VALUES inserts/upserts claim supplied unique keys and existing duplicate rows; generated/default keys, INSERT SELECT, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize their catalog-wide referential actions; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 1.06x | medium | partial |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
@@ -540,8 +542,8 @@ implementation effort:
    correlated forms that cannot use a direct physical-table equality lookup. Correctness holds,
    but scale still diverges from MySQL past small data.
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements
-   wait and rebase, but deadlock victim selection and the remaining transaction
-   write shapes are not implemented.
+   wait and rebase, while the remaining transaction write shapes still rely on
+   optimistic catalog merge.
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition
    handlers, SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential
