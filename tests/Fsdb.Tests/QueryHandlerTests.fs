@@ -362,8 +362,27 @@ let tests =
                   | session, ResultSet(_, []) ->
                       Expect.equal
                           (session.LastResultColumnMetadata |> List.map _.Origin)
-                          [ None; None ]
-                          "views and derived tables do not claim physical origins"
+                          [ Some
+                                { Schema = "app"
+                                  Table = "v"
+                                  OriginalTable = "user_ids"
+                                  OriginalName = "id" }
+                            None ]
+                          "view columns report the view while derived columns remain anonymous"
+
+                      match prepareStatementForSession session "SELECT v.id FROM user_ids AS v" with
+                      | Ok(statement, count) ->
+                          let _, columns = preparedMetadata session statement count
+
+                          Expect.equal
+                              columns.Head.Metadata.Origin
+                              (Some
+                                  { Schema = "app"
+                                    Table = "v"
+                                    OriginalTable = "user_ids"
+                                    OriginalName = "id" })
+                              "prepared metadata reports the view origin"
+                      | Error error -> failtestf "expected the view query to prepare, got %A" error
                   | _, other -> failtestf "expected empty derived metadata, got %A" other
               | _, other -> failtestf "expected empty origin metadata, got %A" other
 

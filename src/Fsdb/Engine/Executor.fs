@@ -2305,7 +2305,7 @@ let private outputColumnOrigins
                 let qualifier = table.Alias |> Option.defaultValue table.Table
                 let isCte = table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames
 
-                if isCte || (tryStoredView store schema table.Table).IsSome then
+                if isCte then
                     None
                 else
                     qualifiers
