@@ -41,7 +41,7 @@ let defaultVariables: Map<string, string option> =
           "transaction_isolation", "REPEATABLE-READ"
           "transaction_read_only", "0"
           "tx_read_only", "0"
-          "lower_case_table_names", "0"
+          "lower_case_table_names", "2"
           "have_ssl", "DISABLED"
           "init_connect", ""
           "license", "GPL"

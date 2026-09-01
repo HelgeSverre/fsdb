@@ -215,7 +215,6 @@ comparisons; default utf8mb4_0900_ai_ci.
 | Compound-expression collation | string functions derive result collation and coercibility from every argument | `CONCAT`/`CONCAT_WS`, `COALESCE`/`IFNULL`, `IF`, `CASE`, `GREATEST`/`LEAST`, `ELT`, `MAKE_SET`, and source-preserving string transforms derive their collation and coercibility from their arguments; less-common overloaded string results remain approximate | low | divergence |
 | Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with common POSIX character classes and mapped malformed patterns; remaining ICU-only grammar and error-code distinctions can differ | low | divergence |
 | Usable charsets | 40+ charsets with transcoding | `Collation.Charset` supports utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) has the same ceiling | low | refusal |
-| Identifier casing | lower_case_table_names semantics | variable reported; identifiers ordinal-case-folded internally | low | divergence |
 
 ## 7. Transactions and concurrency
 

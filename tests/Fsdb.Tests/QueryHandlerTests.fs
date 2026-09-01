@@ -4905,6 +4905,21 @@ let tests =
                   | ResultSet(_, [ [ Some "wait_timeout"; Some "123" ] ]) -> ()
                   | other -> failtestf "expected the global override, got %A" other)
 
+          testCase "lower_case_table_names reports the engine's preserve-and-fold behavior"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE MixedCase (id INT)"
+              let session, _ = handle session "INSERT INTO mixedcase VALUES (1)"
+
+              match handle session "SELECT @@lower_case_table_names, id FROM MIXEDCASE" |> snd with
+              | ResultSet(_, [ [ Some "2"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected case-folded lookup and lower_case_table_names=2, got %A" other
+
+              match handle session "SHOW TABLES" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.contains rows [ Some "MixedCase" ] "declared spelling is preserved"
+              | other -> failtestf "expected SHOW TABLES metadata, got %A" other
+
           testCase "SHOW ENGINES / STORAGE ENGINES / CHARACTER SET / PRIVILEGES / GRANTS answer"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
