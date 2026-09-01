@@ -45,15 +45,8 @@ let mutable defaultPasswordLifetimeDays = 0
 /// Mode inherited by WEEK(date) when its optional second argument is absent.
 let mutable defaultWeekFormat = 0
 
-/// Idle timeout waiting for the *next* command packet — `wait_timeout`'s
-/// semantics. fsdb's default is 300s where MySQL's is 28800: a half-open
-/// peer that connects and then says nothing otherwise pins a socket and a
-/// thread-pool task for eight hours, which at `maxConnections` is a real
-/// denial-of-service surface. Advertised as this number rather than
-/// advertising MySQL's and enforcing this one — a pool that reads
-/// `wait_timeout` to size its idle-recycle needs the truth, or it hands the
-/// application a connection the server closed hours earlier.
-let mutable waitTimeoutSeconds = 300
+/// Idle timeout waiting for the next command packet.
+let mutable waitTimeoutSeconds = 28800
 
 /// Once a client starts a packet, bounds every pause before more bytes arrive.
 /// Idle connections remain governed separately by `wait_timeout`.

@@ -292,16 +292,9 @@ error naming the file and line, matching mysqld, which also refuses to start on
 an unknown option; `loose-` is the escape hatch for both. Every bad line is
 reported, not just the first.
 
-Two deliberate divergences from stock MySQL:
-
-- **`wait_timeout` and `interactive_timeout` report 300, not 28800.** fsdb
-  reaps a connection idle between commands after five minutes, because a
-  half-open peer otherwise pins a socket and a task for eight hours. The
-  number reported is the number enforced — a pool that sizes its idle-recycle
-  from `wait_timeout` gets the truth instead of a connection the server closed
-  hours earlier. Set `wait_timeout` in a defaults file to restore MySQL's
-  value. `interactive_timeout` mirrors it because fsdb ignores
-  `CLIENT_INTERACTIVE` at handshake.
+`wait_timeout` defaults to MySQL's 28800 seconds and remains configurable.
+`interactive_timeout` mirrors it because fsdb ignores `CLIENT_INTERACTIVE` at
+handshake.
 
 `SET GLOBAL` updates the live limits used by later accepts, packet reads,
 idle waits, transaction conflict waits, and recursive CTEs. Session-scoped

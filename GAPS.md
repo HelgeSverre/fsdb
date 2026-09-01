@@ -415,14 +415,12 @@ queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`.
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
 | Compression | CLIENT_COMPRESS/ZSTD | CLIENT_COMPRESS zlib framing is negotiated; Zstandard is not offered | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
-| LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, string field/line separators, `REPLACE`/`IGNORE`, header skipping, column/user-variable fields, and ordered `SET` transformations; no server-file loading | low | subset |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, and generic state-change blocks are encoded in final OK packets; transaction-characteristic and GTID blocks remain absent | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Connection reset commands | COM_RESET_CONNECTION and COM_CHANGE_USER | both replace session-local state; CHANGE_USER performs a fresh authentication exchange and closes the connection after failure | resolved 2026-08-29 |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateAccount` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | direct physical COM_QUERY/COM_STMT_PREPARE columns and COM_FIELD_LIST report source names; declared expressions and text-probed resultsets report their effective MySQL collation ids; view, derived, and UNION source names remain empty | low | partial |
 | Prepared metadata | STMT_PREPARE_OK carries result columns and typed parameter definitions | result columns, schema/operator/DML contexts, common numeric, temporal, JSON, and spatial built-in arguments, and registered-extension signatures are derived statically without evaluating the statement; less-common overloaded built-ins remain generic VAR_STRING | low | divergence |
-| Reprepare | automatic reprepare on metadata change | prepared ASTs resolve tables, columns, views, and result metadata from the live schema on each execution, yielding the same observable schema-change behavior without recompiling SQL text | low | aligned for supported syntax |
 | System variables | hundreds live | common connector, limit, transaction, password-lifetime, and week-format variables are live; most others are inert or absent, and time_zone remains a static string without conversion | medium | divergence |
 
 ## 13. Authentication and privileges
@@ -471,7 +469,6 @@ live Limits reporting.
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS | 25 views; role and privilege views are live, while ROUTINES, PARAMETERS, and EVENTS expose supported declarations | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, and Com_select/insert/update/delete/replace counters; engine and latency families remain absent (`InformationSchema.fs`) | low | divergence |
-| wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
 
@@ -502,7 +499,7 @@ CREATE/DROP DATABASE under traffic.
 ## 16. Deliberate divergences (accepted, not targeted for parity)
 
 Documented or ponytail-marked design decisions that differ from MySQL on
-purpose: wait_timeout 300; no option-file auto-discovery; join candidate cap
+purpose: no option-file auto-discovery; join candidate cap
 of 1M rows; residual SET/USE/server-wide SHOW text-probe privilege bypass;
 VECTOR type and function family (a MySQL 9 forward-port, absent from 8.4 —
 purely additive); live statistics values instead of ANALYZE-stale estimates;

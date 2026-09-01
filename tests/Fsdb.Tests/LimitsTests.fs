@@ -552,12 +552,13 @@ let tests =
                   Expect.equal advertised (string maxAllowedPacket) "advertised == enforced"
               | other -> failtestf "expected a single value, got %A" other
 
-          testCase "wait_timeout advertises what the server actually enforces"
+          testCase "wait_timeout uses MySQL's default and advertises the enforced value"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT @@wait_timeout, @@interactive_timeout" |> snd with
               | ResultSet(_, [ [ Some wait; Some interactive ] ]) ->
-                  Expect.equal wait (string waitTimeoutSeconds) "not MySQL's 28800 while reaping at 300"
+                  Expect.equal wait "28800" "MySQL's default"
+                  Expect.equal wait (string waitTimeoutSeconds) "advertised value matches the command idle timeout"
                   Expect.equal interactive wait "interactive_timeout mirrors it — CLIENT_INTERACTIVE is ignored"
               | other -> failtestf "expected both values, got %A" other ]
