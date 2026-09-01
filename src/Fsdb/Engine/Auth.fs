@@ -305,14 +305,28 @@ let tryAccountLimits (store: Store) (account: Account) =
     tryUserRowForAccount store account
     |> Option.map (fun (columns, row) -> accountLimits columns row)
 
-let isPasswordExpiredAt (now: DateTime) (cols: ColumnDef list) (row: Value[]) =
+let isPasswordExpiredAtWithDefault
+    (defaultLifetimeDays: int)
+    (now: DateTime)
+    (cols: ColumnDef list)
+    (row: Value[])
+    =
     if userColumnText cols row "password_expired" = "Y" then
         true
     else
-        match userColumnValue cols row "password_lifetime", userColumnValue cols row "password_last_changed" with
-        | Some(VInt days), Some(VDateTime changed) when days > 0L -> changed.AddDays(float days) <= now
-        | Some(VUInt days), Some(VDateTime changed) when days > 0UL -> changed.AddDays(float days) <= now
+        let lifetime =
+            match userColumnValue cols row "password_lifetime" with
+            | Some(VInt days) when days >= 0L -> days
+            | Some(VUInt days) -> int64 (min days (uint64 Int64.MaxValue))
+            | _ -> int64 defaultLifetimeDays
+
+        match userColumnValue cols row "password_last_changed" with
+        | Some(VDateTime changed) when lifetime > 0L && now >= changed ->
+            now - changed >= TimeSpan.FromDays(float lifetime)
         | _ -> false
+
+let isPasswordExpiredAt (now: DateTime) (cols: ColumnDef list) (row: Value[]) =
+    isPasswordExpiredAtWithDefault 0 now cols row
 
 let isPasswordExpired cols row = isPasswordExpiredAt DateTime.Now cols row
 

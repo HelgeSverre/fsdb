@@ -319,7 +319,7 @@ shapes, oracle-verified). `CREATE USER` / `DROP USER` / `ALTER USER` /
 `SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
 path; passwords are mysql_native_password hashes verified at the handshake
 (with an AuthSwitchRequest for clients that answer with caching_sha2 first);
-account locks, TLS requirements, explicit password lifetimes, the
+account locks, TLS requirements, explicit and global-default password lifetimes, the
 expired-password reset sandbox, and per-hour/per-connection resource limits
 are enforced;
 statements are privilege-checked at global, database, table, and column scope with

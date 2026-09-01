@@ -39,6 +39,9 @@ let mutable maxConnections = 500
 /// ASTs without coupling otherwise independent sessions.
 let mutable maxPreparedStmtCount = 16382
 
+/// Password lifetime inherited by accounts whose mysql.user row stores NULL.
+let mutable defaultPasswordLifetimeDays = 0
+
 /// Idle timeout waiting for the *next* command packet — `wait_timeout`'s
 /// semantics. fsdb's default is 300s where MySQL's is 28800: a half-open
 /// peer that connects and then says nothing otherwise pins a socket and a
@@ -131,6 +134,12 @@ let private knobs =
         Max = 1048576L
         Set = fun v -> maxPreparedStmtCount <- int v
         Get = fun () -> int64 maxPreparedStmtCount
+        Reportable = true }
+      { Name = "default_password_lifetime"
+        Min = 0L
+        Max = 65535L
+        Set = fun v -> defaultPasswordLifetimeDays <- int v
+        Get = fun () -> int64 defaultPasswordLifetimeDays
         Reportable = true }
       { Name = "wait_timeout"
         Min = 1L

@@ -111,6 +111,7 @@ on one.
 max_connections          = 2000
 max_prepared_stmt_count  = 16382
 max_allowed_packet       = 64M
+default_password_lifetime = 0
 local_infile             = OFF
 max_load_data_bytes      = 64M
 wait_timeout             = 600

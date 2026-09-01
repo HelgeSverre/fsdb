@@ -322,6 +322,42 @@ let tests =
                   Expect.stringContains ddl "ACCOUNT UNLOCK" "account state"
               | other -> failtestf "expected SHOW CREATE USER, got %A" other
 
+          testCase "PASSWORD EXPIRE DEFAULT inherits the global lifetime"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, inherited = handle root "CREATE USER inherited_password PASSWORD EXPIRE DEFAULT"
+              Expect.equal inherited (Affected 0UL) "default-policy account created"
+              let _, exempt = handle root "CREATE USER exempt_password PASSWORD EXPIRE NEVER"
+              Expect.equal exempt (Affected 0UL) "never-expire account created"
+
+              let accountRow name =
+                  Fsdb.Auth.tryUserRow store name
+                  |> Option.defaultWith (fun () -> failtestf "expected account %s" name)
+
+              let columns, row = accountRow "inherited_password"
+
+              let changed =
+                  List.zip columns (Array.toList row)
+                  |> List.pick (fun (column, value) ->
+                      match column.Name, value with
+                      | "password_last_changed", VDateTime timestamp -> Some timestamp
+                      | _ -> None)
+
+              Expect.isFalse
+                  (Fsdb.Auth.isPasswordExpiredAtWithDefault 30 (changed.AddDays 29.0) columns row)
+                  "default lifetime remains active before its boundary"
+
+              Expect.isTrue
+                  (Fsdb.Auth.isPasswordExpiredAtWithDefault 30 (changed.AddDays 30.0) columns row)
+                  "default lifetime expires at its boundary"
+
+              let exemptColumns, exemptRow = accountRow "exempt_password"
+
+              Expect.isFalse
+                  (Fsdb.Auth.isPasswordExpiredAtWithDefault 30 (changed.AddDays 365.0) exemptColumns exemptRow)
+                  "PASSWORD EXPIRE NEVER overrides the global lifetime"
+
           testCase "account statement and connection limits reject and reset with MySQL 1226"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

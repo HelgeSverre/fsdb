@@ -250,6 +250,7 @@ let private globalOnlyVariables =
         globalScopeOnlyVariables
         (Set.ofList
             [ "event_scheduler"
+              "default_password_lifetime"
               "local_infile"
               "max_allowed_packet"
               "max_connections"

@@ -986,7 +986,8 @@ let private authenticateAccount
 
         let accept seqId selected cols row =
             async {
-                let expired = Auth.isPasswordExpired cols row
+                let expired =
+                    Auth.isPasswordExpiredAtWithDefault Limits.defaultPasswordLifetimeDays DateTime.Now cols row
 
                 if expired && capabilities &&& ClientCanHandleExpiredPasswords = 0u then
                     let message =

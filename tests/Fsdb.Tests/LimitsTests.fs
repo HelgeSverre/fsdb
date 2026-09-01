@@ -376,6 +376,27 @@ let tests =
                   | Err(1232, _) -> ()
                   | other -> failtestf "expected an out-of-range session timeout to fail, got %A" other)
 
+          testCase "default_password_lifetime is a bounded global variable"
+          <| fun _ ->
+              withSettings [ "default_password_lifetime", "30" ] (fun () ->
+                  let session = create 1 (Fsdb.Storage.create ())
+
+                  match handle session "SELECT @@GLOBAL.default_password_lifetime" |> snd with
+                  | ResultSet(_, [ [ Some "30" ] ]) -> ()
+                  | other -> failtestf "expected the configured password lifetime, got %A" other
+
+                  match handle session "SET SESSION default_password_lifetime = 31" |> snd with
+                  | Err(1229, _) -> ()
+                  | other -> failtestf "expected the global-only scope error, got %A" other
+
+                  let _, assigned = handle session "SET GLOBAL default_password_lifetime = 31"
+                  Expect.equal assigned (Affected 0UL) "runtime assignment succeeds"
+                  Expect.equal defaultPasswordLifetimeDays 31 "runtime policy changes immediately"
+
+                  match handle session "SET GLOBAL default_password_lifetime = 65536" |> snd with
+                  | Err(1232, _) -> ()
+                  | other -> failtestf "expected the 65535-day ceiling, got %A" other)
+
           testCase "SET GLOBAL applies live limits and rejects an invalid batch atomically"
           <| fun _ ->
               withSettings [] (fun () ->
