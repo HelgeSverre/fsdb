@@ -48,6 +48,11 @@ let withLogger (f: string -> unit) (db: Db) : Db =
 let withTlsCertificate (certificate: X509Certificate2) (db: Db) : Db =
     { db with Transport = db.Transport |> ServerOptions.withCertificate certificate }
 
+/// Trusts client certificates issued by `certificateAuthority` for account `REQUIRE X509` checks.
+let withClientCertificateAuthority (certificateAuthority: X509Certificate2) (db: Db) : Db =
+    { db with
+        Transport = db.Transport |> ServerOptions.withClientCertificateAuthority certificateAuthority }
+
 /// Refuses plaintext MySQL sessions; a TLS certificate is required before serving.
 let requireSecureTransport (db: Db) : Db =
     { db with Transport = db.Transport |> ServerOptions.requireSecureTransport }

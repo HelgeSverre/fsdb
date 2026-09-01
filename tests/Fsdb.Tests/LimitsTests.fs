@@ -2,6 +2,8 @@ module Fsdb.Tests.LimitsTests
 
 open System
 open System.IO
+open System.Security.Cryptography
+open System.Security.Cryptography.X509Certificates
 open Expecto
 open Fsdb.Limits
 open Fsdb.Executor
@@ -168,6 +170,36 @@ let tests =
               match Fsdb.ServerOptions.fromEntries [ entry "loose-require-secure-transport" (Some "OFF") ] with
               | Ok(settings, _) -> Expect.isFalse settings.RequireSecureTransport "loose- still applies a known TLS option"
               | Error message -> failtestf "a known loose TLS option remains valid: %s" message
+
+          testCase "TLS configuration loads client certificate authorities"
+          <| fun _ ->
+              TestSupport.withDirectory "tls-options" (fun directory ->
+                  use key = RSA.Create 2048
+                  let request = CertificateRequest("CN=fsdb config CA", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+                  request.CertificateExtensions.Add(X509BasicConstraintsExtension(true, false, 0, true))
+                  use certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddHours(-1.0), DateTimeOffset.UtcNow.AddHours(1.0))
+                  let certificatePath = Path.Combine(directory, "certificate.pem")
+                  let keyPath = Path.Combine(directory, "key.pem")
+                  File.WriteAllText(certificatePath, certificate.ExportCertificatePem())
+                  File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem())
+
+                  let entry name path : Fsdb.OptionFile.Entry =
+                      { Name = name
+                        Value = Some path
+                        Source = "test.cnf"
+                        Line = 1 }
+
+                  match
+                      Fsdb.ServerOptions.fromEntries
+                          [ entry "ssl_cert" certificatePath
+                            entry "ssl_key" keyPath
+                            entry "ssl_ca" certificatePath ]
+                  with
+                  | Ok(settings, remaining) ->
+                      Expect.isSome settings.Certificate "server certificate loaded"
+                      Expect.equal settings.ClientCertificateAuthorities.Length 1 "client CA loaded"
+                      Expect.isEmpty remaining "TLS entries are consumed"
+                  | Error message -> failtestf "valid TLS material should load: %s" message)
 
           testCase "a bad config reports every offending line with its number, not just the first"
           <| fun _ ->

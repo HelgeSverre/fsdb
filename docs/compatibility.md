@@ -88,14 +88,18 @@ metadata, and events populate their object catalogs. PROCESSLIST,
 ## TLS transport
 
 Supplying `--ssl-cert` and `--ssl-key` enables TLS 1.2 and 1.3 on the MySQL
-listener. The same `ssl-cert`, `ssl-key`, and `require-secure-transport`
-options work in the server sections of an option file.
+listener. The same `ssl-cert`, `ssl-key`, `ssl-ca`, and
+`require-secure-transport` options work in the server sections of an option
+file. `ssl-ca` requests client certificates and validates them against every
+CA certificate in the PEM file.
 `--require-secure-transport` rejects plaintext handshakes with 3159.
-Embedding hosts supply an already-loaded `X509Certificate2` through
-`Db.withTlsCertificate`; `Db.requireSecureTransport` enables the same
-plaintext restriction. Accounts created with `REQUIRE SSL` reject plaintext
-authentication. `REQUIRE X509` is retained in `mysql.user` and SHOW CREATE
-USER but cannot authenticate because client certificates are not requested.
+Embedding hosts supply already-loaded `X509Certificate2` values through
+`Db.withTlsCertificate` and `Db.withClientCertificateAuthority`;
+`Db.requireSecureTransport` enables the same plaintext restriction. Accounts
+created with `REQUIRE SSL` reject plaintext authentication. Accounts created
+with `REQUIRE X509` additionally require a client certificate that chains to
+a configured client CA and, when extended key usage is present, permits client
+authentication.
 
 ## Bulk wire commands
 

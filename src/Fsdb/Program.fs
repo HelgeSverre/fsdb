@@ -11,6 +11,7 @@ type Arguments =
     | Defaults_File of path: string
     | Ssl_Cert of path: string
     | Ssl_Key of path: string
+    | Ssl_Ca of path: string
     | Require_Secure_Transport
     | Version
 
@@ -23,6 +24,7 @@ type Arguments =
             | Defaults_File _ -> "read server settings from a my.cnf-style file's [mysqld] section"
             | Ssl_Cert _ -> "PEM server certificate for TLS"
             | Ssl_Key _ -> "PEM private key for TLS"
+            | Ssl_Ca _ -> "PEM certificate authorities trusted for TLS clients"
             | Require_Secure_Transport -> "reject plaintext MySQL sessions"
             | Version -> "print the fsdb version and exit"
 
@@ -75,6 +77,9 @@ let main argv =
                   match results.TryGetResult Ssl_Key with
                   | Some path -> yield commandLineEntry "ssl_key" (Some path)
                   | None -> ()
+                  match results.TryGetResult Ssl_Ca with
+                  | Some path -> yield commandLineEntry "ssl_ca" (Some path)
+                  | None -> ()
                   if results.Contains <@ Require_Secure_Transport @> then
                       yield commandLineEntry "require_secure_transport" None ]
 
@@ -107,6 +112,11 @@ let main argv =
                 match options.Certificate with
                 | Some certificate -> db |> Db.withTlsCertificate certificate
                 | None -> db
+
+            let db =
+                options.ClientCertificateAuthorities
+                |> List.fold (fun current certificateAuthority ->
+                    current |> Db.withClientCertificateAuthority certificateAuthority) db
 
             let db =
                 if options.RequireSecureTransport then

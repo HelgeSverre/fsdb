@@ -42,7 +42,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
 | Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap currently inventoried |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Multi-table mutation predicates and CJK parsing |
-| Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No mutual TLS or transaction/GTID state trackers |
+| Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No transaction/GTID state trackers or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
 | Metadata | 25 INFORMATION_SCHEMA views, 13 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
@@ -82,7 +82,7 @@ refuses it through the prepared-statement protocol.
 | `GRANT PROXY` remains absent; role DDL, grants, admin option, transitive inheritance, default roles, session activation, metadata, and `SHOW GRANTS ... USING` are supported | low | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
-| `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`, per-account query/update/connection limits, explicit password lifetimes, and the expired-password reset sandbox. `REQUIRE X509` is retained but cannot authenticate without client-certificate transport; auth-plugin selection, issuer/subject/cipher requirements, password history/reuse/current policy, and a mutable global default lifetime remain absent | medium | refusal |
+| `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`/`X509`, per-account query/update/connection limits, explicit password lifetimes, and the expired-password reset sandbox. Auth-plugin selection, issuer/subject/cipher requirements, password history/reuse/current policy, and a mutable global default lifetime remain absent | medium | refusal |
 
 ### SELECT-level syntax gaps
 
@@ -399,7 +399,7 @@ constant-time credential verification, COM_QUERY/INIT_DB/PING/FIELD_LIST/
 QUIT/RESET_CONNECTION, full COM_STMT_PREPARE/EXECUTE/FETCH/CLOSE/SEND_LONG_DATA/
 RESET with read-only cursors, type reuse, and 1153-on-overflow long-data accounting, text and
 binary row encodings including µs-precision temporals and 16 MiB multi-packet
-framing, zlib CLIENT_COMPRESS transport, TLS 1.2/1.3 with an optional PEM server certificate and
+framing, zlib CLIENT_COMPRESS transport, TLS 1.2/1.3 with optional PEM server and client-CA certificates,
 require_secure_transport, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_connections/
 max_prepared_stmt_count enforced with honest advertising, COM_SET_OPTION
 multi-statement toggling, mid-query
@@ -412,7 +412,7 @@ queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| TLS client authentication | account `REQUIRE SSL`/`REQUIRE X509`, client certificates, certificate reload | `REQUIRE SSL` is enforced; `REQUIRE X509` is stored and fails closed because the server does not request client certificates | medium (mutual TLS deployments) | subset/refusal |
+| TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
 | Compression | CLIENT_COMPRESS/ZSTD | CLIENT_COMPRESS zlib framing is negotiated; Zstandard is not offered | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, string field/line separators, `REPLACE`/`IGNORE`, header skipping, column/user-variable fields, and ordered `SET` transformations; no server-file loading | low | subset |

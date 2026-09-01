@@ -73,6 +73,7 @@ just install      # publishes to ~/.local/bin/fsdb, then: fsdb --help
 ```
 USAGE: fsdb [--help] [--port <port>] [--listen <address>] [--data-dir <path>]
             [--defaults-file <path>] [--ssl-cert <path>] [--ssl-key <path>]
+            [--ssl-ca <path>]
             [--require-secure-transport] [--version]
 
 OPTIONS:
@@ -86,6 +87,7 @@ OPTIONS:
                           [mysqld] section
     --ssl-cert <path>     PEM server certificate for TLS
     --ssl-key <path>      PEM private key for TLS
+    --ssl-ca <path>       PEM certificate authorities trusted for TLS clients
     --require-secure-transport
                           reject plaintext MySQL sessions
     --version             print the fsdb version and exit
@@ -119,6 +121,7 @@ cte_max_recursion_depth  = 1000
 loose-skip-name-resolve            # an option fsdb has no knob for
 ssl-cert                 = /etc/fsdb/server-cert.pem
 ssl-key                  = /etc/fsdb/server-key.pem
+ssl-ca                   = /etc/fsdb/client-ca.pem
 require-secure-transport = ON
 ```
 
@@ -628,11 +631,14 @@ let db =
     |> Db.withDataDir "./fsdb-data"
     |> Db.withLogger (fun message -> printfn "[fsdb] %s" message)
     |> Db.withTlsCertificate certificate
+    |> Db.withClientCertificateAuthority clientCa
     |> Db.requireSecureTransport
 ```
 
-The logger is process-global. The TLS certificate must be an
-`X509Certificate2` that contains its private key.
+The logger is process-global. The TLS server certificate must be an
+`X509Certificate2` that contains its private key. Client certificate
+authorities are public certificates used to validate accounts marked
+`REQUIRE X509`.
 
 ### Included examples
 

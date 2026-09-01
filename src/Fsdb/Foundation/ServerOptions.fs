@@ -5,19 +5,26 @@ open System
 open System.Security.Cryptography.X509Certificates
 open Fsdb.OptionFile
 
-/// The optional server certificate and whether plaintext MySQL sessions are refused.
+/// Server identity, client trust roots, and plaintext policy for a listener.
 type Settings =
     { Certificate: X509Certificate2 option
+      ClientCertificateAuthorities: X509Certificate2 list
       RequireSecureTransport: bool }
 
 /// Settings for a plaintext listener.
 let defaults =
     { Certificate = None
+      ClientCertificateAuthorities = []
       RequireSecureTransport = false }
 
 /// Adds a server certificate to the transport settings.
 let withCertificate (certificate: X509Certificate2) (settings: Settings) =
     { settings with Certificate = Some certificate }
+
+/// Trusts client certificates issued by `certificateAuthority`.
+let withClientCertificateAuthority (certificateAuthority: X509Certificate2) (settings: Settings) =
+    { settings with
+        ClientCertificateAuthorities = certificateAuthority :: settings.ClientCertificateAuthorities }
 
 /// Refuses plaintext handshakes.
 let requireSecureTransport (settings: Settings) =
@@ -45,10 +52,23 @@ let private loadCertificate (certPath: string) (keyPath: string) =
     with ex ->
         Error ex.Message
 
+let private loadCertificateAuthorities (path: string) =
+    try
+        let certificates = X509Certificate2Collection()
+        certificates.ImportFromPemFile path
+
+        if certificates.Count = 0 then
+            Error "file contains no certificates"
+        else
+            certificates |> Seq.toList |> Ok
+    with ex ->
+        Error ex.Message
+
 /// Splits TLS options from unrelated server options and validates the final TLS settings.
 let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
     let mutable certificatePath: (string * Entry) option = None
     let mutable keyPath: (string * Entry) option = None
+    let mutable certificateAuthorityPath: (string * Entry) option = None
     let mutable requireSecure = defaults.RequireSecureTransport
     let remaining = ResizeArray<Entry>()
     let errors = ResizeArray<string>()
@@ -67,6 +87,10 @@ let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
             match entry.Value with
             | Some path when not (String.IsNullOrWhiteSpace path) -> keyPath <- Some(path, entry)
             | _ -> errors.Add(sprintf "%s:%d: ssl_key needs a path" entry.Source entry.Line)
+        | "ssl_ca" ->
+            match entry.Value with
+            | Some path when not (String.IsNullOrWhiteSpace path) -> certificateAuthorityPath <- Some(path, entry)
+            | _ -> errors.Add(sprintf "%s:%d: ssl_ca needs a path" entry.Source entry.Line)
         | "require_secure_transport" ->
             match boolValue "require_secure_transport" entry.Value with
             | Ok value -> requireSecure <- value
@@ -92,7 +116,25 @@ let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
     if requireSecure && certificate.IsNone then
         errors.Add "require_secure_transport needs ssl_cert and ssl_key"
 
+    let certificateAuthorities =
+        match certificateAuthorityPath with
+        | None -> []
+        | Some(path, entry) ->
+            match loadCertificateAuthorities path with
+            | Ok certificates -> certificates
+            | Error message ->
+                errors.Add(sprintf "%s:%d: cannot load client certificate authorities: %s" entry.Source entry.Line message)
+                []
+
+    if not (List.isEmpty certificateAuthorities) && certificate.IsNone then
+        errors.Add "ssl_ca needs ssl_cert and ssl_key"
+
     if errors.Count = 0 then
-        Ok({ Certificate = certificate; RequireSecureTransport = requireSecure }, List.ofSeq remaining)
+        Ok(
+            { Certificate = certificate
+              ClientCertificateAuthorities = certificateAuthorities
+              RequireSecureTransport = requireSecure },
+            List.ofSeq remaining
+        )
     else
         Error(String.concat "\n" errors)

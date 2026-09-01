@@ -48,6 +48,64 @@ let private selfSignedCertificate () =
     request.CertificateExtensions.Add(X509BasicConstraintsExtension(false, false, 0, false))
     request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1.0), DateTimeOffset.UtcNow.AddDays(1.0))
 
+let private certificateAuthority () =
+    use key = RSA.Create 2048
+    let request = CertificateRequest("CN=fsdb test CA", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+    request.CertificateExtensions.Add(X509BasicConstraintsExtension(true, false, 0, true))
+    request.CertificateExtensions.Add(X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true))
+    request.CertificateExtensions.Add(X509SubjectKeyIdentifierExtension(request.PublicKey, false))
+    request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1.0), DateTimeOffset.UtcNow.AddDays(1.0))
+
+let private clientCertificate (issuer: X509Certificate2) =
+    use key = RSA.Create 2048
+    let request = CertificateRequest("CN=fsdb client", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+    request.CertificateExtensions.Add(X509BasicConstraintsExtension(false, false, 0, true))
+    request.CertificateExtensions.Add(X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true))
+    let usages = OidCollection()
+    usages.Add(Oid "1.3.6.1.5.5.7.3.2") |> ignore
+    request.CertificateExtensions.Add(X509EnhancedKeyUsageExtension(usages, true))
+    let serialNumber = RandomNumberGenerator.GetBytes 16
+
+    use certificate =
+        request.Create(issuer, DateTimeOffset.UtcNow.AddHours(-1.0), DateTimeOffset.UtcNow.AddHours(12.0), serialNumber)
+
+    certificate.CopyWithPrivateKey key
+
+let private connectTls (port: int) (certificate: X509Certificate2 option) =
+    async {
+        let client = new Net.Sockets.TcpClient()
+        do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+        let rawStream = client.GetStream()
+        let! greeting = readPacketAsync rawStream
+        let greeting = greeting |> Option.defaultWith (fun () -> failtest "the server sends its greeting")
+        let capabilities = ClientProtocol41 ||| ClientSsl ||| ClientSecureConnection
+        let request = Writer()
+        request.WriteInt32LE(int capabilities)
+        request.WriteInt32LE 16777216
+        request.WriteByte 45uy
+        request.WriteBytes(Array.zeroCreate<byte> 23)
+        do! writePacketAsync rawStream { SeqId = greeting.SeqId + 1uy; Payload = request.ToArray() } |> Async.Ignore
+
+        let secured = new SslStream(rawStream, false, fun _ _ _ _ -> true)
+        let authentication = SslClientAuthenticationOptions()
+        authentication.TargetHost <- "localhost"
+        authentication.EnabledSslProtocols <- SslProtocols.Tls12 ||| SslProtocols.Tls13
+
+        certificate
+        |> Option.iter (fun clientCertificate ->
+            let certificates = X509CertificateCollection()
+            certificates.Add clientCertificate |> ignore
+            authentication.ClientCertificates <- certificates)
+
+        try
+            do! secured.AuthenticateAsClientAsync(authentication) |> Async.AwaitTask
+            return client, secured, greeting.SeqId
+        with error ->
+            secured.Dispose()
+            client.Dispose()
+            return raise error
+    }
+
 let private connectRawAsWithCapabilitiesAndScramble
     (port: int)
     (username: string)
@@ -914,6 +972,101 @@ let tests =
                   query.CommandText <- "SELECT CURRENT_USER()"
                   let! identity = query.ExecuteScalarAsync() |> Async.AwaitTask
                   Expect.equal (string identity) "secure_user@%" "TLS account connects"
+              }
+              |> Async.RunSynchronously
+
+          testCase "REQUIRE X509 accepts only client certificates issued by a trusted CA"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let root = Fsdb.Session.create 1 store
+                  let _, created = Fsdb.QueryHandler.handle root "CREATE USER 'x509_user'@'%' REQUIRE X509"
+                  Expect.equal created (Affected 0UL) "X509 account created"
+
+                  use serverCertificate = selfSignedCertificate ()
+                  use authority = certificateAuthority ()
+                  use acceptedCertificate = clientCertificate authority
+                  use untrustedAuthority = certificateAuthority ()
+                  use untrustedCertificate = clientCertificate untrustedAuthority
+
+                  let options =
+                      Fsdb.ServerOptions.defaults
+                      |> Fsdb.ServerOptions.withCertificate serverCertificate
+                      |> Fsdb.ServerOptions.withClientCertificateAuthority authority
+
+                  use server = TestSupport.ServerFixture.startWithOptions options store Fsdb.Functions.empty
+
+                  let! acceptedClient, acceptedStream, acceptedSequence = connectTls server.Port (Some acceptedCertificate)
+                  use acceptedClient = acceptedClient
+                  use acceptedStream = acceptedStream
+                  let capabilities = ClientProtocol41 ||| ClientSsl ||| ClientSecureConnection
+
+                  do!
+                      writePacketAsync
+                          acceptedStream
+                          { SeqId = acceptedSequence + 2uy
+                            Payload = passwordlessHandshakeResponse capabilities "x509_user" }
+                      |> Async.Ignore
+
+                  let! accepted = readPacketAsync acceptedStream
+                  Expect.equal accepted.Value.Payload.[0] 0uy "trusted client certificate authenticates"
+
+                  let! ordinaryClient, ordinaryStream, ordinarySequence = connectTls server.Port None
+                  use ordinaryClient = ordinaryClient
+                  use ordinaryStream = ordinaryStream
+
+                  do!
+                      writePacketAsync
+                          ordinaryStream
+                          { SeqId = ordinarySequence + 2uy
+                            Payload = passwordlessHandshakeResponse capabilities "root" }
+                      |> Async.Ignore
+
+                  let! ordinary = readPacketAsync ordinaryStream
+                  Expect.equal ordinary.Value.Payload.[0] 0uy "ordinary TLS accounts do not need a client certificate"
+
+                  let! missingClient, missingStream, missingSequence = connectTls server.Port None
+                  use missingClient = missingClient
+                  use missingStream = missingStream
+
+                  do!
+                      writePacketAsync
+                          missingStream
+                          { SeqId = missingSequence + 2uy
+                            Payload = passwordlessHandshakeResponse capabilities "x509_user" }
+                      |> Async.Ignore
+
+                  let! rejected = readPacketAsync missingStream
+                  Expect.equal rejected.Value.Payload.[0] 0xffuy "missing client certificate is rejected"
+                  Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 1045 "account denial uses access denied"
+
+                  let! untrusted = connectTls server.Port (Some untrustedCertificate) |> Async.Catch
+
+                  match untrusted with
+                  | Choice2Of2 (:? AuthenticationException)
+                  | Choice2Of2 (:? IO.IOException) -> ()
+                  | Choice2Of2 error -> failtestf "unexpected TLS rejection: %A" error
+                  | Choice1Of2(client, stream, sequence) ->
+                      use client = client
+                      use stream = stream
+
+                      let! response =
+                          async {
+                              do!
+                                  writePacketAsync
+                                      stream
+                                      { SeqId = sequence + 2uy
+                                        Payload = passwordlessHandshakeResponse capabilities "x509_user" }
+                                  |> Async.Ignore
+
+                              return! readPacketAsync stream
+                          }
+                          |> Async.Catch
+
+                      match response with
+                      | Choice1Of2 None
+                      | Choice2Of2 _ -> ()
+                      | Choice1Of2(Some packet) -> failtestf "untrusted TLS returned packet %A" packet.Payload
               }
               |> Async.RunSynchronously
 

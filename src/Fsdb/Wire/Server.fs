@@ -3,6 +3,7 @@ module Fsdb.Server
 
 open System
 open System.Security.Cryptography
+open System.Security.Cryptography.X509Certificates
 open System.Net
 open System.Net.Sockets
 open System.Net.Security
@@ -18,6 +19,28 @@ open Fsdb.Session
 open Fsdb.Storage
 open Fsdb.Value
 open Fsdb.Executor
+
+let private isValidClientCertificate
+    (certificateAuthorities: X509Certificate2 list)
+    (certificate: X509Certificate)
+    (presentedChain: X509Chain)
+    =
+    use remoteCertificate = X509CertificateLoader.LoadCertificate(certificate.Export X509ContentType.Cert)
+    use chain = new X509Chain()
+    chain.ChainPolicy.TrustMode <- X509ChainTrustMode.CustomRootTrust
+    chain.ChainPolicy.RevocationMode <- X509RevocationMode.NoCheck
+    chain.ChainPolicy.VerificationFlags <- X509VerificationFlags.NoFlag
+    chain.ChainPolicy.CustomTrustStore.AddRange(certificateAuthorities |> List.toArray)
+    chain.ChainPolicy.ApplicationPolicy.Add(Oid "1.3.6.1.5.5.7.3.2") |> ignore
+
+    if not (isNull presentedChain) then
+        presentedChain.ChainElements
+        |> Seq.skip 1
+        |> Seq.map _.Certificate
+        |> Seq.toArray
+        |> chain.ChainPolicy.ExtraStore.AddRange
+
+    chain.Build remoteCertificate
 
 /// Carries byte progress across raw, TLS, and compressed buffering boundaries.
 type private ReadProgress() =
@@ -1105,6 +1128,7 @@ let private handleConnection
         let mutable compressedStream: CompressedStream option = None
         let mutable tlsVersion: string option = None
         let mutable tlsCipher: string option = None
+        let mutable clientCertificateValidated = false
         let offeredCapabilities = serverCapabilities options.Certificate.IsSome
 
         let closeTls () =
@@ -1121,8 +1145,19 @@ let private handleConnection
                 let authentication = SslServerAuthenticationOptions()
                 authentication.ServerCertificate <- certificate
                 authentication.EnabledSslProtocols <- SslProtocols.Tls12 ||| SslProtocols.Tls13
-                authentication.ClientCertificateRequired <- false
+                authentication.ClientCertificateRequired <- not (List.isEmpty options.ClientCertificateAuthorities)
                 authentication.AllowRenegotiation <- false
+
+                authentication.RemoteCertificateValidationCallback <-
+                    fun _ remoteCertificate presentedChain _ ->
+                        match remoteCertificate with
+                        | null -> true
+                        | presented ->
+                            let valid =
+                                isValidClientCertificate options.ClientCertificateAuthorities presented presentedChain
+
+                            clientCertificateValidated <- valid
+                            valid
 
                 use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(float Limits.waitTimeoutSeconds))
 
@@ -1232,8 +1267,6 @@ let private handleConnection
                             return None
                         }
                     else
-                        let validatedClientCertificate = false
-
                         authenticateAccount
                             client
                             stream
@@ -1243,7 +1276,7 @@ let private handleConnection
                             resp
                             clientHost
                             tlsVersion.IsSome
-                            validatedClientCertificate
+                            clientCertificateValidated
                             false
                             (handshakeResp.SeqId + 1uy)
                 let! authOkSeq =
@@ -2229,6 +2262,8 @@ let private validateTransportOptions (options: ServerOptions.Settings) =
     match options.Certificate with
     | Some certificate when not certificate.HasPrivateKey -> invalidArg "options" "TLS certificate needs a private key"
     | None when options.RequireSecureTransport -> invalidArg "options" "require_secure_transport needs a TLS certificate"
+    | None when not (List.isEmpty options.ClientCertificateAuthorities) ->
+        invalidArg "options" "client certificate authorities need a TLS certificate"
     | _ -> ()
 
 /// Row-lock waits and statement execution are synchronous. Reserving only the
