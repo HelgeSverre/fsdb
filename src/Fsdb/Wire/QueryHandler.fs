@@ -895,7 +895,10 @@ let private setNames = Regex(@"^NAMES\s+'?(\w+)'?(?:\s+COLLATE\s+'?(\w+)'?)?", R
 /// via `isGlobalScope` to route `GLOBAL`-scoped assignments to the store's
 /// global-variable map instead of this session's own `Variables`.
 let private setVar =
-    Regex(@"^(SESSION\s+|GLOBAL\s+|@@SESSION\.|@@GLOBAL\.|@@)?(`[^`]+`|\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
+    Regex(
+        @"^(SESSION\s+|GLOBAL\s+|@@SESSION\.|@@GLOBAL\.|@@)?(`[^`]+`|\w+)\s*=\s*(.+)$",
+        RegexOptions.IgnoreCase ||| RegexOptions.Singleline
+    )
 
 let private quotedSetLiteral = Regex("^(['\"])(.*)\\1$", RegexOptions.Singleline)
 let private bareSetIdentifier = Regex("^\\w+$")
@@ -3841,8 +3844,18 @@ let private createProcedureRe =
         RegexOptions.IgnoreCase ||| RegexOptions.Singleline
     )
 
+let private routineIdentifierPattern =
+    """(?:`(?:``|[^`])+`|"(?:""|[^"])+"|[\p{L}\p{M}\p{Nd}_$]+)"""
+
 let private callProcedureRe =
-    Regex(@"^\s*CALL\s+(?<name>[^\s(]+)(?:\s*\((?<arguments>.*)\))?\s*$", RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+    Regex(
+        @"^\s*CALL\s+(?<name>"
+        + routineIdentifierPattern
+        + @"(?:\s*\.\s*"
+        + routineIdentifierPattern
+        + @")?)(?:\s*\((?<arguments>.*)\))?\s*$",
+        RegexOptions.IgnoreCase ||| RegexOptions.Singleline
+    )
 
 let private dropProcedureRe =
     Regex(@"^\s*DROP\s+PROCEDURE\s+(?<ifExists>IF\s+EXISTS\s+)?(?<name>\S+)\s*$", RegexOptions.IgnoreCase)

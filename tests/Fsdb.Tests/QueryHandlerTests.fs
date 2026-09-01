@@ -2510,6 +2510,15 @@ let tests =
               | Err(1064, _) -> ()
               | other -> failtestf "expected an empty CALL argument to fail, got %A" other
 
+          testCase "malformed CALL routine names fail as syntax before lookup"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql in [ "CALL syntax_callab)"; "CALL# fuzz\nsyntax_recursive1,#"; "CALL syntax_recursive1," ] do
+                  match handle session sql |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected malformed CALL syntax for %s, got %A" sql other
+
           testCase "procedure declarations preserve one parameter and SQL SECURITY"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -2614,6 +2623,16 @@ let tests =
               match handle session "CALL `first_post`" |> snd with
               | ProcedureResult([ "id" ], [ [ Some "42" ] ]) -> ()
               | other -> failtestf "expected unparenthesized procedure result, got %A" other
+
+              match handle session "CALL fsdb.`first_post`()" |> snd with
+              | ProcedureResult([ "id" ], [ [ Some "42" ] ]) -> ()
+              | other -> failtestf "expected qualified procedure result, got %A" other
+
+              let ansiSession, _ = handle session "SET SESSION sql_mode = 'ANSI_QUOTES'"
+
+              match handle ansiSession "CALL \"first_post\"" |> snd with
+              | ProcedureResult([ "id" ], [ [ Some "42" ] ]) -> ()
+              | other -> failtestf "expected ANSI-quoted procedure result, got %A" other
 
           testCase "parameterized compound procedures execute typed locals and multiple resultsets"
           <| fun _ ->
@@ -4779,18 +4798,20 @@ let tests =
                       Expect.equal value expected (name + " value")
                   | other -> failtestf "expected %s status, got %A" name other
 
-          testCase "SHOW SESSION/GLOBAL VARIABLES match like the bare form; GLOBAL reads the store scope"
+          TestSupport.processGlobalCase
+              "SHOW SESSION/GLOBAL VARIABLES match like the bare form; GLOBAL reads the store scope"
           <| fun _ ->
-              let session = create 1 (Fsdb.Storage.create ())
-              let session, _ = handle session "SET GLOBAL wait_timeout = 123"
+              Fsdb.Limits.withSettings [] (fun () ->
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session, _ = handle session "SET GLOBAL wait_timeout = 123"
 
-              match handle session "SHOW SESSION VARIABLES LIKE 'wait_timeout'" |> snd with
-              | ResultSet(_, [ [ Some "wait_timeout"; Some "300" ] ]) -> ()
-              | other -> failtestf "expected the session value untouched, got %A" other
+                  match handle session "SHOW SESSION VARIABLES LIKE 'wait_timeout'" |> snd with
+                  | ResultSet(_, [ [ Some "wait_timeout"; Some "300" ] ]) -> ()
+                  | other -> failtestf "expected the session value untouched, got %A" other
 
-              match handle session "SHOW GLOBAL VARIABLES LIKE 'wait_timeout'" |> snd with
-              | ResultSet(_, [ [ Some "wait_timeout"; Some "123" ] ]) -> ()
-              | other -> failtestf "expected the global override, got %A" other
+                  match handle session "SHOW GLOBAL VARIABLES LIKE 'wait_timeout'" |> snd with
+                  | ResultSet(_, [ [ Some "wait_timeout"; Some "123" ] ]) -> ()
+                  | other -> failtestf "expected the global override, got %A" other)
 
           testCase "SHOW ENGINES / STORAGE ENGINES / CHARACTER SET / PRIVILEGES / GRANTS answer"
           <| fun _ ->

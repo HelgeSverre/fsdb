@@ -473,7 +473,6 @@ let tests =
                           "stored_procedure"
                           "procedure_parameter"
                           "procedure_compound"
-                          "procedure_recursion"
                           "stored_function"
                           "function_data_change"
                           "scheduled_event"

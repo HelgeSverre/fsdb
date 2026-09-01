@@ -44,6 +44,16 @@ let tests =
               | Err(1193, _) -> ()
               | other -> failtestf "expected a valid unknown-variable assignment to return 1193, got %A" other
 
+          testCase "quoted system-variable values may span lines"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "\n\tSET GLOBAL mandatory_roles = 'syntax_parent@% \n '"
+              Expect.equal result (Affected 0UL) "the multiline value is accepted"
+
+              match handle session "SELECT HEX(@@GLOBAL.mandatory_roles)" |> snd with
+              | ResultSet(_, [ [ Some "73796E7461785F706172656E744025200A20" ] ]) -> ()
+              | other -> failtestf "expected the exact multiline value, got %A" other
+
           testCase "SET @user_var = 1 defines a user variable, readable back via SELECT @user_var"
           <| fun _ ->
               // Real MySQL never validates a user-defined variable's name —

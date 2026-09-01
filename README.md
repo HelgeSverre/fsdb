@@ -693,8 +693,8 @@ just test --filter-test-case <Substring>
 ```
 
 `just test-report` writes JUnit timings to `test-results/fsdb.xml`, and
-`just stress [minutes]` runs Expecto's randomized stress mode with memory
-headroom for the deliberate large-packet cases.
+`just stress [minutes]` runs Expecto's randomized stress mode with a 5 GiB
+memory guard for repeated large-packet and snapshot cases.
 
 Coverage uses the repository-pinned Coverlet tool and fails if total branch
 coverage falls below 65%:
