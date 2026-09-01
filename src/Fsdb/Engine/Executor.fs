@@ -172,6 +172,13 @@ type private MutationSource =
       PhysicalTable: TableRef option
       Columns: ColumnDef list }
 
+type private MutationSourceOverride =
+    { Columns: ColumnDef list
+      Rows: Value[] list
+      IdentityOf: Value[] -> Value[] option }
+
+type private MutationSourceOverrides = Map<string, MutationSourceOverride>
+
 type private LockingReadSource =
     { Qualifier: string
       Reference: TableRef
@@ -6836,6 +6843,7 @@ and private applyMutationJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
+    (sourceOverrides: MutationSourceOverrides)
     ((sourcesSoFar, rowsSoFar): MutationSource list * (Value[] option list * Value[]) list)
     (join: Join)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
@@ -6851,17 +6859,22 @@ and private applyMutationJoin
         let resolved =
             match source with
             | FromTable tableRef ->
-                resolveTableRef store registry dbName tableRef
-                |> Result.map (fun (columns, rows) -> fromItemQualifier source, Some tableRef, columns, rows)
+                let qualifier = fromItemQualifier source
+
+                match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
+                | Some source -> Ok(qualifier, Some tableRef, source.Columns, source.Rows, source.IdentityOf)
+                | None ->
+                    resolveTableRef store registry dbName tableRef
+                    |> Result.map (fun (columns, rows) -> qualifier, Some tableRef, columns, rows, Some)
             | FromSubquery _ ->
                 resolveFromSubquery store registry dbName source None
-                |> Result.map (fun (columns, rows) -> fromItemQualifier source, None, columns, rows)
+                |> Result.map (fun (columns, rows) -> fromItemQualifier source, None, columns, rows, fun _ -> None)
             | FromLateral _
             | FromJsonTable _ -> failwith "applyMutationJoin: source handled above"
 
         match resolved with
         | Error e -> Error e
-        | Ok(joinQualifier, tableRef, joinColumns, joinRows) ->
+        | Ok(joinQualifier, tableRef, joinColumns, joinRows, identityOf) ->
             let newSources = sourcesSoFar @ [ { Qualifier = joinQualifier; PhysicalTable = tableRef; Columns = joinColumns } ]
             let qualifiers = qualifierRanges (newSources |> List.map (fun source -> source.Qualifier, source.Columns))
             let combinedColumnsSoFar = sourcesSoFar |> List.collect _.Columns
@@ -6896,7 +6909,7 @@ and private applyMutationJoin
                 let rightOnly =
                     rightIndexed
                     |> List.filter (fst >> matchedRight.Contains >> not)
-                    |> List.map (fun (_, r) -> leftIdentityPadding @ [ tableRef |> Option.map (fun _ -> r) ], Array.append leftFlatPadding r)
+                    |> List.map (fun (_, r) -> leftIdentityPadding @ [ identityOf r ], Array.append leftFlatPadding r)
 
                 let rows =
                     match join.Kind with
@@ -6969,19 +6982,17 @@ and private applyMutationJoin
                     let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
                     let buildOnLeft = rowsSoFar.Length <= joinRows.Length
 
-                    let rightIdentity row = tableRef |> Option.map (fun _ -> row)
-
                     let leftKeyOf (lIdent: Value[] option list, lFlat: Value[]) = equiKeyOf leftKeyIndices lFlat
                     let rightKeyOf (r: Value[]) = equiKeyOf rightKeyIndices r
 
                     let candidates : (int * int * (Value[] option list * Value[])) list =
                         if buildOnLeft then
                             hashPairs keyCollations leftKeyOf rightKeyOf leftIndexed rightIndexed
-                            |> Seq.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ rightIdentity r ], Array.append lFlat r))
+                            |> Seq.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ identityOf r ], Array.append lFlat r))
                             |> List.ofSeq
                         else
                             hashPairs keyCollations rightKeyOf leftKeyOf rightIndexed leftIndexed
-                            |> Seq.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ rightIdentity r ], Array.append lFlat r))
+                            |> Seq.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ identityOf r ], Array.append lFlat r))
                             |> List.ofSeq
 
                     candidates |> keepMatches residualHolds snd |> Result.map buildCombinedRows
@@ -6993,7 +7004,7 @@ and private applyMutationJoin
                         let combinedFlat = Array.append lFlat r
 
                         evalExpr { ctxFor combinedFlat with Clause = OnClause } effectiveOn
-                        |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ [ tableRef |> Option.map (fun _ -> r) ], combinedFlat)) else None))
+                        |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ [ identityOf r ], combinedFlat)) else None))
                     |> Result.mapError Err
                     |> Result.map buildCombinedRows
 
@@ -7004,19 +7015,31 @@ and private runMutationJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
+    (sourceOverrides: MutationSourceOverrides)
     (from: TableRef)
     (joins: Join list)
     : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
-    match resolveTableRef store registry dbName from with
+    let qualifier = from.Alias |> Option.defaultValue from.Table
+
+    let resolved =
+        match Map.tryFind (qualifier.ToLowerInvariant()) sourceOverrides with
+        | Some source -> Ok(source.Columns, source.Rows, source.IdentityOf)
+        | None -> resolveTableRef store registry dbName from |> Result.map (fun (columns, rows) -> columns, rows, Some)
+
+    match resolved with
     | Error e -> Error e
-    | Ok(cols, rows) ->
+    | Ok(cols, rows, identityOf) ->
         let baseQualifier = from.Alias |> Option.defaultValue from.Table
         let initial =
             [ { Qualifier = baseQualifier
                 PhysicalTable = Some from
                 Columns = cols } ],
-            (rows |> List.map (fun row -> [ Some row ], row))
-        joins |> List.fold (fun acc j -> acc |> Result.bind (fun st -> applyMutationJoin store registry dbName st j)) (Ok initial)
+            (rows |> List.map (fun row -> [ identityOf row ], row))
+
+        joins
+        |> List.fold
+            (fun acc join -> acc |> Result.bind (fun state -> applyMutationJoin store registry dbName sourceOverrides state join))
+            (Ok initial)
 
 /// Resolves a `SELECT`'s `FROM` (a real table, `information_schema`'s
 /// virtual one, a derived table, or none) plus every `JOIN` after it, and
@@ -11315,6 +11338,159 @@ and private fullTextPredicatePlan (table: Table) (predicate: Expr) =
                   PredicateFor = fun rowId -> rewrite (fun scores -> tryFullTextScore rowId scores |> Option.defaultValue 0.0)
                   ProbePredicate = rewrite (fun _ -> 0.0) })
 
+and private fullTextPhysicalSources (store: Store) (dbName: string) (sourceItems: FromItem list) =
+    sourceItems
+    |> traverse (fun item ->
+        match item with
+        | FromTable tableRef ->
+            tryPhysicalTableRef store dbName tableRef
+            |> Result.map (
+                Option.map (fun table ->
+                    { Qualifier = fromItemQualifier item
+                      Item = item
+                      Table = table })
+            )
+        | _ -> Ok None)
+    |> Result.map (List.choose id)
+
+and private fullTextIndexMatches (table: Table) (columns: MatchColumn list) =
+    let names = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList
+
+    table.Indexes
+    |> List.exists (fun index ->
+        index.Kind = FullTextIndex
+        && (index.Columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList) = names)
+
+and private fullTextOwnerOf (sources: FullTextPhysicalSource list) node =
+    match node with
+    | MatchAgainst(columns, _, _) ->
+        let unqualified = columns |> List.filter (_.Qualifier.IsNone)
+        let qualifiers =
+            columns
+            |> List.choose _.Qualifier
+            |> List.distinctBy (fun qualifier -> qualifier.ToLowerInvariant())
+
+        let ambiguous =
+            unqualified
+            |> List.tryFind (fun column ->
+                sources
+                |> List.filter (fun source ->
+                    source.Table.Columns
+                    |> List.exists (fun definition ->
+                        System.String.Equals(definition.Name, column.Name, System.StringComparison.OrdinalIgnoreCase)))
+                |> List.length
+                |> fun ownerCount -> ownerCount > 1)
+
+        match ambiguous with
+        | Some column -> Error(Err(1052, sprintf "Column '%s' in field list is ambiguous" column.Name))
+        | None ->
+            let candidates =
+                match qualifiers with
+                | [] -> sources |> List.filter (fun source -> fullTextIndexMatches source.Table columns)
+                | [ qualifier ] ->
+                    sources
+                    |> List.filter (fun source ->
+                        System.String.Equals(source.Qualifier, qualifier, System.StringComparison.OrdinalIgnoreCase)
+                        && fullTextIndexMatches source.Table columns)
+                | _ -> []
+
+            match candidates with
+            | [ source ] -> Ok source
+            | _ -> Error(Err(1191, "Can't find FULLTEXT index matching the column list"))
+    | _ -> Error(Err(1105, "fulltext pre-pass collected a non-MATCH node"))
+
+and private fullTextNodesForSource
+    (ownedNodes: (FullTextPhysicalSource * Expr) list)
+    (source: FullTextPhysicalSource)
+    =
+    ownedNodes
+    |> List.choose (fun (owner, node) ->
+        if System.String.Equals(owner.Qualifier, source.Qualifier, System.StringComparison.OrdinalIgnoreCase) then
+            Some node
+        else
+            None)
+
+and private fullTextSyntheticColumns matchNodes computed =
+    computed
+    |> List.map (fun (node, _, _) ->
+        let index = matchNodes |> List.findIndex ((=) node)
+        node, sprintf "__fsdb_match_%d__" index)
+
+and private fullTextScoreValues rowId computed =
+    computed
+    |> List.map (fun (_, _, scores) -> VDouble(tryFullTextScore rowId scores |> Option.defaultValue 0.0))
+    |> Array.ofList
+
+and private fullTextMutationSources
+    (store: Store)
+    (dbName: string)
+    (from: TableRef)
+    (joins: Join list)
+    (matchNodes: Expr list)
+    : Result<MutationSourceOverrides * (Expr -> Expr), QueryResult> =
+    if matchNodes.IsEmpty then
+        Ok(Map.empty, fun expression -> expression)
+    else
+        let sourceItems = FromTable from :: (joins |> List.map _.Table)
+
+        fullTextPhysicalSources store dbName sourceItems
+        |> Result.bind (fun sources ->
+            matchNodes
+            |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node))
+            |> Result.bind (fun ownedNodes ->
+                sources
+                |> traverse (fun source ->
+                    let nodes = fullTextNodesForSource ownedNodes source
+
+                    if nodes.IsEmpty then
+                        Ok None
+                    else
+                        fullTextScoresForTable source.Table nodes
+                        |> Result.mapError (fun (code, message) -> Err(code, message))
+                        |> Result.map (fun computed ->
+                            let synthetic = fullTextSyntheticColumns matchNodes computed
+
+                            let identities = Dictionary<Value[], Value[]>(HashIdentity.Reference)
+                            let rows =
+                                source.Table.RowsArray.Indexed
+                                |> Seq.map (fun (rowId, row) ->
+                                    let augmented =
+                                        Array.append row (fullTextScoreValues rowId computed)
+
+                                    identities.[augmented] <- row
+                                    augmented)
+                                |> List.ofSeq
+
+                            let identityOf row =
+                                match identities.TryGetValue row with
+                                | true, original -> Some original
+                                | false, _ -> None
+
+                            Some(
+                                source.Qualifier.ToLowerInvariant(),
+                                { Columns =
+                                    source.Table.Columns
+                                    @ (synthetic
+                                       |> List.map (fun (_, name) -> syntheticColumn name (TDouble false) false))
+                                  Rows = rows
+                                  IdentityOf = identityOf },
+                                synthetic
+                            )))
+                |> Result.map (List.choose id)
+                |> Result.map (fun prepared ->
+                    let replacements =
+                        prepared
+                        |> List.collect (fun (qualifier, _, synthetic) ->
+                            synthetic
+                            |> List.map (fun (node, name) -> node, QualifiedCol(qualifier, name)))
+
+                    let sources =
+                        prepared
+                        |> List.map (fun (qualifier, source, _) -> qualifier, source)
+                        |> Map.ofList
+
+                    sources, substituteExprs replacements)))
+
 /// The fulltext pre-pass: like `runWindowedSelect`, each distinct
 /// `MATCH ... AGAINST` becomes a synthetic score column computed over its
 /// owning physical table ahead of WHERE. The augmented sources then enter
@@ -11331,81 +11507,17 @@ and private runFullTextSelect
     let unsupported () = Err(1191, "Can't find FULLTEXT index matching the column list"), [], []
     let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
 
-    let physicalSources : Result<FullTextPhysicalSource list, QueryResult> =
-        sourceItems
-        |> traverse (fun item ->
-            match item with
-            | FromTable tableRef ->
-                tryPhysicalTableRef store dbName tableRef
-                |> Result.map (
-                    Option.map (fun table ->
-                        { Qualifier = fromItemQualifier item
-                          Item = item
-                          Table = table })
-                )
-            | _ -> Ok None)
-        |> Result.map (List.choose id)
-
-    let indexMatches (table: Table) (columns: MatchColumn list) =
-        let names = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList
-
-        table.Indexes
-        |> List.exists (fun index ->
-            index.Kind = FullTextIndex
-            && (index.Columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList) = names)
-
-    let ownerOf (sources: FullTextPhysicalSource list) node =
-        match node with
-        | MatchAgainst(columns, _, _) ->
-            let unqualified = columns |> List.filter (_.Qualifier.IsNone)
-            let qualifiers =
-                columns
-                |> List.choose _.Qualifier
-                |> List.distinctBy (fun qualifier -> qualifier.ToLowerInvariant())
-
-            let ambiguous =
-                unqualified
-                |> List.tryFind (fun column ->
-                    sources
-                    |> List.filter (fun source ->
-                        source.Table.Columns
-                        |> List.exists (fun definition ->
-                            System.String.Equals(definition.Name, column.Name, System.StringComparison.OrdinalIgnoreCase)))
-                    |> List.length
-                    |> fun ownerCount -> ownerCount > 1)
-
-            match ambiguous with
-            | Some column -> Error(Err(1052, sprintf "Column '%s' in field list is ambiguous" column.Name))
-            | None ->
-                let candidates =
-                    match qualifiers with
-                    | [] -> sources |> List.filter (fun source -> indexMatches source.Table columns)
-                    | [ qualifier ] ->
-                        sources
-                        |> List.filter (fun source ->
-                            System.String.Equals(source.Qualifier, qualifier, System.StringComparison.OrdinalIgnoreCase)
-                            && indexMatches source.Table columns)
-                    | _ -> []
-
-                match candidates with
-                | [ source ] -> Ok source
-                | _ -> Error(Err(1191, "Can't find FULLTEXT index matching the column list"))
-        | _ -> Error(Err(1105, "fulltext pre-pass collected a non-MATCH node"))
-
-    match select.From, physicalSources with
+    match select.From, fullTextPhysicalSources store dbName sourceItems with
     | None, _ -> unsupported ()
     | _, Error error -> error, [], []
     | Some fromItem, Ok sources ->
-        match matchNodes |> traverse (fun node -> ownerOf sources node |> Result.map (fun owner -> owner, node)) with
+        match matchNodes |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node)) with
         | Error error -> error, [], []
         | Ok ownedNodes ->
             let prepared =
                 sources
                 |> traverse (fun (source: FullTextPhysicalSource) ->
-                    let nodes =
-                        ownedNodes
-                        |> List.choose (fun (owner, node) ->
-                            if System.String.Equals(owner.Qualifier, source.Qualifier, System.StringComparison.OrdinalIgnoreCase) then Some node else None)
+                    let nodes = fullTextNodesForSource ownedNodes source
 
                     if nodes.IsEmpty then
                         Ok
@@ -11418,11 +11530,7 @@ and private runFullTextSelect
                         fullTextScoresForTable source.Table nodes
                         |> Result.mapError (fun (code, message) -> Err(code, message))
                         |> Result.map (fun computed ->
-                            let synthetic =
-                                computed
-                                |> List.map (fun (node, _, _) ->
-                                    let index = matchNodes |> List.findIndex ((=) node)
-                                    node, sprintf "__fsdb_match_%d__" index)
+                            let synthetic = fullTextSyntheticColumns matchNodes computed
 
                             let candidateIds =
                                 match select.Where |> Option.bind (fullTextCandidates computed) with
@@ -11446,11 +11554,7 @@ and private runFullTextSelect
                             let rows =
                                 rowsForExecution
                                 |> Seq.map (fun (rowId, row) ->
-                                    Array.append
-                                        row
-                                        (computed
-                                         |> List.map (fun (_, _, scores) -> VDouble(tryFullTextScore rowId scores |> Option.defaultValue 0.0))
-                                         |> Array.ofList))
+                                    Array.append row (fullTextScoreValues rowId computed))
 
                             { Source = source
                               Scores = computed
@@ -16679,9 +16783,27 @@ let rec executeAs
         // `Storage.commitCatalogInto` (see its doc), so disjoint row changes
         // can combine while overlapping changes fail with a retryable conflict.
         (
-            match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
+            let matchNodes =
+                (updateStmt.Assignments |> List.collect (_.Value >> collectMatchAgainst))
+                @ (updateStmt.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
+                @ (updateStmt.Joins |> List.collect (_.On >> collectMatchAgainst))
+                |> List.distinct
+
+            let prepared =
+                fullTextMutationSources store dbName updateStmt.From updateStmt.Joins matchNodes
+                |> Result.bind (fun (sourceOverrides, rewrite) ->
+                    let rewritten =
+                        { updateStmt with
+                            Assignments = updateStmt.Assignments |> List.map (fun assignment -> { assignment with Value = rewrite assignment.Value })
+                            Joins = updateStmt.Joins |> List.map (fun join -> { join with On = rewrite join.On })
+                            Where = updateStmt.Where |> Option.map rewrite }
+
+                    runMutationJoin store registry dbName sourceOverrides rewritten.From rewritten.Joins
+                    |> Result.map (fun joined -> rewritten, joined))
+
+            match prepared with
             | Error e -> ids, e
-            | Ok(sources, joinedRows) ->
+            | Ok(updateStmt, (sources, joinedRows)) ->
                 let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
                 let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
                 let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
@@ -17026,9 +17148,25 @@ let rec executeAs
                                 ids, Affected(uint64 affected)
 
     | Delete deleteStmt ->
-        match runMutationJoin store registry dbName deleteStmt.From deleteStmt.Joins with
+        let matchNodes =
+            (deleteStmt.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
+            @ (deleteStmt.Joins |> List.collect (_.On >> collectMatchAgainst))
+            |> List.distinct
+
+        let prepared =
+            fullTextMutationSources store dbName deleteStmt.From deleteStmt.Joins matchNodes
+            |> Result.bind (fun (sourceOverrides, rewrite) ->
+                let rewritten =
+                    { deleteStmt with
+                        Joins = deleteStmt.Joins |> List.map (fun join -> { join with On = rewrite join.On })
+                        Where = deleteStmt.Where |> Option.map rewrite }
+
+                runMutationJoin store registry dbName sourceOverrides rewritten.From rewritten.Joins
+                |> Result.map (fun joined -> rewritten, joined))
+
+        match prepared with
         | Error e -> ids, e
-        | Ok(sources, joinedRows) ->
+        | Ok(deleteStmt, (sources, joinedRows)) ->
             let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
             let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
             let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None

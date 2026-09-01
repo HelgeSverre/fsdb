@@ -366,6 +366,76 @@ let tests =
               | Err(1210, _) -> ()
               | other -> failtestf "expected an invalid DELETE query argument to remain 1210, got %A" other
 
+          testCase "multi-table UPDATE evaluates MATCH in joins predicates and assignments"
+          <| fun _ ->
+              let store = create ()
+
+              [ "CREATE TABLE articles (id INT PRIMARY KEY, body TEXT, flag INT DEFAULT 0, FULLTEXT(body))"
+                "CREATE TABLE notes (article_id INT PRIMARY KEY, body TEXT, tag INT DEFAULT 0, FULLTEXT(body))"
+                "INSERT INTO articles VALUES (1, 'database security', 0), (2, 'ordinary article', 0), (3, 'database tutorial', 0), (4, 'ordinary fourth', 0)"
+                "INSERT INTO notes VALUES (1, 'release note', 0), (2, 'security note', 0), (3, 'ordinary note', 0), (4, 'security memo', 0)" ]
+              |> List.iter (run store >> ignore)
+
+              Expect.equal
+                  (run
+                      store
+                      "UPDATE articles a JOIN notes n ON n.article_id = a.id SET a.flag = 10, n.tag = 20 WHERE MATCH(a.body) AGAINST('database') AND MATCH(n.body) AGAINST('note')")
+                  (Affected 4UL)
+                  "each matched physical row is updated once"
+
+              Expect.equal
+                  (run store "UPDATE articles a JOIN notes n ON n.article_id = a.id AND MATCH(n.body) AGAINST('security') SET a.flag = 30")
+                  (Affected 2UL)
+                  "MATCH filters a multi-table join condition"
+
+              Expect.equal
+                  (run store "UPDATE articles a JOIN notes n ON n.article_id = a.id SET a.flag = MATCH(n.body) AGAINST('security') > 0")
+                  (Affected 4UL)
+                  "MATCH scores remain available to assignment expressions"
+
+              match run store "SELECT a.id, a.flag, n.tag FROM articles a JOIN notes n ON n.article_id = a.id ORDER BY a.id" with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "1"; Some "0"; Some "20" ]
+                        [ Some "2"; Some "1"; Some "0" ]
+                        [ Some "3"; Some "0"; Some "20" ]
+                        [ Some "4"; Some "1"; Some "0" ] ]
+                      "WHERE ON and SET use the owning full-text corpus"
+              | other -> failtestf "expected updated joined rows, got %A" other
+
+              match run store "UPDATE articles a JOIN notes n ON n.article_id = a.id SET a.flag = 1 WHERE MATCH(body) AGAINST('security')" with
+              | Err(1052, _) -> ()
+              | other -> failtestf "expected an ambiguous unqualified MATCH column, got %A" other
+
+          testCase "multi-table DELETE evaluates MATCH for every target"
+          <| fun _ ->
+              let store = create ()
+
+              [ "CREATE TABLE articles (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
+                "CREATE TABLE notes (article_id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
+                "INSERT INTO articles VALUES (1, 'database security'), (2, 'ordinary article'), (3, 'database tutorial'), (4, 'ordinary fourth')"
+                "INSERT INTO notes VALUES (1, 'release note'), (2, 'security note'), (3, 'ordinary note'), (4, 'security memo')" ]
+              |> List.iter (run store >> ignore)
+
+              Expect.equal
+                  (run
+                      store
+                      "DELETE a, n FROM articles a JOIN notes n ON n.article_id = a.id WHERE MATCH(a.body) AGAINST('database') AND MATCH(n.body) AGAINST('note')")
+                  (Affected 4UL)
+                  "both physical targets use their own full-text scores"
+
+              Expect.equal
+                  (run store "DELETE a FROM articles a JOIN notes n ON n.article_id = a.id AND MATCH(n.body) AGAINST('security') WHERE a.id = 2")
+                  (Affected 1UL)
+                  "MATCH filters a multi-table DELETE join condition"
+
+              Expect.equal (ids (run store "SELECT id FROM articles ORDER BY id")) [ "4" ] "only unmatched articles remain"
+              Expect.equal
+                  (ids (run store "SELECT article_id FROM notes ORDER BY article_id"))
+                  [ "2"; "4" ]
+                  "single-target deletion leaves joined rows intact"
+
           testCase "MATCH scores physical sources before joining"
           <| fun _ ->
               let store = create ()

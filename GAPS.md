@@ -41,7 +41,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
 | Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap currently inventoried |
-| Full-text | Oracle-verified scoring over maintained inverted indexes | Multi-table mutation predicates and CJK parsing |
+| Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
 | Metadata | 25 INFORMATION_SCHEMA views, 13 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
@@ -121,7 +121,6 @@ identities for bit aggregates.
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer_trace remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once; compatible integer/string/decimal scalar `IN`, scalar equality quantifiers, and row-value `IN` reuse typed equality sets, while `IN`/`= ANY` also narrow direct indexed physical outer tables with residual, prefix-key, and row-NULL checks; simple EXISTS stops at one row; direct correlated equalities use persistent indexes or a statement-local canonical-key lookup over a physical inner table; other correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
-| MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
 | sql_mode | ~20 mode bits with semantic effect | strictness, zero-date modes, ERROR_FOR_DIVISION_BY_ZERO diagnostics, ONLY_FULL_GROUP_BY, ANSI_QUOTES, IGNORE_SPACE, PIPES_AS_CONCAT, REAL_AS_FLOAT (including ANSI implications), HIGH_NOT_PRECEDENCE, NO_AUTO_VALUE_ON_ZERO, NO_UNSIGNED_SUBTRACTION, NO_BACKSLASH_ESCAPES, TIME_TRUNCATE_FRACTIONAL, and PAD_CHAR_TO_FULL_LENGTH have effect; most other mode bits remain inert | medium | divergence |
 
 ## 3. Built-in functions
@@ -378,12 +377,12 @@ Boolean evaluation unions only touched postings, prefix terms have maintained
 prefix postings, and bounded AND/OR predicate trees intersect or union MATCH
 candidates before residual evaluation. Projection-only MATCH retains ordinary
 point lookup plans; physical joins score each owning corpus before joining;
-single-table UPDATE/DELETE consume the same candidate algebra.
+single- and multi-table UPDATE/DELETE score each physical source before
+evaluating join conditions, predicates, and assignments.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates and projection-only MATCH preserves point probes; other projection-only shapes scan their owning corpus | medium (scale) | divergence |
-| MATCH scope | any SELECT/UPDATE/DELETE context, joins included | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
 | Tunables | innodb_ft_min_token_size, innodb_ft_max_token_size, ft_query_expansion_limit, stopword tables, enable/disable | constants in `FullText` fix these at 3 / 84 / 20 / the built-in list | low | divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | absent; no CJK tokenization | medium (for CJK) | refusal |
 
