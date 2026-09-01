@@ -8259,7 +8259,7 @@ and private tryRankRepeatedStringOrderKey
 
             for text in ordered do
                 match previous with
-                | Some prior when expectedCollation.Compare prior text <> 0 -> rank <- rank + 1
+                | Some prior when expectedCollation.ComparePrimary prior text <> 0 -> rank <- rank + 1
                 | _ -> ()
 
                 ranks.Add(text, rank)
@@ -8312,6 +8312,61 @@ and private tryOrderDenseRanks (direction: Direction) (group: WindowRow[]) : Win
             append nulls
 
         Some(ordered.ToArray())
+
+and private tryCumeDistRepeatedStrings
+    (direction: Direction)
+    (collation: Collation.Collation)
+    (values: Value[])
+    : Value[] option =
+    let counts = Dictionary<string, int>(System.StringComparer.Ordinal)
+    let mutable nullCount = 0
+    let mutable compatible = true
+
+    for value in values do
+        match value with
+        | VString text ->
+            match counts.TryGetValue text with
+            | true, count -> counts.[text] <- count + 1
+            | false, _ -> counts.Add(text, 1)
+        | VNull -> nullCount <- nullCount + 1
+        | _ -> compatible <- false
+
+    if not compatible || counts.Count > values.Length / 4 then
+        None
+    else
+        let ordered = counts.Keys |> Seq.toArray
+
+        ordered
+        |> Array.sortInPlaceWith (fun left right ->
+            if direction = Asc then collation.Compare left right else collation.Compare right left)
+
+        let cumulative = Dictionary<string, int>(System.StringComparer.Ordinal)
+        let mutable seen = if direction = Asc then nullCount else 0
+        let mutable groupStart = 0
+
+        while groupStart < ordered.Length do
+            let mutable groupEnd = groupStart + 1
+            let mutable groupCount = counts.[ordered.[groupStart]]
+
+            while groupEnd < ordered.Length && collation.ComparePrimary ordered.[groupStart] ordered.[groupEnd] = 0 do
+                groupCount <- groupCount + counts.[ordered.[groupEnd]]
+                groupEnd <- groupEnd + 1
+
+            seen <- seen + groupCount
+
+            for index in groupStart .. groupEnd - 1 do
+                cumulative.Add(ordered.[index], seen)
+
+            groupStart <- groupEnd
+
+        let total = float values.Length
+        let nullCumulative = if direction = Asc then nullCount else values.Length
+
+        values
+        |> Array.map (function
+            | VString text -> VDouble(float cumulative.[text] / total)
+            | _ -> VDouble(float nullCumulative / total))
+        |> Some
 
 and private tryCumeDistDenseRanks
     (direction: Direction)
@@ -10297,9 +10352,23 @@ and private runWindowedSelect
                     |> Option.defaultWith (fun () -> evalExpr context expression)
                     |> Result.map (orderValueFor column collation))
 
+            let tryDirectCumeDist () =
+                match fn, partitionBy, dirs, orderTerms with
+                | WinCumeDist, [], [ direction ], [ (_, _, collation, Some(index, column)) ] ->
+                    match column.Type with
+                    | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText ->
+                        matchedByIndex.Value
+                        |> Array.map (fun row -> readColumnValue store column row.[index])
+                        |> tryCumeDistRepeatedStrings direction collation
+                    | _ -> None
+                | _ -> None
+
             validateFrame ()
             |> Result.bind validateRangeOrderType
             |> Result.bind (fun () ->
+            match tryDirectCumeDist () with
+            | Some values -> Ok values
+            | None ->
             matched
             |> traverse (fun row ->
                 keyOf partitionBy row

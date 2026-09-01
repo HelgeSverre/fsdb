@@ -8115,7 +8115,8 @@ let tests =
                         runDefault
                             store
                             ("SELECT id, ROUND(CUME_DIST() OVER (ORDER BY status), 4), "
-                             + "ROUND(CUME_DIST() OVER (ORDER BY status DESC), 4) FROM status_rows ORDER BY id")
+                             + "ROUND(CUME_DIST() OVER (ORDER BY status DESC), 4), "
+                             + "DENSE_RANK() OVER (ORDER BY status) FROM status_rows ORDER BY id")
                     with
                     | ResultSet(_, rows) ->
                         Expect.equal
@@ -8134,6 +8135,44 @@ let tests =
                               [ Some "12"; Some "1"; Some "0.25" ] ]
                             "NULLs and text peers retain their directed cumulative distribution"
                     | other -> failtestf "expected cumulative text distributions, got %A" other
+
+                testCase "CUME_DIST merges distinct spellings that are collation peers"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE status_rows (id INT, status VARCHAR(8) COLLATE utf8mb4_0900_ai_ci)"
+                    |> ignore
+
+                    runDefault
+                        store
+                        ("INSERT INTO status_rows VALUES (1,NULL),"
+                         + "(2,'A'),(3,'A'),(4,'A'),(5,'A'),(6,'A'),"
+                         + "(7,'a'),(8,'a'),(9,'a'),(10,'a'),(11,'a'),"
+                         + "(12,'B'),(13,'B'),(14,'B'),(15,'B'),(16,'B'),"
+                         + "(17,'b'),(18,'b'),(19,'b'),(20,'b'),(21,'b')")
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            ("SELECT id, ROUND(CUME_DIST() OVER (ORDER BY status), 4), "
+                             + "ROUND(CUME_DIST() OVER (ORDER BY status DESC), 4), "
+                             + "DENSE_RANK() OVER (ORDER BY status) FROM status_rows ORDER BY id")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows.Length 21 "all source rows remain in the result"
+
+                        Expect.equal
+                            [ rows.[0]; rows.[1]; rows.[6]; rows.[11]; rows.[16] ]
+                            [ [ Some "1"; Some "0.0476"; Some "1"; Some "1" ]
+                              [ Some "2"; Some "0.5238"; Some "0.9524"; Some "2" ]
+                              [ Some "7"; Some "0.5238"; Some "0.9524"; Some "2" ]
+                              [ Some "12"; Some "1"; Some "0.4762"; Some "3" ]
+                              [ Some "17"; Some "1"; Some "0.4762"; Some "3" ] ]
+                            "case variants share peer boundaries under the declared collation"
+                    | other -> failtestf "expected collated cumulative distributions, got %A" other
 
                 testCase "an aggregate window over grouped rows runs after the GROUP BY"
                 <| fun _ ->
