@@ -367,6 +367,7 @@ let private parseBooleanQuery (collation: Collation) (query: string) : (BoolOp *
                         |> Array.map (fun text ->
                             { Text = text
                               Key = collation.KeyOf text })
+                        |> Array.skipWhile (isSearchable >> not)
 
                     acc.Add(op, BPhrase(words, proximity))
                 elif isWordChar query.[i] then
@@ -433,6 +434,9 @@ let private scoresFromTfs (index: Index<'id>) (tfs: Map<'id, int>) : Map<'id, fl
 
 let private phraseCandidates (index: Index<'id>) (words: Token[]) =
     words
+    // InnoDB omits short terms and stopwords from postings but retains their
+    // positions after the first searchable word in a phrase.
+    |> Array.filter isSearchable
     |> Array.map (fun word ->
         index.Postings
         |> Map.tryFind word.Key

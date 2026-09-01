@@ -106,6 +106,32 @@ let tests =
               let far = booleanScoresOf corpus "\"stands database\" @1"
               Expect.equal (far |> Array.mapi (fun i v -> i + 1, v > 0.0) |> Array.filter snd |> Array.map fst) [||] "window too narrow"
 
+          testCase "boolean phrases retain internal stopword and short-token positions"
+          <| fun _ ->
+              let phrases =
+                  buildCorpus
+                      [ "the database comparison"
+                        "database the comparison"
+                        "database comparison"
+                        "da database comparison"
+                        "database da comparison" ]
+
+              let matches query =
+                  booleanScoresOf phrases query
+                  |> Array.mapi (fun index score -> index + 1, score > 0.0)
+                  |> Array.filter snd
+                  |> Array.map fst
+
+              Expect.equal (matches "\"the database\"") [| 1; 2; 3; 4; 5 |] "leading stopword is not a phrase anchor"
+              Expect.equal (matches "\"database the comparison\"") [| 2 |] "internal stopword retains its position"
+              Expect.equal (matches "\"da database\"") [| 1; 2; 3; 4; 5 |] "leading short token is not a phrase anchor"
+              Expect.equal (matches "\"database da comparison\"") [| 5 |] "internal short token retains its position"
+              Expect.equal (matches "\"the\"") [||] "a phrase without a searchable term matches nothing"
+
+              let quotedStar = buildCorpus [ "database comparison"; "data comparison" ]
+              let scores = booleanScoresOf quotedStar "\"data* comparison\""
+              Expect.equal (scores |> Array.map (fun score -> score > 0.0)) [| false; true |] "star remains punctuation inside a phrase"
+
           testCase "boolean: ~ keeps the row but zeroes the term's contribution"
           <| fun _ ->
               let s = booleanScoresOf corpus "~security MySQL"
