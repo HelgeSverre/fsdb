@@ -152,15 +152,19 @@ type private FullTextPhysicalSource =
       Item: FromItem
       Table: Table }
 
+type private FullTextScores =
+    | OrderedScores of Map<RowId, float>
+    | HashedScores of Dictionary<RowId, float>
+
 type private FullTextSourcePlan =
     { Source: FullTextPhysicalSource
-      Scores: (Expr * MatchMode * Map<RowId, float>) list
+      Scores: (Expr * MatchMode * FullTextScores) list
       Synthetic: (Expr * string) list
       Columns: ColumnDef list
       Rows: Value[] seq }
 
 type private FullTextCandidates =
-    | ScoredCandidates of Map<RowId, float>
+    | ScoredCandidates of FullTextScores
     | CombinedCandidates of Set<RowId>
 
 type private MutationSource =
@@ -10986,9 +10990,12 @@ and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
                 let fullTextIndex = Map.find index.Name table.FullTextIndexes
                 let scores =
                     match mode with
-                    | NaturalLanguage -> FullText.naturalScores fullTextIndex queryText
-                    | BooleanMode -> FullText.booleanScores fullTextIndex queryText
-                    | QueryExpansion -> FullText.expansionScores fullTextIndex queryText
+                    | NaturalLanguage ->
+                        FullText.tryNaturalSingleTermScoresDictionary fullTextIndex queryText
+                        |> Option.map HashedScores
+                        |> Option.defaultWith (fun () -> FullText.naturalScores fullTextIndex queryText |> OrderedScores)
+                    | BooleanMode -> FullText.booleanScores fullTextIndex queryText |> OrderedScores
+                    | QueryExpansion -> FullText.expansionScores fullTextIndex queryText |> OrderedScores
 
                 Ok(node, mode, scores)
             | None, _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
@@ -10998,7 +11005,20 @@ and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
 
     matchNodes |> traverse scoreNode
 
-and private fullTextCandidates (computed: (Expr * MatchMode * Map<RowId, float>) list) expression =
+and private fullTextScoreIds (scores: FullTextScores) : RowId seq =
+    match scores with
+    | OrderedScores scores -> seq { yield! Map.keys scores }
+    | HashedScores scores -> seq { yield! scores.Keys }
+
+and private tryFullTextScore rowId =
+    function
+    | OrderedScores scores -> Map.tryFind rowId scores
+    | HashedScores scores ->
+        match scores.TryGetValue rowId with
+        | true, score -> Some score
+        | false, _ -> None
+
+and private fullTextCandidates (computed: (Expr * MatchMode * FullTextScores) list) expression =
     let scoreMap node =
         computed
         |> List.tryFind (fun (candidate, _, _) -> candidate = node)
@@ -11006,7 +11026,7 @@ and private fullTextCandidates (computed: (Expr * MatchMode * Map<RowId, float>)
 
     let ids =
         function
-        | ScoredCandidates scores -> scores |> Map.keys |> Set.ofSeq
+        | ScoredCandidates scores -> fullTextScoreIds scores |> Set.ofSeq
         | CombinedCandidates candidates -> candidates
 
     let rec candidates expression =
@@ -11031,7 +11051,7 @@ and private fullTextCandidates (computed: (Expr * MatchMode * Map<RowId, float>)
 and private fullTextCandidateIds (candidates: FullTextCandidates) : RowId seq =
     seq {
         match candidates with
-        | ScoredCandidates scores -> yield! Map.keys scores
+        | ScoredCandidates scores -> yield! fullTextScoreIds scores
         | CombinedCandidates candidates -> yield! Set.toSeq candidates
     }
 
@@ -11058,7 +11078,7 @@ and private fullTextPredicatePlan (table: Table) (predicate: Expr) =
                     rowIds
                     |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
                     |> List.ofSeq
-                  PredicateFor = fun rowId -> rewrite (fun scores -> scores |> Map.tryFind rowId |> Option.defaultValue 0.0)
+                  PredicateFor = fun rowId -> rewrite (fun scores -> tryFullTextScore rowId scores |> Option.defaultValue 0.0)
                   ProbePredicate = rewrite (fun _ -> 0.0) })
 
 /// The fulltext pre-pass: like `runWindowedSelect`, each distinct
@@ -11195,7 +11215,7 @@ and private runFullTextSelect
                                     Array.append
                                         row
                                         (computed
-                                         |> List.map (fun (_, _, scores) -> VDouble(scores |> Map.tryFind rowId |> Option.defaultValue 0.0))
+                                         |> List.map (fun (_, _, scores) -> VDouble(tryFullTextScore rowId scores |> Option.defaultValue 0.0))
                                          |> Array.ofList))
 
                             { Source = source

@@ -238,6 +238,25 @@ let private sumTermScores (index: Index<'id>) (terms: string[]) : Map<'id, float
 let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
     sumTermScores index (naturalTerms index query)
 
+let internal tryNaturalSingleTermScoresDictionary
+    (index: Index<'id>)
+    (query: string)
+    : Collections.Generic.Dictionary<'id, float> option =
+    match naturalTerms index query with
+    | [| term |] ->
+        match Map.tryFind term index.Postings with
+        | None -> Collections.Generic.Dictionary() |> Some
+        | Some rows ->
+            let weight = idf index rows.Count
+            let scale = weight * weight
+            let scores = Collections.Generic.Dictionary<'id, float>(rows.Count)
+
+            for KeyValue(id, frequency) in rows do
+                scores.Add(id, float frequency * scale)
+
+            Some scores
+    | _ -> None
+
 let private scoresInCorpusOrder (corpus: Corpus) (scores: Map<int, float>) =
     corpus.Order |> Array.map (fun id -> scores |> Map.tryFind id |> Option.defaultValue 0.0)
 

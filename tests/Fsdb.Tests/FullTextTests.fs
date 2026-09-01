@@ -150,6 +150,22 @@ let tests =
               Expect.equal (natural |> Map.keys |> Set.ofSeq) (set [ 20; 30 ]) "replacement and insert are searchable"
               Expect.equal (prefix |> Map.keys |> Set.ofSeq) (set [ 20 ]) "prefix postings follow replacement"
 
+          testCase "single-term score dictionaries preserve materialized scores"
+          <| fun _ ->
+              let index =
+                  buildIndexWith
+                      defaultCollation
+                      [ 10, "database tutorial"; 20, "database security"; 30, "security handbook" ]
+
+              let actual =
+                  tryNaturalSingleTermScoresDictionary index "database"
+                  |> Option.get
+                  |> Seq.map (fun (KeyValue(id, score)) -> id, score)
+                  |> Map.ofSeq
+
+              Expect.equal actual (naturalScores index "database") "dictionary scores match"
+              Expect.isNone (tryNaturalSingleTermScoresDictionary index "database security") "multiple terms use combined scoring"
+
           testCase "a deeply nested boolean query is bounded, not a stack overflow"
           <| fun _ ->
               // Thousands of open parens must not overflow the recursive

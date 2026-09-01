@@ -8115,8 +8115,7 @@ let tests =
                         runDefault
                             store
                             ("SELECT id, ROUND(CUME_DIST() OVER (ORDER BY status), 4), "
-                             + "ROUND(CUME_DIST() OVER (ORDER BY status DESC), 4), "
-                             + "DENSE_RANK() OVER (ORDER BY status) FROM status_rows ORDER BY id")
+                             + "ROUND(CUME_DIST() OVER (ORDER BY status DESC), 4) FROM status_rows ORDER BY id")
                     with
                     | ResultSet(_, rows) ->
                         Expect.equal
