@@ -965,6 +965,13 @@ let withViewer store account activeRoles (body: unit -> 'a) : 'a =
               ActiveRoles = activeRoles })
         body
 
+let private viewerHasPrivilege privilege target =
+    match currentViewer.Value with
+    | None -> true
+    | Some viewer ->
+        Fsdb.Auth.checkForAccountWithRoles viewer.Store viewer.Account viewer.ActiveRoles [ privilege, target ]
+        |> Result.isOk
+
 /// The account a viewer is limited to, or `None` when it may see all rows
 /// (embedded/internal, or it holds `priv`).
 let private restrictedTo (priv: string) : Fsdb.Auth.Account option =
@@ -2133,6 +2140,13 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
                         viewer.ActiveRoles
                         [ "TRIGGER", Fsdb.Auth.OnTable(rowText row 1, rowText row 6) ]
                     |> Result.isOk
+                | "EVENTS" ->
+                    Fsdb.Auth.checkForAccountWithRoles
+                        viewer.Store
+                        viewer.Account
+                        viewer.ActiveRoles
+                        [ "EVENT", Fsdb.Auth.OnDb(rowText row 1) ]
+                    |> Result.isOk
                 | _ -> true)
 
         rows
@@ -2737,6 +2751,8 @@ let showCreateTrigger (catalog: Catalog) (dbName: string) (triggerName: string) 
         && String.Equals(trigger.Name, triggerName, StringComparison.OrdinalIgnoreCase))
     |> function
         | None -> Error(1360, sprintf "Trigger does not exist")
+        | Some trigger when not (viewerHasPrivilege "TRIGGER" (Fsdb.Auth.OnTable(trigger.Schema, trigger.Table))) ->
+            Error(1227, "Access denied; you need (at least one of) the TRIGGER privilege(s) for this operation")
         | Some trigger ->
             let ddl =
                 sprintf
@@ -2986,6 +3002,7 @@ let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
         let rows =
             triggerCatalogRows catalog
             |> List.filter (fun trigger -> String.Equals(trigger.Schema, dbName, StringComparison.OrdinalIgnoreCase))
+            |> List.filter (fun trigger -> viewerHasPrivilege "TRIGGER" (Fsdb.Auth.OnTable(trigger.Schema, trigger.Table)))
             |> List.map (fun trigger ->
                 [ Some trigger.Name; Some trigger.Event; Some trigger.Table; Some trigger.Body; Some trigger.Timing
                   Some(triggerCreatedText trigger); Some trigger.SqlMode; Some trigger.Definer
@@ -2998,20 +3015,25 @@ let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
         )
 
 let showEvents (catalog: Catalog) (dbName: string option) : ShowResult =
-    let rows =
-        eventsRows catalog
-        |> List.filter (fun row -> dbName |> Option.forall (fun db -> String.Equals(toText row.[1] |> Option.defaultValue "", db, StringComparison.OrdinalIgnoreCase)))
-        |> List.map (fun row ->
-            [ toText row.[1]; toText row.[2]; toText row.[3]; toText row.[4]; toText row.[7]; toText row.[8]
-              toText row.[9]; toText row.[10]; toText row.[12]; toText row.[13]; toText row.[14]; toText row.[20]
-              toText row.[21]; toText row.[22]; toText row.[23] ])
+    match dbName with
+    | Some db when db.ToLowerInvariant() <> "information_schema" && not (Map.containsKey db catalog) ->
+        Error(1049, sprintf "Unknown database '%s'" db)
+    | _ ->
+        let rows =
+            eventsRows catalog
+            |> List.filter (fun row -> dbName |> Option.forall (fun db -> String.Equals(toText row.[1] |> Option.defaultValue "", db, StringComparison.OrdinalIgnoreCase)))
+            |> List.filter (fun row -> viewerHasPrivilege "EVENT" (Fsdb.Auth.OnDb(toText row.[1] |> Option.defaultValue "")))
+            |> List.map (fun row ->
+                [ toText row.[1]; toText row.[2]; toText row.[3]; toText row.[4]; toText row.[7]; toText row.[8]
+                  toText row.[9]; toText row.[10]; toText row.[12]; toText row.[13]; toText row.[14]; toText row.[20]
+                  toText row.[21]; toText row.[22]; toText row.[23] ])
 
-    Ok(
-        [ "Db"; "Name"; "Definer"; "Time zone"; "Type"; "Execute at"; "Interval value"; "Interval field"
-          "Starts"; "Ends"; "Status"; "Originator"; "character_set_client"; "collation_connection"
-          "Database Collation" ],
-        rows
-    )
+        Ok(
+            [ "Db"; "Name"; "Definer"; "Time zone"; "Type"; "Execute at"; "Interval value"; "Interval field"
+              "Starts"; "Ends"; "Status"; "Originator"; "character_set_client"; "collation_connection"
+              "Database Collation" ],
+            rows
+        )
 
 /// `SHOW PROCEDURE STATUS` / `SHOW FUNCTION STATUS [LIKE|WHERE ...]`.
 let showRoutineStatus (catalog: Catalog) kind : ShowResult =

@@ -55,8 +55,8 @@ build fails with "not defined".
   for compatibility work).
 - Connections authenticate against `mysql.user`: the bootstrap account is
   `root` with no password (`-uroot`, empty password only); an unknown user is
-  a 1045. Text-probed statements (SET/SHOW/KILL/USE) bypass privilege
-  checks — a documented divergence, see docs/compatibility.md.
+  a 1045. Text-probed statements (SET/SHOW/KILL/USE) carry their own scoped
+  checks because they bypass the parsed-statement authorization gate.
 - Comment & doc style: `docs/comment-style.md` is the authority — every
   comment there must survive a KEEP/DELETE/REWRITE grading (why-not-what,
   `ponytail:` debt markers, no session narration, milestone names, roadmap,

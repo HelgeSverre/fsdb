@@ -355,11 +355,49 @@ let private checkSessionAccess session store required =
 let private hasSessionGlobalPrivilege session privilege =
     Auth.hasGlobalPrivForAccountWithRoles session.Store (accountOf session) session.ActiveRoles privilege
 
+let private checkAnySessionGlobalPrivilege session display privileges =
+    if privileges |> List.exists (hasSessionGlobalPrivilege session) then
+        Ok()
+    else
+        Error(
+            1227,
+            sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" display
+        )
+
 let private canSessionSeeDatabase session store database =
     Auth.canSeeDatabaseForAccountWithRoles store (accountOf session) session.ActiveRoles database
 
 let private canSessionSeeTable session store database table =
     Auth.canSeeTableForAccountWithRoles store (accountOf session) session.ActiveRoles database table
+
+let private checkTableMaintenanceAccess session store database table operation =
+    match operation with
+    | "check" ->
+        if canSessionSeeTable session store database table then
+            Ok()
+        else
+            Error(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table '%s'" session.User table)
+    | _ ->
+        let required = [ "SELECT"; "INSERT" ]
+        let denied =
+            required
+            |> List.choose (fun privilege ->
+                match checkSessionAccess session store [ privilege, Auth.OnTable(database, table) ] with
+                | Ok() -> None
+                | Error error -> Some(privilege, error))
+
+        match denied with
+        | [] -> Ok()
+        | [ _, error ] -> Error error
+        | privileges ->
+            Error(
+                1142,
+                sprintf
+                    "%s command denied to user '%s'@'localhost' for table '%s'"
+                    (privileges |> List.map fst |> String.concat ", ")
+                    session.User
+                    table
+            )
 
 let private lockWaitTimeout (session: Session) =
     lookupVar session "innodb_lock_wait_timeout"
@@ -3244,11 +3282,15 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | Savepoint name -> savepoint name session
     | Release name -> releaseSavepoint name session
     | Use dbName ->
-        if Storage.databaseExists (Session.currentStore session) dbName then
-            Session.trackSchemaAssignment dbName ({ session with Database = Some dbName }), Affected 0UL
-        else
+        let store = Session.currentStore session
+
+        if not (Storage.databaseExists store dbName) then
             let code, msg = Storage.toMySqlError (Storage.NoSuchDatabase dbName)
             session, Err(code, msg)
+        elif canSessionSeeDatabase session store dbName then
+            Session.trackSchemaAssignment dbName ({ session with Database = Some dbName }), Affected 0UL
+        else
+            session, Err(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" session.User session.AccountHost dbName)
     | ShowVariables isGlobal -> session, handleShowVariables session isGlobal sql
     | ShowStatus ->
         session,
@@ -3262,11 +3304,14 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         |> showResult
     | ShowEngines -> session, InformationSchema.showEngines () |> showResult
     | ShowEngineInnodbStatus ->
-        session,
-        ResultSet(
-            [ "Type"; "Name"; "Status" ],
-            [ [ Some "InnoDB"; Some ""; Some "fsdb uses an in-memory transactional row store" ] ]
-        )
+        match checkSessionAccess session session.Store [ "PROCESS", Auth.Global ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() ->
+            session,
+            ResultSet(
+                [ "Type"; "Name"; "Status" ],
+                [ [ Some "InnoDB"; Some ""; Some "fsdb uses an in-memory transactional row store" ] ]
+            )
     | ShowPlugins ->
         session,
         ResultSet(
@@ -3274,101 +3319,117 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             [ [ Some "mysql_native_password"; Some "ACTIVE"; Some "AUTHENTICATION"; None; Some "GPL" ] ]
         )
     | ShowBinaryLogs
-    | ShowBinaryLogStatus -> session, Err(1381, "You are not using binary logging")
+    | ShowBinaryLogStatus ->
+        match checkAnySessionGlobalPrivilege session "SUPER, REPLICATION CLIENT" [ "SUPER"; "REPLICATION CLIENT" ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() -> session, Err(1381, "You are not using binary logging")
     | ShowReplicaStatus ->
-        session,
-        ResultSet(
-            [ "Replica_IO_State"
-              "Source_Host"
-              "Source_User"
-              "Source_Port"
-              "Connect_Retry"
-              "Source_Log_File"
-              "Read_Source_Log_Pos"
-              "Relay_Log_File"
-              "Relay_Log_Pos"
-              "Relay_Source_Log_File"
-              "Replica_IO_Running"
-              "Replica_SQL_Running"
-              "Replicate_Do_DB"
-              "Replicate_Ignore_DB"
-              "Replicate_Do_Table"
-              "Replicate_Ignore_Table"
-              "Replicate_Wild_Do_Table"
-              "Replicate_Wild_Ignore_Table"
-              "Last_Errno"
-              "Last_Error"
-              "Skip_Counter"
-              "Exec_Source_Log_Pos"
-              "Relay_Log_Space"
-              "Until_Condition"
-              "Until_Log_File"
-              "Until_Log_Pos"
-              "Source_SSL_Allowed"
-              "Source_SSL_CA_File"
-              "Source_SSL_CA_Path"
-              "Source_SSL_Cert"
-              "Source_SSL_Cipher"
-              "Source_SSL_Key"
-              "Seconds_Behind_Source"
-              "Source_SSL_Verify_Server_Cert"
-              "Last_IO_Errno"
-              "Last_IO_Error"
-              "Last_SQL_Errno"
-              "Last_SQL_Error"
-              "Replicate_Ignore_Server_Ids"
-              "Source_Server_Id"
-              "Source_UUID"
-              "Source_Info_File"
-              "SQL_Delay"
-              "SQL_Remaining_Delay"
-              "Replica_SQL_Running_State"
-              "Source_Retry_Count"
-              "Source_Bind"
-              "Last_IO_Error_Timestamp"
-              "Last_SQL_Error_Timestamp"
-              "Source_SSL_Crl"
-              "Source_SSL_Crlpath"
-              "Retrieved_Gtid_Set"
-              "Executed_Gtid_Set"
-              "Auto_Position"
-              "Replicate_Rewrite_DB"
-              "Channel_Name"
-              "Source_TLS_Version"
-              "Source_public_key_path"
-              "Get_Source_public_key"
-              "Network_Namespace" ],
-            []
-        )
+        match checkAnySessionGlobalPrivilege session "SUPER, REPLICATION CLIENT" [ "SUPER"; "REPLICATION CLIENT" ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() ->
+            session,
+            ResultSet(
+                [ "Replica_IO_State"
+                  "Source_Host"
+                  "Source_User"
+                  "Source_Port"
+                  "Connect_Retry"
+                  "Source_Log_File"
+                  "Read_Source_Log_Pos"
+                  "Relay_Log_File"
+                  "Relay_Log_Pos"
+                  "Relay_Source_Log_File"
+                  "Replica_IO_Running"
+                  "Replica_SQL_Running"
+                  "Replicate_Do_DB"
+                  "Replicate_Ignore_DB"
+                  "Replicate_Do_Table"
+                  "Replicate_Ignore_Table"
+                  "Replicate_Wild_Do_Table"
+                  "Replicate_Wild_Ignore_Table"
+                  "Last_Errno"
+                  "Last_Error"
+                  "Skip_Counter"
+                  "Exec_Source_Log_Pos"
+                  "Relay_Log_Space"
+                  "Until_Condition"
+                  "Until_Log_File"
+                  "Until_Log_Pos"
+                  "Source_SSL_Allowed"
+                  "Source_SSL_CA_File"
+                  "Source_SSL_CA_Path"
+                  "Source_SSL_Cert"
+                  "Source_SSL_Cipher"
+                  "Source_SSL_Key"
+                  "Seconds_Behind_Source"
+                  "Source_SSL_Verify_Server_Cert"
+                  "Last_IO_Errno"
+                  "Last_IO_Error"
+                  "Last_SQL_Errno"
+                  "Last_SQL_Error"
+                  "Replicate_Ignore_Server_Ids"
+                  "Source_Server_Id"
+                  "Source_UUID"
+                  "Source_Info_File"
+                  "SQL_Delay"
+                  "SQL_Remaining_Delay"
+                  "Replica_SQL_Running_State"
+                  "Source_Retry_Count"
+                  "Source_Bind"
+                  "Last_IO_Error_Timestamp"
+                  "Last_SQL_Error_Timestamp"
+                  "Source_SSL_Crl"
+                  "Source_SSL_Crlpath"
+                  "Retrieved_Gtid_Set"
+                  "Executed_Gtid_Set"
+                  "Auto_Position"
+                  "Replicate_Rewrite_DB"
+                  "Channel_Name"
+                  "Source_TLS_Version"
+                  "Source_public_key_path"
+                  "Get_Source_public_key"
+                  "Network_Namespace" ],
+                []
+            )
     | MaintainTables(operation, tables) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let store = Session.currentStore session
+        let resolved = tables |> List.map (fun tableRef -> splitQualified sessionDb tableRef)
 
-        let rows =
-            tables
-            |> List.collect (fun tableRef ->
-                let dbName, tableName = splitQualified sessionDb tableRef
-                let qualified = dbName + "." + tableName
+        match
+            resolved
+            |> List.tryPick (fun (dbName, tableName) ->
+                match checkTableMaintenanceAccess session store dbName tableName operation with
+                | Ok() -> None
+                | Error error -> Some error)
+        with
+        | Some(code, message) -> session, Err(code, message)
+        | None ->
+            let rows =
+                resolved
+                |> List.collect (fun (dbName, tableName) ->
+                    let qualified = dbName + "." + tableName
 
-                match Storage.scan (Session.currentStore session) dbName tableName with
-                | Ok _ when operation = "optimize" ->
-                    [ [ Some qualified
-                        Some operation
-                        Some "note"
-                        Some "Table does not support optimize, doing recreate + analyze instead" ]
-                      [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
-                | Ok _ when operation = "repair" ->
-                    [ [ Some qualified
-                        Some operation
-                        Some "note"
-                        Some "The storage engine for the table doesn't support repair" ] ]
-                | Ok _ -> [ [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
-                | Error _ ->
-                    [ [ Some qualified
-                        Some operation
-                        Some "Error"
-                        Some(sprintf "Table '%s.%s' doesn't exist" dbName tableName) ] ])
+                    match Storage.scan store dbName tableName with
+                    | Ok _ when operation = "optimize" ->
+                        [ [ Some qualified
+                            Some operation
+                            Some "note"
+                            Some "Table does not support optimize, doing recreate + analyze instead" ]
+                          [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+                    | Ok _ when operation = "repair" ->
+                        [ [ Some qualified
+                            Some operation
+                            Some "note"
+                            Some "The storage engine for the table doesn't support repair" ] ]
+                    | Ok _ -> [ [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+                    | Error _ ->
+                        [ [ Some qualified
+                            Some operation
+                            Some "Error"
+                            Some(sprintf "Table '%s.%s' doesn't exist" dbName tableName) ] ])
 
-        session, ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
+            session, ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
     | ShowOpenTables(db, pattern) ->
         let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
 
@@ -3390,7 +3451,13 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
         session, ResultSet([ "Database"; "Table"; "In_use"; "Name_locked" ], rows)
     | ShowCreateDatabase name ->
-        if Storage.databaseExists (Session.currentStore session) name then
+        let store = Session.currentStore session
+
+        if not (Storage.databaseExists store name) then
+            session, Err(1049, sprintf "Unknown database '%s'" name)
+        elif not (canSessionSeeDatabase session store name) then
+            session, Err(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" session.User session.AccountHost name)
+        else
             let quotedName = name.Replace("`", "``")
 
             session,
@@ -3399,8 +3466,6 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                 [ [ Some name
                     Some(sprintf "CREATE DATABASE `%s` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */" quotedName) ] ]
             )
-        else
-            session, Err(1049, sprintf "Unknown database '%s'" name)
     | ShowCharset -> session, InformationSchema.showCharacterSet (likeSuffix sql) |> showResult
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
     | ShowProcesslist full ->
@@ -3413,11 +3478,29 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
         session, result
     | ShowTriggers db ->
-        // `FROM db` when given, else the session's current database — same
-        // resolution MySQL applies.
         let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
-        session, InformationSchema.showTriggers (Session.currentStore session).Catalog dbName |> showResult
-    | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
+        let store = Session.currentStore session
+
+        if not (Storage.databaseExists store dbName) then
+            session, Err(1049, sprintf "Unknown database '%s'" dbName)
+        elif not (canSessionSeeDatabase session store dbName) then
+            session, Err(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" session.User session.AccountHost dbName)
+        else
+            session,
+            InformationSchema.withViewer store (accountOf session) session.ActiveRoles (fun () ->
+                InformationSchema.showTriggers store.Catalog dbName)
+            |> showResult
+    | ShowEvents db ->
+        let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
+        let store = Session.currentStore session
+
+        match checkSessionAccess session store [ "EVENT", Auth.OnDb dbName ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() ->
+            session,
+            InformationSchema.withViewer store (accountOf session) session.ActiveRoles (fun () ->
+                InformationSchema.showEvents store.Catalog (Some dbName))
+            |> showResult
     | ShowRoutineStatus kind ->
         session,
         InformationSchema.withViewer (Session.currentStore session) (accountOf session) session.ActiveRoles (fun () ->
@@ -3446,9 +3529,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
 
-        match InformationSchema.findTable (Session.currentStore session).Catalog dbName table with
-        | Ok _ -> session, Affected 0UL
-        | Error(code, msg) -> session, Err(code, msg)
+        match checkSessionAccess session session.Store [ "ALTER", Auth.OnTable(dbName, table) ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() ->
+            match InformationSchema.findTable (Session.currentStore session).Catalog dbName table with
+            | Ok _ -> session, Affected 0UL
+            | Error(code, msg) -> session, Err(code, msg)
     | ShowConditions errorsOnly ->
         let conditions =
             session.Diagnostics
@@ -3512,7 +3598,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowCreateTrigger name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, trigger = splitQualified sessionDb name
-        session, InformationSchema.showCreateTrigger (Session.currentStore session).Catalog dbName trigger |> showResult
+        let store = Session.currentStore session
+        session,
+        InformationSchema.withViewer store (accountOf session) session.ActiveRoles (fun () ->
+            InformationSchema.showCreateTrigger store.Catalog dbName trigger)
+        |> showResult
     | ShowColumns(full, name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
@@ -3614,64 +3704,67 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
         if kind = "EVENT" then
-            let event =
-                match Storage.scanList (Session.currentStore session) "mysql" "events" with
-                | Error _ -> None
-                | Ok(_, rows) ->
-                    rows
-                    |> List.choose SystemCatalog.Event.tryRead
-                    |> List.tryFind (SystemCatalog.Event.matches database name)
+            match checkSessionAccess session session.Store [ "EVENT", Auth.OnDb database ] with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() ->
+                let event =
+                    match Storage.scanList (Session.currentStore session) "mysql" "events" with
+                    | Error _ -> None
+                    | Ok(_, rows) ->
+                        rows
+                        |> List.choose SystemCatalog.Event.tryRead
+                        |> List.tryFind (SystemCatalog.Event.matches database name)
 
-            match event with
-            | None -> session, Err(1539, sprintf "Unknown event '%s'" name)
-            | Some event ->
-                let definer = accountRefOf event.Definer
-                let schedule =
-                    SystemCatalog.Event.timing event
-                    |> Option.map Event.scheduleText
-                    |> Option.defaultValue event.Schedule
+                match event with
+                | None -> session, Err(1539, sprintf "Unknown event '%s'" name)
+                | Some event ->
+                    let definer = accountRefOf event.Definer
+                    let schedule =
+                        SystemCatalog.Event.timing event
+                        |> Option.map Event.scheduleText
+                        |> Option.defaultValue event.Schedule
 
-                let status =
-                    match event.Status with
-                    | Event.Status.Enabled -> "ENABLE"
-                    | Event.Status.Disabled -> "DISABLE"
-                    | Event.Status.ReplicaSideDisabled -> "DISABLE ON REPLICA"
+                    let status =
+                        match event.Status with
+                        | Event.Status.Enabled -> "ENABLE"
+                        | Event.Status.Disabled -> "DISABLE"
+                        | Event.Status.ReplicaSideDisabled -> "DISABLE ON REPLICA"
 
-                let comment =
-                    if event.Comment = "" then
-                        ""
-                    else
-                        let options = SqlMode.parserOptionsFor event.SqlMode
-                        let escaped =
-                            if options.NoBackslashEscapes then
-                                event.Comment.Replace("'", "''")
-                            else
-                                event.Comment
-                                    .Replace("\\", "\\\\")
-                                    .Replace("'", "''")
-                                    .Replace("\r", "\\r")
-                                    .Replace("\n", "\\n")
+                    let comment =
+                        if event.Comment = "" then
+                            ""
+                        else
+                            let options = SqlMode.parserOptionsFor event.SqlMode
+                            let escaped =
+                                if options.NoBackslashEscapes then
+                                    event.Comment.Replace("'", "''")
+                                else
+                                    event.Comment
+                                        .Replace("\\", "\\\\")
+                                        .Replace("'", "''")
+                                        .Replace("\r", "\\r")
+                                        .Replace("\n", "\\n")
 
-                        " COMMENT '" + escaped + "'"
+                            " COMMENT '" + escaped + "'"
 
-                let ddl =
-                    sprintf
-                        "CREATE DEFINER=`%s`@`%s` EVENT `%s` ON SCHEDULE %s ON COMPLETION %s %s%s DO %s"
-                        (definer.Name.Replace("`", "``"))
-                        (definer.Host.Replace("`", "``"))
-                        (name.Replace("`", "``"))
-                        schedule
-                        event.OnCompletion
-                        status
-                        comment
-                        event.Definition
+                    let ddl =
+                        sprintf
+                            "CREATE DEFINER=`%s`@`%s` EVENT `%s` ON SCHEDULE %s ON COMPLETION %s %s%s DO %s"
+                            (definer.Name.Replace("`", "``"))
+                            (definer.Host.Replace("`", "``"))
+                            (name.Replace("`", "``"))
+                            schedule
+                            event.OnCompletion
+                            status
+                            comment
+                            event.Definition
 
-                session,
-                ResultSet(
-                    [ "Event"; "sql_mode"; "time_zone"; "Create Event"; "character_set_client"; "collation_connection"; "Database Collation" ],
-                    [ [ Some name; Some event.SqlMode; Some event.TimeZone; Some ddl; Some event.CharacterSetClient
-                        Some event.CollationConnection; Some event.DatabaseCollation ] ]
-                )
+                    session,
+                    ResultSet(
+                        [ "Event"; "sql_mode"; "time_zone"; "Create Event"; "character_set_client"; "collation_connection"; "Database Collation" ],
+                        [ [ Some name; Some event.SqlMode; Some event.TimeZone; Some ddl; Some event.CharacterSetClient
+                            Some event.CollationConnection; Some event.DatabaseCollation ] ]
+                    )
         elif kind = "PROCEDURE" then
             let routine =
                 match Storage.scanList (Session.currentStore session) "mysql" "routines" with
@@ -3751,19 +3844,31 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                 )
         else
             session, Err(1305, sprintf "%s %s does not exist" kind name)
-    | FlushPrivileges -> session, Affected 0UL
+    | FlushPrivileges ->
+        match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_PRIVILEGES" [ "RELOAD"; "FLUSH_PRIVILEGES" ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() -> session, Affected 0UL
     | FlushUserResources ->
-        match checkSessionAccess session session.Store [ "RELOAD", Auth.Global ] with
+        match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_USER_RESOURCES" [ "RELOAD"; "FLUSH_USER_RESOURCES" ] with
         | Error(code, message) -> session, Err(code, message)
         | Ok() ->
             Auth.resetAllAccountResources session.Store
             session, Affected 0UL
     | FlushStatus ->
-        InformationSchema.resetQuestions ()
-        InformationSchema.resetCommandCounts ()
-        session, Affected 0UL
-    | FlushTables
-    | FlushLogs -> session, Affected 0UL
+        match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_STATUS" [ "RELOAD"; "FLUSH_STATUS" ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() ->
+            InformationSchema.resetQuestions ()
+            InformationSchema.resetCommandCounts ()
+            session, Affected 0UL
+    | FlushTables ->
+        match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_TABLES" [ "RELOAD"; "FLUSH_TABLES" ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() -> session, Affected 0UL
+    | FlushLogs ->
+        match checkSessionAccess session session.Store [ "RELOAD", Auth.Global ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() -> session, Affected 0UL
     | LockTables ->
         match xaAssociation session with
         | Some(_, state) -> session, xaRmFail (xaStateName state)

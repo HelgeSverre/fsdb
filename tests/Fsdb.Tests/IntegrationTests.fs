@@ -1472,6 +1472,9 @@ let tests =
                           Fsdb.Value.VString(Fsdb.Auth.nativePasswordHash "s3cret") ] ]
                   |> ignore
 
+                  let restrictedDatabase = "restricted_" + Guid.NewGuid().ToString "N"
+                  Fsdb.Storage.createDatabase store restrictedDatabase |> Result.mapError string |> Result.defaultWith failtest
+
                   use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
                   let port = server.Port
 
@@ -1532,6 +1535,35 @@ let tests =
                       | None -> raise e
 
                   Expect.isFalse (Fsdb.Storage.databaseExists store unprivilegedDatabase) "denied handshake did not grow the catalog"
+
+                  use restrictedHandshake =
+                      new MySqlConnector.MySqlConnection(connStr "bob" "s3cret" + ";Database=" + restrictedDatabase)
+
+                  let! restrictedHandshakeResult = restrictedHandshake.OpenAsync() |> Async.AwaitTask |> Async.Catch
+
+                  match restrictedHandshakeResult with
+                  | Choice1Of2() -> failtest "expected an existing but unprivileged handshake database to be refused"
+                  | Choice2Of2 error ->
+                      match mysqlError error with
+                      | Some mysql -> Expect.equal mysql.Number 1044 "the handshake enforces database visibility"
+                      | None -> raise error
+
+                  use restrictedCommand = new MySqlConnector.MySqlConnection(connStr "bob" "s3cret")
+                  do! restrictedCommand.OpenAsync() |> Async.AwaitTask
+                  let! restrictedCommandResult =
+                      restrictedCommand.ChangeDatabaseAsync(restrictedDatabase) |> Async.AwaitTask |> Async.Catch
+
+                  match restrictedCommandResult with
+                  | Choice1Of2() -> failtest "expected COM_INIT_DB to enforce database visibility"
+                  | Choice2Of2 error ->
+                      match mysqlError error with
+                      | Some mysql -> Expect.equal mysql.Number 1044 "COM_INIT_DB access denial"
+                      | None -> raise error
+
+                  Fsdb.Auth.grant store [ "SELECT" ] (Fsdb.Auth.OnDb restrictedDatabase) [ "bob", "%" ] false
+                  |> Result.mapError snd
+                  |> Result.defaultWith failtest
+                  do! restrictedCommand.ChangeDatabaseAsync(restrictedDatabase) |> Async.AwaitTask
 
                   // A passwordless account matches real MySQL: an empty
                   // offered password connects, a non-empty one is 1045.
@@ -3848,6 +3880,10 @@ let tests =
                   | Ok() -> ()
                   | Error error -> failtestf "create database failed: %A" error
 
+                  match Fsdb.Storage.createDatabase store "restricted_change_wire" with
+                  | Ok() -> ()
+                  | Error error -> failtestf "create database failed: %A" error
+
                   Fsdb.Auth.createUser store "changed" "localhost" (Some "secret")
                   |> Result.mapError snd
                   |> Result.defaultWith failtest
@@ -3858,6 +3894,29 @@ let tests =
 
                   use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
                   let capabilities = ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+
+                  let! deniedClient, deniedStream = connectRawAsWithCapabilities server.Port "root" capabilities
+                  use deniedClient = deniedClient
+                  let! _ =
+                      writePacketAsync
+                          deniedStream
+                          { SeqId = 0uy
+                            Payload = changeUserPayload "changed" [||] "restricted_change_wire" 8 (Some "mysql_native_password") }
+
+                  let! deniedSwitch = readPacketAsync deniedStream
+                  let deniedReader = Reader(deniedSwitch.Value.Payload)
+                  Expect.equal (deniedReader.ReadByte()) 0xfeuy "change-user authentication exchange"
+                  let _ = deniedReader.ReadNullTerminatedString()
+                  let deniedScramble = deniedReader.ReadBytes 20
+                  let! _ =
+                      writePacketAsync
+                          deniedStream
+                          { SeqId = deniedSwitch.Value.SeqId + 1uy
+                            Payload = nativePasswordResponse "secret" deniedScramble }
+
+                  let! denied = readPacketAsync deniedStream
+                  Expect.equal (Reader(denied.Value.Payload.[1..]).ReadInt16LE()) 1044 "database privilege enforced"
+
                   let! client, stream = connectRawAsWithCapabilities server.Port "root" capabilities
                   use client = client
 

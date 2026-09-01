@@ -20,6 +20,18 @@ open Fsdb.Storage
 open Fsdb.Value
 open Fsdb.Executor
 
+let private validateDatabaseSelection store account activeRoles database =
+    if not (Storage.databaseExists store database) then
+        let code, message = Storage.toMySqlError (Storage.NoSuchDatabase database)
+        Error(code, message)
+    elif Auth.canSeeDatabaseForAccountWithRoles store account activeRoles database then
+        Ok()
+    else
+        Error(
+            1044,
+            sprintf "Access denied for user '%s'@'%s' to database '%s'" account.Name account.Host database
+        )
+
 let private isValidClientCertificate
     (certificateAuthorities: X509Certificate2 list)
     (certificate: X509Certificate)
@@ -1345,10 +1357,7 @@ let private handleConnection
                     let databaseAllowed =
                         match resp.Database with
                         | None -> Ok()
-                        | Some db when Storage.databaseExists store db -> Ok()
-                        | Some db ->
-                            let code, message = Storage.toMySqlError (Storage.NoSuchDatabase db)
-                            Error(code, message)
+                        | Some db -> validateDatabaseSelection store selectedAccount session.ActiveRoles db
 
                     match databaseAllowed with
                     | Error(code, message) ->
@@ -1444,9 +1453,12 @@ let private handleConnection
                                 | Some(okSeq, selected, expired) ->
                                     let validated =
                                         match request.Database with
-                                        | Some db when not (Storage.databaseExists store db) ->
-                                            let code, message = Storage.toMySqlError (Storage.NoSuchDatabase db)
-                                            Error(code, message)
+                                        | Some db ->
+                                            validateDatabaseSelection
+                                                store
+                                                selected
+                                                (Session.initialRoles store selected)
+                                                db
                                         | _ -> Ok()
 
                                     match validated with
@@ -1502,7 +1514,11 @@ let private handleConnection
 
                                             return! loop session
                             | Some(InitDb db) ->
-                                if Storage.databaseExists (Session.currentStore session) db then
+                                let currentStore = Session.currentStore session
+                                let account = Auth.account session.User session.AccountHost
+
+                                match validateDatabaseSelection currentStore account session.ActiveRoles db with
+                                | Ok() ->
                                     let session =
                                         Session.clearSessionStateChanges session
                                         |> fun session -> Session.trackSchemaAssignment db { session with Database = Some db }
@@ -1522,9 +1538,7 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
-                                else
-                                    let code, message = Storage.toMySqlError (Storage.NoSuchDatabase db)
-
+                                | Error(code, message) ->
                                     do!
                                         writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities code message }
                                         |> Async.Ignore

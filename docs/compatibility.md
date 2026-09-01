@@ -338,11 +338,12 @@ without a host still default to `'%'`. Hostname accounts are not resolved:
 the server accepts numeric peer addresses and the loopback `localhost`
 alias, avoiding unauthenticated reverse-DNS identity claims.
 
+Text-probed forms carry their own privilege checks because they do not pass
+through the parsed-statement authorization gate. This includes global and
+scoped SET, USE and protocol database selection, SHOW metadata and server
+status, table maintenance, FLUSH, KILL, and explicit table locks.
+
 Deliberate divergences (each marked `ponytail:` at its code site):
-- Enforcement follows parsed statements through subqueries, derived tables,
-  and CTEs. Text-probed account, process, database, and table metadata forms
-  carry scoped checks; SET, USE, and server-wide SHOW forms remain outside
-  the common privilege gate.
 - Proxy users, auth-plugin selection, password history/reuse/current policy,
   and a mutable global
   default password lifetime are absent. Thirteen of MySQL's roughly 38

@@ -4879,6 +4879,28 @@ let tests =
               | ResultSet(_, [ [ None ] ]) -> ()
               | other -> failtestf "expected DATABASE() to still be NULL, got %A" other
 
+          testCase "USE requires a privilege in the selected database"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE guarded_use"
+              let root, _ = handle root "USE guarded_use"
+              let root, _ = handle root "CREATE TABLE visible_after_grant (id INT)"
+              let root, _ = handle root "CREATE USER 'database_guest'"
+              let guest = { create 2 store with User = "database_guest" }
+
+              match handle guest "USE guarded_use" with
+              | unchanged, Err(1044, message) ->
+                  Expect.isNone unchanged.Database "denied USE leaves the current database unchanged"
+                  Expect.stringContains message "guarded_use" "denial names the database"
+              | _, other -> failtestf "expected USE to require a database privilege, got %A" other
+
+              let _, _ = handle root "GRANT SELECT ON guarded_use.visible_after_grant TO 'database_guest'"
+
+              match handle guest "USE guarded_use" with
+              | selected, Affected 0UL -> Expect.equal selected.Database (Some "guarded_use") "table grants permit USE"
+              | _, other -> failtestf "expected a table grant to permit USE, got %A" other
+
           testCase "USE information_schema succeeds even though it isn't a real catalog entry"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -5132,6 +5154,7 @@ let tests =
               let root, _ = handle root "CREATE TABLE log (id INT)"
               let root, _ = handle root "CREATE VIEW secret_view AS SELECT id FROM t"
               let root, _ = handle root "CREATE TRIGGER secret_trigger AFTER INSERT ON t FOR EACH ROW INSERT INTO log VALUES (NEW.id)"
+              let root, _ = handle root "CREATE EVENT secret_event ON SCHEDULE EVERY 1 DAY DO INSERT INTO t VALUES (1)"
               let root, _ = handle root "CREATE USER 'limited' IDENTIFIED BY 'pw'"
               let root, _ = handle root "CREATE USER 'grantee' IDENTIFIED BY 'pw'"
               let root, _ = handle root "GRANT SELECT ON secret.t TO 'grantee'"
@@ -5146,6 +5169,7 @@ let tests =
               expectEmpty "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'secret'"
               expectEmpty "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'secret'"
               expectEmpty "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'secret'"
+              expectEmpty "SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = 'secret'"
               expectEmpty "SELECT GRANTEE FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE LIKE '%grantee%'"
               expectEmpty "SELECT GRANTEE FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE LIKE '%grantee%'"
 
@@ -5161,6 +5185,7 @@ let tests =
 
               expectEmpty "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'secret'"
               expectEmpty "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'secret'"
+              expectEmpty "SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = 'secret'"
 
           testCase "parsed execution restores the information schema viewer scope"
           <| fun _ ->
@@ -5754,6 +5779,152 @@ let tests =
               Expect.equal (replace ClientFoundRows) (Affected 1UL) "found-row mode"
 
           QueryHandlerDiagnosticsTests.tests
+
+          TestSupport.processGlobalCase "server-wide probes require their MySQL privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 999907 store
+              let root, _ = handle root "CREATE USER 'probe_guest'"
+              let guest = { create 999908 store with User = "probe_guest" }
+
+              for sql in
+                  [ "SHOW ENGINE INNODB STATUS"
+                    "SHOW BINARY LOGS"
+                    "SHOW BINARY LOG STATUS"
+                    "SHOW REPLICA STATUS"
+                    "FLUSH PRIVILEGES"
+                    "FLUSH USER_RESOURCES"
+                    "FLUSH STATUS"
+                    "FLUSH TABLES"
+                    "FLUSH LOGS" ] do
+                  match handle guest sql |> snd with
+                  | Err(1227, _) -> ()
+                  | other -> failtestf "expected %s to require a global privilege, got %A" sql other
+
+              let root, _ = handle root "GRANT PROCESS, REPLICATION CLIENT ON *.* TO 'probe_guest'"
+
+              match handle guest "SHOW ENGINE INNODB STATUS" |> snd with
+              | ResultSet([ "Type"; "Name"; "Status" ], [ _ ]) -> ()
+              | other -> failtestf "expected PROCESS to permit engine status, got %A" other
+
+              match handle guest "SHOW BINARY LOGS" |> snd with
+              | Err(1381, "You are not using binary logging") -> ()
+              | other -> failtestf "expected REPLICATION CLIENT to reach binary-log state, got %A" other
+
+              match handle guest "SHOW REPLICA STATUS" |> snd with
+              | ResultSet(columns, []) -> Expect.equal columns.Length 60 "replica status shape"
+              | other -> failtestf "expected REPLICATION CLIENT to permit replica status, got %A" other
+
+              let root, _ =
+                  handle
+                      root
+                      "GRANT FLUSH_PRIVILEGES, FLUSH_USER_RESOURCES, FLUSH_STATUS, FLUSH_TABLES ON *.* TO 'probe_guest'"
+
+              for sql in [ "FLUSH PRIVILEGES"; "FLUSH USER_RESOURCES"; "FLUSH STATUS"; "FLUSH TABLES" ] do
+                  match handle guest sql |> snd with
+                  | Affected 0UL -> ()
+                  | other -> failtestf "expected the dedicated dynamic privilege to permit %s, got %A" sql other
+
+              let _, _ = handle root "GRANT RELOAD ON *.* TO 'probe_guest'"
+
+              match handle guest "FLUSH LOGS" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected RELOAD to permit FLUSH LOGS, got %A" other
+
+          testCase "database and table probes enforce scoped privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 999909 store
+              let root, _ = handle root "CREATE DATABASE guarded_probe"
+              let root, _ = handle root "USE guarded_probe"
+              let root, _ = handle root "CREATE TABLE maintained (id INT)"
+              let root, _ = handle root "CREATE USER 'maintenance_guest'"
+              let guest = { create 999910 store with User = "maintenance_guest" }
+
+              for sql in
+                  [ "SHOW CREATE DATABASE guarded_probe"
+                    "ANALYZE TABLE guarded_probe.maintained"
+                    "CHECK TABLE guarded_probe.maintained"
+                    "ALTER TABLE guarded_probe.maintained DISABLE KEYS" ] do
+                  match handle guest sql |> snd with
+                  | Err(1044, _) when sql.StartsWith("SHOW") -> ()
+                  | Err(1142, _) -> ()
+                  | other -> failtestf "expected %s to be denied, got %A" sql other
+
+              let root, _ = handle root "GRANT SELECT ON guarded_probe.maintained TO 'maintenance_guest'"
+
+              match handle guest "SHOW CREATE DATABASE guarded_probe" |> snd with
+              | ResultSet([ "Database"; "Create Database" ], [ _ ]) -> ()
+              | other -> failtestf "expected a table grant to reveal SHOW CREATE DATABASE, got %A" other
+
+              match handle guest "CHECK TABLE guarded_probe.maintained" |> snd with
+              | ResultSet(_, [ [ _; Some "check"; Some "status"; Some "OK" ] ]) -> ()
+              | other -> failtestf "expected any table privilege to permit CHECK TABLE, got %A" other
+
+              match handle guest "ANALYZE TABLE guarded_probe.maintained" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "INSERT" "ANALYZE also requires INSERT"
+              | other -> failtestf "expected SELECT alone to be insufficient for ANALYZE, got %A" other
+
+              let root, _ = handle root "GRANT INSERT ON guarded_probe.maintained TO 'maintenance_guest'"
+
+              for sql in
+                  [ "ANALYZE TABLE guarded_probe.maintained"
+                    "OPTIMIZE TABLE guarded_probe.maintained"
+                    "REPAIR TABLE guarded_probe.maintained" ] do
+                  match handle guest sql |> snd with
+                  | ResultSet _ -> ()
+                  | other -> failtestf "expected SELECT and INSERT to permit %s, got %A" sql other
+
+              let _, _ = handle root "GRANT ALTER ON guarded_probe.maintained TO 'maintenance_guest'"
+
+              match handle guest "ALTER TABLE guarded_probe.maintained ENABLE KEYS" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected ALTER to permit ENABLE KEYS, got %A" other
+
+          testCase "trigger and event probes scope metadata to their object privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 999911 store
+              let root, _ = handle root "CREATE DATABASE object_probe"
+              let root, _ = handle root "USE object_probe"
+              let root, _ = handle root "CREATE TABLE source (id INT)"
+              let root, _ = handle root "CREATE TRIGGER audit_source BEFORE INSERT ON source FOR EACH ROW SET NEW.id = NEW.id"
+              let root, _ = handle root "CREATE EVENT daily_probe ON SCHEDULE EVERY 1 DAY DO INSERT INTO source VALUES (1)"
+              let root, _ = handle root "CREATE USER 'object_guest'"
+              let guest = { create 999912 store with User = "object_guest" }
+
+              for sql in [ "SHOW TRIGGERS FROM object_probe"; "SHOW EVENTS FROM object_probe" ] do
+                  match handle guest sql |> snd with
+                  | Err(1044, _) -> ()
+                  | other -> failtestf "expected %s to hide an inaccessible database, got %A" sql other
+
+              match handle guest "SHOW CREATE TRIGGER object_probe.audit_source" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected SHOW CREATE TRIGGER to require TRIGGER, got %A" other
+
+              match handle guest "SHOW CREATE EVENT object_probe.daily_probe" |> snd with
+              | Err(1044, _) -> ()
+              | other -> failtestf "expected SHOW CREATE EVENT to require EVENT, got %A" other
+
+              let root, _ = handle root "GRANT EVENT ON object_probe.* TO 'object_guest'"
+
+              match handle guest "SHOW EVENTS FROM object_probe" |> snd with
+              | ResultSet(_, [ row ]) -> Expect.equal row.[1] (Some "daily_probe") "visible event"
+              | other -> failtestf "expected EVENT to reveal events, got %A" other
+
+              match handle guest "SHOW TRIGGERS FROM object_probe" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected unrelated database privileges not to reveal triggers, got %A" other
+
+              let _, _ = handle root "GRANT TRIGGER ON object_probe.source TO 'object_guest'"
+
+              match handle guest "SHOW TRIGGERS FROM object_probe" |> snd with
+              | ResultSet(_, [ row ]) -> Expect.equal row.Head (Some "audit_source") "visible trigger"
+              | other -> failtestf "expected TRIGGER to reveal the table trigger, got %A" other
+
+              match handle guest "SHOW CREATE TRIGGER object_probe.audit_source" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected TRIGGER to permit SHOW CREATE TRIGGER, got %A" other
 
           testCase "SHOW CREATE DATABASE, OPEN TABLES, PLUGINS, and ENGINE INNODB STATUS are truthful"
           <| fun _ ->
