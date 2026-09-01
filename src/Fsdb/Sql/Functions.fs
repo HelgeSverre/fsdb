@@ -37,12 +37,25 @@ type ScalarFunction =
     { Name: string
       Fn: QueryContext -> Value list -> Value
       Deterministic: bool
-      DirectOnly: bool }
+      DirectOnly: bool
+      Signature: ScalarSignature option }
+
+and ScalarSignature =
+    { Parameters: Ast.ColumnType list
+      Result: Ast.ColumnType }
 
 module ScalarFunction =
     /// Deterministic, callable anywhere — the default shape.
     let create (name: string) (fn: QueryContext -> Value list -> Value) : ScalarFunction =
-        { Name = name; Fn = fn; Deterministic = true; DirectOnly = false }
+        { Name = name
+          Fn = fn
+          Deterministic = true
+          DirectOnly = false
+          Signature = None }
+
+    /// Declares the SQL parameter and result types exposed during prepare.
+    let withSignature (parameters: Ast.ColumnType list) (result: Ast.ColumnType) (fn: ScalarFunction) : ScalarFunction =
+        { fn with Signature = Some { Parameters = parameters; Result = result } }
 
     /// Marks a function non-deterministic and unavailable to stored expressions.
     let effectful (fn: ScalarFunction) : ScalarFunction =
@@ -88,6 +101,7 @@ type Aggregate = Value list -> Value
 type Registry =
     { Scalars: Map<string, Scalar>
       ScalarMetadata: Map<string, ColumnMetadata>
+      ScalarParameters: Map<string, ColumnMetadata list>
       TextArguments: Map<string, int -> bool>
       Aggregates: Map<string, Aggregate>
       /// Rich (`QueryContext`-aware) registrations, kept separate from
@@ -101,6 +115,7 @@ type Registry =
 let empty: Registry =
     { Scalars = Map.empty
       ScalarMetadata = Map.empty
+      ScalarParameters = Map.empty
       TextArguments = Map.empty
       Aggregates = Map.empty
       Extensions = Map.empty }
@@ -111,6 +126,7 @@ let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
     { registry with
         Scalars = Map.add name fn registry.Scalars
         ScalarMetadata = Map.remove name registry.ScalarMetadata
+        ScalarParameters = Map.remove name registry.ScalarParameters
         TextArguments = Map.remove name registry.TextArguments }
 
 let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
@@ -119,7 +135,19 @@ let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: R
     { registry with
         Scalars = Map.add name fn registry.Scalars
         ScalarMetadata = Map.add name metadata registry.ScalarMetadata
+        ScalarParameters = Map.remove name registry.ScalarParameters
         TextArguments = Map.remove name registry.TextArguments }
+
+let internal registerScalarWithSignature
+    (name: string)
+    (parameters: ColumnMetadata list)
+    (result: ColumnMetadata)
+    (fn: Scalar)
+    (registry: Registry)
+    : Registry =
+    let name = name.ToUpperInvariant()
+    let registry = registerScalarWithMetadata name result fn registry
+    { registry with ScalarParameters = Map.add name parameters registry.ScalarParameters }
 
 let internal registerTextScalar (name: string) (textArgument: int -> bool) (fn: Scalar) (registry: Registry) : Registry =
     let name = name.ToUpperInvariant()
@@ -137,6 +165,9 @@ let lookup (name: string) (registry: Registry) : Scalar option =
 
 let lookupScalarMetadata (name: string) (registry: Registry) : ColumnMetadata option =
     Map.tryFind (name.ToUpperInvariant()) registry.ScalarMetadata
+
+let internal lookupScalarParameters (name: string) (registry: Registry) : ColumnMetadata list option =
+    Map.tryFind (name.ToUpperInvariant()) registry.ScalarParameters
 
 let internal isTextArgument (name: string) index (registry: Registry) =
     registry.TextArguments

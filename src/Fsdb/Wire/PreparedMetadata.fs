@@ -59,55 +59,56 @@ let private jsonMutationFunctions =
 let private integerFunctions =
     set [ "FROM_DAYS"; "MAKEDATE"; "PERIOD_ADD"; "PERIOD_DIFF" ]
 
-let private functionParameterMetadata (name: string) index =
+let private functionParameterMetadata (registry: Registry) (name: string) index =
     let name = name.ToUpperInvariant()
 
-    if Set.contains name floatingPointFunctions then
+    match Functions.lookupScalarParameters name registry with
+    | Some parameters -> parameters |> List.tryItem index |> Option.orElse (Some generic)
+    | None when Set.contains name floatingPointFunctions ->
         Some floatingPoint
-    elif name = "ROUND" || name = "TRUNCATE" then
+    | None when name = "ROUND" || name = "TRUNCATE" ->
         Some(if index = 0 then decimalNumber else signedInteger)
-    elif name = "MOD" || name = "BIT_COUNT" || Set.contains name integerFunctions then
+    | None when name = "MOD" || name = "BIT_COUNT" || Set.contains name integerFunctions ->
         Some signedInteger
-    elif Set.contains name dateFunctions then
+    | None when Set.contains name dateFunctions ->
         Some date
-    elif (name = "WEEK" || name = "YEARWEEK") && index > 0 then
+    | None when (name = "WEEK" || name = "YEARWEEK") && index > 0 ->
         Some signedInteger
-    elif name = "WEEK" || name = "YEARWEEK" then
+    | None when name = "WEEK" || name = "YEARWEEK" ->
         Some dateTime
-    elif Set.contains name dateTimeFunctions || name = "TIME" then
+    | None when Set.contains name dateTimeFunctions || name = "TIME" ->
         Some dateTime
-    elif name = "ADDTIME" || name = "SUBTIME" then
+    | None when name = "ADDTIME" || name = "SUBTIME" ->
         Some time
-    elif name = "SEC_TO_TIME" then
+    | None when name = "SEC_TO_TIME" ->
         Some decimalNumber
-    elif name = "MAKETIME" then
+    | None when name = "MAKETIME" ->
         Some(if index < 2 then signedInteger else decimalNumber)
-    elif name = "FROM_UNIXTIME" then
+    | None when name = "FROM_UNIXTIME" ->
         Some decimalNumber
-    elif name = "FORMAT" then
+    | None when name = "FORMAT" ->
         Some(if index = 0 then decimalNumber else if index = 1 then signedInteger else generic)
-    elif (name = "SUBSTRING" || name = "SUBSTR" || name = "MID") && index > 0 then
+    | None when (name = "SUBSTRING" || name = "SUBSTR" || name = "MID") && index > 0 ->
         Some signedInteger
-    elif name = "SHA2" && index = 1 then
+    | None when name = "SHA2" && index = 1 ->
         Some signedInteger
-    elif Set.contains name jsonMutationFunctions && index % 2 = 0 then
+    | None when Set.contains name jsonMutationFunctions && index % 2 = 0 ->
         Some json
-    elif Set.contains name jsonFirstArgument && index = 0 then
+    | None when Set.contains name jsonFirstArgument && index = 0 ->
         Some json
-    elif Set.contains name geometryFunctions && index = 0 then
+    | None when Set.contains name geometryFunctions && index = 0 ->
         Some geometry
-    elif Set.contains name geometryFunctions && index = 1 && name <> "ST_BUFFER" && name <> "ST_SRID" then
+    | None when Set.contains name geometryFunctions && index = 1 && name <> "ST_BUFFER" && name <> "ST_SRID" ->
         Some geometry
-    elif name = "ST_BUFFER" && index = 1 then
+    | None when name = "ST_BUFFER" && index = 1 ->
         Some floatingPoint
-    elif name = "ST_SRID" && index = 1 then
+    | None when name = "ST_SRID" && index = 1 ->
         Some signedInteger
-    elif Set.contains name wkbConstructors && index = 0 then
+    | None when Set.contains name wkbConstructors && index = 0 ->
         Some binary
-    elif (Set.contains name wkbConstructors || Set.contains name wktConstructors) && index = 1 then
+    | None when (Set.contains name wkbConstructors || Set.contains name wktConstructors) && index = 1 ->
         Some signedInteger
-    else
-        None
+    | None -> None
 
 let private metadataOfValue =
     function
@@ -242,7 +243,7 @@ let parameterDefinitions
         | FuncCall(name, values) ->
             values
             |> List.iteri (fun index value ->
-                inferExpected (functionParameterMetadata name index) value)
+                inferExpected (functionParameterMetadata registry name index) value)
         | Case(subject, branches, fallback) ->
             subject |> Option.iter inferUnknown
 

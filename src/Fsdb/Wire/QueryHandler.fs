@@ -505,7 +505,12 @@ let private registryFor (session: Session) : Functions.Registry =
 
             extension.Fn context args
 
-        Functions.registerScalar name invoke registry
+        match extension.Signature with
+        | None -> Functions.registerScalar name invoke registry
+        | Some signature ->
+            let parameters = signature.Parameters |> List.map ColumnWire.parameterMetadataOfType
+            let result = ColumnWire.metadataOfType signature.Result
+            Functions.registerScalarWithSignature name parameters result invoke registry
 
     let registry =
         session.CustomFunctions.Scalars

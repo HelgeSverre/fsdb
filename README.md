@@ -479,8 +479,13 @@ direct-only. Direct-only functions are rejected where fsdb would invoke them
 indirectly later, including generated columns, functional defaults and indexes,
 CHECK constraints, and trigger bodies.
 
+`ScalarFunction.withSignature` declares SQL parameter and result types for
+prepared-statement metadata. Unsigned integers, JSON, temporal, spatial, and
+binary types therefore reach clients without being reported as generic strings:
+
 ```fsharp
 open System.Net.Http
+open Fsdb.Ast
 
 let http = new HttpClient()
 
@@ -502,6 +507,7 @@ let db =
     Db.create ()
     |> Db.registerFunction (
         ScalarFunction.create "HTTP_GET" httpGet
+        |> ScalarFunction.withSignature [ TVarchar 2048 ] TJson
         |> ScalarFunction.effectful)
 ```
 

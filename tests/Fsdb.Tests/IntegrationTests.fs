@@ -2884,6 +2884,44 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "registered function signatures drive prepared parameter and result metadata"
+          <| fun _ ->
+              async {
+                  let extension =
+                      Fsdb.Functions.ScalarFunction.create "TYPED_EXTENSION" (fun _ _ -> VNull)
+                      |> Fsdb.Functions.ScalarFunction.withSignature
+                          [ TJson; TGeometry Point; TBigInt true ]
+                          (TTime 3)
+
+                  let registry = Fsdb.Functions.empty |> Fsdb.Functions.registerExtension extension
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) registry
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+
+                  let payload =
+                      Array.append
+                          [| 0x16uy |]
+                          (Text.Encoding.UTF8.GetBytes "SELECT TYPED_EXTENSION(?, ?, ?)")
+
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                  let! _, parameters, columns = readPreparedReply stream
+                  let parameters = parameters |> List.map readWireDefinition
+                  let columns = columns |> List.map readWireDefinition
+
+                  Expect.sequenceEqual
+                      (parameters |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
+                      [ 45, parameterMetadataOfType TJson
+                        63, parameterMetadataOfType(TGeometry Point)
+                        63, parameterMetadataOfType(TBigInt true) ]
+                      "the declared parameter types reach COM_STMT_PREPARE"
+
+                  Expect.sequenceEqual
+                      (columns |> List.map _.Metadata)
+                      [ metadataOfType(TTime 3) ]
+                      "the declared result type reaches COM_STMT_PREPARE"
+              }
+              |> Async.RunSynchronously
+
           testCase "prepared statements resolve schema changes when executed"
           <| fun _ ->
               async {
