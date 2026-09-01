@@ -31,6 +31,7 @@ let defaultVariables: Map<string, string option> =
           "time_zone", "SYSTEM"
           "session_track_schema", "ON"
           "session_track_state_change", "OFF"
+          "session_track_transaction_info", "OFF"
           "session_track_system_variables",
           "time_zone,autocommit,character_set_client,character_set_results,character_set_connection"
           "auto_increment_increment", "1"
@@ -200,6 +201,37 @@ type TransportMetrics =
     { mutable BytesReceived: int64
       mutable BytesSent: int64 }
 
+type TransactionTrackingKind =
+    | NoTrackedTransaction
+    | ExplicitTrackedTransaction
+    | ImplicitTrackedTransaction
+
+type TransactionTrackingState =
+    { Kind: TransactionTrackingKind
+      ReadTransactional: bool
+      WroteTransactional: bool
+      UnsafeStatement: bool
+      SentResultSet: bool
+      LockedTables: bool }
+
+type TransactionTracking =
+    { State: TransactionTrackingState
+      Characteristics: string
+      CharacteristicsVersion: int64 }
+
+let private emptyTransactionTrackingState =
+    { Kind = NoTrackedTransaction
+      ReadTransactional = false
+      WroteTransactional = false
+      UnsafeStatement = false
+      SentResultSet = false
+      LockedTables = false }
+
+let private emptyTransactionTracking =
+    { State = emptyTransactionTrackingState
+      Characteristics = ""
+      CharacteristicsVersion = 0L }
+
 /// One open transaction. `Snapshot` is private until COMMIT. `BaseCatalog`
 /// distinguishes its concrete changes from visible rows: fixed views retain
 /// one base, while statement-scoped isolation replaces both when it refreshes.
@@ -255,6 +287,7 @@ type Session =
       Diagnostics: Condition list
       /// Session changes encoded in the successful command's final OK packet.
       SessionStateChanges: SessionStateChange list
+      TransactionTracking: TransactionTracking
       /// Per-column wire descriptors for the latest typed result set.
       LastResultColumnMetadata: ColumnMetadata list
       /// `Some` between BEGIN/START TRANSACTION and COMMIT/ROLLBACK.
@@ -316,6 +349,7 @@ let create (connectionId: int) (store: Store) : Session =
       PendingFoundRows = None
       Diagnostics = []
       SessionStateChanges = []
+      TransactionTracking = emptyTransactionTracking
       LastResultColumnMetadata = []
       Tx = None
       PendingTransactionReadOnly = None
@@ -423,6 +457,125 @@ let trackSchemaAssignment (schema: string) (session: Session) =
             []
 
     appendSessionStateChanges true changes session
+
+type TransactionTrackingLevel =
+    | TransactionTrackingOff
+    | TransactionStateOnly
+    | TransactionCharacteristics
+
+let private transactionTrackingLevel (session: Session) =
+    match session.Variables |> Map.tryFind "session_track_transaction_info" |> Option.flatten with
+    | Some value when value.Equals("STATE", StringComparison.OrdinalIgnoreCase) -> TransactionStateOnly
+    | Some value when value.Equals("CHARACTERISTICS", StringComparison.OrdinalIgnoreCase) -> TransactionCharacteristics
+    | _ -> TransactionTrackingOff
+
+let private renderTransactionState state =
+    String(
+        [| match state.Kind with
+           | ExplicitTrackedTransaction -> 'T'
+           | ImplicitTrackedTransaction -> 'I'
+           | NoTrackedTransaction -> '_'
+           '_'
+           if state.ReadTransactional then 'R' else '_'
+           '_'
+           if state.WroteTransactional then 'W' else '_'
+           if state.UnsafeStatement then 's' else '_'
+           if state.SentResultSet then 'S' else '_'
+           if state.LockedTables then 'L' else '_' |]
+    )
+
+let beginTransactionTracking kind characteristics (session: Session) =
+    { session with
+        TransactionTracking =
+            { State = { emptyTransactionTrackingState with Kind = kind }
+              Characteristics = characteristics
+              CharacteristicsVersion = session.TransactionTracking.CharacteristicsVersion + 1L } }
+
+let endTransactionTracking (session: Session) =
+    { session with
+        TransactionTracking =
+            { emptyTransactionTracking with
+                CharacteristicsVersion = session.TransactionTracking.CharacteristicsVersion + 1L } }
+
+let setTransactionCharacteristics characteristics (session: Session) =
+    { session with
+        TransactionTracking =
+            { session.TransactionTracking with
+                Characteristics = characteristics
+                CharacteristicsVersion = session.TransactionTracking.CharacteristicsVersion + 1L } }
+
+let trackTransactionActivity readTransactional wroteTransactional unsafeStatement (session: Session) =
+    let state = session.TransactionTracking.State
+
+    if state.Kind = NoTrackedTransaction && not state.LockedTables then
+        session
+    else
+        { session with
+            TransactionTracking =
+                { session.TransactionTracking with
+                    State =
+                        { state with
+                            ReadTransactional = state.ReadTransactional || readTransactional
+                            WroteTransactional = state.WroteTransactional || wroteTransactional
+                            UnsafeStatement = state.UnsafeStatement || unsafeStatement } } }
+
+let trackTransactionResultSet (session: Session) =
+    let state = session.TransactionTracking.State
+
+    if state.Kind = NoTrackedTransaction && not state.LockedTables then
+        session
+    else
+        { session with
+            TransactionTracking =
+                { session.TransactionTracking with
+                    State = { state with SentResultSet = true } } }
+
+let trackExplicitTableLocks readTransactional wroteTransactional (session: Session) =
+    let implicitTransaction =
+        session.Variables
+        |> Map.tryFind "autocommit"
+        |> Option.flatten
+        |> Option.contains "0"
+
+    { session with
+        TransactionTracking =
+            { session.TransactionTracking with
+                State =
+                    { emptyTransactionTrackingState with
+                        Kind = if implicitTransaction then ImplicitTrackedTransaction else NoTrackedTransaction
+                        ReadTransactional = implicitTransaction && readTransactional
+                        WroteTransactional = implicitTransaction && wroteTransactional
+                        LockedTables = true } } }
+
+let finalizeTransactionTracking (previous: Session) (session: Session) =
+    if session.Capabilities &&& ClientSessionTrack = 0u then
+        session
+    else
+        let previousLevel = transactionTrackingLevel previous
+        let level = transactionTrackingLevel session
+        let previousTracking = previous.TransactionTracking
+        let tracking = session.TransactionTracking
+
+        let characteristics =
+            if
+                level = TransactionCharacteristics
+                && (previousLevel <> TransactionCharacteristics
+                    || previousTracking.CharacteristicsVersion <> tracking.CharacteristicsVersion)
+            then
+                [ Protocol.TransactionCharacteristicsChanged tracking.Characteristics ]
+            else
+                []
+
+        let state =
+            if
+                level <> TransactionTrackingOff
+                && previousTracking.State <> tracking.State
+            then
+                [ Protocol.TransactionStateChanged(renderTransactionState tracking.State) ]
+            else
+                []
+
+        { session with SessionStateChanges = session.SessionStateChanges @ characteristics @ state }
 
 /// The catalog store all statements on this session currently execute
 /// against: the shared store outside a transaction, or the transaction's

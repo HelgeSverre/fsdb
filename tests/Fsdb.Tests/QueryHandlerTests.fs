@@ -4748,6 +4748,114 @@ let tests =
               let session, _ = handle session "SELECT 1"
               Expect.isEmpty session.SessionStateChanges "the next statement starts with an empty tracker"
 
+          testCase "transaction tracking reports replay characteristics and state transitions"
+          <| fun _ ->
+              let session =
+                  { create 1 (Fsdb.Storage.create ()) with
+                      Capabilities = ClientProtocol41 ||| ClientSessionTrack }
+
+              let session, _ = handle session "CREATE TABLE transaction_tracker (id INT PRIMARY KEY, n INT)"
+              let session, _ = handle session "INSERT INTO transaction_tracker VALUES (1, 1)"
+              let session, _ = handle session "SET session_track_transaction_info = CHARACTERISTICS"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionCharacteristicsChanged "" ]
+                  "enabling characteristics reports the current default"
+
+              let session, _ = handle session "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionCharacteristicsChanged "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;" ]
+                  "next isolation is replayable"
+
+              let session, _ = handle session "SET TRANSACTION READ WRITE"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionCharacteristicsChanged
+                        "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; SET TRANSACTION READ WRITE;" ]
+                  "next access mode joins the replay sequence"
+
+              let session, _ = handle session "START TRANSACTION"
+              let replay = "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; START TRANSACTION READ WRITE;"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionCharacteristicsChanged replay; TransactionStateChanged "T_______" ]
+                  "explicit transaction begins"
+
+              let session, _ = handle session "SELECT * FROM transaction_tracker"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionStateChanged "T_R___S_" ]
+                  "table reads and result sets are retained"
+
+              let session, _ = handle session "UPDATE transaction_tracker SET n = 2 WHERE id = 1"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionStateChanged "T_R_W_S_" ]
+                  "transactional writes accumulate"
+
+              let session, _ = handle session "COMMIT AND CHAIN"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionCharacteristicsChanged replay; TransactionStateChanged "T_______" ]
+                  "chaining reports the restart sequence even when its text is unchanged"
+
+              let session, _ = handle session "DO RAND()"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionStateChanged "T____s__" ]
+                  "replication-unsafe functions occupy the statement flag"
+
+              let session, _ = handle session "ROLLBACK"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionCharacteristicsChanged ""; TransactionStateChanged "________" ]
+                  "rollback returns to the session defaults"
+
+              let session, _ = handle session "SET session_track_transaction_info = STATE"
+              Expect.isEmpty session.SessionStateChanges "changing tracking level does not invent a transaction change"
+
+              let session, _ = handle session "SET autocommit = 0"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ SystemVariableChanged("autocommit", "OFF") ]
+                  "autocommit remains a system-variable tracker"
+
+              let session, _ = handle session "SELECT * FROM transaction_tracker"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionStateChanged "I_R___S_" ]
+                  "autocommit zero starts an implicit transaction"
+
+              let session, _ = handle session "COMMIT"
+              Expect.equal session.SessionStateChanges [ TransactionStateChanged "________" ] "commit clears implicit state"
+
+              let session, _ = handle session "LOCK TABLES transaction_tracker READ"
+              Expect.equal session.SessionStateChanges [ TransactionStateChanged "I_R____L" ] "table locks occupy the final flag"
+
+              let session, _ = handle session "UNLOCK TABLES"
+              Expect.equal session.SessionStateChanges [ TransactionStateChanged "________" ] "unlock clears tracked lock state"
+
+              let session, _ = handle session "ROLLBACK"
+              Expect.isEmpty session.SessionStateChanges "rollback outside a transaction has no tracker output"
+
+              let session, _ = handle session "SET session_track_transaction_info = 2"
+              Expect.equal
+                  session.SessionStateChanges
+                  [ TransactionCharacteristicsChanged "" ]
+                  "numeric enum values are canonicalized"
+              Expect.equal
+                  session.Variables.["session_track_transaction_info"]
+                  (Some "CHARACTERISTICS")
+                  "numeric enum value"
+
+              let session, _ = handle session "SET session_track_transaction_info = 0"
+              Expect.isEmpty session.SessionStateChanges "disabling tracking emits no block"
+
+              match handle session "SET session_track_transaction_info = SOMETHING_ELSE" |> snd with
+              | Err(1231, _) -> ()
+              | other -> failtestf "expected invalid transaction tracker value, got %A" other
+
           testCase "SCHEMA() is a synonym for DATABASE(), matching MySQL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

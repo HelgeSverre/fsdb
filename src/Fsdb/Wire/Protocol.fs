@@ -158,11 +158,15 @@ let StatusSessionStateChanged = 0x4000
 let SessionTrackSystemVariables = 0uy
 let SessionTrackSchema = 1uy
 let SessionTrackStateChange = 2uy
+let SessionTrackTransactionCharacteristics = 4uy
+let SessionTrackTransactionState = 5uy
 
 type SessionStateChange =
     | SystemVariableChanged of name: string * value: string
     | SchemaChanged of name: string
     | StateChanged
+    | TransactionCharacteristicsChanged of sql: string
+    | TransactionStateChanged of state: string
 
 /// Builds the initial HandshakeV10 payload. `authPluginData` must be 20
 /// bytes — the mysql_native_password scramble `Server.authenticateHandshake`
@@ -357,6 +361,10 @@ let private okPayloadWithHeader
                 writeBlock SessionTrackSchema (fun data -> data.WriteLenEncString name)
             | StateChanged ->
                 writeBlock SessionTrackStateChange (fun data -> data.WriteLenEncString "1")
+            | TransactionCharacteristicsChanged sql ->
+                writeBlock SessionTrackTransactionCharacteristics (fun data -> data.WriteLenEncString sql)
+            | TransactionStateChanged state ->
+                writeBlock SessionTrackTransactionState (fun data -> data.WriteLenEncString state)
 
         writer.ToArray()
 

@@ -369,3 +369,14 @@ let rec rewriteStatement replace =
                 Limit = Option.map rewriteExpression delete.Limit }
     | Explain(format, statement) -> Explain(format, rewriteStatement replace statement)
     | statement -> statement
+
+let statementExists predicate statement =
+    let mutable found = false
+
+    statement
+    |> rewriteStatement (fun expression ->
+        if predicate expression then found <- true
+        None)
+    |> ignore
+
+    found

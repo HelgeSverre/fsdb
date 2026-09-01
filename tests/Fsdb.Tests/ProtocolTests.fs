@@ -121,6 +121,39 @@ let tests =
               Expect.equal (schema.ReadLenEncString()) (Some "application") "schema name"
               Expect.equal state.Remaining 0 "all tracker bytes consumed"
 
+          testCase "transaction session tracking uses MySQL block types"
+          <| fun _ ->
+              let capabilities = ClientProtocol41 ||| ClientSessionTrack
+              let payload =
+                  okPayloadWithWarningsAndSessionState
+                      capabilities
+                      StatusInTrans
+                      0UL
+                      0UL
+                      0
+                      [ TransactionCharacteristicsChanged "START TRANSACTION READ ONLY;"
+                        TransactionStateChanged "T_R___S_" ]
+
+              let reader = Reader(payload.[1..])
+              reader.ReadLenEncInt() |> ignore
+              reader.ReadLenEncInt() |> ignore
+              Expect.isTrue (reader.ReadInt16LE() &&& StatusSessionStateChanged <> 0) "state-changed status"
+              reader.ReadInt16LE() |> ignore
+              reader.ReadLenEncString() |> ignore
+              let state = reader.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> reader.ReadBytes |> Reader
+
+              Expect.equal (state.ReadByte()) SessionTrackTransactionCharacteristics "characteristics tracker"
+              let characteristics = state.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> state.ReadBytes |> Reader
+              Expect.equal
+                  (characteristics.ReadLenEncString())
+                  (Some "START TRANSACTION READ ONLY;")
+                  "replayable characteristics"
+
+              Expect.equal (state.ReadByte()) SessionTrackTransactionState "transaction-state tracker"
+              let transactionState = state.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> state.ReadBytes |> Reader
+              Expect.equal (transactionState.ReadLenEncString()) (Some "T_R___S_") "eight-character state"
+              Expect.equal state.Remaining 0 "all tracker bytes consumed"
+
           testCase "interactive clients can negotiate their timeout class"
           <| fun _ ->
               Expect.isTrue (ServerCapabilities &&& ClientInteractive <> 0u) "CLIENT_INTERACTIVE advertised"

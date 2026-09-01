@@ -42,7 +42,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
 | Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap currently inventoried |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Multi-table mutation predicates and CJK parsing |
-| Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and common session-state tracking | No transaction/GTID state trackers or live TLS certificate reload |
+| Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
 | Metadata | 25 INFORMATION_SCHEMA views, 13 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
@@ -402,7 +402,8 @@ multi-statement toggling, mid-query
 disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 `CLIENT_SESSION_TRACK` reports default-schema changes and assignments to the
 configured system-variable set, including same-value assignments, plus the
-generic state-change tracker when enabled. Physical result columns report
+generic state-change tracker and transaction state/characteristics when enabled.
+Physical result columns report
 primary, unique, composite, and non-unique key membership consistently across
 queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`.
 
@@ -411,7 +412,7 @@ queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`.
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
 | Compression | CLIENT_COMPRESS/ZSTD | CLIENT_COMPRESS zlib framing is negotiated; Zstandard is not offered | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
-| Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, and generic state-change blocks are encoded in final OK packets; transaction-characteristic and GTID blocks remain absent | low | subset |
+| Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and eight-flag transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateAccount` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
 | Prepared metadata | STMT_PREPARE_OK carries result columns and typed parameter definitions | result columns, schema/operator/DML contexts, common numeric, temporal, JSON, and spatial built-in arguments, and registered-extension signatures are derived statically without evaluating the statement; less-common overloaded built-ins remain generic VAR_STRING | low | divergence |

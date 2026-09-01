@@ -402,6 +402,73 @@ let tests =
                   let variable = setState.ReadLenEncInt() |> Option.map int |> Option.defaultValue 0 |> setState.ReadBytes |> Reader
                   Expect.equal (variable.ReadLenEncString()) (Some "autocommit") "tracked variable"
                   Expect.equal (variable.ReadLenEncString()) (Some "ON") "tracked value"
+
+                  let! transactionTracking = query "SET session_track_transaction_info = CHARACTERISTICS"
+                  let transactionStatus, transactionState = sessionState transactionTracking.Value
+                  Expect.isTrue
+                      (transactionStatus &&& StatusSessionStateChanged <> 0)
+                      "transaction tracker marks the session changed"
+                  Expect.equal
+                      (transactionState.ReadByte())
+                      SessionTrackTransactionCharacteristics
+                      "transaction-characteristics tracker"
+                  let initialCharacteristics =
+                      transactionState.ReadLenEncInt()
+                      |> Option.map int
+                      |> Option.defaultValue 0
+                      |> transactionState.ReadBytes
+                      |> Reader
+                  Expect.equal (initialCharacteristics.ReadLenEncString()) (Some "") "default characteristics"
+
+                  let! begun = query "START TRANSACTION READ ONLY"
+                  let beginStatus, beginState = sessionState begun.Value
+                  Expect.isTrue (beginStatus &&& StatusInTrans <> 0) "transaction status flag"
+                  Expect.equal
+                      (beginState.ReadByte())
+                      SessionTrackTransactionCharacteristics
+                      "begin characteristics"
+                  let characteristics =
+                      beginState.ReadLenEncInt()
+                      |> Option.map int
+                      |> Option.defaultValue 0
+                      |> beginState.ReadBytes
+                      |> Reader
+                  Expect.equal
+                      (characteristics.ReadLenEncString())
+                      (Some "START TRANSACTION READ ONLY;")
+                      "wire replay statement"
+                  Expect.equal (beginState.ReadByte()) SessionTrackTransactionState "begin transaction state"
+                  let state =
+                      beginState.ReadLenEncInt()
+                      |> Option.map int
+                      |> Option.defaultValue 0
+                      |> beginState.ReadBytes
+                      |> Reader
+                  Expect.equal (state.ReadLenEncString()) (Some "T_______") "wire transaction state"
+
+                  let! rolledBack = query "ROLLBACK"
+                  let rollbackStatus, rollbackState = sessionState rolledBack.Value
+                  Expect.equal (rollbackStatus &&& StatusInTrans) 0 "rollback status flag"
+                  Expect.equal
+                      (rollbackState.ReadByte())
+                      SessionTrackTransactionCharacteristics
+                      "rollback characteristics"
+                  let cleared =
+                      rollbackState.ReadLenEncInt()
+                      |> Option.map int
+                      |> Option.defaultValue 0
+                      |> rollbackState.ReadBytes
+                      |> Reader
+                  Expect.equal (cleared.ReadLenEncString()) (Some "") "cleared characteristics"
+                  Expect.equal (rollbackState.ReadByte()) SessionTrackTransactionState "rollback transaction state"
+                  let clearedState =
+                      rollbackState.ReadLenEncInt()
+                      |> Option.map int
+                      |> Option.defaultValue 0
+                      |> rollbackState.ReadBytes
+                      |> Reader
+                  Expect.equal (clearedState.ReadLenEncString()) (Some "________") "cleared transaction state"
+                  Expect.equal rollbackState.Remaining 0 "all rollback tracker bytes consumed"
               }
               |> Async.RunSynchronously
 

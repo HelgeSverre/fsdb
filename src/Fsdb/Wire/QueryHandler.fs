@@ -105,6 +105,13 @@ let rec private terminalErrorInfo result =
         | MultipleResults results -> results |> List.tryLast |> Option.bind (fst >> terminalErrorInfo)
         | _ -> None
 
+let rec private containsResultSet =
+    function
+    | ResultSet _ -> true
+    | MultipleResults results -> results |> List.exists (fst >> containsResultSet)
+    | Affected _
+    | Err _ -> false
+
 /// Finds every top-level `?` placeholder in `sql` — one that isn't inside a
 /// `'...'`/`"..."` string literal, a `` `...` `` backtick identifier, or a
 /// `-- `/`#`/`/* ... */` comment — and returns its char offset, in order.
@@ -1081,6 +1088,34 @@ let private normalizeOnOff name value =
     | Some value -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name value))
     | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
 
+let private normalizeTransactionTrackingInfo =
+    function
+    | VString value ->
+        match value.Trim().ToUpperInvariant() with
+        | "0" -> Ok "OFF"
+        | "1" -> Ok "STATE"
+        | "2" -> Ok "CHARACTERISTICS"
+        | "OFF"
+        | "STATE"
+        | "CHARACTERISTICS" as value -> Ok value
+        | value -> Error(Err(1231, sprintf "Variable 'session_track_transaction_info' can't be set to the value of '%s'" value))
+    | VInt 0L
+    | VUInt 0UL -> Ok "OFF"
+    | VInt 1L
+    | VUInt 1UL -> Ok "STATE"
+    | VInt 2L
+    | VUInt 2UL -> Ok "CHARACTERISTICS"
+    | VNull -> Error(Err(1231, "Variable 'session_track_transaction_info' can't be set to the value of 'NULL'"))
+    | value ->
+        Error(
+            Err(
+                1231,
+                sprintf
+                    "Variable 'session_track_transaction_info' can't be set to the value of '%s'"
+                    (value |> toText |> Option.defaultValue "NULL")
+            )
+        )
+
 let private normalizeIsolationLevel (raw: string) : string =
     Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
 
@@ -1105,6 +1140,28 @@ let private transactionIsolationValue =
     | ReadCommitted -> "READ-COMMITTED"
     | RepeatableRead -> "REPEATABLE-READ"
     | Serializable -> "SERIALIZABLE"
+
+let private pendingTransactionCharacteristics (session: Session) =
+    [ session.PendingTransactionIsolation
+      |> Option.map (fun isolation -> sprintf "SET TRANSACTION ISOLATION LEVEL %s;" (transactionIsolationName isolation))
+      session.PendingTransactionReadOnly
+      |> Option.map (fun readOnly -> if readOnly then "SET TRANSACTION READ ONLY;" else "SET TRANSACTION READ WRITE;") ]
+    |> List.choose id
+    |> String.concat " "
+
+let private explicitTransactionCharacteristics (readOnly: bool option) (session: Session) =
+    let isolation =
+        session.PendingTransactionIsolation
+        |> Option.map (fun value -> sprintf "SET TRANSACTION ISOLATION LEVEL %s; " (transactionIsolationName value))
+        |> Option.defaultValue ""
+
+    let access =
+        readOnly
+        |> Option.orElse session.PendingTransactionReadOnly
+        |> Option.map (fun value -> if value then " READ ONLY" else " READ WRITE")
+        |> Option.defaultValue ""
+
+    isolation + "START TRANSACTION" + access + ";"
 
 let private transactionIsolationScope (prefix: string) =
     match prefix.Trim().ToUpperInvariant() with
@@ -1187,6 +1244,14 @@ let private parseSetFragment
                                  || name = "event_scheduler"
                                  || name = "mandatory_roles") ->
                         Ok(SetVarAction(name, Session.defaultVariables.[name], isGlobal), sideEffects)
+                    | Ok(_, sideEffects) when usesDefault && name = "session_track_transaction_info" ->
+                        let value =
+                            if isGlobal then
+                                Session.defaultVariables.[name]
+                            else
+                                Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
+
+                        Ok(SetVarAction(name, value, isGlobal), sideEffects)
                     | Ok(value, sideEffects) when name = "max_sp_recursion_depth" ->
                         normalizeRoutineRecursionDepth value
                         |> Result.map (fun (depth, warning) ->
@@ -1211,6 +1276,9 @@ let private parseSetFragment
                         | None -> Error(Err(1649, sprintf "Unknown locale: '%s'" value))
                     | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" ->
                         normalizeOnOff name value
+                        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
+                    | Ok(value, sideEffects) when name = "session_track_transaction_info" ->
+                        normalizeTransactionTrackingInfo value
                         |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
                     | Ok(value, sideEffects) when name = "mandatory_roles" ->
                         match toText value with
@@ -1348,6 +1416,16 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
             | Ok _ ->
                 let updated = actions |> List.fold applySetAction session
                 let updated = { updated with UserVariables = userVariables }
+                let updated =
+                    if
+                        actions
+                        |> List.exists (function
+                            | SetTransactionIsolationAction(NextTransactionIsolation, _) -> true
+                            | _ -> false)
+                    then
+                        Session.setTransactionCharacteristics (pendingTransactionCharacteristics updated) updated
+                    else
+                        updated
                 let changedSystemVariables =
                     actions
                     |> List.collect (function
@@ -1587,7 +1665,7 @@ let private commitSessionWith (publishFlat: bool) (session: Session) : Session =
     | Some tx ->
         publishTransaction publishFlat session tx
         removeTransactionView session
-        { session with Tx = None; Cursors = Map.empty }
+        Session.endTransactionTracking { session with Tx = None; Cursors = Map.empty }
     | None -> { session with Cursors = Map.empty }
 
 let private commitSession (session: Session) : Session = commitSessionWith false session
@@ -1600,6 +1678,7 @@ let private commitSession (session: Session) : Session = commitSessionWith false
 /// CAS-safe merge as `commitSession`); leaves everything else (rows,
 /// schema) alone.
 let private rollbackSession (session: Session) : Session =
+    let hadTransaction = session.Tx.IsSome
     session.Tx
     |> Option.bind _.Xa
     |> Option.iter (fst >> removeXaAssociation session)
@@ -1613,7 +1692,8 @@ let private rollbackSession (session: Session) : Session =
 
     removeTransactionView session
 
-    { session with Tx = None; Cursors = Map.empty }
+    let session = { session with Tx = None; Cursors = Map.empty }
+    if hadTransaction then Session.endTransactionTracking session else session
 
 /// Starts a new transaction with a provisional snapshot. The real snapshot
 /// is rebound at the first database statement, matching InnoDB's default
@@ -1633,24 +1713,27 @@ let private configuredIsolation (session: Session) =
             | Error _ -> RepeatableRead
         | None -> RepeatableRead)
 
-let private beginTransaction (readOnly: bool) (session: Session) : Session =
+let private beginTransaction kind characteristics (readOnly: bool) (session: Session) : Session =
     let session = commitSession session
     let isolation = configuredIsolation session
     let snapshot = Storage.beginTransactionContext session.Store
 
-    { session with
-        PendingTransactionReadOnly = None
-        PendingTransactionIsolation = None
-        Tx =
-            Some
-                { Snapshot = snapshot
-                  BaseCatalog = Map.empty
-                  Isolation = isolation
-                  ReadOnly = readOnly
-                  Seeded = false
-                  Savepoints = Map.empty
-                  NextSavepointSeq = 0
-                  Xa = None } }
+    Session.beginTransactionTracking
+        kind
+        characteristics
+        { session with
+            PendingTransactionReadOnly = None
+            PendingTransactionIsolation = None
+            Tx =
+                Some
+                    { Snapshot = snapshot
+                      BaseCatalog = Map.empty
+                      Isolation = isolation
+                      ReadOnly = readOnly
+                      Seeded = false
+                      Savepoints = Map.empty
+                      NextSavepointSeq = 0
+                      Xa = None } }
 
 let private xaRmFail state =
     Err(1399, sprintf "XAER_RMFAIL: The command cannot be executed when global transaction is in the  %s state" state)
@@ -1685,7 +1768,8 @@ let private startXa xid session =
                 session, Err(1440, "XAER_DUPID: The XID already exists")
             else
                 entries.[xid] <- session.ConnectionId
-                let started = beginTransaction false session
+                let started =
+                    beginTransaction ExplicitTrackedTransaction "" false session
 
                 match started.Tx with
                 | Some transaction ->
@@ -1927,7 +2011,15 @@ let private savepointNotFound (name: string) : QueryResult =
 /// doesn't wrongly get cascade-dropped by a later `ROLLBACK TO`/`RELEASE`
 /// naming something established before this redefinition.
 let private savepoint (name: string) (session: Session) : Session * QueryResult =
-    let session = if session.Tx.IsNone then beginTransaction (configuredReadOnly session) session else session
+    let session =
+        if session.Tx.IsNone then
+            beginTransaction
+                ImplicitTrackedTransaction
+                (pendingTransactionCharacteristics session)
+                (configuredReadOnly session)
+                session
+        else
+            session
 
     match session.Tx with
     | Some tx ->
@@ -2311,6 +2403,16 @@ type private StatementLockBoundary =
     | AcquireStatementLock
     | StatementLockHeld
 
+let private replicationUnsafeFunctions =
+    Set.ofList [ "RAND"; "RANDOM_BYTES"; "SYSDATE"; "UUID"; "UUID_SHORT" ]
+
+let private isReplicationUnsafe statement =
+    Expression.statementExists
+        (function
+        | FuncCall(name, _) -> replicationUnsafeFunctions.Contains(name.ToUpperInvariant())
+        | _ -> false)
+        statement
+
 let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Statement) : Session * QueryResult =
     let store = Session.currentStore session
     let database = session.Database |> Option.defaultValue defaultDatabase
@@ -2352,9 +2454,25 @@ let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Stateme
                     session.ActiveRoles
                     (fun () -> executeParsedStatement session stmt))
 
-        match lockBoundary with
-        | AcquireStatementLock -> executeWithStatementAccess session accesses execute
-        | StatementLockHeld -> execute ()
+        let executed, result =
+            match lockBoundary with
+            | AcquireStatementLock -> executeWithStatementAccess session accesses execute
+            | StatementLockHeld -> execute ()
+
+        let executed =
+            match terminalErrorInfo result with
+            | Some _ -> executed
+            | None ->
+                let readTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.ReadAccess)
+                let wroteTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)
+
+                Session.trackTransactionActivity
+                    readTransactional
+                    wroteTransactional
+                    (isReplicationUnsafe stmt)
+                    executed
+
+        executed, result
 
 let private executeParsedCore session stmt = executeParsedCoreWith AcquireStatementLock session stmt
 let private executeParsedCoreUnderLock session stmt = executeParsedCoreWith StatementLockHeld session stmt
@@ -2598,14 +2716,23 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
         else
             let session =
                 if session.Tx.IsNone && autocommitDisabled session && startsTransaction stmt then
-                    beginTransaction (configuredReadOnly session) session
+                    beginTransaction
+                        ImplicitTrackedTransaction
+                        (pendingTransactionCharacteristics session)
+                        (configuredReadOnly session)
+                        session
                 else
                     session
 
             if session.Tx.IsSome || not (startsTransaction stmt) then
                 executeParsedCore session stmt
             else
-                let mutable working = beginTransaction (configuredReadOnly session) session
+                let mutable working =
+                    beginTransaction
+                        ImplicitTrackedTransaction
+                        (pendingTransactionCharacteristics session)
+                        (configuredReadOnly session)
+                        session
 
                 let executeAutocommit () =
                     try
@@ -2994,7 +3121,10 @@ let private acquireExplicitTableLocks session sql =
                         session.ConnectionId
                         accesses
                 with
-                | Ok() -> session, Affected 0UL
+                | Ok() ->
+                    let readTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.ReadAccess)
+                    let wroteTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)
+                    Session.trackExplicitTableLocks readTransactional wroteTransactional session, Affected 0UL
                 | Error(code, message) -> session, Err(code, message)
 
 let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
@@ -3027,6 +3157,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             | Error result -> session, result
             | Ok() ->
                 let updated = applySetAction session action
+                let updated =
+                    if scope = NextTransactionIsolation then
+                        Session.setTransactionCharacteristics (pendingTransactionCharacteristics updated) updated
+                    else
+                        updated
                 let names = if scope = SessionIsolation then [ "transaction_isolation" ] else []
                 Session.trackSystemVariableAssignments (scope <> GlobalIsolation) names updated, Affected 0UL
     | SetTransactionAccess(sessionScope, readOnly) ->
@@ -3043,6 +3178,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             Session.trackSystemVariableAssignments true [ "transaction_read_only"; "tx_read_only" ] updated, Affected 0UL
         else
             let updated = { session with PendingTransactionReadOnly = Some readOnly }
+            let updated = Session.setTransactionCharacteristics (pendingTransactionCharacteristics updated) updated
             Session.trackSystemVariableAssignments true [] updated, Affected 0UL
     | SetRoleStatement ->
         match Parser.parseWithOptions (parserOptionsForSession session) sql with
@@ -3090,15 +3226,17 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Some(_, state) -> session, xaRmFail (xaStateName state)
         | None ->
             let access = readOnly |> Option.defaultValue (configuredReadOnly session)
+            let characteristics = explicitTransactionCharacteristics readOnly session
             TableLocks.releaseExplicit session.Store session.ConnectionId
-            beginTransaction access session, Affected 0UL
+            beginTransaction ExplicitTrackedTransaction characteristics access session, Affected 0UL
     | Commit chain ->
         match xaAssociation session with
         | Some(_, state) -> session, xaRmFail (xaStateName state)
         | None ->
             let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
+            let characteristics = session.TransactionTracking.Characteristics
             let committed = commitSession session
-            (if chain then beginTransaction readOnly committed else committed), Affected 0UL
+            (if chain then beginTransaction ExplicitTrackedTransaction characteristics readOnly committed else committed), Affected 0UL
     | Rollback ->
         match xaAssociation session with
         | Some(_, state) -> session, xaRmFail (xaStateName state)
@@ -3641,7 +3779,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                     session
 
             TableLocks.releaseExplicit session.Store session.ConnectionId
-            session, Affected 0UL
+            Session.endTransactionTracking session, Affected 0UL
 let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
     Fsdb.Sql.Expression.rewriteStatement
         (function
@@ -5902,6 +6040,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
 /// `Storage.LockWaitTimeout` covers both an explicit gate timeout and an
 /// optimistic commit conflict; both are retryable 1205 errors.
 let private recordResult ((session, result): Session * QueryResult) : Session * QueryResult =
+    let session = if containsResultSet result then Session.trackTransactionResultSet session else session
     let session =
         match terminalResult result with
         | TerminalAffected count ->
@@ -5919,13 +6058,15 @@ let private recordResult ((session, result): Session * QueryResult) : Session * 
     session, result
 
 let private abortTransaction (session: Session) =
+    let hadTransaction = session.Tx.IsSome
     session.Tx
     |> Option.bind _.Xa
     |> Option.iter (fst >> removeXaAssociation session)
 
     session.Tx |> Option.iter (fun transaction -> Storage.releaseTransactionLocks transaction.Snapshot)
     removeTransactionView session
-    { session with Tx = None }
+    let session = { session with Tx = None }
+    if hadTransaction then Session.endTransactionTracking session else session
 
 let private recoverExecutionError (session: Session) (description: string) (error: exn) : Session * QueryResult =
     match error with
@@ -5976,6 +6117,7 @@ let private recordDiagnostics
     (preserve: bool)
     (execute: unit -> Session * QueryResult)
     : Session * QueryResult =
+    let previous = session
     let session = if preserve then session else { session with Diagnostics = [] }
     let (session, result), generated = Diagnostics.capture execute
 
@@ -5985,7 +6127,8 @@ let private recordDiagnostics
         | None -> generated
 
     let session = if preserve then session else { session with Diagnostics = generated }
-    recordResult (session, result)
+    let session, result = recordResult (session, result)
+    Session.finalizeTransactionTracking previous session, result
 
 let private countsAsAccountUpdate = function
     | CreateDatabase _
