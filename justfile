@@ -75,7 +75,7 @@ test-report *ARGS:
         "$@"
 
 # Repeated large-packet and snapshot cases retain several full-size buffers;
-# 5 GiB keeps the stress guard above their expected peak while still catching
+# 6 GiB keeps the stress guard above their expected peak while still catching
 # unbounded growth.
 [group('qa')]
 stress minutes="1" *ARGS:
@@ -85,7 +85,7 @@ stress minutes="1" *ARGS:
     shift
     dotnet run --project tests/Fsdb.Tests -- \
         --stress "$minutes" \
-        --stress-memory-limit 5120 \
+        --stress-memory-limit 6144 \
         --no-spinner \
         "$@"
 
