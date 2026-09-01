@@ -4110,6 +4110,30 @@ let tests =
                         Expect.equal calls 4 "WHERE is not repeated by the post-window projection pass"
                     | other -> failtestf "expected limited window rows, got %A" other
 
+                testCase "LIMIT and OFFSET retain row numbers across ordered partitions"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE msgs (id INT, session_id INT, created_at INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO msgs VALUES (21, 2, 1), (12, 1, 1), (22, 2, 1), (11, 1, 1), (23, 2, 2), (13, 1, 2)"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT id, session_id, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at, id) AS rn FROM msgs ORDER BY session_id, rn LIMIT 3 OFFSET 2"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "13"; Some "1"; Some "3" ]
+                              [ Some "21"; Some "2"; Some "1" ]
+                              [ Some "22"; Some "2"; Some "2" ] ]
+                            "offsets can cross partition boundaries without renumbering"
+                    | other -> failtestf "expected offset window rows, got %A" other
+
                 testCase "SELECT * alongside ROW_NUMBER() OVER (...) doesn't leak the synthetic column into *"
                 <| fun _ ->
                     let store = newStore ()

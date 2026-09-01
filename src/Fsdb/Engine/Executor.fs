@@ -10337,14 +10337,15 @@ and private runWindowedSelect
                     | WinCumeDist, Some _, [ direction ] -> tryCumeDistDenseRanks direction grouped
                     | _ -> None
 
+                let compareWindowRows (leftIndex, (_, leftKey, _)) (rightIndex, (_, rightKey, _)) =
+                    let compared = compareByOrderKeys dirs leftKey rightKey
+                    if compared <> 0 then compared else Operators.compare leftIndex rightIndex
+
                 let sortGroup (group: ResizeArray<WindowRow>) =
                     let source = group.ToArray()
 
                     let comparisonSort () =
-                        source
-                        |> Array.sortInPlaceWith (fun (leftIndex, (_, leftKey, _)) (rightIndex, (_, rightKey, _)) ->
-                            let compared = compareByOrderKeys dirs leftKey rightKey
-                            if compared <> 0 then compared else Operators.compare leftIndex rightIndex)
+                        source |> Array.sortInPlaceWith compareWindowRows
 
                         source
 
@@ -10352,28 +10353,45 @@ and private runWindowedSelect
                     | Some _, [ direction ] -> tryOrderDenseRanks direction source |> Option.defaultWith comparisonSort
                     | _ -> comparisonSort ()
 
+                let windowAlias =
+                    select.Projections
+                    |> List.tryPick (fun (expression, alias) ->
+                        if expression = windowFunc then alias else None)
+
+                let matchesFinalOrder alias =
+                    if select.OrderBy.Length <> partitionBy.Length + 1 then
+                        false
+                    else
+                        match List.splitAt partitionBy.Length select.OrderBy with
+                        | partitionTerms, [ (Col name, Asc) ]
+                            when System.String.Equals(name, alias, System.StringComparison.OrdinalIgnoreCase) ->
+                            List.forall2
+                                (fun expected (actual, direction) -> expected = actual && direction = Asc)
+                                partitionBy
+                                partitionTerms
+                        | _ -> false
+
+                let streamedRowNumberLimit =
+                    match fn, windowAlias, select.Limit with
+                    | WinRowNumber, Some alias, Some limit
+                        when windowFuncs = [ windowFunc ]
+                             && matchesFinalOrder alias
+                             && not select.Distinct
+                             && not select.CalculateFoundRows
+                             && select.Having.IsNone ->
+                        let limit = rowCount limit
+                        let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
+                        let requested = min (int64 matched.Length) (int64 limit + int64 offset)
+                        Some(int requested)
+                    | _ -> None
+
                 let partitions =
-                    if denseCumeDist.IsSome then [] else grouped |> Seq.map sortGroup |> List.ofSeq
+                    if denseCumeDist.IsSome || streamedRowNumberLimit.IsSome then
+                        []
+                    else
+                        grouped |> Seq.map sortGroup |> List.ofSeq
 
                 let rememberRowNumberOrder () =
-                    let windowAlias =
-                        select.Projections
-                        |> List.tryPick (fun (expression, alias) ->
-                            if expression = windowFunc then alias else None)
-
-                    let matchesFinalOrder alias =
-                        if select.OrderBy.Length <> partitionBy.Length + 1 then
-                            false
-                        else
-                            match List.splitAt partitionBy.Length select.OrderBy with
-                            | partitionTerms, [ (Col name, Asc) ]
-                                when System.String.Equals(name, alias, System.StringComparison.OrdinalIgnoreCase) ->
-                                List.forall2
-                                    (fun expected (actual, direction) -> expected = actual && direction = Asc)
-                                    partitionBy
-                                    partitionTerms
-                            | _ -> false
-
                     match windowAlias with
                     | Some alias when windowFuncs = [ windowFunc ] && matchesFinalOrder alias ->
                         let partitionDirections = List.replicate partitionBy.Length Asc
@@ -10391,6 +10409,55 @@ and private runWindowedSelect
                             |> Array.ofSeq
                             |> Some
                     | _ -> ()
+
+                let topRowNumbers requested =
+                    let partitionDirections = List.replicate partitionBy.Length Asc
+
+                    let partitionOrderKey (group: ResizeArray<WindowRow>) =
+                        let _, (key, _, _) = group.[0]
+                        List.map2 (fun value collation -> value, Some collation) key partitionCollations
+
+                    let orderedGroups =
+                        grouped
+                        |> Seq.filter (fun group -> group.Count > 0)
+                        |> Seq.sortWith (fun left right ->
+                            compareByOrderKeys partitionDirections (partitionOrderKey left) (partitionOrderKey right))
+
+                    let selected = ResizeArray<int * Value>()
+                    let order = ResizeArray<int>()
+                    let mutable remaining = requested
+
+                    for group in orderedGroups do
+                        if remaining > 0 then
+                            let take = min remaining group.Count
+                            let largestFirst =
+                                { new System.Collections.Generic.IComparer<WindowRow> with
+                                    member _.Compare(left, right) = compareWindowRows right left }
+
+                            let candidates = System.Collections.Generic.PriorityQueue<WindowRow, WindowRow>(largestFirst)
+
+                            for item in group do
+                                if candidates.Count < take then
+                                    candidates.Enqueue(item, item)
+                                elif compareWindowRows item (candidates.Peek()) < 0 then
+                                    candidates.Dequeue() |> ignore
+                                    candidates.Enqueue(item, item)
+
+                            let rows =
+                                candidates.UnorderedItems
+                                |> Seq.map (fun struct (element, _) -> element)
+                                |> Array.ofSeq
+
+                            rows |> Array.sortInPlaceWith compareWindowRows
+
+                            for position, (originalIndex, _) in Array.indexed rows do
+                                selected.Add(originalIndex, VInt(int64 position + 1L))
+                                order.Add originalIndex
+
+                            remaining <- remaining - take
+
+                    streamedRowOrder <- Some(order.ToArray())
+                    Ok(selected.ToArray())
 
                 // `RANK`'s number for each row in an ORDER BY-sorted partition
                 // group: the 1-based position of the first row in its tie
@@ -10607,8 +10674,11 @@ and private runWindowedSelect
 
                 match fn with
                 | WinRowNumber ->
-                    rememberRowNumberOrder ()
-                    perRow (fun _ pos -> Ok(VInt(int64 pos + 1L)))
+                    match streamedRowNumberLimit with
+                    | Some requested -> topRowNumbers requested
+                    | None ->
+                        rememberRowNumberOrder ()
+                        perRow (fun _ pos -> Ok(VInt(int64 pos + 1L)))
                 | WinRank dense ->
                     partitions
                     |> List.collect (fun group ->
