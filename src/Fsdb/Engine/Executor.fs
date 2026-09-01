@@ -253,6 +253,7 @@ let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMem
 
 /// Statement-local materialized CTE bindings, keyed by normalized name.
 let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * Value[] list>>()
+let private cteOriginScope = System.Threading.AsyncLocal<Map<string, ColumnOrigin option list>>()
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
@@ -1136,6 +1137,9 @@ let withGroupConcatMaxLen (limit: int) (body: unit -> 'a) : 'a =
 
 let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
     DynamicScope.valueOrDefault Map.empty cteScope
+
+let private currentCteOriginScope () : Map<string, ColumnOrigin option list> =
+    DynamicScope.valueOrDefault Map.empty cteOriginScope
 
 let private unknownColumn (name: string) : EvalError =
     1054, sprintf "Unknown column '%s' in 'field list'" name
@@ -2261,13 +2265,129 @@ let private outputColumnFormats (ctx: EvalContext) (columns: ColumnDef list) (pr
 let private outputColumnFsps ctx columns projections =
     outputColumnFormats ctx columns projections |> List.map _.Fsp
 
+let private qualifierRangesOf (sources: (string * ColumnDef list) list) =
+    sources
+    |> List.fold
+        (fun (offset, ranges) (qualifier, columns) ->
+            offset + columns.Length,
+            Map.add (qualifier.ToLowerInvariant()) (columns, offset) ranges)
+        (0, Map.empty)
+    |> snd
+
+let private sourceHasQualifier (qualifier: string) = function
+    | FromTable table ->
+        table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+        || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)))
+    | FromSubquery(_, alias)
+    | FromLateral(_, alias)
+    | FromJsonTable(_, _, _, alias) -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+
+/// MySQL promotes a binary UNION branch for equality and ordering. Other
+/// collation combinations retain the first branch's ordering in this engine.
+let private strictestUnionCollation (left: Collation.Collation) (right: Collation.Collation) =
+    if left.Name = "utf8mb4_bin" || right.Name = "utf8mb4_bin" then
+        Collation.tryFind "utf8mb4_bin" |> Option.defaultValue left
+    else
+        left
+
+let rec private selectSourceColumns (store: Store) (dbName: string) = function
+    | FromTable table ->
+        let database = table.Database |> Option.defaultValue dbName
+
+        match
+            if table.Database.IsNone then
+                currentCteScope () |> Map.tryFind (table.Table.ToLowerInvariant()) |> Option.map fst
+            else
+                None
+        with
+        | Some columns -> columns |> List.map Some
+        | None ->
+            match tryStoredView store database table.Table with
+            | Some view ->
+                match Parser.parse view.Definition with
+                | Ok(Select viewSelect) ->
+                    let columns = selectProjectionColumns store view.Schema viewSelect
+
+                    if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
+                        columns
+                    else
+                        List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
+                | _ -> []
+            | None ->
+                scan store database table.Table
+                |> Result.toOption
+                |> Option.map fst
+                |> Option.defaultValue []
+                |> List.map Some
+    | FromSubquery(PlainSelect body, _)
+    | FromLateral(PlainSelect body, _) -> selectProjectionColumns store dbName body
+    | FromSubquery(UnionSelect(first, rest, _, _, _), _)
+    | FromLateral(UnionSelect(first, rest, _, _, _), _) ->
+        let branches = first :: (rest |> List.map snd)
+        let columns = branches |> List.map (selectProjectionColumns store dbName)
+
+        if columns |> List.forall (fun branch -> branch.Length = columns.Head.Length) then
+            columns
+            |> List.transpose
+            |> List.map (fun candidates ->
+                let present = candidates |> List.choose id
+
+                match present with
+                | [] -> None
+                | first :: rest ->
+                    let collation =
+                        (first :: rest)
+                        |> List.choose _.Collation
+                        |> List.choose Collation.tryFind
+                        |> function
+                            | [] -> None
+                            | first :: rest -> Some((rest |> List.fold strictestUnionCollation first).Name)
+
+                    Some { first with Collation = collation })
+        else
+            []
+    | FromJsonTable _ -> []
+
+and private selectProjectionColumns (store: Store) (dbName: string) (select: SelectStmt) : ColumnDef option list =
+    let sources =
+        (select.From |> Option.toList)
+        @ (select.Joins |> List.map _.Table)
+        |> List.map (fun source -> source, selectSourceColumns store dbName source)
+
+    let columnFor (name: string) (candidates: (FromItem * ColumnDef option list) list) =
+        candidates
+        |> List.collect snd
+        |> List.choose id
+        |> List.filter (fun column -> column.Name.Equals(name, System.StringComparison.OrdinalIgnoreCase))
+        |> function
+            | [ column ] -> Some column
+            | _ -> None
+
+    let rec projectionColumns =
+        function
+        | Star None -> sources |> List.collect snd
+        | Star(Some qualifier) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> List.collect snd
+        | Col name -> [ columnFor name sources ]
+        | QualifiedCol(qualifier, name) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> columnFor name |> List.singleton
+        | Collate(value, collation) ->
+            projectionColumns value
+            |> List.map (Option.map (fun column -> { column with Collation = Some collation; Charset = None }))
+        | _ -> [ None ]
+
+    select.Projections
+    |> List.collect (fun (expression, alias) ->
+        projectionColumns expression
+        |> List.map (fun column ->
+            match column, alias with
+            | Some value, Some name -> Some { value with Name = name }
+            | _ -> column))
+
 type private OutputColumnSource =
     { Qualifier: string
-      Schema: string
-      Table: string
-      Columns: ColumnDef list }
+      Columns: ColumnDef list
+      Origins: ColumnOrigin option list }
 
-let private outputColumnOrigins
+let rec private outputColumnOrigins
     (store: Store)
     (dbName: string)
     (qualifiers: Map<string, ColumnDef list * int>)
@@ -2284,79 +2404,106 @@ let private outputColumnOrigins
 
     let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
 
-    let sourceQualifier = function
+    let qualifierOf = function
         | FromTable table -> table.Alias |> Option.defaultValue table.Table
         | FromSubquery(_, alias)
         | FromLateral(_, alias)
         | FromJsonTable(_, _, _, alias) -> alias
 
-    let cteNames =
-        seq {
-            yield! currentCteScope () |> Map.keys
-            yield! select.Ctes |> Seq.map (fun cte -> cte.CteName.ToLowerInvariant())
-        }
-        |> Set.ofSeq
+    let alignOrigins columns origins =
+        if List.length columns = List.length origins then
+            origins
+        else
+            List.replicate columns.Length None
 
-    let physicalSources =
-        sourceItems
-        |> List.choose (function
+    let withQualifier qualifier =
+        Option.map (fun (origin: ColumnOrigin) -> { origin with Table = qualifier })
+
+    let rec originsForBody qualifier columns =
+        function
+        | PlainSelect body ->
+            let sources =
+                (body.From |> Option.toList) @ (body.Joins |> List.map _.Table)
+                |> List.map (fun item -> qualifierOf item, selectSourceColumns store dbName item |> List.choose id)
+
+            outputColumnOrigins store dbName (qualifierRangesOf sources) body
+            |> List.map (withQualifier qualifier)
+        | UnionSelect _ ->
+            columns
+            |> List.map (fun _ ->
+                Some
+                    { Schema = ""
+                      Table = qualifier
+                      OriginalTable = ""
+                      OriginalName = "" })
+
+    let localCtes = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), cte.Body) |> Map.ofList
+
+    let sourceOf item =
+        let qualifier = qualifierOf item
+        let columns = qualifierColumns qualifier
+
+        let origins =
+            match item with
+            | FromTable table when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) localCtes ->
+                originsForBody qualifier columns localCtes.[table.Table.ToLowerInvariant()]
+            | FromTable table when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) (currentCteScope ()) ->
+                currentCteOriginScope ()
+                |> Map.tryFind (table.Table.ToLowerInvariant())
+                |> Option.defaultValue []
+                |> List.map (withQualifier qualifier)
             | FromTable table ->
                 let schema = table.Database |> Option.defaultValue dbName
-                let qualifier = table.Alias |> Option.defaultValue table.Table
-                let isCte = table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames
 
-                if isCte then
-                    None
-                else
-                    qualifiers
-                    |> Map.tryFind (qualifier.ToLowerInvariant())
-                    |> Option.map (fun (columns, _) ->
-                        { Qualifier = qualifier
-                          Schema = schema
-                          Table = table.Table
-                          Columns = columns })
-            | _ -> None)
+                columns
+                |> List.map (fun column ->
+                    Some
+                        { Schema = schema
+                          Table = qualifier
+                          OriginalTable = table.Table
+                          OriginalName = column.Name })
+            | FromSubquery(body, _)
+            | FromLateral(body, _) -> originsForBody qualifier columns body
+            | FromJsonTable _ -> []
 
-    let originFor source (column: ColumnDef) =
-        { Schema = source.Schema
-          Table = source.Qualifier
-          OriginalTable = source.Table
-          OriginalName = column.Name }
+        { Qualifier = qualifier
+          Columns = columns
+          Origins = alignOrigins columns origins }
+
+    let sources = sourceItems |> List.map sourceOf
+
+    let originAt source index = source.Origins |> List.tryItem index |> Option.defaultValue None
+
+    let matchingOrigins source name =
+        source.Columns
+        |> List.indexed
+        |> List.choose (fun (index, column) ->
+            if sameName column.Name name then Some(originAt source index) else None)
 
     let byQualifier qualifier name =
-        physicalSources
-        |> List.tryPick (fun source ->
-            if sameName source.Qualifier qualifier then
-                source.Columns
-                |> List.tryFind (fun column -> sameName column.Name name)
-                |> Option.map (originFor source)
-            else
-                None)
+        sources
+        |> List.tryFind (fun source -> sameName source.Qualifier qualifier)
+        |> Option.bind (fun source ->
+            match matchingOrigins source name with
+            | [ origin ] -> origin
+            | _ -> None)
 
     let byName name =
-        physicalSources
-        |> List.choose (fun source ->
-            source.Columns
-            |> List.tryFind (fun column -> sameName column.Name name)
-            |> Option.map (originFor source))
+        sources
+        |> List.collect (fun source -> matchingOrigins source name)
         |> function
-            | [ origin ] -> Some origin
+            | [ origin ] -> origin
             | _ -> None
 
     let originsForExpression =
         function
         | Star None ->
-            sourceItems
-            |> List.collect (fun item ->
-                let qualifier = sourceQualifier item
-
-                match physicalSources |> List.tryFind (fun source -> sameName source.Qualifier qualifier) with
-                | Some source -> source.Columns |> List.map (originFor source >> Some)
-                | None -> qualifierColumns qualifier |> List.map (fun _ -> None))
+            sources |> List.collect _.Origins
         | Star(Some qualifier) ->
-            match physicalSources |> List.tryFind (fun source -> sameName source.Qualifier qualifier) with
-            | Some source -> source.Columns |> List.map (originFor source >> Some)
-            | None -> qualifierColumns qualifier |> List.map (fun _ -> None)
+            sources
+            |> List.tryFind (fun source -> sameName source.Qualifier qualifier)
+            |> Option.map _.Origins
+            |> Option.defaultValue []
         | Col name -> [ byName name ]
         | QualifiedCol(qualifier, name) -> [ byQualifier qualifier name ]
         | _ -> [ None ]
@@ -3492,115 +3639,6 @@ let private quantifiedEqualityMembershipResult
                     if containsEqual then VInt 0L elif membership.ContainsNull then VNull else VInt 1L
                 | _ -> VNull))
     | _ -> None
-
-let private sourceHasQualifier (qualifier: string) = function
-    | FromTable table ->
-        table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
-        || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)))
-    | FromSubquery(_, alias)
-    | FromLateral(_, alias)
-    | FromJsonTable(_, _, _, alias) -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
-
-/// MySQL promotes a binary UNION branch for equality and ordering. Other
-/// collation combinations retain the first branch's ordering in this engine.
-let private strictestUnionCollation (left: Collation.Collation) (right: Collation.Collation) =
-    if left.Name = "utf8mb4_bin" || right.Name = "utf8mb4_bin" then
-        Collation.tryFind "utf8mb4_bin" |> Option.defaultValue left
-    else
-        left
-
-let rec private selectSourceColumns (store: Store) (dbName: string) = function
-    | FromTable table ->
-        let database = table.Database |> Option.defaultValue dbName
-
-        match
-            if table.Database.IsNone then
-                currentCteScope () |> Map.tryFind (table.Table.ToLowerInvariant()) |> Option.map fst
-            else
-                None
-        with
-        | Some columns -> columns |> List.map Some
-        | None ->
-            match tryStoredView store database table.Table with
-            | Some view ->
-                match Parser.parse view.Definition with
-                | Ok(Select viewSelect) ->
-                    let columns = selectProjectionColumns store view.Schema viewSelect
-
-                    if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
-                        columns
-                    else
-                        List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
-                | _ -> []
-            | None ->
-                scan store database table.Table
-                |> Result.toOption
-                |> Option.map fst
-                |> Option.defaultValue []
-                |> List.map Some
-    | FromSubquery(PlainSelect body, _)
-    | FromLateral(PlainSelect body, _) -> selectProjectionColumns store dbName body
-    | FromSubquery(UnionSelect(first, rest, _, _, _), _)
-    | FromLateral(UnionSelect(first, rest, _, _, _), _) ->
-        let branches = first :: (rest |> List.map snd)
-        let columns = branches |> List.map (selectProjectionColumns store dbName)
-
-        if columns |> List.forall (fun branch -> branch.Length = columns.Head.Length) then
-            columns
-            |> List.transpose
-            |> List.map (fun candidates ->
-                let present = candidates |> List.choose id
-
-                match present with
-                | [] -> None
-                | first :: rest ->
-                    let collation =
-                        (first :: rest)
-                        |> List.choose _.Collation
-                        |> List.choose Collation.tryFind
-                        |> function
-                            | [] -> None
-                            | first :: rest -> Some((rest |> List.fold strictestUnionCollation first).Name)
-
-                    Some { first with Collation = collation })
-        else
-            []
-    | FromJsonTable _ -> []
-
-and private selectProjectionColumns (store: Store) (dbName: string) (select: SelectStmt) : ColumnDef option list =
-
-    let sources =
-        (select.From |> Option.toList)
-        @ (select.Joins |> List.map _.Table)
-        |> List.map (fun source -> source, selectSourceColumns store dbName source)
-
-    let columnFor (name: string) (candidates: (FromItem * ColumnDef option list) list) =
-        candidates
-        |> List.collect snd
-        |> List.choose id
-        |> List.filter (fun column -> column.Name.Equals(name, System.StringComparison.OrdinalIgnoreCase))
-        |> function
-            | [ column ] -> Some column
-            | _ -> None
-
-    let rec projectionColumns =
-        function
-        | Star None -> sources |> List.collect snd
-        | Star(Some qualifier) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> List.collect snd
-        | Col name -> [ columnFor name sources ]
-        | QualifiedCol(qualifier, name) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> columnFor name |> List.singleton
-        | Collate(value, collation) ->
-            projectionColumns value
-            |> List.map (Option.map (fun column -> { column with Collation = Some collation; Charset = None }))
-        | _ -> [ None ]
-
-    select.Projections
-    |> List.collect (fun (expression, alias) ->
-        projectionColumns expression
-        |> List.map (fun column ->
-            match column, alias with
-            | Some value, Some name -> Some { value with Name = name }
-            | _ -> column))
 
 let private subqueryProjectionOperand (select: SelectStmt) (columns: ColumnDef option list) : QuantifiedOperand =
     match select.Projections, columns with
@@ -4801,10 +4839,12 @@ and private resolveTableRef
                 Error(Err(1462, sprintf "View's SELECT contains a recursive reference to view '%s'" view.Name))
             | _ ->
                 let savedCtes = currentCteScope ()
+                let savedCteOrigins = currentCteOriginScope ()
 
                 try
                     viewStack.Value <- Set.add key stack
                     cteScope.Value <- Map.empty
+                    cteOriginScope.Value <- Map.empty
 
                     let resolved =
                         match Parser.parse view.Definition with
@@ -4857,6 +4897,7 @@ and private resolveTableRef
                 finally
                     viewStack.Value <- stack
                     cteScope.Value <- savedCtes
+                    cteOriginScope.Value <- savedCteOrigins
         | None ->
             if tableRef.Partitions.IsEmpty then
                 match tryLockingReadRows tableRef with
@@ -5872,9 +5913,7 @@ and private fromItemQualifier (item: FromItem) : string =
 /// offsets accumulate across the fold, so source *n*'s columns start right
 /// where source *n-1*'s end.
 and private qualifierRanges (sources: (string * ColumnDef list) list) : Map<string, ColumnDef list * int> =
-    sources
-    |> List.fold (fun (offset, quals) (qualifier, cols) -> offset + List.length cols, Map.add (qualifier.ToLowerInvariant()) (cols, offset) quals) (0, Map.empty)
-    |> snd
+    qualifierRangesOf sources
 
 /// The one `WHERE` predicate every scan and mutation path shares — no
 /// clause matches everything, otherwise SQL's three-valued truthiness
@@ -7403,6 +7442,28 @@ and private withCteScope
     | None ->
 
         let saved = currentCteScope ()
+        let savedOrigins = currentCteOriginScope ()
+
+        let originsFor (cte: CommonTableExpr) columns =
+            let origins =
+                match cte.Body with
+                | PlainSelect select ->
+                    let sources =
+                        (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+                        |> List.map (fun source -> fromItemQualifier source, selectSourceColumns store dbName source |> List.choose id)
+
+                    outputColumnOrigins store dbName (qualifierRanges sources) select
+                    |> List.map (Option.map (fun origin -> { origin with Table = cte.CteName }))
+                | UnionSelect _ ->
+                    columns
+                    |> List.map (fun _ ->
+                        Some
+                            { Schema = ""
+                              Table = cte.CteName
+                              OriginalTable = ""
+                              OriginalName = "" })
+
+            if origins.Length = columns.Length then origins else List.replicate columns.Length None
 
         try
             let rec bind (remaining: CommonTableExpr list) =
@@ -7412,6 +7473,9 @@ and private withCteScope
                     materializeCte store registry dbName cte outer
                     |> Result.bind (fun materialized ->
                         cteScope.Value <- currentCteScope () |> Map.add (cte.CteName.ToLowerInvariant()) materialized
+                        cteOriginScope.Value <-
+                            currentCteOriginScope ()
+                            |> Map.add (cte.CteName.ToLowerInvariant()) (originsFor cte (fst materialized))
                         bind rest)
 
             match bind ctes with
@@ -7419,6 +7483,7 @@ and private withCteScope
             | Ok() -> body ()
         finally
             cteScope.Value <- saved
+            cteOriginScope.Value <- savedOrigins
 
 and private withCteQueryResult
     (store: Store)

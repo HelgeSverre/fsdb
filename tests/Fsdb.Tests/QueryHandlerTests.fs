@@ -362,13 +362,17 @@ let tests =
                   | session, ResultSet(_, []) ->
                       Expect.equal
                           (session.LastResultColumnMetadata |> List.map _.Origin)
-                          [ Some
-                                { Schema = "app"
-                                  Table = "v"
-                                  OriginalTable = "user_ids"
-                                  OriginalName = "id" }
-                            None ]
-                          "view columns report the view while derived columns remain anonymous"
+                          [ (Some
+                                 { Schema = "app"
+                                   Table = "v"
+                                   OriginalTable = "user_ids"
+                                   OriginalName = "id" })
+                            (Some
+                                 { Schema = "app"
+                                   Table = "d"
+                                   OriginalTable = "users"
+                                   OriginalName = "name" }) ]
+                          "view and derived columns retain their source fields"
 
                       match prepareStatementForSession session "SELECT v.id FROM user_ids AS v" with
                       | Ok(statement, count) ->
@@ -385,6 +389,75 @@ let tests =
                       | Error error -> failtestf "expected the view query to prepare, got %A" error
                   | _, other -> failtestf "expected empty derived metadata, got %A" other
               | _, other -> failtestf "expected empty origin metadata, got %A" other
+
+          testCase "derived and CTE metadata preserve MySQL source fields"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE origins"
+              let session, _ = handle session "USE origins"
+              let session, _ = handle session "CREATE TABLE base (id INT PRIMARY KEY, name VARCHAR(20))"
+
+              let expectOrigins sql expected =
+                  match handle session sql with
+                  | resultSession, ResultSet(_, []) ->
+                      Expect.equal (resultSession.LastResultColumnMetadata |> List.map _.Origin) expected sql
+                  | _, other -> failtestf "expected metadata-only result for %s, got %A" sql other
+
+              expectOrigins
+                  "SELECT n.renamed FROM (SELECT d.renamed FROM (SELECT id AS renamed FROM base) d) n LIMIT 0"
+                  [ Some
+                        { Schema = "origins"
+                          Table = "n"
+                          OriginalTable = "base"
+                          OriginalName = "id" } ]
+
+              expectOrigins
+                  "SELECT d.id FROM (SELECT id FROM base UNION ALL SELECT id FROM base) d LIMIT 0"
+                  [ Some
+                        { Schema = ""
+                          Table = "d"
+                          OriginalTable = ""
+                          OriginalName = "" } ]
+
+              expectOrigins
+                  "WITH c AS (SELECT id FROM base) SELECT c.id FROM c LIMIT 0"
+                  [ Some
+                        { Schema = "origins"
+                          Table = "c"
+                          OriginalTable = "base"
+                          OriginalName = "id" } ]
+
+              expectOrigins
+                  "WITH c1 AS (SELECT id FROM base), c2 AS (SELECT id FROM c1) SELECT id FROM c2 LIMIT 0"
+                  [ Some
+                        { Schema = "origins"
+                          Table = "c2"
+                          OriginalTable = "base"
+                          OriginalName = "id" } ]
+
+              expectOrigins
+                  "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 2) SELECT n FROM r LIMIT 0"
+                  [ Some
+                        { Schema = ""
+                          Table = "r"
+                          OriginalTable = ""
+                          OriginalName = "" } ]
+
+              expectOrigins "SELECT d.computed FROM (SELECT id + 1 AS computed FROM base) d LIMIT 0" [ None ]
+
+              match prepareStatementForSession session "SELECT d.name FROM (SELECT name FROM base) d" with
+              | Ok(statement, count) ->
+                  let _, columns = preparedMetadata session statement count
+
+                  Expect.equal
+                      columns.Head.Metadata.Origin
+                      (Some
+                          { Schema = "origins"
+                            Table = "d"
+                            OriginalTable = "base"
+                            OriginalName = "name" })
+                      "prepared derived origin"
+              | Error error -> failtestf "expected the derived query to prepare, got %A" error
 
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
@@ -4825,7 +4898,7 @@ let tests =
                   let session, _ = handle session "SET GLOBAL wait_timeout = 123"
 
                   match handle session "SHOW SESSION VARIABLES LIKE 'wait_timeout'" |> snd with
-                  | ResultSet(_, [ [ Some "wait_timeout"; Some "300" ] ]) -> ()
+                  | ResultSet(_, [ [ Some "wait_timeout"; Some "28800" ] ]) -> ()
                   | other -> failtestf "expected the session value untouched, got %A" other
 
                   match handle session "SHOW GLOBAL VARIABLES LIKE 'wait_timeout'" |> snd with
