@@ -340,7 +340,12 @@ let tests =
           // limit beats the compiled-in default.
           testCase "a configured limit is what SHOW VARIABLES reports, and a session SET still shadows it"
           <| fun _ ->
-              withSettings [ "wait_timeout", "77"; "net_read_timeout", "31"; "max_connections", "42" ] (fun () ->
+              withSettings
+                  [ "wait_timeout", "77"
+                    "interactive_timeout", "88"
+                    "net_read_timeout", "31"
+                    "max_connections", "42" ]
+                  (fun () ->
                   let session = create 1 (Fsdb.Storage.create ())
 
                   match handle session "SELECT @@wait_timeout" |> snd with
@@ -360,6 +365,10 @@ let tests =
                   match handle session "SELECT @@GLOBAL.wait_timeout" |> snd with
                   | ResultSet(_, [ [ Some "77" ] ]) -> ()
                   | other -> failtestf "expected GLOBAL to still read the configured limit, got %A" other
+
+                  match handle session "SELECT @@interactive_timeout" |> snd with
+                  | ResultSet(_, [ [ Some "88" ] ]) -> ()
+                  | other -> failtestf "expected the configured interactive timeout, got %A" other
 
                   match handle session "SELECT @@net_read_timeout" |> snd with
                   | ResultSet(_, [ [ Some "31" ] ]) -> ()
@@ -560,5 +569,5 @@ let tests =
               | ResultSet(_, [ [ Some wait; Some interactive ] ]) ->
                   Expect.equal wait "28800" "MySQL's default"
                   Expect.equal wait (string waitTimeoutSeconds) "advertised value matches the command idle timeout"
-                  Expect.equal interactive wait "interactive_timeout mirrors it — CLIENT_INTERACTIVE is ignored"
+                  Expect.equal interactive "28800" "MySQL's interactive default"
               | other -> failtestf "expected both values, got %A" other ]

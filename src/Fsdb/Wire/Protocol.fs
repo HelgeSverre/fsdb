@@ -90,6 +90,7 @@ let ClientConnectWithDb = 0x00000008u
 let ClientCompress = 0x00000020u
 let ClientLocalFiles = 0x00000080u
 let ClientProtocol41 = 0x00000200u
+let ClientInteractive = 0x00000400u
 let ClientSsl = 0x00000800u
 let ClientSecureConnection = 0x00008000u
 let ClientTransactions = 0x00002000u
@@ -110,6 +111,7 @@ let ServerCapabilities =
     ||| ClientConnectWithDb
     ||| ClientCompress
     ||| ClientProtocol41
+    ||| ClientInteractive
     ||| ClientSecureConnection
     ||| ClientTransactions
     ||| ClientMultiStatements

@@ -130,7 +130,7 @@ require-secure-transport = ON
 Defaults-file settings apply at startup as process-wide defaults. The standard
 files are auto-discovered unless `--defaults-file` selects one explicitly.
 `max_connections`, `max_prepared_stmt_count`, `max_allowed_packet`,
-`local_infile`, `wait_timeout`, `net_read_timeout`, `net_write_timeout`,
+`local_infile`, `wait_timeout`, `interactive_timeout`, `net_read_timeout`, `net_write_timeout`,
 `innodb_lock_wait_timeout`, and `cte_max_recursion_depth` can also be changed
 with `SET GLOBAL`. `max_load_data_bytes` and the `wal_*` settings are
 configuration-only fsdb limits rather than MySQL system variables. See

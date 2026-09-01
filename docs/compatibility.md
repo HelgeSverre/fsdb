@@ -273,7 +273,7 @@ through `SHOW WARNINGS`; the OK/EOF warning count reports the same conditions.
 
 The tunables an operator would plausibly change live in `Fsdb.Limits` and are
 set from the standard server option files or an explicit `--defaults-file`:
-`max_allowed_packet`, `max_connections`, `wait_timeout`, `net_read_timeout`,
+`max_allowed_packet`, `max_connections`, `wait_timeout`, `interactive_timeout`, `net_read_timeout`,
 `innodb_lock_wait_timeout`, `cte_max_recursion_depth`, plus fsdb's own WAL
 rotation thresholds.
 
@@ -292,9 +292,10 @@ error naming the file and line, matching mysqld, which also refuses to start on
 an unknown option; `loose-` is the escape hatch for both. Every bad line is
 reported, not just the first.
 
-`wait_timeout` defaults to MySQL's 28800 seconds and remains configurable.
-`interactive_timeout` mirrors it because fsdb ignores `CLIENT_INTERACTIVE` at
-handshake.
+`wait_timeout` and `interactive_timeout` default to MySQL's 28800 seconds and
+remain independently configurable. A client that negotiates
+`CLIENT_INTERACTIVE` inherits `interactive_timeout`; other clients inherit
+`wait_timeout`.
 
 `SET GLOBAL` updates the live limits used by later accepts, packet reads,
 idle waits, transaction conflict waits, and recursive CTEs. Session-scoped

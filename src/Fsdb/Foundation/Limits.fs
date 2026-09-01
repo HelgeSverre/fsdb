@@ -48,6 +48,9 @@ let mutable defaultWeekFormat = 0
 /// Idle timeout waiting for the next command packet.
 let mutable waitTimeoutSeconds = 28800
 
+/// Idle timeout inherited by clients that negotiate CLIENT_INTERACTIVE.
+let mutable interactiveTimeoutSeconds = 28800
+
 /// Once a client starts a packet, bounds every pause before more bytes arrive.
 /// Idle connections remain governed separately by `wait_timeout`.
 let mutable netReadTimeoutSeconds = 30
@@ -148,6 +151,12 @@ let private knobs =
         Max = 31536000L
         Set = fun v -> waitTimeoutSeconds <- int v
         Get = fun () -> int64 waitTimeoutSeconds
+        Reportable = true }
+      { Name = "interactive_timeout"
+        Min = 1L
+        Max = 31536000L
+        Set = fun v -> interactiveTimeoutSeconds <- int v
+        Get = fun () -> int64 interactiveTimeoutSeconds
         Reportable = true }
       { Name = "net_read_timeout"
         Min = 1L
@@ -281,9 +290,6 @@ let applySetting (name: string) (value: string) : Result<unit, string> =
     |> Result.map (fun (knob, value) -> knob.Set value)
 
 /// Every reportable knob's live value, for SHOW VARIABLES and `SELECT @@x`.
-/// `interactive_timeout` mirrors `wait_timeout` because fsdb ignores
-/// `CLIENT_INTERACTIVE` at handshake — reporting two different numbers would
-/// advertise a distinction the server doesn't actually make.
 let variables () : (string * string) list =
     [ for knob in knobs do
           if knob.Reportable then
@@ -294,7 +300,6 @@ let variables () : (string * string) list =
                       string (knob.Get())
 
               knob.Name, value ]
-    @ [ "interactive_timeout", string waitTimeoutSeconds ]
 
 /// Applies `settings` for the duration of `f`, restoring every knob
 /// afterwards. The process-wide knobs need one gate so independent tests

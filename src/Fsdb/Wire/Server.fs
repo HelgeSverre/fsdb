@@ -891,7 +891,12 @@ let private sessionTimeout (name: string) (fallback: int) (session: Session) =
         | _ -> fallback
     | None -> fallback
 
-let private sessionWaitTimeout = sessionTimeout "wait_timeout" Limits.waitTimeoutSeconds
+let private sessionWaitTimeout (session: Session) =
+    if session.Capabilities &&& ClientInteractive <> 0u then
+        sessionTimeout "interactive_timeout" Limits.interactiveTimeoutSeconds session
+    else
+        sessionTimeout "wait_timeout" Limits.waitTimeoutSeconds session
+
 let private sessionNetReadTimeout = sessionTimeout "net_read_timeout" Limits.netReadTimeoutSeconds
 
 /// Polls `client`'s socket while a query runs, cancelling `queryCts` the

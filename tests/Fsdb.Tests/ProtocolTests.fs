@@ -121,6 +121,10 @@ let tests =
               Expect.equal (schema.ReadLenEncString()) (Some "application") "schema name"
               Expect.equal state.Remaining 0 "all tracker bytes consumed"
 
+          testCase "interactive clients can negotiate their timeout class"
+          <| fun _ ->
+              Expect.isTrue (ServerCapabilities &&& ClientInteractive <> 0u) "CLIENT_INTERACTIVE advertised"
+
           testCase "ERR payload carries the error code and message"
           <| fun _ ->
               let payload = errPayload ClientProtocol41 1064 "bad syntax"

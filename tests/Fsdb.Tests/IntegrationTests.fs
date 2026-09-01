@@ -3303,6 +3303,39 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "CLIENT_INTERACTIVE selects interactive_timeout for idle commands"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+
+                  let setTimeouts stream =
+                      async {
+                          for sql in [ "SET SESSION wait_timeout = 1"; "SET SESSION interactive_timeout = 4" ] do
+                              let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                              let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload }
+                              let! reply = readPacketAsync stream
+                              Expect.equal reply.Value.Payload.[0] 0x00uy (sql + " accepted")
+                      }
+
+                  let! ordinaryClient, ordinaryStream = connectRawAsWithCapabilities server.Port "root" ClientProtocol41
+                  use ordinaryClient = ordinaryClient
+                  let! interactiveClient, interactiveStream =
+                      connectRawAsWithCapabilities server.Port "root" (ClientProtocol41 ||| ClientInteractive)
+                  use interactiveClient = interactiveClient
+
+                  do! setTimeouts ordinaryStream
+                  do! setTimeouts interactiveStream
+                  do! Async.Sleep 1500
+
+                  let! ordinaryReply = readPacketAsync ordinaryStream
+                  Expect.isNone ordinaryReply "ordinary client expires at wait_timeout"
+
+                  let! _ = writePacketAsync interactiveStream { SeqId = 0uy; Payload = [| 0x0euy |] }
+                  let! interactiveReply = readPacketAsync interactiveStream
+                  Expect.equal interactiveReply.Value.Payload.[0] 0x00uy "interactive client remains alive"
+              }
+              |> Async.RunSynchronously
+
           testCase "COM_STATISTICS reports live server counters"
           <| fun _ ->
               async {
