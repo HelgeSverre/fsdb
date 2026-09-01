@@ -11428,6 +11428,50 @@ and private runSelect
     // expansion) itself.
     let resolveOrderExpr = resolveOrderPosition projections
 
+    let directOrderExpression expression =
+        match resolveOrderExpr expression with
+        | Col name as column ->
+            let projected =
+                projections
+                |> List.choose (fun (projection, alias) ->
+                    let outputName =
+                        match alias, projection with
+                        | Some alias, _ -> Some alias
+                        | None, Col source
+                        | None, QualifiedCol(_, source) -> Some source
+                        | _ -> None
+
+                    outputName
+                    |> Option.filter (fun output -> output.Equals(name, System.StringComparison.OrdinalIgnoreCase))
+                    |> Option.map (fun _ -> projection))
+
+            match projected with
+            | [] -> Some column
+            | [ projection ] -> Some projection
+            | _ -> None
+        | QualifiedCol _ as column -> Some column
+        | _ -> None
+
+    let directOrderExpressions =
+        let directProjection =
+            function
+            | Col _, _
+            | QualifiedCol _, _ -> true
+            | _ -> false
+
+        if projections |> List.forall directProjection then
+            let rec collect resolved =
+                function
+                | [] -> Some(List.rev resolved)
+                | (expression, _) :: rest ->
+                    match directOrderExpression expression with
+                    | Some direct -> collect (direct :: resolved) rest
+                    | None -> None
+
+            collect [] orderBy
+        else
+            None
+
     // A non-aggregate, GROUP-BY-less `HAVING` (e.g. `HAVING v > 5`) filters
     // per-row exactly like `WHERE` — `runGroupedSelect` only owns the case
     // where `HAVING` actually needs a group's aggregated results (see the
@@ -11507,9 +11551,11 @@ and private runSelect
             columnMetadataOf (List.length colNames) (finalRows |> List.map (List.zip colNames << List.ofArray))
             |> applyWireOverrides outputWireOverrides
 
-        // Shared by both `ORDER BY` branches below: evaluates `WHERE`, the
-        // projection, and the sort keys for one row, in that order, short-
-        // circuiting to `None` on a `WHERE` miss without projecting it.
+        // General `ORDER BY` evaluator: computes the projection before the
+        // keys because aliases and computed output can define the ordering.
+        // The direct-column bounded path below can retain source rows and
+        // postpone their projection until top-N has selected the survivors.
+        // Both paths short-circuit on a `WHERE` miss.
         // A DISTINCT query's collation-aware key folds string output columns
         // to their canonical form, so åge/age dedupe under ai_ci while the
         // emitted text stays the first row's original value. Non-DISTINCT
@@ -11561,7 +11607,9 @@ and private runSelect
         // `ORDER BY` + `LIMIT`, no `DISTINCT`: bounded top-(limit+offset)
         // selection (`boundedTopN`) instead of a full sort — still touches
         // every matched row (see above), but keeps only `limit + offset` of
-        // them at a time instead of the whole matched set. The `limit +
+        // them at a time instead of the whole matched set. Direct-column
+        // projections are evaluated only for that retained slice; computed
+        // projections keep MySQL's eager filesort behavior. The `limit +
         // offset` addition happens in `int64` and is clamped back into
         // `int` afterward: the parser clamps a `LIMIT` up to MySQL's
         // 2^64-1 down to `Int32.MaxValue` (a real idiom — "offset with no
@@ -11571,11 +11619,34 @@ and private runSelect
             let dirs = List.map snd orderBy
             let capacity = int (min (int64 (Option.get limit) + int64 (Option.defaultValue 0 offset)) (int64 System.Int32.MaxValue))
 
-            match rows |> boundedTopN capacity (fun (ka, _, _) (kb, _, _) -> compareByOrderKeys dirs ka kb) evalKeyed with
-            | Error(code, message) -> Err(code, message), [], []
-            | Ok top ->
-                let limited = top |> List.map (fun (_, p, _) -> p) |> applyLimitOffset limit offset
-                ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
+            match directOrderExpressions with
+            | Some orderExpressions ->
+                let evalOrderedRow row =
+                    matches row
+                    |> Result.bind (fun keep ->
+                        if keep then
+                            orderExpressions
+                            |> traverse (fun expression -> evalOrderKey (ctxFor row) expression)
+                            |> Result.map (fun keys -> Some(keys, row))
+                        else
+                            Ok None)
+
+                match rows |> boundedTopN capacity (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) evalOrderedRow with
+                | Error(code, message) -> Err(code, message), [], []
+                | Ok top ->
+                    let selected = top |> List.map snd |> applyLimitOffset limit offset
+
+                    match selected |> traverse projectRow with
+                    | Error(code, message) -> Err(code, message), [], []
+                    | Ok projected ->
+                        let limited = projected |> List.map pairOf
+                        ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
+            | None ->
+                match rows |> boundedTopN capacity (fun (ka, _, _) (kb, _, _) -> compareByOrderKeys dirs ka kb) evalKeyed with
+                | Error(code, message) -> Err(code, message), [], []
+                | Ok top ->
+                    let limited = top |> List.map (fun (_, pair, _) -> pair) |> applyLimitOffset limit offset
+                    ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
 
         // Honest barrier: `ORDER BY` with no `LIMIT` (nothing to bound a
         // top-N by) or `DISTINCT` alongside `ORDER BY` (deduping after a

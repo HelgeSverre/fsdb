@@ -6233,6 +6233,20 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [] "an OFFSET past the table's end still returns cleanly, not an overflow fault"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "bounded direct projections resolve aliases and positions before sorting"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, score INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1,30),(2,10),(3,20),(4,40)" |> ignore
+
+                    match runDefault store "SELECT id AS chosen, score FROM t ORDER BY chosen DESC LIMIT 2" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "4"; Some "40" ]; [ Some "3"; Some "20" ] ] "alias"
+                    | other -> failtestf "expected alias-ordered rows, got %A" other
+
+                    match runDefault store "SELECT id, score FROM t ORDER BY 2 LIMIT 2 OFFSET 1" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3"; Some "20" ]; [ Some "1"; Some "30" ] ] "position"
+                    | other -> failtestf "expected position-ordered rows, got %A" other
+
                 testCase "LIMIT N against a WHERE matching nearly the whole table touches far fewer rows than the table size"
                 <| fun _ ->
                     let mutable touched = 0
