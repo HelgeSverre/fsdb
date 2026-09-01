@@ -42,6 +42,9 @@ let mutable maxPreparedStmtCount = 16382
 /// Password lifetime inherited by accounts whose mysql.user row stores NULL.
 let mutable defaultPasswordLifetimeDays = 0
 
+/// Mode inherited by WEEK(date) when its optional second argument is absent.
+let mutable defaultWeekFormat = 0
+
 /// Idle timeout waiting for the *next* command packet — `wait_timeout`'s
 /// semantics. fsdb's default is 300s where MySQL's is 28800: a half-open
 /// peer that connects and then says nothing otherwise pins a socket and a
@@ -140,6 +143,12 @@ let private knobs =
         Max = 65535L
         Set = fun v -> defaultPasswordLifetimeDays <- int v
         Get = fun () -> int64 defaultPasswordLifetimeDays
+        Reportable = true }
+      { Name = "default_week_format"
+        Min = 0L
+        Max = 7L
+        Set = fun v -> defaultWeekFormat <- int v
+        Get = fun () -> int64 defaultWeekFormat
         Reportable = true }
       { Name = "wait_timeout"
         Min = 1L

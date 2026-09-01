@@ -2629,9 +2629,10 @@ let internal monthNameFn (locale: TemporalLocale.Names) : Scalar =
         |> Option.defaultValue VNull
     | _ -> VNull
 
-let private weekFn: Scalar =
+let internal weekFn defaultMode: Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map (weekOf 0 >> fst >> int64 >> VInt) |> Option.defaultValue VNull
+    | [ v ] when not (anyNull [ v ]) ->
+        asDateOnly v |> Option.map (weekOf defaultMode >> fst >> int64 >> VInt) |> Option.defaultValue VNull
     | [ v; m ] when not (anyNull [ v; m ]) ->
         asDateOnly v |> Option.map (weekOf (int (toDouble m)) >> fst >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
@@ -3004,7 +3005,7 @@ let private extractFn: Scalar =
             | _ -> VNull
 
         match toText u |> Option.map (fun unit -> unit.ToUpperInvariant()), v with
-        | Some "WEEK", _ -> weekFn [ v ]
+        | Some "WEEK", _ -> weekFn 0 [ v ]
         | Some unit, VZeroDate date ->
             let year, month, day = zeroDateParts date
             extract unit year month day 0 0 0 0
@@ -5630,7 +5631,7 @@ let builtins: Registry =
     |> registerScalar "DAYOFYEAR" (datePartFn (fun d -> d.DayOfYear))
     |> registerScalar "DAYNAME" (dayNameFn defaultTimeLocale)
     |> registerScalar "MONTHNAME" (monthNameFn defaultTimeLocale)
-    |> registerScalar "WEEK" weekFn
+    |> registerScalar "WEEK" (weekFn 0)
     |> registerScalar "WEEKDAY" weekdayFn
     |> registerScalar "WEEKOFYEAR" weekOfYearFn
     |> registerScalar "YEARWEEK" yearWeekFn

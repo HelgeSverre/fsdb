@@ -423,7 +423,7 @@ queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`.
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | direct physical COM_QUERY/COM_STMT_PREPARE columns and COM_FIELD_LIST report source names; declared expressions and text-probed resultsets report their effective MySQL collation ids; view, derived, and UNION source names remain empty | low | partial |
 | Prepared metadata | STMT_PREPARE_OK carries result columns and typed parameter definitions | result columns, schema/operator/DML contexts, common numeric, temporal, JSON, and spatial built-in arguments, and registered-extension signatures are derived statically without evaluating the statement; less-common overloaded built-ins remain generic VAR_STRING | low | divergence |
 | Reprepare | automatic reprepare on metadata change | prepared ASTs resolve tables, columns, views, and result metadata from the live schema on each execution, yielding the same observable schema-change behavior without recompiling SQL text | low | aligned for supported syntax |
-| System variables | hundreds live | ~30 known; most others inert or absent; time_zone static strings with no conversion | medium | divergence |
+| System variables | hundreds live | common connector, limit, transaction, password-lifetime, and week-format variables are live; most others are inert or absent, and time_zone remains a static string without conversion | medium | divergence |
 
 ## 13. Authentication and privileges
 

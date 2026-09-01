@@ -539,6 +539,14 @@ let private registryFor (session: Session) : Functions.Registry =
         |> Option.flatten
         |> Option.bind Functions.tryTimeLocale
         |> Option.defaultValue Functions.defaultTimeLocale
+    let defaultWeekFormat =
+        lookupVar session "default_week_format"
+        |> Option.flatten
+        |> Option.bind (fun value ->
+            match Int32.TryParse value with
+            | true, mode -> Some mode
+            | _ -> None)
+        |> Option.defaultValue 0
 
     let loginUser = if session.LoginUser = "" then session.User else session.LoginUser
 
@@ -549,6 +557,7 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "DAYNAME" (Functions.dayNameFn timeLocale)
     |> Functions.registerScalar "MONTHNAME" (Functions.monthNameFn timeLocale)
     |> Functions.registerScalar "FROM_UNIXTIME" (Functions.fromUnixTimeFn timeLocale)
+    |> Functions.registerScalar "WEEK" (Functions.weekFn defaultWeekFormat)
     |> Functions.registerScalar "DATABASE" database
     |> Functions.registerScalar "SCHEMA" database
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)

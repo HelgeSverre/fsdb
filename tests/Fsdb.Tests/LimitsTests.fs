@@ -397,6 +397,26 @@ let tests =
                   | Err(1232, _) -> ()
                   | other -> failtestf "expected the 65535-day ceiling, got %A" other)
 
+          testCase "default_week_format controls one-argument WEEK"
+          <| fun _ ->
+              withSettings [ "default_week_format", "3" ] (fun () ->
+                  let session = create 1 (Fsdb.Storage.create ())
+
+                  match handle session "SELECT WEEK('2024-01-01'), WEEK('2024-01-01', 0)" |> snd with
+                  | ResultSet(_, [ [ Some "1"; Some "0" ] ]) -> ()
+                  | other -> failtestf "expected configured and explicit WEEK modes, got %A" other
+
+                  let session, assigned = handle session "SET SESSION default_week_format = 2"
+                  Expect.equal assigned (Affected 0UL) "session mode assigned"
+
+                  match handle session "SELECT WEEK('2024-01-01')" |> snd with
+                  | ResultSet(_, [ [ Some "53" ] ]) -> ()
+                  | other -> failtestf "expected the session week mode, got %A" other
+
+                  match handle session "SET SESSION default_week_format = 8" |> snd with
+                  | Err(1232, _) -> ()
+                  | other -> failtestf "expected the 0..7 mode bound, got %A" other)
+
           testCase "SET GLOBAL applies live limits and rejects an invalid batch atomically"
           <| fun _ ->
               withSettings [] (fun () ->
