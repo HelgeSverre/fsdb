@@ -1017,6 +1017,23 @@ let tests =
                       testCase "JSON_UNQUOTE on a non-string JSON value renders its text unchanged"
                       <| fun _ -> Expect.equal (call "JSON_UNQUOTE" [ VJson "1" ]) (VString "1") "non-string"
 
+                      testCase "fused JSON extraction preserves nested built-in results"
+                      <| fun _ ->
+                          let cases =
+                              [ [ VJson """{"s":"hi","n":2,"b":true,"z":null,"a":[1,2]}"""; VString "$.s" ]
+                                [ VJson """{"s":"hi","n":2,"b":true,"z":null,"a":[1,2]}"""; VString "$.n" ]
+                                [ VJson """{"s":"hi","n":2,"b":true,"z":null,"a":[1,2]}"""; VString "$.b" ]
+                                [ VJson """{"s":"hi","n":2,"b":true,"z":null,"a":[1,2]}"""; VString "$.z" ]
+                                [ VJson """{"s":"hi","n":2,"b":true,"z":null,"a":[1,2]}"""; VString "$.a" ]
+                                [ VJson """{"s":"hi","n":2,"b":true,"z":null,"a":[1,2]}"""; VString "$.*" ]
+                                [ VJson """{"s":"hi","n":2,"b":true,"z":null,"a":[1,2]}"""; VString "$.s"; VString "$.n" ]
+                                [ VJson "{}"; VString "$.missing" ]
+                                [ VString "{not json"; VString "$.s" ] ]
+
+                          for arguments in cases do
+                              let nested = call "JSON_UNQUOTE" [ call "JSON_EXTRACT" arguments ]
+                              Expect.equal (Fsdb.Functions.jsonExtractUnquotedFn arguments) nested (sprintf "%A" arguments)
+
                       testCase "JSON null-argument and malformed-path edge cases return NULL"
                       <| fun _ ->
                           Expect.equal (call "JSON_UNQUOTE" [ VNull ]) VNull "unquote null"

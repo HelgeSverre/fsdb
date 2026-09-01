@@ -4171,6 +4171,12 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | _ -> argument
 
         eval argument |> Result.map (Functions.weightString (keyCollation ctx source))
+    | FuncCall(unquoteName, [ FuncCall(extractName, arguments) ])
+        when unquoteName.Equals("JSON_UNQUOTE", System.StringComparison.OrdinalIgnoreCase)
+             && extractName.Equals("JSON_EXTRACT", System.StringComparison.OrdinalIgnoreCase)
+             && Functions.isUnmodifiedBuiltinScalar unquoteName ctx.Registry
+             && Functions.isUnmodifiedBuiltinScalar extractName ctx.Registry ->
+        arguments |> traverse eval |> Result.map Functions.jsonExtractUnquotedFn
     | FuncCall(name, subjectExpr :: patternExpr :: rest)
         when name.Equals("REGEXP_LIKE", System.StringComparison.OrdinalIgnoreCase)
              || name.Equals("REGEXP_INSTR", System.StringComparison.OrdinalIgnoreCase)

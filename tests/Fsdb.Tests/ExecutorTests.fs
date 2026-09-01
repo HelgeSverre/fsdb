@@ -6695,6 +6695,15 @@ let tests =
                             "$[0] on a non-array yields the value itself; any other index misses"
                     | other -> failtestf "expected a single row, got %A" other
 
+                testCase "nested JSON extraction honors scalar registry overrides"
+                <| fun _ ->
+                    let store = newStore ()
+                    let registry = builtins |> registerScalar "JSON_EXTRACT" (fun _ -> VJson "\"custom\"")
+
+                    match run store registry "SELECT JSON_UNQUOTE(JSON_EXTRACT('{\"s\":\"builtin\"}', '$.s'))" with
+                    | ResultSet(_, [ [ Some "custom" ] ]) -> ()
+                    | other -> failtestf "expected the registered JSON_EXTRACT override, got %A" other
+
                 testCase "JSON output emits supplementary-plane characters literally, not as escaped surrogate pairs"
                 <| fun _ ->
                     let store = newStore ()

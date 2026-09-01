@@ -695,23 +695,32 @@ let private jsonNodeLength (node: JsonNode) : int =
     | :? JsonArray as a -> a.Count
     | _ -> 1
 
+let private tryParseJsonPaths pathArguments =
+    let rec loop parsed =
+        function
+        | [] -> Some(List.rev parsed)
+        | path :: rest ->
+            match toText path |> Option.bind parseJsonPath with
+            | Some segments -> loop (segments :: parsed) rest
+            | None -> None
+
+    loop [] pathArguments
+
+let private tryExtractJsonNodes document pathArguments =
+    match tryParseJsonValue document, tryParseJsonPaths pathArguments with
+    | Some root, Some paths -> paths |> List.collect (navigateJson root) |> Some
+    | _ -> None
+
 let private jsonExtractFn: Scalar =
     function
     | doc :: (_ :: _ as pathArgs) when not (anyNull (doc :: pathArgs)) ->
-        match tryParseJsonValue doc with
+        match tryExtractJsonNodes doc pathArgs with
         | None -> VNull
-        | Some root ->
-            let paths = pathArgs |> List.map (fun p -> toText p |> Option.bind parseJsonPath)
-
-            if paths |> List.exists Option.isNone then
-                VNull
-            else
-                let matches = paths |> List.collect (fun p -> navigateJson root p.Value)
-
-                match matches, pathArgs with
-                | [], _ -> VNull
-                | [ single ], [ _ ] -> VJson(formatJsonNode single)
-                | many, _ -> VJson("[" + (many |> List.map formatJsonNode |> String.concat ", ") + "]")
+        | Some matches ->
+            match matches, pathArgs with
+            | [], _ -> VNull
+            | [ single ], [ _ ] -> VJson(formatJsonNode single)
+            | many, _ -> VJson("[" + (many |> List.map formatJsonNode |> String.concat ", ") + "]")
     | _ -> VNull
 
 let private jsonValueFn: Scalar =
@@ -743,6 +752,20 @@ let private jsonUnquoteFn: Scalar =
                 // Not valid JSON text — MySQL would raise 3146; tolerated
                 // here as a pass-through since `Scalar` has no error channel.
                 VString s
+    | _ -> VNull
+
+let internal jsonExtractUnquotedFn: Scalar =
+    function
+    | doc :: (_ :: _ as pathArgs) when not (anyNull (doc :: pathArgs)) ->
+        match tryExtractJsonNodes doc pathArgs with
+        | None -> VNull
+        | Some matches ->
+            match matches, pathArgs with
+            | [], _ -> VNull
+            | [ null ], [ _ ] -> VString "null"
+            | [ node ], [ _ ] when node.GetValueKind() = JsonValueKind.String -> VString(node.GetValue<string>())
+            | [ node ], [ _ ] -> VString(formatJsonNode node)
+            | many, _ -> VString("[" + (many |> List.map formatJsonNode |> String.concat ", ") + "]")
     | _ -> VNull
 
 let private jsonContainsFn: Scalar =
@@ -5745,5 +5768,10 @@ let builtins: Registry =
 
 let internal isUnmodifiedBuiltinAggregate (name: string) (registry: Registry) =
     match lookupAggregate name builtins, lookupAggregate name registry with
+    | Some builtin, Some current -> obj.ReferenceEquals(builtin, current)
+    | _ -> false
+
+let internal isUnmodifiedBuiltinScalar (name: string) (registry: Registry) =
+    match lookup name builtins, lookup name registry with
     | Some builtin, Some current -> obj.ReferenceEquals(builtin, current)
     | _ -> false
