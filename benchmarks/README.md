@@ -97,44 +97,38 @@ round trip from the start).
 
 ### Current latency and scale
 
-The current [10k/50k latency](results/ebc3fca.md) and
-[100k/500k scale](results/ebc3fca-scale.md) runs separate indexed paths from
+The current [10k/50k latency](results/98bc883-quick.md) and
+[100k/500k scale](results/98bc883-scale.md) runs separate indexed paths from
 work that still scans or replans its input:
 
 | Workload | fsdb at 10k | MySQL at 10k | fsdb at 100k | MySQL at 100k |
 |---|---:|---:|---:|---:|
-| Single INSERT | 80 µs | 107 µs | 91 µs | 108 µs |
-| Single-row UPDATE | 133 µs | 107 µs | 130 µs | 122 µs |
-| REPLACE by PK | 96 µs | 132 µs | 109 µs | 146 µs |
-| Secondary range | 126 µs | 44 µs | 151 µs | 61 µs |
-| Indexed join | 4.49 ms | 177 µs | 124 ms | 194 µs |
-| Uncorrelated IN subquery | 103 ms | 149 µs | 1.09 s | 160 µs |
-| GROUP BY aggregate | 87.5 ms | 20.2 ms | 1.17 s | 198 ms |
-| Window query | 343 ms | 46.7 ms | 5.04 s | 715 ms |
-| Natural FULLTEXT | 2.67 ms | 412 µs | 54.7 ms | 3.83 ms |
+| Single INSERT | 299 µs | 124 µs | 404 µs | 115 µs |
+| Single-row UPDATE | 292 µs | 130 µs | 369 µs | 142 µs |
+| REPLACE by PK | 241 µs | 152 µs | 322 µs | 156 µs |
+| Secondary range | 143 µs | 44 µs | 195 µs | 46 µs |
+| Indexed join | 338 µs | 184 µs | 302 µs | 194 µs |
+| Uncorrelated IN subquery | 499 µs | 162 µs | 519 µs | 163 µs |
+| GROUP BY aggregate | 27.2 ms | 20.1 ms | 313 ms | 200 ms |
+| Window query | 85.2 ms | 98.9 ms | 1.21 s | 1.20 s |
+| Natural FULLTEXT | 1.06 ms | 429 µs | 10.3 ms | 3.89 ms |
 
-The point-write and secondary-range slopes are flat. The join, subquery,
-aggregate and window slopes identify planning as the highest-leverage
-performance area. FULLTEXT now uses maintained postings, although its general
-SELECT integration still leaves a visible scale gap.
+Point writes, indexed joins, uncorrelated membership, JSON extraction, and
+secondary ranges retain shallow slopes. Scans, grouping, non-indexed updates,
+decimal membership, and window execution grow with their input. The scale
+window samples have high variance, but both engines finish in the same order
+of magnitude; the old multi-second fsdb-only cliff is gone. FULLTEXT uses
+maintained postings and scales approximately linearly, while the joined query
+remains 6.3x slower than MySQL at 100k articles.
 
-A focused 10k/50k ShortRun after indexed join reordering and subquery
-materialization measured the formerly steep join at 371 µs versus MySQL's
-178 µs, and uncorrelated `IN` at 534 µs versus 155 µs. The remaining
-wide-input costs in that run were `GROUP BY` at 98.2 ms versus 19.9 ms and the
-50k-row window query at 354 ms versus 49.3 ms. These three-iteration numbers
-are diagnostic rather than release-grade, but distinguish the closed planner
-cliffs from the remaining aggregate/window execution gap.
-
-The later [10k/50k quick matrix](results/11463b1-quick.md) includes the
-streaming aggregate path: `GROUP BY` measured 38.9 ms versus MySQL's 26.2 ms,
-and the aggregate view measured 33.8 ms versus 26.0 ms. Aggregate execution is
-therefore no longer a dominant cliff in this dataset. Window execution remains
-the clearest CPU-bound query gap: `ROW_NUMBER` measured 343 ms versus 62.7 ms,
-and `CUME_DIST` 172 ms versus 26.2 ms. FULLTEXT ranged from 2.2x for the boolean
-query to 12.2x for the joined query. ShortRun's three samples make these
-directional measurements; use the scale suite before treating small changes
-as regressions.
+The quick matrix also exposes constant-factor work hidden by slope alone:
+point reads are 237 µs versus 40 µs, recursive CTE evaluation is 953 µs versus
+54 µs, and correlated indexed counts are 1.22 ms versus 207 µs. A sampled CPU
+trace of a saturated recursive-CTE workload attributes most active managed
+time to per-statement query handling, binding, dynamic scope, and `AsyncLocal`
+state transitions rather than the 100-row recursive body itself. That makes
+shared statement setup the next profiling seam, not a special-purpose CTE
+container.
 
 ### Durability-matched (single-connection latency, `ebc3fca-durable.md`)
 
@@ -164,25 +158,26 @@ row-conflict merging:
 | insert | 5,673 | 22,703 |
 | mixed read/write | 20,537 | 47,801 |
 
-The current [worker-scaling run](results/7be1d91-load-scale.md) records both
-completed throughput and retryable lock/deadlock errors:
+The latest [eight-worker run](results/98bc883-load.md) records completed
+throughput with no retryable lock/deadlock errors:
 
-| Workload | fsdb/MySQL at 1 worker | fsdb/MySQL at 16 workers |
-|---|---:|---:|
-| Point read | 0.28x | 0.11x |
-| Distinct UPDATE | 0.97x | 0.23x |
-| Distinct UPSERT | 0.93x | 0.38x |
-| INSERT | 1.35x | 0.61x |
-| Distinct REPLACE | 1.25x | 0.57x |
-| Two-row transaction | 0.64x | 0.18x |
-| Mixed read/write | 0.68x | 0.19x |
+| Workload | fsdb ops/s | MySQL ops/s | fsdb/MySQL |
+|---|---:|---:|---:|
+| Point read | 12,677 | 105,522 | 0.12x |
+| Distinct UPDATE | 4,721 | 11,011 | 0.43x |
+| Hot UPDATE | 6,026 | 15,438 | 0.39x |
+| Distinct UPSERT | 4,225 | 8,085 | 0.52x |
+| INSERT | 5,569 | 15,319 | 0.36x |
+| Distinct REPLACE | 5,662 | 14,255 | 0.40x |
+| Two-row transaction | 2,038 | 9,225 | 0.22x |
+| Mixed read/write | 6,974 | 25,746 | 0.27x |
 
-Single-worker writes are near parity or faster. The falling ratios at higher
-worker counts expose publication/locking contention; 16-worker hot-row UPDATE
-falls to 31 ops/sec despite negligible reported retries, indicating lock
-convoying rather than optimistic abort churn. Multi-worker samples have high
-variance, retained in the raw report, so use the table as scaling evidence
-rather than a narrow regression threshold.
+The default load run is one five-second trial and therefore directional. A
+separate 64-worker prepared-transaction campaign completed 12,800 operations
+with exact MySQL outcome parity and no failures: fsdb reached 781 tx/s at p99
+107 ms, versus MySQL's 266 tx/s at p99 679 ms. That contrast separates the
+engine's efficient hot-account transaction path from the wire and generic
+statement overhead visible in the broad load matrix.
 
 ### Full-text search
 
