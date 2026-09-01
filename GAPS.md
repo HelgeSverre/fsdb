@@ -213,7 +213,7 @@ comparisons; default utf8mb4_0900_ai_ci.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | `Collation` uses ICU CLDR tailoring; tie-break order among primary-equal strings and `WEIGHT_STRING()` textual bytes can differ (equality never does) | low | divergence |
-| Compound-expression collation | string functions derive result collation and coercibility from every argument | comparison operands follow MySQL precedence, but the reported coercibility and result collation of compound strings such as mixed-collation `CONCAT()` remain approximate | low | divergence |
+| Compound-expression collation | string functions derive result collation and coercibility from every argument | `CONCAT`/`CONCAT_WS`, `COALESCE`/`IFNULL`, `IF`, `CASE`, `GREATEST`/`LEAST`, `ELT`, `MAKE_SET`, and source-preserving string transforms derive their collation and coercibility from their arguments; less-common overloaded string results remain approximate | low | divergence |
 | Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with common POSIX character classes and mapped malformed patterns; remaining ICU-only grammar and error-code distinctions can differ | low | divergence |
 | Usable charsets | 40+ charsets with transcoding | `Collation.Charset` supports utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) has the same ceiling | low | refusal |
 | Identifier casing | lower_case_table_names semantics | variable reported; identifiers ordinal-case-folded internally | low | divergence |
@@ -517,10 +517,9 @@ hostile local writer.
 These dated findings remain useful as campaign records, but include behavior
 that later work changed:
 
-- `torture/findings/2026-08-19-json-table-gaps.md` says NESTED PATH, EXISTS
-  PATH, and DEFAULT clauses do not parse; waves W3/W4 shipped them. The
-  remaining true items are ERROR ON EMPTY/ERROR, LEFT JOIN … ON TRUE, and
-  JOIN…USING refusals.
+- `torture/findings/2026-08-19-json-table-gaps.md` predates NESTED PATH,
+  EXISTS PATH, DEFAULT and ERROR clauses, LEFT JOIN, and JOIN USING support.
+  Its listed JSON_TABLE gaps are resolved.
 - The client-contract campaign's four result-type signatures were resolved;
   the 2026-08-21 differential rerun passed every scenario.
 - The 2026-08-17 multi-database campaign predates the sharded database cells,

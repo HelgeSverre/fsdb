@@ -2108,6 +2108,11 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         metadataOfExpr ctx argument
     | FuncCall(name, [ _ ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
         simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | FuncCall(name, [ _ ]) when
+        name.Equals("COLLATION", System.StringComparison.OrdinalIgnoreCase)
+        || name.Equals("CHARSET", System.StringComparison.OrdinalIgnoreCase)
+        ->
+        Some { Value.columnMetadata TypeVarString with ColumnLength = 64u; Flags = NotNullFlag }
     | FuncCall(name, [ _ ]) when name.Equals("SLEEP", System.StringComparison.OrdinalIgnoreCase) ->
         simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | FuncCall(name, [ _; _ ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
@@ -2505,34 +2510,188 @@ let private collationOfColumn (ctx: EvalContext) (column: ColumnDef) : Collation
             |> Option.orElseWith (fun () -> Some ctx.Store.ExecutionSettings.ConnectionCollation)
     | _ -> None
 
-/// The collation a comparison involving `expr` resolves under: an
-/// explicit `expr COLLATE name` tag wins, then a string-typed column's
-/// declared `COLLATE`, then `None` (the caller falls back to the server
-/// default — literal-to-literal semantics).
-let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation option =
-    match expr with
-    | Collate(_, name) -> Collation.tryFind name
-    | _ -> tryColumnDefForExpr ctx expr |> Option.bind (collationOfColumn ctx)
+/// The effective collation and coercibility of a string expression.
+/// Compound functions resolve every result-bearing argument before their
+/// value is evaluated because MySQL rejects incompatible explicit collations
+/// even when control flow would leave one argument unused.
+type private CollationOperand =
+    { Collation: Collation.Collation
+      Coercibility: int
+      Charset: string }
 
-let private coercibilityOfExpr = function
-    | Collate _ -> 0
+let private charsetOfCollation (collation: Collation.Collation) =
+    match collation.Name.IndexOf('_') with
+    | -1 -> collation.Name.ToLowerInvariant()
+    | index -> collation.Name[..index - 1].ToLowerInvariant()
+
+let private isUnicodeCharset charset =
+    charset = "utf8mb4" || charset = "utf8mb3" || charset = "utf8"
+
+let private isBinaryCollation (collation: Collation.Collation) =
+    collation.Name.EndsWith("_bin", System.StringComparison.OrdinalIgnoreCase)
+
+let private operand collation coercibility =
+    { Collation = collation
+      Coercibility = coercibility
+      Charset = charsetOfCollation collation }
+
+let private combineStringCollations operation left right =
+    if left.Coercibility < right.Coercibility then
+        Ok left
+    elif right.Coercibility < left.Coercibility then
+        Ok right
+    elif left.Collation.Name.Equals(right.Collation.Name, System.StringComparison.OrdinalIgnoreCase) then
+        Ok left
+    elif left.Coercibility = 0 then
+        Error(
+            1267,
+            sprintf
+                "Illegal mix of collations (%s,EXPLICIT) and (%s,EXPLICIT) for operation '%s'"
+                left.Collation.Name
+                right.Collation.Name
+                operation
+        )
+    elif left.Charset = right.Charset then
+        match isBinaryCollation left.Collation, isBinaryCollation right.Collation with
+        | true, _ -> Ok left
+        | _, true -> Ok right
+        | _ ->
+            match Collation.tryFind (left.Charset + "_bin") with
+            | Some collation -> Ok(operand collation 1)
+            | None -> Error(1267, sprintf "Illegal mix of collations for operation '%s'" operation)
+    elif left.Charset = "binary" then
+        Ok left
+    elif right.Charset = "binary" then
+        Ok right
+    elif isUnicodeCharset left.Charset <> isUnicodeCharset right.Charset then
+        Ok(if isUnicodeCharset left.Charset then left else right)
+    elif left.Charset = "latin1" || right.Charset = "ascii" then
+        Ok left
+    elif right.Charset = "latin1" || left.Charset = "ascii" then
+        Ok right
+    else
+        Error(1267, sprintf "Illegal mix of collations for operation '%s'" operation)
+
+let private compoundStringArguments = function
+    | FuncCall(name, args) ->
+        match name.ToUpperInvariant(), args with
+        | ("CONCAT" | "CONCAT_WS" | "COALESCE" | "GREATEST" | "LEAST"), values -> Some(name.ToLowerInvariant(), values)
+        | "IFNULL", values -> Some("ifnull", values)
+        | "IF", [ _; whenTrue; whenFalse ] -> Some("if", [ whenTrue; whenFalse ])
+        | "ELT", _ :: values -> Some("elt", values)
+        | "MAKE_SET", _ :: values -> Some("make_set", values)
+        | _ -> None
+    | Case(_, branches, fallback) ->
+        Some("case", (branches |> List.map snd) @ (fallback |> Option.toList))
+    | _ -> None
+
+let private inheritedStringArgument = function
+    | FuncCall(name, [ _; value ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) -> Some value
+    | FuncCall(name, first :: _) when
+        match name.ToUpperInvariant() with
+        | "UPPER"
+        | "UCASE"
+        | "LOWER"
+        | "LCASE"
+        | "REVERSE"
+        | "SUBSTRING"
+        | "SUBSTR"
+        | "LEFT"
+        | "RIGHT"
+        | "TRIM"
+        | "LTRIM"
+        | "RTRIM"
+        | "REPLACE"
+        | "INSERT"
+        | "REPEAT"
+        | "LPAD"
+        | "RPAD"
+        | "NULLIF"
+        | "ANY_VALUE" -> true
+        | _ -> false
+        -> Some first
+    | _ -> None
+
+let private builtinCompoundStringArguments ctx expression =
+    match expression, compoundStringArguments expression with
+    | FuncCall(name, _), Some _ when not (Functions.isUnmodifiedBuiltinScalar name ctx.Registry) -> None
+    | _, result -> result
+
+let private builtinInheritedStringArgument ctx expression =
+    match expression, inheritedStringArgument expression with
+    | FuncCall(name, _), Some _ when not (Functions.isUnmodifiedBuiltinScalar name ctx.Registry) -> None
+    | _, result -> result
+
+let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Result<CollationOperand, EvalError> =
+    let connection coercibility = operand ctx.Store.ExecutionSettings.ConnectionCollation coercibility
+    let named name coercibility =
+        match Collation.tryFind name with
+        | Some collation -> Ok(operand collation coercibility)
+        | None -> Error(1273, sprintf "Unknown collation: '%s'" name)
+
+    match expression with
+    | Collate(_, name) ->
+        named name 0
+    | Lit(VBytes _)
+    | Lit(VBit _) ->
+        named "binary" 4
     | Col _
-    | QualifiedCol _ -> 2
-    | FuncCall(name, _) ->
+    | QualifiedCol _ ->
+        match tryColumnDefForExpr ctx expression with
+        | Some column ->
+            match collationOfColumn ctx column with
+            | Some collation -> Ok(operand collation 2)
+            | None ->
+                match column.Type with
+                | TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob | TBit _ -> named "binary" 2
+                | _ -> Ok(connection 2)
+        | None -> Ok(connection 2)
+    | Lit VNull -> named "binary" 6
+    | Lit(VString _) -> Ok(connection 4)
+    | Lit(VJson _) -> named "utf8mb4_bin" 4
+    | Lit _ -> named "binary" 5
+    | Cast(_, (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _)) -> Ok(connection 2)
+    | Cast(_, TJson) -> named "utf8mb4_bin" 2
+    | Cast(_, (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob | TBit _)) -> named "binary" 2
+    | Cast _ -> named "binary" 5
+    | FuncCall(name, _) when
         match name.ToUpperInvariant() with
         | "USER"
         | "CURRENT_USER"
         | "SESSION_USER"
         | "SYSTEM_USER"
         | "VERSION"
-        | "DATABASE" -> 3
-        | _ -> 4
-    | Lit(VString _)
-    | Lit(VBytes _)
-    | Lit(VJson _) -> 4
-    | Lit VNull -> 6
-    | Lit _ -> 5
-    | _ -> 4
+        | "DATABASE" -> true
+        | _ -> false
+        -> Ok(connection 3)
+    | expression ->
+        match builtinCompoundStringArguments ctx expression with
+        | Some(operation, values) ->
+            values
+            |> Storage.traverse (expressionCollation ctx)
+            |> Result.bind (function
+                | [] -> Ok(connection 4)
+                | first :: rest -> rest |> List.fold (fun state value -> state |> Result.bind (fun current -> combineStringCollations operation current value)) (Ok first))
+        | None ->
+            match builtinInheritedStringArgument ctx expression with
+            | Some source -> expressionCollation ctx source
+            | None -> Ok(connection 4)
+
+let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation option =
+    expressionCollation ctx expr |> Result.toOption |> Option.map _.Collation
+
+let private coercibilityOfExpr ctx expr =
+    expressionCollation ctx expr
+    |> Result.map _.Coercibility
+    |> Result.defaultValue 4
+
+let private normalizeCompoundString descriptor value =
+    match descriptor.Charset, value with
+    | "binary", _ -> value
+    | "latin1", VBytes bytes -> VString(Collation.Charset.decodeLatin1Bytes bytes)
+    | "ascii", VBytes bytes -> VString(Collation.Charset.decodeAsciiBytes bytes)
+    | _, VBytes bytes -> VString(System.Text.Encoding.UTF8.GetString bytes)
+    | _ -> value
 
 /// The collation an equality-classified key resolves under: an explicit
 /// `expr COLLATE`, then a string column's own collation, then the
@@ -3093,24 +3252,12 @@ let private resolvedComparisonCollation
     (expression: Expr)
     (column: ColumnDef option)
     : Collation.Collation option =
-    resolvedCollation ctx expression
-    |> Option.orElseWith (fun () -> column |> Option.bind (collationOfColumn ctx))
-
-type private CollationOperand =
-    { Collation: Collation.Collation
-      Coercibility: int
-      Charset: string }
-
-let private charsetOfCollation (collation: Collation.Collation) =
-    match collation.Name.IndexOf('_') with
-    | -1 -> collation.Name.ToLowerInvariant()
-    | index -> collation.Name[..index - 1].ToLowerInvariant()
-
-let private isUnicodeCharset charset =
-    charset = "utf8mb4" || charset = "utf8mb3" || charset = "utf8"
-
-let private isBinaryCollation (collation: Collation.Collation) =
-    collation.Name.EndsWith("_bin", System.StringComparison.OrdinalIgnoreCase)
+    match expression with
+    | Collate _ -> resolvedCollation ctx expression
+    | _ ->
+        column
+        |> Option.bind (collationOfColumn ctx)
+        |> Option.orElseWith (fun () -> resolvedCollation ctx expression)
 
 let private coercibilityName = function
     | 0 -> "EXPLICIT"
@@ -3134,7 +3281,7 @@ let private collationOperand
         match expression, column with
         | Collate _, _ -> 0
         | _, Some column when collationOfColumn ctx column |> Option.isSome -> 2
-        | _ -> coercibilityOfExpr expression
+        | _ -> coercibilityOfExpr ctx expression
 
     { Collation = collation
       Coercibility = coercibility
@@ -4048,45 +4195,48 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                             else VInt 1L))
     | Distinct e
     | OrderBy(e, _) -> eval e
-    | Case(subject, whens, elseBranch) ->
+    | (Case(subject, whens, elseBranch) as caseExpression) ->
         let fallback () =
             match elseBranch with
             | Some e -> eval e
             | None -> Ok VNull
 
-        match subject with
-        | Some se ->
-            eval se
-            |> Result.bind (fun sv ->
+        let evaluate () =
+            match subject with
+            | Some se ->
+                eval se
+                |> Result.bind (fun sv ->
+                    let rec tryWhens =
+                        function
+                        | [] -> fallback ()
+                        | (whenExpr, resExpr) :: rest ->
+                            eval whenExpr
+                            |> Result.bind (fun wv ->
+                                comparisonResult
+                                    ctx
+                                    se
+                                    (tryColumnDefForExpr ctx se)
+                                    sv
+                                    whenExpr
+                                    (tryColumnDefForExpr ctx whenExpr)
+                                    Eq
+                                    wv
+                                |> Result.bind (function
+                                    | VInt 1L -> eval resExpr
+                                    | _ -> tryWhens rest))
+
+                    tryWhens whens)
+            | None ->
                 let rec tryWhens =
                     function
                     | [] -> fallback ()
-                    | (whenExpr, resExpr) :: rest ->
-                        eval whenExpr
-                        |> Result.bind (fun wv ->
-                            comparisonResult
-                                ctx
-                                se
-                                (tryColumnDefForExpr ctx se)
-                                sv
-                                whenExpr
-                                (tryColumnDefForExpr ctx whenExpr)
-                                Eq
-                                wv
-                            |> Result.bind (function
-                                | VInt 1L -> eval resExpr
-                                | _ -> tryWhens rest))
+                    | (condExpr, resExpr) :: rest ->
+                        eval condExpr
+                        |> Result.bind (fun cv -> if truthy cv = Some true then eval resExpr else tryWhens rest)
 
-                tryWhens whens)
-        | None ->
-            let rec tryWhens =
-                function
-                | [] -> fallback ()
-                | (condExpr, resExpr) :: rest ->
-                    eval condExpr
-                    |> Result.bind (fun cv -> if truthy cv = Some true then eval resExpr else tryWhens rest)
+                tryWhens whens
 
-            tryWhens whens
+        expressionCollation ctx caseExpression |> Result.bind (fun _ -> evaluate ())
     | Between(e, lo, hi) ->
         eval e
         |> Result.bind (fun ve ->
@@ -4111,7 +4261,11 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | Some column -> Error(1364, sprintf "Field '%s' doesn't have a default value" column.Name)
         | None -> Error(1054, "Unknown column in 'field list'")
     | FuncCall(name, [ argument ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
-        Ok(VInt(int64 (coercibilityOfExpr argument)))
+        expressionCollation ctx argument |> Result.map (fun descriptor -> VInt(int64 descriptor.Coercibility))
+    | FuncCall(name, [ argument ]) when name.Equals("COLLATION", System.StringComparison.OrdinalIgnoreCase) ->
+        expressionCollation ctx argument |> Result.map (fun descriptor -> VString descriptor.Collation.Name)
+    | FuncCall(name, [ argument ]) when name.Equals("CHARSET", System.StringComparison.OrdinalIgnoreCase) ->
+        expressionCollation ctx argument |> Result.map (fun descriptor -> VString descriptor.Charset)
     | FuncCall(name, [ argument ]) when name.Equals("SLEEP", System.StringComparison.OrdinalIgnoreCase) ->
         eval argument
         |> Result.bind (fun value ->
@@ -4208,29 +4362,38 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | None when name.Contains('.', System.StringComparison.Ordinal) -> None
             | None -> Functions.lookup (ctx.DbName + "." + name) ctx.Registry
 
-        match scalar with
-        | None -> Error(unknownFunction name)
-        | Some fn ->
-            args
-            |> traverse eval
-            |> Result.bind (fun values ->
-                try
-                    let values =
-                        List.zip args values
-                        |> List.mapi (fun index (expression, value) ->
-                            if Functions.isTextArgument name index ctx.Registry then
-                                displayValueForText ctx expression value
-                            else
-                                value)
+        let compoundDescriptor () =
+            match builtinCompoundStringArguments ctx (FuncCall(name, args)) with
+            | Some _ -> expressionCollation ctx (FuncCall(name, args)) |> Result.map Some
+            | None -> Ok None
 
-                    let invoke () = fn values
+        compoundDescriptor ()
+        |> Result.bind (fun descriptor ->
+            match scalar with
+            | None -> Error(unknownFunction name)
+            | Some fn ->
+                args
+                |> traverse eval
+                |> Result.bind (fun values ->
+                    try
+                        let values =
+                            List.zip args values
+                            |> List.mapi (fun index (expression, value) ->
+                                if Functions.isTextArgument name index ctx.Registry then
+                                    displayValueForText ctx expression value
+                                else
+                                    value)
 
-                    match registryAccount ctx.Registry with
-                    | Some account ->
-                        DynamicScope.withValue scalarExecutionAccount (Some account) invoke |> Ok
-                    | None -> Ok(invoke ())
-                with Diagnostics.EvaluationError(code, message) ->
-                    Error(code, message))
+                        let invoke () =
+                            let value = fn values
+                            descriptor |> Option.map (fun descriptor -> normalizeCompoundString descriptor value) |> Option.defaultValue value
+
+                        match registryAccount ctx.Registry with
+                        | Some account ->
+                            DynamicScope.withValue scalarExecutionAccount (Some account) invoke |> Ok
+                        | None -> Ok(invoke ())
+                    with Diagnostics.EvaluationError(code, message) ->
+                        Error(code, message)))
     // `expr COLLATE name` evaluates as its inner expression — the tag
     // only steers which collation comparisons resolve under.
     | Collate(e, _) -> eval e

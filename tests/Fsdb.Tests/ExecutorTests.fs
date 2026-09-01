@@ -2243,6 +2243,56 @@ let tests =
                     | ResultSet(_, [ [ Some "0"; Some "2"; Some "3"; Some "4"; Some "5"; Some "6" ] ]) -> ()
                     | other -> failtestf "unexpected coercibility classes: %A" other
 
+                testCase "compound string expressions derive collation and coercibility from their arguments"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE compound_collations (ai VARCHAR(10) COLLATE utf8mb4_0900_ai_ci, general VARCHAR(10) COLLATE utf8mb4_general_ci, bin VARCHAR(10) COLLATE utf8mb4_bin, latin VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_swedish_ci)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO compound_collations VALUES ('A', 'a', 'a', 'a')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT COLLATION(CONCAT(ai, 'x')), COERCIBILITY(CONCAT(ai, 'x')), COLLATION(CONCAT(ai, bin)), COERCIBILITY(CONCAT(ai, bin)), COLLATION(CONCAT(ai, general)), COERCIBILITY(CONCAT(ai, general)), COLLATION(CONCAT(ai, latin)), COERCIBILITY(CONCAT(ai, latin)), COLLATION(CONCAT('a', 'b')), COERCIBILITY(CONCAT('a', 'b')) FROM compound_collations"
+                    with
+                    | ResultSet(
+                        _,
+                        [ [ Some "utf8mb4_0900_ai_ci"; Some "2"
+                            Some "utf8mb4_bin"; Some "2"
+                            Some "utf8mb4_bin"; Some "1"
+                            Some "utf8mb4_0900_ai_ci"; Some "2"
+                            Some "utf8mb4_0900_ai_ci"; Some "4" ] ]
+                      ) -> ()
+                    | other -> failtestf "unexpected compound collation descriptors: %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT CONCAT(ai, general) = 'Aa', CONCAT(ai, general) = 'aa', COALESCE(ai, bin) = 'a', IF(1, ai, bin) = 'a', (CASE WHEN 1 THEN ai ELSE bin END) = 'a', CHARSET(CONCAT(ai, latin)) FROM compound_collations"
+                    with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "0"; Some "0"; Some "0"; Some "utf8mb4" ] ]) -> ()
+                    | other -> failtestf "expected compound expressions to use their derived collations, got %A" other
+
+                    match runDefault store "SELECT COLLATION(CONCAT(X'41', 'a')), CHARSET(CONCAT(X'41', 'a')), COERCIBILITY(CONCAT(X'41', 'a')), CONCAT(ai, X'61') = 'aa', CONCAT(X'41', 'a') = 'aa' FROM compound_collations" with
+                    | ResultSet(_, [ [ Some "binary"; Some "binary"; Some "4"; Some "1"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected raw bytes to make CONCAT binary, got %A" other
+
+                    match runDefault store "SELECT COLLATION(NULL), CHARSET(NULL), COLLATION(1), CHARSET(1), COLLATION(CAST('a' AS BINARY)), COERCIBILITY(CAST('a' AS BINARY)), COLLATION(CAST('a' AS CHAR)), COERCIBILITY(CAST('a' AS CHAR))" with
+                    | ResultSet(_, [ [ Some "binary"; Some "binary"; Some "binary"; Some "binary"; Some "binary"; Some "2"; Some "utf8mb4_0900_ai_ci"; Some "2" ] ]) -> ()
+                    | other -> failtestf "unexpected scalar collation descriptors: %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT CONCAT(ai COLLATE utf8mb4_bin, general COLLATE utf8mb4_general_ci) FROM compound_collations"
+                    with
+                    | Err(1267, message) -> Expect.stringContains message "operation 'concat'" "function name"
+                    | other -> failtestf "expected conflicting explicit CONCAT collations to fail, got %A" other
+
                 testCase "equal-rank collations resolve symmetrically"
                 <| fun _ ->
                     let store = newStore ()
