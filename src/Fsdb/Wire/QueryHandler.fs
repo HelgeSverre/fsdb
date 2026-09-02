@@ -1633,13 +1633,6 @@ let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", Rege
 let private setDefaultRoleStatement = Regex(@"^SET\s+DEFAULT\s+ROLE(?:\s|$)", RegexOptions.IgnoreCase)
 let private setRoleStatement = Regex(@"^SET\s+ROLE(?:\s|$)", RegexOptions.IgnoreCase)
 
-type private DirtyTransactionView =
-    { BaseCatalog: Catalog
-      Snapshot: Store }
-
-let private dirtyTransactionViews =
-    ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<int, DirtyTransactionView>>()
-
 let private xaTransactions =
     ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<Xa.Xid, int>>()
 
@@ -1654,20 +1647,15 @@ let private removeXaAssociation (session: Session) xid =
         | true, owner when owner = session.ConnectionId -> entries.TryRemove xid |> ignore
         | _ -> ())
 
-let private transactionViews (store: Store) =
-    dirtyTransactionViews.GetValue(store.Databases, fun _ -> ConcurrentDictionary<int, DirtyTransactionView>())
-
 let private removeTransactionView (session: Session) =
-    match dirtyTransactionViews.TryGetValue session.Store.Databases with
-    | true, views -> views.TryRemove session.ConnectionId |> ignore
-    | false, _ -> ()
+    TransactionRegistry.remove session.Store session.ConnectionId
 
 let private syncTransactionView (session: Session) =
     match session.Tx with
     | Some transaction when transaction.Seeded ->
-        let views = transactionViews session.Store
-
-        views.[session.ConnectionId] <-
+        TransactionRegistry.publish
+            session.Store
+            session.ConnectionId
             { BaseCatalog = transaction.BaseCatalog
               Snapshot = transaction.Snapshot }
     | _ -> removeTransactionView session
@@ -1692,11 +1680,8 @@ let private readUncommittedBase (session: Session) =
     let _, initial = Storage.beginTransactionSnapshotWithBase session.Store
     let mutable snapshot = initial
 
-    transactionViews session.Store
-    |> Seq.filter (fun entry -> entry.Key <> session.ConnectionId)
-    |> Seq.sortBy _.Key
-    |> Seq.iter (fun entry ->
-        let view = entry.Value
+    TransactionRegistry.others session.Store session.ConnectionId
+    |> List.iter (fun view ->
         let candidate = Storage.beginTransactionSnapshotFromCatalog session.Store snapshot.Catalog
 
         try

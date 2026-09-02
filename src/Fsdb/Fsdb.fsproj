@@ -37,6 +37,7 @@
     <Compile Include="Engine/PagedVector.fs" />
     <Compile Include="Engine/RowStore.fs" />
     <Compile Include="Engine/Storage.fs" />
+    <Compile Include="Engine/TransactionRegistry.fs" />
     <Compile Include="Engine/Auth.fs" />
     <Compile Include="Engine/TableLocks.fs" />
     <Compile Include="Engine/Persistence.fs" />
