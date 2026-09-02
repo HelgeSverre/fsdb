@@ -3894,21 +3894,34 @@ let private accountLock: Parser<bool, unit> =
     keyword "ACCOUNT"
     >>. ((keyword "LOCK" >>% true) <|> (keyword "UNLOCK" >>% false))
 
+let private accountAttribute: Parser<AccountAttribute, unit> =
+    (keyword "COMMENT" >>. stringLit
+     |>> (function
+         | VString comment -> AccountComment comment
+         | _ -> AccountComment ""))
+    <|> (keyword "ATTRIBUTE" >>. stringLit
+         |>> (function
+             | VString json -> AccountAttributeJson json
+             | _ -> AccountAttributeJson ""))
+
 let private accountOptions: Parser<AccountOptions, unit> =
     opt accountTlsRequirement
     .>>. opt accountResourceLimits
     .>>. opt passwordExpiration
     .>>. opt accountLock
-    |>> fun (((tls, resources), expiration), locked) ->
+    .>>. opt accountAttribute
+    |>> fun ((((tls, resources), expiration), locked), attribute) ->
         { TlsRequirement = tls
           ResourceLimits = Option.defaultValue AccountOptions.empty.ResourceLimits resources
           PasswordExpiration = expiration
-          Locked = locked }
+          Locked = locked
+          Attribute = attribute }
 
 let private hasAccountOptions (options: AccountOptions) =
     options.TlsRequirement.IsSome
     || options.PasswordExpiration.IsSome
     || options.Locked.IsSome
+    || options.Attribute.IsSome
     || options.ResourceLimits <> AccountOptions.empty.ResourceLimits
 
 let private createUserStmt: Parser<Statement, unit> =

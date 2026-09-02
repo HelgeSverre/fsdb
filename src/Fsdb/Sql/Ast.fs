@@ -744,11 +744,16 @@ type PasswordExpiration =
     | NeverExpirePassword
     | ExpirePasswordAfterDays of uint16
 
+type AccountAttribute =
+    | AccountComment of string
+    | AccountAttributeJson of string
+
 type AccountOptions =
     { TlsRequirement: AccountTlsRequirement option
       ResourceLimits: AccountResourceLimits
       PasswordExpiration: PasswordExpiration option
-      Locked: bool option }
+      Locked: bool option
+      Attribute: AccountAttribute option }
 
 module AccountOptions =
     let empty =
@@ -759,7 +764,8 @@ module AccountOptions =
               MaxConnectionsPerHour = None
               MaxUserConnections = None }
           PasswordExpiration = None
-          Locked = None }
+          Locked = None
+          Attribute = None }
 
 type ExplainFormat =
     | ExplainTraditional

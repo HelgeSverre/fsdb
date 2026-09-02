@@ -1012,7 +1012,8 @@ let tests =
                             MaxQueriesPerHour = Some 11u
                             MaxUserConnections = Some 2u }
                       PasswordExpiration = Some(ExpirePasswordAfterDays 30us)
-                      Locked = Some true }
+                      Locked = Some true
+                      Attribute = Some(AccountAttributeJson "{\"team\":\"storage\"}") }
 
               Fsdb.Auth.createUserWithOptions store "alice" "%" (Some "pw1") options |> ignore
               Fsdb.Auth.createUser store "alice" "localhost" (Some "local") |> ignore
@@ -1033,6 +1034,10 @@ let tests =
                   let limits = Fsdb.Auth.accountLimits cols row
                   Expect.equal limits.MaxQuestions 11u "replayed query limit"
                   Expect.equal limits.MaxUserConnections 2u "replayed connection limit"
+                  Expect.equal
+                      (Fsdb.Auth.accountAttributeText cols row)
+                      (Some "{\"team\": \"storage\"}")
+                      "replayed account attribute"
 
                   match Fsdb.Auth.renderCreateUserForAccount reloaded (Fsdb.Auth.account "alice" "%") with
                   | Ok(_, ddl) -> Expect.stringContains ddl "PASSWORD EXPIRE INTERVAL 30 DAY" "replayed password lifetime"

@@ -313,9 +313,9 @@ shapes, oracle-verified). `CREATE USER` / `DROP USER` / `ALTER USER` /
 `SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
 path; passwords are mysql_native_password hashes verified at the handshake
 (with an AuthSwitchRequest for clients that answer with caching_sha2 first);
-account locks, TLS requirements, explicit and global-default password lifetimes, the
-expired-password reset sandbox, and per-hour/per-connection resource limits
-are enforced;
+account locks, TLS requirements, explicit and global-default password lifetimes,
+mergeable JSON attributes/comments, the expired-password reset sandbox, and
+per-hour/per-connection resource limits are enforced;
 statements are privilege-checked at global, database, table, and column scope with
 MySQL's 1045/1142/1044/1227 error shapes. `SHOW GRANTS [FOR user]`,
 `SHOW PRIVILEGES` (8.4's 73 rows), `information_schema.USER_PRIVILEGES`, and

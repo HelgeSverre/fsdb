@@ -82,7 +82,7 @@ refuses it through the prepared-statement protocol.
 | `GRANT PROXY` remains absent; role DDL, grants, admin option, transitive inheritance, default roles, session activation, metadata, and `SHOW GRANTS ... USING` are supported | low | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
-| `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`/`X509`, per-account query/update/connection limits, explicit and global-default password lifetimes, and the expired-password reset sandbox. Auth-plugin selection, issuer/subject/cipher requirements, and password history/reuse/current policy remain absent | medium | refusal |
+| `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`/`X509`, per-account query/update/connection limits, explicit and global-default password lifetimes, mergeable JSON attributes/comments, and the expired-password reset sandbox. Auth-plugin selection, issuer/subject/cipher requirements, and password history/reuse/current policy remain absent | medium | refusal |
 
 ### SELECT-level syntax gaps
 
@@ -424,7 +424,7 @@ the statement.
 
 Working: mysql.user with MySQL 8.4's exact 51-column order, root bootstrap,
 SHA1-double password hashing with constant-time compare, CREATE/DROP/ALTER
-USER with account lock, TLS requirements, explicit/default password expiry, and resource limits,
+USER with account lock, TLS requirements, explicit/default password expiry, resource limits, and mergeable JSON attributes/comments,
 SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
 level-shaped denials (1045/1044/1142), GRANT OPTION checked at target level,
 fail-closed unknown privileges, dynamic global privileges with individual grant options,
@@ -440,7 +440,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
-| Advanced account policy | auth-plugin selection and password history/reuse/current policy | explicit/default expiry lifetimes and resource limits are enforced; advanced policy clauses remain absent | low | refusal |
+| Advanced account policy | auth-plugin selection and password history/reuse/current policy | explicit/default expiry lifetimes, resource limits, and account attributes/comments are enforced; advanced policy clauses remain absent | low | refusal |
 | Proxy users | supported | absent | low | refusal |
 | SHOW GRANTS completeness | includes role, dynamic-privilege, and PROXY lines | role/dynamic lines and `USING` materialization work; PROXY lines are absent | low | divergence |
 | System-table coverage | ~38 mysql.* tables | `Storage.mysqlSystemDatabase` provides the account/grant, trigger/view/constraint, routine, and event catalogs used by supported features | low | divergence |

@@ -3016,7 +3016,8 @@ let tests =
                         { TlsRequirement = Some RequireSsl
                           ResourceLimits = resources
                           PasswordExpiration = Some(ExpirePasswordAfterDays 180us)
-                          Locked = Some true }
+                          Locked = Some true
+                          Attribute = None }
 
                     Expect.equal
                         (parseOk
@@ -3042,6 +3043,28 @@ let tests =
                     Expect.isError (parse "CREATE USER app PASSWORD EXPIRE INTERVAL 0 DAY") "zero lifetime"
                     Expect.isError (parse "CREATE USER app PASSWORD EXPIRE INTERVAL 65536 DAY") "oversized lifetime"
                     Expect.isError (parse "CREATE USER app WITH MAX_QUERIES_PER_HOUR 4294967296") "oversized resource limit"
+
+                testCase "CREATE and ALTER USER parse comments and JSON attributes"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE USER app COMMENT 'service account'")
+                        (CreateUser(
+                            [ "app", "%", None ],
+                            false,
+                            { AccountOptions.empty with Attribute = Some(AccountComment "service account") }
+                        ))
+                        "comment"
+
+                    Expect.equal
+                        (parseOk "ALTER USER app ATTRIBUTE '{\"team\":\"db\"}'")
+                        (AlterUser(
+                            "app",
+                            "%",
+                            None,
+                            false,
+                            { AccountOptions.empty with Attribute = Some(AccountAttributeJson "{\"team\":\"db\"}") }
+                        ))
+                        "JSON attribute"
 
                 testCase "CREATE ROLE and DROP ROLE parse account lists"
                 <| fun _ ->

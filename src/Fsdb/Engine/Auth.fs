@@ -6,6 +6,7 @@ open System.Collections.Generic
 open System.Net
 open System.Security.Cryptography
 open System.Text.Json
+open System.Text.Json.Nodes
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
@@ -535,6 +536,67 @@ let private initialPasswordExpiration = function
 let private resourceLimitValue value =
     VInt(int64 (Option.defaultValue 0u value))
 
+let private compareAccountMetadataKey (left: string) (right: string) =
+    let leftBytes = Text.Encoding.UTF8.GetBytes left
+    let rightBytes = Text.Encoding.UTF8.GetBytes right
+    let lengthOrder = Operators.compare leftBytes.Length rightBytes.Length
+    if lengthOrder <> 0 then lengthOrder else Operators.compare leftBytes rightBytes
+
+let private canonicalAccountMetadata (source: JsonObject) =
+    let result = JsonObject()
+
+    source
+    |> Seq.sortWith (fun left right -> compareAccountMetadataKey left.Key right.Key)
+    |> Seq.iter (fun entry -> result[entry.Key] <- if isNull entry.Value then null else entry.Value.DeepClone())
+
+    result
+
+let private parseAccountAttribute = function
+    | AccountComment comment ->
+        let metadata = JsonObject()
+        metadata["comment"] <- JsonValue.Create comment
+        Ok metadata
+    | AccountAttributeJson json ->
+        match Functions.jsonParseDocument json with
+        | Ok(:? JsonObject as metadata) -> Ok(canonicalAccountMetadata metadata)
+        | _ -> Error(3982, "The user attribute must be a valid JSON object")
+
+let private storedAccountAttributes (metadata: JsonObject) =
+    let wrapper = JsonObject()
+    wrapper["metadata"] <- canonicalAccountMetadata metadata
+    VJson(Functions.jsonNodeText wrapper)
+
+let private storedAccountMetadata (cols: ColumnDef list) (row: Value[]) =
+    match userColumnValue cols row "User_attributes" with
+    | Some(VJson json) ->
+        match Functions.jsonParseDocument json with
+        | Ok(:? JsonObject as wrapper) ->
+            match wrapper["metadata"] with
+            | :? JsonObject as metadata -> Some(canonicalAccountMetadata metadata)
+            | _ -> Some(canonicalAccountMetadata wrapper)
+        | _ -> None
+    | _ -> None
+
+let accountAttributeText (cols: ColumnDef list) (row: Value[]) =
+    storedAccountMetadata cols row |> Option.map Functions.jsonNodeText
+
+let private createAccountAttributeValue = function
+    | None -> Ok VNull
+    | Some attribute -> parseAccountAttribute attribute |> Result.map storedAccountAttributes
+
+let private mergeAccountAttribute cols row attribute =
+    parseAccountAttribute attribute
+    |> Result.map (fun patch ->
+        let metadata = storedAccountMetadata cols row |> Option.defaultWith (fun () -> JsonObject())
+
+        for entry in patch do
+            if isNull entry.Value then
+                metadata.Remove entry.Key |> ignore
+            else
+                metadata[entry.Key] <- entry.Value.DeepClone()
+
+        "User_attributes", storedAccountAttributes metadata)
+
 let createUserWithOptions
     (store: Store)
     (name: string)
@@ -547,42 +609,46 @@ let createUserWithOptions
     if (tryUserRowForAccount store wanted).IsSome then
         operationFailed "CREATE USER" name host
     else
-        let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
-        let expired, lifetime = initialPasswordExpiration options.PasswordExpiration
+        createAccountAttributeValue options.Attribute
+        |> Result.bind (fun attributes ->
+            let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
+            let expired, lifetime = initialPasswordExpiration options.PasswordExpiration
 
-        let columns =
-            [ "Host"
-              "User"
-              "plugin"
-              "authentication_string"
-              "ssl_type"
-              "max_questions"
-              "max_updates"
-              "max_connections"
-              "max_user_connections"
-              "password_expired"
-              "password_last_changed"
-              "password_lifetime"
-              "account_locked" ]
+            let columns =
+                [ "Host"
+                  "User"
+                  "plugin"
+                  "authentication_string"
+                  "ssl_type"
+                  "max_questions"
+                  "max_updates"
+                  "max_connections"
+                  "max_user_connections"
+                  "password_expired"
+                  "password_last_changed"
+                  "password_lifetime"
+                  "account_locked"
+                  "User_attributes" ]
 
-        let values =
-            [ VString wanted.Host
-              VString name
-              VString "mysql_native_password"
-              VString hash
-              VString(options.TlsRequirement |> Option.defaultValue RequireNone |> sslType)
-              resourceLimitValue options.ResourceLimits.MaxQueriesPerHour
-              resourceLimitValue options.ResourceLimits.MaxUpdatesPerHour
-              resourceLimitValue options.ResourceLimits.MaxConnectionsPerHour
-              resourceLimitValue options.ResourceLimits.MaxUserConnections
-              expired
-              VDateTime(Functions.truncateToSecond DateTime.Now)
-              lifetime
-              VString(if Option.defaultValue false options.Locked then "Y" else "N") ]
+            let values =
+                [ VString wanted.Host
+                  VString name
+                  VString "mysql_native_password"
+                  VString hash
+                  VString(options.TlsRequirement |> Option.defaultValue RequireNone |> sslType)
+                  resourceLimitValue options.ResourceLimits.MaxQueriesPerHour
+                  resourceLimitValue options.ResourceLimits.MaxUpdatesPerHour
+                  resourceLimitValue options.ResourceLimits.MaxConnectionsPerHour
+                  resourceLimitValue options.ResourceLimits.MaxUserConnections
+                  expired
+                  VDateTime(Functions.truncateToSecond DateTime.Now)
+                  lifetime
+                  VString(if Option.defaultValue false options.Locked then "Y" else "N")
+                  attributes ]
 
-        match insertRows store "mysql" "user" (Some columns) [ values ] with
-        | Ok _ -> Ok()
-        | Error error -> Error(toMySqlError error)
+            match insertRows store "mysql" "user" (Some columns) [ values ] with
+            | Ok _ -> Ok()
+            | Error error -> Error(toMySqlError error))
 
 let createUserWithTlsRequirement
     (store: Store)
@@ -812,28 +878,37 @@ let alterUser
     : Result<unit, int * string> =
     let wanted = account name host
 
-    if (tryUserRowForAccount store wanted).IsNone then
-        operationFailed "ALTER USER" name host
-    else
-        let changes =
-            match password with
-            | None -> accountOptionChanges options
-            | Some password ->
-                [ "authentication_string", VString(if password = "" then "" else nativePasswordHash password)
-                  "password_expired", VString "N"
-                  "password_last_changed", VDateTime(Functions.truncateToSecond DateTime.Now) ]
-                @ accountOptionChanges options
+    match tryUserRowForAccount store wanted with
+    | None -> operationFailed "ALTER USER" name host
+    | Some(cols, row) ->
+        let attributeChange =
+            match options.Attribute with
+            | None -> Ok None
+            | Some attribute -> mergeAccountAttribute cols row attribute |> Result.map Some
 
-        let updated =
-            if changes.IsEmpty then
-                Ok 0
-            else
-                updateSystemRows store "user" (matchUserRow wanted) changes
+        attributeChange
+        |> Result.bind (fun attributeChange ->
+            let baseChanges =
+                match password with
+                | None -> accountOptionChanges options
+                | Some password ->
+                    [ "authentication_string", VString(if password = "" then "" else nativePasswordHash password)
+                      "password_expired", VString "N"
+                      "password_last_changed", VDateTime(Functions.truncateToSecond DateTime.Now) ]
+                    @ accountOptionChanges options
 
-        updated
-        |> Result.map (fun _ ->
-            if hasResourceLimitChanges options.ResourceLimits then
-                resetAccountResources store wanted)
+            let changes = baseChanges @ Option.toList attributeChange
+
+            let updated =
+                if changes.IsEmpty then
+                    Ok 0
+                else
+                    updateSystemRows store "user" (matchUserRow wanted) changes
+
+            updated
+            |> Result.map (fun _ ->
+                if hasResourceLimitChanges options.ResourceLimits then
+                    resetAccountResources store wanted))
 
 let alterUserOptions (store: Store) (name: string) (host: string) (options: AccountOptions) : Result<unit, int * string> =
     alterUser store name host None options
@@ -2855,11 +2930,15 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
                 | Some(VUInt days) when days > 0UL -> sprintf "PASSWORD EXPIRE INTERVAL %d DAY" days
                 | _ -> "PASSWORD EXPIRE DEFAULT"
         let account = sprintf "`%s`@`%s`" (name.Replace("`", "``")) (host.Replace("`", "``"))
+        let attributes =
+            match accountAttributeText cols row with
+            | None -> ""
+            | Some json -> sprintf " ATTRIBUTE '%s'" (json.Replace("\\", "\\\\").Replace("'", "\\'"))
 
         Ok(
             sprintf "CREATE USER for %s@%s" name host,
             sprintf
-                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE %s%s %s ACCOUNT %s PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT"
+                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE %s%s %s ACCOUNT %s PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT%s"
                 account
                 plugin
                 hash
@@ -2867,6 +2946,7 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
                 resources
                 passwordExpiration
                 accountState
+                attributes
         )
 
 let renderCreateUser (store: Store) (name: string) = renderCreateUserForAccount store (account name "%")

@@ -2244,9 +2244,9 @@ let private userAttributesRows (catalog: Catalog) =
                 | None -> true)
             |> List.map (fun row ->
                 let attribute =
-                    match row.[attributes] with
-                    | VJson json -> vs json
-                    | value -> value
+                    match Fsdb.Auth.accountAttributeText table.Columns row with
+                    | Some json -> vs json
+                    | None -> row.[attributes]
 
                 [| row.[user]; row.[host]; attribute |])
         | _ -> []

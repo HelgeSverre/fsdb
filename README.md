@@ -43,8 +43,8 @@ with all privileges and no password exists out of the box; accounts, `GRANT`s,
 and passwords are managed with the usual `CREATE USER` / `GRANT` / `SET
 PASSWORD` statements (mysql_native_password, verified at the handshake — a
 passwordless account accepts only an empty password, same as MySQL). Account
-locks, TLS requirements, explicit password expiry, and per-account resource
-limits are enforced as well.
+locks, TLS requirements, explicit password expiry, per-account resource
+limits, and JSON attributes/comments are enforced as well.
 
 First queries:
 
@@ -271,8 +271,8 @@ applications:
 - Stored objects: views and `WITH CHECK OPTION`, procedures, functions,
   scheduled events, and `BEFORE`/`AFTER` triggers with compound bodies and
   nested procedure calls.
-- Accounts: `CREATE USER`, roles, `GRANT`/`REVOKE`, password and resource
-  policy, plus database-, table-, and column-level privilege enforcement.
+- Accounts: `CREATE USER`, roles, `GRANT`/`REVOKE`, password, resource, and
+  attribute policy, plus database-, table-, and column-level privilege enforcement.
 - Bulk and batched work: `CLIENT_MULTI_STATEMENTS`/`CLIENT_MULTI_RESULTS` and
   client-side `LOAD DATA LOCAL INFILE`, including target columns, user
   variables, and ordered `SET` transformations. Local infile is disabled by

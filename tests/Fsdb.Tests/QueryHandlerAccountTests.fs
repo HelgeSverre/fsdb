@@ -233,6 +233,59 @@ let tests =
               | Err(1396, _) -> ()
               | other -> failtestf "expected missing account error 1396, got %A" other
 
+          testCase "CREATE and ALTER USER expose mergeable account attributes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, commentCreated = handle root "CREATE USER attr_comment COMMENT 'hello'"
+              let root, jsonCreated = handle root "CREATE USER attr_json ATTRIBUTE '{\"team\":\"db\",\"n\":1}'"
+
+              Expect.equal commentCreated (Affected 0UL) "comment account created"
+              Expect.equal jsonCreated (Affected 0UL) "attribute account created"
+
+              match
+                  handle
+                      root
+                      "SELECT User, User_attributes FROM mysql.user WHERE User IN ('attr_comment','attr_json') ORDER BY User"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "attr_comment"; Some "{\"metadata\": {\"comment\": \"hello\"}}" ]
+                    [ Some "attr_json"; Some "{\"metadata\": {\"n\": 1, \"team\": \"db\"}}" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected wrapped mysql.user attributes, got %A" other
+
+              match
+                  handle
+                      root
+                      "SELECT USER, ATTRIBUTE FROM information_schema.USER_ATTRIBUTES WHERE USER LIKE 'attr_%' ORDER BY USER"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "attr_comment"; Some "{\"comment\": \"hello\"}" ]
+                    [ Some "attr_json"; Some "{\"n\": 1, \"team\": \"db\"}" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected unwrapped information-schema attributes, got %A" other
+
+              let root, merged = handle root "ALTER USER attr_json ATTRIBUTE '{\"n\":2,\"team\":null}'"
+              let root, commented = handle root "ALTER USER attr_json COMMENT 'second'"
+              Expect.equal merged (Affected 0UL) "attribute patch merged"
+              Expect.equal commented (Affected 0UL) "comment patch merged"
+
+              match handle root "SHOW CREATE USER attr_json" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) ->
+                  Expect.stringContains ddl "ATTRIBUTE '{\"n\": 2, \"comment\": \"second\"}'" "merged attribute"
+              | other -> failtestf "expected attributed SHOW CREATE USER, got %A" other
+
+              match handle root "CREATE USER invalid_attribute ATTRIBUTE '[]'" |> snd with
+              | Err(3982, "The user attribute must be a valid JSON object") ->
+                  Expect.isNone (Fsdb.Auth.tryUserRow store "invalid_attribute") "invalid account was not created"
+              | other -> failtestf "expected invalid attribute error 3982, got %A" other
+
           testCase "CREATE USER retains TLS requirements"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
