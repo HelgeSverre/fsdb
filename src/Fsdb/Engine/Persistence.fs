@@ -710,6 +710,9 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | DropCheck _
     | SetCheckEnforced _
     | SetEngine _
+    | SetAlterAlgorithm _
+    | SetAlterLock _
+    | SetRowFormat _
     | SetTableComment _ -> failwith "Persistence: unsupported ALTER action reached a SchemaChanged event"
     | AddHashPartitions _
     | CoalesceHashPartitions _ -> failwith "Persistence: partition ALTER action requires the current WAL format"

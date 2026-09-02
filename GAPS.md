@@ -81,7 +81,7 @@ refuses it through the prepared-statement protocol.
 |---|---|---|
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; `FLUSH PRIVILEGES`/`USER_RESOURCES`/`STATUS`, all log-channel forms, plain and named `TABLES` (including `LOCAL`/`NO_WRITE_TO_BINLOG`), and `OPTIMIZER_COSTS` work, while `TABLES … WITH READ LOCK`/`FOR EXPORT` remain absent | low | divergence/refusal |
-| `ALTER TABLE` accepts `ALGORITHM` and `LOCK` execution hints but does not enforce the requested online-DDL strategy | low | divergence |
+| `ALTER TABLE` retains last-wins `ALGORITHM`/`LOCK` options and rejects unsupported operation, generated-column, foreign-key, and lock combinations with MySQL errors; InnoDB's COPY/INPLACE/INSTANT lock duration still collapses to one atomic immutable-root publication | low | divergence |
 | HASH and LINEAR HASH partition definitions, `pN` selection, INFORMATION_SCHEMA/SHOW metadata, and `ADD`/`COALESCE PARTITION` are logical catalog features over the shared row store; physical pruning plus `DROP`/`REORGANIZE PARTITION` remain absent | low | divergence/refusal |
 | `GRANT PROXY` remains absent; role DDL, grants, admin option, transitive inheritance, default roles, session activation, metadata, and `SHOW GRANTS ... USING` are supported | low | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, and `TABLESPACE` statements | low | refusal |

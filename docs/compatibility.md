@@ -228,6 +228,16 @@ SIGNAL/RESIGNAL, and GET CURRENT/STACKED DIAGNOSTICS. The full MySQL surface is
 documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
+## ALTER execution options
+
+`ALTER TABLE` retains repeated `ALGORITHM` and `LOCK` clauses with MySQL's
+last-option-wins rule. Unsupported algorithms and incompatible lock requests
+fail before any schema change. The compatibility matrix covers ordinary and
+generated columns, indexes, checks, foreign keys, primary-key replacement,
+table options, and character-set conversion. The in-memory engine publishes
+every accepted schema change as one immutable database-root replacement, so
+InnoDB's physical COPY/INPLACE/INSTANT lock duration does not apply.
+
 ## HASH partitioning
 
 `PARTITION BY HASH` and `PARTITION BY LINEAR HASH` retain their expression and

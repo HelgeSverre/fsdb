@@ -2163,14 +2163,27 @@ let tests =
                                     KeyColumns = indexColumns [ "technical_name" ]
                                     Unique = true
                                     Visible = true
-                                    Kind = BTree } ]
+                                    Kind = BTree }
+                              SetAlterAlgorithm AlgorithmInstant
+                              SetAlterLock LockNone ]
                         ))
                         "alter options"
 
                     Expect.equal
                         (parseOk "ALTER TABLE files ROW_FORMAT = DYNAMIC")
-                        (AlterTable("files", []))
+                        (AlterTable("files", [ SetRowFormat "DYNAMIC" ]))
                         "row format is a storage hint"
+
+                    Expect.equal
+                        (parseOk "ALTER TABLE files ALGORITHM COPY, ALGORITHM=DEFAULT, LOCK SHARED, LOCK=EXCLUSIVE")
+                        (AlterTable(
+                            "files",
+                            [ SetAlterAlgorithm AlgorithmCopy
+                              SetAlterAlgorithm AlgorithmDefault
+                              SetAlterLock LockShared
+                              SetAlterLock LockExclusive ]
+                        ))
+                        "execution options retain their written order"
 
                 testCase "DROP TABLE accepts referential action suffixes"
                 <| fun _ ->

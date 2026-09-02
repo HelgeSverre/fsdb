@@ -14680,6 +14680,184 @@ let private reportDeprecatedStatementSyntax =
         reportUtf8ConversionDeprecations statement
     | statement -> reportUtf8ConversionDeprecations statement
 
+let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: ColumnDef list) actions =
+    let algorithm =
+        actions
+        |> List.choose (function
+            | SetAlterAlgorithm value -> Some value
+            | _ -> None)
+        |> List.tryLast
+        |> Option.defaultValue AlgorithmDefault
+
+    let lockMode =
+        actions
+        |> List.choose (function
+            | SetAlterLock value -> Some value
+            | _ -> None)
+        |> List.tryLast
+        |> Option.defaultValue LockDefault
+
+    let operations =
+        actions
+        |> List.filter (function
+            | SetAlterAlgorithm _
+            | SetAlterLock _ -> false
+            | _ -> true)
+
+    let hasExecutionOption =
+        actions
+        |> List.exists (function
+            | SetAlterAlgorithm _
+            | SetAlterLock _ -> true
+            | _ -> false)
+
+    let allAlgorithms = Set.ofList [ AlgorithmInstant; AlgorithmInplace; AlgorithmCopy ]
+    let onlineAlgorithms = Set.ofList [ AlgorithmInplace; AlgorithmCopy ]
+    let copyAlgorithm = Set.singleton AlgorithmCopy
+    let replacingPrimaryKey = actions |> List.exists (function AddPrimaryKey _ -> true | _ -> false)
+
+    let columnChangeAlgorithms oldName (newColumn: ColumnDef) =
+        existingColumns
+        |> List.tryFind (fun (column: ColumnDef) -> System.String.Equals(column.Name, oldName, System.StringComparison.OrdinalIgnoreCase))
+        |> Option.map (fun oldColumn ->
+            let effectiveNew =
+                { newColumn with
+                    Name = oldColumn.Name
+                    PrimaryKey = oldColumn.PrimaryKey || newColumn.PrimaryKey
+                    Unique = oldColumn.Unique || newColumn.Unique }
+
+            if oldColumn = effectiveNew then
+                allAlgorithms
+            else
+                match oldColumn.Type, effectiveNew.Type with
+                | oldType, newType when oldType = newType -> onlineAlgorithms
+                | TVarchar oldLength, TVarchar newLength when newLength >= oldLength -> onlineAlgorithms
+                | TVarBinary oldLength, TVarBinary newLength when newLength >= oldLength -> onlineAlgorithms
+                | _ -> copyAlgorithm)
+        |> Option.defaultValue copyAlgorithm
+
+    let algorithmsFor = function
+        | AddColumn({ Generated = Some(_, Stored) }, _) -> copyAlgorithm
+        | AddColumn({ Default = Some(DExpression _) }, _) -> copyAlgorithm
+        | AddColumn({ AutoIncrement = true }, _) -> onlineAlgorithms
+        | AddColumn _
+        | DropColumn _
+        | RenameTo _
+        | RenameColumnTo _
+        | DropCheck _
+        | SetCheckEnforced _
+        | SetDefault _ -> allAlgorithms
+        | ModifyColumn(column, _) -> columnChangeAlgorithms column.Name column
+        | ChangeColumn(oldName, column, _) -> columnChangeAlgorithms oldName column
+        | AddCheck _
+        | ConvertCharset _ -> copyAlgorithm
+        | DropPrimaryKey when replacingPrimaryKey -> onlineAlgorithms
+        | DropPrimaryKey -> copyAlgorithm
+        | AddForeignKey _ when foreignKeyChecks -> copyAlgorithm
+        | AddIndex _
+        | DropIndexAction _
+        | RenameIndex _
+        | SetIndexVisibility _
+        | AddForeignKey _
+        | DropForeignKey _
+        | AddPrimaryKey _
+        | SetEngine _
+        | SetTableComment _
+        | SetAutoIncrement _
+        | SetRowFormat _ -> onlineAlgorithms
+        | AddHashPartitions _
+        | CoalesceHashPartitions _ -> Set.empty
+        | SetAlterAlgorithm _
+        | SetAlterLock _ -> allAlgorithms
+
+    let supportedAlgorithms =
+        operations
+        |> List.map algorithmsFor
+        |> List.fold Set.intersect allAlgorithms
+
+    let algorithmName = function
+        | AlgorithmDefault -> "DEFAULT"
+        | AlgorithmInstant -> "INSTANT"
+        | AlgorithmInplace -> "INPLACE"
+        | AlgorithmCopy -> "COPY"
+
+    let alternatives =
+        [ AlgorithmCopy; AlgorithmInplace; AlgorithmInstant ]
+        |> List.filter supportedAlgorithms.Contains
+        |> List.map algorithmName
+        |> String.concat "/"
+
+    let hasOperation predicate = operations |> List.exists predicate
+
+    let requiresColumnRebuild =
+        hasOperation (function
+            | (ModifyColumn _ | ChangeColumn _) as action -> algorithmsFor action = copyAlgorithm
+            | ConvertCharset _ -> true
+            | _ -> false)
+
+    let requiresSharedLock =
+        hasOperation (function
+            | AddColumn({ AutoIncrement = true }, _)
+            | AddIndex { Kind = FullTextIndex } -> true
+            | AddForeignKey _ when foreignKeyChecks -> true
+            | _ -> false)
+
+    let unsupportedAlgorithm requested =
+        match requested with
+        | AlgorithmInstant when hasOperation (function AddColumn({ AutoIncrement = true }, _) -> true | _ -> false) ->
+            Err(1846, "ALGORITHM=INSTANT is not supported. Reason: Adding an auto-increment column requires a lock. Try ALGORITHM=COPY/INPLACE.")
+        | AlgorithmInstant when requiresColumnRebuild ->
+            Err(1846, "ALGORITHM=INSTANT is not supported. Reason: Need to rebuild the table to change column type. Try ALGORITHM=COPY/INPLACE.")
+        | AlgorithmInplace when requiresColumnRebuild ->
+            Err(1846, "ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY.")
+        | (AlgorithmInstant | AlgorithmInplace) when hasOperation (function DropPrimaryKey -> not replacingPrimaryKey | _ -> false) ->
+            let retry = if requested = AlgorithmInstant then "COPY/INPLACE" else "COPY"
+            Err(1846, sprintf "ALGORITHM=%s is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try ALGORITHM=%s." (algorithmName requested) retry)
+        | (AlgorithmInstant | AlgorithmInplace) when foreignKeyChecks && hasOperation (function AddForeignKey _ -> true | _ -> false) ->
+            let retry = if requested = AlgorithmInstant then "COPY/INPLACE" else "COPY"
+            Err(1846, sprintf "ALGORITHM=%s is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try ALGORITHM=%s." (algorithmName requested) retry)
+        | _ ->
+            Err(
+                1845,
+                sprintf
+                    "ALGORITHM=%s is not supported for this operation. Try ALGORITHM=%s."
+                    (algorithmName requested)
+                    alternatives
+            )
+
+    let lockNoneError () =
+        if algorithm = AlgorithmCopy then
+            Err(1846, "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED.")
+        elif operations.IsEmpty then
+            Err(1845, "LOCK=NONE/SHARED is not supported for this operation. Try LOCK=EXCLUSIVE.")
+        elif requiresColumnRebuild then
+            Err(1846, "LOCK=NONE is not supported. Reason: Cannot change column type INPLACE. Try LOCK=SHARED.")
+        elif hasOperation (function AddColumn({ AutoIncrement = true }, _) -> true | _ -> false) then
+            Err(1846, "LOCK=NONE is not supported. Reason: Adding an auto-increment column requires a lock. Try LOCK=SHARED.")
+        elif hasOperation (function AddIndex { Kind = FullTextIndex } -> true | _ -> false) then
+            Err(1846, "LOCK=NONE is not supported. Reason: Fulltext index creation requires a lock. Try LOCK=SHARED.")
+        elif foreignKeyChecks && hasOperation (function AddForeignKey _ -> true | _ -> false) then
+            Err(1846, "LOCK=NONE is not supported. Reason: Adding foreign keys needs foreign_key_checks=OFF. Try LOCK=SHARED.")
+        elif hasOperation (function DropPrimaryKey -> not replacingPrimaryKey | _ -> false) then
+            Err(1846, "LOCK=NONE is not supported. Reason: Dropping a primary key is not allowed without also adding a new primary key. Try LOCK=SHARED.")
+        else
+            Err(1846, "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED.")
+
+    if hasExecutionOption && operations |> List.exists (function AddHashPartitions _ | CoalesceHashPartitions _ -> true | _ -> false) then
+        Some(Err(1064, "You have an error in your SQL syntax"))
+    elif algorithm = AlgorithmInstant && lockMode <> LockDefault then
+        Some(Err(1221, "Incorrect usage of ALGORITHM=INSTANT and LOCK=NONE/SHARED/EXCLUSIVE"))
+    elif algorithm <> AlgorithmDefault && not (supportedAlgorithms.Contains algorithm) then
+        Some(unsupportedAlgorithm algorithm)
+    elif algorithm = AlgorithmCopy && lockMode = LockNone then
+        Some(lockNoneError ())
+    elif lockMode = LockNone && (requiresSharedLock || not (supportedAlgorithms.Contains AlgorithmInplace)) then
+        Some(lockNoneError ())
+    elif operations.IsEmpty && (lockMode = LockNone || lockMode = LockShared) then
+        Some(lockNoneError ())
+    else
+        None
+
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
 let rec executeAs
@@ -15823,6 +16001,10 @@ let rec executeAs
 
     | AlterTable(table, actions) ->
         let db, table = splitQualified dbName table
+        let executionOptionError =
+            match scan store db table with
+            | Ok(columns, _) -> validateAlterExecutionOptions store.ForeignKeyChecks columns actions
+            | Error _ -> None
 
         let unsupportedEngine =
             actions
@@ -15838,12 +16020,13 @@ let rec executeAs
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectQuantifiedComparisonsInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
-        | Some engine, _, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
-        | None, Some err, _, _
-        | None, _, Some err, _
-        | None, _, _, Some err -> ids, err
-        | None, None, None, None ->
+        match executionOptionError, unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectQuantifiedComparisonsInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
+        | Some err, _, _, _, _ -> ids, err
+        | None, Some engine, _, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
+        | None, None, Some err, _, _
+        | None, None, _, Some err, _
+        | None, None, _, _, Some err -> ids, err
+        | None, None, None, None, None ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
@@ -15861,7 +16044,10 @@ let rec executeAs
                     | AddCheck _
                     | DropCheck _
                     | SetCheckEnforced _
-                    | SetEngine _ -> false
+                    | SetEngine _
+                    | SetAlterAlgorithm _
+                    | SetAlterLock _
+                    | SetRowFormat _ -> false
                     | _ -> true)
 
             let equal left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)

@@ -652,6 +652,18 @@ type ColumnPosition =
     | PositionFirst
     | PositionAfter of column: string
 
+type AlterAlgorithm =
+    | AlgorithmDefault
+    | AlgorithmInstant
+    | AlgorithmInplace
+    | AlgorithmCopy
+
+type AlterLock =
+    | LockDefault
+    | LockNone
+    | LockShared
+    | LockExclusive
+
 /// One `ALTER TABLE` action; a statement carries a list of these since
 /// MySQL (and Laravel) commonly comma-separates several in one `ALTER
 /// TABLE`.
@@ -677,6 +689,9 @@ type AlterAction =
     | SetEngine of name: string
     | SetTableComment of comment: string
     | ConvertCharset of charset: string * collation: string option
+    | SetAlterAlgorithm of AlterAlgorithm
+    | SetAlterLock of AlterLock
+    | SetRowFormat of name: string
     /// `ALTER TABLE t AUTO_INCREMENT = n` — moves the counter forward
     /// (never below what existing rows already require, like InnoDB).
     | SetAutoIncrement of value: int64

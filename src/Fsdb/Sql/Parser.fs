@@ -2848,12 +2848,32 @@ let private convertCharsetAction: Parser<AlterAction, unit> =
         | _ -> preturn (ConvertCharset(charset, collation))
 
 let private alterExecutionOption: Parser<AlterAction list, unit> =
-    let algorithm = keyword "ALGORITHM" >>. opt (sym "=") >>. choice [ keyword "DEFAULT"; keyword "INSTANT"; keyword "INPLACE"; keyword "COPY" ]
-    let lock = keyword "LOCK" >>. opt (sym "=") >>. choice [ keyword "DEFAULT"; keyword "NONE"; keyword "SHARED"; keyword "EXCLUSIVE" ]
-    attempt (algorithm <|> lock) >>% []
+    let algorithm =
+        keyword "ALGORITHM"
+        >>. opt (sym "=")
+        >>. choice
+                [ keyword "DEFAULT" >>% AlgorithmDefault
+                  keyword "INSTANT" >>% AlgorithmInstant
+                  keyword "INPLACE" >>% AlgorithmInplace
+                  keyword "COPY" >>% AlgorithmCopy ]
+        |>> SetAlterAlgorithm
+
+    let lock =
+        keyword "LOCK"
+        >>. opt (sym "=")
+        >>. choice
+                [ keyword "DEFAULT" >>% LockDefault
+                  keyword "NONE" >>% LockNone
+                  keyword "SHARED" >>% LockShared
+                  keyword "EXCLUSIVE" >>% LockExclusive ]
+        |>> SetAlterLock
+
+    attempt (algorithm <|> lock) |>> List.singleton
 
 let private alterTableOption: Parser<AlterAction list, unit> =
-    attempt (keyword "ROW_FORMAT" >>. opt (sym "=") >>. identifier) >>% []
+    attempt (keyword "ROW_FORMAT" >>. opt (sym "=") >>. identifier)
+    |>> SetRowFormat
+    |>> List.singleton
 
 let private alterHashPartitions: Parser<AlterAction, unit> =
     let count =

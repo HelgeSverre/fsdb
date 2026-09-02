@@ -1911,19 +1911,137 @@ let tests =
                     | Err(1075, _) -> ()
                     | other -> failtestf "expected an unindexed auto-increment error, got %A" other
 
-                testCase "ALTER TABLE adds a named unique constraint with execution options"
+                testCase "ALTER TABLE rejects unsupported algorithms before changing the table"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE document_type (technical_name VARCHAR(255))" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "ALTER TABLE document_type ADD CONSTRAINT `uniq.document_type.name` UNIQUE (technical_name), ALGORITHM=INSTANT"
+                    with
+                    | Err(1845, _) -> ()
+                    | other -> failtestf "expected unsupported INSTANT error, got %A" other
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO document_type VALUES ('invoice'), ('invoice')")
+                        (Affected 2UL)
+                        "the rejected unique key was not installed"
+
+                testCase "ALTER TABLE applies the final algorithm and lock options"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE document_type (technical_name VARCHAR(255))" |> ignore
 
                     Expect.equal
-                        (runDefault store "ALTER TABLE document_type ADD CONSTRAINT `uniq.document_type.name` UNIQUE (technical_name), ALGORITHM=INSTANT")
+                        (runDefault
+                            store
+                            "ALTER TABLE document_type ADD CONSTRAINT `uniq.document_type.name` UNIQUE (technical_name), ALGORITHM=INSTANT, ALGORITHM=INPLACE, LOCK=NONE")
                         (Affected 0UL)
-                        "constraint added"
+                        "the final supported options apply"
 
                     match runDefault store "INSERT INTO document_type VALUES ('invoice'), ('invoice')" with
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected duplicate-key error, got %A" other
+
+                testCase "ALTER TABLE rejects incompatible algorithm and lock pairs atomically"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, value INT)" |> ignore
+
+                    match runDefault store "ALTER TABLE t ADD COLUMN instant_value INT, ALGORITHM=INSTANT, LOCK=NONE" with
+                    | Err(1221, _) -> ()
+                    | other -> failtestf "expected INSTANT lock error, got %A" other
+
+                    match runDefault store "ALTER TABLE t MODIFY value BIGINT, ALGORITHM=COPY, LOCK=NONE" with
+                    | Err(1846, _) -> ()
+                    | other -> failtestf "expected COPY lock error, got %A" other
+
+                    match runDefault store "ALTER TABLE t ADD COLUMN copy_value INT, ALGORITHM=COPY, LOCK=NONE" with
+                    | Err(1846, _) -> ()
+                    | other -> failtestf "expected COPY lock error for an otherwise online action, got %A" other
+
+                    let table = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
+                    Expect.isFalse (table.Columns |> List.exists (fun column -> column.Name = "instant_value")) "rejected column absent"
+                    Expect.isFalse (table.Columns |> List.exists (fun column -> column.Name = "copy_value")) "rejected copy column absent"
+                    Expect.equal table.Columns.[1].Type (TInt false) "rejected type change absent"
+
+                testCase "ALTER TABLE accepts supported INSTANT and COPY operations"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, value INT)" |> ignore
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE t ADD COLUMN instant_value INT, ALGORITHM=INSTANT, LOCK=DEFAULT")
+                        (Affected 0UL)
+                        "instant column addition"
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE t MODIFY value INT, ALGORITHM=INSTANT")
+                        (Affected 0UL)
+                        "unchanged definition"
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE t MODIFY value INT NOT NULL, ALGORITHM=INPLACE, LOCK=NONE")
+                        (Affected 0UL)
+                        "inplace metadata change"
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE t MODIFY value BIGINT, ALGORITHM=COPY, LOCK=SHARED")
+                        (Affected 0UL)
+                        "copy type change"
+
+                    let table = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
+                    Expect.isTrue (table.Columns |> List.exists (fun column -> column.Name = "instant_value")) "column added"
+                    Expect.equal table.Columns.[1].Type (TBigInt false) "column type changed"
+
+                testCase "ALTER TABLE validates generated columns and foreign keys against the requested algorithm"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, INDEX ix_parent(parent_id))" |> ignore
+
+                    match runDefault store "ALTER TABLE child ADD COLUMN derived INT AS (parent_id + 1) STORED, ALGORITHM=INPLACE" with
+                    | Err(1845, _) -> ()
+                    | other -> failtestf "expected stored-column algorithm error, got %A" other
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE child ADD COLUMN derived INT AS (parent_id + 1) STORED, ALGORITHM=COPY")
+                        (Affected 0UL)
+                        "stored column copy"
+
+                    match
+                        runDefault
+                            store
+                            "ALTER TABLE child ADD CONSTRAINT fk_parent FOREIGN KEY(parent_id) REFERENCES parent(id), ALGORITHM=INPLACE"
+                    with
+                    | Err(1846, _) -> ()
+                    | other -> failtestf "expected foreign-key algorithm error, got %A" other
+
+                    setForeignKeyChecks store false
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "ALTER TABLE child ADD CONSTRAINT fk_parent FOREIGN KEY(parent_id) REFERENCES parent(id), ALGORITHM=INPLACE")
+                        (Affected 0UL)
+                        "disabled checks permit inplace foreign-key creation"
+
+                testCase "ALTER TABLE validates row-format and partition option syntax"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY)" |> ignore
+
+                    match runDefault store "ALTER TABLE t ROW_FORMAT=DYNAMIC, ALGORITHM=INSTANT" with
+                    | Err(1845, _) -> ()
+                    | other -> failtestf "expected row-format algorithm error, got %A" other
+
+                    runDefault store "CREATE TABLE p (id INT PRIMARY KEY) PARTITION BY HASH(id) PARTITIONS 2" |> ignore
+
+                    match runDefault store "ALTER TABLE p ADD PARTITION PARTITIONS 1, ALGORITHM=INPLACE" with
+                    | Err(1064, _) -> ()
+                    | other -> failtestf "expected partition option syntax error, got %A" other
 
                 testCase "MODIFY narrowing DATETIME(6) to DATETIME(2) rounds stored values half-up"
                 <| fun _ ->
