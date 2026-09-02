@@ -1602,7 +1602,8 @@ let private flushTablesRe =
     )
 
 let private flushOptimizerCostsRe = Regex(@"^FLUSH\s+OPTIMIZER_COSTS\s*;?$", RegexOptions.IgnoreCase)
-let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
+let private flushLogsRe =
+    Regex(@"^FLUSH\s+(?:(?:BINARY|ENGINE|ERROR|GENERAL|RELAY|SLOW)\s+)?LOGS\s*;?$", RegexOptions.IgnoreCase)
 let private lockTablesRe = Regex(@"^LOCK\s+TABLES(?:\s|$)", RegexOptions.IgnoreCase)
 let private unlockTablesRe = Regex(@"^UNLOCK\s+TABLES?\s*$", RegexOptions.IgnoreCase)
 

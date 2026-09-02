@@ -5974,7 +5974,8 @@ let tests =
                     "FLUSH TABLES"
                     "FLUSH TABLES missing_table"
                     "FLUSH OPTIMIZER_COSTS"
-                    "FLUSH LOGS" ] do
+                    "FLUSH LOGS"
+                    "FLUSH BINARY LOGS" ] do
                   match handle guest sql |> snd with
                   | Err(1227, _) -> ()
                   | other -> failtestf "expected %s to require a global privilege, got %A" sql other
@@ -6015,6 +6016,10 @@ let tests =
               match handle guest "FLUSH LOGS" |> snd with
               | Affected 0UL -> ()
               | other -> failtestf "expected RELOAD to permit FLUSH LOGS, got %A" other
+
+              match handle guest "FLUSH ENGINE LOGS" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected RELOAD to permit channel-specific FLUSH LOGS, got %A" other
 
           testCase "database and table probes enforce scoped privileges"
           <| fun _ ->
@@ -6164,7 +6169,13 @@ let tests =
                     "FLUSH NO_WRITE_TO_BINLOG TABLES app.visible"
                     "FLUSH OPTIMIZER_COSTS"
                     "FLUSH STATUS"
-                    "FLUSH LOGS" ] do
+                    "FLUSH LOGS"
+                    "FLUSH BINARY LOGS"
+                    "FLUSH ENGINE LOGS"
+                    "FLUSH ERROR LOGS"
+                    "FLUSH GENERAL LOGS"
+                    "FLUSH RELAY LOGS"
+                    "FLUSH SLOW LOGS" ] do
                   match handle session sql |> snd with
                   | Affected 0UL -> ()
                   | other -> failtestf "unexpected %s result: %A" sql other
@@ -6197,16 +6208,17 @@ let tests =
 
               let session = commitThrough "FLUSH LOCAL TABLES flushed, missing" 1 session
               let session = commitThrough "FLUSH OPTIMIZER_COSTS" 2 session
+              let session = commitThrough "FLUSH BINARY LOGS" 3 session
 
               match handle session "SELECT id FROM flushed ORDER BY id" |> snd with
-              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
-              | other -> failtestf "expected both FLUSH statements to commit, got %A" other
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected each FLUSH statement to commit, got %A" other
 
               let session, _ = handle session "CREATE USER 'flush_denied'"
               let session, _ = handle session "GRANT SELECT, INSERT ON fsdb.flushed TO 'flush_denied'"
               let guest = { create 2 session.Store with User = "flush_denied" }
               let guest, _ = handle guest "START TRANSACTION"
-              let guest, _ = handle guest "INSERT INTO flushed VALUES (3)"
+              let guest, _ = handle guest "INSERT INTO flushed VALUES (4)"
               let guest, denied = handle guest "FLUSH OPTIMIZER_COSTS"
 
               match denied with
@@ -6216,7 +6228,7 @@ let tests =
               let _, _ = handle guest "ROLLBACK"
 
               match handle session "SELECT id FROM flushed ORDER BY id" |> snd with
-              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]) -> ()
               | other -> failtestf "expected denied FLUSH to retain its pre-execution commit, got %A" other
 
           testCase "SHOW REPLICA STATUS returns MySQL's empty 60-column shape"
