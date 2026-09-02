@@ -795,6 +795,8 @@ let tests =
 
               match run store "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'information_schema' ORDER BY table_name" with
               | ResultSet(_, rows) ->
+                  let names = rows |> List.choose List.tryHead |> List.choose id
+                  Expect.equal (List.distinct names) names "virtual-table names are unique"
                   Expect.all rows (fun r -> r.[1] = Some "SYSTEM VIEW") "typed SYSTEM VIEW"
 
                   // Every self-listed name must actually resolve through scan.
