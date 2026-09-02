@@ -24,8 +24,8 @@ still gaps (the statement does not work), but they are safer than silent
 divergences; rows marked *refusal* fail loudly, rows marked *divergence*
 behave differently from MySQL without erroring.
 
-The torture ledger `torture/support/known-gaps.json` is currently empty
-(0 signatures); everything below is either undocumented in code, deliberately
+The torture ledger `torture/support/known-gaps.json` is currently empty;
+everything below is either undocumented in code, deliberately
 accepted (marked `ponytail:` in source), or recorded only in
 `torture/findings/`.
 
@@ -60,8 +60,8 @@ including leading UPDATE/DELETE and branch-local WITH), set
 operations, window functions with numeric and temporal interval frames, GROUP BY WITH ROLLUP + GROUPING,
 DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
 SELECT, session-scoped temporary tables, TRUNCATE,
-RENAME TABLE, EXPLAIN (TRADITIONAL/JSON/ANALYZE). Transaction control, SET, SHOW (~25
-variants), USE, KILL, DESCRIBE are text-probed before the grammar
+RENAME TABLE, EXPLAIN (TRADITIONAL/JSON/ANALYZE). Transaction control, SET, SHOW,
+USE, KILL, and DESCRIBE are text-probed before the grammar
 (`QueryHandler.dispatch`).
 XA supports start/end/prepare, one- and two-phase commit, rollback, detached
 recovery, binary transaction identifiers, and durable prepared branches.

@@ -164,7 +164,7 @@ flowchart LR
         EXEC -.->|result rows| WIRE
 
         AUTH["Auth<br/>mysql.user · privileges"]:::side
-        COL["Collation registry<br/>98 collations · 5 charsets"]:::side
+        COL["Collation registry<br/>MySQL names · ICU semantics"]:::side
         FN["Function registry<br/>built-in · custom · session"]:::side
 
         WIRE -.-> AUTH
