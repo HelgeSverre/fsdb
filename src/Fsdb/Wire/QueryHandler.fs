@@ -250,7 +250,15 @@ let private isSessionScope (scope: string) : bool =
     scope.IndexOf("SESSION", StringComparison.OrdinalIgnoreCase) >= 0
 
 let private globalScopeOnlyVariables =
-    Set.ofList [ "activate_all_roles_on_login"; "mandatory_roles" ]
+    Set.ofList
+        [ "activate_all_roles_on_login"
+          "ft_query_expansion_limit"
+          "innodb_ft_max_token_size"
+          "innodb_ft_min_token_size"
+          "mandatory_roles" ]
+
+let private readOnlySystemVariables =
+    Set.ofList [ "ft_query_expansion_limit"; "innodb_ft_max_token_size"; "innodb_ft_min_token_size" ]
 
 let private globalOnlyVariables =
     Set.union
@@ -301,9 +309,12 @@ let private numericSystemVariables =
           "autocommit"
           "cte_max_recursion_depth"
           "foreign_key_checks"
+          "ft_query_expansion_limit"
           "group_concat_max_len"
           "interactive_timeout"
           "innodb_buffer_pool_size"
+          "innodb_ft_max_token_size"
+          "innodb_ft_min_token_size"
           "local_infile"
           "lower_case_table_names"
           "max_allowed_packet"
@@ -1422,6 +1433,8 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetRoutineRecursionDepthAction(_, true, _) when not (hasSessionGlobalPrivilege session "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
+    | SetVarAction(name, _, true) when readOnlySystemVariables.Contains name ->
+        Error(Err(1238, sprintf "Variable '%s' is a read only variable" name))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | SetVarAction(name, _, false) when globalOnlyVariables.Contains name ->

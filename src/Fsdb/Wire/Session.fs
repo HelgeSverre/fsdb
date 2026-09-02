@@ -60,6 +60,9 @@ let defaultVariables: Map<string, string option> =
           "mandatory_roles", ""
           "innodb_buffer_pool_size", "134217728"
           "innodb_file_per_table", "ON"
+          "innodb_ft_max_token_size", "84"
+          "innodb_ft_min_token_size", "3"
+          "ft_query_expansion_limit", "20"
           "read_only", "OFF"
           "restrict_fk_on_non_standard_key", "ON"
           "sql_generate_invisible_primary_key", "OFF" ]

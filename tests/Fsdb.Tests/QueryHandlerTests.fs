@@ -5373,6 +5373,40 @@ let tests =
                   | ResultSet(_, [ [ Some "wait_timeout"; Some "123" ] ]) -> ()
                   | other -> failtestf "expected the global override, got %A" other)
 
+          testCase "full-text sizing variables expose MySQL defaults and remain read only"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match
+                  handle
+                      session
+                      "SELECT @@ft_query_expansion_limit, @@GLOBAL.innodb_ft_min_token_size, @@innodb_ft_max_token_size"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "20"; Some "3"; Some "84" ] ]) -> ()
+              | other -> failtestf "expected full-text sizing defaults, got %A" other
+
+              match handle session "SELECT @@SESSION.innodb_ft_min_token_size" |> snd with
+              | Err(1238, "Variable 'innodb_ft_min_token_size' is a GLOBAL variable") -> ()
+              | other -> failtestf "expected global scope enforcement, got %A" other
+
+              match handle session "SET SESSION innodb_ft_min_token_size=4" |> snd with
+              | Err(1229, "Variable 'innodb_ft_min_token_size' is a GLOBAL variable and should be set with SET GLOBAL") -> ()
+              | other -> failtestf "expected global-only assignment error, got %A" other
+
+              match handle session "SET GLOBAL innodb_ft_min_token_size=4" |> snd with
+              | Err(1238, "Variable 'innodb_ft_min_token_size' is a read only variable") -> ()
+              | other -> failtestf "expected read-only assignment error, got %A" other
+
+              match handle session "SHOW GLOBAL VARIABLES LIKE 'innodb_ft_%_token_size'" |> snd with
+              | ResultSet(
+                  _,
+                  [ [ Some "innodb_ft_max_token_size"; Some "84" ]
+                    [ Some "innodb_ft_min_token_size"; Some "3" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected full-text variables in SHOW, got %A" other
+
           testCase "lower_case_table_names reports the engine's preserve-and-fold behavior"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
