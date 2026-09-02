@@ -216,7 +216,8 @@ scan-shaped locking reads conservatively lock each targeted physical source.
 alias restrictions, temporary-table exception, atomic replacement lists, and
 implicit locks for view and trigger dependencies. Ordinary statements acquire
 compatible table ownership only for their execution, so explicit locks also
-coordinate with sessions that never issue `LOCK TABLES`.
+coordinate with sessions that never issue `LOCK TABLES`. Named `FLUSH TABLES
+... WITH READ LOCK` and `FOR EXPORT` use the same read-lock lifecycle.
 
 #### Indexes and joins
 

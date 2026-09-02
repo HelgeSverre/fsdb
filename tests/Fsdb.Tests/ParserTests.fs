@@ -2791,7 +2791,32 @@ let tests =
                         Expect.equal lock.Name "app.t" "qualified name"
                         Expect.equal lock.Alias (Some "reader") "alias"
                         Expect.equal lock.Mode ReadTableLock "mode"
-                    | other -> failtestf "expected a commented lock request, got %A" other ]
+                    | other -> failtestf "expected a commented lock request, got %A" other
+
+                testCase "parses named FLUSH read locks"
+                <| fun _ ->
+                    for sql in
+                        [ "FLUSH TABLES app.t, `other table` WITH READ LOCK"
+                          "FLUSH LOCAL TABLES app.t, `other table` FOR EXPORT"
+                          "FLUSH NO_WRITE_TO_BINLOG TABLES app.t, `other table` FOR EXPORT;" ] do
+                        Expect.equal
+                            (parseFlushTableLocks sql)
+                            (Ok
+                                [ { Name = "app.t"; Alias = None; Mode = ReadTableLock }
+                                  { Name = "other table"; Alias = None; Mode = ReadTableLock } ])
+                            sql
+
+                testCase "accepts comments in FLUSH read locks"
+                <| fun _ ->
+                    Expect.equal
+                        (parseFlushTableLocks "FLUSH/**/TABLES `app`./* qualifier */`t` WITH/**/READ/**/LOCK")
+                        (Ok [ { Name = "app.t"; Alias = None; Mode = ReadTableLock } ])
+                        "commented FLUSH lock"
+
+                testCase "rejects malformed FLUSH read locks"
+                <| fun _ ->
+                    Expect.isError (parseFlushTableLocks "FLUSH TABLES WITH READ LOCK") "a named table is required"
+                    Expect.isError (parseFlushTableLocks "FLUSH TABLES t FOR") "the modifier must be complete" ]
 
           testList
               "HANDLER"

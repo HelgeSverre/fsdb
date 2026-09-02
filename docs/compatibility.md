@@ -366,8 +366,8 @@ status, table maintenance, FLUSH, KILL, and explicit table locks.
 
 Deliberate divergences (each marked `ponytail:` at its code site):
 - Proxy users, auth-plugin selection, password history/reuse/current policy,
-  and a mutable global
-  default password lifetime are absent. Thirteen of MySQL's roughly 38
-  `mysql.*` tables exist, including fsdb's row-backed role/default-role,
-  constraint, trigger, view, routine, function, and event catalogs.
+  and a mutable global default password lifetime are absent.
+- Every MySQL `mysql.*` table schema is exposed, but engine-owned help, log,
+  GTID, statistics, NDB, and replication-channel rows remain empty unless
+  ordinary fsdb DML populates them.
 - `SHOW GRANTS` omits PROXY lines.

@@ -1605,14 +1605,19 @@ let private flushIdentifierPattern = @"(?:`(?:``|[^`])+`|[\p{L}_$][\p{L}\p{N}_$]
 let private flushTableNamePattern =
     sprintf @"%s(?:\s*\.\s*%s)?" flushIdentifierPattern flushIdentifierPattern
 
+let private flushTableListPattern =
+    sprintf @"%s(?:\s*,\s*%s)*" flushTableNamePattern flushTableNamePattern
+
 let private flushTablesRe =
     Regex(
         sprintf
-            @"^FLUSH\s+(?:(?:NO_WRITE_TO_BINLOG|LOCAL)\s+)?TABLES(?:\s+%s(?:\s*,\s*%s)*)?\s*;?$"
-            flushTableNamePattern
-            flushTableNamePattern,
+            @"^FLUSH\s+(?:(?:NO_WRITE_TO_BINLOG|LOCAL)\s+)?TABLES(?:\s+%s(?:\s+(?:WITH\s+READ\s+LOCK|FOR\s+EXPORT))?)?\s*;?$"
+            flushTableListPattern,
         RegexOptions.IgnoreCase
     )
+
+let private flushTableLocksRe =
+    Regex(@"\s+(?:WITH\s+READ\s+LOCK|FOR\s+EXPORT)\s*;?$", RegexOptions.IgnoreCase)
 
 let private flushOptimizerCostsRe = Regex(@"^FLUSH\s+OPTIMIZER_COSTS\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe =
@@ -3306,47 +3311,49 @@ let private tryProbe (sql: string) : Probe option =
     else
         None
 
-/// What each `Probe` case actually does, given the session and the
-/// (trimmed) SQL text `tryProbe` matched against — a couple of cases
-/// (`SetVar`'s comma/quoting, the `SHOW ...`s' own `LIKE` suffix) still
-/// re-derive a little from `sql` themselves rather than `Probe` carrying
-/// every last capture group, since that parsing already lives in
-/// `handleSet`/`handleShowVariables`/etc. and shouldn't move twice.
+let private acquireResolvedTableAccesses (session: Session) (accesses: TableLocks.Access list) =
+    let privileges =
+        accesses
+        |> List.choose (fun table ->
+            table.ReferenceName
+            |> Option.map (fun _ ->
+                [ "LOCK TABLES", Auth.OnTable(table.Database, table.Table)
+                  "SELECT", Auth.OnTable(table.Database, table.Table) ]))
+        |> List.collect id
+
+    match checkSessionAccess session session.Store privileges with
+    | Error(code, message) -> session, Err(code, message)
+    | Ok() ->
+        match TableLocks.acquireExplicit (lockWaitTimeout session) session.Store session.ConnectionId accesses with
+        | Ok() ->
+            let readTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.ReadAccess)
+            let wroteTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)
+            Session.trackExplicitTableLocks readTransactional wroteTransactional session, Affected 0UL
+        | Error(code, message) -> session, Err(code, message)
+
+let private acquireExplicitTableAccesses session requested =
+    let session = commitSession session
+    TableLocks.releaseExplicit session.Store session.ConnectionId
+    let database = session.Database |> Option.defaultValue defaultDatabase
+
+    match TableLocks.explicitAccesses session.Store session.TemporaryCatalog database requested with
+    | Error(code, message) -> session, Err(code, message)
+    | Ok accesses -> acquireResolvedTableAccesses session accesses
+
 let private acquireExplicitTableLocks session sql =
     match Parser.parseTableLocksWithOptions (parserOptionsForSession session) sql with
     | Error detail -> session, parserError sql detail
+    | Ok requested -> acquireExplicitTableAccesses session requested
+
+let private acquireFlushTableLocks session sql =
+    match Parser.parseFlushTableLocksWithOptions (parserOptionsForSession session) sql with
+    | Error detail -> session, parserError sql detail
     | Ok requested ->
-        let session = commitSession session
-        TableLocks.releaseExplicit session.Store session.ConnectionId
         let database = session.Database |> Option.defaultValue defaultDatabase
 
-        match TableLocks.explicitAccesses session.Store session.TemporaryCatalog database requested with
+        match TableLocks.flushAccesses session.Store session.TemporaryCatalog database requested with
         | Error(code, message) -> session, Err(code, message)
-        | Ok accesses ->
-            let privileges =
-                accesses
-                |> List.choose (fun table ->
-                    table.ReferenceName
-                    |> Option.map (fun _ ->
-                        [ "LOCK TABLES", Auth.OnTable(table.Database, table.Table)
-                          "SELECT", Auth.OnTable(table.Database, table.Table) ]))
-                |> List.collect id
-
-            match checkSessionAccess session session.Store privileges with
-            | Error(code, message) -> session, Err(code, message)
-            | Ok() ->
-                match
-                    TableLocks.acquireExplicit
-                        (lockWaitTimeout session)
-                        session.Store
-                        session.ConnectionId
-                        accesses
-                with
-                | Ok() ->
-                    let readTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.ReadAccess)
-                    let wroteTransactional = accesses |> List.exists (fun access -> access.Mode = TableLocks.WriteAccess)
-                    Session.trackExplicitTableLocks readTransactional wroteTransactional session, Affected 0UL
-                | Error(code, message) -> session, Err(code, message)
+        | Ok accesses -> acquireResolvedTableAccesses session accesses
 
 let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
     probe
@@ -4048,6 +4055,9 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | FlushTables ->
         match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_TABLES" [ "RELOAD"; "FLUSH_TABLES" ] with
         | Error(code, message) -> session, Err(code, message)
+        | Ok() when flushTableLocksRe.IsMatch sql && TableLocks.holdsExplicit session.Store session.ConnectionId ->
+            session, Err(1192, "Can't execute the given command because you have active locked tables or an active transaction")
+        | Ok() when flushTableLocksRe.IsMatch sql -> acquireFlushTableLocks session sql
         | Ok() -> session, Affected 0UL
     | FlushOptimizerCosts ->
         match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_OPTIMIZER_COSTS" [ "RELOAD"; "FLUSH_OPTIMIZER_COSTS" ] with

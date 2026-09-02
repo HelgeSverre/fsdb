@@ -4542,6 +4542,34 @@ let parseTableLocksWithOptions (options: ParserOptions) (sql: string) : Result<E
 let parseTableLocks (sql: string) : Result<ExplicitTableLock list, string> =
     parseTableLocksWithOptions defaultOptions sql
 
+let parseFlushTableLocksWithOptions (options: ParserOptions) (sql: string) : Result<ExplicitTableLock list, string> =
+    let modifier =
+        choice
+            [ attempt (keyword "WITH" >>. keyword "READ" >>. keyword "LOCK")
+              keyword "FOR" >>. keyword "EXPORT" ]
+
+    let table =
+        qualifiedTableName
+        |>> fun name ->
+            { Name = name
+              Alias = None
+              Mode = ReadTableLock }
+
+    let parser =
+        ws
+        >>. keyword "FLUSH"
+        >>. opt (choice [ attempt (keyword "NO_WRITE_TO_BINLOG"); keyword "LOCAL" ])
+        >>. keyword "TABLES"
+        >>. sepBy1 table (sym ",")
+        .>> modifier
+        .>> opt (sym ";")
+        .>> eof
+
+    withParserState options sql (runWithDepthLimit parser)
+
+let parseFlushTableLocks (sql: string) : Result<ExplicitTableLock list, string> =
+    parseFlushTableLocksWithOptions defaultOptions sql
+
 let private handlerPosition =
     choice
         [ keyword "FIRST" >>% HandlerFirst

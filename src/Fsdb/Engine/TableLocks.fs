@@ -665,7 +665,7 @@ let accessesForStatement store temporaryCatalog defaultDb statement =
     |> mergeAccesses
     |> expandDependencies store
 
-let explicitAccesses store temporaryCatalog defaultDb locks =
+let private resolveExplicitAccesses ignoreTemporary store temporaryCatalog defaultDb locks =
     let views = viewEntries store
 
     let rec resolve resolved =
@@ -681,7 +681,7 @@ let explicitAccesses store temporaryCatalog defaultDb locks =
             let current =
                 access database table (Some(requested.Alias |> Option.defaultValue table)) mode
 
-            if isTemporary temporaryCatalog current then
+            if isTemporary temporaryCatalog current && ignoreTemporary then
                 resolve resolved rest
             else
                 match tableSnapshot store database table, Map.containsKey (tableKey database table) views with
@@ -690,3 +690,9 @@ let explicitAccesses store temporaryCatalog defaultDb locks =
                 | Error _, false -> Error(1146, sprintf "Table '%s.%s' doesn't exist" database table)
 
     resolve [] locks |> Result.map (expandDependencies store)
+
+let explicitAccesses store temporaryCatalog defaultDb locks =
+    resolveExplicitAccesses true store temporaryCatalog defaultDb locks
+
+let flushAccesses store temporaryCatalog defaultDb locks =
+    resolveExplicitAccesses false store temporaryCatalog defaultDb locks

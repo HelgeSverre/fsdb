@@ -80,7 +80,7 @@ refuses it through the prepared-statement protocol.
 | Statement family | Impact | Class |
 |---|---|---|
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
-| `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; `FLUSH PRIVILEGES`/`USER_RESOURCES`/`STATUS`, all log-channel forms, plain and named `TABLES` (including `LOCAL`/`NO_WRITE_TO_BINLOG`), and `OPTIMIZER_COSTS` work, while `TABLES … WITH READ LOCK`/`FOR EXPORT` remain absent | low | divergence/refusal |
+| `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; `FLUSH PRIVILEGES`/`USER_RESOURCES`/`STATUS`, all log-channel forms, plain and named `TABLES` (including `LOCAL`/`NO_WRITE_TO_BINLOG` and named `WITH READ LOCK`/`FOR EXPORT`), and `OPTIMIZER_COSTS` work, while the global `FLUSH TABLES WITH READ LOCK` remains absent | low | divergence/refusal |
 | `ALTER TABLE` retains last-wins `ALGORITHM`/`LOCK` options and rejects unsupported operation, generated-column, foreign-key, and lock combinations with MySQL errors; InnoDB's COPY/INPLACE/INSTANT lock duration still collapses to one atomic immutable-root publication | low | divergence |
 | HASH and LINEAR HASH partition definitions, `pN` selection, INFORMATION_SCHEMA/SHOW metadata, and `ADD`/`COALESCE PARTITION` are logical catalog features over the shared row store; physical pruning plus `DROP`/`REORGANIZE PARTITION` remain absent | low | divergence/refusal |
 | `GRANT PROXY` remains absent; role DDL, grants, admin option, transitive inheritance, default roles, session activation, metadata, and `SHOW GRANTS ... USING` are supported | low | refusal |

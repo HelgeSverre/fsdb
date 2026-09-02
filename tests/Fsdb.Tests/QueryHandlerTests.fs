@@ -2155,7 +2155,7 @@ let tests =
               | Err(1205, _) -> ()
               | other -> failtestf "expected a lock wait timeout, got %A" other
 
-              let _, _ = handle holder "UNLOCK TABLES"
+              let holder, _ = handle holder "UNLOCK TABLES"
 
               match handle reader "HANDLER h READ FIRST" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
@@ -2670,6 +2670,63 @@ let tests =
               let _, _ = handle session "UNLOCK TABLES"
               ()
 
+          testCase "named FLUSH read locks share explicit table-lock semantics"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE flushed_lock_target (id INT PRIMARY KEY, n INT)"
+              let setup, _ = handle setup "CREATE TABLE flushed_lock_other (id INT PRIMARY KEY)"
+              let _, _ = handle setup "INSERT INTO flushed_lock_target VALUES (1, 10)"
+              let holder, locked = handle (create 2 store) "FLUSH TABLES flushed_lock_target WITH READ LOCK"
+              Expect.equal locked (Affected 0UL) "named FLUSH lock acquired"
+
+              match handle holder "SELECT n FROM flushed_lock_target" |> snd with
+              | ResultSet(_, [ [ Some "10" ] ]) -> ()
+              | other -> failtestf "expected the flushed table to remain readable, got %A" other
+
+              match handle holder "SELECT id FROM flushed_lock_other" |> snd with
+              | Err(1100, _) -> ()
+              | other -> failtestf "expected an unlisted table to remain inaccessible, got %A" other
+
+              match handle holder "UPDATE flushed_lock_target SET n=11 WHERE id=1" |> snd with
+              | Err(1099, _) -> ()
+              | other -> failtestf "expected the FLUSH read lock to reject writes, got %A" other
+
+              let waiting =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 3 store) "UPDATE flushed_lock_target SET n=11 WHERE id=1")
+
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the FLUSH read lock blocks another writer"
+              let holder, _ = handle holder "UNLOCK TABLES"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "the writer continues after UNLOCK TABLES"
+
+              match waiting.Result |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the waiting update to succeed, got %A" other
+
+              let holder, exported = handle holder "FLUSH LOCAL TABLES flushed_lock_target FOR EXPORT"
+              Expect.equal exported (Affected 0UL) "FOR EXPORT lock acquired"
+
+              match handle holder "FLUSH TABLES flushed_lock_other WITH READ LOCK" |> snd with
+              | Err(1192, _) -> ()
+              | other -> failtestf "expected an active FLUSH lock to reject replacement, got %A" other
+
+              match handle holder "SELECT n FROM flushed_lock_target" |> snd with
+              | ResultSet(_, [ [ Some "11" ] ]) -> ()
+              | other -> failtestf "expected the original FLUSH lock to remain active, got %A" other
+
+              let holder, _ = handle holder "UNLOCK TABLES"
+
+              match handle holder "FLUSH TABLES missing_flush_lock WITH READ LOCK" |> snd with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected the missing FLUSH table to fail, got %A" other
+
+              let holder, _ = handle holder "CREATE TEMPORARY TABLE temporary_flush_lock (id INT)"
+
+              match handle holder "FLUSH TABLES temporary_flush_lock FOR EXPORT" |> snd with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected temporary tables to stay outside FLUSH locking, got %A" other
+
           testCase "permanent DDL releases explicit table locks"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -2708,6 +2765,18 @@ let tests =
                   let _, _ = handle limited "UNLOCK TABLES"
                   ()
               | _, other -> failtestf "expected SELECT plus LOCK TABLES to permit a WRITE lock, got %A" other
+
+              match handle limited "FLUSH TABLES privileged_lock WITH READ LOCK" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected FLUSH_TABLES privilege enforcement, got %A" other
+
+              let _, _ = handle root "GRANT FLUSH_TABLES ON *.* TO 'lock_user'@'%'"
+
+              match handle limited "FLUSH TABLES privileged_lock WITH READ LOCK" with
+              | limited, Affected 0UL ->
+                  let _, _ = handle limited "UNLOCK TABLES"
+                  ()
+              | _, other -> failtestf "expected FLUSH_TABLES plus table privileges to acquire the read lock, got %A" other
 
           testCase "closing a session releases its explicit table locks"
           <| fun _ ->
@@ -6666,13 +6735,12 @@ let tests =
                   | other -> failtestf "unexpected %s result: %A" sql other
 
               for sql in
-                  [ "FLUSH TABLES visible WITH READ LOCK"
-                    "FLUSH TABLES visible FOR EXPORT"
+                  [ "FLUSH TABLES WITH READ LOCK"
                     "FLUSH TABLES visible,"
                     "FLUSH TABLES visible trailing" ] do
                   match handle session sql |> snd with
                   | Err(1064, _) -> ()
-                  | other -> failtestf "expected unsupported or malformed %s to fail, got %A" sql other
+                  | other -> failtestf "expected malformed %s to fail, got %A" sql other
 
               match handle session "SHOW ENGINE INNODB STATUS" |> snd with
               | ResultSet([ "Type"; "Name"; "Status" ], [ [ Some "InnoDB"; Some ""; Some status ] ]) ->
@@ -6695,15 +6763,22 @@ let tests =
               let session = commitThrough "FLUSH OPTIMIZER_COSTS" 2 session
               let session = commitThrough "FLUSH BINARY LOGS" 3 session
 
+              let session, _ = handle session "START TRANSACTION"
+              let session, _ = handle session "INSERT INTO flushed VALUES (4)"
+              let session, locked = handle session "FLUSH TABLES flushed WITH READ LOCK"
+              Expect.equal locked (Affected 0UL) "named FLUSH lock commits"
+              let session, _ = handle session "UNLOCK TABLES"
+              let session = handle session "ROLLBACK" |> fst
+
               match handle session "SELECT id FROM flushed ORDER BY id" |> snd with
-              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]) -> ()
               | other -> failtestf "expected each FLUSH statement to commit, got %A" other
 
               let session, _ = handle session "CREATE USER 'flush_denied'"
               let session, _ = handle session "GRANT SELECT, INSERT ON fsdb.flushed TO 'flush_denied'"
               let guest = { create 2 session.Store with User = "flush_denied" }
               let guest, _ = handle guest "START TRANSACTION"
-              let guest, _ = handle guest "INSERT INTO flushed VALUES (4)"
+              let guest, _ = handle guest "INSERT INTO flushed VALUES (5)"
               let guest, denied = handle guest "FLUSH OPTIMIZER_COSTS"
 
               match denied with
@@ -6713,7 +6788,7 @@ let tests =
               let _, _ = handle guest "ROLLBACK"
 
               match handle session "SELECT id FROM flushed ORDER BY id" |> snd with
-              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]) -> ()
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ]; [ Some "4" ]; [ Some "5" ] ]) -> ()
               | other -> failtestf "expected denied FLUSH to retain its pre-execution commit, got %A" other
 
           testCase "SHOW REPLICA STATUS returns MySQL's empty 60-column shape"
