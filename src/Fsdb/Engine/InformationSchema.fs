@@ -2226,6 +2226,31 @@ let private userPrivilegesRows (catalog: Catalog) : Value[] list =
                 staticRows @ dynamicRows)
         | _ -> []
 
+let private userAttributesRows (catalog: Catalog) =
+    match mysqlTable catalog "user" with
+    | None -> []
+    | Some table ->
+        match colIdx table "User", colIdx table "Host", colIdx table "User_attributes" with
+        | Some user, Some host, Some attributes ->
+            let ownOnly = restrictedTo "SELECT"
+
+            table.Rows
+            |> List.filter (fun row ->
+                match ownOnly with
+                | Some viewer ->
+                    Fsdb.Auth.sameAccount
+                        (Fsdb.Auth.account (rowText row user) (rowText row host))
+                        viewer
+                | None -> true)
+            |> List.map (fun row ->
+                let attribute =
+                    match row.[attributes] with
+                    | VJson json -> vs json
+                    | value -> value
+
+                [| row.[user]; row.[host]; attribute |])
+        | _ -> []
+
 /// Per-database grants off `mysql.db`.
 let private schemaPrivilegesRows (catalog: Catalog) : Value[] list =
     match mysqlTable catalog "db" with
@@ -2719,6 +2744,77 @@ let private resourceGroupsColumns =
 let private tablespacesExtensionsColumns =
     [ requiredCol "TABLESPACE_NAME" (TVarchar 268); col "ENGINE_ATTRIBUTE" TJson ]
 
+let private filesColumns =
+    [ col "FILE_ID" (TBigInt false)
+      col "FILE_NAME" TText
+      col "FILE_TYPE" (TVarchar 256)
+      requiredCol "TABLESPACE_NAME" (TVarchar 268)
+      requiredCol "TABLE_CATALOG" (TVarchar 0)
+      col "TABLE_SCHEMA" (TVarBinary 0)
+      col "TABLE_NAME" (TVarBinary 0)
+      col "LOGFILE_GROUP_NAME" (TVarchar 256)
+      col "LOGFILE_GROUP_NUMBER" (TBigInt false)
+      requiredCol "ENGINE" (TVarchar 64)
+      col "FULLTEXT_KEYS" (TVarBinary 0)
+      col "DELETED_ROWS" (TVarBinary 0)
+      col "UPDATE_COUNT" (TVarBinary 0)
+      col "FREE_EXTENTS" (TBigInt false)
+      col "TOTAL_EXTENTS" (TBigInt false)
+      col "EXTENT_SIZE" (TBigInt false)
+      col "INITIAL_SIZE" (TBigInt false)
+      col "MAXIMUM_SIZE" (TBigInt false)
+      col "AUTOEXTEND_SIZE" (TBigInt false)
+      col "CREATION_TIME" (TVarBinary 0)
+      col "LAST_UPDATE_TIME" (TVarBinary 0)
+      col "LAST_ACCESS_TIME" (TVarBinary 0)
+      col "RECOVER_TIME" (TVarBinary 0)
+      col "TRANSACTION_COUNTER" (TVarBinary 0)
+      col "VERSION" (TBigInt false)
+      col "ROW_FORMAT" (TVarchar 256)
+      col "TABLE_ROWS" (TVarBinary 0)
+      col "AVG_ROW_LENGTH" (TVarBinary 0)
+      col "DATA_LENGTH" (TVarBinary 0)
+      col "MAX_DATA_LENGTH" (TVarBinary 0)
+      col "INDEX_LENGTH" (TVarBinary 0)
+      col "DATA_FREE" (TBigInt false)
+      col "CREATE_TIME" (TVarBinary 0)
+      col "UPDATE_TIME" (TVarBinary 0)
+      col "CHECK_TIME" (TVarBinary 0)
+      col "CHECKSUM" (TVarBinary 0)
+      col "STATUS" (TVarchar 256)
+      col "EXTRA" (TVarchar 256) ]
+
+let private pluginsColumns =
+    [ requiredCol "PLUGIN_NAME" (TVarchar 64)
+      requiredCol "PLUGIN_VERSION" (TVarchar 20)
+      requiredCol "PLUGIN_STATUS" (TVarchar 10)
+      requiredCol "PLUGIN_TYPE" (TVarchar 80)
+      requiredCol "PLUGIN_TYPE_VERSION" (TVarchar 20)
+      col "PLUGIN_LIBRARY" (TVarchar 64)
+      col "PLUGIN_LIBRARY_VERSION" (TVarchar 20)
+      col "PLUGIN_AUTHOR" (TVarchar 64)
+      col "PLUGIN_DESCRIPTION" (TVarchar 65535)
+      col "PLUGIN_LICENSE" (TVarchar 80)
+      requiredCol "LOAD_OPTION" (TVarchar 64) ]
+
+let private pluginsRows =
+    [ [| vs "mysql_native_password"
+         vs "1.1"
+         vs "ACTIVE"
+         vs "AUTHENTICATION"
+         vs "2.1"
+         VNull
+         VNull
+         vs "fsdb"
+         vs "Native MySQL authentication"
+         vs "GPL"
+         vs "ON" |] ]
+
+let private userAttributesColumns =
+    [ requiredCol "USER" (TChar 32)
+      requiredCol "HOST" (TChar 255)
+      col "ATTRIBUTE" TLongText ]
+
 let private columnsExtensionsColumns =
     [ requiredCol "TABLE_CATALOG" (TVarchar 64)
       requiredCol "TABLE_SCHEMA" (TVarchar 64)
@@ -2774,10 +2870,12 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "ENABLED_ROLES", enabledRolesColumns
       "ENGINES", enginesColumns
       "EVENTS", eventsColumns
+      "FILES", filesColumns
       "KEY_COLUMN_USAGE", keyColumnUsageColumns
       "OPTIMIZER_TRACE", optimizerTraceColumns
       "PARAMETERS", parametersColumns
       "PARTITIONS", partitionsColumns
+      "PLUGINS", pluginsColumns
       "PROFILING", profilingColumns
       "PROCESSLIST", processlistColumns
       "REFERENTIAL_CONSTRAINTS", referentialConstraintsColumns
@@ -2798,6 +2896,7 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "TABLE_CONSTRAINTS_EXTENSIONS", tableConstraintsExtensionsColumns
       "TABLE_PRIVILEGES", tablePrivilegesColumns
       "TRIGGERS", triggersColumns
+      "USER_ATTRIBUTES", userAttributesColumns
       "USER_PRIVILEGES", userPrivilegesColumns
       "VIEW_ROUTINE_USAGE", viewRoutineUsageColumns
       "VIEW_TABLE_USAGE", viewTableUsageColumns
@@ -3023,6 +3122,8 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "ROUTINES" -> Some(routinesRows catalog)
         | "PARAMETERS" -> Some(parametersRows catalog)
         | "EVENTS" -> Some(eventsRows catalog)
+        | "FILES" -> Some []
+        | "PLUGINS" -> Some pluginsRows
         | "OPTIMIZER_TRACE"
         | "PROFILING"
         | "RESOURCE_GROUPS"
@@ -3033,6 +3134,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "ST_GEOMETRY_COLUMNS" -> Some(stGeometryColumnsRows catalog viewColumns)
         | "TABLES_EXTENSIONS" -> Some(tablesExtensionsRows catalog)
         | "TABLE_CONSTRAINTS_EXTENSIONS" -> Some(tableConstraintsExtensionsRows catalog)
+        | "USER_ATTRIBUTES" -> Some(userAttributesRows catalog)
         | "VIEW_ROUTINE_USAGE" -> Some(viewRoutineUsageRows catalog)
         | "VIEW_TABLE_USAGE" -> Some(viewTableUsageRows catalog)
         | _ -> None
@@ -3757,6 +3859,18 @@ let showEngines () : ShowResult =
         [ "Engine"; "Support"; "Comment"; "Transactions"; "XA"; "Savepoints" ],
         enginesRows |> List.map (fun r -> r |> Array.toList |> List.map Value.toText)
     )
+
+let showPlugins () : ShowResult =
+    let rows =
+        pluginsRows
+        |> List.map (fun row ->
+            [ Value.toText row.[0]
+              Value.toText row.[2]
+              Value.toText row.[3]
+              Value.toText row.[5]
+              Value.toText row.[9] ])
+
+    Ok([ "Name"; "Status"; "Type"; "Library"; "License" ], rows)
 
 /// `SHOW CHARACTER SET` / `SHOW CHARSET [LIKE 'pattern']`.
 let showCharacterSet (likeOpt: string option) : ShowResult =

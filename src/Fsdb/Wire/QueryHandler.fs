@@ -3478,11 +3478,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                 [ [ Some "InnoDB"; Some ""; Some "fsdb uses an in-memory transactional row store" ] ]
             )
     | ShowPlugins ->
-        session,
-        ResultSet(
-            [ "Name"; "Status"; "Type"; "Library"; "License" ],
-            [ [ Some "mysql_native_password"; Some "ACTIVE"; Some "AUTHENTICATION"; None; Some "GPL" ] ]
-        )
+        session, InformationSchema.showPlugins () |> showResult
     | ShowBinaryLogs
     | ShowBinaryLogStatus ->
         match checkAnySessionGlobalPrivilege session "SUPER, REPLICATION CLIENT" [ "SUPER"; "REPLICATION CLIENT" ] with

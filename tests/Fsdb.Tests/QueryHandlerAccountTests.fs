@@ -1746,6 +1746,7 @@ let tests =
           testCase "mysql.user has MySQL 8.4's exact 51-column shape and mysql.db its 22"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
+              let root = create 1 store
 
               match Fsdb.Storage.scanList store "mysql" "user" with
               | Ok(cols, rows) ->
@@ -1760,5 +1761,22 @@ let tests =
                   Expect.equal (List.length cols) 22 "22 columns"
                   Expect.isEmpty rows "no db-level grants out of the box"
               | Error e -> failtestf "expected mysql.db to scan, got %A" e
+
+              let root, _ = handle root "CREATE USER attribute_reader"
+
+              match handle root "SELECT USER, HOST, ATTRIBUTE FROM information_schema.USER_ATTRIBUTES ORDER BY USER" |> snd with
+              | ResultSet(
+                  _,
+                  [ [ Some "attribute_reader"; Some "%"; None ]
+                    [ Some "root"; Some "%"; None ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected root to see account attributes, got %A" other
+
+              let reader = { create 2 store with User = "attribute_reader" }
+
+              match handle reader "SELECT USER, HOST, ATTRIBUTE FROM information_schema.USER_ATTRIBUTES" |> snd with
+              | ResultSet(_, [ [ Some "attribute_reader"; Some "%"; None ] ]) -> ()
+              | other -> failtestf "expected account attributes to be viewer-scoped, got %A" other
 
         ]

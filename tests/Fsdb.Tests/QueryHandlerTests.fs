@@ -6292,6 +6292,20 @@ let tests =
               | ResultSet([ "Name"; "Status"; "Type"; "Library"; "License" ], [ [ Some "mysql_native_password"; Some "ACTIVE"; Some "AUTHENTICATION"; None; Some "GPL" ] ]) -> ()
               | other -> failtestf "unexpected SHOW PLUGINS result: %A" other
 
+              match
+                  handle
+                      session
+                      "SELECT plugin_name, plugin_version, plugin_status, plugin_type, plugin_type_version, plugin_library, plugin_license, load_option FROM information_schema.plugins"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "mysql_native_password"; Some "1.1"; Some "ACTIVE"; Some "AUTHENTICATION"; Some "2.1"
+                      None; Some "GPL"; Some "ON" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "unexpected information_schema.PLUGINS result: %A" other
+
               for sql in [ "SHOW BINARY LOGS"; "SHOW BINARY LOG STATUS" ] do
                   match handle session sql |> snd with
                   | Err(1381, "You are not using binary logging") -> ()

@@ -790,6 +790,20 @@ let tests =
                   | ResultSet(columns, []) -> Expect.sequenceEqual columns expectedColumns (table + " columns")
                   | other -> failtestf "expected empty %s, got %A" table other
 
+              match run store "SELECT * FROM information_schema.files" with
+              | ResultSet(columns, []) ->
+                  Expect.sequenceEqual
+                      columns
+                      [ "FILE_ID"; "FILE_NAME"; "FILE_TYPE"; "TABLESPACE_NAME"; "TABLE_CATALOG"; "TABLE_SCHEMA"
+                        "TABLE_NAME"; "LOGFILE_GROUP_NAME"; "LOGFILE_GROUP_NUMBER"; "ENGINE"; "FULLTEXT_KEYS"
+                        "DELETED_ROWS"; "UPDATE_COUNT"; "FREE_EXTENTS"; "TOTAL_EXTENTS"; "EXTENT_SIZE"
+                        "INITIAL_SIZE"; "MAXIMUM_SIZE"; "AUTOEXTEND_SIZE"; "CREATION_TIME"; "LAST_UPDATE_TIME"
+                        "LAST_ACCESS_TIME"; "RECOVER_TIME"; "TRANSACTION_COUNTER"; "VERSION"; "ROW_FORMAT"
+                        "TABLE_ROWS"; "AVG_ROW_LENGTH"; "DATA_LENGTH"; "MAX_DATA_LENGTH"; "INDEX_LENGTH"
+                        "DATA_FREE"; "CREATE_TIME"; "UPDATE_TIME"; "CHECK_TIME"; "CHECKSUM"; "STATUS"; "EXTRA" ]
+                      "FILES columns"
+              | other -> failtestf "expected the empty FILES surface, got %A" other
+
               match
                   run
                       store
