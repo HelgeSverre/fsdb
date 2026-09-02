@@ -417,6 +417,9 @@ type Store =
       RowLockSequence: int64 array
       TransactionLocks: TransactionLockContext option }
 
+    member internal this.NextLockOwnerId() =
+        Interlocked.Increment(&this.RowLockSequence.[0])
+
     /// Materializes one catalog root in O(database count), with row structures
     /// shared immutably. Hot single-database paths read `Databases` directly.
     /// Slots are sampled independently, so cross-database snapshots
@@ -555,7 +558,7 @@ let beginTransactionSnapshotWithBase (store: Store) : Catalog * Store =
     catalog, transactionSnapshotFromCatalog store catalog
 
 let beginTransactionContext (store: Store) : Store =
-    let owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
+    let owner = store.NextLockOwnerId()
 
     { store with
         OnCommit = ResizeArray()
@@ -570,7 +573,7 @@ let beginTransactionContext (store: Store) : Store =
 
 let beginTransactionWithBase (store: Store) : Catalog * Store =
     let catalog, snapshot = beginTransactionSnapshotWithBase store
-    let owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
+    let owner = store.NextLockOwnerId()
 
     catalog,
     { snapshot with
@@ -2812,7 +2815,7 @@ let private withWriteLocksFor
         match store.TransactionLocks with
         | Some context -> context, false
         | None ->
-            { Owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
+            { Owner = store.NextLockOwnerId()
               HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
               RollbackWork = 0L
               DeadlockVictim = false },

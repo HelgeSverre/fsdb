@@ -57,12 +57,12 @@ let private parserError (sql: string) (detail: string) =
 
     if temporal.Success then Err(1525, temporal.Groups.["message"].Value) else syntaxError sql
 
-/// Raw map lookup: the outer `option` is "is `name` even a known variable"
-/// (unchanged since `Session.Variables` grew NULL-capable values) — `None`
-/// there is the true "unknown variable" case (1193 below), while `Some
-/// None` is a known variable currently holding SQL NULL. Callers that only
-/// want the value (collapsing "unknown" and "known but NULL" the way
-/// `SELECT @@x` does for both sigils) flatten it themselves.
+let private hasKeywordPrefix (keyword: string) (text: string) =
+    text.StartsWith(keyword, StringComparison.OrdinalIgnoreCase)
+    && (text.Length = keyword.Length || Char.IsWhiteSpace text.[keyword.Length])
+
+/// Preserves the distinction between an unknown variable and a known SQL
+/// NULL value.
 let private lookupVar (session: Session) (name: string) : string option option =
     session.Variables |> Map.tryFind (name.ToLowerInvariant())
 
@@ -272,11 +272,8 @@ let private globalOnlyVariables =
               "max_prepared_stmt_count"
               "net_write_timeout" ])
 
-/// The raw (unflattened) lookup behind `resolveAtRef` — kept separate so
-/// `handleAtVarSelect` can still tell "unknown system variable" (outer
-/// `None`) apart from "known, currently NULL" when deciding whether to
-/// raise 1193, the one case `resolveAtRef`'s flattened `string option`
-/// can't distinguish.
+/// The outer option preserves error 1193 for unknown system variables while
+/// the inner option represents SQL NULL.
 let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name: string) : string option option =
     let name = name.ToLowerInvariant()
 
@@ -693,16 +690,8 @@ let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string
 
     ResultSet([ "Variable_name"; "Value" ], rows)
 
-// ---------------------------------------------------------------------------
-// SHOW TABLES / DATABASES / COLUMNS / CREATE TABLE / INDEX / TABLE STATUS,
-// and DESCRIBE — matched by text probe like SHOW VARIABLES above, since
-// they're catalog-introspection statements read straight off `Storage`
-// rather than something `Executor` evaluates rows through. Just the probe
-// regexes and raw-SQL argument extraction live here; the actual
-// `(columns, rows)`/`(code, message)` rendering is `InformationSchema`'s
-// (colocated with its `information_schema`-view row-builders), reached via
-// `showResult` below.
-// ---------------------------------------------------------------------------
+// Catalog introspection stays text-probed because it bypasses Executor;
+// InformationSchema owns its result rendering.
 
 let private showStatusRe =
     Regex(@"^SHOW\s+(?:(SESSION|GLOBAL)\s+)?STATUS(\s|$)", RegexOptions.IgnoreCase)
@@ -4202,19 +4191,7 @@ let renumberPlaceholders (stmt: Statement) : Statement * int =
             stmt
 
     renumbered, next.Value
-
-
-
-/// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
-/// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax
-/// error gets, so `Server` doesn't need its own copy of that formatting.
-/// `Ok` carries the parsed `Statement` (with `Placeholder` nodes where the
-/// `?`s were) plus the placeholder count for COM_STMT_PREPARE_OK.
-///
-/// `None` for the text-probed forms the grammar doesn't produce
-/// (SET/SHOW/transaction control) — those still execute textually through
-/// `Sql`, so their placeholder count is the plain `placeholderPositions`
-/// count rather than a parser one.
+/// Validates COM_STMT_PREPARE without executing text-probed commands.
 let private prepareStatementWithOptions
     (options: Parser.ParserOptions)
     (sql: string)
@@ -4222,11 +4199,7 @@ let private prepareStatementWithOptions
     let trimmed = sql.Trim().TrimEnd(';').Trim()
     let command = Parser.stripVersionCommentsWithOptions options trimmed
 
-    let startsWithKeyword (keyword: string) =
-        command.StartsWith(keyword, StringComparison.OrdinalIgnoreCase)
-        && (command.Length = keyword.Length || Char.IsWhiteSpace command.[keyword.Length])
-
-    if startsWithKeyword "LOAD DATA" || startsWithKeyword "HANDLER" || startsWithKeyword "XA" then
+    if hasKeywordPrefix "LOAD DATA" command || hasKeywordPrefix "HANDLER" command || hasKeywordPrefix "XA" command then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
     elif (tryProbe options trimmed).IsSome then
         Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
@@ -6387,13 +6360,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                     let code, message = Storage.toMySqlError error
                     session, Err(code, message)
 
-    let isHandler =
-        sql.StartsWith("HANDLER", StringComparison.OrdinalIgnoreCase)
-        && (sql.Length = 7 || Char.IsWhiteSpace sql.[7])
-
-    let isXa =
-        sql.StartsWith("XA", StringComparison.OrdinalIgnoreCase)
-        && (sql.Length = 2 || Char.IsWhiteSpace sql.[2])
+    let isHandler = hasKeywordPrefix "HANDLER" sql
+    let isXa = hasKeywordPrefix "XA" sql
 
     if Parser.isBlank sql then
         InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.emptyQuery

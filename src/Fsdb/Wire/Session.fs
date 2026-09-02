@@ -586,8 +586,6 @@ let finalizeTransactionTracking (previous: Session) (session: Session) =
 
         { session with SessionStateChanges = session.SessionStateChanges @ characteristics @ state }
 
-/// The catalog store all statements on this session currently execute
-/// against: the shared store outside a transaction, or the transaction's
-/// private snapshot inside one (see `Transaction`).
+/// Resolves statement storage to the active transaction snapshot when present.
 let currentStore (session: Session) : Store =
     session.Tx |> Option.map (fun tx -> tx.Snapshot) |> Option.defaultValue session.Store
