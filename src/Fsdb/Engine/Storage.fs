@@ -589,6 +589,14 @@ let transactionRollbackWork (store: Store) =
     |> Option.map (fun context -> Threading.Interlocked.Read(&context.RollbackWork))
     |> Option.defaultValue 0L
 
+let transactionId (store: Store) =
+    store.TransactionLocks |> Option.map (fun context -> uint64 context.Owner)
+
+let transactionLockStructCount (store: Store) =
+    store.TransactionLocks
+    |> Option.map (fun context -> lock context.HeldStripes (fun () -> uint64 context.HeldStripes.Count))
+    |> Option.defaultValue 0UL
+
 let restoreTransactionRollbackWork (store: Store) work =
     store.TransactionLocks
     |> Option.iter (fun context -> Threading.Interlocked.Exchange(&context.RollbackWork, work) |> ignore)

@@ -2841,6 +2841,81 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "INNODB_TRX exposes the first active table statement over the wire"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+
+                  let connectionString =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                          server.Port
+
+                  use writer = new MySqlConnector.MySqlConnection(connectionString)
+                  use observer = new MySqlConnector.MySqlConnection(connectionString)
+                  do! writer.OpenAsync() |> Async.AwaitTask
+                  do! observer.OpenAsync() |> Async.AwaitTask
+
+                  let execute sql =
+                      async {
+                          use command = writer.CreateCommand()
+                          command.CommandText <- sql
+                          let! _ = command.ExecuteNonQueryAsync() |> Async.AwaitTask
+                          return ()
+                      }
+
+                  do! execute "CREATE TABLE wire_transaction_probe (id INT PRIMARY KEY)"
+                  do! execute "INSERT INTO wire_transaction_probe VALUES (1)"
+
+                  use connectionIdCommand = writer.CreateCommand()
+                  connectionIdCommand.CommandText <- "SELECT CONNECTION_ID()"
+                  let! writerConnectionId = connectionIdCommand.ExecuteScalarAsync() |> Async.AwaitTask
+                  do! execute "START TRANSACTION"
+
+                  use slow = writer.CreateCommand()
+                  slow.CommandText <- "SELECT SLEEP(2), id FROM wire_transaction_probe"
+                  let slowResult = slow.ExecuteScalarAsync()
+
+                  let rec findQuery attempts =
+                      async {
+                          use probe = observer.CreateCommand()
+
+                          probe.CommandText <-
+                              sprintf
+                                  "SELECT trx_query FROM information_schema.innodb_trx WHERE trx_mysql_thread_id=%s"
+                                  (string writerConnectionId)
+
+                          let! value = probe.ExecuteScalarAsync() |> Async.AwaitTask
+
+                          if isNull value && attempts > 0 then
+                              do! Async.Sleep 25
+                              return! findQuery (attempts - 1)
+                          else
+                              return Option.ofObj value |> Option.map string
+                      }
+
+                  let! activeQuery = findQuery 40
+
+                  Expect.equal
+                      activeQuery
+                      (Some "SELECT SLEEP(?), id FROM wire_transaction_probe")
+                      "the running transaction exposes its current statement"
+
+                  let! _ = slowResult |> Async.AwaitTask
+                  do! execute "COMMIT"
+
+                  use afterCommit = observer.CreateCommand()
+
+                  afterCommit.CommandText <-
+                      sprintf
+                          "SELECT trx_id FROM information_schema.innodb_trx WHERE trx_mysql_thread_id=%s"
+                          (string writerConnectionId)
+
+                  let! closed = afterCommit.ExecuteScalarAsync() |> Async.AwaitTask
+                  Expect.isNull closed "commit removes the transaction row"
+              }
+              |> Async.RunSynchronously
+
           // A batch UPDATE whose WHERE calls a slow registered function
           // runs its per-row predicate inside `Storage.updateRows`'s fold
           // — which, unlike the SELECT row pipeline's `traverse`, had no

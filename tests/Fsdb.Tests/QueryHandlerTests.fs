@@ -5690,7 +5690,7 @@ let tests =
               let root, _ = handle root "CREATE USER 'fkviewer'"
               let viewer = { create 2 store with User = "fkviewer" }
 
-              for table in [ "INNODB_FOREIGN"; "INNODB_FOREIGN_COLS"; "INNODB_BUFFER_POOL_STATS"; "INNODB_TABLES" ] do
+              for table in [ "INNODB_FOREIGN"; "INNODB_FOREIGN_COLS"; "INNODB_BUFFER_POOL_STATS"; "INNODB_TABLES"; "INNODB_TRX" ] do
                   match handle viewer (sprintf "SELECT * FROM information_schema.%s" table) |> snd with
                   | Err(1227, message) ->
                       Expect.equal
@@ -5708,6 +5708,111 @@ let tests =
               match handle viewer "SELECT id FROM information_schema.innodb_foreign WHERE id='fsdb/fk_process'" |> snd with
               | ResultSet(_, [ [ Some "fsdb/fk_process" ] ]) -> ()
               | other -> failtestf "expected PROCESS-visible foreign key, got %A" other
+
+          TestSupport.processGlobalCase "INNODB_TRX follows active transaction lifecycle and reports logical state"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable writer = create 779001 store
+              let observer = create 779002 store
+              let writerProcess = Fsdb.InformationSchema.registerProcess 779001L "root" "localhost"
+              Fsdb.InformationSchema.registerProcess 779002L "root" "localhost" |> ignore
+
+              let execute sql =
+                  let next, result = handle writer sql
+                  writer <- next
+
+                  match result with
+                  | Err(code, message) -> failtestf "%s failed with %d: %s" sql code message
+                  | _ -> ()
+
+              try
+                  execute "CREATE TABLE transaction_probe (id INT PRIMARY KEY, value INT)"
+                  execute "INSERT INTO transaction_probe VALUES (1,10)"
+                  execute "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+                  execute "START TRANSACTION READ ONLY"
+
+                  match handle observer "SELECT trx_id FROM information_schema.innodb_trx WHERE trx_mysql_thread_id=779001" |> snd with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected an unseeded transaction to stay hidden, got %A" other
+
+                  execute "SELECT * FROM transaction_probe"
+                  Fsdb.InformationSchema.beginProcessQuery writerProcess "SELECT * FROM transaction_probe"
+
+                  let readOnlyId =
+                      match
+                          handle
+                              observer
+                              "SELECT trx_id,trx_state,trx_started,trx_mysql_thread_id,trx_query,trx_isolation_level,trx_unique_checks,trx_foreign_key_checks,trx_is_read_only,trx_rows_modified FROM information_schema.innodb_trx WHERE trx_mysql_thread_id=779001"
+                          |> snd
+                      with
+                      | ResultSet(
+                          _,
+                          [ [ Some transactionId
+                              Some "RUNNING"
+                              Some started
+                              Some "779001"
+                              Some "SELECT * FROM transaction_probe"
+                              Some "READ COMMITTED"
+                              Some "1"
+                              Some "1"
+                              Some "1"
+                              Some "0" ] ]
+                        ) ->
+                          Expect.isTrue (started.Contains "-") "transaction start renders as a datetime"
+                          transactionId
+                      | other -> failtestf "expected the active read-only transaction, got %A" other
+
+                  Fsdb.InformationSchema.finishProcessQuery writerProcess
+
+                  match handle observer "SELECT trx_query FROM information_schema.innodb_trx WHERE trx_mysql_thread_id=779001" |> snd with
+                  | ResultSet(_, [ [ None ] ]) -> ()
+                  | other -> failtestf "expected an idle transaction with no current query, got %A" other
+
+                  execute "ROLLBACK"
+                  execute "SET unique_checks=0, foreign_key_checks=0"
+                  execute "START TRANSACTION READ WRITE"
+                  execute "UPDATE transaction_probe SET value=11 WHERE id=1"
+                  Fsdb.InformationSchema.beginProcessQuery writerProcess "UPDATE transaction_probe SET value=11 WHERE id=1"
+
+                  match
+                      handle
+                          observer
+                          "SELECT trx_id,trx_state,trx_query,trx_weight,trx_tables_in_use,trx_tables_locked,trx_lock_structs,trx_lock_memory_bytes,trx_rows_locked,trx_rows_modified,trx_unique_checks,trx_foreign_key_checks,trx_is_read_only,trx_autocommit_non_locking FROM information_schema.innodb_trx WHERE trx_mysql_thread_id=779001"
+                      |> snd
+                  with
+                  | ResultSet(
+                      _,
+                      [ [ Some transactionId
+                          Some "RUNNING"
+                          Some "UPDATE transaction_probe SET value=11 WHERE id=1"
+                          Some weight
+                          Some "0"
+                          Some "1"
+                          Some lockStructs
+                          Some "0"
+                          Some rowsLocked
+                          Some "1"
+                          Some "0"
+                          Some "0"
+                          Some "0"
+                          Some "0" ] ]
+                    ) ->
+                      Expect.notEqual transactionId readOnlyId "a later transaction has a distinct identity"
+                      Expect.isGreaterThan (uint64 weight) 0UL "write weight is live"
+                      Expect.isGreaterThan (uint64 lockStructs) 0UL "held row stripes are reported"
+                      Expect.isGreaterThan (uint64 rowsLocked) 0UL "modified rows remain locked"
+                  | other -> failtestf "expected the active write transaction, got %A" other
+
+                  Fsdb.InformationSchema.finishProcessQuery writerProcess
+                  execute "ROLLBACK"
+
+                  match handle observer "SELECT trx_id FROM information_schema.innodb_trx WHERE trx_mysql_thread_id=779001" |> snd with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected rollback to remove the transaction row, got %A" other
+              finally
+                  handle writer "ROLLBACK" |> ignore
+                  Fsdb.InformationSchema.unregisterProcess 779001L
+                  Fsdb.InformationSchema.unregisterProcess 779002L
 
           testCase "process and grant metadata stay scoped to the host-qualified account"
           <| fun _ ->

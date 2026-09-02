@@ -1650,14 +1650,33 @@ let private removeXaAssociation (session: Session) xid =
 let private removeTransactionView (session: Session) =
     TransactionRegistry.remove session.Store session.ConnectionId
 
+let private enabledSessionFlag name (session: Session) =
+    lookupVar session name
+    |> Option.flatten
+    |> Option.forall ((<>) "0")
+
 let private syncTransactionView (session: Session) =
     match session.Tx with
     | Some transaction when transaction.Seeded ->
-        TransactionRegistry.publish
-            session.Store
-            session.ConnectionId
-            { BaseCatalog = transaction.BaseCatalog
-              Snapshot = transaction.Snapshot }
+        let rowsModified = Storage.transactionRollbackWork transaction.Snapshot |> max 0L |> uint64
+
+        match Storage.transactionId transaction.Snapshot with
+        | Some transactionId ->
+            TransactionRegistry.publish
+                session.Store
+                session.ConnectionId
+                { BaseCatalog = transaction.BaseCatalog
+                  Snapshot = transaction.Snapshot
+                  Metadata =
+                    { Id = transactionId
+                      Started = DateTime.Now
+                      Isolation = transactionIsolationName transaction.Isolation
+                      ReadOnly = transaction.ReadOnly
+                      UniqueChecks = enabledSessionFlag "unique_checks" session
+                      ForeignKeyChecks = enabledSessionFlag "foreign_key_checks" session
+                      RowsModified = rowsModified
+                      LockStructs = Storage.transactionLockStructCount transaction.Snapshot } }
+        | None -> removeTransactionView session
     | _ -> removeTransactionView session
 
     session
@@ -2482,6 +2501,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             session
             |> startTransactionStatement
             |> prepareTransactionWrite stmt
+            |> syncTransactionView
             |> execute
 
         let canAllocateAutoIncrement =

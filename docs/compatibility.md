@@ -84,6 +84,9 @@ with a single divergence: `SHOW SLAVE STATUS`, which real 8.4 also rejects
 with 1064. Stored views, triggers, procedures, functions, their parameter
 metadata, and events populate their object catalogs. PROCESSLIST,
 `Threads_connected`, and `KILL` operate on the real connection registry.
+`information_schema.INNODB_TRX` exposes active seeded transactions, including
+their isolation mode, logical write weight, and held row stripes. InnoDB-only
+lock-memory and scheduling fields remain zero or NULL.
 
 ## TLS transport
 

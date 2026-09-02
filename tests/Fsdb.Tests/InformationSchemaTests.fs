@@ -860,6 +860,15 @@ let tests =
                   "af2baf75773c0073d6cb490ba8871556ed70ef0421a563dc984b074d1a866cba"
                   "the complete MySQL 8.4 descriptor export"
 
+          testCase "INNODB_TRX exposes the MySQL 8.4 descriptor"
+          <| fun _ ->
+              let store = setup ()
+
+              Expect.equal
+                  (descriptorDigest store [ "INNODB_TRX" ])
+                  "5db3519af650f4b939d73f9aa112a666c7ee0ef3e7ac5b23ac2ff45b6311d01a"
+                  "the MySQL 8.4 transaction descriptor"
+
           testCase "InnoDB dictionary views project tables, columns, indexes, fields, statistics, and virtual dependencies"
           <| fun _ ->
               let store = setup ()

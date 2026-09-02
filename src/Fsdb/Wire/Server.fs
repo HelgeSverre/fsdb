@@ -1409,12 +1409,17 @@ let private handleConnection
                 // gone — there's no one to send a reply to, so the caller
                 // just lets the command loop end instead of trying to reply
                 // then read the next command off a dead stream.
-                let runCancellable (dispatch: unit -> Session * Executor.QueryResult) : (Session * Executor.QueryResult) option =
+                let runCancellable sql (dispatch: unit -> Session * Executor.QueryResult) : (Session * Executor.QueryResult) option =
+                    InformationSchema.beginProcessQuery processEntry (Log.redactSql sql)
+
                     try
-                        Some(withCancellationWatch client (Some processEntry) dispatch)
-                    with :? OperationCanceledException ->
-                        Log.diagnostic "fsdb: connection %d: query cancelled (client disconnected)" connectionId
-                        None
+                        try
+                            Some(withCancellationWatch client (Some processEntry) dispatch)
+                        with :? OperationCanceledException ->
+                            Log.diagnostic "fsdb: connection %d: query cancelled (client disconnected)" connectionId
+                            None
+                    finally
+                        InformationSchema.finishProcessQuery processEntry
 
                 let rec loop (session: Session) : Async<unit> =
                     async {
@@ -1595,20 +1600,10 @@ let private handleConnection
 
                                         return! loop session
                                 else
-                                    processEntry.Command <- "Query"
-                                    processEntry.State <- "executing"
-                                    processEntry.StateSince <- DateTime.Now
-                                    processEntry.Info <- Some(Log.redactSql sql)
-
                                     let statements =
                                         match Parser.splitStatements sql with
                                         | Result.Ok statements -> Result.Ok statements
                                         | Result.Error _ -> Result.Error(1064, "You have an error in your SQL syntax")
-
-                                    processEntry.Command <- "Sleep"
-                                    processEntry.State <- ""
-                                    processEntry.StateSince <- DateTime.Now
-                                    processEntry.Info <- None
 
                                     let multiStatements = session.MultiStatementsEnabled && capabilities &&& ClientMultiResults <> 0u
 
@@ -1625,7 +1620,7 @@ let private handleConnection
 
                                         return! loop session
                                     | Result.Ok [] ->
-                                        let dispatched = runCancellable (fun () -> QueryHandler.handle session sql)
+                                        let dispatched = runCancellable sql (fun () -> QueryHandler.handle session sql)
 
                                         match dispatched with
                                         | None -> ()
@@ -1656,7 +1651,7 @@ let private handleConnection
                                                         | Result.Ok None ->
                                                             async {
                                                                 return
-                                                                    runCancellable (fun () -> QueryHandler.handle session statement)
+                                                                    runCancellable statement (fun () -> QueryHandler.handle session statement)
                                                                     |> Option.map (fun (nextSession, result) -> nextSession, result, seqId)
                                                             }
                                                         | Result.Ok(Some load) when not Limits.localInfile || capabilities &&& ClientLocalFiles = 0u ->
@@ -1683,8 +1678,10 @@ let private handleConnection
                                                                     | Result.Error(code, message) -> return Some(session, Err(code, message), responseSeqId)
                                                                     | Result.Ok rows ->
                                                                         return
-                                                                            runCancellable (fun () -> QueryHandler.executeLocalLoad session load rows)
-                                                                            |> Option.map (fun (nextSession, result) -> nextSession, result, responseSeqId)
+                                                                            runCancellable statement (fun () ->
+                                                                                QueryHandler.executeLocalLoad session load rows)
+                                                                            |> Option.map (fun (nextSession, result) ->
+                                                                                nextSession, result, responseSeqId)
                                                             }
 
                                                     match dispatched with
@@ -1739,7 +1736,7 @@ let private handleConnection
                             | Some ProcessInfo ->
                                 InformationSchema.recordQuestion session.StatusCounters
 
-                                match runCancellable (fun () -> QueryHandler.handle session "SHOW PROCESSLIST") with
+                                match runCancellable "SHOW PROCESSLIST" (fun () -> QueryHandler.handle session "SHOW PROCESSLIST") with
                                 | None -> ()
                                 | Some(session, result) ->
                                     activeSession <- Some session
@@ -1759,7 +1756,9 @@ let private handleConnection
                             | Some(ProcessKill connectionId) ->
                                 InformationSchema.recordQuestion session.StatusCounters
 
-                                match runCancellable (fun () -> QueryHandler.handle session (sprintf "KILL CONNECTION %d" connectionId)) with
+                                let sql = sprintf "KILL CONNECTION %d" connectionId
+
+                                match runCancellable sql (fun () -> QueryHandler.handle session sql) with
                                 | None -> ()
                                 | Some(session, result) ->
                                     activeSession <- Some session
@@ -2019,7 +2018,7 @@ let private handleConnection
                                             { session with Statements = Map.add stmtId { stmt with LastParamTypes = Some types } session.Statements }
                                             |> discardLongData stmtId
 
-                                        match runCancellable (fun () -> QueryHandler.executePrepared session stmt values) with
+                                        match runCancellable stmt.Sql (fun () -> QueryHandler.executePrepared session stmt values) with
                                         | None -> ()
                                         | Some(session, result) ->
                                             match cursor, result with

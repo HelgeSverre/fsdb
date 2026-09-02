@@ -1380,6 +1380,18 @@ let registerProcessAs (id: int64) (account: Fsdb.Auth.Account) (user: string) (h
 let registerProcess (id: int64) (user: string) (host: string) =
     registerProcessAs id (Fsdb.Auth.account user "%") user host
 
+let beginProcessQuery (entry: ProcessEntry) info =
+    entry.Command <- "Query"
+    entry.State <- "executing"
+    entry.StateSince <- DateTime.Now
+    entry.Info <- Some info
+
+let finishProcessQuery (entry: ProcessEntry) =
+    entry.Command <- "Sleep"
+    entry.State <- ""
+    entry.StateSince <- DateTime.Now
+    entry.Info <- None
+
 let unregisterProcess (id: int64) = processes.TryRemove id |> ignore
 
 let tryFindProcess (id: int64) : ProcessEntry option =
@@ -1402,6 +1414,45 @@ let private processlistColumns =
       strCol "STATE"
       strCol "INFO" ]
 
+let private innodbTrxColumn name columnType nullable =
+    { col name columnType with
+        Nullable = nullable
+        Default = Some(DConst(VString "")) }
+
+let private innodbTrxText name length nullable =
+    { innodbTrxColumn name (TVarchar length) nullable with
+        Charset = Some "utf8mb3"
+        Collation = Some "utf8mb3_general_ci" }
+
+let private maxInnoDbTrxQueryLength = 1024
+
+let private innodbTrxColumns =
+    [ innodbTrxColumn "trx_id" (TBigInt true) false
+      innodbTrxText "trx_state" 13 false
+      innodbTrxColumn "trx_started" (TDateTime 0) false
+      innodbTrxText "trx_requested_lock_id" 126 true
+      innodbTrxColumn "trx_wait_started" (TDateTime 0) true
+      innodbTrxColumn "trx_weight" (TBigInt true) false
+      innodbTrxColumn "trx_mysql_thread_id" (TBigInt true) false
+      innodbTrxText "trx_query" maxInnoDbTrxQueryLength true
+      innodbTrxText "trx_operation_state" 64 true
+      innodbTrxColumn "trx_tables_in_use" (TBigInt true) false
+      innodbTrxColumn "trx_tables_locked" (TBigInt true) false
+      innodbTrxColumn "trx_lock_structs" (TBigInt true) false
+      innodbTrxColumn "trx_lock_memory_bytes" (TBigInt true) false
+      innodbTrxColumn "trx_rows_locked" (TBigInt true) false
+      innodbTrxColumn "trx_rows_modified" (TBigInt true) false
+      innodbTrxColumn "trx_concurrency_tickets" (TBigInt true) false
+      innodbTrxText "trx_isolation_level" 16 false
+      innodbTrxColumn "trx_unique_checks" (TInt false) false
+      innodbTrxColumn "trx_foreign_key_checks" (TInt false) false
+      innodbTrxText "trx_last_foreign_key_error" 256 true
+      innodbTrxColumn "trx_adaptive_hash_latched" (TInt false) false
+      innodbTrxColumn "trx_adaptive_hash_timeout" (TBigInt true) false
+      innodbTrxColumn "trx_is_read_only" (TInt false) false
+      innodbTrxColumn "trx_autocommit_non_locking" (TInt false) false
+      innodbTrxColumn "trx_schedule_weight" (TBigInt true) true ]
+
 /// Live connections the current viewer may see — its own only, unless it
 /// holds `PROCESS`. Shared by the `information_schema.processlist` view and
 /// `SHOW PROCESSLIST`.
@@ -1411,6 +1462,53 @@ let private visibleProcesses () : ProcessEntry list =
     match restrictedTo "PROCESS" with
     | Some account -> all |> List.filter (fun p -> Fsdb.Auth.sameAccount p.Account account)
     | None -> all
+
+let private innodbTrxRows () =
+    match currentViewer.Value with
+    | None -> []
+    | Some viewer ->
+        let visible =
+            visibleProcesses ()
+            |> List.map (fun connection -> connection.Id, connection)
+            |> Map.ofList
+
+        TransactionRegistry.entries viewer.Store
+        |> List.choose (fun (connectionId, transaction) ->
+            visible
+            |> Map.tryFind (int64 connectionId)
+            |> Option.map (fun connection ->
+                let metadata = transaction.Metadata
+                let rowsLocked = max metadata.RowsModified metadata.LockStructs
+                let tablesLocked = if rowsLocked = 0UL then 0UL else 1UL
+                let query =
+                    connection.Info
+                    |> Option.map (fun text -> text.Substring(0, min text.Length maxInnoDbTrxQueryLength))
+
+                [| VUInt metadata.Id
+                   vs "RUNNING"
+                   VDateTime metadata.Started
+                   VNull
+                   VNull
+                   VUInt(metadata.RowsModified + rowsLocked)
+                   VUInt(uint64 connectionId)
+                   query |> Option.map VString |> Option.defaultValue VNull
+                   VNull
+                   VUInt 0UL
+                   VUInt tablesLocked
+                   VUInt metadata.LockStructs
+                   VUInt 0UL
+                   VUInt rowsLocked
+                   VUInt metadata.RowsModified
+                   VUInt 0UL
+                   vs metadata.Isolation
+                   vi (if metadata.UniqueChecks then 1 else 0)
+                   vi (if metadata.ForeignKeyChecks then 1 else 0)
+                   VNull
+                   vi 0
+                   VUInt 0UL
+                   vi (if metadata.ReadOnly then 1 else 0)
+                   vi 0
+                   VNull |]))
 
 /// `(ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO)` per visible connection —
 /// the `information_schema.processlist` row source.
@@ -3023,6 +3121,7 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "INNODB_FOREIGN", innodbForeignColumns
       "INNODB_FOREIGN_COLS", innodbForeignColsColumns
       "INNODB_FT_DEFAULT_STOPWORD", innodbFtDefaultStopwordColumns
+      "INNODB_TRX", innodbTrxColumns
       "KEY_COLUMN_USAGE", keyColumnUsageColumns
       "KEYWORDS", keywordsColumns
       "OPTIMIZER_TRACE", optimizerTraceColumns
@@ -3282,6 +3381,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "INNODB_FOREIGN" -> Some(innodbForeignRows catalog)
         | "INNODB_FOREIGN_COLS" -> Some(innodbForeignColsRows catalog)
         | "INNODB_FT_DEFAULT_STOPWORD" -> Some innodbFtDefaultStopwordRows
+        | "INNODB_TRX" -> Some(innodbTrxRows ())
         | _ when InnoDbMetadata.contains upper -> InnoDbMetadata.tryRows catalog upper
         | "KEYWORDS" -> Some keywordsRows
         | "PLUGINS" -> Some pluginsRows
