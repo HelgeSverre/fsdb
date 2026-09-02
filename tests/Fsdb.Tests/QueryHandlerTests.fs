@@ -60,6 +60,50 @@ let tests =
                   Expect.equal message "<IV> option ignored" "warning text"
               | other -> failtestf "expected ignored-IV warning, got %A" other
 
+          testCase "deprecated row-count and ODKU syntax warn once per occurrence"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE deprecated_rows (id INT PRIMARY KEY, n INT)"
+              let session, _ = handle session "INSERT INTO deprecated_rows VALUES (1, 10), (2, 20)"
+
+              let session, _ =
+                  handle session "SELECT SQL_CALC_FOUND_ROWS * FROM deprecated_rows LIMIT 1"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1287,
+                    "SQL_CALC_FOUND_ROWS is deprecated and will be removed in a future release. Consider using two separate queries instead." ]
+                  "SQL_CALC_FOUND_ROWS warning"
+
+              let session, _ = handle session "SELECT FOUND_ROWS() FROM deprecated_rows"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1287,
+                    "FOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead." ]
+                  "FOUND_ROWS warning is not repeated per row"
+
+              let session, _ =
+                  handle session "SELECT (SELECT FOUND_ROWS()), FOUND_ROWS() FROM deprecated_rows LIMIT 1"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map _.Code)
+                  [ 1287; 1287 ]
+                  "each direct or nested deprecated function occurrence warns"
+
+              let session, _ =
+                  handle
+                      session
+                      "INSERT INTO deprecated_rows VALUES (3, 30) ON DUPLICATE KEY UPDATE n = VALUES(n) + VALUES(n)"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1287,
+                    "'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead"
+                    1287,
+                    "'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead" ]
+                  "VALUES warnings do not require a duplicate row"
+
           testCase "AES result metadata remains binary when LIMIT 0 returns no rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -13637,6 +13637,69 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")
 
+let private selectClauseExpressions (select: SelectStmt) =
+    (select.Projections |> List.map fst)
+    @ Option.toList select.Where
+    @ Option.toList select.Having
+    @ select.GroupBy
+    @ (select.OrderBy |> List.map fst)
+    @ (select.Joins |> List.map _.On)
+    @ Option.toList select.Limit
+    @ Option.toList select.Offset
+
+let rec private countFunctionCallsInExpression name expression =
+    let current =
+        match expression with
+        | FuncCall(called, _) when called.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> 1
+        | _ -> 0
+
+    current
+    + (Expression.children expression |> List.sumBy (countFunctionCallsInExpression name))
+    + (Expression.subqueries expression |> List.sumBy (countFunctionCallsInSelect name))
+
+and private countFunctionCallsInSelect name (select: SelectStmt) =
+    let fromItem =
+        function
+        | FromTable _ -> 0
+        | FromSubquery(query, _)
+        | FromLateral(query, _) -> countFunctionCallsInQuery name query
+        | FromJsonTable(source, _, _, _) -> countFunctionCallsInExpression name source
+
+    (selectClauseExpressions select |> List.sumBy (countFunctionCallsInExpression name))
+    + (select.Windows
+       |> List.sumBy (snd >> OverSpec >> Expression.overExpressions >> List.sumBy (countFunctionCallsInExpression name)))
+    + (select.Ctes |> List.sumBy (fun cte -> countFunctionCallsInQuery name cte.Body))
+    + (select.From |> Option.map fromItem |> Option.defaultValue 0)
+    + (select.Joins |> List.sumBy (_.Table >> fromItem))
+
+and private countFunctionCallsInQuery name =
+    function
+    | PlainSelect select -> countFunctionCallsInSelect name select
+    | UnionSelect(first, rest, orderBy, limit, offset) ->
+        countFunctionCallsInSelect name first
+        + (rest |> List.sumBy (snd >> countFunctionCallsInSelect name))
+        + (orderBy |> List.sumBy (fst >> countFunctionCallsInExpression name))
+        + (limit |> Option.map (countFunctionCallsInExpression name) |> Option.defaultValue 0)
+        + (offset |> Option.map (countFunctionCallsInExpression name) |> Option.defaultValue 0)
+
+let private countFunctionCalls name expressions =
+    expressions |> List.sumBy (countFunctionCallsInExpression name)
+
+let private repeatWarning count code message =
+    for _ in 1..count do
+        Diagnostics.warning code message
+
+let private reportSelectDeprecations (select: SelectStmt) =
+    if select.CalculateFoundRows then
+        Diagnostics.warning
+            1287
+            "SQL_CALC_FOUND_ROWS is deprecated and will be removed in a future release. Consider using two separate queries instead."
+
+    repeatWarning
+        (countFunctionCallsInSelect "FOUND_ROWS" select)
+        1287
+        "FOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead."
+
 /// A top-level `SELECT`'s resultset plus its per-column MySQL wire types —
 /// `QueryHandler.executeStatement`'s type-preserving entry point into
 /// `runSelectStmt`, which can't be `public` itself (see the doc there).
@@ -13652,6 +13715,7 @@ let runTopLevelSelect
     : QueryResult * ColumnMetadata list * uint64 option * Value[] list =
     resetStatementMemo ()
     let executable = { select with IntoVariables = [] }
+    reportSelectDeprecations select
 
     if select.CalculateFoundRows then
         let unbounded =
@@ -13684,6 +13748,8 @@ let runTopLevelUnion
     (offset: Expr option)
     : QueryResult * ColumnMetadata list * uint64 option =
     resetStatementMemo ()
+    reportSelectDeprecations first
+    rest |> List.iter (snd >> reportSelectDeprecations)
 
     if first.CalculateFoundRows then
         let result, types, values =
@@ -14582,6 +14648,26 @@ let private reportNumericDisplayWarnings columns =
             | _ -> ()
         | None -> ()
 
+let private reportDeprecatedStatementSyntax =
+    let reportValuesFunctionDeprecations assignments =
+        assignments
+        |> List.map snd
+        |> countFunctionCalls "VALUES"
+        |> fun count ->
+            repeatWarning
+                count
+                1287
+                "'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead"
+
+    function
+    | Select select -> reportSelectDeprecations select
+    | Union(first, rest, _, _, _) ->
+        reportSelectDeprecations first
+        rest |> List.iter (snd >> reportSelectDeprecations)
+    | Insert(_, _, _, assignments, _)
+    | InsertSelect(_, _, _, assignments, _) -> reportValuesFunctionDeprecations assignments
+    | _ -> ()
+
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
 let rec executeAs
@@ -14595,6 +14681,7 @@ let rec executeAs
     : (int64 * int64) * QueryResult =
     // Query results are stable only for the statement that produced them.
     resetStatementMemo ()
+    reportDeprecatedStatementSyntax stmt
 
     /// Bodies execute with the trigger's schema `db` as the default
     /// database — MySQL resolves a body's unqualified table names against
