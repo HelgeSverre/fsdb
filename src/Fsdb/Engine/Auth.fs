@@ -1024,6 +1024,7 @@ let private privilegeNames (privileges: PrivilegeSpec list) =
 /// for REVOKE; table-level edits union/subtract the SET string instead.
 let private applyAtLevel
     (store: Store)
+    (grantor: Account option)
     (name: string)
     (host: string)
     (defs: PrivDef list)
@@ -1131,13 +1132,22 @@ let private applyAtLevel
                     deleteRows store "mysql" "tables_priv" (fun r -> Result.Ok(matchesRow r)) |> ignore
                     Result.Ok()
                 | Some _ ->
+                    let changes =
+                        [ "Table_priv", VString(String.concat "," newSet) ]
+                        @ (grantor
+                           |> Option.filter (fun _ -> granting)
+                           |> Option.map (fun account -> [ "Grantor", VString(formatAccount account) ])
+                           |> Option.defaultValue [])
+
                     updateSystemRows
                         store
                         "tables_priv"
                         (fun _ r -> matchesRow r)
-                        [ "Table_priv", VString(String.concat "," newSet) ]
+                        changes
                     |> Result.map ignore
                 | None when granting ->
+                    let grantor = grantor |> Option.defaultValue (account "root" "%")
+
                     match
                         insertRows
                             store
@@ -1148,7 +1158,7 @@ let private applyAtLevel
                                 VString db
                                 VString name
                                 VString table
-                                VString "root@%"
+                                VString(formatAccount grantor)
                                 VString(String.concat "," newSet) ] ]
                     with
                     | Result.Ok _ -> Result.Ok()
@@ -1205,7 +1215,7 @@ let private applyDynamicPrivileges
             | None, false -> Ok())
     |> Result.map ignore
 
-let private applyResolvedPrivileges store name host resolved target withGrantOption granting =
+let private applyResolvedPrivileges store grantor name host resolved target withGrantOption granting =
     let changesOnlyDynamicPrivileges =
         resolved.Static.IsEmpty
         && not resolved.Dynamic.IsEmpty
@@ -1215,7 +1225,7 @@ let private applyResolvedPrivileges store name host resolved target withGrantOpt
         if changesOnlyDynamicPrivileges then
             Ok()
         else
-            applyAtLevel store name host resolved.Static target withGrantOption granting
+            applyAtLevel store grantor name host resolved.Static target withGrantOption granting
 
     applyStatic
     |> Result.bind (fun () ->
@@ -1314,7 +1324,7 @@ let private validateColumnSpecifications store target (specifications: Privilege
             "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used"
         )
 
-let private syncTableColumnPrivileges store wanted database table withGrantOption =
+let private syncTableColumnPrivileges store grantor wanted database table withGrantOption =
     let columnMembers =
         match scanList store "mysql" "columns_priv" with
         | Error _ -> []
@@ -1350,15 +1360,23 @@ let private syncTableColumnPrivileges store wanted database table withGrantOptio
                 |> Result.map ignore
                 |> Result.mapError toMySqlError
             else
+                let changes =
+                    [ "Table_priv", VString(String.concat "," tableMembers)
+                      "Column_priv", VString(String.concat "," columnMembers) ]
+                    @ (grantor
+                       |> Option.map (fun account -> [ "Grantor", VString(formatAccount account) ])
+                       |> Option.defaultValue [])
+
                 updateSystemRows
                     store
                     "tables_priv"
                     (fun _ row -> matches row)
-                    [ "Table_priv", VString(String.concat "," tableMembers)
-                      "Column_priv", VString(String.concat "," columnMembers) ]
+                    changes
                 |> Result.map ignore
         | None when columnMembers.IsEmpty -> Ok()
         | None ->
+            let grantor = grantor |> Option.defaultValue (account "root" "%")
+
             insertRows
                 store
                 "mysql"
@@ -1368,7 +1386,7 @@ let private syncTableColumnPrivileges store wanted database table withGrantOptio
                     VString database
                     VString wanted.Name
                     VString table
-                    VString "root@%"
+                    VString(formatAccount grantor)
                     VString(if withGrantOption then "Grant" else "")
                     VString(String.concat "," columnMembers) ] ]
             |> Result.map ignore
@@ -1376,6 +1394,7 @@ let private syncTableColumnPrivileges store wanted database table withGrantOptio
 
 let private applyColumnSpecifications
     store
+    grantor
     wanted
     database
     table
@@ -1452,7 +1471,7 @@ let private applyColumnSpecifications
                             VString(String.concat "," updated) ] ]
                     |> Result.map ignore
                     |> Result.mapError toMySqlError)
-            |> Result.bind (fun _ -> syncTableColumnPrivileges store wanted database table withGrantOption)
+            |> Result.bind (fun _ -> syncTableColumnPrivileges store grantor wanted database table withGrantOption)
 
 let private revokeTablePrivilegesFromColumns store wanted database table (privileges: PrivilegeSpec list) =
     let members =
@@ -1494,7 +1513,7 @@ let private revokeTablePrivilegesFromColumns store wanted database table (privil
                         (fun _ candidate -> matches candidate && eqI (userColumnText columns candidate "Column_name") column)
                         [ "Column_priv", VString(String.concat "," updated) ]
                     |> Result.map ignore)
-            |> Result.bind (fun _ -> syncTableColumnPrivileges store wanted database table false)
+            |> Result.bind (fun _ -> syncTableColumnPrivileges store None wanted database table false)
 
 let private quotedAccount account = sprintf "`%s`@`%s`" account.Name account.Host
 
@@ -1734,7 +1753,8 @@ let formatCurrentRoles roles =
 
 /// `GRANT privs ON target TO users [WITH GRANT OPTION]`. MySQL 8 no longer
 /// auto-creates unknown grantees — that's 1410.
-let grantSpecifications
+let grantSpecificationsAs
+    (grantor: Account)
     (store: Store)
     (privs: PrivilegeSpec list)
     (target: PrivTarget)
@@ -1757,14 +1777,17 @@ let grantSpecifications
                     (if wholeSpecifications.IsEmpty then
                          Ok()
                      else
-                         applyResolvedPrivileges store name host resolved target withGrantOption true)
+                         applyResolvedPrivileges store (Some grantor) name host resolved target withGrantOption true)
                     |> Result.bind (fun () ->
                         match columns, target with
                         | [], _ -> Ok()
                         | columns, OnTable(database, table) ->
-                            applyColumnSpecifications store wanted database table columns withGrantOption true
+                            applyColumnSpecifications store (Some grantor) wanted database table columns withGrantOption true
                         | _ -> Error(1144, "Illegal GRANT/REVOKE command")))
             |> Result.map ignore))
+
+let grantSpecifications store privs target users withGrantOption =
+    grantSpecificationsAs (account "root" "%") store privs target users withGrantOption
 
 let grant store privileges target users withGrantOption =
     privileges
@@ -1798,7 +1821,7 @@ let revokeSpecifications
                     (if wholeSpecifications.IsEmpty then
                          Ok()
                      else
-                         applyResolvedPrivileges store name host resolved target revokesGrantOption false)
+                         applyResolvedPrivileges store None name host resolved target revokesGrantOption false)
                     |> Result.bind (fun () ->
                         match target with
                         | OnTable(database, table) ->
@@ -1807,7 +1830,7 @@ let revokeSpecifications
                                 if columns.IsEmpty then
                                     Ok()
                                 else
-                                    applyColumnSpecifications store wanted database table columns false false)
+                                    applyColumnSpecifications store None wanted database table columns false false)
                         | _ when columns.IsEmpty -> Ok()
                         | _ -> Error(1144, "Illegal GRANT/REVOKE command")))
             |> Result.map ignore))

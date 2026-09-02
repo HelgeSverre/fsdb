@@ -827,6 +827,50 @@ let tests =
                                [ Some "geometry_metadata_view"; Some "shape"; None; None; Some "point" ] ]) -> ()
               | other -> failtestf "expected geometry metadata rows, got %A" other
 
+          testCase "view table usage reports direct dependencies"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE usage_base (id INT)" |> ignore
+              let session = Fsdb.Session.create 1 store
+
+              let session, createdFunction =
+                  Fsdb.QueryHandler.handle
+                      session
+                      "CREATE FUNCTION usage_plus(value INT) RETURNS INT DETERMINISTIC RETURN value + 1"
+
+              Expect.equal createdFunction (Affected 0UL) "stored function created"
+              run store "CREATE VIEW usage_first AS SELECT id FROM usage_base" |> ignore
+              run store "CREATE VIEW usage_nested AS SELECT id FROM usage_first" |> ignore
+
+              let _, createdView =
+                  Fsdb.QueryHandler.handle
+                      session
+                      "CREATE VIEW usage_function AS SELECT usage_plus(id) AS id FROM usage_base"
+
+              Expect.equal createdView (Affected 0UL) "function-backed view created"
+
+              match
+                  run
+                      store
+                      "SELECT view_name, table_schema, table_name FROM information_schema.view_table_usage WHERE view_schema = 'fsdb' AND view_name LIKE 'usage_%' ORDER BY view_name, table_name"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "usage_first"; Some "fsdb"; Some "usage_base" ]
+                    [ Some "usage_function"; Some "fsdb"; Some "usage_base" ]
+                    [ Some "usage_nested"; Some "fsdb"; Some "usage_first" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected direct view dependencies, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT table_name, specific_schema, specific_name FROM information_schema.view_routine_usage WHERE table_schema = 'fsdb' ORDER BY table_name, specific_name"
+              with
+              | ResultSet(_, [ [ Some "usage_function"; Some "fsdb"; Some "usage_plus" ] ]) -> ()
+              | other -> failtestf "expected direct view routine dependencies, got %A" other
+
           testCase "the verbatim TablePlus routines query returns an empty set with aliased columns"
           <| fun _ ->
               let store = setup ()

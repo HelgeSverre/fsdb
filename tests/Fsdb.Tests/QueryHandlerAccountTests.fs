@@ -621,7 +621,8 @@ let tests =
               let root, _ = handle root "INSERT INTO role_db.documents VALUES (1)"
               let root, _ = handle root "CREATE ROLE reader, parent, cycle_a, cycle_b"
               let root, _ = handle root "CREATE USER alice, bob"
-              let root, _ = handle root "GRANT SELECT ON role_db.* TO reader"
+              let root, _ = handle root "GRANT SELECT ON role_db.documents TO reader"
+              let root, _ = handle root "GRANT UPDATE(id) ON role_db.documents TO parent"
               let root, _ = handle root "GRANT reader TO parent"
               let root, _ = handle root "GRANT parent TO alice WITH ADMIN OPTION"
 
@@ -700,6 +701,57 @@ let tests =
                   ()
               | other -> failtestf "expected direct and inherited applicable roles, got %A" other
 
+              match
+                  handle
+                      alice
+                      "SELECT USER, GRANTEE, ROLE_NAME, IS_GRANTABLE, IS_DEFAULT, IS_MANDATORY FROM information_schema.ADMINISTRABLE_ROLE_AUTHORIZATIONS"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "alice"; Some "alice"; Some "parent"; Some "YES"; Some "YES"; Some "NO" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected administrable role metadata, got %A" other
+
+              match
+                  handle
+                      alice
+                      "SELECT GRANTOR, GRANTOR_HOST, GRANTEE, GRANTEE_HOST, TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.ROLE_TABLE_GRANTS"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "root"; Some "%"; Some "reader"; Some "%"; Some "def"; Some "role_db"
+                      Some "documents"; Some "Select"; Some "NO" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected inherited role table grants, got %A" other
+
+              match
+                  handle
+                      alice
+                      "SELECT GRANTOR, GRANTOR_HOST, GRANTEE, GRANTEE_HOST, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.ROLE_COLUMN_GRANTS"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "root"; Some "%"; Some "parent"; Some "%"; Some "role_db"; Some "documents"
+                      Some "id"; Some "Update"; Some "NO" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected active role column grants, got %A" other
+
+              match handle alice "SELECT * FROM information_schema.ROLE_ROUTINE_GRANTS" |> snd with
+              | ResultSet(
+                  [ "GRANTOR"; "GRANTOR_HOST"; "GRANTEE"; "GRANTEE_HOST"; "SPECIFIC_CATALOG"; "SPECIFIC_SCHEMA"
+                    "SPECIFIC_NAME"; "ROUTINE_CATALOG"; "ROUTINE_SCHEMA"; "ROUTINE_NAME"; "PRIVILEGE_TYPE"
+                    "IS_GRANTABLE" ],
+                  []
+                ) ->
+                  ()
+              | other -> failtestf "expected the empty role routine grant surface, got %A" other
+
               match handle alice "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'role_db'" |> snd with
               | ResultSet(_, [ [ Some "documents" ] ]) -> ()
               | other -> failtestf "expected role privileges to reveal table metadata, got %A" other
@@ -725,7 +777,7 @@ let tests =
                   Expect.equal
                       (rows |> List.map (List.head >> Option.get))
                       [ "GRANT USAGE ON *.* TO `alice`@`%`"
-                        "GRANT SELECT ON `role_db`.* TO `alice`@`%`"
+                        "GRANT SELECT, UPDATE (`id`) ON `role_db`.`documents` TO `alice`@`%`"
                         "GRANT `parent`@`%` TO `alice`@`%` WITH ADMIN OPTION" ]
                       "USING materializes inherited role privileges"
               | other -> failtestf "expected materialized role grants, got %A" other
@@ -733,6 +785,35 @@ let tests =
               match handle root "SHOW GRANTS FOR alice USING reader" |> snd with
               | Err(3530, _) -> ()
               | other -> failtestf "expected indirect USING role refusal, got %A" other
+
+          testCase "delegated grants retain their actual grantor"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE grantor_db"
+              let root, _ = handle root "CREATE TABLE grantor_db.documents (id INT)"
+              let root, _ = handle root "CREATE USER delegator"
+              let root, _ = handle root "CREATE ROLE delegated_reader"
+
+              let _, _ =
+                  handle
+                      root
+                      "GRANT SELECT ON grantor_db.documents TO delegator WITH GRANT OPTION"
+
+              let delegator = { create 2 store with User = "delegator" }
+
+              match handle delegator "GRANT SELECT ON grantor_db.documents TO delegated_reader" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected delegated table grant, got %A" other
+
+              match
+                  handle
+                      root
+                      "SELECT Grantor FROM mysql.tables_priv WHERE User = 'delegated_reader' AND Db = 'grantor_db'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "delegator@%" ] ]) -> ()
+              | other -> failtestf "expected the delegated grantor identity, got %A" other
 
           testCase "role selection and lifecycle keep grant catalogs consistent"
           <| fun _ ->
@@ -1326,6 +1407,66 @@ let tests =
               with
               | ResultSet(_, [ [ Some "hidden"; Some "point" ] ]) -> ()
               | other -> failtestf "expected visible geometry metadata, got %A" other
+
+          testCase "view dependency metadata requires dependency privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE dependency_db"
+              let root, _ = handle root "CREATE TABLE dependency_db.source_rows (id INT)"
+
+              let root, _ =
+                  handle
+                      root
+                      "CREATE FUNCTION dependency_db.incremented(value INT) RETURNS INT DETERMINISTIC RETURN value + 1"
+
+              let root, _ =
+                  handle root "CREATE VIEW dependency_db.table_view AS SELECT id FROM dependency_db.source_rows"
+
+              let root, _ =
+                  handle
+                      root
+                      "CREATE VIEW dependency_db.routine_view AS SELECT dependency_db.incremented(id) AS id FROM dependency_db.source_rows"
+
+              let root, _ = handle root "CREATE USER dependency_reader"
+              let root, _ = handle root "GRANT SELECT ON dependency_db.source_rows TO dependency_reader"
+              let root, _ = handle root "GRANT SELECT ON dependency_db.table_view TO dependency_reader"
+              let root, _ = handle root "GRANT SELECT ON dependency_db.routine_view TO dependency_reader"
+              let reader = { create 2 store with User = "dependency_reader" }
+
+              let tableUsage () =
+                  handle
+                      reader
+                      "SELECT view_name, table_name FROM information_schema.view_table_usage WHERE view_schema = 'dependency_db' ORDER BY view_name"
+                  |> snd
+
+              let routineUsage () =
+                  handle
+                      reader
+                      "SELECT table_name, specific_name FROM information_schema.view_routine_usage WHERE table_schema = 'dependency_db'"
+                  |> snd
+
+              Expect.equal (tableUsage ()) (ResultSet([ "view_name"; "table_name" ], [])) "SHOW VIEW guards table usage"
+              Expect.equal (routineUsage ()) (ResultSet([ "table_name"; "specific_name" ], [])) "SHOW VIEW guards routine usage"
+
+              let root, _ = handle root "GRANT SHOW VIEW ON dependency_db.table_view TO dependency_reader"
+              let root, _ = handle root "GRANT SHOW VIEW ON dependency_db.routine_view TO dependency_reader"
+
+              match tableUsage () with
+              | ResultSet(
+                  _,
+                  [ [ Some "routine_view"; Some "source_rows" ]
+                    [ Some "table_view"; Some "source_rows" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected visible table dependencies, got %A" other
+
+              Expect.equal (routineUsage ()) (ResultSet([ "table_name"; "specific_name" ], [])) "EXECUTE guards routine usage"
+              let _, _ = handle root "GRANT EXECUTE ON dependency_db.* TO dependency_reader"
+
+              match routineUsage () with
+              | ResultSet(_, [ [ Some "routine_view"; Some "incremented" ] ]) -> ()
+              | other -> failtestf "expected visible routine dependency, got %A" other
 
           testCase "column grants authorize only referenced and written columns"
           <| fun _ ->

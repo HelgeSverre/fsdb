@@ -1511,6 +1511,169 @@ let private viewsRows (catalog: Catalog) : Value[] list =
         [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs view.CheckOption; vs (if isUpdatableView catalog view.Schema view.Definition then "YES" else "NO"); vs view.Definer
            vs view.SecurityType; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
 
+let private viewTableUsageColumns =
+    [ col "VIEW_CATALOG" (TVarchar 64)
+      col "VIEW_SCHEMA" (TVarchar 64)
+      col "VIEW_NAME" (TVarchar 64)
+      col "TABLE_CATALOG" (TVarchar 64)
+      col "TABLE_SCHEMA" (TVarchar 64)
+      col "TABLE_NAME" (TVarchar 64) ]
+
+let private viewerCanShowView schema name =
+    match currentViewer.Value with
+    | None -> true
+    | Some viewer ->
+        Fsdb.Auth.checkForAccountWithRoles
+            viewer.Store
+            viewer.Account
+            viewer.ActiveRoles
+            [ "SHOW VIEW", Fsdb.Auth.OnTable(schema, name) ]
+        |> Result.isOk
+
+let private viewTableUsageRows (catalog: Catalog) =
+    let visible viewSchema viewName tableSchema tableName =
+        match currentViewer.Value with
+        | None -> true
+        | Some viewer ->
+            viewerCanShowView viewSchema viewName
+            && Fsdb.Auth.canSeeTableForAccountWithRoles
+                viewer.Store
+                viewer.Account
+                viewer.ActiveRoles
+                tableSchema
+                tableName
+
+    viewCatalogEntries catalog
+    |> List.collect (fun view ->
+        match Parser.parseViewDefinition view.Definition with
+        | Error _ -> []
+        | Ok definition ->
+            Fsdb.Auth.requiredPrivileges view.Schema definition.Statement
+            |> List.choose (function
+                | "SELECT", Fsdb.Auth.OnTable(tableSchema, tableName) ->
+                    Some(tableSchema, tableName)
+                | _ -> None)
+            |> List.distinctBy (fun (schema, table) -> schema.ToLowerInvariant(), table.ToLowerInvariant())
+            |> List.filter (fun (schema, table) -> visible view.Schema view.Name schema table)
+            |> List.map (fun (schema, table) ->
+                [| vs "def"; vs view.Schema; vs view.Name; vs "def"; vs schema; vs table |]))
+
+let private viewRoutineUsageColumns =
+    [ col "TABLE_CATALOG" (TVarchar 64)
+      col "TABLE_SCHEMA" (TVarchar 64)
+      col "TABLE_NAME" (TVarchar 64)
+      col "SPECIFIC_CATALOG" (TVarchar 64)
+      col "SPECIFIC_SCHEMA" (TVarchar 64)
+      requiredCol "SPECIFIC_NAME" (TVarchar 64) ]
+
+let rec private calledFunctionsInExpression (expression: Expr) : string list =
+    let direct =
+        Fsdb.Sql.Expression.collect
+            (function
+            | FuncCall(name, _) -> Some name
+            | _ -> None)
+            expression
+
+    direct
+    @ (Fsdb.Sql.Expression.collectSubqueries expression
+       |> List.collect calledFunctionsInSelect)
+
+and private calledFunctionsInFromItem (item: FromItem) : string list =
+    match item with
+    | FromTable _ -> []
+    | FromSubquery(query, _)
+    | FromLateral(query, _) -> calledFunctionsInSelectOrUnion query
+    | FromJsonTable(source, _, _, _) -> calledFunctionsInExpression source
+
+and private calledFunctionsInSelect (select: SelectStmt) : string list =
+    let expressions =
+        (select.Projections |> List.map fst)
+        @ Option.toList select.Where
+        @ Option.toList select.Having
+        @ select.GroupBy
+        @ (select.OrderBy |> List.map fst)
+        @ Option.toList select.Limit
+        @ Option.toList select.Offset
+        @ (select.Joins |> List.map _.On)
+        @ (select.Windows
+           |> List.collect (snd >> OverSpec >> Fsdb.Sql.Expression.overExpressions))
+
+    (expressions |> List.collect calledFunctionsInExpression)
+    @ (select.From |> Option.map calledFunctionsInFromItem |> Option.defaultValue [])
+    @ (select.Joins |> List.collect (_.Table >> calledFunctionsInFromItem))
+    @ (select.Ctes |> List.collect (_.Body >> calledFunctionsInSelectOrUnion))
+
+and private calledFunctionsInSelectOrUnion (query: SelectOrUnion) : string list =
+    match query with
+    | PlainSelect select -> calledFunctionsInSelect select
+    | UnionSelect(first, rest, orderBy, limit, offset) ->
+        calledFunctionsInSelect first
+        @ (rest |> List.collect (snd >> calledFunctionsInSelect))
+        @ (orderBy |> List.collect (fst >> calledFunctionsInExpression))
+        @ (limit |> Option.map calledFunctionsInExpression |> Option.defaultValue [])
+        @ (offset |> Option.map calledFunctionsInExpression |> Option.defaultValue [])
+
+let private viewRoutineUsageRows (catalog: Catalog) =
+    let functions =
+        mysqlTable catalog "functions"
+        |> Option.map (fun table ->
+            table.RowsArray
+            |> Seq.choose SystemCatalog.StoredFunction.tryRead
+            |> List.ofSeq)
+        |> Option.defaultValue []
+
+    let resolve (viewSchema: string) (name: string) =
+        let separator = name.IndexOf('.')
+
+        let schema, functionName, qualified =
+            if separator < 0 then
+                viewSchema, name, false
+            else
+                name.Substring(0, separator), name.Substring(separator + 1), true
+
+        let native =
+            not qualified
+            && (Functions.lookup functionName Functions.builtins |> Option.isSome
+                || Functions.lookupAggregate functionName Functions.builtins |> Option.isSome)
+
+        if native then
+            None
+        else
+            functions
+            |> List.tryFind (fun routine -> eqI routine.Schema schema && eqI routine.Name functionName)
+            |> Option.map (fun routine -> routine.Schema, routine.Name)
+
+    let canSee viewSchema viewName routineSchema =
+        match currentViewer.Value with
+        | None -> true
+        | Some viewer ->
+            viewerCanShowView viewSchema viewName
+            && (Fsdb.Auth.checkForAccountWithRoles
+                    viewer.Store
+                    viewer.Account
+                    viewer.ActiveRoles
+                    [ "EXECUTE", Fsdb.Auth.OnDb routineSchema ]
+                |> Result.isOk)
+
+    viewCatalogEntries catalog
+    |> List.collect (fun view ->
+        match Parser.parseViewDefinition view.Definition with
+        | Error _ -> []
+        | Ok definition ->
+            let calls =
+                match definition.Statement with
+                | Select select -> calledFunctionsInSelect select
+                | Union(first, rest, orderBy, limit, offset) ->
+                    calledFunctionsInSelectOrUnion(UnionSelect(first, rest, orderBy, limit, offset))
+                | _ -> []
+
+            calls
+            |> List.choose (resolve view.Schema)
+            |> List.distinctBy (fun (schema, name) -> schema.ToLowerInvariant(), name.ToLowerInvariant())
+            |> List.filter (fun (schema, _) -> canSee view.Schema view.Name schema)
+            |> List.map (fun (schema, name) ->
+                [| vs "def"; vs view.Schema; vs view.Name; vs "def"; vs schema; vs name |]))
+
 let private routinesColumns =
     [ strCol "SPECIFIC_NAME"
       strCol "ROUTINE_CATALOG"
@@ -2237,6 +2400,69 @@ let private applicableRolesColumns =
       strCol "IS_DEFAULT"
       strCol "IS_MANDATORY" ]
 
+let private administrableRoleAuthorizationsColumns =
+    [ col "USER" (TVarchar 97)
+      col "HOST" (TVarchar 256)
+      col "GRANTEE" (TVarchar 97)
+      col "GRANTEE_HOST" (TVarchar 256)
+      col "ROLE_NAME" (TVarchar 255)
+      col "ROLE_HOST" (TVarchar 256)
+      requiredCol "IS_GRANTABLE" (TVarchar 3)
+      col "IS_DEFAULT" (TVarchar 3)
+      requiredCol "IS_MANDATORY" (TVarchar 3) ]
+
+let private roleTableGrantsColumns =
+    let privileges =
+        [ "Select"
+          "Insert"
+          "Update"
+          "Delete"
+          "Create"
+          "Drop"
+          "Grant"
+          "References"
+          "Index"
+          "Alter"
+          "Create View"
+          "Show view"
+          "Trigger" ]
+
+    [ col "GRANTOR" (TVarchar 97)
+      col "GRANTOR_HOST" (TVarchar 256)
+      requiredCol "GRANTEE" (TChar 32)
+      requiredCol "GRANTEE_HOST" (TChar 255)
+      requiredCol "TABLE_CATALOG" (TVarchar 3)
+      requiredCol "TABLE_SCHEMA" (TChar 64)
+      requiredCol "TABLE_NAME" (TChar 64)
+      requiredCol "PRIVILEGE_TYPE" (TSet privileges)
+      requiredCol "IS_GRANTABLE" (TVarchar 3) ]
+
+let private roleColumnGrantsColumns =
+    [ col "GRANTOR" (TVarchar 97)
+      col "GRANTOR_HOST" (TVarchar 256)
+      requiredCol "GRANTEE" (TChar 32)
+      requiredCol "GRANTEE_HOST" (TChar 255)
+      requiredCol "TABLE_CATALOG" (TVarchar 3)
+      requiredCol "TABLE_SCHEMA" (TChar 64)
+      requiredCol "TABLE_NAME" (TChar 64)
+      requiredCol "COLUMN_NAME" (TChar 64)
+      requiredCol "PRIVILEGE_TYPE" (TSet [ "Select"; "Insert"; "Update"; "References" ])
+      requiredCol "IS_GRANTABLE" (TVarchar 3) ]
+
+let private roleRoutineGrantsColumns =
+    [ col "GRANTOR" (TVarchar 97)
+      col "GRANTOR_HOST" (TVarchar 256)
+      requiredCol "GRANTEE" (TChar 32)
+      requiredCol "GRANTEE_HOST" (TChar 255)
+      requiredCol "SPECIFIC_CATALOG" (TVarchar 3)
+      requiredCol "SPECIFIC_SCHEMA" (TChar 64)
+      requiredCol "SPECIFIC_NAME" (TChar 64)
+      requiredCol "ROUTINE_CATALOG" (TVarchar 3)
+      requiredCol "ROUTINE_SCHEMA" (TChar 64)
+      requiredCol "ROUTINE_NAME" (TChar 64)
+      requiredCol "PRIVILEGE_TYPE" (TSet [ "Execute"; "Alter Routine"; "Grant" ])
+      requiredCol "IS_GRANTABLE" (TVarchar 3) ]
+
 let private isDefaultRole store account role =
     Fsdb.Auth.defaultRolesForAccount store account
     |> List.exists (Fsdb.Auth.sameAccount role)
@@ -2303,6 +2529,140 @@ let private applicableRolesRows () =
                         "YES"
                     else
                         "NO") |])
+
+let private administrableRoleAuthorizationsRows () =
+    applicableRolesRows ()
+    |> List.filter (fun row -> eqI (rowText row 6) "YES")
+
+let private grantorValues value =
+    match Fsdb.Auth.tryParseAccount value with
+    | Some grantor -> vs grantor.Name, vs grantor.Host
+    | None -> VNull, VNull
+
+let private activeRoleClosure () =
+    currentViewer.Value
+    |> Option.map (fun viewer -> Fsdb.Auth.roleClosure viewer.Store viewer.ActiveRoles)
+    |> Option.defaultValue []
+
+let private belongsToActiveRole roles user host =
+    let account = Fsdb.Auth.account user host
+    roles |> List.exists (Fsdb.Auth.sameAccount account)
+
+let private roleTableGrantsRows (catalog: Catalog) =
+    match mysqlTable catalog "tables_priv" with
+    | None -> []
+    | Some table ->
+        match
+            colIdx table "User",
+            colIdx table "Host",
+            colIdx table "Db",
+            colIdx table "Table_name",
+            colIdx table "Grantor",
+            colIdx table "Table_priv"
+        with
+        | Some user, Some host, Some database, Some tableName, Some grantor, Some privileges ->
+            let roles = activeRoleClosure ()
+
+            table.Rows
+            |> List.choose (fun row ->
+                let userName = rowText row user
+                let hostName = rowText row host
+                let privilegeSet = rowText row privileges
+
+                if belongsToActiveRole roles userName hostName && not (String.IsNullOrEmpty privilegeSet) then
+                    let grantorName, grantorHost = grantorValues (rowText row grantor)
+                    let grantable = Fsdb.Auth.setMembers privilegeSet |> List.exists (eqI "Grant")
+
+                    Some
+                        [| grantorName
+                           grantorHost
+                           vs userName
+                           vs hostName
+                           vs "def"
+                           vs (rowText row database)
+                           vs (rowText row tableName)
+                           vs privilegeSet
+                           vs (if grantable then "YES" else "NO") |]
+                else
+                    None)
+        | _ -> []
+
+let private roleColumnGrantsRows (catalog: Catalog) =
+    match mysqlTable catalog "columns_priv", mysqlTable catalog "tables_priv" with
+    | Some columnsTable, Some tablesTable ->
+        match
+            colIdx columnsTable "User",
+            colIdx columnsTable "Host",
+            colIdx columnsTable "Db",
+            colIdx columnsTable "Table_name",
+            colIdx columnsTable "Column_name",
+            colIdx columnsTable "Column_priv",
+            colIdx tablesTable "User",
+            colIdx tablesTable "Host",
+            colIdx tablesTable "Db",
+            colIdx tablesTable "Table_name",
+            colIdx tablesTable "Grantor",
+            colIdx tablesTable "Table_priv"
+        with
+        | Some user,
+          Some host,
+          Some database,
+          Some tableName,
+          Some columnName,
+          Some privileges,
+          Some tableUser,
+          Some tableHost,
+          Some tableDatabase,
+          Some grantTable,
+          Some grantor,
+          Some tablePrivileges ->
+            let roles = activeRoleClosure ()
+
+            let grantRow userName hostName databaseName tableNameValue =
+                tablesTable.Rows
+                |> List.tryFind (fun row ->
+                    eqI (rowText row tableUser) userName
+                    && eqI (rowText row tableHost) hostName
+                    && eqI (rowText row tableDatabase) databaseName
+                    && eqI (rowText row grantTable) tableNameValue)
+
+            columnsTable.Rows
+            |> List.choose (fun row ->
+                let userName = rowText row user
+                let hostName = rowText row host
+                let databaseName = rowText row database
+                let tableNameValue = rowText row tableName
+                let privilegeSet = rowText row privileges
+
+                if belongsToActiveRole roles userName hostName && not (String.IsNullOrEmpty privilegeSet) then
+                    let tableGrant = grantRow userName hostName databaseName tableNameValue
+
+                    let grantorName, grantorHost =
+                        tableGrant
+                        |> Option.map (fun grant -> grantorValues (rowText grant grantor))
+                        |> Option.defaultValue (VNull, VNull)
+
+                    let grantable =
+                        tableGrant
+                        |> Option.exists (fun grant ->
+                            Fsdb.Auth.setMembers (rowText grant tablePrivileges)
+                            |> List.exists (eqI "Grant"))
+
+                    Some
+                        [| grantorName
+                           grantorHost
+                           vs userName
+                           vs hostName
+                           vs "def"
+                           vs databaseName
+                           vs tableNameValue
+                           vs (rowText row columnName)
+                           vs privilegeSet
+                           vs (if grantable then "YES" else "NO") |]
+                else
+                    None)
+        | _ -> []
+    | _ -> []
 
 /// The one storage engine fsdb reports for every table — `SHOW ENGINES`'
 /// twin lives in `showEngines` below off this same row.
@@ -2401,7 +2761,8 @@ let private stGeometryColumnsColumns =
 /// `SHOW TABLES FROM information_schema` append, so listing and resolution
 /// can't drift.
 let private virtualTableDefs : (string * ColumnDef list) list =
-    [ "APPLICABLE_ROLES", applicableRolesColumns
+    [ "ADMINISTRABLE_ROLE_AUTHORIZATIONS", administrableRoleAuthorizationsColumns
+      "APPLICABLE_ROLES", applicableRolesColumns
       "CHARACTER_SETS", characterSetsColumns
       "CHECK_CONSTRAINTS", checkConstraintsColumns
       "COLLATIONS", collationsColumns
@@ -2421,6 +2782,9 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "PROCESSLIST", processlistColumns
       "REFERENTIAL_CONSTRAINTS", referentialConstraintsColumns
       "RESOURCE_GROUPS", resourceGroupsColumns
+      "ROLE_COLUMN_GRANTS", roleColumnGrantsColumns
+      "ROLE_ROUTINE_GRANTS", roleRoutineGrantsColumns
+      "ROLE_TABLE_GRANTS", roleTableGrantsColumns
       "ROUTINES", routinesColumns
       "SCHEMATA", schemataColumns
       "SCHEMATA_EXTENSIONS", schemataExtensionsColumns
@@ -2435,6 +2799,8 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "TABLE_PRIVILEGES", tablePrivilegesColumns
       "TRIGGERS", triggersColumns
       "USER_PRIVILEGES", userPrivilegesColumns
+      "VIEW_ROUTINE_USAGE", viewRoutineUsageColumns
+      "VIEW_TABLE_USAGE", viewTableUsageColumns
       "VIEWS", viewsColumns ]
 
 /// information_schema's own tables as `TABLES` rows — `SYSTEM VIEW`, NULL
@@ -2628,6 +2994,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
 
     let rows =
         match upper with
+        | "ADMINISTRABLE_ROLE_AUTHORIZATIONS" -> Some(administrableRoleAuthorizationsRows ())
         | "APPLICABLE_ROLES" -> Some(applicableRolesRows ())
         | "TABLES" -> Some(tablesRows catalog @ selfTablesRows ())
         | "COLUMNS" -> Some(columnsRows catalog viewColumns @ selfColumnsRowsCached.Value)
@@ -2660,9 +3027,14 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "PROFILING"
         | "RESOURCE_GROUPS"
         | "TABLESPACES_EXTENSIONS" -> Some []
+        | "ROLE_COLUMN_GRANTS" -> Some(roleColumnGrantsRows catalog)
+        | "ROLE_ROUTINE_GRANTS" -> Some []
+        | "ROLE_TABLE_GRANTS" -> Some(roleTableGrantsRows catalog)
         | "ST_GEOMETRY_COLUMNS" -> Some(stGeometryColumnsRows catalog viewColumns)
         | "TABLES_EXTENSIONS" -> Some(tablesExtensionsRows catalog)
         | "TABLE_CONSTRAINTS_EXTENSIONS" -> Some(tableConstraintsExtensionsRows catalog)
+        | "VIEW_ROUTINE_USAGE" -> Some(viewRoutineUsageRows catalog)
+        | "VIEW_TABLE_USAGE" -> Some(viewTableUsageRows catalog)
         | _ -> None
 
     rows
