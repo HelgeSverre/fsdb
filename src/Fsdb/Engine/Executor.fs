@@ -1999,7 +1999,8 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | _ -> inferred
 
     let choose expressions =
-        let metadata = expressions |> List.choose (metadataOfExpr ctx)
+        let inferred = expressions |> List.map (fun expression -> expression, metadataOfExpr ctx expression)
+        let metadata = inferred |> List.choose snd
         let notNull =
             metadata.Length = expressions.Length
             && (metadata |> List.forall (fun item -> item.Flags &&& NotNullFlag <> 0us))
@@ -2022,9 +2023,18 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                     else
                         item.Flags &&& ~~~NotNullFlag }
 
+        let onlyUntypedNulls =
+            inferred
+            |> List.forall (function
+                | _, Some _ -> true
+                | Lit VNull, None -> true
+                | _ -> false)
+
         let textMetadata = metadata |> List.filter isText
 
-        if not textMetadata.IsEmpty then
+        match metadata with
+        | [ item ] when onlyUntypedNulls -> item |> withNullability |> Some
+        | _ when not textMetadata.IsEmpty ->
             textMetadata
             |> List.maxBy _.ColumnLength
             |> fun item ->
@@ -2034,15 +2044,15 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                     { item with TypeId = TypeVarString; Flags = item.Flags &&& ~~~BlobFlag }
             |> withNullability
             |> Some
-        elif metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) then
+        | _ when metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) ->
             simple TypeDouble |> Option.map withNullability
-        elif metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal) then
+        | _ when metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal) ->
             metadata
             |> List.filter (fun item -> item.TypeId = TypeNewDecimal)
             |> List.maxBy (fun item -> item.Decimals, item.ColumnLength)
             |> withNullability
             |> Some
-        elif not metadata.IsEmpty && metadata |> List.forall isInteger then
+        | _ when not metadata.IsEmpty && metadata |> List.forall isInteger ->
             let isUnsigned = metadata |> List.forall (fun item -> item.Flags &&& UnsignedFlag <> 0us)
 
             simple TypeLongLong
@@ -2055,8 +2065,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                         else
                             item.Flags &&& ~~~UnsignedFlag })
             |> Option.map withNullability
-        else
-            List.tryHead metadata |> Option.map withNullability
+        | _ -> List.tryHead metadata |> Option.map withNullability
 
     let chooseCoalescing expressions =
         let notNull =
@@ -8721,10 +8730,9 @@ and private tryIndexOrder
 /// data-driven read of the same typed values the row already carries
 /// (see `Value.mysqlTypeOf`), not a separate static type-inference pass,
 /// so it's correct for a literal, a cast, or an aggregate the same way it
-/// is for a bare column reference. Falls back to VAR_STRING for a column
-/// that's NULL in every row (or there are no rows at all) — NULL
-/// round-trips the same regardless of the declared type, so there's
-/// nothing to lose by guessing wrong there.
+/// is for a bare column reference. Unknown all-NULL columns fall back to
+/// VAR_STRING here; `applyWireOverrides` replaces that fallback whenever
+/// the projection has declared or statically inferred metadata.
 and private columnMetadataOf (colCount: int) (rows: (string * Value) list list) : ColumnMetadata list =
     [ for i in 0 .. colCount - 1 ->
           rows
@@ -12188,7 +12196,6 @@ and private runSelect
 
         // Wire metadata follows returned rows so LIMIT can stop source
         // evaluation early.
-        // ponytail: infer schema-declared types for all-null result columns.
         let typesOf (finalRows: Value[] list) : ColumnMetadata list =
             columnMetadataOf (List.length colNames) (finalRows |> List.map (List.zip colNames << List.ofArray))
             |> applyWireOverrides outputWireOverrides

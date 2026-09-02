@@ -601,6 +601,49 @@ let tests =
                   Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong; TypeVarString ] "id reports INT's own width, name is a string"
               | _, other -> failtestf "expected a resultset, got %A" other
 
+          testCase "all-NULL rows retain declared and inferred result metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TABLE null_metadata (i INT, d DECIMAL(7,2), s VARCHAR(12), e ENUM('a','b'), tm TIME(3), j JSON)"
+
+              let session, _ = handle session "INSERT INTO null_metadata VALUES (NULL, NULL, NULL, NULL, NULL, NULL)"
+
+              match
+                  handle
+                      session
+                      "SELECT i, d, s, e, tm, j, i + 1, CAST(NULL AS SIGNED), IF(1, NULL, i), CASE WHEN 1 THEN NULL ELSE i END, COALESCE(NULL, i) FROM null_metadata"
+              with
+              | session, ResultSet(_, [ row ]) ->
+                  Expect.all row Option.isNone "every projected value is NULL"
+
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeLong
+                        TypeNewDecimal
+                        TypeVarString
+                        TypeString
+                        TypeTime
+                        TypeJson
+                        TypeLongLong
+                        TypeLongLong
+                        TypeLong
+                        TypeLong
+                        TypeLong ]
+                      "metadata follows declarations and expressions"
+
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.Decimals)
+                      [ 0uy; 2uy; 0uy; 0uy; 3uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy ]
+                      "declared precision survives NULL values"
+
+                  Expect.isTrue (session.LastResultColumnMetadata.[3].Flags &&& EnumFlag <> 0us) "ENUM remains identifiable"
+                  Expect.isTrue (session.LastResultColumnMetadata.[4].Flags &&& BinaryFlag <> 0us) "TIME remains binary"
+              | _, other -> failtestf "expected an all-NULL result row, got %A" other
+
           testCase "LIMIT 0 (the getColumnMeta/\"metadata, no rows\" idiom) still reports real column wire types, not a blanket VAR_STRING"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
