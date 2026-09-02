@@ -5972,6 +5972,8 @@ let tests =
                     "FLUSH USER_RESOURCES"
                     "FLUSH STATUS"
                     "FLUSH TABLES"
+                    "FLUSH TABLES missing_table"
+                    "FLUSH OPTIMIZER_COSTS"
                     "FLUSH LOGS" ] do
                   match handle guest sql |> snd with
                   | Err(1227, _) -> ()
@@ -5994,9 +5996,16 @@ let tests =
               let root, _ =
                   handle
                       root
-                      "GRANT FLUSH_PRIVILEGES, FLUSH_USER_RESOURCES, FLUSH_STATUS, FLUSH_TABLES ON *.* TO 'probe_guest'"
+                      "GRANT FLUSH_PRIVILEGES, FLUSH_USER_RESOURCES, FLUSH_STATUS, FLUSH_TABLES, FLUSH_OPTIMIZER_COSTS ON *.* TO 'probe_guest'"
 
-              for sql in [ "FLUSH PRIVILEGES"; "FLUSH USER_RESOURCES"; "FLUSH STATUS"; "FLUSH TABLES" ] do
+              for sql in
+                  [ "FLUSH PRIVILEGES"
+                    "FLUSH USER_RESOURCES"
+                    "FLUSH STATUS"
+                    "FLUSH TABLES"
+                    "FLUSH LOCAL TABLES missing_table, `other table`"
+                    "FLUSH NO_WRITE_TO_BINLOG TABLES guarded_probe.maintained"
+                    "FLUSH OPTIMIZER_COSTS" ] do
                   match handle guest sql |> snd with
                   | Affected 0UL -> ()
                   | other -> failtestf "expected the dedicated dynamic privilege to permit %s, got %A" sql other
@@ -6148,15 +6157,67 @@ let tests =
                 ) -> ()
               | other -> failtestf "unexpected REPAIR result: %A" other
 
-              for sql in [ "FLUSH TABLES"; "FLUSH STATUS"; "FLUSH LOGS" ] do
+              for sql in
+                  [ "FLUSH TABLES"
+                    "FLUSH TABLES visible, missing"
+                    "FLUSH LOCAL TABLES `visible`"
+                    "FLUSH NO_WRITE_TO_BINLOG TABLES app.visible"
+                    "FLUSH OPTIMIZER_COSTS"
+                    "FLUSH STATUS"
+                    "FLUSH LOGS" ] do
                   match handle session sql |> snd with
                   | Affected 0UL -> ()
                   | other -> failtestf "unexpected %s result: %A" sql other
+
+              for sql in
+                  [ "FLUSH TABLES visible WITH READ LOCK"
+                    "FLUSH TABLES visible FOR EXPORT"
+                    "FLUSH TABLES visible,"
+                    "FLUSH TABLES visible trailing" ] do
+                  match handle session sql |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected unsupported or malformed %s to fail, got %A" sql other
 
               match handle session "SHOW ENGINE INNODB STATUS" |> snd with
               | ResultSet([ "Type"; "Name"; "Status" ], [ [ Some "InnoDB"; Some ""; Some status ] ]) ->
                   Expect.stringContains status "in-memory transactional row store" "engine status describes fsdb"
               | other -> failtestf "unexpected SHOW ENGINE result: %A" other
+
+          testCase "FLUSH table lists and optimizer costs commit active transactions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE flushed (id INT)"
+
+              let commitThrough sql value session =
+                  let session, _ = handle session "START TRANSACTION"
+                  let session, _ = handle session (sprintf "INSERT INTO flushed VALUES (%d)" value)
+                  let session, result = handle session sql
+                  Expect.equal result (Affected 0UL) sql
+                  handle session "ROLLBACK" |> fst
+
+              let session = commitThrough "FLUSH LOCAL TABLES flushed, missing" 1 session
+              let session = commitThrough "FLUSH OPTIMIZER_COSTS" 2 session
+
+              match handle session "SELECT id FROM flushed ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected both FLUSH statements to commit, got %A" other
+
+              let session, _ = handle session "CREATE USER 'flush_denied'"
+              let session, _ = handle session "GRANT SELECT, INSERT ON fsdb.flushed TO 'flush_denied'"
+              let guest = { create 2 session.Store with User = "flush_denied" }
+              let guest, _ = handle guest "START TRANSACTION"
+              let guest, _ = handle guest "INSERT INTO flushed VALUES (3)"
+              let guest, denied = handle guest "FLUSH OPTIMIZER_COSTS"
+
+              match denied with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected FLUSH privilege denial, got %A" other
+
+              let _, _ = handle guest "ROLLBACK"
+
+              match handle session "SELECT id FROM flushed ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected denied FLUSH to retain its pre-execution commit, got %A" other
 
           testCase "SHOW REPLICA STATUS returns MySQL's empty 60-column shape"
           <| fun _ ->

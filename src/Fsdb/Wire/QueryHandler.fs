@@ -1587,7 +1587,21 @@ let private isRoleSessionStatement =
     | SetRole _
     | SetDefaultRole _ -> true
     | _ -> false
-let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
+let private flushIdentifierPattern = @"(?:`(?:``|[^`])+`|[\p{L}_$][\p{L}\p{N}_$]*)"
+
+let private flushTableNamePattern =
+    sprintf @"%s(?:\s*\.\s*%s)?" flushIdentifierPattern flushIdentifierPattern
+
+let private flushTablesRe =
+    Regex(
+        sprintf
+            @"^FLUSH\s+(?:(?:NO_WRITE_TO_BINLOG|LOCAL)\s+)?TABLES(?:\s+%s(?:\s*,\s*%s)*)?\s*;?$"
+            flushTableNamePattern
+            flushTableNamePattern,
+        RegexOptions.IgnoreCase
+    )
+
+let private flushOptimizerCostsRe = Regex(@"^FLUSH\s+OPTIMIZER_COSTS\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
 let private lockTablesRe = Regex(@"^LOCK\s+TABLES(?:\s|$)", RegexOptions.IgnoreCase)
 let private unlockTablesRe = Regex(@"^UNLOCK\s+TABLES?\s*$", RegexOptions.IgnoreCase)
@@ -2940,6 +2954,7 @@ type private Probe =
     | FlushUserResources
     | FlushStatus
     | FlushTables
+    | FlushOptimizerCosts
     | FlushLogs
     | LockTables
     | UnlockTables
@@ -2952,6 +2967,7 @@ let private probeCausesImplicitCommit = function
     | FlushUserResources
     | FlushStatus
     | FlushTables
+    | FlushOptimizerCosts
     | FlushLogs
     | LockTables
     | UnlockTables -> true
@@ -2967,6 +2983,13 @@ let private probeForbiddenInFunctionOrTrigger probe =
         | Savepoint _
         | Release _ -> true
         | _ -> false)
+
+let private beginProbeExecution session probe =
+    match probe with
+    | LockTables
+    | UnlockTables -> session
+    | _ when probeCausesImplicitCommit probe -> commitSession session
+    | _ -> session
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -3077,6 +3100,8 @@ let private tryProbe (sql: string) : Probe option =
         Some FlushStatus
     elif flushTablesRe.IsMatch sql then
         Some FlushTables
+    elif flushOptimizerCostsRe.IsMatch sql then
+        Some FlushOptimizerCosts
     elif flushLogsRe.IsMatch sql then
         Some FlushLogs
     elif lockTablesRe.IsMatch sql then
@@ -3874,6 +3899,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             session, Affected 0UL
     | FlushTables ->
         match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_TABLES" [ "RELOAD"; "FLUSH_TABLES" ] with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() -> session, Affected 0UL
+    | FlushOptimizerCosts ->
+        match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_OPTIMIZER_COSTS" [ "RELOAD"; "FLUSH_OPTIMIZER_COSTS" ] with
         | Error(code, message) -> session, Err(code, message)
         | Ok() -> session, Affected 0UL
     | FlushLogs ->
@@ -6140,7 +6169,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         | Some probe ->
                             // Probe results contain rendered strings rather than
                             // values from which descriptors can be inferred.
-                            let session, result = runProbe session sql probe
+                            let session, result = runProbe (beginProbeExecution session probe) sql probe
                             { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
                         | None -> withStoredFunctionRegistry dispatch session (fun current -> executeStatement current sql rawSql)
 
