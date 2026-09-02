@@ -301,6 +301,23 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "COMMIT RELEASE replies before closing the connection"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+                  let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "COMMIT RELEASE")
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+
+                  let! committed = readPacketAsync stream
+                  Expect.equal committed.Value.Payload.[0] 0uy "commit returns an OK packet"
+
+                  let! closed = readPacketAsync stream
+                  Expect.isNone closed "the server closes after the reply"
+              }
+              |> Async.RunSynchronously
+
           testCase "MySqlConnector can negotiate zlib compression"
           <| fun _ ->
               async {
@@ -532,6 +549,37 @@ let tests =
                   Expect.equal second.Value.SeqId 2uy "error continues response packet numbering"
                   Expect.isTrue (Fsdb.Storage.scanList store "fsdb" "batch_before" |> Result.isOk) "prior statement remains applied"
                   Expect.isTrue (Fsdb.Storage.scanList store "fsdb" "batch_after" |> Result.isError) "later statement is skipped"
+              }
+              |> Async.RunSynchronously
+
+          testCase "CLIENT_MULTI_STATEMENTS stops after COMMIT RELEASE"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+
+                  let! client, stream =
+                      connectRawAsWithCapabilities
+                          server.Port
+                          "root"
+                          (ClientProtocol41 ||| ClientMultiStatements ||| ClientMultiResults)
+
+                  use client = client
+                  let sql = "COMMIT RELEASE; CREATE TABLE after_release (id INT)"
+                  let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+
+                  let! committed = readPacketAsync stream
+                  Expect.equal committed.Value.Payload.[0] 0uy "commit returns an OK packet"
+
+                  let status = Reader(committed.Value.Payload.[1..])
+                  status.ReadLenEncInt() |> ignore
+                  status.ReadLenEncInt() |> ignore
+                  Expect.equal (status.ReadInt16LE() &&& StatusMoreResultsExists) 0 "the final reply has no pending result"
+
+                  let! closed = readPacketAsync stream
+                  Expect.isNone closed "the server closes after the commit reply"
+                  Expect.isTrue (Fsdb.Storage.scanList store "fsdb" "after_release" |> Result.isError) "later statements are skipped"
               }
               |> Async.RunSynchronously
 

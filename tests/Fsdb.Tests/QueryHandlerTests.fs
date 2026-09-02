@@ -7642,6 +7642,52 @@ let tests =
                   Expect.equal (session.Variables.["collation_connection"]) (Some "latin1_swedish_ci") "default collation"
               | _, other -> failtestf "expected SET CHARACTER SET to succeed, got %A" other
 
+          testCase "transaction completion clauses honor explicit and session defaults"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              for assigned, expected in [ "0", "NO_CHAIN"; "1", "CHAIN"; "'RELEASE'", "RELEASE" ] do
+                  let updated, result = handle session ("SET completion_type = " + assigned)
+                  Expect.equal result (Affected 0UL) ("assignment " + assigned)
+                  Expect.equal updated.Variables.["completion_type"] (Some expected) ("canonical value " + assigned)
+
+              match handle session "SET completion_type = 3" |> snd with
+              | Err(1231, _) -> ()
+              | other -> failtestf "expected invalid completion_type error, got %A" other
+
+              let _, globalResult = handle session "SET GLOBAL completion_type = CHAIN"
+              Expect.equal globalResult (Affected 0UL) "global assignment"
+              Expect.equal (create 2 store).Variables.["completion_type"] (Some "CHAIN") "new-session default"
+
+              let chained, _ = handle session "SET completion_type = CHAIN"
+              let chained, _ = handle chained "START TRANSACTION READ ONLY"
+              let chained, rolledBack = handle chained "ROLLBACK WORK"
+              Expect.equal rolledBack (Affected 0UL) "rollback"
+              Expect.isTrue (chained.Tx |> Option.exists _.ReadOnly) "the default starts a matching transaction"
+
+              let ended, result = handle chained "ROLLBACK AND NO CHAIN NO RELEASE"
+              Expect.equal result (Affected 0UL) "explicit completion"
+              Expect.isNone ended.Tx "NO CHAIN suppresses the default"
+              Expect.isFalse ended.CloseAfterReply "NO RELEASE keeps the connection"
+
+              let releasing, _ = handle session "SET completion_type = RELEASE"
+              let releasing, _ = handle releasing "BEGIN"
+              let releasing, result = handle releasing "COMMIT"
+              Expect.equal result (Affected 0UL) "commit"
+              Expect.isTrue releasing.CloseAfterReply "the session default releases the connection"
+
+              let retained, _ = handle session "SET completion_type = RELEASE"
+              let retained, _ = handle retained "BEGIN"
+              let retained, result = handle retained "COMMIT AND CHAIN NO RELEASE"
+              Expect.equal result (Affected 0UL) "explicit chain"
+              Expect.isSome retained.Tx "CHAIN starts a transaction"
+              Expect.isFalse retained.CloseAfterReply "NO RELEASE suppresses the default"
+
+              match handle session "COMMIT AND CHAIN RELEASE" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected incompatible completion syntax to fail, got %A" other
+
           testCase "XA transactions detach at prepare and commit across sessions"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

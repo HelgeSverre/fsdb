@@ -95,6 +95,8 @@ let tests =
                     "SET NAMES utf8mb4"
                     "START TRANSACTION"
                     "COMMIT"
+                    "COMMIT RELEASE"
+                    "ROLLBACK AND CHAIN NO RELEASE"
                     "SHOW TABLES" ] do
                   match prepareStatement sql with
                   | Result.Ok(None, 0) -> ()

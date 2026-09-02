@@ -27,6 +27,7 @@ let defaultVariables: Map<string, string option> =
           "collation_database", "utf8mb4_general_ci"
           "lc_time_names", "en_US"
           "autocommit", "1"
+          "completion_type", "NO_CHAIN"
           "system_time_zone", "UTC"
           "time_zone", "SYSTEM"
           "session_track_schema", "ON"
@@ -327,6 +328,7 @@ type Session =
       StatusCounters: Fsdb.InformationSchema.StatusCounters
       TlsVersion: string option
       TlsCipher: string option
+      CloseAfterReply: bool
       TransportMetrics: TransportMetrics }
 
 let create (connectionId: int) (store: Store) : Session =
@@ -374,6 +376,7 @@ let create (connectionId: int) (store: Store) : Session =
       StatusCounters = Fsdb.InformationSchema.createStatusCounters ()
       TlsVersion = None
       TlsCipher = None
+      CloseAfterReply = false
       TransportMetrics =
         { BytesReceived = 0L
           BytesSent = 0L } }

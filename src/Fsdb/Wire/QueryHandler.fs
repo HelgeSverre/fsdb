@@ -1141,33 +1141,33 @@ let private normalizeOnOff name value =
     | Some value -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name value))
     | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
 
-let private normalizeTransactionTrackingInfo =
-    function
-    | VString value ->
-        match value.Trim().ToUpperInvariant() with
-        | "0" -> Ok "OFF"
-        | "1" -> Ok "STATE"
-        | "2" -> Ok "CHARACTERISTICS"
-        | "OFF"
-        | "STATE"
-        | "CHARACTERISTICS" as value -> Ok value
-        | value -> Error(Err(1231, sprintf "Variable 'session_track_transaction_info' can't be set to the value of '%s'" value))
-    | VInt 0L
-    | VUInt 0UL -> Ok "OFF"
-    | VInt 1L
-    | VUInt 1UL -> Ok "STATE"
-    | VInt 2L
-    | VUInt 2UL -> Ok "CHARACTERISTICS"
-    | VNull -> Error(Err(1231, "Variable 'session_track_transaction_info' can't be set to the value of 'NULL'"))
-    | value ->
-        Error(
-            Err(
-                1231,
-                sprintf
-                    "Variable 'session_track_transaction_info' can't be set to the value of '%s'"
-                    (value |> toText |> Option.defaultValue "NULL")
+let private normalizeEnumVariable name values value =
+    let raw = value |> toText |> Option.map (_.Trim().ToUpperInvariant())
+
+    values
+    |> List.indexed
+    |> List.tryPick (fun (ordinal, canonical) ->
+        raw
+        |> Option.filter (fun candidate -> candidate = string ordinal || candidate = canonical)
+        |> Option.map (fun _ -> canonical))
+    |> function
+        | Some canonical -> Ok canonical
+        | None ->
+            Error(
+                Err(
+                    1231,
+                    sprintf
+                        "Variable '%s' can't be set to the value of '%s'"
+                        name
+                        (raw |> Option.defaultValue "NULL")
+                )
             )
-        )
+
+let private normalizeTransactionTrackingInfo =
+    normalizeEnumVariable "session_track_transaction_info" [ "OFF"; "STATE"; "CHARACTERISTICS" ]
+
+let private normalizeCompletionType =
+    normalizeEnumVariable "completion_type" [ "NO_CHAIN"; "CHAIN"; "RELEASE" ]
 
 let private normalizeIsolationLevel (raw: string) : string =
     Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
@@ -1297,7 +1297,9 @@ let private parseSetFragment
                                  || name = "event_scheduler"
                                  || name = "mandatory_roles") ->
                         Ok(SetVarAction(name, Session.defaultVariables.[name], isGlobal), sideEffects)
-                    | Ok(_, sideEffects) when usesDefault && name = "session_track_transaction_info" ->
+                    | Ok(_, sideEffects)
+                        when usesDefault
+                             && (name = "completion_type" || name = "session_track_transaction_info") ->
                         let value =
                             if isGlobal then
                                 Session.defaultVariables.[name]
@@ -1332,6 +1334,9 @@ let private parseSetFragment
                         |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
                     | Ok(value, sideEffects) when name = "session_track_transaction_info" ->
                         normalizeTransactionTrackingInfo value
+                        |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
+                    | Ok(value, sideEffects) when name = "completion_type" ->
+                        normalizeCompletionType value
                         |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
                     | Ok(value, sideEffects) when name = "mandatory_roles" ->
                         match toText value with
@@ -1502,18 +1507,22 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
 
                 Session.trackSystemVariableAssignments changesSession changedSystemVariables updated, Affected 0UL
 
-// ---------------------------------------------------------------------------
-// Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by
-// text probe (like SET/SHOW above) rather than taught to the grammar —
-// these are session-control statements, not something `Executor` evaluates
-// rows against. See `Session.Transaction` for how real (not no-op) snapshot
-// isolation is implemented cheaply on top of `Storage.Store`'s already-public
-// mutable fields.
-// ---------------------------------------------------------------------------
+// Transaction control stays outside the data-statement AST because it changes
+// connection state without entering Executor.
 
 let private beginTx = Regex(@"^(?:BEGIN(?:\s+WORK)?|START\s+TRANSACTION(?:\s+READ\s+(ONLY|WRITE))?)$", RegexOptions.IgnoreCase)
-let private commitTx = Regex(@"^COMMIT(?:\s+WORK)?(?:\s+AND\s+(NO\s+)?CHAIN)?$", RegexOptions.IgnoreCase)
-let private rollbackTx = Regex(@"^ROLLBACK(\s+WORK)?$", RegexOptions.IgnoreCase)
+
+let private transactionCompletion =
+    Regex(
+        @"^
+          (?<command>COMMIT|ROLLBACK)
+          (?:\s+WORK)?
+          (?<chain>\s+AND\s+(?<noChain>NO\s+)?CHAIN)?
+          (?<release>\s+(?<noRelease>NO\s+)?RELEASE)?
+          $",
+        RegexOptions.IgnoreCase ||| RegexOptions.IgnorePatternWhitespace
+    )
+
 let private savepointStmt = Regex(@"^SAVEPOINT\s+(\S+)$", RegexOptions.IgnoreCase)
 let private rollbackToSavepointStmt = Regex(@"^ROLLBACK(\s+WORK)?\s+TO\s+(?:SAVEPOINT\s+)?(\S+)$", RegexOptions.IgnoreCase)
 let private releaseSavepointStmt = Regex(@"^RELEASE\s+SAVEPOINT\s+(\S+)$", RegexOptions.IgnoreCase)
@@ -2974,16 +2983,17 @@ let private executeStatement (session: Session) (normalizedSql: string) (parserS
     | Result.Ok stmt -> executeParsedWithTemporaryAction action session stmt
     | Result.Error detail -> { session with LastResultColumnMetadata = [] }, parserError parserSql detail
 
-/// Every statement form `dispatch` recognizes purely by text probe
-/// (SET/USE/SHOW/transaction control) rather than `Parser.parse` — one DU
-/// case per form, so `tryProbe` (the recognizer) and `runProbe` (what to do
-/// once recognized) are two separate functions over the same closed set
-/// instead of the same ordered if/elif chain written out twice by hand.
-/// `prepareStatement` only needs `tryProbe`'s `.IsSome`, since PDO's default
-/// `ATTR_EMULATE_PREPARES = false` means even a plain `SET
-/// FOREIGN_KEY_CHECKS=0` (Laravel's `Schema::disableForeignKeyConstraints`)
-/// goes through COM_STMT_PREPARE, and the grammar itself has no `SET`/`SHOW`
-/// production to validate it against.
+type private CompletionDirective =
+    | UseCompletionDefault
+    | EnableCompletion
+    | DisableCompletion
+
+type private TransactionCompletion =
+    { Chain: CompletionDirective
+      Release: CompletionDirective }
+
+/// One closed representation keeps direct and prepared execution from
+/// recognizing different command sets.
 type private Probe =
     | SetAutocommit of value: string
     | SetTransactionIsolation of scope: TransactionIsolationScope * level: string
@@ -2995,8 +3005,8 @@ type private Probe =
     | SetVar
     | RollbackTo of savepoint: string
     | Begin of readOnly: bool option
-    | Commit of chain: bool
-    | Rollback
+    | Commit of completion: TransactionCompletion
+    | Rollback of completion: TransactionCompletion
     | Savepoint of name: string
     | Release of name: string
     | Use of dbName: string
@@ -3064,7 +3074,7 @@ let private probeForbiddenInFunctionOrTrigger probe =
     || (match probe with
         | Begin _
         | Commit _
-        | Rollback
+        | Rollback _
         | RollbackTo _
         | Savepoint _
         | Release _ -> true
@@ -3088,7 +3098,7 @@ let private probeStatusCommand = function
     | SetPassword _ -> Some InformationSchema.StatusCommand.setPassword
     | Begin _ -> Some InformationSchema.StatusCommand.beginTransaction
     | Commit _ -> Some InformationSchema.StatusCommand.commit
-    | Rollback -> Some InformationSchema.StatusCommand.rollback
+    | Rollback _ -> Some InformationSchema.StatusCommand.rollback
     | RollbackTo _ -> Some InformationSchema.StatusCommand.rollbackToSavepoint
     | Savepoint _ -> Some InformationSchema.StatusCommand.savepoint
     | Release _ -> Some InformationSchema.StatusCommand.releaseSavepoint
@@ -3148,13 +3158,32 @@ let private probeStatusCommand = function
     | LockTables -> Some InformationSchema.StatusCommand.lockTables
     | UnlockTables -> Some InformationSchema.StatusCommand.unlockTables
 
-/// The one ordered list of text-probed forms — matching `Probe`'s cases
-/// exactly (the compiler enforces `runProbe` covers every one of them), so
-/// COM_QUERY (`dispatch`) and COM_STMT_PREPARE (`prepareStatement`) can
-/// never disagree about which statements are text-probed vs. parsed the way
-/// two independently-written predicates could drift.
+let private completionDirective (present: Group) (negated: Group) =
+    if not present.Success then
+        UseCompletionDefault
+    elif negated.Success then
+        DisableCompletion
+    else
+        EnableCompletion
+
+let private tryTransactionCompletion command =
+    let matched = transactionCompletion.Match command
+
+    if not matched.Success then
+        None
+    else
+        let completion =
+            { Chain = completionDirective matched.Groups.["chain"] matched.Groups.["noChain"]
+              Release = completionDirective matched.Groups.["release"] matched.Groups.["noRelease"] }
+
+        match completion.Chain, completion.Release with
+        | EnableCompletion, EnableCompletion -> None
+        | _ when matched.Groups.["command"].Value.Equals("COMMIT", StringComparison.OrdinalIgnoreCase) -> Some(Commit completion)
+        | _ -> Some(Rollback completion)
+
 let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe option =
     let command = sql.TrimStart()
+    let completion = tryTransactionCompletion command
 
     if setAutocommit.IsMatch sql then
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
@@ -3189,10 +3218,8 @@ let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe
     elif beginTx.IsMatch command then
         let mode = (beginTx.Match command).Groups.[1]
         Some(Begin(if mode.Success then Some(mode.Value = "ONLY") else None))
-    elif commitTx.IsMatch command then
-        Some(Commit(Regex.IsMatch(command, @"AND\s+CHAIN$", RegexOptions.IgnoreCase)))
-    elif rollbackTx.IsMatch command then
-        Some Rollback
+    elif completion.IsSome then
+        completion
     elif savepointStmt.IsMatch sql then
         Some(Savepoint((savepointStmt.Match sql).Groups.[1].Value))
     elif releaseSavepointStmt.IsMatch sql then
@@ -3365,6 +3392,27 @@ let private acquireFlushTableLocks session sql =
         | Error(code, message) -> session, Err(code, message)
         | Ok accesses -> acquireResolvedTableAccesses session accesses
 
+let private resolveCompletionDirective defaultValue = function
+    | UseCompletionDefault -> defaultValue
+    | EnableCompletion -> true
+    | DisableCompletion -> false
+
+let private applyTransactionCompletion completion characteristics readOnly session =
+    let defaultChain, defaultRelease =
+        match session.Variables |> Map.tryFind "completion_type" |> Option.flatten with
+        | Some "CHAIN" -> true, false
+        | Some "RELEASE" -> false, true
+        | _ -> false, false
+
+    let session =
+        if resolveCompletionDirective defaultChain completion.Chain then
+            beginTransaction ExplicitTrackedTransaction characteristics readOnly session
+        else
+            session
+
+    { session with
+        CloseAfterReply = resolveCompletionDirective defaultRelease completion.Release }
+
 let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
     probe
     |> probeStatusCommand
@@ -3471,18 +3519,22 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             let characteristics = explicitTransactionCharacteristics readOnly session
             TableLocks.releaseExplicit session.Store session.ConnectionId
             beginTransaction ExplicitTrackedTransaction characteristics access session, Affected 0UL
-    | Commit chain ->
+    | Commit completion ->
         match xaAssociation session with
         | Some(_, state) -> session, xaRmFail (xaStateName state)
         | None ->
             let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
             let characteristics = session.TransactionTracking.Characteristics
             let committed = commitSession session
-            (if chain then beginTransaction ExplicitTrackedTransaction characteristics readOnly committed else committed), Affected 0UL
-    | Rollback ->
+            applyTransactionCompletion completion characteristics readOnly committed, Affected 0UL
+    | Rollback completion ->
         match xaAssociation session with
         | Some(_, state) -> session, xaRmFail (xaStateName state)
-        | None -> rollbackSession session, Affected 0UL
+        | None ->
+            let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
+            let characteristics = session.TransactionTracking.Characteristics
+            let rolledBack = rollbackSession session
+            applyTransactionCompletion completion characteristics readOnly rolledBack, Affected 0UL
     | Savepoint name -> savepoint name session
     | Release name -> releaseSavepoint name session
     | Use dbName ->

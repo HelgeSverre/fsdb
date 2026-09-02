@@ -1638,7 +1638,8 @@ let private handleConnection
                                                     session.LastResultColumnMetadata
                                                     result
 
-                                            return! loop session
+                                            if not session.CloseAfterReply then
+                                                return! loop session
                                     | Result.Ok statements ->
                                         let rec sendBatch session seqId statements =
                                             async {
@@ -1689,7 +1690,10 @@ let private handleConnection
                                                     | Some(nextSession, result, resultSeqId) ->
                                                         activeSession <- Some nextSession
                                                         processEntry.Db <- nextSession.Database
-                                                        let hasMore = not remaining.IsEmpty && (match result with Err _ -> false | _ -> true)
+                                                        let hasMore =
+                                                            not nextSession.CloseAfterReply
+                                                            && not remaining.IsEmpty
+                                                            && (match result with Err _ -> false | _ -> true)
                                                         let! nextSeqId =
                                                             sendQueryResultWithSessionStateAndNextSeq
                                                                 stream
@@ -1704,6 +1708,7 @@ let private handleConnection
 
                                                         match result with
                                                         | Err _ -> return Some nextSession
+                                                        | _ when nextSession.CloseAfterReply -> return None
                                                         | _ -> return! sendBatch nextSession nextSeqId remaining
                                             }
 
@@ -2041,7 +2046,8 @@ let private handleConnection
                                                         columns
                                                         metadata
 
-                                                return! loop session
+                                                if not session.CloseAfterReply then
+                                                    return! loop session
                                             | _ ->
                                                 activeSession <- Some session
 
@@ -2057,7 +2063,8 @@ let private handleConnection
                                                         session.LastResultColumnMetadata
                                                         result
 
-                                                return! loop session
+                                                if not session.CloseAfterReply then
+                                                    return! loop session
                             | Some(StmtFetch(stmtId, rowCount)) ->
                                 match Map.tryFind stmtId session.Statements, Map.tryFind stmtId session.Cursors with
                                 | None, _ ->

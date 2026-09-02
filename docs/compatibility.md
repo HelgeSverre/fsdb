@@ -322,6 +322,10 @@ idle waits, transaction conflict waits, and recursive CTEs. Session-scoped
 `wait_timeout`; after the first packet byte arrives, every pause in ordinary,
 TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.
 
+`COMMIT` and `ROLLBACK` honor `AND [NO] CHAIN`, `[NO] RELEASE`, and the
+session or global `completion_type` default. `RELEASE` sends the command reply
+before closing the connection.
+
 ## Users, authentication, and privileges
 
 fsdb has a real account system backed by the native MySQL 8.4 catalog schemas
