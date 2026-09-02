@@ -2261,6 +2261,9 @@ let rec private statementStatusCommand = function
     | CreateDatabase _ -> Some InformationSchema.StatusCommand.createDatabase
     | DropDatabase _ -> Some InformationSchema.StatusCommand.dropDatabase
     | AlterDatabase _ -> Some InformationSchema.StatusCommand.alterDatabase
+    | CreateServer _ -> Some InformationSchema.StatusCommand.createServer
+    | AlterServer _ -> Some InformationSchema.StatusCommand.alterServer
+    | DropServer _ -> Some InformationSchema.StatusCommand.dropServer
     | CreateTable _
     | CreateTableLike _
     | CreateTableAs _ -> Some InformationSchema.StatusCommand.createTable
@@ -2613,6 +2616,9 @@ let private causesImplicitCommit = function
     | DropUser _
     | RenameUser _
     | AlterUser _
+    | CreateServer _
+    | AlterServer _
+    | DropServer _
     | CreateRole _
     | DropRole _
     | Grant _
@@ -6461,6 +6467,9 @@ let private countsAsAccountUpdate = function
     | DropUser _
     | RenameUser _
     | AlterUser _
+    | CreateServer _
+    | AlterServer _
+    | DropServer _
     | CreateRole _
     | DropRole _
     | Grant _

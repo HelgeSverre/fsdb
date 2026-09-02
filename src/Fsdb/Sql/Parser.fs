@@ -3924,6 +3924,66 @@ let private hasAccountOptions (options: AccountOptions) =
     || options.Attribute.IsSome
     || options.ResourceLimits <> AccountOptions.empty.ResourceLimits
 
+type private ParsedForeignServerOption =
+    | ForeignServerHost of string
+    | ForeignServerDatabase of string
+    | ForeignServerUser of string
+    | ForeignServerPassword of string
+    | ForeignServerPort of uint64
+    | ForeignServerSocket of string
+    | ForeignServerOwner of string
+
+let private foreignServerString =
+    stringLit
+    |>> function
+        | VString value -> value
+        | _ -> ""
+
+let private foreignServerOption =
+    choice
+        [ keyword "HOST" >>. foreignServerString |>> ForeignServerHost
+          keyword "DATABASE" >>. foreignServerString |>> ForeignServerDatabase
+          keyword "USER" >>. foreignServerString |>> ForeignServerUser
+          keyword "PASSWORD" >>. foreignServerString |>> ForeignServerPassword
+          keyword "PORT" >>. (puint64 .>> ws) |>> ForeignServerPort
+          keyword "SOCKET" >>. foreignServerString |>> ForeignServerSocket
+          keyword "OWNER" >>. foreignServerString |>> ForeignServerOwner ]
+
+let private foreignServerOptions =
+    between (sym "(") (sym ")") (sepBy1 foreignServerOption (sym ","))
+    |>> List.fold
+        (fun options -> function
+            | ForeignServerHost value -> { options with Host = Some value }
+            | ForeignServerDatabase value -> { options with Database = Some value }
+            | ForeignServerUser value -> { options with User = Some value }
+            | ForeignServerPassword value -> { options with Password = Some value }
+            | ForeignServerPort value -> { options with Port = Some value }
+            | ForeignServerSocket value -> { options with Socket = Some value }
+            | ForeignServerOwner value -> { options with Owner = Some value })
+        ForeignServerOptions.empty
+
+let private createServerStmt: Parser<Statement, unit> =
+    (keyword "CREATE" >>. keyword "SERVER" >>. identOrString
+     .>> keyword "FOREIGN"
+     .>> keyword "DATA"
+     .>> keyword "WRAPPER"
+     .>>. identOrString
+     .>> keyword "OPTIONS"
+     .>>. foreignServerOptions)
+    |>> fun ((name, wrapper), options) -> CreateServer(name, wrapper, options)
+
+let private alterServerStmt: Parser<Statement, unit> =
+    (keyword "ALTER" >>. keyword "SERVER" >>. identOrString
+     .>> keyword "OPTIONS"
+     .>>. foreignServerOptions)
+    |>> AlterServer
+
+let private dropServerStmt: Parser<Statement, unit> =
+    (keyword "DROP" >>. keyword "SERVER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. identOrString)
+    |>> fun (ifExists, name) -> DropServer(name, ifExists)
+
 let private createUserStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
@@ -4201,7 +4261,10 @@ let private setRoleStmt: Parser<Statement, unit> =
 /// just that first token without needing to backtrack at all.
 statementRef.Value <-
     choice
-        [ attempt createUserStmt
+        [ attempt createServerStmt
+          attempt alterServerStmt
+          attempt dropServerStmt
+          attempt createUserStmt
           attempt createRoleStmt
           attempt setDefaultRoleStmt
           attempt setRoleStmt

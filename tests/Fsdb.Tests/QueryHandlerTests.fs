@@ -5252,6 +5252,9 @@ let tests =
               let session = execute session "HANDLER status_family OPEN AS status_cursor"
               let session = execute session "HANDLER status_cursor READ FIRST"
               let session = execute session "HANDLER status_cursor CLOSE"
+              let session = execute session "CREATE SERVER status_server FOREIGN DATA WRAPPER mysql OPTIONS (HOST 'localhost')"
+              let session = execute session "ALTER SERVER status_server OPTIONS (PORT 3306)"
+              let session = execute session "DROP SERVER status_server"
 
               let expected =
                   [ "Com_create_table", 1L
@@ -5270,7 +5273,10 @@ let tests =
                     "Com_dealloc_sql", 1L
                     "Com_ha_open", 1L
                     "Com_ha_read", 1L
-                    "Com_ha_close", 1L ]
+                    "Com_ha_close", 1L
+                    "Com_create_server", 1L
+                    "Com_alter_server", 1L
+                    "Com_drop_server", 1L ]
 
               for name, expectedValue in expected do
                   match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
@@ -6111,6 +6117,140 @@ let tests =
               Expect.equal (replace ClientFoundRows) (Affected 1UL) "found-row mode"
 
           QueryHandlerDiagnosticsTests.tests
+
+          testCase "SERVER DDL maintains mysql.servers with MySQL errors and privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 999905 store
+
+              let root, created =
+                  handle
+                      root
+                      "CREATE SERVER inventory FOREIGN DATA WRAPPER mysql OPTIONS (HOST 'db.example', DATABASE 'warehouse', USER 'app', PASSWORD 'secret', PORT 3306, SOCKET '/tmp/mysql.sock', OWNER 'ops')"
+
+              Expect.equal created (Affected 0UL) "created"
+
+              match
+                  handle
+                      root
+                      "SELECT Server_name, Host, Db, Username, Password, Port, Socket, Wrapper, Owner FROM mysql.servers WHERE Server_name = 'inventory'"
+                  |> snd
+              with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal
+                      row
+                      [ Some "inventory"
+                        Some "db.example"
+                        Some "warehouse"
+                        Some "app"
+                        Some "secret"
+                        Some "3306"
+                        Some "/tmp/mysql.sock"
+                        Some "mysql"
+                        Some "ops" ]
+                      "catalog row"
+              | other -> failtestf "expected mysql.servers row, got %A" other
+
+              match
+                  handle root "CREATE SERVER inventory FOREIGN DATA WRAPPER mysql OPTIONS (HOST 'other')"
+                  |> snd
+              with
+              | Err(1476, message) -> Expect.stringContains message "already exists" "duplicate create"
+              | other -> failtestf "expected duplicate SERVER error, got %A" other
+
+              let root, altered =
+                  handle root "ALTER SERVER inventory OPTIONS (HOST 'first', HOST 'second', PORT 4294967295)"
+
+              Expect.equal altered (Affected 0UL) "altered"
+
+              match
+                  handle
+                      root
+                      "SELECT Host, Db, Username, Port, Wrapper FROM mysql.servers WHERE Server_name = 'inventory'"
+                  |> snd
+              with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal
+                      row
+                      [ Some "second"; Some "warehouse"; Some "app"; Some "2147483647"; Some "mysql" ]
+                      "ALTER patches named options and preserves the rest"
+              | other -> failtestf "expected altered mysql.servers row, got %A" other
+
+              match handle root "ALTER SERVER missing OPTIONS (HOST 'x')" |> snd with
+              | Err(1477, message) -> Expect.stringContains message "does not exist" "missing alter"
+              | other -> failtestf "expected missing SERVER error, got %A" other
+
+              let root, _ = handle root "CREATE USER server_guest"
+              let guest = { create 999906 store with User = "server_guest" }
+
+              match
+                  handle guest "CREATE SERVER denied FOREIGN DATA WRAPPER mysql OPTIONS (HOST 'x')"
+                  |> snd
+              with
+              | Err(1227, message) -> Expect.stringContains message "SUPER" "global privilege"
+              | other -> failtestf "expected CREATE SERVER privilege error, got %A" other
+
+              let root, _ = handle root "GRANT SUPER ON *.* TO server_guest"
+
+              match
+                  handle guest "CREATE SERVER allowed FOREIGN DATA WRAPPER custom OPTIONS (HOST 'x')"
+                  |> snd
+              with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected SUPER to permit CREATE SERVER, got %A" other
+
+              let root, dropped = handle root "DROP SERVER inventory"
+              Expect.equal dropped (Affected 0UL) "dropped"
+
+              match handle root "DROP SERVER inventory" |> snd with
+              | Err(1477, _) -> ()
+              | other -> failtestf "expected missing DROP SERVER error, got %A" other
+
+              match handle root "DROP SERVER IF EXISTS inventory" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected idempotent DROP SERVER, got %A" other
+
+              let root, unicodeCreated =
+                  handle root "CREATE SERVER `café` FOREIGN DATA WRAPPER mysql OPTIONS (HOST 'é')"
+
+              Expect.equal unicodeCreated (Affected 0UL) "unicode server name"
+
+              Expect.equal
+                  (root.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1366, "Incorrect string value: '\\xC3\\xA9' for column 'Host' at row 1" ]
+                  "HOST uses mysql.servers' ASCII character set"
+
+              let root, accentAltered = handle root "ALTER SERVER cafe OPTIONS (OWNER 'matched')"
+              Expect.equal accentAltered (Affected 0UL) "server names use utf8mb3_general_ci"
+
+              match handle root "SELECT Host, Owner FROM mysql.servers WHERE Server_name = 'café'" |> snd with
+              | ResultSet(_, [ [ Some "?"; Some "matched" ] ]) -> ()
+              | other -> failtestf "expected normalized server catalog row, got %A" other
+
+              match handle root "DROP SERVER cafe" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected collation-aware DROP SERVER, got %A" other
+
+              let root, unicodeFieldsCreated =
+                  handle
+                      root
+                      "CREATE SERVER unicode_fields FOREIGN DATA WRAPPER '😀' OPTIONS (DATABASE '😀', USER '😀', PASSWORD '😀', SOCKET '😀', OWNER '😀')"
+
+              Expect.equal unicodeFieldsCreated (Affected 0UL) "utf8mb3 fields"
+              Expect.equal (root.Diagnostics |> List.map _.Code) (List.replicate 6 1300) "every utf8mb3 conversion warns"
+
+              match
+                  handle
+                      root
+                      "SELECT Db, Username, Password, Socket, Wrapper, Owner FROM mysql.servers WHERE Server_name = 'unicode_fields'"
+                  |> snd
+              with
+              | ResultSet(_, [ row ]) -> Expect.equal row (List.replicate 6 (Some "?")) "utf8mb3 fields"
+              | other -> failtestf "expected converted server fields, got %A" other
+
+              match handle root "DROP SERVER unicode_fields" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected unicode-field server cleanup, got %A" other
 
           TestSupport.processGlobalCase "server-wide probes require their MySQL privileges"
           <| fun _ ->

@@ -2961,6 +2961,66 @@ let tests =
                     | Error error -> failtestf "expected parsed view definition, got %s" error ]
 
           testList
+              "foreign server statements"
+              [ testCase "CREATE, ALTER, and DROP SERVER parse catalog options"
+                <| fun _ ->
+                    let created =
+                        { ForeignServerOptions.empty with
+                            Host = Some "db.example"
+                            Database = Some "inventory"
+                            User = Some "app"
+                            Password = Some "secret"
+                            Port = Some 3306UL
+                            Socket = Some "/tmp/mysql.sock"
+                            Owner = Some "ops" }
+
+                    Expect.equal
+                        (parseOk
+                            "CREATE SERVER inventory FOREIGN DATA WRAPPER mysql OPTIONS (HOST 'db.example', DATABASE 'inventory', USER 'app', PASSWORD 'secret', PORT 3306, SOCKET '/tmp/mysql.sock', OWNER 'ops')")
+                        (CreateServer("inventory", "mysql", created))
+                        "create"
+
+                    Expect.equal
+                        (parseOk "ALTER SERVER inventory OPTIONS (HOST 'first', HOST 'second', PORT 3307)")
+                        (AlterServer(
+                            "inventory",
+                            { ForeignServerOptions.empty with
+                                Host = Some "second"
+                                Port = Some 3307UL }
+                        ))
+                        "alter uses the final repeated option"
+
+                    Expect.equal
+                        (parseOk "DROP SERVER IF EXISTS inventory")
+                        (DropServer("inventory", true))
+                        "drop"
+
+                    Expect.equal
+                        (parseOk "CREATE SERVER 'quoted name' FOREIGN DATA WRAPPER 'mysql' OPTIONS (HOST 'db.example')")
+                        (CreateServer(
+                            "quoted name",
+                            "mysql",
+                            { ForeignServerOptions.empty with Host = Some "db.example" }
+                        ))
+                        "quoted name and wrapper"
+
+                    Expect.isError
+                        (parse "CREATE SERVER IF NOT EXISTS inventory FOREIGN DATA WRAPPER mysql OPTIONS (HOST 'db.example')")
+                        "CREATE SERVER has no IF NOT EXISTS form"
+
+                    Expect.isError
+                        (parse "CREATE SERVER empty FOREIGN DATA WRAPPER mysql OPTIONS ()")
+                        "CREATE SERVER requires an option"
+
+                    Expect.isError
+                        (parse "ALTER SERVER inventory OPTIONS ()")
+                        "ALTER SERVER requires an option"
+
+                    Expect.isError
+                        (parse "CREATE SERVER inventory FOREIGN DATA WRAPPER mysql OPTIONS (PORT '3306')")
+                        "PORT is numeric" ]
+
+          testList
               "user statements"
               [ testCase "CREATE USER parses quoted user@host, IDENTIFIED BY, IF NOT EXISTS, and multiple accounts"
                 <| fun _ ->

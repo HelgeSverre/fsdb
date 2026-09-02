@@ -2,6 +2,7 @@ module Fsdb.Engine.SystemCatalog
 
 open System
 open Fsdb.Value
+open Fsdb.Ast
 
 let private textOr fallback index (row: Value[]) =
     row |> Array.tryItem index |> Option.bind toText |> Option.defaultValue fallback
@@ -113,6 +114,79 @@ module View =
                   SecurityType = textOr "DEFINER" 7 row
                   Algorithm = textOr "UNDEFINED" 8 row })
             row
+
+module Server =
+    type Entry =
+        { Name: string
+          Host: string
+          Database: string
+          User: string
+          Password: string
+          Port: int64
+          Socket: string
+          Wrapper: string
+          Owner: string }
+
+    let private truncate length (value: string) =
+        let runes = value.EnumerateRunes() |> Seq.truncate length |> Seq.map _.ToString()
+        String.concat "" runes
+
+    let private optionOr current value = Option.defaultValue current value
+    let private nameCollation =
+        Fsdb.Collation.tryFind "utf8mb3_general_ci"
+        |> Option.defaultValue Fsdb.Collation.defaultCollation
+
+    let withOptions (options: ForeignServerOptions) (entry: Entry) =
+        { entry with
+            Host = options.Host |> Option.map (truncate 255) |> optionOr entry.Host
+            Database = options.Database |> Option.map (truncate 64) |> optionOr entry.Database
+            User = options.User |> Option.map (truncate 64) |> optionOr entry.User
+            Password = options.Password |> Option.map (truncate 64) |> optionOr entry.Password
+            Port = options.Port |> Option.map (min (uint64 Int32.MaxValue) >> int64) |> optionOr entry.Port
+            Socket = options.Socket |> Option.map (truncate 64) |> optionOr entry.Socket
+            Owner = options.Owner |> Option.map (truncate 64) |> optionOr entry.Owner }
+
+    let create name wrapper options =
+        { Name = truncate 64 name
+          Host = ""
+          Database = ""
+          User = ""
+          Password = ""
+          Port = 0L
+          Socket = ""
+          Wrapper = truncate 64 wrapper
+          Owner = "" }
+        |> withOptions options
+
+    let toRow (entry: Entry) =
+        [| VString entry.Name
+           VString entry.Host
+           VString entry.Database
+           VString entry.User
+           VString entry.Password
+           VInt entry.Port
+           VString entry.Socket
+           VString entry.Wrapper
+           VString entry.Owner |]
+
+    let tryRead row =
+        readCompleteRow 9
+            (fun row ->
+                { Name = textAt 0 row
+                  Host = textAt 1 row
+                  Database = textAt 2 row
+                  User = textAt 3 row
+                  Password = textAt 4 row
+                  Port = int64At 0L 5 row
+                  Socket = textAt 6 row
+                  Wrapper = textAt 7 row
+                  Owner = textAt 8 row })
+            row
+
+    let matches name (entry: Entry) =
+        nameCollation.Equals entry.Name (truncate 64 name)
+
+    let rowMatches name row = tryRead row |> Option.exists (matches name)
 
 module Routine =
     type Entry =

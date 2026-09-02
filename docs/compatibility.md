@@ -307,9 +307,10 @@ TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.
 
 ## Users, authentication, and privileges
 
-fsdb has a real account system backed by a stored `mysql` schema (`user`,
-`db`, `tables_priv`, `columns_priv`, `global_grants` — MySQL 8.4 column
-shapes, oracle-verified). `CREATE USER` / `DROP USER` / `ALTER USER` /
+fsdb has a real account system backed by a 24-table `mysql` schema (`user`,
+`db`, `tables_priv`, `columns_priv`, `global_grants`, `servers`, and the
+remaining compatibility catalogs use MySQL 8.4 column shapes). `CREATE USER` /
+`DROP USER` / `ALTER USER` /
 `SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
 path; passwords are mysql_native_password hashes verified at the handshake
 (with an AuthSwitchRequest for clients that answer with caching_sha2 first);
@@ -324,6 +325,8 @@ MySQL 8.4's registered dynamic global privileges are stored in
 `mysql.global_grants`, retain their individual grant options, appear in both
 metadata surfaces, and participate in authorization. Static `ALL PRIVILEGES`
 does not imply them.
+`CREATE SERVER`, `ALTER SERVER`, and `DROP SERVER` persist foreign-server
+definitions in `mysql.servers` and require `SUPER`, matching MySQL 8.4.
 Roles use `mysql.role_edges` and `mysql.default_roles`; grants, admin option,
 transitive inheritance, default activation during authentication, session
 `SET ROLE`, global mandatory roles, `activate_all_roles_on_login`, role-aware

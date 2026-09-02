@@ -267,7 +267,8 @@ applications:
   ordinary and recursive CTEs, JSON paths, and `JSON_TABLE`.
 - Writes and schema: `INSERT`, `INSERT ... SELECT`, `REPLACE`, multi-table
   `UPDATE`/`DELETE`, generated columns, foreign keys, HASH partition metadata,
-  `EXPLAIN`, and enforced or `NOT ENFORCED` `CHECK` constraints.
+  foreign-server catalog DDL, `EXPLAIN`, and enforced or `NOT ENFORCED`
+  `CHECK` constraints.
 - Stored objects: views and `WITH CHECK OPTION`, procedures, functions,
   scheduled events, and `BEFORE`/`AFTER` triggers with compound bodies and
   nested procedure calls.
@@ -279,7 +280,7 @@ applications:
   default and bounded by `max_load_data_bytes`.
 
 The introspection surface GUI clients lean on is served with real data:
-25 `information_schema` tables whose column sets are diffed against a live
+47 `information_schema` tables whose column sets are diffed against a live
 MySQL 8.4, the `SHOW` family (`STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`,
 `CREATE TABLE`, ...), and a live `PROCESSLIST` with working
 `KILL QUERY|CONNECTION`.

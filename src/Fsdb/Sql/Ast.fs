@@ -767,6 +767,26 @@ module AccountOptions =
           Locked = None
           Attribute = None }
 
+type ForeignServerOptions =
+    { Host: string option
+      Database: string option
+      User: string option
+      Password: string option
+      Port: uint64 option
+      Socket: string option
+      Owner: string option }
+
+[<RequireQualifiedAccess>]
+module ForeignServerOptions =
+    let empty =
+        { Host = None
+          Database = None
+          User = None
+          Password = None
+          Port = None
+          Socket = None
+          Owner = None }
+
 type ExplainFormat =
     | ExplainTraditional
     | ExplainJson
@@ -888,6 +908,9 @@ type Statement =
     | DropUser of users: (string * string) list * ifExists: bool
     | RenameUser of users: ((string * string) * (string * string)) list
     | AlterUser of name: string * host: string * password: string option * ifExists: bool * options: AccountOptions
+    | CreateServer of name: string * wrapper: string * options: ForeignServerOptions
+    | AlterServer of name: string * options: ForeignServerOptions
+    | DropServer of name: string * ifExists: bool
     | CreateRole of users: (string * string) list * ifNotExists: bool
     | DropRole of users: (string * string) list * ifExists: bool
     | GrantRoles of roles: (string * string) list * users: (string * string) list * withAdminOption: bool

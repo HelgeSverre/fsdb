@@ -1013,6 +1013,40 @@ let tests =
                   | Ok(_, rows) -> Expect.isEmpty rows (table + " restored empty")
                   | Error error -> failtestf "expected restored mysql.%s, got %A" table error
 
+          testCase "SERVER DDL replays through the WAL"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let root = Fsdb.Session.create 7001 store
+
+              let root, created =
+                  handle
+                      root
+                      "CREATE SERVER durable FOREIGN DATA WRAPPER mysql OPTIONS (HOST 'before', DATABASE 'app', PORT 3306)"
+
+              Expect.equal created (Affected 0UL) "created"
+              let _, altered = handle root "ALTER SERVER durable OPTIONS (HOST 'after')"
+              Expect.equal altered (Affected 0UL) "altered"
+
+              let reloaded = load dir
+
+              match scanList reloaded "mysql" "servers" with
+              | Ok(_, [ row ]) ->
+                  Expect.equal
+                      (row |> Array.map toText |> Array.toList)
+                      [ Some "durable"
+                        Some "after"
+                        Some "app"
+                        Some ""
+                        Some ""
+                        Some "3306"
+                        Some ""
+                        Some "mysql"
+                        Some "" ]
+                      "created and altered row"
+              | other -> failtestf "expected one recovered mysql.servers row, got %A" other
+
           testCase "CREATE USER / SET PASSWORD / DROP USER mutations replay from the WAL"
           <| fun _ ->
               let dir = tempDataDir ()

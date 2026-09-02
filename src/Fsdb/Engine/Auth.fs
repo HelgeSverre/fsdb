@@ -2545,6 +2545,9 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | CreateDatabase(name, _, _) -> [ "CREATE", OnDb name ]
     | DropDatabase(name, _) -> [ "DROP", OnDb name ]
     | AlterDatabase(name, _) -> [ "ALTER", OnDb(name |> Option.defaultValue defaultDb) ]
+    | CreateServer _
+    | AlterServer _
+    | DropServer _ -> [ "SUPER", Global ]
     | CreateUser _
     | DropUser _
     | RenameUser _

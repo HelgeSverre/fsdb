@@ -70,6 +70,8 @@ dependencies; `UNLOCK TABLE[S]` and disconnect release ownership.
 navigation, prefix comparisons, WHERE/LIMIT filtering, temporary tables,
 live row roots, declared result metadata, and DDL invalidation; MySQL likewise
 refuses it through the prepared-statement protocol.
+`CREATE SERVER`, `ALTER SERVER`, and `DROP SERVER` maintain the persisted
+`mysql.servers` catalog with MySQL's patch and privilege semantics.
 
 ### Statement-level gaps
 
@@ -80,7 +82,7 @@ refuses it through the prepared-statement protocol.
 | `ALTER TABLE` accepts `ALGORITHM` and `LOCK` execution hints but does not enforce the requested online-DDL strategy | low | divergence |
 | HASH and LINEAR HASH partition definitions, `pN` selection, INFORMATION_SCHEMA/SHOW metadata, and `ADD`/`COALESCE PARTITION` are logical catalog features over the shared row store; physical pruning plus `DROP`/`REORGANIZE PARTITION` remain absent | low | divergence/refusal |
 | `GRANT PROXY` remains absent; role DDL, grants, admin option, transitive inheritance, default roles, session activation, metadata, and `SHOW GRANTS ... USING` are supported | low | refusal |
-| Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
+| Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, and `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
 | `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`/`X509`, per-account query/update/connection limits, explicit and global-default password lifetimes, mergeable JSON attributes/comments, and the expired-password reset sandbox. Auth-plugin selection, issuer/subject/cipher requirements, and password history/reuse/current policy remain absent | medium | refusal |
 

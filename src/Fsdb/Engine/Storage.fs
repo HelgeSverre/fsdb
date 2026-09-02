@@ -1294,22 +1294,22 @@ let private truncateRunes (length: int) (text: string) =
     else
         runes |> Seq.truncate length |> Seq.map _.ToString() |> String.concat "" |> Some
 
+let private escapedUtf8Suffix (text: string) (converted: string) =
+    let firstChanged =
+        Seq.zip text converted
+        |> Seq.tryFindIndex (fun (original, replacement) -> original <> replacement)
+        |> Option.defaultValue 0
+
+    text.Substring(firstChanged)
+    |> Text.Encoding.UTF8.GetBytes
+    |> Array.map (fun b -> if b < 0x80uy then string (char b) else sprintf "\\x%02X" b)
+    |> String.concat ""
+
 let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     let strict = mode.Strict
     let roundInteger (value: decimal) = Math.Round(value, 0, MidpointRounding.AwayFromZero)
     let fail () =
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
-
-    let escapedUtf8Suffix (text: string) (converted: string) =
-        let firstChanged =
-            Seq.zip text converted
-            |> Seq.tryFindIndex (fun (original, replacement) -> original <> replacement)
-            |> Option.defaultValue 0
-
-        text.Substring(firstChanged)
-        |> Text.Encoding.UTF8.GetBytes
-        |> Array.map (fun b -> if b < 0x80uy then string (char b) else sprintf "\\x%02X" b)
-        |> String.concat ""
 
     let charsetChecked (text: string) : Result<string, StorageError> =
         let converted =
@@ -4545,14 +4545,14 @@ let private normalizePrimaryKeyNullability (columns: ColumnDef list) =
         else
             column)
 
-let private normalizeMetadataComment (comment: string) =
+let private normalizeUtf8mb3Text (text: string) =
     let normalized =
-        comment.EnumerateRunes()
+        text.EnumerateRunes()
         |> Seq.map (fun rune -> if rune.Value <= 0xFFFF then rune.ToString() else "?")
         |> String.concat ""
 
-    if normalized <> comment then
-        let bytes = Encoding.UTF8.GetBytes comment
+    if normalized <> text then
+        let bytes = Encoding.UTF8.GetBytes text
 
         let preview =
             bytes
@@ -4591,10 +4591,10 @@ let createTableSeeded
     ensureDatabase store dbName
     let columns =
         columns
-        |> List.map (fun column -> { column with Comment = normalizeMetadataComment column.Comment })
+        |> List.map (fun column -> { column with Comment = normalizeUtf8mb3Text column.Comment })
         |> normalizePrimaryKeyNullability
 
-    let tableComment = tableComment |> Option.map normalizeMetadataComment
+    let tableComment = tableComment |> Option.map normalizeUtf8mb3Text
 
     let createEvent (createTime, columns) =
         let statement =
@@ -4979,10 +4979,10 @@ let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: IndexKeyGr
 let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
     let action =
         match action with
-        | AddColumn(column, position) -> AddColumn({ column with Comment = normalizeMetadataComment column.Comment }, position)
-        | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeMetadataComment column.Comment }, position)
-        | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeMetadataComment column.Comment }, position)
-        | SetTableComment comment -> SetTableComment(normalizeMetadataComment comment)
+        | AddColumn(column, position) -> AddColumn({ column with Comment = normalizeUtf8mb3Text column.Comment }, position)
+        | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeUtf8mb3Text column.Comment }, position)
+        | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeUtf8mb3Text column.Comment }, position)
+        | SetTableComment comment -> SetTableComment(normalizeUtf8mb3Text comment)
         | action -> action
 
     let strict = mode.Strict
@@ -7864,6 +7864,81 @@ let scanList (store: Store) (dbName: string) (tableName: string) : Result<Column
         match tryGetTable slot.Value tableName with
         | Error e -> Error e
         | Ok table -> Ok(table.Columns, rowsList table)
+
+let private foreignServerMissing name =
+    ExpressionError(
+        1477,
+        sprintf "The foreign server name you are trying to reference does not exist. Data source error:  %s" name
+    )
+
+let private normalizeForeignServerOptions (options: ForeignServerOptions) =
+    let host =
+        options.Host
+        |> Option.map (fun host ->
+            let converted = Collation.Charset.transcodeAscii host
+
+            if converted <> host then
+                Diagnostics.warning
+                    1366
+                    (sprintf "Incorrect string value: '%s' for column 'Host' at row 1" (escapedUtf8Suffix host converted))
+
+            converted)
+
+    { options with
+        Host = host
+        Database = options.Database |> Option.map normalizeUtf8mb3Text
+        User = options.User |> Option.map normalizeUtf8mb3Text
+        Password = options.Password |> Option.map normalizeUtf8mb3Text
+        Socket = options.Socket |> Option.map normalizeUtf8mb3Text
+        Owner = options.Owner |> Option.map normalizeUtf8mb3Text }
+
+let createForeignServer store name wrapper options =
+    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+    let name = normalizeUtf8mb3Text name
+    let wrapper = normalizeUtf8mb3Text wrapper
+    let entry = SystemCatalog.Server.create name wrapper (normalizeForeignServerOptions options)
+
+    match insertRows snapshot "mysql" "servers" None [ entry |> SystemCatalog.Server.toRow |> Array.toList ] with
+    | Ok _ ->
+        commitCatalogInto store baseCatalog snapshot
+        Ok()
+    | Error(DuplicateKey _) ->
+        Error(ExpressionError(1476, sprintf "The foreign server, %s, you are trying to create already exists." name))
+    | Error error -> Error error
+
+let alterForeignServer store name options =
+    let requestedName = name
+    let name = normalizeUtf8mb3Text name
+    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+
+    match scanList snapshot "mysql" "servers" with
+    | Error error -> Error error
+    | Ok(_, rows) when rows |> List.exists (SystemCatalog.Server.rowMatches name) |> not ->
+        Error(foreignServerMissing requestedName)
+    | Ok _ ->
+        let options = normalizeForeignServerOptions options
+
+        updateRows
+            snapshot
+            "mysql"
+            "servers"
+            None
+            (SystemCatalog.Server.rowMatches name >> Ok)
+            (fun row ->
+                row
+                |> SystemCatalog.Server.tryRead
+                |> Option.map (SystemCatalog.Server.withOptions options >> SystemCatalog.Server.toRow >> Ok)
+                |> Option.defaultValue (Error(ExpressionError(1105, "Invalid mysql.servers row"))))
+        |> Result.map (fun _ -> commitCatalogInto store baseCatalog snapshot)
+
+let dropForeignServer store name =
+    let requestedName = name
+    let name = normalizeUtf8mb3Text name
+
+    deleteRows store "mysql" "servers" (SystemCatalog.Server.rowMatches name >> Ok)
+    |> Result.bind (function
+        | 0 -> Error(foreignServerMissing requestedName)
+        | _ -> Ok())
 
 /// Generated columns retain a write-time value because indexes and
 /// constraints operate on physical rows. `Executor.prepareVirtualRows`

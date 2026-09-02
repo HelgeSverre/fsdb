@@ -15627,6 +15627,22 @@ let rec executeAs
         else
             ids, storageErr (NoSuchDatabase name)
 
+    | CreateServer(name, wrapper, options) ->
+        match Storage.createForeignServer store name wrapper options with
+        | Ok() -> ids, Affected 0UL
+        | Error error -> ids, storageErr error
+
+    | AlterServer(name, options) ->
+        match Storage.alterForeignServer store name options with
+        | Ok() -> ids, Affected 0UL
+        | Error error -> ids, storageErr error
+
+    | DropServer(name, ifExists) ->
+        match Storage.dropForeignServer store name with
+        | Ok() -> ids, Affected 0UL
+        | Error(ExpressionError(1477, _)) when ifExists -> ids, Affected 0UL
+        | Error error -> ids, storageErr error
+
     | CreateTableAs(name, query, ifNotExists) ->
         let destinationDb, destinationName = splitQualified dbName name
         let destinationExists = scan store destinationDb destinationName |> Result.isOk
