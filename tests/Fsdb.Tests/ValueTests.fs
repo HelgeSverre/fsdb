@@ -38,6 +38,11 @@ let tests =
                 testCase "VDouble renders without float noise"
                 <| fun _ -> Expect.equal (toText (VDouble 1.5)) (Some "1.5") "double"
 
+                testCase "FLOAT renders from single precision without double noise"
+                <| fun _ ->
+                    Expect.equal (formatFloat 0.1f) "0.1" "fraction"
+                    Expect.equal (formatFloat 1e20f) "1e20" "exponent"
+
                 testCase "VDecimal renders without trailing exponent notation"
                 <| fun _ -> Expect.equal (toText (VDecimal 12.50M)) (Some "12.50") "decimal"
 

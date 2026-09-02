@@ -1100,12 +1100,9 @@ let tryRawBytes =
     | VBytes bytes -> Some bytes
     | _ -> None
 
-/// .NET's shortest-round-trip double formatting agrees with MySQL on the
-/// mantissa but not the exponent: "1E+20" vs MySQL's "1e20" (lowercase,
-/// no '+', no zero-padding). Reshapes just the exponent part when present.
-let private formatDouble (d: float) : string =
-    let s = d.ToString(CultureInfo.InvariantCulture)
-
+/// MySQL uses lowercase, unpadded exponents without a positive sign, unlike
+/// .NET's otherwise-compatible shortest-round-trip floating-point text.
+let private normalizeExponent (s: string) =
     match s.IndexOf 'E' with
     | -1 -> s
     | i ->
@@ -1121,6 +1118,12 @@ let private formatDouble (d: float) : string =
             | d -> d
 
         mantissa + "e" + sign + digits
+
+let private formatDouble (value: float) =
+    value.ToString(CultureInfo.InvariantCulture) |> normalizeExponent
+
+let formatFloat (value: float32) =
+    value.ToString(CultureInfo.InvariantCulture) |> normalizeExponent
 
 /// Renders a value the way the text resultset protocol does: NULL becomes
 /// the lenenc-null marker (`None`), everything else its textual form.

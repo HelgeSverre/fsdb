@@ -2795,12 +2795,18 @@ let private padNumeric width (text: string) =
         text.PadLeft(width, '0')
 
 let private renderOutputValue format value =
+    let renderDouble number =
+        match format.Column |> Option.map _.Type with
+        | Some(TFloat _) -> Some(Value.formatFloat (float32 number))
+        | _ -> Value.toText value
+
     let text =
         match format.Column |> Option.bind _.NumericDisplay, value with
         | Some display, VDouble number ->
             match display.Decimals with
             | Some decimals -> Some(number.ToString("F" + string decimals, System.Globalization.CultureInfo.InvariantCulture))
-            | None -> Value.toText value
+            | None -> renderDouble number
+        | None, VDouble number -> renderDouble number
         | Some _, VDecimal number ->
             match format.Column |> Option.map _.Type with
             | Some(TDecimal(_, scale, _)) -> Some(number.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture))
