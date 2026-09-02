@@ -46,7 +46,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
-| Metadata | 77 INFORMATION_SCHEMA views, all 38 MySQL 8.4 `mysql.*` table schemas, six fsdb catalogs, and the complete keyword and `Com_*` registries | `INNODB_TRX` and engine-maintained physical contents remain absent |
+| Metadata | Broad INFORMATION_SCHEMA coverage, every MySQL 8.4 `mysql.*` table schema, fsdb catalogs, and the complete keyword and `Com_*` registries | `INNODB_TRX` and engine-maintained physical contents remain absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -426,7 +426,7 @@ the statement.
 
 ## 13. Authentication and privileges
 
-Working: mysql.user with MySQL 8.4's exact 51-column order, root bootstrap,
+Working: mysql.user with MySQL 8.4's native column order, root bootstrap,
 SHA1-double password hashing with constant-time compare, CREATE/DROP/ALTER
 USER with account lock, TLS requirements, explicit/default password expiry, resource limits, and mergeable JSON attributes/comments,
 SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
@@ -447,34 +447,34 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 | Advanced account policy | auth-plugin selection and password history/reuse/current policy | explicit/default expiry lifetimes, resource limits, and account attributes/comments are enforced; advanced policy clauses remain absent | low | refusal |
 | Proxy users | supported | absent | low | refusal |
 | SHOW GRANTS completeness | includes role, dynamic-privilege, and PROXY lines | role/dynamic lines and `USING` materialization work; PROXY lines are absent | low | divergence |
-| System-table coverage | 38 mysql.* tables with engine-maintained contents | all 38 table names and MySQL 8.4 column order, types, nullability, key membership, defaults, and generated columns exist, plus six fsdb stored-object catalogs; the eight optimizer-cost and three group-replication configuration/action bootstrap rows are present, but native catalog collations and engine-maintained help, log, GTID, InnoDB-statistics, procedure-grant, NDB, and replication-channel rows still differ or remain empty unless ordinary fsdb DML populates them | low | divergence |
+| System-table coverage | mysql.* tables with engine-maintained contents | MySQL 8.4 table schemas preserve column order, types, nullability, key membership, defaults, and generated columns alongside fsdb's stored-object catalogs; stock optimizer-cost and group-replication configuration/action rows are present, but native catalog collations and engine-maintained help, log, GTID, InnoDB-statistics, procedure-grant, NDB, and replication-channel rows still differ or remain empty unless ordinary fsdb DML populates them | low | divergence |
 
 ## 14. Metadata, server administration, logging, replication
 
-Working: 77 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
+Working: INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
 COLUMNS (including column comments), STATISTICS, TABLE_CONSTRAINTS, KEY_COLUMN_USAGE,
 REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
 ENGINES, COLLATIONS, CHARACTER_SETS, extension metadata, geometry columns,
 optional optimizer/profiling/resource-group/file surfaces, keyword, plugin, user-attribute, and planar spatial-reference catalogs,
 privilege and role-grant views, and direct view table/routine dependencies, …), direct
-SELECT-ability of all 38 MySQL-native `mysql.*` schemas plus six fsdb catalogs, SHOW TABLES/COLUMNS/INDEX/CREATE
+SELECT-ability of MySQL-native `mysql.*` schemas plus fsdb's catalogs, SHOW TABLES/COLUMNS/INDEX/CREATE
 TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
-COLLATION/PRIVILEGES (73 oracle-verified rows)/PROCESSLIST/VARIABLES/STATUS/
+COLLATION/PRIVILEGES/PROCESSLIST/VARIABLES/STATUS/
 GRANTS/TRIGGERS/WARNINGS/ERRORS with statement condition counts, DESCRIBE,
 ALTER TABLE DISABLE/ENABLE KEYS
 no-op for mysqldump, my.cnf parsing ([mysqld]/[server], loose- prefix,
 !include with depth cap), KILL QUERY/CONNECTION with PROCESS/SUPER checks,
-live Limits reporting. `SHOW STATUS` exposes the complete 168-row MySQL 8.4
-`Com_*` registry and updates every command family fsdb implements, including
+live Limits reporting. `SHOW STATUS` exposes MySQL 8.4's `Com_*` registry and
+updates every command family fsdb implements, including
 text and binary prepared statements, XA, HANDLER, routines, events, and
 administrative probes.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| INFORMATION_SCHEMA breadth | 78 views incl. INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | 77 views; six InnoDB dictionary views project live table, column, index, statistics, and virtual-column metadata, while 21 physical diagnostic schemas return truthful empty rowsets because fsdb has no matching buffer-pool, tablespace, compression, or metrics subsystem. `INNODB_TRX` remains absent; ST_SPATIAL_REFERENCE_SYSTEMS exposes fsdb's supported SRID 0 instead of MySQL's full EPSG registry | low | divergence |
+| INFORMATION_SCHEMA breadth | INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | Every MySQL 8.4 view except `INNODB_TRX` is present. InnoDB dictionary views project live table, column, index, statistics, and virtual-column metadata; physical diagnostics return truthful empty rowsets where fsdb has no matching buffer-pool, tablespace, compression, or metrics subsystem. ST_SPATIAL_REFERENCE_SYSTEMS exposes fsdb's supported SRID 0 instead of MySQL's full EPSG registry | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | Optimizer cost overrides | `mysql.server_cost` and `mysql.engine_cost` values feed plan costs after `FLUSH OPTIMIZER_COSTS` | both tables expose MySQL's eight bootstrap rows, generated defaults, and mutable override columns; fsdb's shape-driven planner does not consume their overrides | low | divergence |
-| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | all 168 `Com_*` names are exposed with distinct session/global values and supported commands are live; unsupported commands remain truthfully zero, while engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |
+| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | `Com_*` names have distinct session/global values and supported commands are live; unsupported commands remain truthfully zero, while engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | Logging | general log, slow log, error-log file | `mysql.general_log` and `mysql.slow_log` expose their catalog schemas but remain empty; diagnostics go to credential-redacted stderr (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | no replication execution; REPLICATION privileges are vocabulary only and internal WAL is not a binlog; native catalog schemas plus the three stock group-action configuration rows exist for metadata compatibility | architectural | refusal |
 

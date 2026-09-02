@@ -26,7 +26,7 @@ let maxTokenLength = 84
 let private queryExpansionLimit = 20
 
 /// InnoDB's default stopword list, verbatim from a live 8.4.11's
-/// `INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD` (36 rows; "the" really
+/// `INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD` (where "the" really
 /// does appear twice there).
 let defaultStopwords =
     [ "a"; "about"; "an"; "are"; "as"; "at"; "be"; "by"; "com"; "de"

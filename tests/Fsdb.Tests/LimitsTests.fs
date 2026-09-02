@@ -97,8 +97,8 @@ let tests =
 
                   Expect.equal maxAllowedPacket (64 * 1024 * 1024) "a rejected value leaves the knob alone")
 
-          // The suite runs ~1400 tests in one process. A knob that leaks out
-          // of the test that set it silently changes whatever runs next.
+          // Tests share one process. A knob that leaks out of the test that
+          // set it silently changes whatever runs next.
           testCase "withSettings restores every knob it touched"
           <| fun _ ->
               let before = maxConnections

@@ -4188,7 +4188,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             // And/Or already evaluate both operands (no short-circuit, since
             // SQL's three-valued logic needs both sides to tell "false" apart
             // from "unknown"), so every `BinOp` collapses into one total match
-            // on `op` here — all 12 `Ast.Op` cases handled in the one place,
+            // on `op` here — every `Ast.Op` case is handled in one place,
             // rather than two more `failwith`-guarded helpers each only
             // partially matching the same type.
             eval a

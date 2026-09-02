@@ -2,8 +2,8 @@
 /// sorts text. Everything that needs string semantics delegates here;
 /// nothing re-derives its own rules per call site.
 ///
-/// The full utf8mb4 collation set MySQL 8.4 ships is registered below
-/// (all 89), using ICU collation with explicit sensitivity and padding
+/// The utf8mb4 collation set MySQL 8.4 ships is registered below, using
+/// ICU collation with explicit sensitivity and padding
 /// policies. Host ICU and MySQL use different UCA/CLDR versions, so exact
 /// weight strings and accent tie-break ordering may differ.
 ///  - `utf8mb4_unicode_520_ci`/legacy language collations use ICU's CLDR

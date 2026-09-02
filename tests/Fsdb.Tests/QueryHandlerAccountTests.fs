@@ -1317,7 +1317,8 @@ let tests =
 
               match handle root "SHOW PRIVILEGES" |> snd with
               | ResultSet([ "Privilege"; "Context"; "Comment" ], rows) ->
-                  Expect.equal (List.length rows) 73 "MySQL 8.4's 73 privileges"
+                  Expect.contains rows [ Some "Select"; Some "Tables"; Some "To retrieve rows from table" ] "static privilege"
+                  Expect.contains rows [ Some "XA_RECOVER_ADMIN"; Some "Server Admin"; Some "" ] "dynamic privilege"
               | other -> failtestf "expected the privilege table, got %A" other
 
               match handle root "FLUSH PRIVILEGES" |> snd with

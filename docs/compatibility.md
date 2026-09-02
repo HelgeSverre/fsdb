@@ -51,16 +51,16 @@ the optimizer-only SELECT modifiers without changing query results.
 
 ## Gauntlet
 
-| Application | Laravel | Migrations | Result |
-|---|---|---|---|
-| App A | 11 | 94 | full parity, 0 failures |
-| App B | 11 | 205 | parity; 5 residual failures reproduce identically on real MySQL (app-side factory/collation bugs) |
-| App C | 10 | 160 | behavioral equivalence with real MySQL (identical failure set from an app-side factory bug) |
-| App D | 13 | 43 | parity; 1 residual failure is a sqlite-only PRAGMA introspection test that fails identically on real MySQL |
-| App E | 13 | 487 | full 10,972-test suite: 10,913 passed, all 36 failures individually verified as app-side bugs or real-MySQL-identical; one documented order divergence on an unordered query |
+| Application | Laravel | Result |
+|---|---|---|
+| App A | 11 | full parity |
+| App B | 11 | residual failures reproduce identically on real MySQL (app-side factory/collation bugs) |
+| App C | 10 | behavioral equivalence with real MySQL (identical failure set from an app-side factory bug) |
+| App D | 13 | residual failure is a sqlite-only PRAGMA introspection test that fails identically on real MySQL |
+| App E | 13 | full backend-facing suite; residual failures are app-side or real-MySQL-identical, with one documented order divergence on an unordered query |
 
 The applications are private codebases, identified here only by framework
-version and size.
+version.
 
 ## Implemented surface
 
@@ -76,10 +76,10 @@ client, a reference application suite, or a benchmark threshold.
 
 The introspection surface was built from what real clients actually send:
 TablePlus 26.9.6's queries extracted verbatim from its binary, and
-phpMyAdmin 5.2.x's query builders read from source. All 77
+phpMyAdmin 5.2.x's query builders read from source. The supported
 `information_schema` tables have column descriptors pinned against a
-live MySQL 8.4.11, and a ~70-query
-replay fixture covering both clients' connect/browse/structure flows runs
+live MySQL 8.4.11, and a replay fixture covering both clients'
+connect/browse/structure flows runs
 with a single divergence: `SHOW SLAVE STATUS`, which real 8.4 also rejects
 with 1064. Stored views, triggers, procedures, functions, their parameter
 metadata, and events populate their object catalogs. PROCESSLIST,
@@ -317,11 +317,10 @@ TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.
 
 ## Users, authentication, and privileges
 
-fsdb has a real account system backed by a 44-table `mysql` schema. All 38
-MySQL 8.4 table names use their native column order, types, nullability, key
-membership, defaults, and generated columns; six additional tables store
-fsdb views, triggers, routines, functions, events, and checks. The optimizer
-cost tables include MySQL's eight bootstrap rows and remain writable, although
+fsdb has a real account system backed by the native MySQL 8.4 catalog schemas
+plus fsdb's stored-object catalogs. Native tables use their MySQL column order,
+types, nullability, key membership, defaults, and generated columns. The
+optimizer cost tables include MySQL's stock bootstrap rows and remain writable, although
 fsdb's planner does not consume their overrides. The three stock group-action
 configuration rows are present without replication execution. Native catalog
 collations and engine-maintained help, log, statistics, GTID, NDB, and
@@ -335,7 +334,7 @@ mergeable JSON attributes/comments, the expired-password reset sandbox, and
 per-hour/per-connection resource limits are enforced;
 statements are privilege-checked at global, database, table, and column scope with
 MySQL's 1045/1142/1044/1227 error shapes. `SHOW GRANTS [FOR user]`,
-`SHOW PRIVILEGES` (8.4's 73 rows), `information_schema.USER_PRIVILEGES`, and
+`SHOW PRIVILEGES`, `information_schema.USER_PRIVILEGES`, and
 `FLUSH PRIVILEGES` (no-op OK) are served; `DROP DATABASE mysql` is 3552.
 MySQL 8.4's registered dynamic global privileges are stored in
 `mysql.global_grants`, retain their individual grant options, appear in both

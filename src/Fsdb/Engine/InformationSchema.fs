@@ -3085,9 +3085,9 @@ let private selfTablesRows () : Value[] list =
            vs ""
            vs "" |])
 
-// Built once: `virtualTableDefs` never changes after startup, and these
-// ~330 rows were most of every COLUMNS scan's cost (readers never mutate
-// row arrays, same sharing contract `Storage.scanList` already has).
+// Built once: `virtualTableDefs` never changes after startup, and materializing
+// these rows dominated every COLUMNS scan. Readers never mutate row arrays,
+// matching the sharing contract `Storage.scanList` already has.
 let private selfColumnsRowsCached : Lazy<Value[] list> =
     lazy
         (virtualTableDefs
@@ -3467,10 +3467,9 @@ let showCollation (likeOpt: string option) : ShowResult =
         rows
     )
 
-/// `SHOW PRIVILEGES` — MySQL 8.4.11's exact 73 rows (oracle-verified): the
-/// 33 static privileges with their contexts/comments, then the dynamic
-/// privileges (Server Admin, empty comment). Static data — fsdb enforces
-/// only the static set, but clients enumerate this list as-is.
+/// `SHOW PRIVILEGES` follows MySQL 8.4.11's static privilege descriptions,
+/// followed by its dynamic privileges. fsdb enforces the static set, but
+/// clients enumerate the complete list.
 let showPrivileges () : ShowResult =
     let staticRows =
         [ "Alter", "Tables", "To alter the table"

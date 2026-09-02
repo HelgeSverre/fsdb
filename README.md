@@ -240,10 +240,10 @@ joins expressed with `USING` or `NATURAL JOIN`.
 
 ### Collations & charsets
 
-All 89 utf8mb4 collations MySQL 8.4 ships are registered — plus the legacy
-`utf8mb3`/`latin1`/`ascii`/`binary` ones (`utf8_*` accepted as MySQL's
-deprecated alias), 98 in all — each as a locale, fold level, and pad
-attribute with ICU sort keys doing the work. Honored per-column and per
+MySQL 8.4's utf8mb4 collations are registered alongside the legacy
+`utf8mb3`/`latin1`/`ascii`/`binary` families (`utf8_*` is accepted as
+MySQL's deprecated alias). Each carries a locale, fold level, and pad
+attribute, with ICU sort keys doing the work. Honored per-column and per
 `SET collation_connection` in grouping, dedup, joins, and unique keys.
 Charsets `utf8mb4`/`utf8mb3`/`latin1` (cp1252)/`ascii`/`binary` follow
 MySQL's write-time semantics, with `CONVERT(x USING …)` and `_charset'…'`
@@ -280,8 +280,8 @@ applications:
   default and bounded by `max_load_data_bytes`.
 
 The introspection surface GUI clients lean on has compatible schemas and live
-data wherever fsdb owns the underlying subsystem: 77 `information_schema`
-tables whose column sets are diffed against a live
+data wherever fsdb owns the underlying subsystem: `information_schema`
+column sets are diffed against a live
 MySQL 8.4, the `SHOW` family (`STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`,
 `CREATE TABLE`, ...), and a live `PROCESSLIST` with working
 `KILL QUERY|CONNECTION`.
