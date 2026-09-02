@@ -6075,7 +6075,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
             match authorize "ALTER ROUTINE" database with
             | Error(code, message) -> session, Err(code, message)
             | Ok() when not exists && not ifExists -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
-            | Ok() when not exists -> session, Affected 0UL
+            | Ok() when not exists ->
+                Diagnostics.note 1305 (sprintf "PROCEDURE %s.%s does not exist" database name)
+                session, Affected 0UL
             | Ok() ->
                 match Storage.deleteRows session.Store "mysql" "routines" (SystemCatalog.Routine.rowMatches database name >> Ok) with
                 | Ok _ -> session, Affected 0UL
@@ -6089,7 +6091,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
             match authorize "ALTER ROUTINE" database with
             | Error(code, message) -> session, Err(code, message)
             | Ok() when not exists && not ifExists -> session, Err(1305, sprintf "FUNCTION %s does not exist" name)
-            | Ok() when not exists -> session, Affected 0UL
+            | Ok() when not exists ->
+                Diagnostics.note 1305 (sprintf "FUNCTION %s.%s does not exist" database name)
+                session, Affected 0UL
             | Ok() ->
                 match Storage.deleteRows session.Store "mysql" "functions" (SystemCatalog.StoredFunction.rowMatches database name >> Ok) with
                 | Ok _ -> session, Affected 0UL
@@ -6343,7 +6347,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
             match authorize database with
             | Error(code, message) -> session, Err(code, message)
             | Ok() when not exists && not ifExists -> session, Err(1539, sprintf "Unknown event '%s'" name)
-            | Ok() when not exists -> session, Affected 0UL
+            | Ok() when not exists ->
+                Diagnostics.note 1305 (sprintf "Event %s does not exist" name)
+                session, Affected 0UL
             | Ok() ->
                 match Storage.deleteRows session.Store "mysql" "events" (SystemCatalog.Event.rowMatches database name >> Ok) with
                 | Ok _ -> session, Affected 0UL

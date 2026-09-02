@@ -2671,11 +2671,10 @@ let private createIndexStmt: Parser<Statement, unit> =
 
 let private dropIndexStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "INDEX"
-     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
-     .>>. identifier
+     >>. identifier
      .>> keyword "ON"
      .>>. qualifiedTableName)
-    |>> fun ((ifExists, name), table) -> DropIndexStmt(name, table, ifExists)
+    |>> fun (name, table) -> DropIndexStmt(name, table, false)
 
 let private dropTable: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "TABLE"

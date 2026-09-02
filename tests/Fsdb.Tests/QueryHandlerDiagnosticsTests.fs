@@ -45,6 +45,121 @@ let tests =
               | ResultSet([ "Level"; "Code"; "Message" ], []) -> ()
               | other -> failtestf "expected an empty errors resultset, got %A" other
 
+          testCase "conditional schema and table DDL records MySQL notes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE diagnostics_db"
+              let session, result = handle session "CREATE DATABASE IF NOT EXISTS diagnostics_db"
+              Expect.equal result (Affected 0UL) "existing database is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1007, "Can't create database 'diagnostics_db'; database exists" ]
+                  "database note"
+
+              let session, _ = handle session "CREATE TABLE diagnostics_table (id INT)"
+              let session, result = handle session "CREATE TABLE IF NOT EXISTS diagnostics_table (other INT)"
+              Expect.equal result (Affected 0UL) "existing table is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1050, "Table 'diagnostics_table' already exists" ]
+                  "table note"
+
+              let session, _ = handle session "CREATE TABLE diagnostics_source (id INT)"
+              let session, result = handle session "CREATE TABLE IF NOT EXISTS diagnostics_table AS SELECT id FROM diagnostics_source"
+              Expect.equal result (Affected 0UL) "existing table skips CREATE TABLE AS"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1050 ] "CREATE TABLE AS note"
+
+              let session, result = handle session "CREATE TABLE IF NOT EXISTS diagnostics_table LIKE diagnostics_source"
+              Expect.equal result (Affected 0UL) "existing table skips CREATE TABLE LIKE"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1050 ] "CREATE TABLE LIKE note"
+
+              let session, result = handle session "DROP TABLE IF EXISTS absent_one, absent_two"
+              Expect.equal result (Affected 0UL) "missing tables are ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1051, "Unknown table 'fsdb.absent_one'"
+                    Fsdb.Diagnostics.Note, 1051, "Unknown table 'fsdb.absent_two'" ]
+                  "one note per missing table"
+
+              let session, result = handle session "DROP DATABASE IF EXISTS absent_database"
+              Expect.equal result (Affected 0UL) "missing database is ignored"
+              Expect.isEmpty session.Diagnostics "DROP DATABASE IF EXISTS remains silent"
+
+          testCase "conditional object and account DDL records MySQL notes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "DROP VIEW IF EXISTS absent_view"
+              Expect.equal result (Affected 0UL) "missing view is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1051, "Unknown table 'fsdb.absent_view'" ]
+                  "view note"
+
+              let session, result = handle session "DROP TRIGGER IF EXISTS absent_trigger"
+              Expect.equal result (Affected 0UL) "missing trigger is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1360, "Trigger does not exist" ]
+                  "trigger note"
+
+              let session, result = handle session "DROP PROCEDURE IF EXISTS absent_procedure"
+              Expect.equal result (Affected 0UL) "missing procedure is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1305, "PROCEDURE fsdb.absent_procedure does not exist" ]
+                  "procedure note"
+
+              let session, result = handle session "DROP FUNCTION IF EXISTS absent_function"
+              Expect.equal result (Affected 0UL) "missing function is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1305, "FUNCTION fsdb.absent_function does not exist" ]
+                  "function note"
+
+              let session, result = handle session "DROP EVENT IF EXISTS absent_event"
+              Expect.equal result (Affected 0UL) "missing event is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1305, "Event absent_event does not exist" ]
+                  "event note"
+
+              let session, _ = handle session "CREATE USER 'present_user'@'localhost'"
+              let session, result = handle session "CREATE USER IF NOT EXISTS 'present_user'@'localhost'"
+              Expect.equal result (Affected 0UL) "existing user is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 3163, "Authorization ID 'present_user'@'localhost' already exists." ]
+                  "create-user note"
+
+              let session, result = handle session "ALTER USER IF EXISTS 'absent_user'@'localhost' IDENTIFIED BY 'secret'"
+              Expect.equal result (Affected 0UL) "missing user alteration is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 3162, "Authorization ID 'absent_user'@'localhost' does not exist." ]
+                  "alter-user note"
+
+              let session, result = handle session "DROP USER IF EXISTS 'absent_user'@'localhost'"
+              Expect.equal result (Affected 0UL) "missing user drop is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 3162, "Authorization ID 'absent_user'@'localhost' does not exist." ]
+                  "drop-user note"
+
+              let session, _ = handle session "CREATE ROLE 'present_role'"
+              let session, result = handle session "CREATE ROLE IF NOT EXISTS 'present_role'"
+              Expect.equal result (Affected 0UL) "existing role is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 3163, "Authorization ID 'present_role'@'%' already exists." ]
+                  "create-role note"
+
+              let session, result = handle session "DROP ROLE IF EXISTS 'absent_role'"
+              Expect.equal result (Affected 0UL) "missing role drop is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 3162, "Authorization ID 'absent_role'@'%' does not exist." ]
+                  "drop-role note"
+
           testCase "GET CURRENT DIAGNOSTICS assigns statement and condition information"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

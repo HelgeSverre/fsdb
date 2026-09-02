@@ -873,14 +873,7 @@ type Statement =
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list
     | CreateIndex of name: string * table: string * columns: IndexColumn list * unique: bool * kind: IndexKind * visible: bool
-    /// `DROP INDEX [IF EXISTS] name ON table` — `IF EXISTS` is accepted for
-    /// MySQL parity. The executor doesn't need the flag: a missing *index*
-    /// already drops to a silent no-op (the one thing `IF EXISTS` suppresses
-    /// in MySQL), and a missing *table* still errors under `IF EXISTS` in
-    /// MySQL too, which the executor's own `NoSuchTable` path already does.
-    /// Kept on the AST (and in the WAL encoding) so `EXPLAIN`/replay see the
-    /// statement exactly as written.
-    | DropIndexStmt of name: string * table: string * ifExists: bool
+    | DropIndexStmt of name: string * table: string * suppressMissing: bool
     | Insert of
         table: string *
         columns: string list *

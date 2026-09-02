@@ -2307,10 +2307,13 @@ let tests =
                         (AlterTable("companies", [ SetIndexVisibility("company_disabled_index", true) ]))
                         "index visibility alteration"
 
-                testCase "DROP INDEX [IF EXISTS] name ON table"
+                testCase "DROP INDEX name ON table"
                 <| fun _ ->
                     Expect.equal (parseOk "DROP INDEX idx_a ON t") (DropIndexStmt("idx_a", "t", false)) "drop index"
-                    Expect.equal (parseOk "DROP INDEX IF EXISTS idx_a ON t") (DropIndexStmt("idx_a", "t", true)) "drop index if exists"
+
+                    match parse "DROP INDEX IF EXISTS idx_a ON t" with
+                    | Error _ -> ()
+                    | Ok statement -> failtestf "expected IF EXISTS to be rejected, got %A" statement
 
                 testCase "CAST(expr AS type), including SIGNED/UNSIGNED"
                 <| fun _ ->

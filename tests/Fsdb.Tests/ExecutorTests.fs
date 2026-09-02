@@ -3258,7 +3258,7 @@ let tests =
                     | Affected 0UL -> ()
                     | other -> failtestf "expected DROP DATABASE IF EXISTS to be a no-op, got %A" other
 
-                testCase "CREATE TABLE IF NOT EXISTS / DROP TABLE IF EXISTS / DROP INDEX IF EXISTS are no-ops when absent"
+                testCase "conditional table DDL and missing-index errors match MySQL"
                 <| fun _ ->
                     let store = newStore ()
 
@@ -3266,7 +3266,6 @@ let tests =
                     | Affected 0UL -> ()
                     | other -> failtestf "expected CREATE TABLE IF NOT EXISTS to succeed, got %A" other
 
-                    // a second create with IF NOT EXISTS is a silent no-op.
                     runDefault store "CREATE TABLE t (a INT)" |> ignore
 
                     match runDefault store "CREATE TABLE IF NOT EXISTS t (a INT)" with
@@ -3277,23 +3276,13 @@ let tests =
                     | Affected 0UL -> ()
                     | other -> failtestf "expected DROP TABLE IF EXISTS to no-op for a missing table, got %A" other
 
-                    // DROP INDEX on an existing table with a missing index is
-                    // a no-op whether or not IF EXISTS is given (MySQL 1091
-                    // suppressed by IF EXISTS; fsdb's ALTER drops to the same
-                    // silent no-op).
                     match runDefault store "DROP INDEX no_such_idx ON t" with
-                    | Affected 0UL -> ()
-                    | other -> failtestf "expected DROP INDEX on a missing index to no-op, got %A" other
+                    | Err(1091, "Can't DROP 'no_such_idx'; check that column/key exists") -> ()
+                    | other -> failtestf "expected 1091 for a missing DROP INDEX, got %A" other
 
-                    match runDefault store "DROP INDEX IF EXISTS no_such_idx ON t" with
-                    | Affected 0UL -> ()
-                    | other -> failtestf "expected DROP INDEX IF EXISTS to no-op for a missing index, got %A" other
-
-                    // a missing table still errors even under IF EXISTS,
-                    // matching MySQL.
-                    match runDefault store "DROP INDEX IF EXISTS no_such_idx ON missing_table" with
-                    | Err(1146, _) -> ()
-                    | other -> failtestf "expected 1146 for DROP INDEX IF EXISTS on a missing table, got %A" other
+                    match runDefault store "ALTER TABLE t DROP INDEX no_such_idx" with
+                    | Err(1091, "Can't DROP 'no_such_idx'; check that column/key exists") -> ()
+                    | other -> failtestf "expected 1091 for a missing ALTER TABLE index, got %A" other
 
                 testCase "CREATE TABLE AS SELECT infers columns and inserts atomically"
                 <| fun _ ->

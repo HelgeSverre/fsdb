@@ -5586,11 +5586,14 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         |> Result.bind (fun () -> checkFullTextColumns table.Columns ix)
         |> Result.map (fun () -> { table with Indexes = table.Indexes @ [ ix ] }, None)
     | DropIndexAction name ->
-        Ok(
-            { table with
-                Indexes = table.Indexes |> List.filter (fun ix -> not (String.Equals(ix.Name, name, StringComparison.OrdinalIgnoreCase))) },
-            None
-        )
+        if table.Indexes |> List.exists (fun index -> String.Equals(index.Name, name, StringComparison.OrdinalIgnoreCase)) then
+            Ok(
+                { table with
+                    Indexes = table.Indexes |> List.filter (fun index -> not (String.Equals(index.Name, name, StringComparison.OrdinalIgnoreCase))) },
+                None
+            )
+        else
+            Error(ExpressionError(1091, sprintf "Can't DROP '%s'; check that column/key exists" name))
     | SetIndexVisibility(name, visible) ->
         let equal (index: IndexDef) = String.Equals(index.Name, name, StringComparison.OrdinalIgnoreCase)
 

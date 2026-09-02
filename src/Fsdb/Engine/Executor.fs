@@ -1158,6 +1158,18 @@ let private storageErr (e: StorageError) : QueryResult =
     let code, message = toMySqlError e
     Err(code, message)
 
+let private noteTableExists name =
+    Diagnostics.note 1050 (sprintf "Table '%s' already exists" name)
+
+let private noteUnknownTable database table =
+    Diagnostics.note 1051 (sprintf "Unknown table '%s.%s'" database table)
+
+let private noteAuthorizationExists name host =
+    Diagnostics.note 3163 (sprintf "Authorization ID '%s'@'%s' already exists." name host)
+
+let private noteAuthorizationMissing name host =
+    Diagnostics.note 3162 (sprintf "Authorization ID '%s'@'%s' does not exist." name host)
+
 /// The leading numeric run of `s`, the way MySQL's numeric `CAST`/implicit
 /// string-to-number conversion reads a string — `"12abc"` yields
 /// `Some "12"`, `"abc"` yields `None`. Unlike `Storage.coerceValue`'s
@@ -15799,7 +15811,9 @@ let rec executeAs
     | CreateDatabase(name, ifNotExists, _) ->
         match Storage.createDatabase store name with
         | Ok() -> ids, Affected 0UL
-        | Error(DatabaseExists _) when ifNotExists -> ids, Affected 0UL
+        | Error(DatabaseExists _) when ifNotExists ->
+            Diagnostics.note 1007 (sprintf "Can't create database '%s'; database exists" name)
+            ids, Affected 0UL
         | Error e -> ids, storageErr e
 
     | DropDatabase(name, ifExists) ->
@@ -15857,6 +15871,7 @@ let rec executeAs
         let viewExists = tryStoredView store destinationDb destinationName |> Option.isSome
 
         if ifNotExists && (destinationExists || viewExists) then
+            noteTableExists destinationName
             ids, Affected 0UL
         elif destinationExists || viewExists then
             ids, storageErr (TableExists destinationName)
@@ -15900,6 +15915,7 @@ let rec executeAs
         let destinationExists = scan store destinationDb destinationName |> Result.isOk
 
         if ifNotExists && (destinationExists || tryStoredView store destinationDb destinationName |> Option.isSome) then
+            noteTableExists destinationName
             ids, Affected 0UL
         else
             let sourceDb, sourceName = splitQualified dbName source
@@ -15950,7 +15966,9 @@ let rec executeAs
         let db, name = splitQualified dbName table.Name
 
         match tryStoredView store db name with
-        | Some _ when table.IfNotExists -> ids, Affected 0UL
+        | Some _ when table.IfNotExists ->
+            noteTableExists name
+            ids, Affected 0UL
         | Some _ -> ids, storageErr (TableExists name)
         | None ->
             match
@@ -15969,6 +15987,7 @@ let rec executeAs
                 let alreadyExists = scan store db name |> Result.isOk
 
                 if alreadyExists && table.IfNotExists then
+                    noteTableExists name
                     ids, Affected 0UL
                 else
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
@@ -15995,7 +16014,9 @@ let rec executeAs
                         Storage.commitCatalogInto store baseCatalog snapshot
                         reportNumericDisplayWarnings table.Columns
                         ids, Affected 0UL
-                    | Error(TableExists _) when table.IfNotExists -> ids, Affected 0UL
+                    | Error(TableExists _) when table.IfNotExists ->
+                        noteTableExists name
+                        ids, Affected 0UL
                     | Error e -> ids, storageErr e
 
     | DropTable(names, ifExists) ->
@@ -16017,11 +16038,29 @@ let rec executeAs
                     ))
             |> Result.bind (fun _ -> removeStoredChecks snapshot db name |> Result.map ignore)
 
-        match dropTables snapshot ifExists targets |> Result.bind (traverse removeStoredObjects) with
-        | Ok _ ->
-            Storage.commitCatalogInto store baseCatalog snapshot
-            ids, Affected 0UL
-        | Error e -> ids, storageErr e
+        match dropTables snapshot ifExists targets with
+        | Error error -> ids, storageErr error
+        | Ok dropped ->
+            match dropped |> traverse removeStoredObjects with
+            | Error error -> ids, storageErr error
+            | Ok _ ->
+                Storage.commitCatalogInto store baseCatalog snapshot
+
+                if ifExists then
+                    let normalizedTarget (db: string, table) =
+                        db.ToLowerInvariant(), normalizeTableName table
+
+                    let droppedNames =
+                        dropped
+                        |> List.map normalizedTarget
+                        |> Set.ofList
+
+                    targets
+                    |> List.distinctBy normalizedTarget
+                    |> List.filter (normalizedTarget >> droppedNames.Contains >> not)
+                    |> List.iter (fun (db, table) -> noteUnknownTable db table)
+
+                ids, Affected 0UL
 
     | AlterTable(table, actions) ->
         let db, table = splitQualified dbName table
@@ -16436,14 +16475,12 @@ let rec executeAs
                 | Ok() -> ids, Affected 0UL
                 | Error e -> ids, storageErr e
 
-    | DropIndexStmt(name, table, _) ->
-        // `ifExists` needs no executor logic (see the AST case's doc):
-        // dropping a missing index is already a silent no-op, and a missing
-        // table errors here even under `IF EXISTS`, matching MySQL.
+    | DropIndexStmt(name, table, suppressMissing) ->
         let db, table = splitQualified dbName table
 
         match alterTable store db table [ DropIndexAction name ] with
         | Ok() -> ids, Affected 0UL
+        | Error(ExpressionError(1091, _)) when suppressMissing -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
     | Truncate table ->
@@ -16656,10 +16693,16 @@ let rec executeAs
                 if removed = 0 && not ifExists then
                     Error(NoSuchTable viewName)
                 else
-                    Ok())
+                    Ok(db, viewName, removed))
 
         match names |> traverse dropOne with
-        | Ok _ -> ids, Affected 0UL
+        | Ok results ->
+            if ifExists then
+                results
+                |> List.filter (fun (_, _, removed) -> removed = 0)
+                |> List.iter (fun (db, viewName, _) -> noteUnknownTable db viewName)
+
+            ids, Affected 0UL
         | Error error -> ids, storageErr error
 
     | CreateTrigger(name, timing, event, table, order, body) ->
@@ -16706,7 +16749,9 @@ let rec executeAs
                 |> Seq.choose (fun row -> SystemCatalog.Trigger.tryRead row |> Option.map (fun trigger -> row, trigger))
                 |> Seq.tryFind (snd >> matchesTrigger)
             with
-            | None when ifExists -> ids, Affected 0UL
+            | None when ifExists ->
+                Diagnostics.note 1360 "Trigger does not exist"
+                ids, Affected 0UL
             | None -> ids, Err(1360, "Trigger does not exist")
             | Some(target, trigger) ->
                 let targetOrder = trigger.Order
@@ -16736,7 +16781,9 @@ let rec executeAs
     | CreateUser(users, ifNotExists, options) ->
         let createOne (name, host, password) =
             match Auth.createUserWithOptions store name host password options with
-            | Error(1396, _) when ifNotExists -> Ok()
+            | Error(1396, _) when ifNotExists ->
+                noteAuthorizationExists name host
+                Ok()
             | result -> result
 
         match users |> traverse createOne with
@@ -16746,7 +16793,9 @@ let rec executeAs
     | CreateRole(users, ifNotExists) ->
         let createOne (name, host) =
             match Auth.createUser store name host None with
-            | Error(1396, _) when ifNotExists -> Ok()
+            | Error(1396, _) when ifNotExists ->
+                noteAuthorizationExists name host
+                Ok()
             | Error(1396, _) -> Error(1396, sprintf "Operation CREATE ROLE failed for '%s'@'%s'" name host)
             | Ok() -> Auth.setAccountLocked store name host true
             | error -> error
@@ -16758,7 +16807,9 @@ let rec executeAs
     | DropRole(users, ifExists) ->
         let dropOne (name, host) =
             match Auth.dropRole store name host with
-            | Error(1396, _) when ifExists -> Ok()
+            | Error(1396, _) when ifExists ->
+                noteAuthorizationMissing name host
+                Ok()
             | Error(1396, _) -> Error(1396, sprintf "Operation DROP ROLE failed for '%s'@'%s'" name host)
             | result -> result
 
@@ -16769,7 +16820,9 @@ let rec executeAs
     | DropUser(users, ifExists) ->
         let dropOne (name, host) =
             match Auth.dropUser store name host with
-            | Error(1396, _) when ifExists -> Ok()
+            | Error(1396, _) when ifExists ->
+                noteAuthorizationMissing name host
+                Ok()
             | r -> r
 
         match users |> traverse dropOne with
@@ -16787,7 +16840,9 @@ let rec executeAs
     | AlterUser(name, host, password, ifExists, options) ->
         match Auth.alterUser store name host password options with
         | Ok() -> ids, Affected 0UL
-        | Error(1396, _) when ifExists -> ids, Affected 0UL
+        | Error(1396, _) when ifExists ->
+            noteAuthorizationMissing name host
+            ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 
     | Grant(privs, level, users, withGrantOption) ->
