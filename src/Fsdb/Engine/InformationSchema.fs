@@ -31,6 +31,7 @@ let private col (name: string) (ty: ColumnType) : ColumnDef =
 
 let private strCol name = col name (TVarchar 255)
 let private intCol name = col name (TInt false)
+let private requiredCol name ty = { col name ty with Nullable = false }
 
 /// Every real (non-`information_schema`) database in the catalog, flattened
 /// to `(dbName, table)` pairs — the source rows every virtual table below
@@ -2316,6 +2317,85 @@ let private enginesRows: Value[] list =
          vs "YES"
          vs "YES" |] ]
 
+let private columnStatisticsColumns =
+    [ requiredCol "SCHEMA_NAME" (TVarchar 64)
+      requiredCol "TABLE_NAME" (TVarchar 64)
+      requiredCol "COLUMN_NAME" (TVarchar 64)
+      requiredCol "HISTOGRAM" TJson ]
+
+let private optimizerTraceColumns =
+    [ requiredCol "QUERY" (TVarchar 65535)
+      requiredCol "TRACE" (TVarchar 65535)
+      requiredCol "MISSING_BYTES_BEYOND_MAX_MEM_SIZE" (TInt false)
+      requiredCol "INSUFFICIENT_PRIVILEGES" TBool ]
+
+let private profilingColumns =
+    [ requiredCol "QUERY_ID" (TInt false)
+      requiredCol "SEQ" (TInt false)
+      requiredCol "STATE" (TVarchar 30)
+      requiredCol "DURATION" (TDecimal(905, 0, false))
+      col "CPU_USER" (TDecimal(905, 0, false))
+      col "CPU_SYSTEM" (TDecimal(905, 0, false))
+      intCol "CONTEXT_VOLUNTARY"
+      intCol "CONTEXT_INVOLUNTARY"
+      intCol "BLOCK_OPS_IN"
+      intCol "BLOCK_OPS_OUT"
+      intCol "MESSAGES_SENT"
+      intCol "MESSAGES_RECEIVED"
+      intCol "PAGE_FAULTS_MAJOR"
+      intCol "PAGE_FAULTS_MINOR"
+      intCol "SWAPS"
+      col "SOURCE_FUNCTION" (TVarchar 30)
+      col "SOURCE_FILE" (TVarchar 20)
+      intCol "SOURCE_LINE" ]
+
+let private resourceGroupsColumns =
+    [ requiredCol "RESOURCE_GROUP_NAME" (TVarchar 64)
+      requiredCol "RESOURCE_GROUP_TYPE" (TEnum [ "SYSTEM"; "USER" ])
+      requiredCol "RESOURCE_GROUP_ENABLED" TBool
+      col "VCPU_IDS" TBlob
+      requiredCol "THREAD_PRIORITY" (TInt false) ]
+
+let private tablespacesExtensionsColumns =
+    [ requiredCol "TABLESPACE_NAME" (TVarchar 268); col "ENGINE_ATTRIBUTE" TJson ]
+
+let private columnsExtensionsColumns =
+    [ requiredCol "TABLE_CATALOG" (TVarchar 64)
+      requiredCol "TABLE_SCHEMA" (TVarchar 64)
+      requiredCol "TABLE_NAME" (TVarchar 64)
+      col "COLUMN_NAME" (TVarchar 64)
+      col "ENGINE_ATTRIBUTE" TJson
+      col "SECONDARY_ENGINE_ATTRIBUTE" TJson ]
+
+let private schemataExtensionsColumns =
+    [ col "CATALOG_NAME" (TVarchar 64)
+      col "SCHEMA_NAME" (TVarchar 64)
+      col "OPTIONS" (TVarchar 256) ]
+
+let private tablesExtensionsColumns =
+    [ requiredCol "TABLE_CATALOG" (TVarchar 64)
+      requiredCol "TABLE_SCHEMA" (TVarchar 64)
+      requiredCol "TABLE_NAME" (TVarchar 64)
+      col "ENGINE_ATTRIBUTE" TJson
+      col "SECONDARY_ENGINE_ATTRIBUTE" TJson ]
+
+let private tableConstraintsExtensionsColumns =
+    [ requiredCol "CONSTRAINT_CATALOG" (TVarchar 64)
+      requiredCol "CONSTRAINT_SCHEMA" (TVarchar 64)
+      requiredCol "CONSTRAINT_NAME" (TVarchar 64)
+      requiredCol "TABLE_NAME" (TVarchar 64)
+      col "ENGINE_ATTRIBUTE" TJson
+      col "SECONDARY_ENGINE_ATTRIBUTE" TJson ]
+
+let private stGeometryColumnsColumns =
+    [ col "TABLE_CATALOG" (TVarchar 64)
+      col "TABLE_SCHEMA" (TVarchar 64)
+      col "TABLE_NAME" (TVarchar 64)
+      col "COLUMN_NAME" (TVarchar 64)
+      col "SRS_NAME" (TVarchar 80)
+      col "SRS_ID" (TInt true)
+      col "GEOMETRY_TYPE_NAME" TLongText ]
+
 /// Every virtual table this module serves, name -> columns — `scan`'s
 /// dispatch source and the self-listing the `TABLES`/`COLUMNS` views and
 /// `SHOW TABLES FROM information_schema` append, so listing and resolution
@@ -2327,21 +2407,31 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "COLLATIONS", collationsColumns
       "COLLATION_CHARACTER_SET_APPLICABILITY", collationCharacterSetApplicabilityColumns
       "COLUMNS", columnsColumns
+      "COLUMNS_EXTENSIONS", columnsExtensionsColumns
       "COLUMN_PRIVILEGES", columnPrivilegesColumns
+      "COLUMN_STATISTICS", columnStatisticsColumns
       "ENABLED_ROLES", enabledRolesColumns
       "ENGINES", enginesColumns
       "EVENTS", eventsColumns
       "KEY_COLUMN_USAGE", keyColumnUsageColumns
+      "OPTIMIZER_TRACE", optimizerTraceColumns
       "PARAMETERS", parametersColumns
       "PARTITIONS", partitionsColumns
+      "PROFILING", profilingColumns
       "PROCESSLIST", processlistColumns
       "REFERENTIAL_CONSTRAINTS", referentialConstraintsColumns
+      "RESOURCE_GROUPS", resourceGroupsColumns
       "ROUTINES", routinesColumns
       "SCHEMATA", schemataColumns
+      "SCHEMATA_EXTENSIONS", schemataExtensionsColumns
       "SCHEMA_PRIVILEGES", schemaPrivilegesColumns
       "STATISTICS", statisticsColumns
+      "ST_GEOMETRY_COLUMNS", stGeometryColumnsColumns
       "TABLES", tablesColumns
+      "TABLES_EXTENSIONS", tablesExtensionsColumns
+      "TABLESPACES_EXTENSIONS", tablespacesExtensionsColumns
       "TABLE_CONSTRAINTS", tableConstraintsColumns
+      "TABLE_CONSTRAINTS_EXTENSIONS", tableConstraintsExtensionsColumns
       "TABLE_PRIVILEGES", tablePrivilegesColumns
       "TRIGGERS", triggersColumns
       "USER_PRIVILEGES", userPrivilegesColumns
@@ -2382,6 +2472,47 @@ let private selfColumnsRowsCached : Lazy<Value[] list> =
         (virtualTableDefs
          |> List.collect (fun (name, cols) ->
              cols |> List.mapi (fun i c -> columnRowWith "select" "information_schema" name i "" c)))
+
+let private allColumnRows catalog viewColumns =
+    columnsRows catalog viewColumns @ selfColumnsRowsCached.Value
+
+let private columnsExtensionsRows catalog viewColumns =
+    allColumnRows catalog viewColumns
+    |> List.map (fun row -> [| row.[0]; row.[1]; row.[2]; row.[3]; VNull; VNull |])
+
+let private schemataExtensionsRows catalog =
+    schemataRows catalog
+    |> List.map (fun row -> [| row.[0]; row.[1]; vs "" |])
+
+let private tablesExtensionsRows catalog =
+    tablesRows catalog @ selfTablesRows ()
+    |> List.map (fun row -> [| row.[0]; row.[1]; row.[2]; VNull; VNull |])
+
+let private tableConstraintsExtensionsRows catalog =
+    tableConstraintsRows catalog
+    |> List.filter (fun row -> not (eqI (rowText row 5) "CHECK"))
+    |> List.map (fun row -> [| row.[0]; row.[1]; row.[2]; row.[4]; VNull; VNull |])
+
+let private geometryDataTypes =
+    set
+        [ "geometry"
+          "point"
+          "linestring"
+          "polygon"
+          "multipoint"
+          "multilinestring"
+          "multipolygon"
+          "geomcollection" ]
+
+let private stGeometryColumnsRows catalog viewColumns =
+    allColumnRows catalog viewColumns
+    |> List.choose (fun row ->
+        let dataType = rowText row 7
+
+        if geometryDataTypes.Contains(dataType) then
+            Some [| row.[0]; row.[1]; row.[2]; row.[3]; VNull; row.[21]; vs dataType |]
+        else
+            None)
 
 let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (rows: Value[] list) : Value[] list =
     match currentViewer.Value with
@@ -2427,7 +2558,10 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
 
             let visibleColumn =
                 match tableName, schemaIndex, tableIndex, columnNameIndex with
-                | "COLUMNS", Some dbIndex, Some nameIndex, Some columnIndex ->
+                | metadataTable, Some dbIndex, Some nameIndex, Some columnIndex
+                    when metadataTable = "COLUMNS"
+                         || metadataTable = "COLUMNS_EXTENSIONS"
+                         || metadataTable = "ST_GEOMETRY_COLUMNS" ->
                     Fsdb.Auth.canSeeColumnForAccountWithRoles
                         viewer.Store
                         viewer.Account
@@ -2497,6 +2631,8 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "APPLICABLE_ROLES" -> Some(applicableRolesRows ())
         | "TABLES" -> Some(tablesRows catalog @ selfTablesRows ())
         | "COLUMNS" -> Some(columnsRows catalog viewColumns @ selfColumnsRowsCached.Value)
+        | "COLUMNS_EXTENSIONS" -> Some(columnsExtensionsRows catalog viewColumns)
+        | "COLUMN_STATISTICS" -> Some []
         | "STATISTICS" -> Some(statisticsRows catalog)
         | "KEY_COLUMN_USAGE" -> Some(keyColumnUsageRows catalog)
         | "REFERENTIAL_CONSTRAINTS" -> Some(referentialConstraintsRows catalog)
@@ -2506,6 +2642,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "COLLATIONS" -> Some collationsRows
         | "CHARACTER_SETS" -> Some characterSetsRows
         | "SCHEMATA" -> Some(schemataRows catalog)
+        | "SCHEMATA_EXTENSIONS" -> Some(schemataExtensionsRows catalog)
         | "PROCESSLIST" -> Some(processlistRows ())
         | "PARTITIONS" -> Some(partitionsRows catalog)
         | "USER_PRIVILEGES" -> Some(userPrivilegesRows catalog)
@@ -2519,6 +2656,13 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "ROUTINES" -> Some(routinesRows catalog)
         | "PARAMETERS" -> Some(parametersRows catalog)
         | "EVENTS" -> Some(eventsRows catalog)
+        | "OPTIMIZER_TRACE"
+        | "PROFILING"
+        | "RESOURCE_GROUPS"
+        | "TABLESPACES_EXTENSIONS" -> Some []
+        | "ST_GEOMETRY_COLUMNS" -> Some(stGeometryColumnsRows catalog viewColumns)
+        | "TABLES_EXTENSIONS" -> Some(tablesExtensionsRows catalog)
+        | "TABLE_CONSTRAINTS_EXTENSIONS" -> Some(tableConstraintsExtensionsRows catalog)
         | _ -> None
 
     rows

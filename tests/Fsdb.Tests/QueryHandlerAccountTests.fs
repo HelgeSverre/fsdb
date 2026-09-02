@@ -1221,7 +1221,7 @@ let tests =
               let store = Fsdb.Storage.create ()
               let root = create 1 store
               let root, _ = handle root "CREATE DATABASE column_db"
-              let root, _ = handle root "CREATE TABLE column_db.orders (id INT, total INT, status INT, customer_id INT, hidden INT)"
+              let root, _ = handle root "CREATE TABLE column_db.orders (id INT, total INT, status INT, customer_id INT, hidden POINT)"
               let root, _ = handle root "CREATE USER column_reader"
 
               let root, granted =
@@ -1293,6 +1293,39 @@ let tests =
                         Some "customer_id", Some "references" ]
                       "only columns carrying a privilege are visible"
               | other -> failtestf "expected scoped SHOW FULL COLUMNS, got %A" other
+
+              match
+                  handle
+                      reader
+                      "SELECT column_name FROM information_schema.columns_extensions WHERE table_schema = 'column_db' AND table_name = 'orders' ORDER BY column_name"
+                  |> snd
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "customer_id" ]; [ Some "id" ]; [ Some "status" ]; [ Some "total" ] ]
+                      "extension metadata follows column grants"
+              | other -> failtestf "expected scoped extension metadata, got %A" other
+
+              match
+                  handle
+                      reader
+                      "SELECT column_name FROM information_schema.st_geometry_columns WHERE table_schema = 'column_db' AND table_name = 'orders'"
+                  |> snd
+              with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected hidden geometry metadata, got %A" other
+
+              let _, _ = handle root "GRANT SELECT(hidden) ON column_db.orders TO column_reader"
+
+              match
+                  handle
+                      reader
+                      "SELECT column_name, geometry_type_name FROM information_schema.st_geometry_columns WHERE table_schema = 'column_db' AND table_name = 'orders'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "hidden"; Some "point" ] ]) -> ()
+              | other -> failtestf "expected visible geometry metadata, got %A" other
 
           testCase "column grants authorize only referenced and written columns"
           <| fun _ ->

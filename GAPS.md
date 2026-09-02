@@ -44,7 +44,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
-| Metadata | 25 INFORMATION_SCHEMA views, 13 mysql.* tables, and the complete MySQL 8.4 `Com_*` registry | Storage statistics and engine-specific status families are stand-ins or absent |
+| Metadata | 35 INFORMATION_SCHEMA views, 13 mysql.* tables, and the complete MySQL 8.4 `Com_*` registry | Storage statistics and engine-specific metadata families are stand-ins or absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -118,7 +118,7 @@ identities for bit aggregates.
 |---|---|---|---|---|
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | fully-bound composite equality probes, scalar/composite literal `IN` lists, and matching physical inner/left/right joins use B-tree buckets; a simple physical `RIGHT JOIN` can reverse-probe an exact left index and stream the preserved right side; direct literal ranges feed single-table SELECT/UPDATE/DELETE and locking reads through primary, unique, and secondary indexes; `ORDER BY` and `GROUP BY` can stream matching stored-column and `LOWER(column)`/`UPPER(column)` key prefixes, including suffixes after literal-equality keys; arbitrary expression ordering and broader grouping still scan/sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | qualified physical inner-join stars choose ready indexed sources by cardinality and push qualified base-table ranges into the initial scan, while `STRAIGHT_JOIN` preserves written order; outer/lateral/derived joins and statements with name-resolution-sensitive unqualified references retain source order; broader pushdown, statistics, and a general cost model remain absent | medium | divergence |
-| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer_trace remain absent | low | divergence |
+| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once; compatible integer/string/decimal scalar `IN`, scalar equality quantifiers, and row-value `IN` reuse typed equality sets, while `IN`/`= ANY` also narrow direct indexed physical outer tables with residual, prefix-key, and row-NULL checks; simple EXISTS stops at one row; direct correlated equalities use persistent indexes or a statement-local canonical-key lookup over a physical inner table; other correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | sql_mode | ~20 mode bits with semantic effect | strictness, zero-date modes, ERROR_FOR_DIVISION_BY_ZERO diagnostics, ONLY_FULL_GROUP_BY, ANSI_QUOTES, IGNORE_SPACE, PIPES_AS_CONCAT, REAL_AS_FLOAT (including ANSI implications), HIGH_NOT_PRECEDENCE, NO_AUTO_VALUE_ON_ZERO, NO_UNSIGNED_SUBTRACTION, NO_BACKSLASH_ESCAPES, TIME_TRUNCATE_FRACTIONAL, and PAD_CHAR_TO_FULL_LENGTH have effect; most other mode bits remain inert | medium | divergence |
@@ -447,10 +447,11 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 
 ## 14. Metadata, server administration, logging, replication
 
-Working: 25 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
+Working: 35 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
 COLUMNS (including column comments), STATISTICS, TABLE_CONSTRAINTS, KEY_COLUMN_USAGE,
 REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
-ENGINES, COLLATIONS, CHARACTER_SETS, privilege and role views, …), direct
+ENGINES, COLLATIONS, CHARACTER_SETS, extension metadata, geometry columns,
+optional optimizer/profiling/resource-group surfaces, privilege and role views, …), direct
 SELECT-ability of the 13 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
 TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
 COLLATION/PRIVILEGES (73 oracle-verified rows)/PROCESSLIST/VARIABLES/STATUS/
@@ -465,7 +466,7 @@ administrative probes.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS | 25 views; role and privilege views are live, while ROUTINES, PARAMETERS, and EVENTS expose supported declarations | low | divergence |
+| INFORMATION_SCHEMA breadth | 79 views incl. INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | 35 views; generic extension tables, optional histogram/optimizer/profiling/resource-group surfaces, geometry columns, roles/privileges, ROUTINES, PARAMETERS, and EVENTS are live; engine internals and the remaining usage catalogs are absent | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | all 168 `Com_*` names are exposed with distinct session/global values and supported commands are live; unsupported commands remain truthfully zero, while engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |

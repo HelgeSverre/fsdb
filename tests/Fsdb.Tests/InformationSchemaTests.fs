@@ -765,6 +765,68 @@ let tests =
                   | ResultSet(_, []) -> ()
                   | other -> failtestf "expected empty %s, got %A" table other
 
+          testCase "extension and optional metadata views expose truthful rows"
+          <| fun _ ->
+              let store = setup ()
+
+              run
+                  store
+                  "CREATE TABLE geometry_metadata (id INT PRIMARY KEY, shape POINT, CONSTRAINT positive_id CHECK (id > 0))"
+              |> ignore
+
+              run store "CREATE VIEW geometry_metadata_view AS SELECT shape FROM geometry_metadata" |> ignore
+
+              for table, expectedColumns in
+                  [ "column_statistics", [ "SCHEMA_NAME"; "TABLE_NAME"; "COLUMN_NAME"; "HISTOGRAM" ]
+                    "optimizer_trace", [ "QUERY"; "TRACE"; "MISSING_BYTES_BEYOND_MAX_MEM_SIZE"; "INSUFFICIENT_PRIVILEGES" ]
+                    "profiling",
+                    [ "QUERY_ID"; "SEQ"; "STATE"; "DURATION"; "CPU_USER"; "CPU_SYSTEM"; "CONTEXT_VOLUNTARY"
+                      "CONTEXT_INVOLUNTARY"; "BLOCK_OPS_IN"; "BLOCK_OPS_OUT"; "MESSAGES_SENT"; "MESSAGES_RECEIVED"
+                      "PAGE_FAULTS_MAJOR"; "PAGE_FAULTS_MINOR"; "SWAPS"; "SOURCE_FUNCTION"; "SOURCE_FILE"; "SOURCE_LINE" ]
+                    "resource_groups",
+                    [ "RESOURCE_GROUP_NAME"; "RESOURCE_GROUP_TYPE"; "RESOURCE_GROUP_ENABLED"; "VCPU_IDS"; "THREAD_PRIORITY" ]
+                    "tablespaces_extensions", [ "TABLESPACE_NAME"; "ENGINE_ATTRIBUTE" ] ] do
+                  match run store (sprintf "SELECT * FROM information_schema.%s" table) with
+                  | ResultSet(columns, []) -> Expect.sequenceEqual columns expectedColumns (table + " columns")
+                  | other -> failtestf "expected empty %s, got %A" table other
+
+              match
+                  run
+                      store
+                      "SELECT column_name, engine_attribute, secondary_engine_attribute FROM information_schema.columns_extensions WHERE table_schema='fsdb' AND table_name='geometry_metadata' ORDER BY column_name"
+              with
+              | ResultSet(_, [ [ Some "id"; None; None ]; [ Some "shape"; None; None ] ]) -> ()
+              | other -> failtestf "expected column extension rows, got %A" other
+
+              match run store "SELECT catalog_name, schema_name, options FROM information_schema.schemata_extensions WHERE schema_name='fsdb'" with
+              | ResultSet(_, [ [ Some "def"; Some "fsdb"; Some "" ] ]) -> ()
+              | other -> failtestf "expected the schema extension row, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT table_name, engine_attribute, secondary_engine_attribute FROM information_schema.tables_extensions WHERE table_schema='fsdb' AND table_name LIKE 'geometry_metadata%' ORDER BY table_name"
+              with
+              | ResultSet(_, [ [ Some "geometry_metadata"; None; None ]; [ Some "geometry_metadata_view"; None; None ] ]) -> ()
+              | other -> failtestf "expected table extension rows, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT constraint_name, table_name, engine_attribute, secondary_engine_attribute FROM information_schema.table_constraints_extensions WHERE constraint_schema='fsdb' AND table_name='geometry_metadata' ORDER BY constraint_name"
+              with
+              | ResultSet(_, [ [ Some "PRIMARY"; Some "geometry_metadata"; None; None ] ]) -> ()
+              | other -> failtestf "expected constraint extension rows, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT table_name, column_name, srs_name, srs_id, geometry_type_name FROM information_schema.st_geometry_columns WHERE table_schema='fsdb' ORDER BY table_name"
+              with
+              | ResultSet(_, [ [ Some "geometry_metadata"; Some "shape"; None; None; Some "point" ]
+                               [ Some "geometry_metadata_view"; Some "shape"; None; None; Some "point" ] ]) -> ()
+              | other -> failtestf "expected geometry metadata rows, got %A" other
+
           testCase "the verbatim TablePlus routines query returns an empty set with aliased columns"
           <| fun _ ->
               let store = setup ()
