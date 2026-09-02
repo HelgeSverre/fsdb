@@ -28,12 +28,13 @@ let private queryExpansionLimit = 20
 /// InnoDB's default stopword list, verbatim from a live 8.4.11's
 /// `INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD` (36 rows; "the" really
 /// does appear twice there).
-let private stopwords =
-    Set.ofList
-        [ "a"; "about"; "an"; "are"; "as"; "at"; "be"; "by"; "com"; "de"
-          "en"; "for"; "from"; "how"; "i"; "in"; "is"; "it"; "la"; "of"
-          "on"; "or"; "that"; "the"; "this"; "to"; "was"; "what"; "when"
-          "where"; "who"; "will"; "with"; "und"; "www" ]
+let defaultStopwords =
+    [ "a"; "about"; "an"; "are"; "as"; "at"; "be"; "by"; "com"; "de"
+      "en"; "for"; "from"; "how"; "i"; "in"; "is"; "it"; "la"; "of"
+      "on"; "or"; "that"; "the"; "this"; "to"; "was"; "what"; "when"
+      "where"; "who"; "will"; "with"; "und"; "the"; "www" ]
+
+let private stopwords = Set.ofList defaultStopwords
 
 /// The observed IDF floor for a term every document contains — see the
 /// module doc. sqrt of the per-occurrence epsilon rank a live 8.4.11

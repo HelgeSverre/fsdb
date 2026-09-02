@@ -2821,6 +2821,14 @@ let private pluginsRows =
          vs "GPL"
          vs "ON" |] ]
 
+let private innodbFtDefaultStopwordColumns =
+    [ { requiredCol "value" (TVarchar 18) with
+          Charset = Some "utf8mb3"
+          Collation = Some "utf8mb3_general_ci" } ]
+
+let private innodbFtDefaultStopwordRows =
+    Fsdb.FullText.defaultStopwords |> List.map (fun value -> [| vs value |])
+
 let private userAttributesColumns =
     [ requiredCol "USER" (TChar 32)
       requiredCol "HOST" (TChar 255)
@@ -2949,6 +2957,7 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "ENGINES", enginesColumns
       "EVENTS", eventsColumns
       "FILES", filesColumns
+      "INNODB_FT_DEFAULT_STOPWORD", innodbFtDefaultStopwordColumns
       "KEY_COLUMN_USAGE", keyColumnUsageColumns
       "KEYWORDS", keywordsColumns
       "OPTIMIZER_TRACE", optimizerTraceColumns
@@ -3204,6 +3213,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "PARAMETERS" -> Some(parametersRows catalog)
         | "EVENTS" -> Some(eventsRows catalog)
         | "FILES" -> Some []
+        | "INNODB_FT_DEFAULT_STOPWORD" -> Some innodbFtDefaultStopwordRows
         | "KEYWORDS" -> Some keywordsRows
         | "PLUGINS" -> Some pluginsRows
         | "OPTIMIZER_TRACE"

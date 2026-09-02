@@ -748,6 +748,42 @@ let tests =
                       | None -> failtestf "NULL table_name in self-listing"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "INNODB_FT_DEFAULT_STOPWORD exposes MySQL's duplicate-preserving registry"
+          <| fun _ ->
+              let store = setup ()
+
+              match
+                  run
+                      store
+                      "SELECT column_name, column_type, is_nullable, collation_name FROM information_schema.columns WHERE table_schema='information_schema' AND table_name='INNODB_FT_DEFAULT_STOPWORD'"
+              with
+              | ResultSet(_, [ [ Some "value"; Some "varchar(18)"; Some "NO"; Some "utf8mb3_general_ci" ] ]) -> ()
+              | other -> failtestf "expected the stopword column descriptor, got %A" other
+
+              match run store "SELECT COUNT(*), COUNT(DISTINCT value) FROM information_schema.innodb_ft_default_stopword" with
+              | ResultSet(_, [ [ Some "36"; Some "35" ] ]) -> ()
+              | other -> failtestf "expected the complete stopword registry, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT GROUP_CONCAT(DISTINCT value ORDER BY value SEPARATOR ',') FROM information_schema.innodb_ft_default_stopword"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "a,about,an,are,as,at,be,by,com,de,en,for,from,how,i,in,is,it,la,of,on,or,that,the,this,to,und,was,what,when,where,who,will,with,www" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected MySQL's stopword values, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT value, COUNT(*) FROM information_schema.innodb_ft_default_stopword GROUP BY value HAVING COUNT(*) > 1"
+              with
+              | ResultSet(_, [ [ Some "the"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected MySQL's duplicate stopword, got %A" other
+
           testCase "COLUMNS reports CHARACTER_OCTET_LENGTH and PRIVILEGES"
           <| fun _ ->
               let store = setup ()
