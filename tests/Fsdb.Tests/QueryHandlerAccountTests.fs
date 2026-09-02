@@ -1911,12 +1911,21 @@ let tests =
                     "time_zone_transition_type",
                     [ "Time_zone_id"; "Transition_type_id"; "Offset"; "Is_DST"; "Abbreviation" ] ] do
                   match handle root (sprintf "SELECT * FROM mysql.%s" table) |> snd with
-                  | ResultSet(columns, []) -> Expect.sequenceEqual columns expectedColumns (table + " columns")
-                  | other -> failtestf "expected empty mysql.%s, got %A" table other
+                  | ResultSet(columns, rows) ->
+                      Expect.sequenceEqual columns expectedColumns (table + " columns")
+
+                      let expectedRows =
+                          match table with
+                          | "engine_cost" -> 2
+                          | "server_cost" -> 6
+                          | _ -> 0
+
+                      Expect.equal rows.Length expectedRows (table + " bootstrap rows")
+                  | other -> failtestf "expected mysql.%s result, got %A" table other
 
               let expectShapes table expected =
                   match Fsdb.Storage.scanList store "mysql" table with
-                  | Ok(columns, []) ->
+                  | Ok(columns, _) ->
                       let actual =
                           columns
                           |> List.map (fun column ->
@@ -1927,7 +1936,7 @@ let tests =
                               column.Unique)
 
                       Expect.equal actual expected (table + " column shapes")
-                  | other -> failtestf "expected empty mysql.%s metadata, got %A" table other
+                  | other -> failtestf "expected mysql.%s metadata, got %A" table other
 
               expectShapes
                   "general_log"
@@ -2051,22 +2060,45 @@ let tests =
 
               for table in [ "engine_cost"; "server_cost" ] do
                   match Fsdb.Storage.scanList store "mysql" table with
-                  | Ok(columns, []) ->
+                  | Ok(columns, _) ->
                       let defaultValue = columns |> List.find (fun column -> column.Name = "default_value")
                       let lastUpdate = columns |> List.find (fun column -> column.Name = "last_update")
                       Expect.isSome defaultValue.Generated (table + " generated default value")
                       Expect.equal lastUpdate.Default (Some DCurrentTimestamp) (table + " timestamp default")
                       Expect.isTrue lastUpdate.OnUpdateCurrentTimestamp (table + " timestamp update clause")
-                  | other -> failtestf "expected empty mysql.%s cost metadata, got %A" table other
+                  | other -> failtestf "expected mysql.%s cost metadata, got %A" table other
 
-              let root, insertedCost =
-                  handle root "INSERT INTO mysql.server_cost (cost_name) VALUES ('row_evaluate_cost')"
+              match
+                  handle
+                      root
+                      "SELECT engine_name, device_type, cost_name, cost_value, comment, default_value FROM mysql.engine_cost ORDER BY cost_name"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "default"; Some "0"; Some "io_block_read_cost"; None; None; Some "1" ]
+                    [ Some "default"; Some "0"; Some "memory_block_read_cost"; None; None; Some "0.25" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected MySQL engine costs, got %A" other
 
-              Expect.equal insertedCost (Affected 1UL) "cost row inserts"
-
-              match handle root "SELECT default_value FROM mysql.server_cost" |> snd with
-              | ResultSet(_, [ [ Some "0.1" ] ]) -> ()
-              | other -> failtestf "expected generated server cost, got %A" other
+              match
+                  handle
+                      root
+                      "SELECT cost_name, cost_value, comment, default_value FROM mysql.server_cost ORDER BY cost_name"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "disk_temptable_create_cost"; None; None; Some "20" ]
+                    [ Some "disk_temptable_row_cost"; None; None; Some "0.5" ]
+                    [ Some "key_compare_cost"; None; None; Some "0.05" ]
+                    [ Some "memory_temptable_create_cost"; None; None; Some "1" ]
+                    [ Some "memory_temptable_row_cost"; None; None; Some "0.1" ]
+                    [ Some "row_evaluate_cost"; None; None; Some "0.1" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected MySQL server costs, got %A" other
 
               let root, _ = handle root "CREATE USER attribute_reader"
 

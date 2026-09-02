@@ -3527,6 +3527,28 @@ let private mysqlCompatibilityTableIndexes =
 let private compatibilityIndexes name =
     Map.tryFind name mysqlCompatibilityTableIndexes |> Option.defaultValue []
 
+let private compatibilityRows name =
+    let timestamp =
+        let now = DateTime.Now
+        VDateTime(now.AddTicks(-(now.Ticks % TimeSpan.TicksPerSecond)))
+
+    let engineCost costName =
+        [| VString "default"; VInt 0L; VString costName; VNull; timestamp; VNull; VNull |]
+
+    let serverCost costName =
+        [| VString costName; VNull; timestamp; VNull; VNull |]
+
+    match name with
+    | "engine_cost" -> [ engineCost "io_block_read_cost"; engineCost "memory_block_read_cost" ]
+    | "server_cost" ->
+        [ serverCost "disk_temptable_create_cost"
+          serverCost "disk_temptable_row_cost"
+          serverCost "key_compare_cost"
+          serverCost "memory_temptable_create_cost"
+          serverCost "memory_temptable_row_cost"
+          serverCost "row_evaluate_cost" ]
+    | _ -> []
+
 let private mysqlSystemDatabase () : Database =
     ([ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
        "db", sysTable "db" mysqlDbColumns []
@@ -3542,7 +3564,9 @@ let private mysqlSystemDatabase () : Database =
        "events", sysTable "events" mysqlEventsColumns []
        "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
      @ (mysqlCompatibilityTableDefs
-        |> List.map (fun (name, columns) -> name, sysTableWithIndexes name columns (compatibilityIndexes name) [])))
+        |> List.map (fun (name, columns) ->
+            name,
+            sysTableWithIndexes name columns (compatibilityIndexes name) (compatibilityRows name))))
     |> Map.ofList
 
 /// Restores catalog tables absent from snapshots written by older versions.
@@ -3551,9 +3575,9 @@ let ensureMysqlSchema (store: Store) : unit =
 
     let dbRef = store.Databases.["mysql"]
 
-    let ensureTable name columns indexes =
+    let ensureTable name columns indexes rows =
         match Map.tryFind name dbRef.Value with
-        | None -> dbRef.Value <- Map.add name (sysTableWithIndexes name columns indexes []) dbRef.Value
+        | None -> dbRef.Value <- Map.add name (sysTableWithIndexes name columns indexes rows) dbRef.Value
         | Some table ->
             let retainedColumns =
                 if table.Columns.Length > columns.Length then
@@ -3606,10 +3630,11 @@ let ensureMysqlSchema (store: Store) : unit =
       "global_grants", mysqlGlobalGrantsColumns
       "role_edges", mysqlRoleEdgesColumns
       "default_roles", mysqlDefaultRolesColumns ]
-    |> List.iter (fun (name, columns) -> ensureTable name columns [])
+    |> List.iter (fun (name, columns) -> ensureTable name columns [] [])
 
     mysqlCompatibilityTableDefs
-    |> List.iter (fun (name, columns) -> ensureTable name columns (compatibilityIndexes name))
+    |> List.iter (fun (name, columns) ->
+        ensureTable name columns (compatibilityIndexes name) (compatibilityRows name))
 
 let ensureRootDynamicPrivileges (store: Store) : unit =
     ensureMysqlSchema store

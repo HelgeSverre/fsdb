@@ -310,9 +310,11 @@ TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.
 fsdb has a real account system backed by a 44-table `mysql` schema. All 38
 MySQL 8.4 table names use their native column order, types, nullability, key
 membership, defaults, and generated columns; six additional tables store
-fsdb views, triggers, routines, functions, events, and checks. Native catalog
-collations and engine-maintained help, log, cost, statistics, GTID, NDB, and
-replication rows still differ or remain empty. `CREATE USER` /
+fsdb views, triggers, routines, functions, events, and checks. The optimizer
+cost tables include MySQL's eight bootstrap rows and remain writable, although
+fsdb's planner does not consume their overrides. Native catalog collations and
+engine-maintained help, log, statistics, GTID, NDB, and replication rows still
+differ or remain empty. `CREATE USER` /
 `DROP USER` / `ALTER USER` /
 `SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
 path; passwords are mysql_native_password hashes verified at the handshake

@@ -1031,7 +1031,14 @@ let tests =
 
               for table in removedTables do
                   match scanList reloaded "mysql" table with
-                  | Ok(_, rows) -> Expect.isEmpty rows (table + " restored empty")
+                  | Ok(_, rows) ->
+                      let expectedRows =
+                          match table with
+                          | "engine_cost" -> 2
+                          | "server_cost" -> 6
+                          | _ -> 0
+
+                      Expect.equal rows.Length expectedRows (table + " bootstrap rows restored")
                   | Error error -> failtestf "expected restored mysql.%s, got %A" table error
 
           testCase "SERVER DDL replays through the WAL"
