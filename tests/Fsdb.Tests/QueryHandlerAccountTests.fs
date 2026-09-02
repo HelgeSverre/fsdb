@@ -53,14 +53,25 @@ let tests =
                           names
                           [ "check_constraints"
                             "columns_priv"
+                            "component"
                             "db"
                             "default_roles"
                             "events"
+                            "func"
                             "functions"
                             "global_grants"
+                            "password_history"
+                            "plugin"
+                            "proxies_priv"
                             "role_edges"
                             "routines"
+                            "servers"
                             "tables_priv"
+                            "time_zone"
+                            "time_zone_leap_second"
+                            "time_zone_name"
+                            "time_zone_transition"
+                            "time_zone_transition_type"
                             "triggers"
                             "user"
                             "views" ]
@@ -1814,6 +1825,25 @@ let tests =
                   Expect.equal (List.length cols) 22 "22 columns"
                   Expect.isEmpty rows "no db-level grants out of the box"
               | Error e -> failtestf "expected mysql.db to scan, got %A" e
+
+              for table, expectedColumns in
+                  [ "component", [ "component_id"; "component_group_id"; "component_urn" ]
+                    "func", [ "name"; "ret"; "dl"; "type" ]
+                    "password_history", [ "Host"; "User"; "Password_timestamp"; "Password" ]
+                    "plugin", [ "name"; "dl" ]
+                    "proxies_priv",
+                    [ "Host"; "User"; "Proxied_host"; "Proxied_user"; "With_grant"; "Grantor"; "Timestamp" ]
+                    "servers",
+                    [ "Server_name"; "Host"; "Db"; "Username"; "Password"; "Port"; "Socket"; "Wrapper"; "Owner" ]
+                    "time_zone", [ "Time_zone_id"; "Use_leap_seconds" ]
+                    "time_zone_leap_second", [ "Transition_time"; "Correction" ]
+                    "time_zone_name", [ "Name"; "Time_zone_id" ]
+                    "time_zone_transition", [ "Time_zone_id"; "Transition_time"; "Transition_type_id" ]
+                    "time_zone_transition_type",
+                    [ "Time_zone_id"; "Transition_type_id"; "Offset"; "Is_DST"; "Abbreviation" ] ] do
+                  match handle root (sprintf "SELECT * FROM mysql.%s" table) |> snd with
+                  | ResultSet(columns, []) -> Expect.sequenceEqual columns expectedColumns (table + " columns")
+                  | other -> failtestf "expected empty mysql.%s, got %A" table other
 
               let root, _ = handle root "CREATE USER attribute_reader"
 

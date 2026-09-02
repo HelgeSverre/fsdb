@@ -44,7 +44,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
-| Metadata | 47 INFORMATION_SCHEMA views, 13 mysql.* tables, and the complete MySQL 8.4 keyword and `Com_*` registries | Storage statistics and engine-specific metadata families are stand-ins or absent |
+| Metadata | 47 INFORMATION_SCHEMA views, 24 mysql.* tables, and the complete MySQL 8.4 keyword and `Com_*` registries | Storage statistics and engine-specific metadata families are stand-ins or absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -443,7 +443,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 | Advanced account policy | auth-plugin selection and password history/reuse/current policy | explicit/default expiry lifetimes, resource limits, and account attributes/comments are enforced; advanced policy clauses remain absent | low | refusal |
 | Proxy users | supported | absent | low | refusal |
 | SHOW GRANTS completeness | includes role, dynamic-privilege, and PROXY lines | role/dynamic lines and `USING` materialization work; PROXY lines are absent | low | divergence |
-| System-table coverage | ~38 mysql.* tables | `Storage.mysqlSystemDatabase` provides the account/grant, trigger/view/constraint, routine, and event catalogs used by supported features | low | divergence |
+| System-table coverage | ~38 mysql.* tables | 24 tables cover live account/grant/stored-object catalogs plus exact empty component, UDF, plugin, server, time-zone, password-history, and proxy schemas; help, logging, and InnoDB statistics tables remain absent | low | divergence |
 
 ## 14. Metadata, server administration, logging, replication
 
@@ -453,7 +453,7 @@ REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
 ENGINES, COLLATIONS, CHARACTER_SETS, extension metadata, geometry columns,
 optional optimizer/profiling/resource-group/file surfaces, keyword, plugin, user-attribute, and planar spatial-reference catalogs,
 privilege and role-grant views, and direct view table/routine dependencies, …), direct
-SELECT-ability of the 13 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
+SELECT-ability of the 24 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
 TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
 COLLATION/PRIVILEGES (73 oracle-verified rows)/PROCESSLIST/VARIABLES/STATUS/
 GRANTS/TRIGGERS/WARNINGS/ERRORS with statement condition counts, DESCRIBE,

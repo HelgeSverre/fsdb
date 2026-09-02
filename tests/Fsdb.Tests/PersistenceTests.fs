@@ -998,6 +998,21 @@ let tests =
 
               Expect.equal users [ VString "alice"; VString "root" ] "root bootstrap row + the persisted alice row"
 
+          testCase "snapshot loading restores compatibility system catalogs"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              let mysql = store.Databases.["mysql"]
+              mysql.Value <- mysql.Value |> Map.remove "component" |> Map.remove "time_zone_name"
+              snapshotNow dir store
+
+              let reloaded = load dir
+
+              for table in [ "component"; "time_zone_name" ] do
+                  match scanList reloaded "mysql" table with
+                  | Ok(_, rows) -> Expect.isEmpty rows (table + " restored empty")
+                  | Error error -> failtestf "expected restored mysql.%s, got %A" table error
+
           testCase "CREATE USER / SET PASSWORD / DROP USER mutations replay from the WAL"
           <| fun _ ->
               let dir = tempDataDir ()

@@ -3009,6 +3009,76 @@ let private mysqlDefaultRolesColumns: ColumnDef list =
       keyCol "DEFAULT_ROLE_HOST" 255
       keyCol "DEFAULT_ROLE_USER" 32 ]
 
+let private primarySysCol name ty nullable dflt =
+    { sysCol name ty nullable dflt with PrimaryKey = true }
+
+let private mysqlComponentColumns =
+    [ { primarySysCol "component_id" (TInt true) false None with AutoIncrement = true }
+      sysCol "component_group_id" (TInt true) false None
+      sysCol "component_urn" TText false None ]
+
+let private mysqlFuncColumns =
+    [ primarySysCol "name" (TChar 64) false (Some(VString ""))
+      sysCol "ret" (TTinyInt false) false (Some(VInt 0L))
+      sysCol "dl" (TChar 128) false (Some(VString ""))
+      sysCol "type" (TEnum [ "function"; "aggregate" ]) false None ]
+
+let private mysqlPluginColumns =
+    [ primarySysCol "name" (TVarchar 64) false (Some(VString ""))
+      sysCol "dl" (TVarchar 128) false (Some(VString "")) ]
+
+let private mysqlServersColumns =
+    [ primarySysCol "Server_name" (TChar 64) false (Some(VString ""))
+      sysCol "Host" (TChar 255) false (Some(VString ""))
+      sysCol "Db" (TChar 64) false (Some(VString ""))
+      sysCol "Username" (TChar 64) false (Some(VString ""))
+      sysCol "Password" (TChar 64) false (Some(VString ""))
+      sysCol "Port" (TInt false) false (Some(VInt 0L))
+      sysCol "Socket" (TChar 64) false (Some(VString ""))
+      sysCol "Wrapper" (TChar 64) false (Some(VString ""))
+      sysCol "Owner" (TChar 64) false (Some(VString "")) ]
+
+let private mysqlTimeZoneColumns =
+    [ { primarySysCol "Time_zone_id" (TInt true) false None with AutoIncrement = true }
+      sysCol "Use_leap_seconds" (TEnum [ "Y"; "N" ]) false (Some(VString "N")) ]
+
+let private mysqlTimeZoneLeapSecondColumns =
+    [ primarySysCol "Transition_time" (TBigInt false) false None
+      sysCol "Correction" (TInt false) false None ]
+
+let private mysqlTimeZoneNameColumns =
+    [ primarySysCol "Name" (TChar 64) false None
+      sysCol "Time_zone_id" (TInt true) false None ]
+
+let private mysqlTimeZoneTransitionColumns =
+    [ primarySysCol "Time_zone_id" (TInt true) false None
+      primarySysCol "Transition_time" (TBigInt false) false None
+      sysCol "Transition_type_id" (TInt true) false None ]
+
+let private mysqlTimeZoneTransitionTypeColumns =
+    [ primarySysCol "Time_zone_id" (TInt true) false None
+      primarySysCol "Transition_type_id" (TInt true) false None
+      sysCol "Offset" (TInt false) false (Some(VInt 0L))
+      sysCol "Is_DST" (TTinyInt true) false (Some(VInt 0L))
+      sysCol "Abbreviation" (TChar 8) false (Some(VString "")) ]
+
+let private mysqlPasswordHistoryColumns =
+    [ primarySysCol "Host" (TChar 255) false (Some(VString ""))
+      primarySysCol "User" (TChar 32) false (Some(VString ""))
+      { primarySysCol "Password_timestamp" (TTimestamp 6) false None with Default = Some DCurrentTimestamp }
+      sysCol "Password" TText true None ]
+
+let private mysqlProxiesPrivColumns =
+    [ primarySysCol "Host" (TChar 255) false (Some(VString ""))
+      primarySysCol "User" (TChar 32) false (Some(VString ""))
+      primarySysCol "Proxied_host" (TChar 255) false (Some(VString ""))
+      primarySysCol "Proxied_user" (TChar 32) false (Some(VString ""))
+      sysCol "With_grant" TBool false (Some(VInt 0L))
+      sysCol "Grantor" (TVarchar 288) false (Some(VString ""))
+      { sysCol "Timestamp" (TTimestamp 0) false None with
+          Default = Some DCurrentTimestamp
+          OnUpdateCurrentTimestamp = true } ]
+
 let private rootDynamicGrantRows =
     Privileges.dynamic
     |> List.map (fun privilege -> [| VString "root"; VString "%"; VString privilege; VString "Y" |])
@@ -3176,20 +3246,34 @@ let mysqlCheckConstraintsColumns: ColumnDef list =
       sysCol "generated_name" (TChar 3) false (Some(VString "NO"))
       sysCol "ordinal_position" (TInt true) false (Some(VInt 1L)) ]
 
+let private mysqlCompatibilityTableDefs =
+    [ "component", mysqlComponentColumns
+      "func", mysqlFuncColumns
+      "password_history", mysqlPasswordHistoryColumns
+      "plugin", mysqlPluginColumns
+      "proxies_priv", mysqlProxiesPrivColumns
+      "servers", mysqlServersColumns
+      "time_zone", mysqlTimeZoneColumns
+      "time_zone_leap_second", mysqlTimeZoneLeapSecondColumns
+      "time_zone_name", mysqlTimeZoneNameColumns
+      "time_zone_transition", mysqlTimeZoneTransitionColumns
+      "time_zone_transition_type", mysqlTimeZoneTransitionTypeColumns ]
+
 let private mysqlSystemDatabase () : Database =
-    [ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
-      "db", sysTable "db" mysqlDbColumns []
-      "tables_priv", sysTable "tables_priv" mysqlTablesPrivColumns []
-      "columns_priv", sysTable "columns_priv" mysqlColumnsPrivColumns []
-      "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns rootDynamicGrantRows
-      "role_edges", sysTable "role_edges" mysqlRoleEdgesColumns []
-      "default_roles", sysTable "default_roles" mysqlDefaultRolesColumns []
-      "triggers", sysTable "triggers" mysqlTriggersColumns []
-      "views", sysTable "views" mysqlViewsColumns []
-      "routines", sysTable "routines" mysqlRoutinesColumns []
-      "functions", sysTable "functions" mysqlStoredFunctionsColumns []
-      "events", sysTable "events" mysqlEventsColumns []
-      "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
+    ([ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
+       "db", sysTable "db" mysqlDbColumns []
+       "tables_priv", sysTable "tables_priv" mysqlTablesPrivColumns []
+       "columns_priv", sysTable "columns_priv" mysqlColumnsPrivColumns []
+       "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns rootDynamicGrantRows
+       "role_edges", sysTable "role_edges" mysqlRoleEdgesColumns []
+       "default_roles", sysTable "default_roles" mysqlDefaultRolesColumns []
+       "triggers", sysTable "triggers" mysqlTriggersColumns []
+       "views", sysTable "views" mysqlViewsColumns []
+       "routines", sysTable "routines" mysqlRoutinesColumns []
+       "functions", sysTable "functions" mysqlStoredFunctionsColumns []
+       "events", sysTable "events" mysqlEventsColumns []
+       "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
+     @ (mysqlCompatibilityTableDefs |> List.map (fun (name, columns) -> name, sysTable name columns [])))
     |> Map.ofList
 
 /// Restores catalog tables absent from snapshots written by older versions.
@@ -3227,15 +3311,16 @@ let ensureMysqlSchema (store: Store) : unit =
     // Old trigger rows receive an empty definer and therefore fail closed;
     // treating a missing identity as root would turn catalog migration into
     // a privilege escalation.
-    [ "triggers", mysqlTriggersColumns
-      "views", mysqlViewsColumns
-      "routines", mysqlRoutinesColumns
-      "functions", mysqlStoredFunctionsColumns
-      "events", mysqlEventsColumns
-      "check_constraints", mysqlCheckConstraintsColumns
-      "global_grants", mysqlGlobalGrantsColumns
-      "role_edges", mysqlRoleEdgesColumns
-      "default_roles", mysqlDefaultRolesColumns ]
+    ([ "triggers", mysqlTriggersColumns
+       "views", mysqlViewsColumns
+       "routines", mysqlRoutinesColumns
+       "functions", mysqlStoredFunctionsColumns
+       "events", mysqlEventsColumns
+       "check_constraints", mysqlCheckConstraintsColumns
+       "global_grants", mysqlGlobalGrantsColumns
+       "role_edges", mysqlRoleEdgesColumns
+       "default_roles", mysqlDefaultRolesColumns ]
+     @ mysqlCompatibilityTableDefs)
     |> List.iter (fun (name, columns) -> ensureTable name columns)
 
 let ensureRootDynamicPrivileges (store: Store) : unit =
