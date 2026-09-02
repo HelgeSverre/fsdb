@@ -1,6 +1,6 @@
 /// Active transaction snapshots shared by isolation visibility and metadata.
-/// Registries follow the shared database roots, keeping independent stores
-/// isolated while transaction snapshots come and go with their sessions.
+/// Registries follow the shared commit domain, keeping independent stores
+/// isolated while remaining visible through their private snapshots.
 module Fsdb.TransactionRegistry
 
 open System.Collections.Concurrent
@@ -12,16 +12,16 @@ type Entry =
       Snapshot: Store }
 
 let private registries =
-    ConditionalWeakTable<ConcurrentDictionary<string, Database ref>, ConcurrentDictionary<int, Entry>>()
+    ConditionalWeakTable<obj, ConcurrentDictionary<int, Entry>>()
 
 let private registryFor (store: Store) =
-    registries.GetValue(store.Databases, fun _ -> ConcurrentDictionary<int, Entry>())
+    registries.GetValue(store.CommitLock, fun _ -> ConcurrentDictionary<int, Entry>())
 
 let publish (store: Store) (connectionId: int) (entry: Entry) =
     (registryFor store).[connectionId] <- entry
 
 let remove (store: Store) (connectionId: int) =
-    match registries.TryGetValue store.Databases with
+    match registries.TryGetValue store.CommitLock with
     | true, registry -> registry.TryRemove connectionId |> ignore
     | false, _ -> ()
 
