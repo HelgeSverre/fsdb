@@ -4333,7 +4333,13 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
         Ok None
 
 type private TextRoutineCommand =
-    | CreateProcedure of name: string * parameters: string * securityType: string * body: string * definer: string option
+    | CreateProcedure of
+        name: string *
+        ifNotExists: bool *
+        parameters: string *
+        securityType: string *
+        body: string *
+        definer: string option
     | CreateFunction of
         name: string *
         ifNotExists: bool *
@@ -4348,7 +4354,7 @@ type private TextRoutineCommand =
 
 let private createProcedureRe =
     Regex(
-        """^\s*CREATE\s+(?:DEFINER\s*=\s*(?<definer>(?:CURRENT_USER(?:\(\))?|(?:'[^']*'|`[^`]*`|[A-Za-z0-9_$.-]+)(?:\s*@\s*(?:'[^']*'|`[^`]*`|[A-Za-z0-9_$.:/%-]+))?))\s+)?PROCEDURE\s+(?<name>\S+)\s*\((?<parameters>(?:[^()]|\([^()]*\))*)\)\s+(?:SQL\s+SECURITY\s+(?<security>INVOKER|DEFINER)\s+)?(?<body>.+)$""",
+        """^\s*CREATE\s+(?:DEFINER\s*=\s*(?<definer>(?:CURRENT_USER(?:\(\))?|(?:'[^']*'|`[^`]*`|[A-Za-z0-9_$.-]+)(?:\s*@\s*(?:'[^']*'|`[^`]*`|[A-Za-z0-9_$.:/%-]+))?))\s+)?PROCEDURE\s+(?<ifNotExists>IF\s+NOT\s+EXISTS\s+)?(?<name>\S+)\s*\((?<parameters>(?:[^()]|\([^()]*\))*)\)\s+(?:SQL\s+SECURITY\s+(?<security>INVOKER|DEFINER)\s+)?(?<body>.+)$""",
         RegexOptions.IgnoreCase ||| RegexOptions.Singleline
     )
 
@@ -4399,6 +4405,7 @@ let private tryTextRoutineCommand (sql: string) =
         Some(
             CreateProcedure(
                 create.Groups.["name"].Value,
+                create.Groups.["ifNotExists"].Success,
                 create.Groups.["parameters"].Value.Trim(),
                 security,
                 create.Groups.["body"].Value,
@@ -5802,18 +5809,21 @@ and private dispatchNormalized session rawSql parserOptions sql =
             checkSessionAccess session session.Store [ privilege, Auth.OnDb database ]
 
         match command with
-        | CreateProcedure(qualifiedName, parameters, securityType, body, requestedDefiner) ->
+        | CreateProcedure(qualifiedName, ifNotExists, parameters, securityType, body, requestedDefiner) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let definer = requestedDefinerAccount session requestedDefiner
             let mayChooseDefiner = canUseRequestedDefiner session requestedDefiner
+            let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)
 
             match authorize "CREATE ROUTINE" database with
             | Error(code, message) -> session, Err(code, message)
             | Ok() when not mayChooseDefiner ->
                 session,
                 Err(1227, "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation")
-            | Ok() when routineEntries () |> List.exists (SystemCatalog.Routine.matches database name) ->
-                session, Err(1304, sprintf "PROCEDURE %s already exists" name)
+            | Ok() when exists && ifNotExists ->
+                Diagnostics.note 1304 (sprintf "PROCEDURE %s already exists" name)
+                session, Affected 0UL
+            | Ok() when exists -> session, Err(1304, sprintf "PROCEDURE %s already exists" name)
             | Ok() ->
                 let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
 
@@ -5854,6 +5864,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let definer = requestedDefinerAccount session requestedDefiner
             let mayChooseDefiner = canUseRequestedDefiner session requestedDefiner
+            let exists = functionEntries () |> List.exists (SystemCatalog.StoredFunction.matches database name)
 
             match Storage.databaseExists (Session.currentStore session) database, authorize "CREATE ROUTINE" database with
             | false, _ -> session, Err(1049, sprintf "Unknown database '%s'" database)
@@ -5861,11 +5872,10 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | true, Ok() when not mayChooseDefiner ->
                 session,
                 Err(1227, "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation")
-            | true, Ok() when functionEntries () |> List.exists (SystemCatalog.StoredFunction.matches database name) && ifNotExists ->
+            | true, Ok() when exists && ifNotExists ->
                 Diagnostics.note 1304 (sprintf "FUNCTION %s already exists" name)
                 session, Affected 0UL
-            | true, Ok() when functionEntries () |> List.exists (SystemCatalog.StoredFunction.matches database name) ->
-                session, Err(1304, sprintf "FUNCTION %s already exists" name)
+            | true, Ok() when exists -> session, Err(1304, sprintf "FUNCTION %s already exists" name)
             | true, Ok() ->
                 let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
 
@@ -6580,7 +6590,7 @@ type private AccountStatement =
 
 let private textRoutineUpdateAuthorization session = function
     | CallProcedure _ -> None
-    | CreateProcedure(qualifiedName, _, _, _, requestedDefiner)
+    | CreateProcedure(qualifiedName, _, _, _, _, requestedDefiner)
     | CreateFunction(qualifiedName, _, _, _, _, _, requestedDefiner) ->
         let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 

@@ -102,6 +102,18 @@ let tests =
                   [ Fsdb.Diagnostics.Note, 1360, "Trigger does not exist" ]
                   "trigger note"
 
+              let session, _ = handle session "CREATE PROCEDURE present_procedure() SELECT 1 AS value"
+              let session, result = handle session "CREATE PROCEDURE IF NOT EXISTS present_procedure() SELECT 2 AS value"
+              Expect.equal result (Affected 0UL) "existing procedure is ignored"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1304, "PROCEDURE present_procedure already exists" ]
+                  "procedure creation note"
+
+              match handle session "CALL present_procedure()" |> snd with
+              | MultipleResults [ (ResultSet([ "value" ], [ [ Some "1" ] ]), _); (Affected _, []) ] -> ()
+              | other -> failtestf "expected the original procedure body, got %A" other
+
               let session, result = handle session "DROP PROCEDURE IF EXISTS absent_procedure"
               Expect.equal result (Affected 0UL) "missing procedure is ignored"
               Expect.equal
