@@ -305,10 +305,9 @@ and ColumnDefault =
     | DCurrentTimestamp
     | DExpression of Expr
 
-/// VIRTUAL vs STORED on a generated column. Both are materialized at write
-/// time in this engine (no recompute-on-read path), so the kind only drives
-/// metadata (SHOW CREATE TABLE, information_schema `EXTRA`). MySQL's default
-/// when the keyword is omitted is VIRTUAL.
+/// VIRTUAL vs STORED on a generated column. Both retain a write-time value
+/// for constraint and index maintenance; query sources recompute VIRTUAL
+/// values, while STORED values read the retained cell. The default is VIRTUAL.
 and GeneratedKind =
     | Virtual
     | Stored

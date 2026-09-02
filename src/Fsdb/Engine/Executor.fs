@@ -3887,6 +3887,21 @@ and private isStatementStableSelect
 
         expressions |> List.forall (isStatementStableExpr store registry dbName scope)
 
+/// Prevents indirect evaluation of extension functions registered as
+/// direct-only, including definitions loaded from older persisted catalogs.
+let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
+    registry.Extensions
+    |> Map.fold
+        (fun current name extension ->
+            if extension.DirectOnly then
+                registerScalar
+                    name
+                    (fun _ -> raise (SqlError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name)))
+                    current
+            else
+                current)
+        registry
+
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
 
@@ -6452,6 +6467,79 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
         choose (Set.singleton baseQualifier) [] select.Joins
     | _ -> select.Joins
 
+and private prepareVirtualRows
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (qualifier: string)
+    (columns: ColumnDef list)
+    (rows: Value[] seq)
+    : Result<Value[] seq, QueryResult> =
+    let generated =
+        columns
+        |> List.indexed
+        |> List.choose (fun (index, column) ->
+            match column.Generated with
+            | Some(expression, Virtual) -> Some(index, column, expression)
+            | _ -> None)
+
+    if generated.IsEmpty then
+        Ok rows
+    else
+        let registry = shadowDirectOnly "generated column" registry
+        let context = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) None
+
+        rows
+        |> traverseSeq (fun row ->
+            let current = Array.copy row
+            let ctx = context current
+
+            generated
+            |> traverse (fun (index, column, expression) ->
+                evalExpr ctx expression
+                |> Result.bind (fun value ->
+                    match Storage.coerceValue store.ExecutionSettings.SqlMode.Strict column value with
+                    | Ok value ->
+                        current.[index] <- value
+                        Ok()
+                    | Error error -> Error(Storage.toMySqlError error)))
+            |> Result.map (fun _ -> Some current))
+        |> Result.mapError (fun (code, message) -> Err(code, message))
+        |> Result.map (fun rows -> rows :> Value[] seq)
+
+/// Indexed join probes return physical row arrays, so their results must
+/// resolve to the corresponding VIRTUAL-prepared row before evaluation.
+and private alignPreparedRows
+    (columns: ColumnDef list)
+    (table: Table option)
+    (rows: Value[] seq)
+    : Value[] seq * (Value[] -> Value[]) =
+    let hasVirtual =
+        columns
+        |> List.exists (fun column ->
+            match column.Generated with
+            | Some(_, Virtual) -> true
+            | _ -> false)
+
+    match hasVirtual, table with
+    | true, Some table when columns.Length = table.Columns.Length ->
+        let prepared = List.ofSeq rows
+        let stored = List.ofSeq table.RowsArray
+
+        if prepared.Length = stored.Length then
+            let byStored = Dictionary<Value[], Value[]>(HashIdentity.Reference)
+            List.iter2 (fun source target -> byStored.[source] <- target) stored prepared
+
+            let read row =
+                match byStored.TryGetValue row with
+                | true, prepared -> prepared
+                | false, _ -> row
+
+            prepared :> Value[] seq, read
+        else
+            prepared :> Value[] seq, id
+    | _ -> rows, id
+
 and private applyResolvedJoin
     (store: Store)
     (registry: Registry)
@@ -6462,8 +6550,10 @@ and private applyResolvedJoin
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    let joinQualifier = fromItemQualifier join.Table
+
     let joinSource =
-        let qualifier = (fromItemQualifier join.Table).ToLowerInvariant()
+        let qualifier = joinQualifier.ToLowerInvariant()
 
         match Map.tryFind qualifier sourceOverrides with
         | Some source -> Ok(source.Columns, source.Rows, source.PhysicalTable)
@@ -6480,13 +6570,18 @@ and private applyResolvedJoin
                 resolveFromItem store registry dbName join.Table
                 |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
 
+        |> Result.bind (fun (columns, rows, physicalTable) ->
+            prepareVirtualRows store registry dbName joinQualifier columns rows
+            |> Result.map (fun rows -> columns, rows, physicalTable))
+
     match joinSource with
     | Error e -> Error e
     | Ok(joinColumns, joinRows, physicalTable) ->
-        let joinQualifier = fromItemQualifier join.Table
         let newSources = sourcesSoFar @ [ joinQualifier, joinColumns ]
         let qualifiers = qualifierRanges newSources
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
+        let rowsSoFar, readLeft = alignPreparedRows combinedColumnsSoFar leftPhysicalTable rowsSoFar
+        let joinRows, readRight = alignPreparedRows joinColumns physicalTable joinRows
         let leftNullPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
         let rightNullPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
 
@@ -6591,9 +6686,11 @@ and private applyResolvedJoin
                 |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
                 |> Result.map (List.forall (fun v -> truthy v = Some true))
 
-            let indexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns physicalTable equiKeys
+            let rightIndexTable = physicalTable |> Option.filter (fun table -> table.Columns.Length = joinColumns.Length)
+            let leftIndexTable = leftPhysicalTable |> Option.filter (fun table -> table.Columns.Length = combinedColumnsSoFar.Length)
+            let indexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns rightIndexTable equiKeys
             let preservedRightProbe =
-                tryIndexedPreservedRightProbe store join combinedColumnsSoFar joinColumns leftPhysicalTable equiKeys
+                tryIndexedPreservedRightProbe store join combinedColumnsSoFar joinColumns leftIndexTable equiKeys
 
             let leftQualifiers = sourcesSoFar |> List.map (fst >> _.ToLowerInvariant()) |> Set.ofList
 
@@ -6639,6 +6736,7 @@ and private applyResolvedJoin
                     |> List.map (fun rightIndex -> right.[rightIndex])
                     |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
                     |> Option.defaultValue []
+                    |> List.map (fun (rowId, left) -> rowId, readLeft left)
                     |> List.filter (fun (_, left) ->
                         match residualHolds (Array.append left rightNullPadding) with
                         | Ok matches -> matches
@@ -6672,6 +6770,7 @@ and private applyResolvedJoin
                     |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
                     |> Option.map Seq.ofList
                     |> Option.defaultValue probe.Table.RowsArray.Indexed
+                    |> Seq.map (fun (rowId, right) -> rowId, readRight right)
 
                 match join.Kind, exactKey, residualConjuncts with
                 | (InnerJoin | NaturalJoin), true, [] ->
@@ -6729,7 +6828,11 @@ and private applyResolvedJoin
                     |> Result.mapError Err
                     |> Result.map (buildCombinedRows [] >> fun (joinedSources, rows) -> joinedSources, rows :> Value[] seq, coalesceNames)
                 | (RightJoin | NaturalRightJoin), _, _ ->
-                    let positionedRight = probe.Table.RowsArray.Indexed |> Seq.indexed |> List.ofSeq
+                    let positionedRight =
+                        probe.Table.RowsArray.Indexed
+                        |> Seq.map (fun (rowId, right) -> rowId, readRight right)
+                        |> Seq.indexed
+                        |> List.ofSeq
                     let rightPositions = positionedRight |> List.map (fun (index, (rowId, _)) -> rowId, index) |> Map.ofList
                     let rightIndexed = positionedRight |> List.map (fun (index, (_, row)) -> index, row)
 
@@ -7927,30 +8030,33 @@ and private runUnlockedSelectStmt
             =
             let baseQualifier = fromItemQualifier fromItem
 
-            let initial : Result<((string * ColumnDef list) list * Value[] seq * Table option) * string list list, QueryResult> =
-                Ok(([ baseQualifier, baseColumns ], baseRows, basePhysicalTable), [])
+            match prepareVirtualRows store registry dbName baseQualifier baseColumns baseRows with
+            | Error error -> error, [], []
+            | Ok baseRows ->
+                let initial : Result<((string * ColumnDef list) list * Value[] seq * Table option) * string list list, QueryResult> =
+                    Ok(([ baseQualifier, baseColumns ], baseRows, basePhysicalTable), [])
 
-            match
-                planJoinOrder store dbName select
-                |> List.fold
-                    (fun acc join ->
-                        acc
-                        |> Result.bind (fun ((sources, rows, leftPhysicalTable), namesPerJoin) ->
-                            applyJoin store registry dbName outer Map.empty leftPhysicalTable (sources, rows) join
-                            |> Result.map (fun (sources', rows', names) -> (sources', rows', None), names :: namesPerJoin)))
-                    initial
-            with
-            | Error e -> e, [], []
-            | Ok((sources, rows, _), namesPerJoinRev) ->
-                let namesPerJoin = List.rev namesPerJoinRev
+                match
+                    planJoinOrder store dbName select
+                    |> List.fold
+                        (fun acc join ->
+                            acc
+                            |> Result.bind (fun ((sources, rows, leftPhysicalTable), namesPerJoin) ->
+                                applyJoin store registry dbName outer Map.empty leftPhysicalTable (sources, rows) join
+                                |> Result.map (fun (sources', rows', names) -> (sources', rows', None), names :: namesPerJoin)))
+                        initial
+                with
+                | Error error -> error, [], []
+                | Ok((sources, rows, _), namesPerJoinRev) ->
+                    let namesPerJoin = List.rev namesPerJoinRev
 
-                let select' =
-                    if namesPerJoin |> List.forall List.isEmpty then
-                        select
-                    else
-                        rewriteNaturalSelect select sources select.Joins namesPerJoin
+                    let select =
+                        if namesPerJoin |> List.forall List.isEmpty then
+                            select
+                        else
+                            rewriteNaturalSelect select sources select.Joins namesPerJoin
 
-                runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select' outer
+                    runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select outer
 
         let runArbitrary columns (rows: Value[] seq) physicalTable resolvedSelect =
             runResolved ArbitraryGroupRows columns rows physicalTable resolvedSelect
@@ -11561,6 +11667,11 @@ and private runFullTextSelect
                               Synthetic = synthetic
                               Columns = columns
                               Rows = rows }))
+                |> Result.bind (
+                    traverse (fun plan ->
+                        prepareVirtualRows store registry dbName plan.Source.Qualifier plan.Columns plan.Rows
+                        |> Result.map (fun rows -> { plan with Rows = rows }))
+                )
 
             match prepared with
             | Error error -> error, [], []
@@ -12146,29 +12257,6 @@ let private applyOnUpdateTimestamps
             newRow.[i] <- Storage.currentTimestampForColumn mode c
 
         newRow
-
-/// Shadows every `DirectOnly` extension with a 3102 raiser for the duration
-/// of an engine-driven (indirect) evaluation — the eval-time half of
-/// DIRECTONLY enforcement (`firstDirectOnlyCall` below is the DDL-time
-/// half). A definition can reach evaluation without ever passing the DDL
-/// check — a subquery smuggling the call past that traversal, or an object
-/// loaded from a data dir persisted before the function was registered —
-/// so whatever shape the expression takes, the moment the engine would
-/// actually invoke the function it gets the same 3102 the DDL check gives.
-/// `what` names the offending context in the message ("generated column",
-/// "trigger").
-let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
-    registry.Extensions
-    |> Map.fold
-        (fun r name ext ->
-            if ext.DirectOnly then
-                registerScalar
-                    name
-                    (fun _ -> raise (SqlError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name)))
-                    r
-            else
-                r)
-        registry
 
 /// Computes every `Generated` column of `row` (`CREATE TABLE ... col AS
 /// (expr)`) fresh from its other columns' current values, leaving every

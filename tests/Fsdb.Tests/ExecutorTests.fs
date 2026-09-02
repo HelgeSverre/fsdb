@@ -4048,6 +4048,45 @@ let tests =
                     | ResultSet([ "doubled" ], [ [ Some "20" ] ]) -> ()
                     | other -> failtestf "expected doubled to recompute to 20, got %A" other
 
+                testCase "VIRTUAL columns recompute on reads while STORED columns retain their row value"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    [ "CREATE TABLE left_values (id INT PRIMARY KEY, n INT, virtual_n INT AS (n * 2), stored_n INT AS (n * 3) STORED, body TEXT, FULLTEXT(body))"
+                      "CREATE TABLE right_values (id INT PRIMARY KEY, n INT, virtual_n INT AS (n * 2), stored_n INT AS (n * 3) STORED)"
+                      "INSERT INTO left_values (id, n, body) VALUES (1, 5, 'searchable document')"
+                      "INSERT INTO right_values (id, n) VALUES (1, 7)" ]
+                    |> List.iter (runDefault store >> ignore)
+
+                    let replaceGeneratedValues table =
+                        updateRows
+                            store
+                            defaultDatabase
+                            table
+                            None
+                            (fun _ -> Ok true)
+                            (fun row ->
+                                let changed = Array.copy row
+                                changed.[2] <- VInt 999L
+                                changed.[3] <- VInt 999L
+                                Ok changed)
+
+                    Expect.equal (replaceGeneratedValues "left_values") (Ok 1) "the stored row is changed"
+                    Expect.equal (replaceGeneratedValues "right_values") (Ok 1) "the joined row is changed"
+
+                    match
+                        runDefault
+                            store
+                            "SELECT l.virtual_n, l.stored_n, r.virtual_n, r.stored_n FROM left_values l JOIN right_values r ON r.id = l.id WHERE l.id = 1"
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row [ Some "10"; Some "999"; Some "14"; Some "999" ] "both physical sources use their declared storage kind"
+                    | other -> failtestf "expected one generated-column join row, got %A" other
+
+                    match runDefault store "SELECT virtual_n, stored_n FROM left_values WHERE MATCH(body) AGAINST('searchable')" with
+                    | ResultSet(_, [ row ]) -> Expect.equal row [ Some "10"; Some "999" ] "full-text source preparation preserves virtual reads"
+                    | other -> failtestf "expected one generated-column full-text row, got %A" other
+
                 testCase "an INSERT naming a generated column errors 3105 like MySQL"
                 <| fun _ ->
                     let store = newStore ()

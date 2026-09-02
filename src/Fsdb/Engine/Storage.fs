@@ -7741,15 +7741,10 @@ let scanList (store: Store) (dbName: string) (tableName: string) : Result<Column
         | Error e -> Error e
         | Ok table -> Ok(table.Columns, rowsList table)
 
-/// Generated/virtual columns (`CREATE TABLE ... col AS (expr) [STORED |
-/// VIRTUAL]`) — `Ast.ColumnDef.Generated` carries the parsed `Expr`, but
-/// evaluating it needs `Executor.evalExpr` (a whole registry/row-context
-/// this module doesn't have), so the actual recompute-on-write lives in
-/// `Executor.recomputeGeneratedColumns`, called after every successful
-/// `INSERT`/`UPDATE`. `VIRTUAL` and `STORED` are tracked
-/// (`Ast.GeneratedKind`, surfaced in metadata) but both materialize into
-/// `Rows` the same way, since this engine has no separate "recompute on
-/// every read" path.
+/// Generated columns retain a write-time value because indexes and
+/// constraints operate on physical rows. `Executor.prepareVirtualRows`
+/// replaces VIRTUAL cells before rows enter query evaluation; STORED cells
+/// retain this value on reads.
 
 /// WAL replay runs before live traffic can observe the store, so replay can
 /// publish directly without the checked write paths or their synchronization.

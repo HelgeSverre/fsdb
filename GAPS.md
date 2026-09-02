@@ -171,14 +171,14 @@ enforcement, YEAR, JSON, per-column charset/collation,
 wire-faithful column metadata (`ColumnWire.metadataOfType`), `BIT(1)`–`BIT(64)`
 fields with binary literals and defaults, deprecated numeric display widths
 and `ZEROFILL` formatting/metadata, per-row functional defaults with
-column references, utf8mb3-normalized table and column comments, and OGC WKB geometry values
+column references, VIRTUAL generated values recomputed on query reads,
+utf8mb3-normalized table and column comments, and OGC WKB geometry values
 (`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
 accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Spatial indexes and operations | R-tree indexes, overlays, general buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar point `ST_Buffer`, `ST_Distance`, `ST_Envelope`, topology predicates, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
-| Generated columns | VIRTUAL recomputed on read, STORED materialized | `Executor.recomputeGeneratedColumns` materializes both at write time; no read-path recompute | low | divergence |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
