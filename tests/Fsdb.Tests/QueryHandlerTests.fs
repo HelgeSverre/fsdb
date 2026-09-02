@@ -5178,6 +5178,40 @@ let tests =
                   | ResultSet(_, [ [ Some actual; Some value ] ]) when actual = name && int64 value > 0L -> ()
                   | other -> failtestf "expected a positive %s counter, got %A" name other
 
+          TestSupport.processGlobalCase "SHOW STATUS reports transaction and FLUSH command counters"
+          <| fun _ ->
+              Fsdb.InformationSchema.resetCommandCounts ()
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let execute session sql = handle session sql |> fst
+
+              let session = execute session "START TRANSACTION"
+              let session = execute session "SAVEPOINT status_point"
+              let session = execute session "ROLLBACK TO SAVEPOINT status_point"
+              let session = execute session "RELEASE SAVEPOINT status_point"
+              let session = execute session "COMMIT"
+              let session = execute session "ROLLBACK"
+              let session = execute session "FLUSH TABLES"
+
+              for name in
+                  [ "Com_begin"
+                    "Com_savepoint"
+                    "Com_rollback_to_savepoint"
+                    "Com_release_savepoint"
+                    "Com_commit"
+                    "Com_rollback"
+                    "Com_flush" ] do
+                  match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
+                  | ResultSet(_, [ [ Some actual; Some "1" ] ]) when actual = name -> ()
+                  | other -> failtestf "expected %s to equal one, got %A" name other
+
+              let session = execute session "FLUSH STATUS"
+
+              for name in [ "Com_begin"; "Com_commit"; "Com_flush" ] do
+                  match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
+                  | ResultSet(_, [ [ Some actual; Some "0" ] ]) when actual = name -> ()
+                  | other -> failtestf "expected FLUSH STATUS to reset %s, got %A" name other
+
           testCase "SHOW STATUS reports connection compression and wire bytes"
           <| fun _ ->
               let metrics: Fsdb.Session.TransportMetrics =

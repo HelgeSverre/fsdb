@@ -999,35 +999,55 @@ type private AtomicCounter() =
     member _.Reset() = Threading.Interlocked.Exchange(&value, 0L) |> ignore
 
 let private questionCount = AtomicCounter()
-let private deleteCommandCount = AtomicCounter()
-let private insertCommandCount = AtomicCounter()
-let private replaceCommandCount = AtomicCounter()
-let private selectCommandCount = AtomicCounter()
-let private updateCommandCount = AtomicCounter()
 
 type StatusCommand =
+    | BeginCommand
+    | CommitCommand
     | DeleteCommand
+    | FlushCommand
     | InsertCommand
+    | ReleaseSavepointCommand
     | ReplaceCommand
+    | RollbackCommand
+    | RollbackToSavepointCommand
+    | SavepointCommand
     | SelectCommand
     | UpdateCommand
 
 let private commandName = function
+    | BeginCommand -> "Com_begin"
+    | CommitCommand -> "Com_commit"
     | DeleteCommand -> "Com_delete"
+    | FlushCommand -> "Com_flush"
     | InsertCommand -> "Com_insert"
+    | ReleaseSavepointCommand -> "Com_release_savepoint"
     | ReplaceCommand -> "Com_replace"
+    | RollbackCommand -> "Com_rollback"
+    | RollbackToSavepointCommand -> "Com_rollback_to_savepoint"
+    | SavepointCommand -> "Com_savepoint"
     | SelectCommand -> "Com_select"
     | UpdateCommand -> "Com_update"
 
 let private reportedCommands =
-    [ DeleteCommand; InsertCommand; ReplaceCommand; SelectCommand; UpdateCommand ]
+    [ BeginCommand
+      CommitCommand
+      DeleteCommand
+      FlushCommand
+      InsertCommand
+      ReleaseSavepointCommand
+      ReplaceCommand
+      RollbackCommand
+      RollbackToSavepointCommand
+      SavepointCommand
+      SelectCommand
+      UpdateCommand ]
 
-let private commandCounter = function
-    | DeleteCommand -> deleteCommandCount
-    | InsertCommand -> insertCommandCount
-    | ReplaceCommand -> replaceCommandCount
-    | SelectCommand -> selectCommandCount
-    | UpdateCommand -> updateCommandCount
+let private commandCounters =
+    reportedCommands
+    |> List.map (fun command -> command, AtomicCounter())
+    |> Map.ofList
+
+let private commandCounter command = Map.find command commandCounters
 
 let recordQuestion () = questionCount.Increment()
 let questions () = questionCount.Value

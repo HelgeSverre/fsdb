@@ -2992,6 +2992,21 @@ let private beginProbeExecution session probe =
     | _ when probeCausesImplicitCommit probe -> commitSession session
     | _ -> session
 
+let private probeStatusCommand = function
+    | Begin _ -> Some InformationSchema.BeginCommand
+    | Commit _ -> Some InformationSchema.CommitCommand
+    | Rollback -> Some InformationSchema.RollbackCommand
+    | RollbackTo _ -> Some InformationSchema.RollbackToSavepointCommand
+    | Savepoint _ -> Some InformationSchema.SavepointCommand
+    | Release _ -> Some InformationSchema.ReleaseSavepointCommand
+    | FlushPrivileges
+    | FlushUserResources
+    | FlushStatus
+    | FlushTables
+    | FlushOptimizerCosts
+    | FlushLogs -> Some InformationSchema.FlushCommand
+    | _ -> None
+
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
 /// COM_QUERY (`dispatch`) and COM_STMT_PREPARE (`prepareStatement`) can
@@ -3203,6 +3218,8 @@ let private acquireExplicitTableLocks session sql =
                 | Error(code, message) -> session, Err(code, message)
 
 let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
+    probe |> probeStatusCommand |> Option.iter InformationSchema.recordCommand
+
     let session =
         match probe with
         | ShowDatabases

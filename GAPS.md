@@ -1,7 +1,7 @@
 # MySQL 8.4 feature gaps
 
 A map of where fsdb diverges from or lacks MySQL 8.4 functionality. Oracle for
-every row is real MySQL 8.4 (never sqlite). Audit refreshed 2026-09-01 from a
+every row is real MySQL 8.4 (never sqlite). Audit refreshed 2026-09-02 from a
 full static exploration of `src/Fsdb/` plus the documented records
 (`docs/compatibility.md`, `torture/findings/`, `torture/support/known-gaps.json`,
 `benchmarks/results/`) and the adversarial parser, wire, privilege, logging,
@@ -71,7 +71,7 @@ navigation, prefix comparisons, WHERE/LIMIT filtering, temporary tables,
 live row roots, declared result metadata, and DDL invalidation; MySQL likewise
 refuses it through the prepared-statement protocol.
 
-### Statements MySQL 8.4 parses that fsdb refuses (no grammar, no probe)
+### Statement-level gaps
 
 | Statement family | Impact | Class |
 |---|---|---|
@@ -465,7 +465,7 @@ live Limits reporting.
 |---|---|---|---|---|
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS | 25 views; role and privilege views are live, while ROUTINES, PARAMETERS, and EVENTS expose supported declarations | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
-| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, and Com_select/insert/update/delete/replace counters; engine and latency families remain absent (`InformationSchema.fs`) | low | divergence |
+| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, DML, transaction/savepoint, and FLUSH command counters; other command, engine, and latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
 
