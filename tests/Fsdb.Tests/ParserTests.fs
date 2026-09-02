@@ -1301,6 +1301,16 @@ let tests =
                     | AlterTable("p", [ DropPartitions [ "p0"; "p2" ] ]) -> ()
                     | other -> failtestf "expected named partition removal, got %A" other
 
+                    Expect.equal
+                        (parsePartitionMaintenance "ALTER TABLE app.p ANALYZE PARTITION p0,p2")
+                        (Ok("app.p", "analyze", Some [ "p0"; "p2" ]))
+                        "named partition maintenance"
+
+                    Expect.equal
+                        (parsePartitionMaintenance "ALTER/**/TABLE `app`.`p` OPTIMIZE/**/PARTITION ALL")
+                        (Ok("app.p", "optimize", None))
+                        "all-partition maintenance with comments"
+
                     match parse "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 0" with
                     | Error _ -> ()
                     | Ok statement -> failtestf "expected zero partitions to be rejected, got %A" statement

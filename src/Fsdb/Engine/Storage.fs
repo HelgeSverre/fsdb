@@ -8177,6 +8177,11 @@ let hashPartitionIndex (partitioning: HashPartitioning) (value: Value) : uint32 
 
         uint32 partition
 
+let hashPartitionNames (partitioning: HashPartitioning) =
+    [ 0u .. partitioning.Count - 1u ]
+    |> List.map (fun index -> sprintf "p%d" index, index)
+    |> Map.ofList
+
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads `dbName`'s own slot directly (not
 /// the whole-catalog `Store.Catalog` view, which would pay an O(number of

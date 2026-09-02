@@ -4571,6 +4571,35 @@ let parseFlushTableLocksWithOptions (options: ParserOptions) (sql: string) : Res
 let parseFlushTableLocks (sql: string) : Result<ExplicitTableLock list, string> =
     parseFlushTableLocksWithOptions defaultOptions sql
 
+let parsePartitionMaintenanceWithOptions
+    (options: ParserOptions)
+    (sql: string)
+    : Result<string * string * string list option, string> =
+    let operation =
+        choice
+            [ keyword "ANALYZE" >>% "analyze"
+              keyword "CHECK" >>% "check"
+              keyword "OPTIMIZE" >>% "optimize"
+              keyword "REPAIR" >>% "repair" ]
+
+    let partitions =
+        (attempt (keyword "ALL") >>% None)
+        <|> (sepBy1 identifier (sym ",") |>> Some)
+
+    let parser =
+        pipe3
+            (ws >>. keyword "ALTER" >>. keyword "TABLE" >>. qualifiedTableName)
+            operation
+            (keyword "PARTITION" >>. partitions)
+            (fun table action selected -> table, action, selected)
+        .>> opt (sym ";")
+        .>> eof
+
+    withParserState options sql (runWithDepthLimit parser)
+
+let parsePartitionMaintenance (sql: string) : Result<string * string * string list option, string> =
+    parsePartitionMaintenanceWithOptions defaultOptions sql
+
 let private handlerPosition =
     choice
         [ keyword "FIRST" >>% HandlerFirst

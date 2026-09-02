@@ -724,6 +724,8 @@ let private showBinaryLogStatusRe = Regex(@"^SHOW\s+BINARY\s+LOG\s+STATUS\s*$", 
 let private showReplicaStatusRe =
     Regex(@"^SHOW\s+REPLICA\s+STATUS(?:\s+FOR\s+CHANNEL\s+'[^']*')?\s*$", RegexOptions.IgnoreCase)
 let private maintenanceTableRe = Regex(@"^(ANALYZE|CHECK|OPTIMIZE|REPAIR)\s+TABLE\s+(.+?)\s*$", RegexOptions.IgnoreCase)
+let private partitionMaintenanceRe =
+    Regex(@"^ALTER\s+TABLE\s+.+?\s+(?:ANALYZE|CHECK|OPTIMIZE|REPAIR)\s+PARTITION(?:\s|$)", RegexOptions.IgnoreCase)
 let private showOpenTablesRe = Regex(@"^SHOW\s+OPEN\s+TABLES(?:\s+(?:FROM|IN)\s+(\S+))?(?:\s+LIKE\s+'([^']*)')?\s*$", RegexOptions.IgnoreCase)
 let private showCreateDatabaseRe =
     Regex(@"^SHOW\s+CREATE\s+(?:DATABASE|SCHEMA)(?:\s+IF\s+NOT\s+EXISTS)?\s+(\S+)\s*$", RegexOptions.IgnoreCase)
@@ -3006,6 +3008,7 @@ type private Probe =
     | ShowBinaryLogStatus
     | ShowReplicaStatus
     | MaintainTables of operation: string * tables: string list
+    | MaintainPartitions of operation: string * table: string * partitions: string list option
     | ShowOpenTables of db: string option * pattern: string option
     | ShowCreateDatabase of name: string
     | ShowCharset
@@ -3043,6 +3046,7 @@ type private Probe =
 let private probeCausesImplicitCommit = function
     | SetPassword _
     | MaintainTables _
+    | MaintainPartitions _
     | AlterKeysNoop _
     | FlushPrivileges
     | FlushUserResources
@@ -3096,7 +3100,8 @@ let private probeStatusCommand = function
     | ShowBinaryLogs -> Some InformationSchema.StatusCommand.showBinaryLogs
     | ShowBinaryLogStatus -> Some InformationSchema.StatusCommand.showBinaryLogStatus
     | ShowReplicaStatus -> Some InformationSchema.StatusCommand.showReplicaStatus
-    | MaintainTables(operation, _) ->
+    | MaintainTables(operation, _)
+    | MaintainPartitions(operation, _, _) ->
         match operation.ToUpperInvariant() with
         | "ANALYZE" -> Some InformationSchema.StatusCommand.analyze
         | "CHECK" -> Some InformationSchema.StatusCommand.check
@@ -3147,7 +3152,7 @@ let private probeStatusCommand = function
 /// COM_QUERY (`dispatch`) and COM_STMT_PREPARE (`prepareStatement`) can
 /// never disagree about which statements are text-probed vs. parsed the way
 /// two independently-written predicates could drift.
-let private tryProbe (sql: string) : Probe option =
+let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe option =
     let command = sql.TrimStart()
 
     if setAutocommit.IsMatch sql then
@@ -3215,6 +3220,10 @@ let private tryProbe (sql: string) : Probe option =
         let matched = maintenanceTableRe.Match sql
         let tables = matched.Groups.[2].Value.Split(',') |> Array.map (fun table -> table.Trim()) |> List.ofArray
         Some(MaintainTables(matched.Groups.[1].Value.ToLowerInvariant(), tables))
+    elif partitionMaintenanceRe.IsMatch sql then
+        match Parser.parsePartitionMaintenanceWithOptions parserOptions sql with
+        | Ok(table, operation, partitions) -> Some(MaintainPartitions(operation, table, partitions))
+        | Error _ -> None
     elif showOpenTablesRe.IsMatch sql then
         let m = showOpenTablesRe.Match sql
         Some(
@@ -3583,6 +3592,40 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                   "Network_Namespace" ],
                 []
             )
+    | MaintainPartitions(operation, tableRef, selectedPartitions) ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let dbName, tableName = splitQualified sessionDb tableRef
+        let store = Session.currentStore session
+
+        match checkTableMaintenanceAccess session store dbName tableName operation with
+        | Error(code, message) -> session, Err(code, message)
+        | Ok() ->
+            match InformationSchema.findTable store.Catalog dbName tableName with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok { Partitioning = None } ->
+                session, Err(1505, "Partition management on a not partitioned table is not possible")
+            | Ok({ Partitioning = Some partitioning } as table) ->
+                let partitionNames = hashPartitionNames partitioning
+
+                let unknown =
+                    selectedPartitions
+                    |> Option.bind (List.tryFind (fun name -> not (Map.containsKey (name.ToLowerInvariant()) partitionNames)))
+
+                match unknown with
+                | Some name -> session, Err(1735, sprintf "Unknown partition '%s' in table '%s'" name table.OriginalName)
+                | None ->
+                    let qualified = dbName + "." + tableName
+                    let rows =
+                        if operation = "optimize" then
+                            [ [ Some qualified
+                                Some operation
+                                Some "note"
+                                Some "Table does not support optimize on partitions. All partitions will be rebuilt and analyzed." ]
+                              [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+                        else
+                            [ [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+
+                    session, ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
     | MaintainTables(operation, tables) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let store = Session.currentStore session
@@ -4140,7 +4183,7 @@ let private prepareStatementWithOptions
 
     if startsWithKeyword "LOAD DATA" || startsWithKeyword "HANDLER" || startsWithKeyword "XA" then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
-    elif (tryProbe trimmed).IsSome then
+    elif (tryProbe options trimmed).IsSome then
         Result.Ok(None, placeholderPositionsWithOptions options sql |> List.length)
     else
         match Parser.parseWithOptions options sql with
@@ -4382,7 +4425,7 @@ let private routineValidationError error =
     Err(code, message)
 
 let private isSupportedStoredProgramText options sql =
-    let probe = tryProbe sql
+    let probe = tryProbe options sql
 
     let supportedProbe =
         match probe with
@@ -6356,7 +6399,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                         // unreachable placeholders out of persisted expressions.
                         session, syntaxError sql
                     | Ok None ->
-                        match tryProbe sql with
+                        match tryProbe parserOptions sql with
                         | Some probe when insideFunctionOrTrigger session && probeForbiddenInFunctionOrTrigger probe ->
                             session, Err(1422, "Explicit or implicit commit is not allowed in stored function or trigger.")
                         | Some probe when probeCausesImplicitCommit probe && xaAssociation session |> Option.isSome ->
@@ -6559,7 +6602,7 @@ let private textEventUpdateIsAuthorized session = function
         checkSessionAccess session session.Store [ "EVENT", Auth.OnDb database ] |> Result.isOk
 
 let rec private parsedAccountStatement session parserOptions depth sql =
-    match tryProbe sql with
+    match tryProbe parserOptions sql with
     | Some probe -> ProbedAccountStatement probe
     | None ->
         match parseStatement parserOptions sql with

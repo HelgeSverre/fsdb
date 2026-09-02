@@ -5154,10 +5154,7 @@ and private resolveTableRef
                     match table.Partitioning with
                     | None -> Error(Err(1747, "PARTITION () clause on non partitioned table"))
                     | Some partitioning ->
-                        let partitionNames =
-                            [ 0u .. partitioning.Count - 1u ]
-                            |> List.map (fun index -> sprintf "p%d" index, index)
-                            |> Map.ofList
+                        let partitionNames = hashPartitionNames partitioning
 
                         let requested =
                             tableRef.Partitions

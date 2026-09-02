@@ -6747,6 +6747,48 @@ let tests =
                   Expect.stringContains status "in-memory transactional row store" "engine status describes fsdb"
               | other -> failtestf "unexpected SHOW ENGINE result: %A" other
 
+          testCase "HASH partition maintenance validates names and reports MySQL rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE maintained_partitions (id INT) PARTITION BY HASH(id) PARTITIONS 3"
+
+              let expectStatus operation sql =
+                  match handle session sql |> snd with
+                  | ResultSet(
+                      [ "Table"; "Op"; "Msg_type"; "Msg_text" ],
+                      [ [ Some "fsdb.maintained_partitions"; Some actual; Some "status"; Some "OK" ] ]
+                    ) ->
+                      Expect.equal actual operation sql
+                  | other -> failtestf "unexpected partition maintenance result for %s: %A" sql other
+
+              expectStatus "analyze" "ALTER/**/TABLE maintained_partitions ANALYZE/**/PARTITION p0,p2"
+              expectStatus "check" "ALTER TABLE maintained_partitions CHECK PARTITION ALL"
+              expectStatus "repair" "ALTER TABLE maintained_partitions REPAIR PARTITION p1"
+
+              match handle session "ALTER TABLE maintained_partitions OPTIMIZE PARTITION p0" |> snd with
+              | ResultSet(
+                  [ "Table"; "Op"; "Msg_type"; "Msg_text" ],
+                  [ [ Some "fsdb.maintained_partitions"; Some "optimize"; Some "note"
+                      Some "Table does not support optimize on partitions. All partitions will be rebuilt and analyzed." ]
+                    [ Some "fsdb.maintained_partitions"; Some "optimize"; Some "status"; Some "OK" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "unexpected OPTIMIZE PARTITION result: %A" other
+
+              match handle session "ALTER TABLE maintained_partitions CHECK PARTITION p9" |> snd with
+              | Err(1735, "Unknown partition 'p9' in table 'maintained_partitions'") -> ()
+              | other -> failtestf "expected unknown partition error, got %A" other
+
+              let session, _ = handle session "CREATE TABLE unpartitioned (id INT)"
+
+              match handle session "ALTER TABLE unpartitioned ANALYZE PARTITION p0" |> snd with
+              | Err(1505, "Partition management on a not partitioned table is not possible") -> ()
+              | other -> failtestf "expected unpartitioned-table error, got %A" other
+
+              match prepareStatementForSession session "ALTER TABLE maintained_partitions ANALYZE PARTITION p0" with
+              | Ok(None, 0) -> ()
+              | other -> failtestf "expected partition maintenance to prepare as a text probe, got %A" other
+
           testCase "FLUSH table lists and optimizer costs commit active transactions"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
