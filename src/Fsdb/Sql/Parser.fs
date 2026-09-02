@@ -2896,6 +2896,7 @@ let private alterHashPartitions: Parser<AlterAction, unit> =
 
     (attempt (keyword "ADD" >>. keyword "PARTITION" >>. keyword "PARTITIONS") >>. count |>> AddHashPartitions)
     <|> (attempt (keyword "COALESCE" >>. keyword "PARTITION") >>. count |>> CoalesceHashPartitions)
+    <|> (attempt (keyword "DROP" >>. keyword "PARTITION") >>. sepBy1 identifier (sym ",") |>> DropPartitions)
 
 let private alterAction: Parser<AlterAction list, unit> =
     choice

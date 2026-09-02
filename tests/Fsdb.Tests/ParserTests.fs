@@ -1297,6 +1297,10 @@ let tests =
                     | AlterTable("p", [ AddHashPartitions 2u; CoalesceHashPartitions 1u ]) -> ()
                     | other -> failtestf "expected HASH partition growth actions, got %A" other
 
+                    match parseOk "ALTER TABLE p DROP PARTITION p0,p2" with
+                    | AlterTable("p", [ DropPartitions [ "p0"; "p2" ] ]) -> ()
+                    | other -> failtestf "expected named partition removal, got %A" other
+
                     match parse "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 0" with
                     | Error _ -> ()
                     | Ok statement -> failtestf "expected zero partitions to be rejected, got %A" statement

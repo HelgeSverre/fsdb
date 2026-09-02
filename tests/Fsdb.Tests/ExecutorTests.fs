@@ -72,6 +72,16 @@ let tests =
                     | Err(1735, _) -> ()
                     | other -> failtestf "expected unknown partition error, got %A" other
 
+                    match runDefault store "ALTER TABLE p DROP PARTITION p0" with
+                    | Err(1512, "DROP PARTITION can only be used on RANGE/LIST partitions") -> ()
+                    | other -> failtestf "expected HASH partition removal to match MySQL's refusal, got %A" other
+
+                    runDefault store "CREATE TABLE unpartitioned (id INT)" |> ignore
+
+                    match runDefault store "ALTER TABLE unpartitioned DROP PARTITION p0" with
+                    | Err(1505, "Partition management on a not partitioned table is not possible") -> ()
+                    | other -> failtestf "expected nonpartitioned removal to fail, got %A" other
+
                     match runDefault store "CREATE TABLE invalid_partition (value VARCHAR(5)) PARTITION BY HASH(value) PARTITIONS 2" with
                     | Err(1659, _) -> ()
                     | other -> failtestf "expected string HASH keys to be rejected, got %A" other

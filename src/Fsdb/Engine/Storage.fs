@@ -5747,6 +5747,10 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | Some partitioning when count >= partitioning.Count ->
             Error(ExpressionError(1508, "Cannot remove all partitions, use DROP TABLE instead"))
         | Some partitioning -> Ok({ table with Partitioning = Some { partitioning with Count = partitioning.Count - count } }, None)
+    | DropPartitions _ ->
+        match table.Partitioning with
+        | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
+        | Some _ -> Error(ExpressionError(1512, "DROP PARTITION can only be used on RANGE/LIST partitions"))
     | SetEngine _ -> Ok(table, None)
     | SetAlterAlgorithm _
     | SetAlterLock _

@@ -697,6 +697,7 @@ type AlterAction =
     | SetAutoIncrement of value: int64
     | AddHashPartitions of count: uint32
     | CoalesceHashPartitions of count: uint32
+    | DropPartitions of names: string list
 
 type HashPartitioning =
     { Expression: Expr

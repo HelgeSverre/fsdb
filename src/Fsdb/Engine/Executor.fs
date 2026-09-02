@@ -14778,7 +14778,8 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         | SetAutoIncrement _
         | SetRowFormat _ -> onlineAlgorithms
         | AddHashPartitions _
-        | CoalesceHashPartitions _ -> Set.empty
+        | CoalesceHashPartitions _
+        | DropPartitions _ -> Set.empty
         | SetAlterAlgorithm _
         | SetAlterLock _ -> allAlgorithms
 
@@ -14855,7 +14856,11 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         else
             Err(1846, "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED.")
 
-    if hasExecutionOption && operations |> List.exists (function AddHashPartitions _ | CoalesceHashPartitions _ -> true | _ -> false) then
+    if
+        hasExecutionOption
+        && operations
+           |> List.exists (function AddHashPartitions _ | CoalesceHashPartitions _ | DropPartitions _ -> true | _ -> false)
+    then
         Some(Err(1064, "You have an error in your SQL syntax"))
     elif algorithm = AlgorithmInstant && lockMode <> LockDefault then
         Some(Err(1221, "Incorrect usage of ALGORITHM=INSTANT and LOCK=NONE/SHARED/EXCLUSIVE"))

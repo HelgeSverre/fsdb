@@ -251,8 +251,9 @@ PARTITION n` update the logical map and redistribute subsequent selections.
 
 All rows still share one immutable row store. Partition selection evaluates
 the hash expression while scanning; it does not provide MySQL's physical
-partition pruning or separate storage. `DROP` and `REORGANIZE PARTITION`
-remain unsupported.
+partition pruning or separate storage. `DROP PARTITION` returns MySQL's
+HASH-specific 1512 refusal. `TRUNCATE PARTITION`, partition maintenance
+clauses, and `REORGANIZE PARTITION` remain unsupported.
 
 ## Check constraints
 
