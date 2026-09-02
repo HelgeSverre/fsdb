@@ -7,6 +7,8 @@ full static exploration of `src/Fsdb/` plus the documented records
 `benchmarks/results/`) and the adversarial parser, wire, privilege, logging,
 and persistence paths. Evidence anchors name files and definitions instead
 of line numbers so routine refactors do not silently make them misleading.
+This is an open ledger: remove resolved rows, and narrow partially resolved
+rows to only the behavior that still differs in the same commit as the fix.
 
 ## How to read this document
 
