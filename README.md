@@ -304,9 +304,8 @@ their code sites.
 
 ## Persistence format
 
-`--data-dir` stores two files, both binary (no JSON). Durable mode currently
-targets macOS and Linux because disk synchronization calls POSIX `fsync`
-through libc.
+`--data-dir` stores two files, both binary (no JSON). Durable mode uses POSIX
+`fsync` through libc on Unix and the managed durable file flush on Windows.
 
 The data directory is a trusted input with the same authority as the server
 process. CRC-32 detects torn or accidentally corrupted records; it does not
@@ -340,12 +339,12 @@ overtake a published WAL event. The defaults-file setting
 
 **`snapshot.fsdb`** — the catalog as a self-delimiting binary tree
 (`database count` → tables → rows), same tag-byte codec and row format as the
-WAL. Written to `snapshot.fsdb.new`, fsynced via libc `fsync`, then renamed
+WAL. Written to `snapshot.fsdb.new`, durably flushed, then renamed
 into place; a `.new` that parses cleanly supersedes the WAL on startup, a
 torn one falls back to the old snapshot plus full WAL replay. fsdb avoids
-`FileStream.Flush(true)` because it issues the substantially stronger
+`FileStream.Flush(true)` on Unix because it issues the substantially stronger
 `F_FULLFSYNC` on macOS; plain `fsync` matches MySQL's default macOS flush
-semantics.
+semantics. Windows uses `Flush(true)` as its portable disk-flush path.
 
 By default, the catalog is snapshotted and the WAL truncated once the WAL
 crosses 64 MiB or 100,000 events, or during a graceful shutdown. The

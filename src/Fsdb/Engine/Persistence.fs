@@ -94,16 +94,33 @@ let private shutdownRegistrations = ResizeArray<IDisposable>()
 [<DllImport("libc", SetLastError = true)>]
 extern int private fsync(int fd)
 
-/// Plain fsync matches MySQL's default macOS durability; Flush(true) uses the
-/// materially stronger and slower F_FULLFSYNC.
-let private flushToDisk (s: FileStream) : unit =
-    s.Flush false
-    let rc = fsync(s.SafeFileHandle.DangerousGetHandle().ToInt32())
+type internal DurableFlushMethod =
+    | ManagedFlush
+    | PosixFsync
 
-    if rc <> 0 then
-        // Continuing after fsync failure would falsely acknowledge durability.
-        let err = Marshal.GetLastWin32Error()
-        Environment.FailFast(sprintf "fsdb: fatal fsync failure (errno %d) — write cannot be confirmed durable" err)
+let internal durableFlushMethod isWindows =
+    if isWindows then ManagedFlush else PosixFsync
+
+let internal shutdownSignals isWindows =
+    if isWindows then [ PosixSignal.SIGINT ] else [ PosixSignal.SIGTERM; PosixSignal.SIGINT ]
+
+/// Plain fsync matches MySQL's macOS durability; managed Flush(true) is kept
+/// to Windows because it maps to the materially stronger F_FULLFSYNC on macOS.
+let private flushToDisk (s: FileStream) : unit =
+    match durableFlushMethod (OperatingSystem.IsWindows()) with
+    | ManagedFlush ->
+        try
+            s.Flush true
+        with error ->
+            Environment.FailFast("fsdb: fatal disk flush failure — write cannot be confirmed durable", error)
+    | PosixFsync ->
+        s.Flush false
+        let rc = fsync(s.SafeFileHandle.DangerousGetHandle().ToInt32())
+
+        if rc <> 0 then
+            // Continuing after fsync failure would falsely acknowledge durability.
+            let err = Marshal.GetLastWin32Error()
+            Environment.FailFast(sprintf "fsdb: fatal fsync failure (errno %d) — write cannot be confirmed durable" err)
 
 /// A file fsync does not persist the directory entry created by snapshot rename.
 /// Directory fsync is best-effort because the durable file bytes remain valid.
@@ -114,12 +131,13 @@ extern int private posixOpen(string path, int flags)
 extern int private posixClose(int fd)
 
 let private fsyncDir (dir: string) : unit =
-    let O_RDONLY = 0
-    let fd = posixOpen (dir, O_RDONLY)
+    if durableFlushMethod (OperatingSystem.IsWindows()) = PosixFsync then
+        let O_RDONLY = 0
+        let fd = posixOpen (dir, O_RDONLY)
 
-    if fd >= 0 then
-        fsync fd |> ignore
-        posixClose fd |> ignore
+        if fd >= 0 then
+            fsync fd |> ignore
+            posixClose fd |> ignore
 
 // Tagged, length-delimited codecs keep WAL and snapshots streamable.
 
@@ -1498,5 +1516,5 @@ let attach (dataDir: string) (store: Store) : unit =
 
     let onShutdown (_: PosixSignalContext) = sink.EnqueueCheckpoint() ()
 
-    shutdownRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGTERM, onShutdown))
-    shutdownRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGINT, onShutdown))
+    shutdownSignals (OperatingSystem.IsWindows())
+    |> List.iter (fun signal -> shutdownRegistrations.Add(PosixSignalRegistration.Create(signal, onShutdown)))

@@ -71,9 +71,9 @@ build fails with "not defined".
 - Persistence is opt-in via `--data-dir` (WAL + snapshot); default in-memory.
   Both halves are binary, no JSON: WAL `wal.bin` = `[len][crc32]` records over
   `CommitEvent` payloads (CRC torn-tail detection); snapshot `snapshot.fsdb` =
-  self-delimiting binary tree. fsync via libc — `FileStream.Flush(true)` issues
-  `F_FULLFSYNC` on macOS (~5 ms per call) and diverges from MySQL's own macOS
-  durability semantics.
+  self-delimiting binary tree. Unix uses libc fsync; Windows uses the managed
+  durable flush. `FileStream.Flush(true)` issues `F_FULLFSYNC` on macOS
+  (~5 ms per call) and diverges from MySQL's own macOS durability semantics.
 - Stored rows have stable, non-reused `RowId`s in fixed-size immutable pages.
   Point writes copy only touched pages; tombstones keep other identities
   stable, and ordinary .NET reachability retains pages used by snapshots.

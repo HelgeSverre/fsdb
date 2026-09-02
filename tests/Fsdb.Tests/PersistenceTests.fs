@@ -189,7 +189,22 @@ let private rowsOf (store: Store) (dbName: string) (table: string) : Value[] lis
 let tests =
     testList
         "persistence"
-        [ testList
+        [ testCase "durability selects OS-supported flush and shutdown paths"
+          <| fun _ ->
+              Expect.equal (durableFlushMethod true) ManagedFlush "Windows uses the managed durable flush"
+              Expect.equal (durableFlushMethod false) PosixFsync "Unix uses plain fsync"
+
+              Expect.equal
+                  (shutdownSignals true)
+                  [ Runtime.InteropServices.PosixSignal.SIGINT ]
+                  "Windows registers only its supported console signal"
+
+              Expect.equal
+                  (shutdownSignals false)
+                  [ Runtime.InteropServices.PosixSignal.SIGTERM; Runtime.InteropServices.PosixSignal.SIGINT ]
+                  "Unix registers termination and interrupt signals"
+
+          testList
               "group commit queue"
               [ testCase "writes arriving during a flush share the next batch"
                 <| fun _ ->

@@ -260,8 +260,8 @@ has resolved.
 
 Working: opt-in `--data-dir` mode with CRC-framed WAL ([len][crc32] records
 over CommitEvent payloads, torn-tail truncation), self-delimiting CRC'd
-snapshots, libc fsync-before-ack with FailFast on failure, directory fsync
-after rename, `.new` snapshot verification before preference, replay that
+snapshots, platform durable-flush-before-ack with FailFast on failure, Unix
+directory fsync after rename, `.new` snapshot verification before preference, replay that
 bypasses checked write paths with ordered change application and incremental
 derived-index maintenance, bounded group commit, ordered checkpoint barriers,
 rotation via a lock-step replica store, signal-driven final rotation,
@@ -275,7 +275,6 @@ WAL.
 | Durability default | durable unless configured otherwise | in-memory unless `--data-dir` passed; process death loses everything | medium (deployment) | divergence |
 | Keyless WAL row lookup | redo addresses physical records directly | replay resolves rows through unique indexes when possible; events on tables without a usable unique key use one ordered table pass because the WAL stores row images rather than row ids | low (recovery and durable keyless-write throughput) | divergence |
 | Space reclamation | purge threads reclaim deleted rows | Delete-heavy tables compact immutable row roots after at least 256 tombstones occupy one quarter of physical slots; reclamation is foreground and occasionally scans one table root | low | divergence |
-| Platform | portable | durable mode macOS/Linux only (libc fsync design) | low | divergence |
 
 ## 9. Views and triggers
 
