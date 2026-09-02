@@ -46,7 +46,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
-| Metadata | 48 INFORMATION_SCHEMA views, all 38 MySQL 8.4 `mysql.*` table schemas, six fsdb catalogs, and the complete keyword and `Com_*` registries | Storage statistics and engine-specific catalog contents are stand-ins or absent |
+| Metadata | 50 INFORMATION_SCHEMA views, all 38 MySQL 8.4 `mysql.*` table schemas, six fsdb catalogs, and the complete keyword and `Com_*` registries | Storage statistics and engine-specific catalog contents are stand-ins or absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -471,7 +471,7 @@ administrative probes.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| INFORMATION_SCHEMA breadth | 79 views incl. INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | 48 views; generic extension tables, optional histogram/optimizer/profiling/resource-group/file surfaces, the complete 734-row keyword registry, InnoDB's default full-text stopwords, plugin and user-attribute catalogs, geometry columns, role grants, direct view dependencies, privileges, ROUTINES, PARAMETERS, and EVENTS are live; remaining InnoDB internals are absent, while ST_SPATIAL_REFERENCE_SYSTEMS exposes fsdb's supported SRID 0 instead of MySQL's full EPSG registry | low | divergence |
+| INFORMATION_SCHEMA breadth | 79 views incl. INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | 50 views; generic extension tables, optional histogram/optimizer/profiling/resource-group/file surfaces, the complete 734-row keyword registry, InnoDB's default full-text stopwords and live foreign-key catalogs, plugin and user-attribute catalogs, geometry columns, role grants, direct view dependencies, privileges, ROUTINES, PARAMETERS, and EVENTS are live; remaining InnoDB internals are absent, while ST_SPATIAL_REFERENCE_SYSTEMS exposes fsdb's supported SRID 0 instead of MySQL's full EPSG registry | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | Optimizer cost overrides | `mysql.server_cost` and `mysql.engine_cost` values feed plan costs after `FLUSH OPTIMIZER_COSTS` | both tables expose MySQL's eight bootstrap rows, generated defaults, and mutable override columns; fsdb's shape-driven planner does not consume their overrides | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | all 168 `Com_*` names are exposed with distinct session/global values and supported commands are live; unsupported commands remain truthfully zero, while engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |

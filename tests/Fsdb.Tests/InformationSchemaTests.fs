@@ -784,6 +784,80 @@ let tests =
               | ResultSet(_, [ [ Some "the"; Some "2" ] ]) -> ()
               | other -> failtestf "expected MySQL's duplicate stopword, got %A" other
 
+          testCase "INNODB_FOREIGN catalogs expose composite keys and referential-action bits"
+          <| fun _ ->
+              let store = setup ()
+
+              run store "CREATE TABLE composite_parent (tenant_id INT, id INT, PRIMARY KEY(tenant_id, id))"
+              |> ignore
+
+              run
+                  store
+                  "CREATE TABLE composite_child (tenant_id INT, parent_id INT, INDEX ix_parent(tenant_id, parent_id), CONSTRAINT named_fk FOREIGN KEY(tenant_id, parent_id) REFERENCES composite_parent(tenant_id, id) ON DELETE CASCADE ON UPDATE SET NULL)"
+              |> ignore
+
+              run
+                  store
+                  "CREATE TABLE default_child (parent_id INT, INDEX ix_parent(parent_id), CONSTRAINT default_fk FOREIGN KEY(parent_id) REFERENCES users(id))"
+              |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT column_name, column_type, is_nullable, column_default, collation_name FROM information_schema.columns WHERE table_schema='information_schema' AND table_name='INNODB_FOREIGN' ORDER BY ordinal_position"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "ID"; Some "varchar(129)"; Some "YES"; None; Some "utf8mb3_tolower_ci" ]
+                    [ Some "FOR_NAME"; Some "varchar(129)"; Some "YES"; None; Some "utf8mb3_tolower_ci" ]
+                    [ Some "REF_NAME"; Some "varchar(129)"; Some "YES"; None; Some "utf8mb3_tolower_ci" ]
+                    [ Some "N_COLS"; Some "bigint"; Some "NO"; Some "0"; None ]
+                    [ Some "TYPE"; Some "bigint unsigned"; Some "NO"; Some "0"; None ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected the INNODB_FOREIGN descriptor, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT column_name, column_type, is_nullable, column_default, collation_name FROM information_schema.columns WHERE table_schema='information_schema' AND table_name='INNODB_FOREIGN_COLS' ORDER BY ordinal_position"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "ID"; Some "varchar(129)"; Some "YES"; None; Some "utf8mb3_tolower_ci" ]
+                    [ Some "FOR_COL_NAME"; Some "varchar(64)"; Some "NO"; None; Some "utf8mb3_tolower_ci" ]
+                    [ Some "REF_COL_NAME"; Some "varchar(64)"; Some "NO"; None; Some "utf8mb3_tolower_ci" ]
+                    [ Some "POS"; Some "int unsigned"; Some "NO"; None; None ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected the INNODB_FOREIGN_COLS descriptor, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT id, for_name, ref_name, n_cols, type FROM information_schema.innodb_foreign WHERE id IN ('fsdb/named_fk','fsdb/default_fk') ORDER BY id"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "fsdb/default_fk"; Some "fsdb/default_child"; Some "fsdb/users"; Some "1"; Some "48" ]
+                    [ Some "fsdb/named_fk"; Some "fsdb/composite_child"; Some "fsdb/composite_parent"; Some "2"; Some "9" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected InnoDB foreign-key rows, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT id, for_col_name, ref_col_name, pos FROM information_schema.innodb_foreign_cols WHERE id='fsdb/named_fk' ORDER BY pos"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "fsdb/named_fk"; Some "tenant_id"; Some "tenant_id"; Some "1" ]
+                    [ Some "fsdb/named_fk"; Some "parent_id"; Some "id"; Some "2" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected InnoDB foreign-key column rows, got %A" other
+
           testCase "COLUMNS reports CHARACTER_OCTET_LENGTH and PRIVILEGES"
           <| fun _ ->
               let store = setup ()

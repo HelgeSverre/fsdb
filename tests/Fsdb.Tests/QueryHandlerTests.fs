@@ -5673,6 +5673,39 @@ let tests =
                   Fsdb.InformationSchema.unregisterProcess 777001L
                   Fsdb.InformationSchema.unregisterProcess 777002L
 
+          testCase "InnoDB foreign-key metadata requires PROCESS"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE TABLE fk_parent (id INT PRIMARY KEY)"
+
+              let root, _ =
+                  handle
+                      root
+                      "CREATE TABLE fk_child (parent_id INT, INDEX(parent_id), CONSTRAINT fk_process FOREIGN KEY(parent_id) REFERENCES fk_parent(id))"
+
+              let root, _ = handle root "CREATE USER 'fkviewer'"
+              let viewer = { create 2 store with User = "fkviewer" }
+
+              for table in [ "INNODB_FOREIGN"; "INNODB_FOREIGN_COLS" ] do
+                  match handle viewer (sprintf "SELECT * FROM information_schema.%s" table) |> snd with
+                  | Err(1227, message) ->
+                      Expect.equal
+                          message
+                          "Access denied; you need (at least one of) the PROCESS privilege(s) for this operation"
+                          (table + " denial")
+                  | other -> failtestf "expected PROCESS denial for %s, got %A" table other
+
+              let _, granted = handle root "GRANT PROCESS ON *.* TO 'fkviewer'"
+
+              match granted with
+              | Err(code, message) -> failtestf "grant PROCESS: %d %s" code message
+              | _ -> ()
+
+              match handle viewer "SELECT id FROM information_schema.innodb_foreign WHERE id='fsdb/fk_process'" |> snd with
+              | ResultSet(_, [ [ Some "fsdb/fk_process" ] ]) -> ()
+              | other -> failtestf "expected PROCESS-visible foreign key, got %A" other
+
           testCase "process and grant metadata stay scoped to the host-qualified account"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

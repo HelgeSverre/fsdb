@@ -973,6 +973,9 @@ let private viewerHasPrivilege privilege target =
         Fsdb.Auth.checkForAccountWithRoles viewer.Store viewer.Account viewer.ActiveRoles [ privilege, target ]
         |> Result.isOk
 
+/// Whether the current viewer may read PROCESS-restricted metadata.
+let canViewProcessMetadata () = viewerHasPrivilege "PROCESS" Fsdb.Auth.Global
+
 /// The account a viewer is limited to, or `None` when it may see all rows
 /// (embedded/internal, or it holds `priv`).
 let private restrictedTo (priv: string) : Fsdb.Auth.Account option =
@@ -2829,6 +2832,66 @@ let private innodbFtDefaultStopwordColumns =
 let private innodbFtDefaultStopwordRows =
     Fsdb.FullText.defaultStopwords |> List.map (fun value -> [| vs value |])
 
+let private innodbInternalTextColumn name length nullable =
+    { col name (TVarchar length) with
+        Nullable = nullable
+        Charset = Some "utf8mb3"
+        Collation = Some "utf8mb3_tolower_ci" }
+
+let private innodbForeignColumns =
+    [ innodbInternalTextColumn "ID" 129 true
+      innodbInternalTextColumn "FOR_NAME" 129 true
+      innodbInternalTextColumn "REF_NAME" 129 true
+      { requiredCol "N_COLS" (TBigInt false) with Default = Some(DConst(VInt 0L)) }
+      { requiredCol "TYPE" (TBigInt true) with Default = Some(DConst(VUInt 0UL)) } ]
+
+let private innodbForeignColsColumns =
+    [ innodbInternalTextColumn "ID" 129 true
+      innodbInternalTextColumn "FOR_COL_NAME" 64 false
+      innodbInternalTextColumn "REF_COL_NAME" 64 false
+      requiredCol "POS" (TInt true) ]
+
+let private foreignActionBits deleteAction updateAction =
+    let actionBit cascade setNull noAction =
+        function
+        | Some action when eqI action "CASCADE" -> cascade
+        | Some action when eqI action "SET NULL" -> setNull
+        | Some action when eqI action "RESTRICT" -> 0UL
+        | _ -> noAction
+
+    actionBit 1UL 2UL 16UL deleteAction ||| actionBit 4UL 8UL 32UL updateAction
+
+let private innodbForeignEntries catalog =
+    allTables catalog
+    |> List.collect (fun (database, table) ->
+        table.ForeignKeys
+        |> List.map (fun foreignKey ->
+            let referencedDatabase = foreignKey.RefDatabase |> Option.defaultValue database
+            let id = sprintf "%s/%s" database foreignKey.Name
+            let foreignTable = sprintf "%s/%s" database (normalizeTableName table.OriginalName)
+            let referencedTable = sprintf "%s/%s" referencedDatabase (normalizeTableName foreignKey.RefTable)
+            id, foreignTable, referencedTable, foreignKey))
+
+let private innodbForeignRows catalog =
+    innodbForeignEntries catalog
+    |> List.map (fun (id, foreignTable, referencedTable, foreignKey) ->
+        [| vs id
+           vs foreignTable
+           vs referencedTable
+           vi foreignKey.Columns.Length
+           VUInt(foreignActionBits foreignKey.OnDelete foreignKey.OnUpdate) |])
+
+let private innodbForeignColsRows catalog =
+    innodbForeignEntries catalog
+    |> List.collect (fun (constraintId, _, _, foreignKey) ->
+        foreignKey.Columns
+        |> List.mapi (fun index foreignColumn ->
+            foreignKey.RefColumns
+            |> List.tryItem index
+            |> Option.map (fun referencedColumn ->
+                [| vs constraintId; vs foreignColumn; vs referencedColumn; VUInt(uint64 (index + 1)) |]))
+        |> List.choose id)
+
 let private userAttributesColumns =
     [ requiredCol "USER" (TChar 32)
       requiredCol "HOST" (TChar 255)
@@ -2957,6 +3020,8 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "ENGINES", enginesColumns
       "EVENTS", eventsColumns
       "FILES", filesColumns
+      "INNODB_FOREIGN", innodbForeignColumns
+      "INNODB_FOREIGN_COLS", innodbForeignColsColumns
       "INNODB_FT_DEFAULT_STOPWORD", innodbFtDefaultStopwordColumns
       "KEY_COLUMN_USAGE", keyColumnUsageColumns
       "KEYWORDS", keywordsColumns
@@ -3213,6 +3278,8 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "PARAMETERS" -> Some(parametersRows catalog)
         | "EVENTS" -> Some(eventsRows catalog)
         | "FILES" -> Some []
+        | "INNODB_FOREIGN" -> Some(innodbForeignRows catalog)
+        | "INNODB_FOREIGN_COLS" -> Some(innodbForeignColsRows catalog)
         | "INNODB_FT_DEFAULT_STOPWORD" -> Some innodbFtDefaultStopwordRows
         | "KEYWORDS" -> Some keywordsRows
         | "PLUGINS" -> Some pluginsRows

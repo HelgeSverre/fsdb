@@ -4105,6 +4105,9 @@ let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
                 current)
         registry
 
+let private processRestrictedInformationSchemaTables =
+    Set.ofList [ "INNODB_FOREIGN"; "INNODB_FOREIGN_COLS" ]
+
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
 
@@ -5035,9 +5038,17 @@ and private resolveTableRef
     if tableRef.Database.IsNone && System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase) then
         Ok([], [ [||] ])
     elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-        match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
-        | Some(columns, rows) -> Ok(columns, rows)
-        | None -> Error(storageErr (NoSuchTable tableRef.Table))
+        let tableName = tableRef.Table.ToUpperInvariant()
+
+        if
+            processRestrictedInformationSchemaTables.Contains tableName
+            && not (InformationSchema.canViewProcessMetadata ())
+        then
+            Error(Err(1227, "Access denied; you need (at least one of) the PROCESS privilege(s) for this operation"))
+        else
+            match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
+            | Some(columns, rows) -> Ok(columns, rows)
+            | None -> Error(storageErr (NoSuchTable tableRef.Table))
     elif
         System.String.Equals(tableDb, "fsdb", System.StringComparison.OrdinalIgnoreCase)
         && store.VirtualTables.ContainsKey(tableRef.Table.ToLowerInvariant())

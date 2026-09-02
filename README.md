@@ -280,7 +280,7 @@ applications:
   default and bounded by `max_load_data_bytes`.
 
 The introspection surface GUI clients lean on is served with real data:
-48 `information_schema` tables whose column sets are diffed against a live
+50 `information_schema` tables whose column sets are diffed against a live
 MySQL 8.4, the `SHOW` family (`STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`,
 `CREATE TABLE`, ...), and a live `PROCESSLIST` with working
 `KILL QUERY|CONNECTION`.
