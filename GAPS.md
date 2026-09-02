@@ -473,29 +473,14 @@ administrative probes.
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
 
-## 15. Differential-testing findings and reruns (torture harness)
+## 15. Differential-testing and performance tails
 
-Recorded in `torture/findings/` and not enrolled in
-`support/known-gaps.json`; status distinguishes current ceilings from evidence
-that predates the implementation it measured:
-
-| Finding | Detail | Status |
-|---|---|---|
-| Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | The complete corpus matches native MySQL 8.4.11 across 102 baselines. Account requirements, typed/compound and recursive procedures, CALL, HANDLER, XA control, HASH partition selection/growth, all four transaction isolation settings, and data-changing stored functions invoked from SELECT and UPDATE now pass. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-31 |
-| Depth-three syntax stress | Three earlier 10,000-mutation seeds produced no crash, timeout, protocol fault, or invariant failure. The 2026-09-01 rerun matched 8,343 errors, accepted 1,313 mutations, and reported zero differences after malformed `CALL` names, multiline system-variable strings, and the stale procedure-cleanup assertion were corrected | resolved 2026-09-01 |
-| Same-row transaction contention | The original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts. Row-delta publication removed whole-table copy/reindex work. The latest 64x200 campaign completed all 12,800 prepared transactions with exact parity and zero failures; fsdb reached 781 tx/s at p99 107 ms versus MySQL's 266 tx/s at p99 679 ms | correctness resolved; generic load throughput remains open |
-| Multi-database scaling | Single-capture snapshots, deferred transaction catalogs, and per-database lock namespaces prevent cross-database conflicts. A 12-database, 19,200-transaction campaign preserved every database independently with no cross-database bleed; wall time was 0.38x the serial projection against a 0.80 ceiling | correctness and scaling threshold resolved 2026-08-27 |
-| Crash/restart durability | Concurrent two-table transactions were interrupted by 80 forced process crashes across four 16-worker campaigns, followed by the latest 20-restart campaign. Recovery retained every acknowledged commit, exposed no partial transaction, invented no row, and preserved identical state through graceful snapshot restarts; the latest run retained all 672 acknowledged operations plus 3 of 320 reply-ambiguous operations, for 675 recovered commits | resolved 2026-09-01; broader snapshot-rotation volume remains useful stress coverage |
-| Drupal full gauntlet | The complete pinned inventory ran 3,882 classes and 28,588 assertions. MySQL 8.4 replays separated browser/environment failures from two fsdb READ COMMITTED insert/upsert conflicts; row and unique-key claims removed both, with the affected moderation classes passing 11/11 and the serializer replay producing no database error or 1205 | transaction findings resolved 2026-08-27; retained artifacts classify remaining upstream failures |
-| Planner slope rerun | The latest tracked 10k/50k and 100k/500k matrices retain shallow slopes for point writes, indexed joins, uncorrelated membership, JSON extraction, and secondary ranges. At scale, indexed join is 302 µs versus MySQL's 194 µs, uncorrelated `IN` is 519 µs versus 163 µs, and secondary range is 195 µs versus 46 µs. Remaining input-sensitive work is grouping at 313 ms versus 200 ms, non-indexed update at 105 ms versus 41 ms, decimal membership at 132 ms versus 81 ms, and full-text join at 25.0 ms versus 3.94 ms. Window top is 1.21 s for both engines in a high-variance sample, while `CUME_DIST` is 247 ms versus MySQL's 458 ms. A saturated recursive-CTE CPU trace points to shared query handling, binding, dynamic scope, and `AsyncLocal` transitions as the next constant-factor seam | measured slope cliffs resolved; shared statement setup and remaining scans open |
-| Set-operation grouping | parenthesized set operands preserve their own precedence, branch-local ordering, and limits | resolved 2026-08-29 |
-
-Uncovered torture lanes (harness scope, not product gaps): matched negative
-semantic-oracle campaigns, connection
-churn mid-transaction, cancellation while queued, savepoints under
-concurrency, isolation levels other than REPEATABLE READ, concurrent
-CREATE/DROP DATABASE under traffic.
+| Open campaign | Current gap |
+|---|---|
+| Planner constant factors | The latest tracked scale matrices measure indexed joins at 302 µs versus MySQL's 194 µs, uncorrelated `IN` at 519 µs versus 163 µs, and secondary ranges at 195 µs versus 46 µs. Input-sensitive work remains in grouping (313 ms versus 200 ms), non-indexed update (105 ms versus 41 ms), decimal membership (132 ms versus 81 ms), and full-text joins (25.0 ms versus 3.94 ms). Shared statement setup and scan-shaped plans remain the principal measured seams. |
+| Transaction fault scheduling | The torture harness lacks matched connection churn during transactions, cancellation while queued, savepoints under contention, and concurrent campaigns across every isolation level. |
+| Catalog churn | Concurrent `CREATE/DROP DATABASE` under query and transaction traffic lacks a differential campaign. |
+| Snapshot rotation volume | Crash/restart campaigns cover acknowledged-commit and atomicity invariants; longer high-volume checkpoint-rotation campaigns remain useful stress coverage. |
 
 ## 16. Deliberate divergences (accepted, not targeted for parity)
 
@@ -510,29 +495,7 @@ fabricated); and an explicitly trusted data directory whose CRCs detect
 corruption rather than authenticate a
 hostile local writer.
 
-## 17. Historical records with resolved entries
-
-These dated findings remain useful as campaign records, but include behavior
-that later work changed:
-
-- `torture/findings/2026-08-19-json-table-gaps.md` predates NESTED PATH,
-  EXISTS PATH, DEFAULT and ERROR clauses, LEFT JOIN, and JOIN USING support.
-  Its listed JSON_TABLE gaps are resolved.
-- The client-contract campaign's four result-type signatures were resolved;
-  the 2026-08-21 differential rerun passed every scenario.
-- The 2026-08-17 multi-database campaign predates the sharded database cells,
-  paged row store, and row-striped point updates. Its correctness evidence is
-  retained, but its scaling classification needs a fresh run.
-- The 2026-08-24 adversarial security report was retired after parser-depth,
-  oversized-packet, metadata-privilege, bounded-logging, and idempotent-GRANT
-  fixes landed. Data-directory write access remains the explicit trust boundary
-  recorded in README and section 16.
-- The constraints audit found PRIMARY KEY columns were rendered as implicitly
-  NOT NULL but remained nullable in storage. New schemas normalize the flag,
-  old persisted schemas are guarded at coercion, and ADD PRIMARY KEY validates
-  both NULL and duplicate existing values.
-
-## 18. Relative severity view
+## 17. Relative severity view
 
 Ranked by expected disruption to the primary consumers, independent of
 implementation effort:
