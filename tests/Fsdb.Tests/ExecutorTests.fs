@@ -6141,6 +6141,32 @@ let tests =
                     Expect.equal rightPlan.AccessType (Some "ref") "RIGHT USING selects indexed ref access"
                     Expect.equal rightPlan.Key (Some "ix_id") "RIGHT USING selects the right-side key"
 
+                testCase "an ordinary join can reintroduce ambiguity after USING"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE natural_a (id INT, value_a INT)" |> ignore
+                    runDefault store "CREATE TABLE natural_b (id INT, value_b INT)" |> ignore
+                    runDefault store "CREATE TABLE natural_c (id INT, value_c INT)" |> ignore
+                    runDefault store "INSERT INTO natural_a VALUES (1, 10)" |> ignore
+                    runDefault store "INSERT INTO natural_b VALUES (1, 20)" |> ignore
+                    runDefault store "INSERT INTO natural_c VALUES (1, 30)" |> ignore
+
+                    let joined =
+                        "FROM natural_a a JOIN natural_b b USING(id) JOIN natural_c c ON c.id = a.id"
+
+                    for sql, clause in
+                        [ $"SELECT id {joined}", "field list"
+                          $"SELECT a.id {joined} WHERE id = 1", "where clause"
+                          $"SELECT a.value_a {joined} ORDER BY id", "order clause" ] do
+                        match runDefault store sql with
+                        | Err(1052, message) ->
+                            Expect.equal message $"Column 'id' in {clause} is ambiguous" clause
+                        | other -> failtestf "expected ambiguous %s, got %A" clause other
+
+                    match runDefault store "SELECT id FROM natural_a a JOIN natural_b b USING(id) JOIN natural_c c USING(id)" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the fully coalesced id, got %A" other
+
                 testCase "an indexed INNER JOIN probes a composite equality key"
                 <| fun _ ->
                     let store = newStore ()

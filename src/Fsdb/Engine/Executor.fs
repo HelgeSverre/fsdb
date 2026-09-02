@@ -7473,20 +7473,15 @@ and private rewriteNaturalSelect
                         | _ -> commons @ leftRest @ rightRest)
                 (baseColumns |> List.map (fun c -> c.Name, qualified baseQualifier c.Name))
 
-    // Unqualified natural-join columns resolve through their COALESCE chain.
-    // ponytail: reject 1052 when a later ordinary join reintroduces the name.
+    // A later ordinary join can reintroduce an otherwise coalesced name.
     let coalesceMap =
         namesPerJoin
         |> List.concat
         |> List.distinctBy (fun n -> n.ToLowerInvariant())
-        |> List.map (fun name ->
-            let occurrences =
-                sources
-                |> List.filter (fun (_, cols) ->
-                    cols |> List.exists (fun c -> System.String.Equals(c.Name, name, System.StringComparison.OrdinalIgnoreCase)))
-                |> List.map (fun (q, _) -> qualified q name)
-
-            name.ToLowerInvariant(), FuncCall("COALESCE", occurrences))
+        |> List.choose (fun name ->
+            match plan |> List.filter (fst >> fun candidate -> equalsIgnoreCase candidate name) with
+            | [ _, expression ] -> Some(name.ToLowerInvariant(), expression)
+            | _ -> None)
         |> Map.ofList
 
     let rewriteExpr e = rewriteCoalescedCols coalesceMap e
