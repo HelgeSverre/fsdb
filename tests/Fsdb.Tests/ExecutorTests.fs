@@ -86,6 +86,67 @@ let tests =
                     | Err(1659, _) -> ()
                     | other -> failtestf "expected string HASH keys to be rejected, got %A" other
 
+                testCase "HASH partition truncation removes only selected rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE p (id INT PRIMARY KEY) PARTITION BY HASH(id) PARTITIONS 4" |> ignore
+                    runDefault store "INSERT INTO p VALUES (0),(1),(2),(3),(4),(5),(6),(7)" |> ignore
+                    runDefault store "CREATE TABLE audit (id INT)" |> ignore
+                    runDefault store "CREATE TRIGGER p_delete AFTER DELETE ON p FOR EACH ROW INSERT INTO audit VALUES (OLD.id)" |> ignore
+
+                    Expect.equal
+                        (runDefault store "ALTER TABLE p TRUNCATE PARTITION p1,p3")
+                        (Affected 0UL)
+                        "partition truncation result"
+
+                    match runDefault store "SELECT id FROM p ORDER BY id" with
+                    | ResultSet(_, [ [ Some "0" ]; [ Some "2" ]; [ Some "4" ]; [ Some "6" ] ]) -> ()
+                    | other -> failtestf "expected only even partitions to remain, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) FROM audit" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected partition truncation to bypass DELETE triggers, got %A" other
+
+                    match runDefault store "ALTER TABLE p TRUNCATE PARTITION p0,p9" with
+                    | Err(1735, "Unknown partition 'p9' in table 'p'") -> ()
+                    | other -> failtestf "expected unknown partition error, got %A" other
+
+                    runDefault store "INSERT INTO p VALUES (9)" |> ignore
+                    runDefault store "ALTER TABLE p TRUNCATE PARTITION p2" |> ignore
+
+                    match runDefault store "SELECT id FROM p ORDER BY id" with
+                    | ResultSet(_, [ [ Some "0" ]; [ Some "4" ]; [ Some "9" ] ]) -> ()
+                    | other -> failtestf "expected p2 to be truncated, got %A" other
+
+                    runDefault store "ALTER TABLE p TRUNCATE PARTITION ALL" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) FROM p" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected ALL partitions to be empty, got %A" other
+
+                    runDefault store "CREATE TABLE plain (id INT)" |> ignore
+
+                    match runDefault store "ALTER TABLE plain TRUNCATE PARTITION p0" with
+                    | Err(1505, "Partition management on a not partitioned table is not possible") -> ()
+                    | other -> failtestf "expected unpartitioned-table error, got %A" other
+
+                    runDefault store "CREATE TABLE ai (id INT AUTO_INCREMENT PRIMARY KEY) PARTITION BY HASH(id) PARTITIONS 2" |> ignore
+                    runDefault store "INSERT INTO ai VALUES (NULL),(NULL),(NULL)" |> ignore
+                    runDefault store "ALTER TABLE ai TRUNCATE PARTITION p1" |> ignore
+                    runDefault store "INSERT INTO ai VALUES (NULL)" |> ignore
+
+                    match runDefault store "SELECT id FROM ai ORDER BY id" with
+                    | ResultSet(_, [ [ Some "2" ]; [ Some "4" ] ]) -> ()
+                    | other -> failtestf "expected partition truncation to preserve AUTO_INCREMENT, got %A" other
+
+                    runDefault store "CREATE TABLE dated (d DATE) PARTITION BY HASH(YEAR(d)) PARTITIONS 2" |> ignore
+                    runDefault store "INSERT INTO dated VALUES ('2024-01-01'),('2025-01-01')" |> ignore
+                    runDefault store "ALTER TABLE dated TRUNCATE PARTITION p1" |> ignore
+
+                    match runDefault store "SELECT d FROM dated" with
+                    | ResultSet(_, [ [ Some "2024-01-01" ] ]) -> ()
+                    | other -> failtestf "expected the stored HASH expression to select rows, got %A" other
+
                 testCase "SELECT without FROM returns a single row"
                 <| fun _ ->
                     let store = newStore ()
@@ -2052,6 +2113,10 @@ let tests =
                     match runDefault store "ALTER TABLE p ADD PARTITION PARTITIONS 1, ALGORITHM=INPLACE" with
                     | Err(1064, _) -> ()
                     | other -> failtestf "expected partition option syntax error, got %A" other
+
+                    match runDefault store "ALTER TABLE p ADD COLUMN label INT, TRUNCATE PARTITION p0" with
+                    | Err(1064, _) -> ()
+                    | other -> failtestf "expected partition truncation to reject combined alterations, got %A" other
 
                 testCase "MODIFY narrowing DATETIME(6) to DATETIME(2) rounds stored values half-up"
                 <| fun _ ->

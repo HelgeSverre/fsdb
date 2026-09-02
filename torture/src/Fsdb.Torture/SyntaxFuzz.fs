@@ -154,6 +154,7 @@ module SyntaxFuzz =
            "read_uncommitted", "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
            "partition_selection", "SELECT id FROM syntax_partitioned PARTITION (p0) ORDER BY id"
            "partition_growth", "ALTER TABLE syntax_partitioned ADD PARTITION PARTITIONS 1"
+           "partition_truncate", "ALTER TABLE syntax_partitioned TRUNCATE PARTITION p1"
            "spatial_buffer", "SELECT ST_AsText(ST_Buffer(ST_PointFromText('POINT(0 0)'), 1))"
            "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix
            "numeric_display", sprintf "CREATE TABLE syntax_display_%s (i INT(7) ZEROFILL, d DECIMAL(7,2) ZEROFILL, f FLOAT(8,2) ZEROFILL)" suffix

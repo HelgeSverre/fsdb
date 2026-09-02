@@ -1301,6 +1301,14 @@ let tests =
                     | AlterTable("p", [ DropPartitions [ "p0"; "p2" ] ]) -> ()
                     | other -> failtestf "expected named partition removal, got %A" other
 
+                    match parseOk "ALTER TABLE p TRUNCATE PARTITION p0,p2" with
+                    | AlterTable("p", [ TruncatePartitions(Some [ "p0"; "p2" ]) ]) -> ()
+                    | other -> failtestf "expected named partition truncation, got %A" other
+
+                    match parseOk "ALTER TABLE p TRUNCATE PARTITION ALL" with
+                    | AlterTable("p", [ TruncatePartitions None ]) -> ()
+                    | other -> failtestf "expected all-partition truncation, got %A" other
+
                     Expect.equal
                         (parsePartitionMaintenance "ALTER TABLE app.p ANALYZE PARTITION p0,p2")
                         (Ok("app.p", "analyze", Some [ "p0"; "p2" ]))

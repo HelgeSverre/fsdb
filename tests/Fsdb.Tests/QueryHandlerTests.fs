@@ -6789,6 +6789,21 @@ let tests =
               | Ok(None, 0) -> ()
               | other -> failtestf "expected partition maintenance to prepare as a text probe, got %A" other
 
+          testCase "TRUNCATE PARTITION commits the active transaction"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE partition_commit (id INT) PARTITION BY HASH(id) PARTITIONS 4"
+              let session, _ = handle session "INSERT INTO partition_commit VALUES (2)"
+              let session, _ = handle session "START TRANSACTION"
+              let session, _ = handle session "INSERT INTO partition_commit VALUES (9)"
+              let session, result = handle session "ALTER TABLE partition_commit TRUNCATE PARTITION p2"
+              Expect.equal result (Affected 0UL) "truncate result"
+              let session, _ = handle session "ROLLBACK"
+
+              match handle session "SELECT id FROM partition_commit ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "9" ] ]) -> ()
+              | other -> failtestf "expected the insert committed and p2 truncated, got %A" other
+
           testCase "FLUSH table lists and optimizer costs commit active transactions"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

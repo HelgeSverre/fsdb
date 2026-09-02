@@ -2470,6 +2470,8 @@ let tests =
               let session = run session "CREATE TABLE p (id INT NOT NULL)"
               let session = run session "CREATE TABLE hp (id INT) PARTITION BY HASH(id) PARTITIONS 2"
               let session = run session "ALTER TABLE hp ADD PARTITION PARTITIONS 1"
+              let session = run session "INSERT INTO hp VALUES (0),(1),(2),(3),(4),(5)"
+              let session = run session "ALTER TABLE hp TRUNCATE PARTITION p1"
               let session = run session "ALTER TABLE p ADD PRIMARY KEY (id)"
               let session = run session "INSERT INTO p (id) VALUES (1)"
               let session = run session "CREATE TABLE t (id INT NOT NULL, name VARCHAR(20))"
@@ -2512,11 +2514,20 @@ let tests =
               | Ok { Partitioning = Some { Count = 3u; Expression = Col "id" } } -> ()
               | other -> failtestf "expected HASH partition metadata from the WAL, got %A" other
 
-              snapshotNow dir reloaded
+              match rowsOf reloaded defaultDatabase "hp" |> List.map (fun row -> row.[0]) with
+              | [ VInt 0L; VInt 2L; VInt 3L; VInt 5L ] -> ()
+              | other -> failtestf "expected partition truncation from the WAL, got %A" other
 
-              match tableSnapshot (load dir) defaultDatabase "hp" with
+              snapshotNow dir reloaded
+              let snapshotReloaded = load dir
+
+              match tableSnapshot snapshotReloaded defaultDatabase "hp" with
               | Ok { Partitioning = Some { Count = 3u; Expression = Col "id" } } -> ()
               | other -> failtestf "expected HASH partition metadata from the snapshot, got %A" other
+
+              match rowsOf snapshotReloaded defaultDatabase "hp" |> List.map (fun row -> row.[0]) with
+              | [ VInt 0L; VInt 2L; VInt 3L; VInt 5L ] -> ()
+              | other -> failtestf "expected partition truncation from the snapshot, got %A" other
 
           testCase "withDataDir durability and Db.onCommit CDC coexist on one store"
           <| fun _ ->

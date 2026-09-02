@@ -728,6 +728,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | DropCheck _
     | SetCheckEnforced _
     | DropPartitions _
+    | TruncatePartitions _
     | SetEngine _
     | SetAlterAlgorithm _
     | SetAlterLock _

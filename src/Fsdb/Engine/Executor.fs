@@ -14776,7 +14776,8 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         | SetRowFormat _ -> onlineAlgorithms
         | AddHashPartitions _
         | CoalesceHashPartitions _
-        | DropPartitions _ -> Set.empty
+        | DropPartitions _
+        | TruncatePartitions _ -> Set.empty
         | SetAlterAlgorithm _
         | SetAlterLock _ -> allAlgorithms
 
@@ -14798,6 +14799,7 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         |> String.concat "/"
 
     let hasOperation predicate = operations |> List.exists predicate
+    let truncatesPartitions = hasOperation (function TruncatePartitions _ -> true | _ -> false)
 
     let requiresColumnRebuild =
         hasOperation (function
@@ -14853,10 +14855,12 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         else
             Err(1846, "LOCK=NONE is not supported. Reason: COPY algorithm requires a lock. Try LOCK=SHARED.")
 
-    if
+    if truncatesPartitions && operations.Length <> 1 then
+        Some(Err(1064, "You have an error in your SQL syntax"))
+    elif
         hasExecutionOption
         && operations
-           |> List.exists (function AddHashPartitions _ | CoalesceHashPartitions _ | DropPartitions _ -> true | _ -> false)
+           |> List.exists (function AddHashPartitions _ | CoalesceHashPartitions _ | DropPartitions _ | TruncatePartitions _ -> true | _ -> false)
     then
         Some(Err(1064, "You have an error in your SQL syntax"))
     elif algorithm = AlgorithmInstant && lockMode <> LockDefault then
@@ -14871,6 +14875,43 @@ let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: Col
         Some(lockNoneError ())
     else
         None
+
+let private truncateHashPartitions
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (tableName: string)
+    (selectedPartitions: string list option)
+    : Result<unit, StorageError> =
+    tableSnapshot store dbName tableName
+    |> Result.bind (fun table ->
+        match table.Partitioning, selectedPartitions with
+        | None, _ -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
+        | Some _, None ->
+            deleteRows store dbName tableName (fun _ -> Ok true) |> Result.map ignore
+        | Some partitioning, Some selectedPartitions ->
+            let partitionNames = hashPartitionNames partitioning
+            let requested =
+                selectedPartitions |> List.map (fun name -> name, name.ToLowerInvariant())
+
+            match requested |> List.tryFind (snd >> partitionNames.ContainsKey >> not) with
+            | Some(name, _) -> Error(ExpressionError(1735, sprintf "Unknown partition '%s' in table '%s'" name table.OriginalName))
+            | None ->
+                let selected = requested |> List.map (fun (_, name) -> Map.find name partitionNames) |> Set.ofList
+                let ctxFor =
+                    contextFactory
+                        store
+                        registry
+                        dbName
+                        (columnIndexOf table.Columns)
+                        (singleQualifier tableName table.Columns)
+                        None
+
+                deleteRows store dbName tableName (fun row ->
+                    match evalExpr (ctxFor row) partitioning.Expression with
+                    | Ok value -> Ok(Set.contains (hashPartitionIndex partitioning value) selected)
+                    | Error(code, message) -> Error(ExpressionError(code, message)))
+                |> Result.map ignore)
 
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
@@ -16061,8 +16102,15 @@ let rec executeAs
                     | SetEngine _
                     | SetAlterAlgorithm _
                     | SetAlterLock _
-                    | SetRowFormat _ -> false
+                    | SetRowFormat _
+                    | TruncatePartitions _ -> false
                     | _ -> true)
+
+            let partitionTruncation =
+                actions
+                |> List.tryFind (function
+                    | TruncatePartitions _ -> true
+                    | _ -> false)
 
             let equal left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
@@ -16145,9 +16193,10 @@ let rec executeAs
             let alterPhysical =
                 prepareColumnChanges ()
                 |> Result.bind (fun () ->
-                    if physicalActions.IsEmpty then
-                        scan snapshot db table |> Result.map ignore
-                    else
+                    match partitionTruncation with
+                    | Some(TruncatePartitions selected) -> truncateHashPartitions snapshot registry db table selected
+                    | _ when physicalActions.IsEmpty -> scan snapshot db table |> Result.map ignore
+                    | _ ->
                         alterTable snapshot db table physicalActions
                         |> withGeneratedRecomputed snapshot registry dbName db table)
 

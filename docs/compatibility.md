@@ -253,8 +253,10 @@ All rows still share one immutable row store. Partition selection evaluates
 the hash expression while scanning; it does not provide MySQL's physical
 partition pruning or separate storage. `ANALYZE`, `CHECK`, `OPTIMIZE`, and
 `REPAIR PARTITION` validate partition names and report MySQL-compatible status
-rows. `DROP PARTITION` returns MySQL's HASH-specific 1512 refusal.
-`TRUNCATE PARTITION` and `REORGANIZE PARTITION` remain unsupported.
+rows. `TRUNCATE PARTITION` removes rows from named partitions without firing
+DELETE triggers and preserves the table's AUTO_INCREMENT counter.
+`DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Partition renaming
+through `REORGANIZE PARTITION` remains unsupported.
 
 ## Check constraints
 

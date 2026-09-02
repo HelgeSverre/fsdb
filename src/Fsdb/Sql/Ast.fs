@@ -698,6 +698,7 @@ type AlterAction =
     | AddHashPartitions of count: uint32
     | CoalesceHashPartitions of count: uint32
     | DropPartitions of names: string list
+    | TruncatePartitions of names: string list option
 
 type HashPartitioning =
     { Expression: Expr

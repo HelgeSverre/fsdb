@@ -5751,6 +5751,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         match table.Partitioning with
         | None -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
         | Some _ -> Error(ExpressionError(1512, "DROP PARTITION can only be used on RANGE/LIST partitions"))
+    | TruncatePartitions _ ->
+        Error(ExpressionError(1105, "TRUNCATE PARTITION must be evaluated by the SQL executor"))
     | SetEngine _ -> Ok(table, None)
     | SetAlterAlgorithm _
     | SetAlterLock _
