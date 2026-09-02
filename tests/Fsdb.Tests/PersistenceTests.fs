@@ -1003,12 +1003,18 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               let mysql = store.Databases.["mysql"]
-              mysql.Value <- mysql.Value |> Map.remove "component" |> Map.remove "time_zone_name"
+              mysql.Value <-
+                  mysql.Value
+                  |> Map.remove "component"
+                  |> Map.remove "general_log"
+                  |> Map.remove "help_topic"
+                  |> Map.remove "slow_log"
+                  |> Map.remove "time_zone_name"
               snapshotNow dir store
 
               let reloaded = load dir
 
-              for table in [ "component"; "time_zone_name" ] do
+              for table in [ "component"; "general_log"; "help_topic"; "slow_log"; "time_zone_name" ] do
                   match scanList reloaded "mysql" table with
                   | Ok(_, rows) -> Expect.isEmpty rows (table + " restored empty")
                   | Error error -> failtestf "expected restored mysql.%s, got %A" table error

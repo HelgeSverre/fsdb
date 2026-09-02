@@ -307,9 +307,9 @@ TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.
 
 ## Users, authentication, and privileges
 
-fsdb has a real account system backed by a 24-table `mysql` schema (`user`,
-`db`, `tables_priv`, `columns_priv`, `global_grants`, `servers`, and the
-remaining compatibility catalogs use MySQL 8.4 column shapes). `CREATE USER` /
+fsdb has a real account system backed by a 30-table `mysql` schema. Twenty-four
+tables use MySQL catalog names and column shapes; six store fsdb views,
+triggers, routines, functions, events, and checks. `CREATE USER` /
 `DROP USER` / `ALTER USER` /
 `SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
 path; passwords are mysql_native_password hashes verified at the handshake

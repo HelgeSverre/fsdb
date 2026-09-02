@@ -59,13 +59,19 @@ let tests =
                             "events"
                             "func"
                             "functions"
+                            "general_log"
                             "global_grants"
+                            "help_category"
+                            "help_keyword"
+                            "help_relation"
+                            "help_topic"
                             "password_history"
                             "plugin"
                             "proxies_priv"
                             "role_edges"
                             "routines"
                             "servers"
+                            "slow_log"
                             "tables_priv"
                             "time_zone"
                             "time_zone_leap_second"
@@ -1829,12 +1835,20 @@ let tests =
               for table, expectedColumns in
                   [ "component", [ "component_id"; "component_group_id"; "component_urn" ]
                     "func", [ "name"; "ret"; "dl"; "type" ]
+                    "general_log", [ "event_time"; "user_host"; "thread_id"; "server_id"; "command_type"; "argument" ]
+                    "help_category", [ "help_category_id"; "name"; "parent_category_id"; "url" ]
+                    "help_keyword", [ "help_keyword_id"; "name" ]
+                    "help_relation", [ "help_topic_id"; "help_keyword_id" ]
+                    "help_topic", [ "help_topic_id"; "name"; "help_category_id"; "description"; "example"; "url" ]
                     "password_history", [ "Host"; "User"; "Password_timestamp"; "Password" ]
                     "plugin", [ "name"; "dl" ]
                     "proxies_priv",
                     [ "Host"; "User"; "Proxied_host"; "Proxied_user"; "With_grant"; "Grantor"; "Timestamp" ]
                     "servers",
                     [ "Server_name"; "Host"; "Db"; "Username"; "Password"; "Port"; "Socket"; "Wrapper"; "Owner" ]
+                    "slow_log",
+                    [ "start_time"; "user_host"; "query_time"; "lock_time"; "rows_sent"; "rows_examined"; "db"
+                      "last_insert_id"; "insert_id"; "server_id"; "sql_text"; "thread_id" ]
                     "time_zone", [ "Time_zone_id"; "Use_leap_seconds" ]
                     "time_zone_leap_second", [ "Transition_time"; "Correction" ]
                     "time_zone_name", [ "Name"; "Time_zone_id" ]
@@ -1844,6 +1858,79 @@ let tests =
                   match handle root (sprintf "SELECT * FROM mysql.%s" table) |> snd with
                   | ResultSet(columns, []) -> Expect.sequenceEqual columns expectedColumns (table + " columns")
                   | other -> failtestf "expected empty mysql.%s, got %A" table other
+
+              let expectShapes table expected =
+                  match Fsdb.Storage.scanList store "mysql" table with
+                  | Ok(columns, []) ->
+                      let actual =
+                          columns
+                          |> List.map (fun column ->
+                              column.Name,
+                              column.Type,
+                              column.Nullable,
+                              column.PrimaryKey,
+                              column.Unique)
+
+                      Expect.equal actual expected (table + " column shapes")
+                  | other -> failtestf "expected empty mysql.%s metadata, got %A" table other
+
+              expectShapes
+                  "general_log"
+                  [ "event_time", TTimestamp 6, false, false, false
+                    "user_host", TMediumText, false, false, false
+                    "thread_id", TBigInt true, false, false, false
+                    "server_id", TInt true, false, false, false
+                    "command_type", TVarchar 64, false, false, false
+                    "argument", TMediumBlob, false, false, false ]
+
+              expectShapes
+                  "help_category"
+                  [ "help_category_id", TSmallInt true, false, true, false
+                    "name", TChar 64, false, false, true
+                    "parent_category_id", TSmallInt true, true, false, false
+                    "url", TText, false, false, false ]
+
+              expectShapes
+                  "help_keyword"
+                  [ "help_keyword_id", TInt true, false, true, false
+                    "name", TChar 64, false, false, true ]
+
+              expectShapes
+                  "help_relation"
+                  [ "help_topic_id", TInt true, false, true, false
+                    "help_keyword_id", TInt true, false, true, false ]
+
+              expectShapes
+                  "help_topic"
+                  [ "help_topic_id", TInt true, false, true, false
+                    "name", TChar 64, false, false, true
+                    "help_category_id", TSmallInt true, false, false, false
+                    "description", TText, false, false, false
+                    "example", TText, false, false, false
+                    "url", TText, false, false, false ]
+
+              expectShapes
+                  "slow_log"
+                  [ "start_time", TTimestamp 6, false, false, false
+                    "user_host", TMediumText, false, false, false
+                    "query_time", TTime 6, false, false, false
+                    "lock_time", TTime 6, false, false, false
+                    "rows_sent", TInt false, false, false, false
+                    "rows_examined", TInt false, false, false, false
+                    "db", TVarchar 512, false, false, false
+                    "last_insert_id", TInt false, false, false, false
+                    "insert_id", TInt false, false, false, false
+                    "server_id", TInt true, false, false, false
+                    "sql_text", TMediumBlob, false, false, false
+                    "thread_id", TBigInt true, false, false, false ]
+
+              for table, timestampColumn in [ "general_log", "event_time"; "slow_log", "start_time" ] do
+                  match Fsdb.Storage.scanList store "mysql" table with
+                  | Ok(column :: _, []) ->
+                      Expect.equal column.Name timestampColumn (table + " timestamp column")
+                      Expect.equal column.Default (Some DCurrentTimestamp) (table + " timestamp default")
+                      Expect.isTrue column.OnUpdateCurrentTimestamp (table + " timestamp update clause")
+                  | other -> failtestf "expected empty mysql.%s timestamp metadata, got %A" table other
 
               let root, _ = handle root "CREATE USER attribute_reader"
 

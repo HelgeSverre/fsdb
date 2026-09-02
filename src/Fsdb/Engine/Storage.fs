@@ -3027,6 +3027,54 @@ let private mysqlPluginColumns =
     [ primarySysCol "name" (TVarchar 64) false (Some(VString ""))
       sysCol "dl" (TVarchar 128) false (Some(VString "")) ]
 
+let private mysqlGeneralLogColumns =
+    [ { sysCol "event_time" (TTimestamp 6) false None with
+          Default = Some DCurrentTimestamp
+          OnUpdateCurrentTimestamp = true }
+      sysCol "user_host" TMediumText false None
+      sysCol "thread_id" (TBigInt true) false None
+      sysCol "server_id" (TInt true) false None
+      sysCol "command_type" (TVarchar 64) false None
+      sysCol "argument" TMediumBlob false None ]
+
+let private mysqlHelpCategoryColumns =
+    [ primarySysCol "help_category_id" (TSmallInt true) false None
+      { sysCol "name" (TChar 64) false None with Unique = true }
+      sysCol "parent_category_id" (TSmallInt true) true None
+      sysCol "url" TText false None ]
+
+let private mysqlHelpKeywordColumns =
+    [ primarySysCol "help_keyword_id" (TInt true) false None
+      { sysCol "name" (TChar 64) false None with Unique = true } ]
+
+let private mysqlHelpRelationColumns =
+    [ primarySysCol "help_topic_id" (TInt true) false None
+      primarySysCol "help_keyword_id" (TInt true) false None ]
+
+let private mysqlHelpTopicColumns =
+    [ primarySysCol "help_topic_id" (TInt true) false None
+      { sysCol "name" (TChar 64) false None with Unique = true }
+      sysCol "help_category_id" (TSmallInt true) false None
+      sysCol "description" TText false None
+      sysCol "example" TText false None
+      sysCol "url" TText false None ]
+
+let private mysqlSlowLogColumns =
+    [ { sysCol "start_time" (TTimestamp 6) false None with
+          Default = Some DCurrentTimestamp
+          OnUpdateCurrentTimestamp = true }
+      sysCol "user_host" TMediumText false None
+      sysCol "query_time" (TTime 6) false None
+      sysCol "lock_time" (TTime 6) false None
+      sysCol "rows_sent" (TInt false) false None
+      sysCol "rows_examined" (TInt false) false None
+      sysCol "db" (TVarchar 512) false None
+      sysCol "last_insert_id" (TInt false) false None
+      sysCol "insert_id" (TInt false) false None
+      sysCol "server_id" (TInt true) false None
+      sysCol "sql_text" TMediumBlob false None
+      sysCol "thread_id" (TBigInt true) false None ]
+
 let private mysqlServersColumns =
     [ primarySysCol "Server_name" (TChar 64) false (Some(VString ""))
       sysCol "Host" (TChar 255) false (Some(VString ""))
@@ -3249,10 +3297,16 @@ let mysqlCheckConstraintsColumns: ColumnDef list =
 let private mysqlCompatibilityTableDefs =
     [ "component", mysqlComponentColumns
       "func", mysqlFuncColumns
+      "general_log", mysqlGeneralLogColumns
+      "help_category", mysqlHelpCategoryColumns
+      "help_keyword", mysqlHelpKeywordColumns
+      "help_relation", mysqlHelpRelationColumns
+      "help_topic", mysqlHelpTopicColumns
       "password_history", mysqlPasswordHistoryColumns
       "plugin", mysqlPluginColumns
       "proxies_priv", mysqlProxiesPrivColumns
       "servers", mysqlServersColumns
+      "slow_log", mysqlSlowLogColumns
       "time_zone", mysqlTimeZoneColumns
       "time_zone_leap_second", mysqlTimeZoneLeapSecondColumns
       "time_zone_name", mysqlTimeZoneNameColumns
