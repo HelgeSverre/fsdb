@@ -3432,11 +3432,7 @@ let private padFn (left: bool) : Scalar =
             result (if left then padding + str else str + padding)
     | _ -> VNull
 
-/// `LEFT`/`RIGHT` count *bytes* on a binary operand and characters on a
-/// text one, same as MySQL. Without the `VBytes` case the bytes would go
-/// through `req`'s text view first, and any non-ASCII byte comes back out
-/// as its multi-byte UTF-8 encoding — `LEFT(x, 4)` over binary data then
-/// returns six bytes of mangled prefix.
+/// `LEFT` and `RIGHT` count bytes for binary values and characters for text.
 let private leftFn: Scalar =
     function
     | [ value; n ] when not (anyNull [ value; n ]) ->

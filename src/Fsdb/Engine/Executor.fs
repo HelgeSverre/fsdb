@@ -46,6 +46,9 @@ let private nestedResultsError context =
 
 let private nestedSubqueryResultsError = 1105, "Multiple resultsets are not valid in a subquery"
 
+let private equalsIgnoreCase (left: string) (right: string) =
+    System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+
 /// An expression-evaluation failure: a MySQL error code and message, the
 /// same shape `Storage.toMySqlError` produces, so both error sources funnel
 /// into `Err` the same way.
@@ -454,7 +457,6 @@ let private registryForView (store: Store) (registry: Registry) (view: StoredVie
 /// a second escaping convention. Invalid catalog text is treated as an absent
 /// list so direct catalog damage cannot crash the query worker.
 let private tryStoredView (store: Store) (dbName: string) (viewName: string) : StoredView option =
-    let eqI (left: string) (right: string) = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
     let columns (value: string) =
         if value = "" then
             []
@@ -471,7 +473,7 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
     | Ok(_, rows) ->
         rows
         |> Seq.choose SystemCatalog.View.tryRead
-        |> Seq.tryFind (fun view -> eqI view.Name viewName && eqI view.Schema dbName)
+        |> Seq.tryFind (fun view -> equalsIgnoreCase view.Name viewName && equalsIgnoreCase view.Schema dbName)
         |> Option.map (fun view ->
             { Name = view.Name
               Schema = view.Schema
@@ -1125,14 +1127,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
     classify Set.empty view select
 
 let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
-    let eqI left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
-
     match scan store "mysql" "check_constraints" with
     | Error _ -> []
     | Ok(_, rows) ->
         rows
         |> Seq.choose SystemCatalog.Check.tryRead
-        |> Seq.filter (fun check -> eqI check.Schema dbName && eqI check.Table tableName)
+        |> Seq.filter (fun check -> equalsIgnoreCase check.Schema dbName && equalsIgnoreCase check.Table tableName)
         |> Seq.sortBy _.Ordinal
         |> List.ofSeq
 
@@ -5617,21 +5617,11 @@ and private describeQueryColumns
 and private describeStoredViewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
     describeQueryColumns store registry schema (StoredRelation name)
 
-/// Pre-filters an `information_schema` scan by the WHERE's top-level
-/// `col = 'literal'` equality conjuncts (`TABLE_SCHEMA`/`TABLE_NAME` is what
-/// GUI clients send) — building every catalog row only for the executor to
-/// discard all but one table's was the `COLUMNS` hotspot. Conjuncts come
-/// from the same `pointLookupEqualities` the PK fast path uses (inheriting
-/// its correlated-qualifier guard); for the self-contained per-table views
-/// the catalog itself is narrowed before row construction, and every view's
-/// rows are post-filtered. Pure narrowing: the full WHERE still runs over
-/// the result. `None` when the FROM isn't information_schema or the WHERE
-/// has no usable conjunct (plain scan then).
-/// The pre-filter compares OrdinalIgnoreCase where the WHERE
-/// proper compares ai_ci — an accented table name queried by its unaccented
-/// spelling would be over-filtered; GUI clients echo names the server gave
-/// them, so this stays until something real hits it. Joined
-/// information_schema queries take the unnarrowed path.
+/// Narrows single-source `information_schema` scans by literal schema and
+/// table equalities before catalog rows are materialized. The full predicate
+/// still validates every retained row.
+/// ponytail: use the query collation instead of OrdinalIgnoreCase before
+/// accepting noncanonical names in this pre-filter.
 and private tryInformationSchemaNarrow
     (store: Store)
     (registry: Registry)
@@ -5644,9 +5634,6 @@ and private tryInformationSchemaNarrow
     if not (System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase)) then
         None
     else
-        let eqI (a: string) (b: string) =
-            System.String.Equals(a, b, System.StringComparison.OrdinalIgnoreCase)
-
         match
             pointLookupEqualities tableRef where
             |> List.choose (function
@@ -5655,11 +5642,10 @@ and private tryInformationSchemaNarrow
         with
         | [] -> None
         | eqs ->
-            // The heavy per-table views derive each row from exactly one
-            // catalog table, so a TABLE_SCHEMA/TABLE_NAME equality can
-            // shrink the catalog before any row is built (cross-table views
-            // like KEY_COLUMN_USAGE only get the post-filter).
-            let eqFor col = eqs |> List.tryPick (fun (n, v) -> if eqI n col then Some v else None)
+            let eqFor col =
+                eqs
+                |> List.tryPick (fun (name, value) ->
+                    if equalsIgnoreCase name col then Some value else None)
 
             let selfContained =
                 match tableRef.Table.ToUpperInvariant() with
@@ -5672,11 +5658,14 @@ and private tryInformationSchemaNarrow
                 if selfContained then
                     let bySchema =
                         match eqFor "TABLE_SCHEMA" with
-                        | Some s -> store.Catalog |> Map.filter (fun db _ -> eqI db s)
+                        | Some schema -> store.Catalog |> Map.filter (fun db _ -> equalsIgnoreCase db schema)
                         | None -> store.Catalog
 
                     match eqFor "TABLE_NAME" with
-                    | Some t -> bySchema |> Map.map (fun _ db -> db |> Map.filter (fun _ tbl -> eqI tbl.OriginalName t))
+                    | Some table ->
+                        bySchema
+                        |> Map.map (fun _ db ->
+                            db |> Map.filter (fun _ stored -> equalsIgnoreCase stored.OriginalName table))
                     | None -> bySchema
                 else
                     store.Catalog
@@ -5702,7 +5691,7 @@ and private tryInformationSchemaNarrow
                     filters
                     |> List.forall (fun (i, v) ->
                         match row.[i] with
-                        | VString s -> eqI s v
+                        | VString text -> equalsIgnoreCase text v
                         | _ -> false)
 
                 cols, rows |> List.filter keep)
@@ -7171,9 +7160,8 @@ and private applyMutationJoin
     | FromLateral _ ->
         Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | FromJsonTable _ ->
-        // MySQL allows a JSON_TABLE join source in multi-table
-        // UPDATE/DELETE; its lateral row expansion does not yet preserve the
-        // source identity list used by physical mutation targets.
+        // ponytail: preserve physical source identities through JSON_TABLE
+        // before allowing it in multi-table mutations.
         Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | source ->
         let resolved =
@@ -7476,10 +7464,8 @@ and private rewriteNaturalSelect
                         | _ -> commons @ leftRest @ rightRest)
                 (baseColumns |> List.map (fun c -> c.Name, qualified baseQualifier c.Name))
 
-    // Unqualified refs to a coalesced name resolve to the COALESCE over
-    // every source occurrence of that name (a name re-added by a
-    // later plain join with the same column would be silently included —
-    // MySQL errors 1052 there; ORM-shaped queries never hit it).
+    // Unqualified natural-join columns resolve through their COALESCE chain.
+    // ponytail: reject 1052 when a later ordinary join reintroduces the name.
     let coalesceMap =
         namesPerJoin
         |> List.concat
@@ -7844,17 +7830,10 @@ and private withCteQueryResult
 
     bodyResult |> Option.defaultValue scopeResult
 
-/// One `WITH` binding's rows. A `WITH RECURSIVE` name that actually
-/// references itself iterates its `UNION` branches semi-naively (each pass
-/// sees only the previous pass's new rows) until a pass adds nothing;
-/// everything else is an ordinary derived table.
-/// The recursion ceiling is the current session's effective
-/// `cte_max_recursion_depth`; zero permits unbounded expansion.
-/// A second, narrower gap: MySQL fixes each
-/// recursive column's *type* from the anchor row and then errors (1406) when
-/// a later pass overflows it — a literal `NULL` anchor column is
-/// `VARCHAR(0)` there and rejects everything — while these rows stay
-/// dynamically typed and just accept the wider value.
+/// Materializes self-referencing CTEs semi-naively until no new rows appear.
+/// The session recursion limit applies; zero permits unbounded expansion.
+/// ponytail: fix recursive column types from the anchor and raise 1406 when
+/// a recursive value exceeds them.
 and private materializeCte
     (store: Store)
     (registry: Registry)
@@ -12203,16 +12182,9 @@ and private runSelect
     | Ok probeProjection ->
         let colNames = probeProjection |> List.map fst
 
-        // Column wire types are read off whatever rows actually cross the
-        // wire (post `DISTINCT`/`LIMIT`/`OFFSET`), not the full matched set
-        // — the same data-driven "first non-NULL value" approximation
-        // `columnMetadataOf` always used, narrowed to the rows a client can
-        // observe. A column that's NULL in every *returned* row
-        // but non-NULL further down the matched set (past `LIMIT`)
-        // reports `VAR_STRING` instead of that later type; scanning the
-        // full matched set just to pick a wire type would defeat the
-        // `LIMIT` short-circuit below for every query. Upgrade to schema-
-        // declared (not data-driven) column types if this ever bites.
+        // Wire metadata follows returned rows so LIMIT can stop source
+        // evaluation early.
+        // ponytail: infer schema-declared types for all-null result columns.
         let typesOf (finalRows: Value[] list) : ColumnMetadata list =
             columnMetadataOf (List.length colNames) (finalRows |> List.map (List.zip colNames << List.ofArray))
             |> applyWireOverrides outputWireOverrides
@@ -12545,10 +12517,8 @@ let private computeGeneratedRow
 
         let ctx = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier table columns) None row'
 
-        // `ctx.Row` holds `row'` by reference, so mutating it in place
-        // right after each column's evaluated (rather than collecting then
-        // applying afterwards) lets a later generated column's expression
-        // see an earlier one's freshly computed value.
+        // The shared row reference preserves left-to-right visibility between
+        // generated columns.
         generated
         |> traverse (fun (col, expr) ->
             evalExpr ctx expr
@@ -15856,9 +15826,8 @@ let rec executeAs
         | Error e -> ids, storageErr e
 
     | AlterDatabase(requestedName, _) ->
-        // The charset/collate tail is parsed and discarded (see
-        // `Parser.databaseOptions`'s doc) — nothing in the catalog needs to
-        // record it, so this is just an existence check.
+        // Database charset and collation are server-wide in the current
+        // catalog model, so ALTER DATABASE only validates the target.
         let name = requestedName |> Option.defaultValue dbName
 
         if Storage.databaseExists store name then
@@ -16358,14 +16327,9 @@ let rec executeAs
             | Error e -> ids, storageErr e
 
     | RenameTable pairs ->
-        // A cross-database `RENAME TABLE a.t TO b.t` only takes the target
-        // name's table part. It does not move the table
-        // between catalogs, add that once a migration renames across
-        // databases rather than within one.
-        // Grouped by database and applied per group, so a multi-pair rename
-        // within one database is one atomic catalog swap and one WAL event
-        // (see `Storage.renameTables`) rather than N independently-replayable
-        // ones. Grouping preserves each group's original pair order.
+        // Each database group publishes one catalog root and WAL event while
+        // preserving the requested rename order.
+        // ponytail: move tables between catalogs for cross-database renames.
         let groups =
             pairs
             |> List.map (fun (oldName, newName) ->
@@ -17573,8 +17537,7 @@ let rec executeAs
                                 // across tables too.
                                 let working = Array.copy flat
 
-                                // A claim spans the complete SET list so later
-                                // assignments to the same alias are retained.
+                                // One claim covers every assignment to the alias.
                                 let claimedThisRow =
                                     identities
                                     |> List.mapi (fun srcIdx identity ->

@@ -989,9 +989,8 @@ let private parserOptionsForSession (session: Session) =
     |> Option.defaultValue ""
     |> SqlMode.parserOptionsFor
 
-/// Evaluates a `SET` user-variable right-hand side through the ordinary
-/// expression grammar. A private variable map preserves SET's all-or-
-/// nothing application when a later fragment fails.
+/// Evaluates a SET expression against private state so the statement remains
+/// atomic when any assignment fails.
 let private resolveUserSetRhs
     (session: Session)
     (userVariables: Map<string, Value>)
@@ -1212,11 +1211,8 @@ let private transactionIsolationScope (prefix: string) =
     | "@@GLOBAL." -> GlobalIsolation
     | _ -> SessionIsolation
 
-/// Parses one comma-split fragment into the variable(s) it would assign,
-/// without touching `session`/`Store` — `handleSet` only applies any of
-/// these once every fragment in the statement has parsed. Top-level targets
-/// stay deferred, while nested `:=` assignments become visible to later
-/// right-hand sides.
+/// Parses one SET fragment without mutating the session. Nested assignments
+/// remain visible to subsequent right-hand sides in the same statement.
 let private parseSetFragment
     (sql: string)
     (session: Session)
@@ -2094,14 +2090,9 @@ let closeSession (session: Session) : unit =
 let private savepointNotFound (name: string) : QueryResult =
     Err(1305, sprintf "SAVEPOINT %s does not exist" name)
 
-/// `SAVEPOINT name` outside an explicit transaction implicitly starts one,
-/// matching real MySQL. Re-issuing an existing name deletes the old
-/// savepoint and sets a new one in its place (also real MySQL behavior) —
-/// `Map.add` already does the "replace" half; giving it a fresh
-/// `NextSavepointSeq` tick does the "moves to the end of the establishment
-/// order" half, so a savepoint set *before* this one but named earlier
-/// doesn't wrongly get cascade-dropped by a later `ROLLBACK TO`/`RELEASE`
-/// naming something established before this redefinition.
+/// SAVEPOINT starts an implicit transaction when needed. Redefinition gets a
+/// fresh sequence so later rollback and release operations preserve MySQL's
+/// establishment order.
 let private savepoint (name: string) (session: Session) : Session * QueryResult =
     let session =
         if session.Tx.IsNone then

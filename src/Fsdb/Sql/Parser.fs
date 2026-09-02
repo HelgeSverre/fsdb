@@ -1185,13 +1185,9 @@ let private groupConcatAtom: Parser<Expr, unit> =
             |> List.map (fun (e, dirOpt) -> OrderBy(e, dirOpt |> Option.defaultValue Asc))
         FuncCall("GROUP_CONCAT", argExpr :: orderByArgs @ (sepOpt |> Option.toList))
 
-/// The `PARTITION BY expr, ... ORDER BY expr [ASC|DESC], ... [frame]` body
-/// of an `OVER (...)`, also reused verbatim by the `WINDOW w AS (...)`
-/// clause. Written out here rather than reusing the later `orderKey` parser
-/// (which needs `Asc`/`Desc`'s default already applied) since `orderKey`
-/// isn't defined until after `atom`; duplicating its two-line
-/// direction-defaulting logic is cheaper than reordering the file to hoist
-/// it.
+/// Parses the window specification shared by `OVER` and named `WINDOW`.
+/// Its direction default stays local because the recursive expression parser
+/// precedes the general `orderKey` parser.
 let internal windowFrameBound: Parser<FrameBound, unit> =
     choice
         [ attempt (keyword "UNBOUNDED" >>. keyword "PRECEDING") >>% UnboundedPreceding
