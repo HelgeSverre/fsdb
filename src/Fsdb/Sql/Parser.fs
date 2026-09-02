@@ -2568,14 +2568,16 @@ let private createTable: Parser<Statement, unit> =
                         if isStringy then
                             let charset = c.Charset |> Option.orElse tableCharset
 
-                            let inheritedCollation =
-                                match c.Charset with
-                                | Some charset -> Some(Collation.defaultNameForCharset charset)
-                                | None ->
-                                    tableCollation
-                                    |> Option.orElseWith (fun () ->
-                                        charset |> Option.map Collation.defaultNameForCharset)
-                                    |> Option.orElse (Some Collation.defaultCollation.Name)
+                            let collation =
+                                c.Collation
+                                |> Option.defaultWith (fun () ->
+                                    match c.Charset with
+                                    | Some declared -> Collation.defaultNameForCharset declared
+                                    | None ->
+                                        tableCollation
+                                        |> Option.orElseWith (fun () ->
+                                            charset |> Option.map Collation.defaultNameForCharset)
+                                        |> Option.defaultValue Collation.defaultCollation.Name)
 
                             { c with
                                 // A real column always ends up with an
@@ -2588,9 +2590,7 @@ let private createTable: Parser<Statement, unit> =
                                 // charset stays `None` unless declared, so
                                 // SHOW CREATE TABLE renders the default
                                 // case as plain `varchar(20)`.
-                                Collation =
-                                    c.Collation
-                                    |> Option.orElse inheritedCollation
+                                Collation = Some collation
                                 Charset = charset }
                         else
                             c

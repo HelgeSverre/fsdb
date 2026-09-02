@@ -380,9 +380,6 @@ let private isVirtualColumn (column: ColumnDef) =
     | Some(_, Virtual) -> true
     | _ -> false
 
-let private primaryColumns (table: Table) =
-    Storage.primaryKeyColumns table
-
 let private indexEntries (tables: TableEntry list) =
     tables
     |> List.collect (fun table ->
@@ -607,7 +604,7 @@ let private indexFieldCount (index: IndexEntry) =
     elif index.Primary then
         storedColumns + 2
     else
-        let primary = primaryColumns index.Table.Table
+        let primary = Storage.primaryKeyColumns index.Table.Table
         let keyNames = index.KeyColumns |> List.map _.Name |> Set.ofList
         let primarySuffix = primary |> List.filter (keyNames.Contains >> not) |> List.length
         index.KeyColumns.Length + (if primary.IsEmpty then 1 else primarySuffix)
