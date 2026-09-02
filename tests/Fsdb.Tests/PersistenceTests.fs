@@ -1003,18 +1003,33 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               let mysql = store.Databases.["mysql"]
-              mysql.Value <-
-                  mysql.Value
-                  |> Map.remove "component"
-                  |> Map.remove "general_log"
-                  |> Map.remove "help_topic"
-                  |> Map.remove "slow_log"
-                  |> Map.remove "time_zone_name"
+              let removedTables =
+                  [ "component"
+                    "engine_cost"
+                    "general_log"
+                    "gtid_executed"
+                    "help_topic"
+                    "innodb_index_stats"
+                    "innodb_table_stats"
+                    "ndb_binlog_index"
+                    "procs_priv"
+                    "replication_asynchronous_connection_failover"
+                    "replication_asynchronous_connection_failover_managed"
+                    "replication_group_configuration_version"
+                    "replication_group_member_actions"
+                    "server_cost"
+                    "slave_master_info"
+                    "slave_relay_log_info"
+                    "slave_worker_info"
+                    "slow_log"
+                    "time_zone_name" ]
+
+              mysql.Value <- removedTables |> List.fold (fun tables name -> Map.remove name tables) mysql.Value
               snapshotNow dir store
 
               let reloaded = load dir
 
-              for table in [ "component"; "general_log"; "help_topic"; "slow_log"; "time_zone_name" ] do
+              for table in removedTables do
                   match scanList reloaded "mysql" table with
                   | Ok(_, rows) -> Expect.isEmpty rows (table + " restored empty")
                   | Error error -> failtestf "expected restored mysql.%s, got %A" table error

@@ -3012,6 +3012,19 @@ let private mysqlDefaultRolesColumns: ColumnDef list =
 let private primarySysCol name ty nullable dflt =
     { sysCol name ty nullable dflt with PrimaryKey = true }
 
+let private currentTimestampSysCol name fsp =
+    { sysCol name (TTimestamp fsp) false None with
+        Default = Some DCurrentTimestamp
+        OnUpdateCurrentTimestamp = true }
+
+let private costDefaultColumn defaults =
+    let branches =
+        defaults
+        |> List.map (fun (name, value) -> Lit(VString name), Lit(VDouble value))
+
+    { sysCol "default_value" (TFloat false) true None with
+        Generated = Some(Case(Some(Col "cost_name"), branches, None), Virtual) }
+
 let private mysqlComponentColumns =
     [ { primarySysCol "component_id" (TInt true) false None with AutoIncrement = true }
       sysCol "component_group_id" (TInt true) false None
@@ -3028,9 +3041,7 @@ let private mysqlPluginColumns =
       sysCol "dl" (TVarchar 128) false (Some(VString "")) ]
 
 let private mysqlGeneralLogColumns =
-    [ { sysCol "event_time" (TTimestamp 6) false None with
-          Default = Some DCurrentTimestamp
-          OnUpdateCurrentTimestamp = true }
+    [ currentTimestampSysCol "event_time" 6
       sysCol "user_host" TMediumText false None
       sysCol "thread_id" (TBigInt true) false None
       sysCol "server_id" (TInt true) false None
@@ -3060,9 +3071,7 @@ let private mysqlHelpTopicColumns =
       sysCol "url" TText false None ]
 
 let private mysqlSlowLogColumns =
-    [ { sysCol "start_time" (TTimestamp 6) false None with
-          Default = Some DCurrentTimestamp
-          OnUpdateCurrentTimestamp = true }
+    [ currentTimestampSysCol "start_time" 6
       sysCol "user_host" TMediumText false None
       sysCol "query_time" (TTime 6) false None
       sysCol "lock_time" (TTime 6) false None
@@ -3074,6 +3083,177 @@ let private mysqlSlowLogColumns =
       sysCol "server_id" (TInt true) false None
       sysCol "sql_text" TMediumBlob false None
       sysCol "thread_id" (TBigInt true) false None ]
+
+let private mysqlEngineCostColumns =
+    [ primarySysCol "engine_name" (TVarchar 64) false None
+      primarySysCol "device_type" (TInt false) false None
+      primarySysCol "cost_name" (TVarchar 64) false None
+      sysCol "cost_value" (TFloat false) true None
+      currentTimestampSysCol "last_update" 0
+      sysCol "comment" (TVarchar 1024) true None
+      costDefaultColumn [ "io_block_read_cost", 1.0; "memory_block_read_cost", 0.25 ] ]
+
+let private mysqlGtidExecutedColumns =
+    [ primarySysCol "source_uuid" (TChar 36) false None
+      primarySysCol "interval_start" (TBigInt false) false None
+      sysCol "interval_end" (TBigInt false) false None
+      primarySysCol "gtid_tag" (TChar 32) false None ]
+
+let private mysqlInnodbIndexStatsColumns =
+    [ primarySysCol "database_name" (TVarchar 64) false None
+      primarySysCol "table_name" (TVarchar 199) false None
+      primarySysCol "index_name" (TVarchar 64) false None
+      currentTimestampSysCol "last_update" 0
+      primarySysCol "stat_name" (TVarchar 64) false None
+      sysCol "stat_value" (TBigInt true) false None
+      sysCol "sample_size" (TBigInt true) true None
+      sysCol "stat_description" (TVarchar 1024) false None ]
+
+let private mysqlInnodbTableStatsColumns =
+    [ primarySysCol "database_name" (TVarchar 64) false None
+      primarySysCol "table_name" (TVarchar 199) false None
+      currentTimestampSysCol "last_update" 0
+      sysCol "n_rows" (TBigInt true) false None
+      sysCol "clustered_index_size" (TBigInt true) false None
+      sysCol "sum_of_other_index_sizes" (TBigInt true) false None ]
+
+let private mysqlNdbBinlogIndexColumns =
+    [ sysCol "Position" (TBigInt true) false None
+      sysCol "File" (TVarchar 255) false None
+      primarySysCol "epoch" (TBigInt true) false None
+      sysCol "inserts" (TInt true) false None
+      sysCol "updates" (TInt true) false None
+      sysCol "deletes" (TInt true) false None
+      sysCol "schemaops" (TInt true) false None
+      primarySysCol "orig_server_id" (TInt true) false None
+      primarySysCol "orig_epoch" (TBigInt true) false None
+      sysCol "gci" (TInt true) false None
+      sysCol "next_position" (TBigInt true) false None
+      sysCol "next_file" (TVarchar 255) false None ]
+
+let private mysqlProcsPrivColumns =
+    [ primarySysCol "Host" (TChar 255) false (Some(VString ""))
+      primarySysCol "Db" (TChar 64) false (Some(VString ""))
+      primarySysCol "User" (TChar 32) false (Some(VString ""))
+      primarySysCol "Routine_name" (TChar 64) false (Some(VString ""))
+      primarySysCol "Routine_type" (TEnum [ "FUNCTION"; "PROCEDURE" ]) false None
+      sysCol "Grantor" (TVarchar 288) false (Some(VString ""))
+      sysCol "Proc_priv" (TSet [ "Execute"; "Alter Routine"; "Grant" ]) false (Some(VString ""))
+      currentTimestampSysCol "Timestamp" 0 ]
+
+let private mysqlReplicationFailoverColumns =
+    [ primarySysCol "Channel_name" (TChar 64) false None
+      primarySysCol "Host" (TChar 255) false None
+      primarySysCol "Port" (TInt true) false None
+      primarySysCol "Network_namespace" (TChar 64) false None
+      sysCol "Weight" (TTinyInt true) false None
+      primarySysCol "Managed_name" (TChar 64) false (Some(VString "")) ]
+
+let private mysqlReplicationFailoverManagedColumns =
+    [ primarySysCol "Channel_name" (TChar 64) false None
+      primarySysCol "Managed_name" (TChar 64) false (Some(VString ""))
+      sysCol "Managed_type" (TChar 64) false (Some(VString ""))
+      sysCol "Configuration" TJson true None ]
+
+let private mysqlReplicationGroupConfigurationVersionColumns =
+    [ primarySysCol "name" (TChar 255) false None
+      sysCol "version" (TBigInt true) false None ]
+
+let private mysqlReplicationGroupMemberActionsColumns =
+    [ primarySysCol "name" (TChar 255) false None
+      primarySysCol "event" (TChar 64) false None
+      sysCol "enabled" TBool false None
+      sysCol "type" (TChar 64) false None
+      sysCol "priority" (TTinyInt true) false None
+      sysCol "error_handling" (TChar 64) false None ]
+
+let private mysqlServerCostColumns =
+    [ primarySysCol "cost_name" (TVarchar 64) false None
+      sysCol "cost_value" (TFloat false) true None
+      currentTimestampSysCol "last_update" 0
+      sysCol "comment" (TVarchar 1024) true None
+      costDefaultColumn
+          [ "disk_temptable_create_cost", 20.0
+            "disk_temptable_row_cost", 0.5
+            "key_compare_cost", 0.05
+            "memory_temptable_create_cost", 1.0
+            "memory_temptable_row_cost", 0.1
+            "row_evaluate_cost", 0.1 ] ]
+
+let private mysqlSlaveMasterInfoColumns =
+    [ sysCol "Number_of_lines" (TInt true) false None
+      sysCol "Master_log_name" TText false None
+      sysCol "Master_log_pos" (TBigInt true) false None
+      sysCol "Host" (TVarchar 255) true None
+      sysCol "User_name" TText true None
+      sysCol "User_password" TText true None
+      sysCol "Port" (TInt true) false None
+      sysCol "Connect_retry" (TInt true) false None
+      sysCol "Enabled_ssl" TBool false None
+      sysCol "Ssl_ca" TText true None
+      sysCol "Ssl_capath" TText true None
+      sysCol "Ssl_cert" TText true None
+      sysCol "Ssl_cipher" TText true None
+      sysCol "Ssl_key" TText true None
+      sysCol "Ssl_verify_server_cert" TBool false None
+      sysCol "Heartbeat" (TFloat false) false None
+      sysCol "Bind" TText true None
+      sysCol "Ignored_server_ids" TText true None
+      sysCol "Uuid" TText true None
+      sysCol "Retry_count" (TBigInt true) false None
+      sysCol "Ssl_crl" TText true None
+      sysCol "Ssl_crlpath" TText true None
+      sysCol "Enabled_auto_position" TBool false None
+      primarySysCol "Channel_name" (TVarchar 64) false None
+      sysCol "Tls_version" TText true None
+      sysCol "Public_key_path" TText true None
+      sysCol "Get_public_key" TBool false None
+      sysCol "Network_namespace" TText true None
+      sysCol "Master_compression_algorithm" (TVarchar 64) false None
+      sysCol "Master_zstd_compression_level" (TInt true) false None
+      sysCol "Tls_ciphersuites" TText true None
+      sysCol "Source_connection_auto_failover" TBool false (Some(VInt 0L))
+      sysCol "Gtid_only" TBool false (Some(VInt 0L)) ]
+
+let private mysqlSlaveRelayLogInfoColumns =
+    [ sysCol "Number_of_lines" (TInt true) false None
+      sysCol "Relay_log_name" TText true None
+      sysCol "Relay_log_pos" (TBigInt true) true None
+      sysCol "Master_log_name" TText true None
+      sysCol "Master_log_pos" (TBigInt true) true None
+      sysCol "Sql_delay" (TInt false) true None
+      sysCol "Number_of_workers" (TInt true) true None
+      sysCol "Id" (TInt true) true None
+      primarySysCol "Channel_name" (TVarchar 64) false None
+      sysCol "Privilege_checks_username" (TVarchar 32) true None
+      sysCol "Privilege_checks_hostname" (TVarchar 255) true None
+      sysCol "Require_row_format" TBool false None
+      sysCol
+          "Require_table_primary_key_check"
+          (TEnum [ "STREAM"; "ON"; "OFF"; "GENERATE" ])
+          false
+          (Some(VString "STREAM"))
+      sysCol
+          "Assign_gtids_to_anonymous_transactions_type"
+          (TEnum [ "OFF"; "LOCAL"; "UUID" ])
+          false
+          (Some(VString "OFF"))
+      sysCol "Assign_gtids_to_anonymous_transactions_value" TText true None ]
+
+let private mysqlSlaveWorkerInfoColumns =
+    [ primarySysCol "Id" (TInt true) false None
+      sysCol "Relay_log_name" TText false None
+      sysCol "Relay_log_pos" (TBigInt true) false None
+      sysCol "Master_log_name" TText false None
+      sysCol "Master_log_pos" (TBigInt true) false None
+      sysCol "Checkpoint_relay_log_name" TText false None
+      sysCol "Checkpoint_relay_log_pos" (TBigInt true) false None
+      sysCol "Checkpoint_master_log_name" TText false None
+      sysCol "Checkpoint_master_log_pos" (TBigInt true) false None
+      sysCol "Checkpoint_seqno" (TInt true) false None
+      sysCol "Checkpoint_group_size" (TInt true) false None
+      sysCol "Checkpoint_group_bitmap" TBlob false None
+      primarySysCol "Channel_name" (TVarchar 64) false None ]
 
 let private mysqlServersColumns =
     [ primarySysCol "Server_name" (TChar 64) false (Some(VString ""))
@@ -3153,13 +3333,13 @@ let private rootUserRow: Value[] =
                 | _ -> VNull)
     |> List.toArray
 
-let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] list) : Table =
+let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexes: IndexDef list) (rows: Value[] list) : Table =
     let table =
         { OriginalName = name
           Columns = columns
           RowsArray = RowStore.ofSeq rows
           NextAutoId = 1L
-          Indexes = []
+          Indexes = indexes
           ForeignKeys = []
           TableCharset = None
           TableCollation = None
@@ -3179,6 +3359,9 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
         SecondaryIndex = rebuildSecondaryIndex table
         SecondaryOrder = rebuildSecondaryOrder table
         FullTextIndexes = rebuildFullTextIndexes table }
+
+let private sysTable name columns rows =
+    sysTableWithIndexes name columns [] rows
 
 /// A registered virtual table dressed up as a rowless catalog `Table`, so
 /// the `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX` renderers
@@ -3296,22 +3479,53 @@ let mysqlCheckConstraintsColumns: ColumnDef list =
 
 let private mysqlCompatibilityTableDefs =
     [ "component", mysqlComponentColumns
+      "engine_cost", mysqlEngineCostColumns
       "func", mysqlFuncColumns
       "general_log", mysqlGeneralLogColumns
+      "gtid_executed", mysqlGtidExecutedColumns
       "help_category", mysqlHelpCategoryColumns
       "help_keyword", mysqlHelpKeywordColumns
       "help_relation", mysqlHelpRelationColumns
       "help_topic", mysqlHelpTopicColumns
+      "innodb_index_stats", mysqlInnodbIndexStatsColumns
+      "innodb_table_stats", mysqlInnodbTableStatsColumns
+      "ndb_binlog_index", mysqlNdbBinlogIndexColumns
       "password_history", mysqlPasswordHistoryColumns
       "plugin", mysqlPluginColumns
+      "procs_priv", mysqlProcsPrivColumns
       "proxies_priv", mysqlProxiesPrivColumns
+      "replication_asynchronous_connection_failover", mysqlReplicationFailoverColumns
+      "replication_asynchronous_connection_failover_managed", mysqlReplicationFailoverManagedColumns
+      "replication_group_configuration_version", mysqlReplicationGroupConfigurationVersionColumns
+      "replication_group_member_actions", mysqlReplicationGroupMemberActionsColumns
+      "server_cost", mysqlServerCostColumns
       "servers", mysqlServersColumns
+      "slave_master_info", mysqlSlaveMasterInfoColumns
+      "slave_relay_log_info", mysqlSlaveRelayLogInfoColumns
+      "slave_worker_info", mysqlSlaveWorkerInfoColumns
       "slow_log", mysqlSlowLogColumns
       "time_zone", mysqlTimeZoneColumns
       "time_zone_leap_second", mysqlTimeZoneLeapSecondColumns
       "time_zone_name", mysqlTimeZoneNameColumns
       "time_zone_transition", mysqlTimeZoneTransitionColumns
       "time_zone_transition_type", mysqlTimeZoneTransitionTypeColumns ]
+
+let private mysqlCompatibilityTableIndexes =
+    let grantor =
+        { Name = "Grantor"
+          KeyColumns =
+            [ { Name = "Grantor"
+                PrefixLength = None
+                Transform = None
+                Direction = Asc } ]
+          Unique = false
+          Visible = true
+          Kind = BTree }
+
+    Map.ofList [ "procs_priv", [ grantor ] ]
+
+let private compatibilityIndexes name =
+    Map.tryFind name mysqlCompatibilityTableIndexes |> Option.defaultValue []
 
 let private mysqlSystemDatabase () : Database =
     ([ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
@@ -3327,7 +3541,8 @@ let private mysqlSystemDatabase () : Database =
        "functions", sysTable "functions" mysqlStoredFunctionsColumns []
        "events", sysTable "events" mysqlEventsColumns []
        "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
-     @ (mysqlCompatibilityTableDefs |> List.map (fun (name, columns) -> name, sysTable name columns [])))
+     @ (mysqlCompatibilityTableDefs
+        |> List.map (fun (name, columns) -> name, sysTableWithIndexes name columns (compatibilityIndexes name) [])))
     |> Map.ofList
 
 /// Restores catalog tables absent from snapshots written by older versions.
@@ -3336,9 +3551,9 @@ let ensureMysqlSchema (store: Store) : unit =
 
     let dbRef = store.Databases.["mysql"]
 
-    let ensureTable name columns =
+    let ensureTable name columns indexes =
         match Map.tryFind name dbRef.Value with
-        | None -> dbRef.Value <- Map.add name (sysTable name columns []) dbRef.Value
+        | None -> dbRef.Value <- Map.add name (sysTableWithIndexes name columns indexes []) dbRef.Value
         | Some table ->
             let retainedColumns =
                 if table.Columns.Length > columns.Length then
@@ -3353,29 +3568,48 @@ let ensureMysqlSchema (store: Store) : unit =
                 |> List.map (fun column -> match column.Default with Some(DConst value) -> value | _ -> VNull)
                 |> Array.ofList
 
-            if table.Columns <> currentColumns then
+            let addedIndexes =
+                indexes
+                |> List.filter (fun required ->
+                    table.Indexes
+                    |> List.exists (fun existing ->
+                        existing.Name.Equals(required.Name, StringComparison.OrdinalIgnoreCase))
+                    |> not)
+
+            if table.Columns <> currentColumns || not addedIndexes.IsEmpty then
+                let indexes = table.Indexes @ addedIndexes
+                let updated =
+                    { table with
+                        Columns = currentColumns
+                        Indexes = indexes
+                        RowsArray = table.RowsArray |> RowStore.map (fun row -> Array.append row defaultValues) }
+
                 dbRef.Value <-
                     Map.add
                         name
-                        { table with
-                            Columns = currentColumns
-                            RowsArray = table.RowsArray |> RowStore.map (fun row -> Array.append row defaultValues) }
+                        { updated with
+                            UniqueIndex = rebuildUniqueIndex updated
+                            SecondaryIndex = rebuildSecondaryIndex updated
+                            SecondaryOrder = rebuildSecondaryOrder updated
+                            FullTextIndexes = rebuildFullTextIndexes updated }
                         dbRef.Value
 
     // Old trigger rows receive an empty definer and therefore fail closed;
     // treating a missing identity as root would turn catalog migration into
     // a privilege escalation.
-    ([ "triggers", mysqlTriggersColumns
-       "views", mysqlViewsColumns
-       "routines", mysqlRoutinesColumns
-       "functions", mysqlStoredFunctionsColumns
-       "events", mysqlEventsColumns
-       "check_constraints", mysqlCheckConstraintsColumns
-       "global_grants", mysqlGlobalGrantsColumns
-       "role_edges", mysqlRoleEdgesColumns
-       "default_roles", mysqlDefaultRolesColumns ]
-     @ mysqlCompatibilityTableDefs)
-    |> List.iter (fun (name, columns) -> ensureTable name columns)
+    [ "triggers", mysqlTriggersColumns
+      "views", mysqlViewsColumns
+      "routines", mysqlRoutinesColumns
+      "functions", mysqlStoredFunctionsColumns
+      "events", mysqlEventsColumns
+      "check_constraints", mysqlCheckConstraintsColumns
+      "global_grants", mysqlGlobalGrantsColumns
+      "role_edges", mysqlRoleEdgesColumns
+      "default_roles", mysqlDefaultRolesColumns ]
+    |> List.iter (fun (name, columns) -> ensureTable name columns [])
+
+    mysqlCompatibilityTableDefs
+    |> List.iter (fun (name, columns) -> ensureTable name columns (compatibilityIndexes name))
 
 let ensureRootDynamicPrivileges (store: Store) : unit =
     ensureMysqlSchema store

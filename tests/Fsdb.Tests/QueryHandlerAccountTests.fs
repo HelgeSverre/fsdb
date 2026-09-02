@@ -56,21 +56,35 @@ let tests =
                             "component"
                             "db"
                             "default_roles"
+                            "engine_cost"
                             "events"
                             "func"
                             "functions"
                             "general_log"
                             "global_grants"
+                            "gtid_executed"
                             "help_category"
                             "help_keyword"
                             "help_relation"
                             "help_topic"
+                            "innodb_index_stats"
+                            "innodb_table_stats"
+                            "ndb_binlog_index"
                             "password_history"
                             "plugin"
+                            "procs_priv"
                             "proxies_priv"
+                            "replication_asynchronous_connection_failover"
+                            "replication_asynchronous_connection_failover_managed"
+                            "replication_group_configuration_version"
+                            "replication_group_member_actions"
                             "role_edges"
                             "routines"
+                            "server_cost"
                             "servers"
+                            "slave_master_info"
+                            "slave_relay_log_info"
+                            "slave_worker_info"
                             "slow_log"
                             "tables_priv"
                             "time_zone"
@@ -1834,18 +1848,59 @@ let tests =
 
               for table, expectedColumns in
                   [ "component", [ "component_id"; "component_group_id"; "component_urn" ]
+                    "engine_cost",
+                    [ "engine_name"; "device_type"; "cost_name"; "cost_value"; "last_update"; "comment"
+                      "default_value" ]
                     "func", [ "name"; "ret"; "dl"; "type" ]
                     "general_log", [ "event_time"; "user_host"; "thread_id"; "server_id"; "command_type"; "argument" ]
+                    "gtid_executed", [ "source_uuid"; "interval_start"; "interval_end"; "gtid_tag" ]
                     "help_category", [ "help_category_id"; "name"; "parent_category_id"; "url" ]
                     "help_keyword", [ "help_keyword_id"; "name" ]
                     "help_relation", [ "help_topic_id"; "help_keyword_id" ]
                     "help_topic", [ "help_topic_id"; "name"; "help_category_id"; "description"; "example"; "url" ]
+                    "innodb_index_stats",
+                    [ "database_name"; "table_name"; "index_name"; "last_update"; "stat_name"; "stat_value"
+                      "sample_size"; "stat_description" ]
+                    "innodb_table_stats",
+                    [ "database_name"; "table_name"; "last_update"; "n_rows"; "clustered_index_size"
+                      "sum_of_other_index_sizes" ]
+                    "ndb_binlog_index",
+                    [ "Position"; "File"; "epoch"; "inserts"; "updates"; "deletes"; "schemaops"; "orig_server_id"
+                      "orig_epoch"; "gci"; "next_position"; "next_file" ]
                     "password_history", [ "Host"; "User"; "Password_timestamp"; "Password" ]
                     "plugin", [ "name"; "dl" ]
+                    "procs_priv",
+                    [ "Host"; "Db"; "User"; "Routine_name"; "Routine_type"; "Grantor"; "Proc_priv"; "Timestamp" ]
                     "proxies_priv",
                     [ "Host"; "User"; "Proxied_host"; "Proxied_user"; "With_grant"; "Grantor"; "Timestamp" ]
+                    "replication_asynchronous_connection_failover",
+                    [ "Channel_name"; "Host"; "Port"; "Network_namespace"; "Weight"; "Managed_name" ]
+                    "replication_asynchronous_connection_failover_managed",
+                    [ "Channel_name"; "Managed_name"; "Managed_type"; "Configuration" ]
+                    "replication_group_configuration_version", [ "name"; "version" ]
+                    "replication_group_member_actions",
+                    [ "name"; "event"; "enabled"; "type"; "priority"; "error_handling" ]
+                    "server_cost", [ "cost_name"; "cost_value"; "last_update"; "comment"; "default_value" ]
                     "servers",
                     [ "Server_name"; "Host"; "Db"; "Username"; "Password"; "Port"; "Socket"; "Wrapper"; "Owner" ]
+                    "slave_master_info",
+                    [ "Number_of_lines"; "Master_log_name"; "Master_log_pos"; "Host"; "User_name"; "User_password"
+                      "Port"; "Connect_retry"; "Enabled_ssl"; "Ssl_ca"; "Ssl_capath"; "Ssl_cert"; "Ssl_cipher"
+                      "Ssl_key"; "Ssl_verify_server_cert"; "Heartbeat"; "Bind"; "Ignored_server_ids"; "Uuid"
+                      "Retry_count"; "Ssl_crl"; "Ssl_crlpath"; "Enabled_auto_position"; "Channel_name"; "Tls_version"
+                      "Public_key_path"; "Get_public_key"; "Network_namespace"; "Master_compression_algorithm"
+                      "Master_zstd_compression_level"; "Tls_ciphersuites"; "Source_connection_auto_failover"
+                      "Gtid_only" ]
+                    "slave_relay_log_info",
+                    [ "Number_of_lines"; "Relay_log_name"; "Relay_log_pos"; "Master_log_name"; "Master_log_pos"
+                      "Sql_delay"; "Number_of_workers"; "Id"; "Channel_name"; "Privilege_checks_username"
+                      "Privilege_checks_hostname"; "Require_row_format"; "Require_table_primary_key_check"
+                      "Assign_gtids_to_anonymous_transactions_type"; "Assign_gtids_to_anonymous_transactions_value" ]
+                    "slave_worker_info",
+                    [ "Id"; "Relay_log_name"; "Relay_log_pos"; "Master_log_name"; "Master_log_pos"
+                      "Checkpoint_relay_log_name"; "Checkpoint_relay_log_pos"; "Checkpoint_master_log_name"
+                      "Checkpoint_master_log_pos"; "Checkpoint_seqno"; "Checkpoint_group_size"
+                      "Checkpoint_group_bitmap"; "Channel_name" ]
                     "slow_log",
                     [ "start_time"; "user_host"; "query_time"; "lock_time"; "rows_sent"; "rows_examined"; "db"
                       "last_insert_id"; "insert_id"; "server_id"; "sql_text"; "thread_id" ]
@@ -1884,6 +1939,23 @@ let tests =
                     "argument", TMediumBlob, false, false, false ]
 
               expectShapes
+                  "engine_cost"
+                  [ "engine_name", TVarchar 64, false, true, false
+                    "device_type", TInt false, false, true, false
+                    "cost_name", TVarchar 64, false, true, false
+                    "cost_value", TFloat false, true, false, false
+                    "last_update", TTimestamp 0, false, false, false
+                    "comment", TVarchar 1024, true, false, false
+                    "default_value", TFloat false, true, false, false ]
+
+              expectShapes
+                  "gtid_executed"
+                  [ "source_uuid", TChar 36, false, true, false
+                    "interval_start", TBigInt false, false, true, false
+                    "interval_end", TBigInt false, false, false, false
+                    "gtid_tag", TChar 32, false, true, false ]
+
+              expectShapes
                   "help_category"
                   [ "help_category_id", TSmallInt true, false, true, false
                     "name", TChar 64, false, false, true
@@ -1910,6 +1982,51 @@ let tests =
                     "url", TText, false, false, false ]
 
               expectShapes
+                  "procs_priv"
+                  [ "Host", TChar 255, false, true, false
+                    "Db", TChar 64, false, true, false
+                    "User", TChar 32, false, true, false
+                    "Routine_name", TChar 64, false, true, false
+                    "Routine_type", TEnum [ "FUNCTION"; "PROCEDURE" ], false, true, false
+                    "Grantor", TVarchar 288, false, false, false
+                    "Proc_priv", TSet [ "Execute"; "Alter Routine"; "Grant" ], false, false, false
+                    "Timestamp", TTimestamp 0, false, false, false ]
+
+              match store.Databases.["mysql"].Value.["procs_priv"].Indexes with
+              | [ index ] ->
+                  Expect.equal index.Name "Grantor" "procedure grant lookup index"
+                  Expect.equal index.Columns [ "Grantor" ] "procedure grant lookup column"
+                  Expect.isFalse index.Unique "procedure grant lookup is nonunique"
+              | indexes -> failtestf "expected the mysql.procs_priv Grantor index, got %A" indexes
+
+              expectShapes
+                  "replication_asynchronous_connection_failover"
+                  [ "Channel_name", TChar 64, false, true, false
+                    "Host", TChar 255, false, true, false
+                    "Port", TInt true, false, true, false
+                    "Network_namespace", TChar 64, false, true, false
+                    "Weight", TTinyInt true, false, false, false
+                    "Managed_name", TChar 64, false, true, false ]
+
+              expectShapes
+                  "slave_relay_log_info"
+                  [ "Number_of_lines", TInt true, false, false, false
+                    "Relay_log_name", TText, true, false, false
+                    "Relay_log_pos", TBigInt true, true, false, false
+                    "Master_log_name", TText, true, false, false
+                    "Master_log_pos", TBigInt true, true, false, false
+                    "Sql_delay", TInt false, true, false, false
+                    "Number_of_workers", TInt true, true, false, false
+                    "Id", TInt true, true, false, false
+                    "Channel_name", TVarchar 64, false, true, false
+                    "Privilege_checks_username", TVarchar 32, true, false, false
+                    "Privilege_checks_hostname", TVarchar 255, true, false, false
+                    "Require_row_format", TBool, false, false, false
+                    "Require_table_primary_key_check", TEnum [ "STREAM"; "ON"; "OFF"; "GENERATE" ], false, false, false
+                    "Assign_gtids_to_anonymous_transactions_type", TEnum [ "OFF"; "LOCAL"; "UUID" ], false, false, false
+                    "Assign_gtids_to_anonymous_transactions_value", TText, true, false, false ]
+
+              expectShapes
                   "slow_log"
                   [ "start_time", TTimestamp 6, false, false, false
                     "user_host", TMediumText, false, false, false
@@ -1931,6 +2048,25 @@ let tests =
                       Expect.equal column.Default (Some DCurrentTimestamp) (table + " timestamp default")
                       Expect.isTrue column.OnUpdateCurrentTimestamp (table + " timestamp update clause")
                   | other -> failtestf "expected empty mysql.%s timestamp metadata, got %A" table other
+
+              for table in [ "engine_cost"; "server_cost" ] do
+                  match Fsdb.Storage.scanList store "mysql" table with
+                  | Ok(columns, []) ->
+                      let defaultValue = columns |> List.find (fun column -> column.Name = "default_value")
+                      let lastUpdate = columns |> List.find (fun column -> column.Name = "last_update")
+                      Expect.isSome defaultValue.Generated (table + " generated default value")
+                      Expect.equal lastUpdate.Default (Some DCurrentTimestamp) (table + " timestamp default")
+                      Expect.isTrue lastUpdate.OnUpdateCurrentTimestamp (table + " timestamp update clause")
+                  | other -> failtestf "expected empty mysql.%s cost metadata, got %A" table other
+
+              let root, insertedCost =
+                  handle root "INSERT INTO mysql.server_cost (cost_name) VALUES ('row_evaluate_cost')"
+
+              Expect.equal insertedCost (Affected 1UL) "cost row inserts"
+
+              match handle root "SELECT default_value FROM mysql.server_cost" |> snd with
+              | ResultSet(_, [ [ Some "0.1" ] ]) -> ()
+              | other -> failtestf "expected generated server cost, got %A" other
 
               let root, _ = handle root "CREATE USER attribute_reader"
 

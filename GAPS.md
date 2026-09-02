@@ -44,7 +44,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
-| Metadata | 47 INFORMATION_SCHEMA views, 30 mysql.* tables, and the complete MySQL 8.4 keyword and `Com_*` registries | Storage statistics and engine-specific metadata families are stand-ins or absent |
+| Metadata | 47 INFORMATION_SCHEMA views, all 38 MySQL 8.4 `mysql.*` table schemas, six fsdb catalogs, and the complete keyword and `Com_*` registries | Storage statistics and engine-specific catalog contents are stand-ins or absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -445,7 +445,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 | Advanced account policy | auth-plugin selection and password history/reuse/current policy | explicit/default expiry lifetimes, resource limits, and account attributes/comments are enforced; advanced policy clauses remain absent | low | refusal |
 | Proxy users | supported | absent | low | refusal |
 | SHOW GRANTS completeness | includes role, dynamic-privilege, and PROXY lines | role/dynamic lines and `USING` materialization work; PROXY lines are absent | low | divergence |
-| System-table coverage | 38 mysql.* tables | 30 row-backed tables include 24 MySQL-named schemas plus six fsdb stored-object catalogs; help and log schemas are present but rowless, while optimizer cost, GTID, InnoDB statistics, procedure grants, and replication-state tables remain absent | low | divergence |
+| System-table coverage | 38 mysql.* tables with engine-maintained contents | all 38 table names and MySQL 8.4 column order, types, nullability, key membership, defaults, and generated columns exist, plus six fsdb stored-object catalogs; native catalog collations and engine-maintained help, log, cost, GTID, InnoDB-statistics, procedure-grant, NDB, and replication-state rows still differ or remain empty unless ordinary fsdb DML populates them | low | divergence |
 
 ## 14. Metadata, server administration, logging, replication
 
@@ -455,7 +455,7 @@ REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
 ENGINES, COLLATIONS, CHARACTER_SETS, extension metadata, geometry columns,
 optional optimizer/profiling/resource-group/file surfaces, keyword, plugin, user-attribute, and planar spatial-reference catalogs,
 privilege and role-grant views, and direct view table/routine dependencies, …), direct
-SELECT-ability of the 30 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
+SELECT-ability of all 38 MySQL-native `mysql.*` schemas plus six fsdb catalogs, SHOW TABLES/COLUMNS/INDEX/CREATE
 TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
 COLLATION/PRIVILEGES (73 oracle-verified rows)/PROCESSLIST/VARIABLES/STATUS/
 GRANTS/TRIGGERS/WARNINGS/ERRORS with statement condition counts, DESCRIBE,
