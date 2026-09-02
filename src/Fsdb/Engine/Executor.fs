@@ -2726,55 +2726,13 @@ let private combineStringCollations operation left right =
     else
         Error(1267, sprintf "Illegal mix of collations for operation '%s'" operation)
 
-let private compoundStringArguments = function
-    | FuncCall(name, args) ->
-        match name.ToUpperInvariant(), args with
-        | ("CONCAT" | "CONCAT_WS" | "COALESCE" | "GREATEST" | "LEAST"), values -> Some(name.ToLowerInvariant(), values)
-        | "IFNULL", values -> Some("ifnull", values)
-        | "IF", [ _; whenTrue; whenFalse ] -> Some("if", [ whenTrue; whenFalse ])
-        | "ELT", _ :: values -> Some("elt", values)
-        | "MAKE_SET", _ :: values -> Some("make_set", values)
-        | _ -> None
-    | Case(_, branches, fallback) ->
-        Some("case", (branches |> List.map snd) @ (fallback |> Option.toList))
-    | _ -> None
+let private registeredResultCollation ctx name =
+    Functions.lookupResultCollation name ctx.Registry
 
-let private inheritedStringArgument = function
-    | FuncCall(name, [ _; value ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) -> Some value
-    | FuncCall(name, first :: _) when
-        match name.ToUpperInvariant() with
-        | "UPPER"
-        | "UCASE"
-        | "LOWER"
-        | "LCASE"
-        | "REVERSE"
-        | "SUBSTRING"
-        | "SUBSTR"
-        | "LEFT"
-        | "RIGHT"
-        | "TRIM"
-        | "LTRIM"
-        | "RTRIM"
-        | "REPLACE"
-        | "INSERT"
-        | "REPEAT"
-        | "LPAD"
-        | "RPAD"
-        | "NULLIF"
-        | "ANY_VALUE" -> true
-        | _ -> false
-        -> Some first
-    | _ -> None
-
-let private builtinCompoundStringArguments ctx expression =
-    match expression, compoundStringArguments expression with
-    | FuncCall(name, _), Some _ when not (Functions.isUnmodifiedBuiltinScalar name ctx.Registry) -> None
-    | _, result -> result
-
-let private builtinInheritedStringArgument ctx expression =
-    match expression, inheritedStringArgument expression with
-    | FuncCall(name, _), Some _ when not (Functions.isUnmodifiedBuiltinScalar name ctx.Registry) -> None
-    | _, result -> result
+let private hasCombinedResultCollation ctx name =
+    match registeredResultCollation ctx name with
+    | Some(Functions.CombineArguments _) -> true
+    | _ -> false
 
 let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Result<CollationOperand, EvalError> =
     let connection coercibility = operand ctx.Store.ExecutionSettings.ConnectionCollation coercibility
@@ -2782,6 +2740,19 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
         match Collation.tryFind name with
         | Some collation -> Ok(operand collation coercibility)
         | None -> Error(1273, sprintf "Unknown collation: '%s'" name)
+
+    let combine operation expressions =
+        expressions
+        |> Storage.traverse (expressionCollation ctx)
+        |> Result.bind (function
+            | [] -> Ok(connection 4)
+            | first :: rest ->
+                rest
+                |> List.fold
+                    (fun state value ->
+                        state
+                        |> Result.bind (fun current -> combineStringCollations operation current value))
+                    (Ok first))
 
     match expression with
     | Collate(_, name) ->
@@ -2808,6 +2779,27 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
     | Cast(_, TJson) -> named "utf8mb4_bin" 2
     | Cast(_, (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob | TBit _)) -> named "binary" 2
     | Cast _ -> named "binary" 5
+    | Subquery select ->
+        selectProjectionColumns ctx.Store ctx.DbName select
+        |> List.tryHead
+        |> Option.flatten
+        |> Option.bind (collationOfColumn ctx)
+        |> Option.map (fun collation -> Ok(operand collation 2))
+        |> Option.defaultValue (Ok(connection 4))
+    | Distinct value
+    | OrderBy(value, _) -> expressionCollation ctx value
+    | FuncCall(name, [ value ])
+        when (name.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
+              || name.Equals("MAX", System.StringComparison.OrdinalIgnoreCase))
+             && Functions.isUnmodifiedBuiltinAggregate name ctx.Registry ->
+        expressionCollation ctx value
+    | FuncCall(name, value :: _)
+        when name.Equals("GROUP_CONCAT", System.StringComparison.OrdinalIgnoreCase) ->
+        expressionCollation ctx value
+    | FuncCall(name, _)
+        when name.Equals("JSON_ARRAYAGG", System.StringComparison.OrdinalIgnoreCase)
+             || name.Equals("JSON_OBJECTAGG", System.StringComparison.OrdinalIgnoreCase) ->
+        named "utf8mb4_bin" 2
     | FuncCall(name, _) when
         match name.ToUpperInvariant() with
         | "USER"
@@ -2818,18 +2810,33 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
         | "DATABASE" -> true
         | _ -> false
         -> Ok(connection 3)
-    | expression ->
-        match builtinCompoundStringArguments ctx expression with
-        | Some(operation, values) ->
-            values
-            |> Storage.traverse (expressionCollation ctx)
-            |> Result.bind (function
-                | [] -> Ok(connection 4)
-                | first :: rest -> rest |> List.fold (fun state value -> state |> Result.bind (fun current -> combineStringCollations operation current value)) (Ok first))
-        | None ->
-            match builtinInheritedStringArgument ctx expression with
-            | Some source -> expressionCollation ctx source
-            | None -> Ok(connection 4)
+    | FuncCall(name, [ _; Lit(VString charset) ]) when name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase) ->
+        named (Collation.defaultNameForCharset charset) 2
+    | FuncCall(name, arguments) ->
+        match registeredResultCollation ctx name with
+        | Some(Functions.InheritArgument index) ->
+            arguments
+            |> List.tryItem index
+            |> Option.map (expressionCollation ctx)
+            |> Option.defaultValue (Ok(connection 4))
+        | Some(Functions.CombineArguments includes) ->
+            arguments
+            |> List.indexed
+            |> List.choose (fun (index, argument) -> if includes index then Some argument else None)
+            |> combine (name.ToLowerInvariant())
+        | Some(Functions.FixedCollation(name, coercibility)) -> named name coercibility
+        | None -> Ok(connection 4)
+    | Case(_, branches, fallback) ->
+        (branches |> List.map snd) @ (fallback |> Option.toList) |> combine "case"
+    | WindowOver(fn, _) ->
+        match fn with
+        | WinLagLead(_, value, _, fallback) -> value :: Option.toList fallback |> combine "lag"
+        | WinFirstValue value
+        | WinLastValue value
+        | WinNthValue(value, _) -> expressionCollation ctx value
+        | WinAggregate(name, arguments) -> expressionCollation ctx (FuncCall(name, arguments))
+        | _ -> named "binary" 5
+    | _ -> Ok(connection 4)
 
 let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation option =
     expressionCollation ctx expr |> Result.toOption |> Option.map _.Collation
@@ -4423,9 +4430,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | None -> Functions.lookup (ctx.DbName + "." + name) ctx.Registry
 
         let compoundDescriptor () =
-            match builtinCompoundStringArguments ctx (FuncCall(name, args)) with
-            | Some _ -> expressionCollation ctx (FuncCall(name, args)) |> Result.map Some
-            | None -> Ok None
+            if hasCombinedResultCollation ctx name then
+                expressionCollation ctx (FuncCall(name, args)) |> Result.map Some
+            else
+                Ok None
 
         compoundDescriptor ()
         |> Result.bind (fun descriptor ->
@@ -9440,6 +9448,11 @@ and private rewriteAggregates
     | UserVariable _
     | SystemVariable _ -> Ok expr
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
+    | FuncCall(name, [ _ ])
+        when name.Equals("COLLATION", System.StringComparison.OrdinalIgnoreCase)
+             || name.Equals("CHARSET", System.StringComparison.OrdinalIgnoreCase)
+             || name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
+        Ok expr
     | FuncCall(name, args) when isAggregateCall registry expr -> evalAggregate registry ctxFor rows name args |> Result.map Lit
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | Row values -> values |> traverse sub |> Result.map Row
@@ -11277,8 +11290,9 @@ and private runWindowedSelect
 
                     metadataOfExpr (ctxFor [||]) wf
                     |> Option.map (fun metadata ->
+                        let collation = keyCollation (ctxFor [||]) wf
                         let column =
-                            deriveColumns [ name ] [ store.ExecutionSettings.ConnectionCollation ] [ metadata ]
+                            deriveColumns [ name ] [ collation ] [ metadata ]
                             |> List.head
                         { column with Nullable = nullable })
                     |> Option.defaultValue (syntheticColumn name (TBigInt false) nullable))

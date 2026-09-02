@@ -6997,6 +6997,10 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected the aborted transaction's INSERT rolled back, got %A" other
 
+              match handle (create 2 (Fsdb.Storage.create ())) "SELECT INSERT('abc', 1, 1)" |> snd with
+              | Err(1582, message) -> Expect.stringContains message "native function 'insert'" "function name"
+              | other -> failtestf "expected an INSERT arity error, got %A" other
+
           testCase "a DirectOnly function is rejected inside a generated column definition but fine in SELECT"
           <| fun _ ->
               let embeddish =

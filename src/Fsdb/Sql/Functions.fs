@@ -97,12 +97,20 @@ module VirtualTable =
 /// `COUNT(*)` is handled directly by the executor.
 type Aggregate = Value list -> Value
 
+/// Result collation lives beside invocation semantics so adding a builtin
+/// cannot require a second function-name list in the executor.
+type ResultCollation =
+    | InheritArgument of index: int
+    | CombineArguments of includeArgument: (int -> bool)
+    | FixedCollation of name: string * coercibility: int
+
 /// Case-insensitive scalar, aggregate, and extension registrations.
 type Registry =
     { Scalars: Map<string, Scalar>
       ScalarMetadata: Map<string, ColumnMetadata>
       ScalarParameters: Map<string, ColumnMetadata list>
       TextArguments: Map<string, int -> bool>
+      ResultCollations: Map<string, ResultCollation>
       Aggregates: Map<string, Aggregate>
       /// Rich (`QueryContext`-aware) registrations, kept separate from
       /// `Scalars` so builtins and plain `registerScalar` users never pay
@@ -117,6 +125,7 @@ let empty: Registry =
       ScalarMetadata = Map.empty
       ScalarParameters = Map.empty
       TextArguments = Map.empty
+      ResultCollations = Map.empty
       Aggregates = Map.empty
       Extensions = Map.empty }
 
@@ -127,7 +136,8 @@ let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
         Scalars = Map.add name fn registry.Scalars
         ScalarMetadata = Map.remove name registry.ScalarMetadata
         ScalarParameters = Map.remove name registry.ScalarParameters
-        TextArguments = Map.remove name registry.TextArguments }
+        TextArguments = Map.remove name registry.TextArguments
+        ResultCollations = Map.remove name registry.ResultCollations }
 
 let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
     let name = name.ToUpperInvariant()
@@ -136,7 +146,8 @@ let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: R
         Scalars = Map.add name fn registry.Scalars
         ScalarMetadata = Map.add name metadata registry.ScalarMetadata
         ScalarParameters = Map.remove name registry.ScalarParameters
-        TextArguments = Map.remove name registry.TextArguments }
+        TextArguments = Map.remove name registry.TextArguments
+        ResultCollations = Map.remove name registry.ResultCollations }
 
 let internal registerScalarWithSignature
     (name: string)
@@ -153,6 +164,24 @@ let internal registerTextScalar (name: string) (textArgument: int -> bool) (fn: 
     let name = name.ToUpperInvariant()
     let registry = registerScalar name fn registry
     { registry with TextArguments = Map.add name textArgument registry.TextArguments }
+
+let private registerResultCollation (name: string) (policy: ResultCollation) (registry: Registry) =
+    { registry with
+        ResultCollations = Map.add (name.ToUpperInvariant()) policy registry.ResultCollations }
+
+let internal registerStringScalar name textArgument resultCollation fn registry =
+    registry
+    |> registerTextScalar name textArgument fn
+    |> registerResultCollation name resultCollation
+
+let private registerScalarResult name resultCollation fn registry =
+    registry
+    |> registerScalar name fn
+    |> registerResultCollation name resultCollation
+
+let private binaryResult = FixedCollation("binary", 4)
+let private jsonResult = FixedCollation("utf8mb4_bin", 2)
+let private jsonTextResult = FixedCollation("utf8mb4_bin", 4)
 
 let registerAggregate (name: string) (fn: Aggregate) (registry: Registry) : Registry =
     { registry with Aggregates = Map.add (name.ToUpperInvariant()) fn registry.Aggregates }
@@ -173,6 +202,9 @@ let internal isTextArgument (name: string) index (registry: Registry) =
     registry.TextArguments
     |> Map.tryFind (name.ToUpperInvariant())
     |> Option.exists (fun predicate -> predicate index)
+
+let internal lookupResultCollation (name: string) (registry: Registry) =
+    registry.ResultCollations |> Map.tryFind (name.ToUpperInvariant())
 
 let lookupAggregate (name: string) (registry: Registry) : Aggregate option =
     Map.tryFind (name.ToUpperInvariant()) registry.Aggregates
@@ -3329,6 +3361,51 @@ let private replaceFn: Scalar =
         if raw then binaryValue result else VString result
     | _ -> VNull
 
+let private insertStringFn: Scalar =
+    function
+    | [ source; position; length; replacement ] when not (anyNull [ source; position; length; replacement ]) ->
+        let integerArgument value =
+            let number = toDouble value
+
+            if Double.IsNaN number then 0L
+            elif number >= float System.Int64.MaxValue then System.Int64.MaxValue
+            elif number <= float System.Int64.MinValue then System.Int64.MinValue
+            else int64 number
+
+        let position = integerArgument position
+        let length = integerArgument length
+
+        match tryRawBytes source with
+        | Some bytes ->
+            if position < 1L || position > int64 bytes.Length then
+                source
+            else
+                let start = int position - 1
+                let removed =
+                    if length < 0L then bytes.Length - start
+                    else min (int (min length (int64 System.Int32.MaxValue))) (bytes.Length - start)
+
+                let inserted = tryRawBytes replacement |> Option.defaultValue (Encoding.UTF8.GetBytes(req replacement))
+                Array.concat [ Array.take start bytes; inserted; Array.skip (start + removed) bytes ] |> VBytes
+        | None ->
+            let characters = req source |> _.EnumerateRunes() |> Seq.map _.ToString() |> Seq.toArray
+
+            if position < 1L || position > int64 characters.Length then
+                source
+            else
+                let start = int position - 1
+                let removed =
+                    if length < 0L then characters.Length - start
+                    else min (int (min length (int64 System.Int32.MaxValue))) (characters.Length - start)
+
+                String.concat
+                    ""
+                    [ characters |> Array.take start |> String.concat ""
+                      req replacement
+                      characters |> Array.skip (start + removed) |> String.concat "" ]
+                |> VString
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'insert'"))
+
 let private padFn (left: bool) : Scalar =
     function
     | [ s; lenV; p ] when not (anyNull [ s; lenV; p ]) ->
@@ -5519,68 +5596,71 @@ let builtins: Registry =
     empty
     |> registerScalar "NOW" nowFn
     |> registerScalar "CURRENT_TIMESTAMP" nowFn
-    |> registerTextScalar "CONCAT" everyArgument concatFn
-    |> registerTextScalar "UPPER" firstArgument (textMap VBytes (fun s -> s.ToUpperInvariant()))
-    |> registerTextScalar "LOWER" firstArgument (textMap VBytes (fun s -> s.ToLowerInvariant()))
+    |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) concatFn
+    |> registerStringScalar "UPPER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
+    |> registerStringScalar "UCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
+    |> registerStringScalar "LOWER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
+    |> registerStringScalar "LCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
     |> registerTextScalar "LENGTH" firstArgument lengthFn
     |> registerTextScalar "OCTET_LENGTH" firstArgument lengthFn
     |> registerTextScalar "BIT_LENGTH" firstArgument bitLengthFn
     |> registerTextScalar "CHAR_LENGTH" firstArgument charLengthFn
-    |> registerScalar "COALESCE" coalesceFn
-    |> registerScalar "IFNULL" ifNullFn
-    |> registerScalar "IF" ifFn
+    |> registerTextScalar "CHARACTER_LENGTH" firstArgument charLengthFn
+    |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
+    |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn
+    |> registerScalarResult "IF" (CombineArguments (arguments (set [ 1; 2 ]))) ifFn
     |> registerScalar "ABS" absFn
     |> registerScalar "ROUND" roundFn
     |> registerScalar "MOD" modFn
     // JSON
-    |> registerScalar "JSON_EXTRACT" jsonExtractFn
-    |> registerScalar "JSON_VALUE" jsonValueFn
-    |> registerScalar "JSON_UNQUOTE" jsonUnquoteFn
+    |> registerScalarResult "JSON_EXTRACT" jsonResult jsonExtractFn
+    |> registerScalarResult "JSON_VALUE" (FixedCollation("utf8mb4_0900_bin", 4)) jsonValueFn
+    |> registerScalarResult "JSON_UNQUOTE" jsonTextResult jsonUnquoteFn
     |> registerScalar "JSON_CONTAINS" jsonContainsFn
     |> registerScalar "JSON_MEMBER_OF" jsonMemberOfFn
     |> registerScalar "JSON_CONTAINS_PATH" jsonContainsPathFn
     |> registerScalar "JSON_OVERLAPS" jsonOverlapsFn
-    |> registerScalar "JSON_QUOTE" jsonQuoteFn
-    |> registerScalar "JSON_PRETTY" jsonPrettyFn
-    |> registerScalar "JSON_MERGE_PATCH" (jsonMergeFn mergeJsonPatch)
-    |> registerScalar "JSON_MERGE_PRESERVE" (jsonMergeFn mergeJsonPreserve)
-    |> registerScalar "JSON_ARRAY_APPEND" jsonArrayAppendFn
-    |> registerScalar "JSON_ARRAY_INSERT" jsonArrayInsertFn
+    |> registerScalarResult "JSON_QUOTE" jsonTextResult jsonQuoteFn
+    |> registerScalarResult "JSON_PRETTY" jsonTextResult jsonPrettyFn
+    |> registerScalarResult "JSON_MERGE_PATCH" jsonResult (jsonMergeFn mergeJsonPatch)
+    |> registerScalarResult "JSON_MERGE_PRESERVE" jsonResult (jsonMergeFn mergeJsonPreserve)
+    |> registerScalarResult "JSON_ARRAY_APPEND" jsonResult jsonArrayAppendFn
+    |> registerScalarResult "JSON_ARRAY_INSERT" jsonResult jsonArrayInsertFn
     |> registerScalar "JSON_STORAGE_SIZE" jsonStorageSizeFn
     |> registerScalar "JSON_STORAGE_FREE" jsonStorageFreeFn
-    |> registerScalar "JSON_SET" (jsonWriteFn JSet)
-    |> registerScalar "JSON_INSERT" (jsonWriteFn JInsert)
-    |> registerScalar "JSON_REPLACE" (jsonWriteFn JReplace)
-    |> registerScalar "JSON_REMOVE" jsonRemoveFn
-    |> registerScalar "JSON_ARRAY" jsonArrayFn
-    |> registerScalar "JSON_OBJECT" jsonObjectFn
+    |> registerScalarResult "JSON_SET" jsonResult (jsonWriteFn JSet)
+    |> registerScalarResult "JSON_INSERT" jsonResult (jsonWriteFn JInsert)
+    |> registerScalarResult "JSON_REPLACE" jsonResult (jsonWriteFn JReplace)
+    |> registerScalarResult "JSON_REMOVE" jsonResult jsonRemoveFn
+    |> registerScalarResult "JSON_ARRAY" jsonResult jsonArrayFn
+    |> registerScalarResult "JSON_OBJECT" jsonResult jsonObjectFn
     |> registerScalar "JSON_LENGTH" jsonLengthFn
     |> registerScalar "JSON_DEPTH" jsonDepthFn
     |> registerScalar "JSON_VALID" jsonValidFn
     |> registerScalar "JSON_SCHEMA_VALID" jsonSchemaValidFn
-    |> registerScalar "JSON_SCHEMA_VALIDATION_REPORT" jsonSchemaValidationReportFn
-    |> registerScalar "JSON_TYPE" jsonTypeFn
-    |> registerScalar "JSON_KEYS" jsonKeysFn
-    |> registerScalar "JSON_SEARCH" jsonSearchFn
-    |> registerScalar "WEIGHT_STRING" weightStringFn
-    |> registerScalar "ST_GEOMFROMTEXT" (geometryFromTextFn Geometry "ST_GeomFromText")
-    |> registerScalar "ST_GEOMETRYFROMTEXT" (geometryFromTextFn Geometry "ST_GeometryFromText")
-    |> registerScalar "GEOMFROMTEXT" (geometryFromTextFn Geometry "GeomFromText")
-    |> registerScalar "GEOMETRYFROMTEXT" (geometryFromTextFn Geometry "GeometryFromText")
-    |> registerScalar "ST_POINTFROMTEXT" (geometryFromTextFn Point "ST_PointFromText")
-    |> registerScalar "POINTFROMTEXT" (geometryFromTextFn Point "PointFromText")
-    |> registerScalar "ST_LINESTRINGFROMTEXT" (geometryFromTextFn LineString "ST_LineStringFromText")
-    |> registerScalar "ST_POLYGONFROMTEXT" (geometryFromTextFn Polygon "ST_PolygonFromText")
-    |> registerScalar "ST_GEOMFROMWKB" (geometryFromWkbFn Geometry "ST_GeomFromWKB")
-    |> registerScalar "ST_GEOMETRYFROMWKB" (geometryFromWkbFn Geometry "ST_GeometryFromWKB")
-    |> registerScalar "GEOMFROMWKB" (geometryFromWkbFn Geometry "GeomFromWKB")
-    |> registerScalar "ST_POINTFROMWKB" (geometryFromWkbFn Point "ST_PointFromWKB")
+    |> registerScalarResult "JSON_SCHEMA_VALIDATION_REPORT" jsonResult jsonSchemaValidationReportFn
+    |> registerScalarResult "JSON_TYPE" jsonTextResult jsonTypeFn
+    |> registerScalarResult "JSON_KEYS" jsonResult jsonKeysFn
+    |> registerScalarResult "JSON_SEARCH" jsonResult jsonSearchFn
+    |> registerScalarResult "WEIGHT_STRING" binaryResult weightStringFn
+    |> registerScalarResult "ST_GEOMFROMTEXT" binaryResult (geometryFromTextFn Geometry "ST_GeomFromText")
+    |> registerScalarResult "ST_GEOMETRYFROMTEXT" binaryResult (geometryFromTextFn Geometry "ST_GeometryFromText")
+    |> registerScalarResult "GEOMFROMTEXT" binaryResult (geometryFromTextFn Geometry "GeomFromText")
+    |> registerScalarResult "GEOMETRYFROMTEXT" binaryResult (geometryFromTextFn Geometry "GeometryFromText")
+    |> registerScalarResult "ST_POINTFROMTEXT" binaryResult (geometryFromTextFn Point "ST_PointFromText")
+    |> registerScalarResult "POINTFROMTEXT" binaryResult (geometryFromTextFn Point "PointFromText")
+    |> registerScalarResult "ST_LINESTRINGFROMTEXT" binaryResult (geometryFromTextFn LineString "ST_LineStringFromText")
+    |> registerScalarResult "ST_POLYGONFROMTEXT" binaryResult (geometryFromTextFn Polygon "ST_PolygonFromText")
+    |> registerScalarResult "ST_GEOMFROMWKB" binaryResult (geometryFromWkbFn Geometry "ST_GeomFromWKB")
+    |> registerScalarResult "ST_GEOMETRYFROMWKB" binaryResult (geometryFromWkbFn Geometry "ST_GeometryFromWKB")
+    |> registerScalarResult "GEOMFROMWKB" binaryResult (geometryFromWkbFn Geometry "GeomFromWKB")
+    |> registerScalarResult "ST_POINTFROMWKB" binaryResult (geometryFromWkbFn Point "ST_PointFromWKB")
     |> registerScalar "ST_ASTEXT" (geometryToTextFn "ST_AsText")
     |> registerScalar "ST_ASWKT" (geometryToTextFn "ST_AsWKT")
     |> registerScalar "ASTEXT" (geometryToTextFn "AsText")
-    |> registerScalar "ST_ASWKB" (geometryToWkbFn "ST_AsWKB")
-    |> registerScalar "ST_ASBINARY" (geometryToWkbFn "ST_AsBinary")
-    |> registerScalar "ASBINARY" (geometryToWkbFn "AsBinary")
+    |> registerScalarResult "ST_ASWKB" binaryResult (geometryToWkbFn "ST_AsWKB")
+    |> registerScalarResult "ST_ASBINARY" binaryResult (geometryToWkbFn "ST_AsBinary")
+    |> registerScalarResult "ASBINARY" binaryResult (geometryToWkbFn "AsBinary")
     |> registerScalar "ST_SRID" geometrySridFn
     |> registerScalar "ST_GEOMETRYTYPE" geometryTypeFn
     |> registerScalar "GEOMETRYTYPE" geometryTypeFn
@@ -5600,9 +5680,9 @@ let builtins: Registry =
     |> registerScalar "ST_INTERSECTS" (geometryRelationFn "ST_INTERSECTS" id)
     |> registerScalar "ST_DISJOINT" (geometryRelationFn "ST_DISJOINT" not)
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
-    |> registerScalar "ST_BUFFER" geometryBufferFn
-    |> registerScalar "ST_CONVEXHULL" geometryConvexHullFn
-    |> registerScalar "ST_ENVELOPE" geometryEnvelopeFn
+    |> registerScalarResult "ST_BUFFER" binaryResult geometryBufferFn
+    |> registerScalarResult "ST_CONVEXHULL" binaryResult geometryConvexHullFn
+    |> registerScalarResult "ST_ENVELOPE" binaryResult geometryEnvelopeFn
     |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)
     |> registerScalar "MBRWITHIN" (mbrPredicateFn "MBRWITHIN" (fun first second -> mbrContains second first))
     |> registerScalar "MBRINTERSECTS" (mbrPredicateFn "MBRINTERSECTS" mbrIntersects)
@@ -5666,59 +5746,60 @@ let builtins: Registry =
     |> registerScalar "CONVERT_TZ" convertTzFn
     |> registerScalar "STR_TO_DATE" strToDateFn
     // Strings
-    |> registerTextScalar "SUBSTRING" firstArgument substringFn
-    |> registerTextScalar "SUBSTR" firstArgument substringFn
-    |> registerTextScalar "MID" firstArgument substringFn
+    |> registerStringScalar "SUBSTRING" firstArgument (InheritArgument 0) substringFn
+    |> registerStringScalar "SUBSTR" firstArgument (InheritArgument 0) substringFn
+    |> registerStringScalar "MID" firstArgument (InheritArgument 0) substringFn
     |> registerTextScalar "LOCATE" (arguments (set [ 0; 1 ])) locateFn
     |> registerTextScalar "INSTR" everyArgument instrFn
     |> registerTextScalar "POSITION" everyArgument locateFn
-    |> registerTextScalar "REPLACE" everyArgument replaceFn
-    |> registerTextScalar "TRIM" firstArgument (textMap (trimRaw true true) (fun s -> s.Trim()))
-    |> registerTextScalar "TRIM_BOTH" everyArgument (trimSubstring true true)
-    |> registerTextScalar "TRIM_LEADING" everyArgument (trimSubstring true false)
-    |> registerTextScalar "TRIM_TRAILING" everyArgument (trimSubstring false true)
-    |> registerTextScalar "LTRIM" firstArgument (textMap (trimRaw true false) (fun s -> s.TrimStart()))
-    |> registerTextScalar "RTRIM" firstArgument (textMap (trimRaw false true) (fun s -> s.TrimEnd()))
-    |> registerTextScalar "LPAD" (arguments (set [ 0; 2 ])) (padFn true)
-    |> registerTextScalar "RPAD" (arguments (set [ 0; 2 ])) (padFn false)
-    |> registerTextScalar "LEFT" firstArgument leftFn
-    |> registerTextScalar "RIGHT" firstArgument rightFn
-    |> registerTextScalar "REVERSE" firstArgument (textMap (Array.rev >> VBytes) (fun s -> String(Array.rev (s.ToCharArray()))))
-    |> registerTextScalar "REPEAT" firstArgument repeatFn
+    |> registerStringScalar "REPLACE" everyArgument (InheritArgument 0) replaceFn
+    |> registerStringScalar "INSERT" everyArgument (InheritArgument 0) insertStringFn
+    |> registerStringScalar "TRIM" firstArgument (InheritArgument 0) (textMap (trimRaw true true) (fun s -> s.Trim()))
+    |> registerStringScalar "TRIM_BOTH" everyArgument (InheritArgument 1) (trimSubstring true true)
+    |> registerStringScalar "TRIM_LEADING" everyArgument (InheritArgument 1) (trimSubstring true false)
+    |> registerStringScalar "TRIM_TRAILING" everyArgument (InheritArgument 1) (trimSubstring false true)
+    |> registerStringScalar "LTRIM" firstArgument (InheritArgument 0) (textMap (trimRaw true false) (fun s -> s.TrimStart()))
+    |> registerStringScalar "RTRIM" firstArgument (InheritArgument 0) (textMap (trimRaw false true) (fun s -> s.TrimEnd()))
+    |> registerStringScalar "LPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (padFn true)
+    |> registerStringScalar "RPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (padFn false)
+    |> registerStringScalar "LEFT" firstArgument (InheritArgument 0) leftFn
+    |> registerStringScalar "RIGHT" firstArgument (InheritArgument 0) rightFn
+    |> registerStringScalar "REVERSE" firstArgument (InheritArgument 0) (textMap (Array.rev >> VBytes) (fun s -> String(Array.rev (s.ToCharArray()))))
+    |> registerStringScalar "REPEAT" firstArgument (InheritArgument 0) repeatFn
     |> registerScalar "SPACE" spaceFn
     |> registerTextScalar "ASCII" firstArgument asciiFn
     |> registerTextScalar "ORD" firstArgument ordFn
-    |> registerScalar "CHAR" charFn
+    |> registerScalarResult "CHAR" binaryResult charFn
     |> registerScalar "HEX" hexFn
-    |> registerTextScalar "UNHEX" firstArgument unhexFn
-    |> registerTextScalar "AES_ENCRYPT" (arguments (set [ 0; 1 ])) (aesEncrypt "aes-128-ecb")
-    |> registerTextScalar "AES_DECRYPT" (arguments (set [ 0; 1 ])) (aesDecrypt "aes-128-ecb")
+    |> registerStringScalar "UNHEX" firstArgument binaryResult unhexFn
+    |> registerStringScalar "AES_ENCRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesEncrypt "aes-128-ecb")
+    |> registerStringScalar "AES_DECRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesDecrypt "aes-128-ecb")
     |> registerTextScalar "MD5" firstArgument md5Fn
     |> registerTextScalar "SHA1" firstArgument sha1Fn
     |> registerTextScalar "SHA" firstArgument sha1Fn
     |> registerTextScalar "SHA2" firstArgument sha2Fn
     |> registerScalar "FORMAT" formatFn
-    |> registerTextScalar "SUBSTRING_INDEX" (arguments (set [ 0; 1 ])) substringIndexFn
-    |> registerTextScalar "CONCAT_WS" everyArgument concatWsFn
-    |> registerTextScalar "ELT" (argumentsAfter 0) eltFn
-    |> registerTextScalar "EXPORT_SET" (arguments (set [ 1; 2; 3 ])) exportSetFn
-    |> registerTextScalar "MAKE_SET" (argumentsAfter 0) makeSetFn
+    |> registerStringScalar "SUBSTRING_INDEX" (arguments (set [ 0; 1 ])) (InheritArgument 0) substringIndexFn
+    |> registerStringScalar "CONCAT_WS" everyArgument (CombineArguments everyArgument) concatWsFn
+    |> registerStringScalar "ELT" (argumentsAfter 0) (CombineArguments (argumentsAfter 0)) eltFn
+    |> registerStringScalar "EXPORT_SET" (arguments (set [ 1; 2; 3 ])) (CombineArguments (arguments (set [ 1; 2; 3 ]))) exportSetFn
+    |> registerStringScalar "MAKE_SET" (argumentsAfter 0) (CombineArguments (argumentsAfter 0)) makeSetFn
     |> registerScalar "FIELD" fieldFn
     |> registerTextScalar "FIND_IN_SET" everyArgument findInSetFn
-    |> registerTextScalar "QUOTE" firstArgument quoteFn
+    |> registerStringScalar "QUOTE" firstArgument (InheritArgument 0) quoteFn
     |> registerTextScalar "STRCMP" everyArgument strcmpFn
-    |> registerTextScalar "SOUNDEX" firstArgument soundexFn
+    |> registerStringScalar "SOUNDEX" firstArgument (InheritArgument 0) soundexFn
     |> registerTextScalar "TO_BASE64" firstArgument toBase64Fn
-    |> registerTextScalar "FROM_BASE64" firstArgument fromBase64Fn
-    |> registerTextScalar "COMPRESS" firstArgument compressFn
-    |> registerTextScalar "UNCOMPRESS" firstArgument uncompressFn
+    |> registerStringScalar "FROM_BASE64" firstArgument binaryResult fromBase64Fn
+    |> registerStringScalar "COMPRESS" firstArgument binaryResult compressFn
+    |> registerStringScalar "UNCOMPRESS" firstArgument binaryResult uncompressFn
     |> registerTextScalar "UNCOMPRESSED_LENGTH" firstArgument uncompressedLengthFn
-    |> registerScalar "RANDOM_BYTES" randomBytesFn
+    |> registerScalarResult "RANDOM_BYTES" binaryResult randomBytesFn
     |> registerScalar "UUID_SHORT" uuidShortFn
-    |> registerScalar "NAME_CONST" nameConstFn
+    |> registerScalarResult "NAME_CONST" (InheritArgument 1) nameConstFn
     |> registerScalar "REGEXP_LIKE" (regexpFunction "REGEXP_LIKE" Collation.defaultCollation |> Option.get)
-    |> registerScalar "REGEXP_REPLACE" (regexpFunction "REGEXP_REPLACE" Collation.defaultCollation |> Option.get)
-    |> registerScalar "REGEXP_SUBSTR" (regexpFunction "REGEXP_SUBSTR" Collation.defaultCollation |> Option.get)
+    |> registerScalarResult "REGEXP_REPLACE" (InheritArgument 0) (regexpFunction "REGEXP_REPLACE" Collation.defaultCollation |> Option.get)
+    |> registerScalarResult "REGEXP_SUBSTR" (InheritArgument 0) (regexpFunction "REGEXP_SUBSTR" Collation.defaultCollation |> Option.get)
     |> registerScalar "REGEXP_INSTR" (regexpFunction "REGEXP_INSTR" Collation.defaultCollation |> Option.get)
     // Math/misc
     |> registerScalar "CEIL" ceilFn
@@ -5746,10 +5827,10 @@ let builtins: Registry =
     |> registerScalar "SIGN" signFn
     |> registerScalar "TRUNCATE" truncateFn
     |> registerScalar "RAND" randFn
-    |> registerScalar "GREATEST" greatestFn
-    |> registerScalar "LEAST" leastFn
-    |> registerScalar "NULLIF" nullIfFn
-    |> registerScalar "ANY_VALUE" anyValueFn
+    |> registerScalarResult "GREATEST" (CombineArguments everyArgument) greatestFn
+    |> registerScalarResult "LEAST" (CombineArguments everyArgument) leastFn
+    |> registerScalarResult "NULLIF" (InheritArgument 0) nullIfFn
+    |> registerScalarResult "ANY_VALUE" (InheritArgument 0) anyValueFn
     |> registerScalar "ISNULL" isNullFn
     |> registerScalar "CONV" convFn
     |> registerScalar "BIN" binFn
@@ -5763,12 +5844,12 @@ let builtins: Registry =
     |> registerScalar "OCT" octFn
     |> registerTextScalar "CRC32" firstArgument crc32Fn
     |> registerScalar "UUID" uuidFn
-    |> registerScalar "UUID_TO_BIN" uuidToBinFn
+    |> registerScalarResult "UUID_TO_BIN" binaryResult uuidToBinFn
     |> registerScalar "BIN_TO_UUID" binToUuidFn
     |> registerScalar "IS_UUID" isUuidFn
     |> registerScalar "INET_ATON" inetAtonFn
     |> registerScalar "INET_NTOA" inetNtoaFn
-    |> registerScalar "INET6_ATON" inet6AtonFn
+    |> registerScalarResult "INET6_ATON" binaryResult inet6AtonFn
     |> registerScalar "INET6_NTOA" inet6NtoaFn
     |> registerScalar "IS_IPV4" isIpv4Fn
     |> registerScalar "IS_IPV6" isIpv6Fn

@@ -2288,10 +2288,88 @@ let tests =
                     match
                         runDefault
                             store
+                            "SELECT COLLATION(MID(bin, 1, 1)), COLLATION(TRIM(BOTH ai FROM bin)), COLLATION(LPAD(bin, 3, ai)), COLLATION(REPLACE(bin, ai, general)), COLLATION(SUBSTRING_INDEX(bin, ai, 1)), COLLATION(QUOTE(bin)), COLLATION(SOUNDEX(bin)), COLLATION(REGEXP_REPLACE(bin, 'a', 'x')), COLLATION(REGEXP_SUBSTR(bin, 'a')), COERCIBILITY(REGEXP_SUBSTR(bin, 'a')) FROM compound_collations"
+                    with
+                    | ResultSet(
+                        _,
+                        [ [ Some "utf8mb4_bin"; Some "utf8mb4_bin"; Some "utf8mb4_bin"; Some "utf8mb4_bin"; Some "utf8mb4_bin"
+                            Some "utf8mb4_bin"; Some "utf8mb4_bin"; Some "utf8mb4_bin"; Some "utf8mb4_bin"; Some "2" ] ]
+                      ) -> ()
+                    | other -> failtestf "unexpected source-preserving collation descriptors: %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT COLLATION(EXPORT_SET(1, ai, bin, general)), COERCIBILITY(EXPORT_SET(1, ai, bin, general)), COLLATION(CONVERT(ai USING latin1)), COERCIBILITY(CONVERT(ai USING latin1)), COLLATION(CONVERT(ai USING binary)), COERCIBILITY(CONVERT(ai USING binary)) FROM compound_collations"
+                    with
+                    | ResultSet(
+                        _,
+                        [ [ Some "utf8mb4_bin"; Some "2"; Some "latin1_swedish_ci"; Some "2"; Some "binary"; Some "2" ] ]
+                      ) -> ()
+                    | other -> failtestf "unexpected less-common result collation descriptors: %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT COLLATION(MIN(bin)), COERCIBILITY(MIN(bin)), COLLATION(ANY_VALUE(bin)), COERCIBILITY(ANY_VALUE(bin)), COLLATION(GROUP_CONCAT(bin)), COERCIBILITY(GROUP_CONCAT(bin)) FROM compound_collations"
+                    with
+                    | ResultSet(
+                        _,
+                        [ [ Some "utf8mb4_bin"; Some "2"; Some "utf8mb4_bin"; Some "2"; Some "utf8mb4_bin"; Some "2" ] ]
+                      ) -> ()
+                    | other -> failtestf "unexpected aggregate result collation descriptors: %A" other
+
+                    match
+                        runDefault
+                            store
                             "SELECT CONCAT(ai COLLATE utf8mb4_bin, general COLLATE utf8mb4_general_ci) FROM compound_collations"
                     with
                     | Err(1267, message) -> Expect.stringContains message "operation 'concat'" "function name"
                     | other -> failtestf "expected conflicting explicit CONCAT collations to fail, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT EXPORT_SET(1, ai COLLATE utf8mb4_0900_ai_ci, bin COLLATE utf8mb4_bin) FROM compound_collations"
+                    with
+                    | Err(1267, message) -> Expect.stringContains message "operation 'export_set'" "function name"
+                    | other -> failtestf "expected conflicting explicit EXPORT_SET collations to fail, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT INSERT('Quadratic', 3, 4, 'What'), INSERT('a😀b', 2, 1, 'X'), HEX(INSERT(X'618062', 2, 1, X'58')), INSERT('abc', 0, 1, 'X'), INSERT('abc', 2, -1, 'X'), INSERT('abc', 9223372036854775807, 1, 'X'), UCASE('Ab'), LCASE('Ab'), CHARACTER_LENGTH('a😀'), COLLATION(INSERT(bin, 1, 1, ai)) FROM compound_collations"
+                    with
+                    | ResultSet(
+                        _,
+                        [ [ Some "QuWhattic"; Some "aXb"; Some "615862"; Some "abc"; Some "aX"; Some "abc"; Some "AB"; Some "ab"; Some "2"
+                            Some "utf8mb4_bin" ] ]
+                      ) -> ()
+                    | other -> failtestf "unexpected string alias or INSERT result: %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT COLLATION((SELECT bin FROM compound_collations LIMIT 1)), COERCIBILITY((SELECT bin FROM compound_collations LIMIT 1)), COLLATION(CONCAT(ai, (SELECT bin FROM compound_collations LIMIT 1))), COERCIBILITY(CONCAT(ai, (SELECT bin FROM compound_collations LIMIT 1))), COLLATION(LAG(ai, 1, bin) OVER ()), COERCIBILITY(LAG(ai, 1, bin) OVER ()), COLLATION(FIRST_VALUE(bin) OVER ()), COERCIBILITY(FIRST_VALUE(bin) OVER ()) FROM compound_collations"
+                    with
+                    | ResultSet(
+                        _,
+                        [ [ Some "utf8mb4_bin"; Some "2"; Some "utf8mb4_bin"; Some "2"; Some "utf8mb4_bin"; Some "2"
+                            Some "utf8mb4_bin"; Some "2" ] ]
+                      ) -> ()
+                    | other -> failtestf "unexpected subquery or window collation descriptors: %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT COLLATION(UNHEX('61')), COERCIBILITY(UNHEX('61')), COLLATION(AES_ENCRYPT('a', 'k')), COLLATION(FROM_BASE64('YQ==')), COLLATION(COMPRESS('a')), COLLATION(RANDOM_BYTES(1)), COLLATION(UUID_TO_BIN(UUID())), COLLATION(INET6_ATON('::1')), COLLATION(ST_ASWKB(ST_POINTFROMTEXT('POINT(1 2)'))), COLLATION(JSON_SET('{}', '$.a', 1)), COERCIBILITY(JSON_SET('{}', '$.a', 1)), COLLATION(JSON_UNQUOTE('\"a\"')), COERCIBILITY(JSON_UNQUOTE('\"a\"'))"
+                    with
+                    | ResultSet(
+                        _,
+                        [ [ Some "binary"; Some "4"; Some "binary"; Some "binary"; Some "binary"; Some "binary"; Some "binary"
+                            Some "binary"; Some "binary"; Some "utf8mb4_bin"; Some "2"; Some "utf8mb4_bin"; Some "4" ] ]
+                      ) -> ()
+                    | other -> failtestf "unexpected fixed result collation descriptors: %A" other
 
                 testCase "equal-rank collations resolve symmetrically"
                 <| fun _ ->

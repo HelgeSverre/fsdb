@@ -126,7 +126,7 @@ identities for bit aggregates.
 ## 3. Built-in functions
 
 Registered surface (`Functions.builtins`): string (CONCAT family,
-SUBSTRING_INDEX, ELT/FIELD/FIND_IN_SET/EXPORT_SET, QUOTE, STRCMP,
+`INSERT`, SUBSTRING aliases, SUBSTRING_INDEX, ELT/FIELD/FIND_IN_SET/EXPORT_SET, QUOTE, STRCMP,
 WEIGHT_STRING with `AS CHAR(N)`/`AS BINARY(N)`, REGEXP_LIKE family with
 match_type, SOUNDEX, MAKE_SET, base64 conversion), math (ROUND with exact/approximate split, CONV,
 CRC32, BIT_COUNT, logarithms, exponentials, and trigonometry), date/time
@@ -207,11 +207,13 @@ for SHOW COLLATION/I_S; PAD SPACE semantics; connection collation for
 literal-vs-literal comparison; symmetric MySQL coercibility precedence for
 scalar, row, `IN`, subquery, quantified, `CASE`, `BETWEEN`, `LIKE`, and join
 comparisons; default utf8mb4_0900_ai_ci.
+Builtin string-result policies are registered beside scalar implementations;
+the executor composes them through aggregate, subquery, window, fixed binary,
+and JSON results without a second builtin-name list.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | `Collation` uses ICU CLDR tailoring; tie-break order among primary-equal strings and `WEIGHT_STRING()` textual bytes can differ (equality never does) | low | divergence |
-| Compound-expression collation | string functions derive result collation and coercibility from every argument | `CONCAT`/`CONCAT_WS`, `COALESCE`/`IFNULL`, `IF`, `CASE`, `GREATEST`/`LEAST`, `ELT`, `MAKE_SET`, and source-preserving string transforms derive their collation and coercibility from their arguments; less-common overloaded string results remain approximate | low | divergence |
 | Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with common POSIX character classes and mapped malformed patterns; remaining ICU-only grammar and error-code distinctions can differ | low | divergence |
 | Usable charsets | 40+ charsets with transcoding | `Collation.Charset` supports utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) has the same ceiling | low | refusal |
 
