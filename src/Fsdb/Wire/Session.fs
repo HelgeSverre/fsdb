@@ -195,7 +195,8 @@ type Savepoint =
     { Sequence: int
       BaseCatalog: Catalog
       Catalog: Catalog
-      PendingEventCount: int }
+      PendingEventCount: int
+      RollbackWork: int64 }
 
 type TransportMetrics =
     { mutable BytesReceived: int64

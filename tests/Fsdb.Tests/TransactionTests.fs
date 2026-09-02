@@ -429,9 +429,18 @@ let tests =
               let session, _ = handle session "CREATE TABLE tx_s (id INT)"
               let session, _ = handle session "BEGIN"
               let session, _ = handle session "INSERT INTO tx_s VALUES (1)"
+
+              let rollbackWork session =
+                  session.Tx
+                  |> Option.map (fun transaction -> Fsdb.Storage.transactionRollbackWork transaction.Snapshot)
+                  |> Option.defaultValue 0L
+
+              Expect.equal (rollbackWork session) 1L "the first insert contributes one rollback row"
               let session, _ = handle session "SAVEPOINT sp1"
               let session, _ = handle session "INSERT INTO tx_s VALUES (2)"
+              Expect.equal (rollbackWork session) 2L "the post-savepoint insert contributes another rollback row"
               let session, _ = handle session "ROLLBACK TO SAVEPOINT sp1"
+              Expect.equal (rollbackWork session) 1L "rolling back to the savepoint restores its rollback cost"
               let session, _ = handle session "COMMIT"
 
               match handle session "SELECT id FROM tx_s ORDER BY id" |> snd with
@@ -882,6 +891,55 @@ let tests =
               | None -> failtestf "expected the smaller transaction to deadlock, got %A" smallerResult
 
               Expect.equal largerResult (Affected 1UL) "the larger transaction survives and acquires row one"
+
+          testCase "deadlock victim cost counts changed rows rather than lock stripes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE tx_deadlock_collision (id INT PRIMARY KEY, n INT)"
+
+              let seedRows =
+                  [ for id in 1L .. 4097L -> [ VInt id; VInt 0L ] ]
+
+              match
+                  Fsdb.Storage.insertRows
+                      store
+                      Fsdb.Storage.defaultDatabase
+                      "tx_deadlock_collision"
+                      None
+                      seedRows
+              with
+              | Ok outcome -> Expect.equal outcome.Affected 4097 "all collision rows are seeded"
+              | Error error -> failtestf "expected collision rows to insert, got %A" error
+
+              let smaller, _ = handle (create 2 store) "BEGIN"
+              let larger, _ = handle (create 3 store) "BEGIN"
+              let smaller, _ = handle smaller "UPDATE tx_deadlock_collision SET n = 1 WHERE id = 2"
+
+              let larger, largerUpdate =
+                  handle larger "UPDATE tx_deadlock_collision SET n = 2 WHERE id IN (1, 4097)"
+
+              Expect.equal largerUpdate (Affected 2UL) "the larger transaction changes two rows on one lock stripe"
+
+              let smallerWaiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle smaller "UPDATE tx_deadlock_collision SET n = 1 WHERE id = 1")
+
+              Expect.isFalse (smallerWaiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the smaller transaction waits"
+              let larger, largerResult = handle larger "UPDATE tx_deadlock_collision SET n = 2 WHERE id = 2"
+              Expect.isTrue (smallerWaiting.Wait(TimeSpan.FromSeconds 2.0)) "the selected victim releases its row"
+              let smaller, smallerResult = smallerWaiting.Result
+
+              if larger.Tx.IsSome then
+                  handle larger "ROLLBACK" |> ignore
+
+              match Fsdb.Executor.errorInfo smallerResult with
+              | Some error ->
+                  Expect.equal error.Code 1213 "the one-row transaction is the victim"
+                  Expect.equal error.State "40001" "the selected victim keeps the deadlock SQLSTATE"
+                  Expect.isNone smaller.Tx "the victim transaction is rolled back"
+              | None -> failtestf "expected the smaller transaction to deadlock, got %A" smallerResult
+
+              Expect.equal largerResult (Affected 1UL) "the two-row transaction survives despite sharing one stripe"
 
           testCase "deadlock detection follows cycles longer than two transactions"
           <| fun _ ->

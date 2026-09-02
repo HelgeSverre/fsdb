@@ -326,6 +326,7 @@ type RowLockStripe =
 type TransactionLockContext =
     { Owner: int64
       HeldStripes: Collections.Generic.HashSet<RowLockStripe>
+      mutable RollbackWork: int64
       mutable DeadlockVictim: bool }
 
 type LockWait =
@@ -440,6 +441,27 @@ let private hasCommitConsumer (store: Store) =
 let private collectsCommitEvents (store: Store) =
     store.PendingEvents.IsSome || hasCommitConsumer store
 
+let rec private eventRollbackWork = function
+    | RowsInserted(_, _, rows)
+    | RowsDeleted(_, _, rows) -> int64 rows.Length
+    | RowsUpdated(_, _, changes) -> int64 changes.Length
+    | TransactionCommitted events
+    | XaPrepared(_, _, events)
+    | XaCommitted(_, events) -> events |> List.sumBy eventRollbackWork
+    | AutoIncrementAdvanced _
+    | SchemaChanged _
+    | SchemaChangedAt _
+    | XaRolledBack _ -> 0L
+
+let private recordRollbackWork (store: Store) events =
+    match store.TransactionLocks with
+    | Some context ->
+        let work = events |> List.sumBy eventRollbackWork
+
+        if work <> 0L then
+            Threading.Interlocked.Add(&context.RollbackWork, work) |> ignore
+    | None -> ()
+
 let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent list) (observerEvents: CommitEvent list) =
     let durableAction, observerError =
         lock store.CommitLock (fun () ->
@@ -465,6 +487,8 @@ let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent li
         observerError |> Option.iter raise
 
 let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
+    recordRollbackWork store events
+
     match events, store.PendingEvents with
     | [], _ -> ignore
     | events, Some buffer ->
@@ -480,7 +504,7 @@ let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> un
     | _ -> ignore
 
 let private prepareResultEvents (store: Store) (eventsOf: 'a -> CommitEvent list) (result: 'a) : unit -> unit =
-    if collectsCommitEvents store then
+    if collectsCommitEvents store || store.TransactionLocks.IsSome then
         prepareEvents store (eventsOf result)
     else
         ignore
@@ -541,6 +565,7 @@ let beginTransactionContext (store: Store) : Store =
             Some
                 { Owner = owner
                   HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
+                  RollbackWork = 0L
                   DeadlockVictim = false } }
 
 let beginTransactionWithBase (store: Store) : Catalog * Store =
@@ -553,10 +578,20 @@ let beginTransactionWithBase (store: Store) : Catalog * Store =
             Some
                 { Owner = owner
                   HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
+                  RollbackWork = 0L
                   DeadlockVictim = false } }
 
 let carryTransactionLocks (source: Store) (snapshot: Store) : Store =
     { snapshot with TransactionLocks = source.TransactionLocks }
+
+let transactionRollbackWork (store: Store) =
+    store.TransactionLocks
+    |> Option.map (fun context -> Threading.Interlocked.Read(&context.RollbackWork))
+    |> Option.defaultValue 0L
+
+let restoreTransactionRollbackWork (store: Store) work =
+    store.TransactionLocks
+    |> Option.iter (fun context -> Threading.Interlocked.Exchange(&context.RollbackWork, work) |> ignore)
 
 let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<RowLockStripe>) =
     for stripe in stripes do
@@ -582,6 +617,7 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
     match store.TransactionLocks with
     | None -> body ()
     | Some context ->
+        let rollbackWork = Threading.Interlocked.Read(&context.RollbackWork)
         let held = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
         let modes = Dictionary<RowLockStripe, bool * bool>(HashIdentity.Reference)
 
@@ -595,6 +631,7 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
         try
             body ()
         with _ ->
+            Threading.Interlocked.Exchange(&context.RollbackWork, rollbackWork) |> ignore
             let current =
                 lock context.HeldStripes (fun () ->
                     context.HeldStripes
@@ -2642,7 +2679,7 @@ let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockCon
         | Some owners ->
             let rollbackCost owner =
                 let waiting = graph.Edges.[owner]
-                lock waiting.Context.HeldStripes (fun () -> waiting.Context.HeldStripes.Count)
+                Threading.Interlocked.Read(&waiting.Context.RollbackWork)
 
             let victim =
                 owners
@@ -2769,6 +2806,7 @@ let private withWriteLocksFor
         | None ->
             { Owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
               HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
+              RollbackWork = 0L
               DeadlockVictim = false },
             true
 

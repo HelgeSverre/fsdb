@@ -2100,7 +2100,8 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
                                 { Sequence = seq
                                   BaseCatalog = tx.BaseCatalog
                                   Catalog = tx.Snapshot.Catalog
-                                  PendingEventCount = eventCount }
+                                  PendingEventCount = eventCount
+                                  RollbackWork = Storage.transactionRollbackWork tx.Snapshot }
                                 tx.Savepoints
                         NextSavepointSeq = seq + 1 } },
         Affected 0UL
@@ -2117,6 +2118,7 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
         // since, before wholesale-replacing the snapshot's catalog with it.
         let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
         Storage.setCatalog tx.Snapshot catalog
+        Storage.restoreTransactionRollbackWork tx.Snapshot savepoint.RollbackWork
         // Drop every event this transaction buffered after the savepoint —
         // otherwise a WAL replay would apply writes the savepoint rollback
         // just undid.
