@@ -44,7 +44,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
-| Metadata | 46 INFORMATION_SCHEMA views, 13 mysql.* tables, and the complete MySQL 8.4 `Com_*` registry | Storage statistics and engine-specific metadata families are stand-ins or absent |
+| Metadata | 47 INFORMATION_SCHEMA views, 13 mysql.* tables, and the complete MySQL 8.4 keyword and `Com_*` registries | Storage statistics and engine-specific metadata families are stand-ins or absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -447,11 +447,11 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 
 ## 14. Metadata, server administration, logging, replication
 
-Working: 46 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
+Working: 47 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
 COLUMNS (including column comments), STATISTICS, TABLE_CONSTRAINTS, KEY_COLUMN_USAGE,
 REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
 ENGINES, COLLATIONS, CHARACTER_SETS, extension metadata, geometry columns,
-optional optimizer/profiling/resource-group/file surfaces, plugin, user-attribute, and planar spatial-reference catalogs,
+optional optimizer/profiling/resource-group/file surfaces, keyword, plugin, user-attribute, and planar spatial-reference catalogs,
 privilege and role-grant views, and direct view table/routine dependencies, …), direct
 SELECT-ability of the 13 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
 TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
@@ -467,7 +467,7 @@ administrative probes.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| INFORMATION_SCHEMA breadth | 79 views incl. INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | 46 views; generic extension tables, optional histogram/optimizer/profiling/resource-group/file surfaces, plugin and user-attribute catalogs, geometry columns, role grants, direct view dependencies, privileges, ROUTINES, PARAMETERS, and EVENTS are live; InnoDB internals and KEYWORDS remain absent, while ST_SPATIAL_REFERENCE_SYSTEMS exposes fsdb's supported SRID 0 instead of MySQL's full EPSG registry | low | divergence |
+| INFORMATION_SCHEMA breadth | 79 views incl. INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | 47 views; generic extension tables, optional histogram/optimizer/profiling/resource-group/file surfaces, the complete 734-row keyword registry, plugin and user-attribute catalogs, geometry columns, role grants, direct view dependencies, privileges, ROUTINES, PARAMETERS, and EVENTS are live; InnoDB internals remain absent, while ST_SPATIAL_REFERENCE_SYSTEMS exposes fsdb's supported SRID 0 instead of MySQL's full EPSG registry | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | all 168 `Com_*` names are exposed with distinct session/global values and supported commands are live; unsupported commands remain truthfully zero, while engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |

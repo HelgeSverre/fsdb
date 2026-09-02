@@ -867,6 +867,20 @@ let tests =
               | ResultSet(_, [ [ Some "47" ] ]) -> ()
               | other -> failtestf "expected all 47 linear units, got %A" other
 
+              match run store "SELECT WORD, RESERVED FROM information_schema.keywords WHERE WORD IN ('SELECT', 'ACCOUNT', 'QUALIFY') ORDER BY WORD" with
+              | ResultSet(
+                  [ "WORD"; "RESERVED" ],
+                  [ [ Some "ACCOUNT"; Some "0" ]
+                    [ Some "QUALIFY"; Some "1" ]
+                    [ Some "SELECT"; Some "1" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected MySQL's keyword classifications, got %A" other
+
+              match run store "SELECT COUNT(*), SUM(RESERVED) FROM information_schema.keywords" with
+              | ResultSet(_, [ [ Some "734"; Some "262" ] ]) -> ()
+              | other -> failtestf "expected the complete MySQL keyword registry, got %A" other
+
           testCase "view table usage reports direct dependencies"
           <| fun _ ->
               let store = setup ()

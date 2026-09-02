@@ -2784,6 +2784,14 @@ let private filesColumns =
       col "STATUS" (TVarchar 256)
       col "EXTRA" (TVarchar 256) ]
 
+let private keywordsColumns =
+    [ col "WORD" (TVarchar 128)
+      col "RESERVED" (TInt false) ]
+
+let private keywordsRows =
+    InformationSchemaKeywords.rows
+    |> List.map (fun (word, reserved) -> [| vs word; vi (if reserved then 1 else 0) |])
+
 let private pluginsColumns =
     [ requiredCol "PLUGIN_NAME" (TVarchar 64)
       requiredCol "PLUGIN_VERSION" (TVarchar 20)
@@ -2939,6 +2947,7 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "EVENTS", eventsColumns
       "FILES", filesColumns
       "KEY_COLUMN_USAGE", keyColumnUsageColumns
+      "KEYWORDS", keywordsColumns
       "OPTIMIZER_TRACE", optimizerTraceColumns
       "PARAMETERS", parametersColumns
       "PARTITIONS", partitionsColumns
@@ -3192,6 +3201,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "PARAMETERS" -> Some(parametersRows catalog)
         | "EVENTS" -> Some(eventsRows catalog)
         | "FILES" -> Some []
+        | "KEYWORDS" -> Some keywordsRows
         | "PLUGINS" -> Some pluginsRows
         | "OPTIMIZER_TRACE"
         | "PROFILING"
