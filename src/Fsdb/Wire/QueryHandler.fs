@@ -410,6 +410,12 @@ let private checkTableMaintenanceAccess session store database table operation =
                     table
             )
 
+let private maintenanceRow table operation messageType message =
+    [ Some table; Some operation; Some messageType; Some message ]
+
+let private maintenanceResult rows =
+    ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
+
 let private lockWaitTimeout (session: Session) =
     lookupVar session "innodb_lock_wait_timeout"
     |> Option.flatten
@@ -697,18 +703,6 @@ let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string
 // (colocated with its `information_schema`-view row-builders), reached via
 // `showResult` below.
 // ---------------------------------------------------------------------------
-
-let private stripIdentifierQuotes (s: string) =
-    let text = s.Trim()
-
-    if
-        text.Length >= 2
-        && ((text.[0] = '`' && text.[text.Length - 1] = '`')
-            || (text.[0] = '"' && text.[text.Length - 1] = '"'))
-    then
-        text.Substring(1, text.Length - 2)
-    else
-        text
 
 let private showStatusRe =
     Regex(@"^SHOW\s+(?:(SESSION|GLOBAL)\s+)?STATUS(\s|$)", RegexOptions.IgnoreCase)
@@ -3617,15 +3611,16 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                     let qualified = dbName + "." + tableName
                     let rows =
                         if operation = "optimize" then
-                            [ [ Some qualified
-                                Some operation
-                                Some "note"
-                                Some "Table does not support optimize on partitions. All partitions will be rebuilt and analyzed." ]
-                              [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+                            [ maintenanceRow
+                                  qualified
+                                  operation
+                                  "note"
+                                  "Table does not support optimize on partitions. All partitions will be rebuilt and analyzed."
+                              maintenanceRow qualified operation "status" "OK" ]
                         else
-                            [ [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+                            [ maintenanceRow qualified operation "status" "OK" ]
 
-                    session, ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
+                    session, maintenanceResult rows
     | MaintainTables(operation, tables) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let store = Session.currentStore session
@@ -3647,24 +3642,15 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
                     match Storage.scan store dbName tableName with
                     | Ok _ when operation = "optimize" ->
-                        [ [ Some qualified
-                            Some operation
-                            Some "note"
-                            Some "Table does not support optimize, doing recreate + analyze instead" ]
-                          [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+                        [ maintenanceRow qualified operation "note" "Table does not support optimize, doing recreate + analyze instead"
+                          maintenanceRow qualified operation "status" "OK" ]
                     | Ok _ when operation = "repair" ->
-                        [ [ Some qualified
-                            Some operation
-                            Some "note"
-                            Some "The storage engine for the table doesn't support repair" ] ]
-                    | Ok _ -> [ [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+                        [ maintenanceRow qualified operation "note" "The storage engine for the table doesn't support repair" ]
+                    | Ok _ -> [ maintenanceRow qualified operation "status" "OK" ]
                     | Error _ ->
-                        [ [ Some qualified
-                            Some operation
-                            Some "Error"
-                            Some(sprintf "Table '%s.%s' doesn't exist" dbName tableName) ] ])
+                        [ maintenanceRow qualified operation "Error" (sprintf "Table '%s.%s' doesn't exist" dbName tableName) ])
 
-            session, ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
+            session, maintenanceResult rows
     | ShowOpenTables(db, pattern) ->
         let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
 

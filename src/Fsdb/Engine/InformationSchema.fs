@@ -778,9 +778,9 @@ let private tableConstraintsColumns =
       strCol "CONSTRAINT_TYPE"
       strCol "ENFORCED" ]
 
-let private storedCheckRows (catalog: Catalog) : Value[] list =
+let private storedChecks (catalog: Catalog) : SystemCatalog.Check.Entry list =
     mysqlTable catalog "check_constraints"
-    |> Option.map (fun table -> table.RowsArray |> List.ofSeq)
+    |> Option.map (fun table -> table.RowsArray |> Seq.choose SystemCatalog.Check.tryRead |> List.ofSeq)
     |> Option.defaultValue []
 
 let private checkConstraintsColumns =
@@ -790,8 +790,8 @@ let private checkConstraintsColumns =
       { col "CHECK_CLAUSE" TLongText with Nullable = false } ]
 
 let private checkConstraintsRows (catalog: Catalog) : Value[] list =
-    storedCheckRows catalog
-    |> List.map (fun row -> [| vs "def"; row.[1]; row.[0]; row.[3] |])
+    storedChecks catalog
+    |> List.map (fun check -> [| vs "def"; vs check.Schema; vs check.Name; vs check.Clause |])
 
 /// One row per named `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` constraint —
 /// unlike `STATISTICS` (above), a plain non-unique `INDEX` has no row here,
@@ -824,8 +824,15 @@ let private tableConstraintsRows (catalog: Catalog) : Value[] list =
         pkRows @ uniqueRows @ fkRows)
 
     let checks =
-        storedCheckRows catalog
-        |> List.map (fun row -> [| vs "def"; row.[1]; row.[0]; row.[1]; row.[2]; vs "CHECK"; row.[4] |])
+        storedChecks catalog
+        |> List.map (fun check ->
+            [| vs "def"
+               vs check.Schema
+               vs check.Name
+               vs check.Schema
+               vs check.Table
+               vs "CHECK"
+               vs (if check.Enforced then "YES" else "NO") |])
 
     structural @ checks
 
@@ -2146,31 +2153,29 @@ let private eventsColumns =
       strCol "COLLATION_CONNECTION"
       strCol "DATABASE_COLLATION" ]
 
-let private eventsRows (catalog: Catalog) =
+let private eventCatalogEntries (catalog: Catalog) : SystemCatalog.Event.Entry list =
     mysqlTable catalog "events"
-    |> Option.map (fun table ->
-        table.RowsArray
-        |> Seq.choose SystemCatalog.Event.tryRead
-        |> Seq.map (fun event ->
-            let eventType, intervalValue, intervalField =
-                match event.IntervalValue, event.IntervalField with
-                | Some value, Some field -> vs "RECURRING", vs value, vs field
-                | _ -> vs "ONE TIME", VNull, VNull
-
-            let created = event.Created |> Option.map VDateTime |> Option.defaultValue VNull
-            let lastAltered = event.LastAltered |> Option.map VDateTime |> Option.defaultValue VNull
-            let lastExecuted = event.LastExecuted |> Option.map VDateTime |> Option.defaultValue VNull
-
-            [| vs "def"; vs event.Schema; vs event.Name; vs event.Definer; vs event.TimeZone; vs "SQL"; vs event.Definition
-               eventType; event.ExecuteAt |> Option.map VDateTime |> Option.defaultValue VNull
-               intervalValue; intervalField; vs event.SqlMode
-               event.Starts |> Option.map VDateTime |> Option.defaultValue VNull
-               event.Ends |> Option.map VDateTime |> Option.defaultValue VNull
-               vs (Fsdb.Sql.Event.statusText event.Status); vs event.OnCompletion; created; lastAltered; lastExecuted
-               vs event.Comment; VInt event.Originator; vs event.CharacterSetClient; vs event.CollationConnection
-               vs event.DatabaseCollation |])
-        |> List.ofSeq)
+    |> Option.map (fun table -> table.RowsArray |> Seq.choose SystemCatalog.Event.tryRead |> List.ofSeq)
     |> Option.defaultValue []
+
+let private eventScheduleFields (event: SystemCatalog.Event.Entry) =
+    match event.IntervalValue, event.IntervalField with
+    | Some value, Some field -> "RECURRING", Some value, Some field
+    | _ -> "ONE TIME", None, None
+
+let private eventsRows (catalog: Catalog) =
+    let dateValue = Option.map VDateTime >> Option.defaultValue VNull
+    let textValue = Option.map VString >> Option.defaultValue VNull
+
+    eventCatalogEntries catalog
+    |> List.map (fun event ->
+        let eventType, intervalValue, intervalField = eventScheduleFields event
+
+        [| vs "def"; vs event.Schema; vs event.Name; vs event.Definer; vs event.TimeZone; vs "SQL"; vs event.Definition
+           vs eventType; dateValue event.ExecuteAt; textValue intervalValue; textValue intervalField; vs event.SqlMode
+           dateValue event.Starts; dateValue event.Ends; vs (Fsdb.Sql.Event.statusText event.Status); vs event.OnCompletion
+           dateValue event.Created; dateValue event.LastAltered; dateValue event.LastExecuted; vs event.Comment
+           VInt event.Originator; vs event.CharacterSetClient; vs event.CollationConnection; vs event.DatabaseCollation |])
 
 let private partitionsColumns =
     [ strCol "TABLE_CATALOG"
@@ -2909,18 +2914,48 @@ let private pluginsColumns =
       col "PLUGIN_LICENSE" (TVarchar 80)
       requiredCol "LOAD_OPTION" (TVarchar 64) ]
 
+type private PluginDescriptor =
+    { Name: string
+      Version: string
+      Status: string
+      PluginType: string
+      TypeVersion: string
+      Library: string option
+      LibraryVersion: string option
+      Author: string
+      Description: string
+      License: string
+      LoadOption: string }
+
+let private plugins =
+    [ { Name = "mysql_native_password"
+        Version = "1.1"
+        Status = "ACTIVE"
+        PluginType = "AUTHENTICATION"
+        TypeVersion = "2.1"
+        Library = None
+        LibraryVersion = None
+        Author = "fsdb"
+        Description = "Native MySQL authentication"
+        License = "GPL"
+        LoadOption = "ON" } ]
+
 let private pluginsRows =
-    [ [| vs "mysql_native_password"
-         vs "1.1"
-         vs "ACTIVE"
-         vs "AUTHENTICATION"
-         vs "2.1"
-         VNull
-         VNull
-         vs "fsdb"
-         vs "Native MySQL authentication"
-         vs "GPL"
-         vs "ON" |] ]
+    let textValue = Option.map VString >> Option.defaultValue VNull
+
+    plugins
+    |> List.map (fun plugin ->
+        [| vs plugin.Name
+           vs plugin.Version
+           vs plugin.Status
+           vs plugin.PluginType
+           vs plugin.TypeVersion
+           textValue plugin.Library
+           textValue plugin.LibraryVersion
+           vs plugin.Author
+           vs plugin.Description
+           vs plugin.License
+           vs plugin.LoadOption |])
 
 let private innodbFtDefaultStopwordColumns =
     [ { requiredCol "value" (TVarchar 18) with
@@ -3843,17 +3878,12 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                 onUpdate)
 
     let checkLines =
-        storedCheckRows catalog
-        |> List.filter (fun row ->
-            System.String.Equals(Value.toText row.[1] |> Option.defaultValue "", dbName, System.StringComparison.OrdinalIgnoreCase)
-            && System.String.Equals(Value.toText row.[2] |> Option.defaultValue "", t.OriginalName, System.StringComparison.OrdinalIgnoreCase))
-        |> List.sortBy (fun row -> Value.toText row.[0] |> Option.defaultValue "" |> _.ToLowerInvariant())
-        |> List.map (fun row ->
-            let name = Value.toText row.[0] |> Option.defaultValue ""
-            let clause = Value.toText row.[3] |> Option.defaultValue ""
-            let enforced = Value.toText row.[4] |> Option.defaultValue "YES"
-            let enforcement = if enforced.Equals("NO", System.StringComparison.OrdinalIgnoreCase) then " /*!80016 NOT ENFORCED */" else ""
-            sprintf "CONSTRAINT %s CHECK (%s)%s" (backtick name) clause enforcement)
+        storedChecks catalog
+        |> List.filter (fun check -> eqI check.Schema dbName && eqI check.Table t.OriginalName)
+        |> List.sortBy (fun check -> check.Name.ToLowerInvariant())
+        |> List.map (fun check ->
+            let enforcement = if check.Enforced then "" else " /*!80016 NOT ENFORCED */"
+            sprintf "CONSTRAINT %s CHECK (%s)%s" (backtick check.Name) check.Clause enforcement)
 
     let lines = (t.Columns |> List.map columnLine) @ pkLine @ indexLines @ fkLines @ checkLines
     let tableComment =
@@ -4124,13 +4154,9 @@ let showEngines () : ShowResult =
 
 let showPlugins () : ShowResult =
     let rows =
-        pluginsRows
-        |> List.map (fun row ->
-            [ Value.toText row.[0]
-              Value.toText row.[2]
-              Value.toText row.[3]
-              Value.toText row.[5]
-              Value.toText row.[9] ])
+        plugins
+        |> List.map (fun plugin ->
+            [ Some plugin.Name; Some plugin.Status; Some plugin.PluginType; plugin.Library; Some plugin.License ])
 
     Ok([ "Name"; "Status"; "Type"; "Library"; "License" ], rows)
 
@@ -4192,16 +4218,6 @@ let showStatus
 
     Ok([ "Variable_name"; "Value" ], rows)
 
-/// A `SHOW` over a per-database object catalog fsdb has no objects for
-/// (`SHOW TRIGGERS`/`SHOW EVENTS`/`SHOW PROCEDURE STATUS`...) — headers
-/// exactly MySQL 8.4's, rows genuinely empty; an unknown database still
-/// 1049s.
-let private showEmptyOf (catalog: Catalog) (dbName: string option) (headers: string list) : ShowResult =
-    match dbName with
-    | Some db when db.ToLowerInvariant() <> "information_schema" && not (Map.containsKey db catalog) ->
-        Error(1049, sprintf "Unknown database '%s'" db)
-    | _ -> Ok(headers, [])
-
 /// `SHOW TRIGGERS [FROM db]` — headers and row shape exactly MySQL 8.4.11's
 /// (write-probed), rows off the `mysql.triggers` catalog for `dbName`.
 let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
@@ -4228,14 +4244,30 @@ let showEvents (catalog: Catalog) (dbName: string option) : ShowResult =
     | Some db when db.ToLowerInvariant() <> "information_schema" && not (Map.containsKey db catalog) ->
         Error(1049, sprintf "Unknown database '%s'" db)
     | _ ->
+        let dateText = Option.bind (VDateTime >> toText)
+
         let rows =
-            eventsRows catalog
-            |> List.filter (fun row -> dbName |> Option.forall (fun db -> String.Equals(toText row.[1] |> Option.defaultValue "", db, StringComparison.OrdinalIgnoreCase)))
-            |> List.filter (fun row -> viewerHasPrivilege "EVENT" (Fsdb.Auth.OnDb(toText row.[1] |> Option.defaultValue "")))
-            |> List.map (fun row ->
-                [ toText row.[1]; toText row.[2]; toText row.[3]; toText row.[4]; toText row.[7]; toText row.[8]
-                  toText row.[9]; toText row.[10]; toText row.[12]; toText row.[13]; toText row.[14]; toText row.[20]
-                  toText row.[21]; toText row.[22]; toText row.[23] ])
+            eventCatalogEntries catalog
+            |> List.filter (fun event -> dbName |> Option.forall (eqI event.Schema))
+            |> List.filter (fun event -> viewerHasPrivilege "EVENT" (Fsdb.Auth.OnDb event.Schema))
+            |> List.map (fun event ->
+                let eventType, intervalValue, intervalField = eventScheduleFields event
+
+                [ Some event.Schema
+                  Some event.Name
+                  Some event.Definer
+                  Some event.TimeZone
+                  Some eventType
+                  dateText event.ExecuteAt
+                  intervalValue
+                  intervalField
+                  dateText event.Starts
+                  dateText event.Ends
+                  Some(Fsdb.Sql.Event.statusText event.Status)
+                  Some(string event.Originator)
+                  Some event.CharacterSetClient
+                  Some event.CollationConnection
+                  Some event.DatabaseCollation ])
 
         Ok(
             [ "Db"; "Name"; "Definer"; "Time zone"; "Type"; "Execute at"; "Interval value"; "Interval field"

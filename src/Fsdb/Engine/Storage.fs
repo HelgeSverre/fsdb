@@ -293,7 +293,7 @@ type DurableCommitSlot = { mutable Sink: DurableCommitSink option }
 
 let defaultDatabase = "fsdb"
 
-let private stripIdentifierQuotes (s: string) =
+let internal stripIdentifierQuotes (s: string) =
     let text = s.Trim()
 
     if
