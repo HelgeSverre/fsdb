@@ -2602,9 +2602,6 @@ let rec private outputColumnOrigins
     (qualifiers: Map<string, ColumnDef list * int>)
     (select: SelectStmt)
     : ColumnOrigin option list =
-    let sameName (left: string) (right: string) =
-        System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
-
     let qualifierColumns (qualifier: string) =
         qualifiers
         |> Map.tryFind (qualifier.ToLowerInvariant())
@@ -2687,11 +2684,11 @@ let rec private outputColumnOrigins
         source.Columns
         |> List.indexed
         |> List.choose (fun (index, column) ->
-            if sameName column.Name name then Some(originAt source index) else None)
+            if equalsIgnoreCase column.Name name then Some(originAt source index) else None)
 
     let byQualifier qualifier name =
         sources
-        |> List.tryFind (fun source -> sameName source.Qualifier qualifier)
+        |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier qualifier)
         |> Option.bind (fun source ->
             match matchingOrigins source name with
             | [ origin ] -> origin
@@ -2710,7 +2707,7 @@ let rec private outputColumnOrigins
             sources |> List.collect _.Origins
         | Star(Some qualifier) ->
             sources
-            |> List.tryFind (fun source -> sameName source.Qualifier qualifier)
+            |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier qualifier)
             |> Option.map _.Origins
             |> Option.defaultValue []
         | Col name -> [ byName name ]

@@ -4332,22 +4332,26 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
     else
         Ok None
 
+type private ProcedureCreation =
+    { Name: string
+      IfNotExists: bool
+      Parameters: string
+      SecurityType: string
+      Body: string
+      Definer: string option }
+
+type private FunctionCreation =
+    { Name: string
+      IfNotExists: bool
+      Parameters: string
+      ReturnType: string
+      Characteristics: string
+      Body: string
+      Definer: string option }
+
 type private TextRoutineCommand =
-    | CreateProcedure of
-        name: string *
-        ifNotExists: bool *
-        parameters: string *
-        securityType: string *
-        body: string *
-        definer: string option
-    | CreateFunction of
-        name: string *
-        ifNotExists: bool *
-        parameters: string *
-        returnType: string *
-        characteristics: string *
-        body: string *
-        definer: string option
+    | CreateProcedure of ProcedureCreation
+    | CreateFunction of FunctionCreation
     | CallProcedure of name: string * arguments: string
     | DropProcedure of name: string * ifExists: bool
     | DropFunction of name: string * ifExists: bool
@@ -4403,29 +4407,32 @@ let private tryTextRoutineCommand (sql: string) =
                 | value -> value.ToUpperInvariant()
 
         Some(
-            CreateProcedure(
-                create.Groups.["name"].Value,
-                create.Groups.["ifNotExists"].Success,
-                create.Groups.["parameters"].Value.Trim(),
-                security,
-                create.Groups.["body"].Value,
-                if create.Groups.["definer"].Success then Some(create.Groups.["definer"].Value.Trim()) else None
-            )
+            CreateProcedure
+                { Name = create.Groups.["name"].Value
+                  IfNotExists = create.Groups.["ifNotExists"].Success
+                  Parameters = create.Groups.["parameters"].Value.Trim()
+                  SecurityType = security
+                  Body = create.Groups.["body"].Value
+                  Definer =
+                    if create.Groups.["definer"].Success then
+                        Some(create.Groups.["definer"].Value.Trim())
+                    else
+                        None }
         )
     elif createFunction.Success then
         Some(
-            CreateFunction(
-                createFunction.Groups.["name"].Value,
-                createFunction.Groups.["ifNotExists"].Success,
-                createFunction.Groups.["parameters"].Value.Trim(),
-                createFunction.Groups.["returns"].Value.Trim(),
-                createFunction.Groups.["characteristics"].Value.Trim(),
-                createFunction.Groups.["body"].Value,
-                if createFunction.Groups.["definer"].Success then
-                    Some(createFunction.Groups.["definer"].Value.Trim())
-                else
-                    None
-            )
+            CreateFunction
+                { Name = createFunction.Groups.["name"].Value
+                  IfNotExists = createFunction.Groups.["ifNotExists"].Success
+                  Parameters = createFunction.Groups.["parameters"].Value.Trim()
+                  ReturnType = createFunction.Groups.["returns"].Value.Trim()
+                  Characteristics = createFunction.Groups.["characteristics"].Value.Trim()
+                  Body = createFunction.Groups.["body"].Value
+                  Definer =
+                    if createFunction.Groups.["definer"].Success then
+                        Some(createFunction.Groups.["definer"].Value.Trim())
+                    else
+                        None }
         )
     elif call.Success then
         Some(CallProcedure(call.Groups.["name"].Value, call.Groups.["arguments"].Value.Trim()))
@@ -5809,10 +5816,10 @@ and private dispatchNormalized session rawSql parserOptions sql =
             checkSessionAccess session session.Store [ privilege, Auth.OnDb database ]
 
         match command with
-        | CreateProcedure(qualifiedName, ifNotExists, parameters, securityType, body, requestedDefiner) ->
-            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-            let definer = requestedDefinerAccount session requestedDefiner
-            let mayChooseDefiner = canUseRequestedDefiner session requestedDefiner
+        | CreateProcedure creation ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) creation.Name
+            let definer = requestedDefinerAccount session creation.Definer
+            let mayChooseDefiner = canUseRequestedDefiner session creation.Definer
             let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)
 
             match authorize "CREATE ROUTINE" database with
@@ -5820,14 +5827,14 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | Ok() when not mayChooseDefiner ->
                 session,
                 Err(1227, "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation")
-            | Ok() when exists && ifNotExists ->
+            | Ok() when exists && creation.IfNotExists ->
                 Diagnostics.note 1304 (sprintf "PROCEDURE %s already exists" name)
                 session, Affected 0UL
             | Ok() when exists -> session, Err(1304, sprintf "PROCEDURE %s already exists" name)
             | Ok() ->
                 let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
 
-                match parseRoutineDefinition options parameters body with
+                match parseRoutineDefinition options creation.Parameters creation.Body with
                 | Error error -> session, error
                 | Ok _ ->
                     if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
@@ -5846,11 +5853,11 @@ and private dispatchNormalized session rawSql parserOptions sql =
                                   "collation_connection"; "database_collation" ])
                             [ [ VString database
                                 VString name
-                                VString body
+                                VString creation.Body
                                 VDateTime DateTime.Now
                                 VString(Auth.formatAccount definer)
-                                VString parameters
-                                VString securityType
+                                VString creation.Parameters
+                                VString creation.SecurityType
                                 VString session.Store.ExecutionSettings.SqlModeText
                                 VString session.Store.ExecutionSettings.ConnectionCharset
                                 VString session.Store.ExecutionSettings.ConnectionCollation.Name
@@ -5860,10 +5867,10 @@ and private dispatchNormalized session rawSql parserOptions sql =
                     | Error error ->
                         let code, message = Storage.toMySqlError error
                         session, Err(code, message)
-        | CreateFunction(qualifiedName, ifNotExists, parameters, returnType, characteristics, body, requestedDefiner) ->
-            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-            let definer = requestedDefinerAccount session requestedDefiner
-            let mayChooseDefiner = canUseRequestedDefiner session requestedDefiner
+        | CreateFunction creation ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) creation.Name
+            let definer = requestedDefinerAccount session creation.Definer
+            let mayChooseDefiner = canUseRequestedDefiner session creation.Definer
             let exists = functionEntries () |> List.exists (SystemCatalog.StoredFunction.matches database name)
 
             match Storage.databaseExists (Session.currentStore session) database, authorize "CREATE ROUTINE" database with
@@ -5872,14 +5879,17 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | true, Ok() when not mayChooseDefiner ->
                 session,
                 Err(1227, "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation")
-            | true, Ok() when exists && ifNotExists ->
+            | true, Ok() when exists && creation.IfNotExists ->
                 Diagnostics.note 1304 (sprintf "FUNCTION %s already exists" name)
                 session, Affected 0UL
             | true, Ok() when exists -> session, Err(1304, sprintf "FUNCTION %s already exists" name)
             | true, Ok() ->
                 let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
 
-                match parseFunctionCharacteristics characteristics, parseFunctionDefinition options parameters returnType body with
+                match
+                    parseFunctionCharacteristics creation.Characteristics,
+                    parseFunctionDefinition options creation.Parameters creation.ReturnType creation.Body
+                with
                 | Error error, _
                 | _, Error error -> session, error
                 | Ok(securityType, deterministic, dataAccess), Ok(_, parsedReturnType, _) ->
@@ -5900,10 +5910,10 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             [ [ VString database
                                 VString name
                                 VString(InformationSchema.columnTypeText parsedReturnType)
-                                VString body
+                                VString creation.Body
                                 VDateTime DateTime.Now
                                 VString(Auth.formatAccount definer)
-                                VString parameters
+                                VString creation.Parameters
                                 VString securityType
                                 VString(if deterministic then "YES" else "NO")
                                 VString dataAccess
@@ -6588,16 +6598,17 @@ type private AccountStatement =
     | TextAccountUpdate of authorized: bool
     | UnknownAccountStatement
 
+let private routineCreationIsAuthorized session qualifiedName requestedDefiner =
+    let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+    checkSessionAccess session session.Store [ "CREATE ROUTINE", Auth.OnDb database ]
+    |> Result.map (fun () -> canUseRequestedDefiner session requestedDefiner)
+    |> Result.defaultValue false
+
 let private textRoutineUpdateAuthorization session = function
     | CallProcedure _ -> None
-    | CreateProcedure(qualifiedName, _, _, _, _, requestedDefiner)
-    | CreateFunction(qualifiedName, _, _, _, _, _, requestedDefiner) ->
-        let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-
-        checkSessionAccess session session.Store [ "CREATE ROUTINE", Auth.OnDb database ]
-        |> Result.map (fun () -> canUseRequestedDefiner session requestedDefiner)
-        |> Result.defaultValue false
-        |> Some
+    | CreateProcedure creation -> routineCreationIsAuthorized session creation.Name creation.Definer |> Some
+    | CreateFunction creation -> routineCreationIsAuthorized session creation.Name creation.Definer |> Some
     | DropProcedure(qualifiedName, _)
     | DropFunction(qualifiedName, _) ->
         let database, _ = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
