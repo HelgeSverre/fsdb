@@ -3547,6 +3547,21 @@ let private compatibilityRows name =
           serverCost "memory_temptable_create_cost"
           serverCost "memory_temptable_row_cost"
           serverCost "row_evaluate_cost" ]
+    | "replication_group_configuration_version" ->
+        [ [| VString "replication_group_member_actions"; VUInt 1UL |] ]
+    | "replication_group_member_actions" ->
+        [ [| VString "mysql_disable_super_read_only_if_primary"
+             VString "AFTER_PRIMARY_ELECTION"
+             VInt 1L
+             VString "INTERNAL"
+             VUInt 1UL
+             VString "IGNORE" |]
+          [| VString "mysql_start_failover_channels_if_primary"
+             VString "AFTER_PRIMARY_ELECTION"
+             VInt 1L
+             VString "INTERNAL"
+             VUInt 10UL
+             VString "CRITICAL" |] ]
     | _ -> []
 
 let private mysqlSystemDatabase () : Database =

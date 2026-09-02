@@ -312,9 +312,10 @@ MySQL 8.4 table names use their native column order, types, nullability, key
 membership, defaults, and generated columns; six additional tables store
 fsdb views, triggers, routines, functions, events, and checks. The optimizer
 cost tables include MySQL's eight bootstrap rows and remain writable, although
-fsdb's planner does not consume their overrides. Native catalog collations and
-engine-maintained help, log, statistics, GTID, NDB, and replication rows still
-differ or remain empty. `CREATE USER` /
+fsdb's planner does not consume their overrides. The three stock group-action
+configuration rows are present without replication execution. Native catalog
+collations and engine-maintained help, log, statistics, GTID, NDB, and
+replication-channel rows still differ or remain empty. `CREATE USER` /
 `DROP USER` / `ALTER USER` /
 `SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
 path; passwords are mysql_native_password hashes verified at the handshake

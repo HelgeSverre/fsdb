@@ -1035,6 +1035,8 @@ let tests =
                       let expectedRows =
                           match table with
                           | "engine_cost" -> 2
+                          | "replication_group_configuration_version" -> 1
+                          | "replication_group_member_actions" -> 2
                           | "server_cost" -> 6
                           | _ -> 0
 

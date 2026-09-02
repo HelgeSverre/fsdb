@@ -1917,6 +1917,8 @@ let tests =
                       let expectedRows =
                           match table with
                           | "engine_cost" -> 2
+                          | "replication_group_configuration_version" -> 1
+                          | "replication_group_member_actions" -> 2
                           | "server_cost" -> 6
                           | _ -> 0
 
@@ -2099,6 +2101,34 @@ let tests =
                 ) ->
                   ()
               | other -> failtestf "expected MySQL server costs, got %A" other
+
+              match
+                  handle
+                      root
+                      "SELECT name, event, enabled, type, priority, error_handling FROM mysql.replication_group_member_actions ORDER BY name"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "mysql_disable_super_read_only_if_primary"
+                      Some "AFTER_PRIMARY_ELECTION"
+                      Some "1"
+                      Some "INTERNAL"
+                      Some "1"
+                      Some "IGNORE" ]
+                    [ Some "mysql_start_failover_channels_if_primary"
+                      Some "AFTER_PRIMARY_ELECTION"
+                      Some "1"
+                      Some "INTERNAL"
+                      Some "10"
+                      Some "CRITICAL" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected MySQL group replication actions, got %A" other
+
+              match handle root "SELECT name, version FROM mysql.replication_group_configuration_version" |> snd with
+              | ResultSet(_, [ [ Some "replication_group_member_actions"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected MySQL group replication version, got %A" other
 
               let root, _ = handle root "CREATE USER attribute_reader"
 
