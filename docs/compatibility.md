@@ -76,9 +76,9 @@ client, a reference application suite, or a benchmark threshold.
 
 The introspection surface was built from what real clients actually send:
 TablePlus 26.9.6's queries extracted verbatim from its binary, and
-phpMyAdmin 5.2.x's query builders read from source. All 50
-`information_schema` tables have column sets pinned against a
-live MySQL 8.4.11 (`SHOW COLUMNS` per table, both sides), and a ~70-query
+phpMyAdmin 5.2.x's query builders read from source. All 71
+`information_schema` tables have column descriptors pinned against a
+live MySQL 8.4.11, and a ~70-query
 replay fixture covering both clients' connect/browse/structure flows runs
 with a single divergence: `SHOW SLAVE STATUS`, which real 8.4 also rejects
 with 1064. Stored views, triggers, procedures, functions, their parameter

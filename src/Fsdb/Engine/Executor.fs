@@ -4105,8 +4105,9 @@ let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
                 current)
         registry
 
-let private processRestrictedInformationSchemaTables =
-    Set.ofList [ "INNODB_FOREIGN"; "INNODB_FOREIGN_COLS" ]
+let private informationSchemaRequiresProcess (tableName: string) =
+    tableName.StartsWith("INNODB_", System.StringComparison.OrdinalIgnoreCase)
+    && not (tableName.Equals("INNODB_FT_DEFAULT_STOPWORD", System.StringComparison.OrdinalIgnoreCase))
 
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
@@ -5041,7 +5042,7 @@ and private resolveTableRef
         let tableName = tableRef.Table.ToUpperInvariant()
 
         if
-            processRestrictedInformationSchemaTables.Contains tableName
+            informationSchemaRequiresProcess tableName
             && not (InformationSchema.canViewProcessMetadata ())
         then
             Error(Err(1227, "Access denied; you need (at least one of) the PROCESS privilege(s) for this operation"))

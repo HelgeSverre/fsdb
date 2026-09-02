@@ -748,6 +748,81 @@ let tests =
                       | None -> failtestf "NULL table_name in self-listing"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "InnoDB physical diagnostic views expose MySQL descriptors without fabricated rows"
+          <| fun _ ->
+              let store = setup ()
+
+              let tableNames =
+                  [ "INNODB_BUFFER_PAGE"
+                    "INNODB_BUFFER_PAGE_LRU"
+                    "INNODB_BUFFER_POOL_STATS"
+                    "INNODB_CACHED_INDEXES"
+                    "INNODB_CMP"
+                    "INNODB_CMPMEM"
+                    "INNODB_CMPMEM_RESET"
+                    "INNODB_CMP_PER_INDEX"
+                    "INNODB_CMP_PER_INDEX_RESET"
+                    "INNODB_CMP_RESET"
+                    "INNODB_DATAFILES"
+                    "INNODB_FT_BEING_DELETED"
+                    "INNODB_FT_CONFIG"
+                    "INNODB_FT_DELETED"
+                    "INNODB_FT_INDEX_CACHE"
+                    "INNODB_FT_INDEX_TABLE"
+                    "INNODB_METRICS"
+                    "INNODB_SESSION_TEMP_TABLESPACES"
+                    "INNODB_TABLESPACES"
+                    "INNODB_TABLESPACES_BRIEF"
+                    "INNODB_TEMP_TABLE_INFO" ]
+
+              let quotedNames = tableNames |> List.map (sprintf "'%s'") |> String.concat ","
+
+              match
+                  run
+                      store
+                      (sprintf
+                          "SELECT table_name FROM information_schema.tables WHERE table_schema='information_schema' AND table_name IN (%s) ORDER BY table_name"
+                          quotedNames)
+              with
+              | ResultSet(_, rows) ->
+                  let listed = rows |> List.choose List.tryHead |> List.choose id |> Set.ofList
+                  Expect.equal listed (Set.ofList tableNames) "all views self-list"
+              | other -> failtestf "expected the InnoDB view names, got %A" other
+
+              for tableName in tableNames do
+                  match run store (sprintf "SELECT * FROM information_schema.%s LIMIT 1" tableName) with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected truthful empty rows from %s, got %A" tableName other
+
+              match
+                  run
+                      store
+                      (sprintf
+                          "SELECT CONCAT_WS('|',table_name,ordinal_position,column_name,column_type,is_nullable,IF(column_default IS NULL,'<NULL>',CONCAT('<',column_default,'>')),IFNULL(collation_name,'-')) FROM information_schema.columns WHERE table_schema='information_schema' AND table_name IN (%s) ORDER BY table_name,ordinal_position"
+                          quotedNames)
+              with
+              | ResultSet(_, rows) ->
+                  let canonical =
+                      rows
+                      |> List.map (function
+                          | [ Some line ] -> line
+                          | row -> failtestf "expected one non-NULL descriptor field, got %A" row)
+                      |> String.concat "\n"
+                      |> fun text -> text + "\n"
+
+                  let digest =
+                      canonical
+                      |> System.Text.Encoding.UTF8.GetBytes
+                      |> System.Security.Cryptography.SHA256.HashData
+                      |> System.Convert.ToHexString
+                      |> _.ToLowerInvariant()
+
+                  Expect.equal
+                      digest
+                      "af2baf75773c0073d6cb490ba8871556ed70ef0421a563dc984b074d1a866cba"
+                      "the complete MySQL 8.4 descriptor export"
+              | other -> failtestf "expected InnoDB view descriptors, got %A" other
+
           testCase "INNODB_FT_DEFAULT_STOPWORD exposes MySQL's duplicate-preserving registry"
           <| fun _ ->
               let store = setup ()
