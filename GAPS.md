@@ -467,7 +467,7 @@ administrative probes.
 |---|---|---|---|---|
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS | 25 views; role and privilege views are live, while ROUTINES, PARAMETERS, and EVENTS expose supported declarations | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
-| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | all 168 `Com_*` names are exposed and supported commands are live; unsupported commands remain truthfully zero, but counters are process-wide rather than session-scoped and engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |
+| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | all 168 `Com_*` names are exposed with distinct session/global values and supported commands are live; unsupported commands remain truthfully zero, while engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
 

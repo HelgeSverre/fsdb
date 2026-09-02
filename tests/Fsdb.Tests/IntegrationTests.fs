@@ -2403,7 +2403,7 @@ let tests =
                   let session = create 1 store
 
                   for name in [ "Com_stmt_prepare"; "Com_stmt_execute"; "Com_stmt_close" ] do
-                      match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
+                      match handle session (sprintf "SHOW GLOBAL STATUS LIKE '%s'" name) |> snd with
                       | ResultSet(_, [ [ Some actual; Some "1" ] ]) when actual = name -> ()
                       | other -> failtestf "expected %s to equal one, got %A" name other
               }

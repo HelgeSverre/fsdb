@@ -700,7 +700,7 @@ let private stripIdentifierQuotes (s: string) =
         text
 
 let private showStatusRe =
-    Regex(@"^SHOW\s+(?:SESSION\s+|GLOBAL\s+)?STATUS(\s|$)", RegexOptions.IgnoreCase)
+    Regex(@"^SHOW\s+(?:(SESSION|GLOBAL)\s+)?STATUS(\s|$)", RegexOptions.IgnoreCase)
 
 let private showVariablesRe =
     Regex(@"^SHOW\s+(SESSION\s+|GLOBAL\s+)?VARIABLES(\s|$)", RegexOptions.IgnoreCase)
@@ -1948,7 +1948,7 @@ let private runXa (parserOptions: Parser.ParserOptions) (session: Session) sql =
             | Xa.Rollback _ -> InformationSchema.StatusCommand.xaRollback
             | Xa.Recover _ -> InformationSchema.StatusCommand.xaRecover
 
-        InformationSchema.recordCommand statusCommand
+        InformationSchema.recordCommand session.StatusCounters statusCommand
 
         let executed, result =
             match command with
@@ -2073,6 +2073,7 @@ let closeSession (session: Session) : unit =
     releaseAllAdvisoryLocks session |> ignore
     rollbackSession session |> ignore
     TableLocks.releaseExplicit session.Store session.ConnectionId
+    InformationSchema.releaseStatusCounters session.StatusCounters
 
 let private savepointNotFound (name: string) : QueryResult =
     Err(1305, sprintf "SAVEPOINT %s does not exist" name)
@@ -2306,7 +2307,7 @@ let rec private statementStatusCommand = function
 let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
     stmt
     |> statementStatusCommand
-    |> Option.iter InformationSchema.recordCommand
+    |> Option.iter (InformationSchema.recordCommand session.StatusCounters)
 
     let dbName = session.Database |> Option.defaultValue defaultDatabase
 
@@ -2968,7 +2969,7 @@ type private Probe =
     | Release of name: string
     | Use of dbName: string
     | ShowVariables of isGlobal: bool
-    | ShowStatus
+    | ShowStatus of isGlobal: bool
     | ShowEngines
     | ShowEngineInnodbStatus
     | ShowPlugins
@@ -3059,7 +3060,7 @@ let private probeStatusCommand = function
     | Release _ -> Some InformationSchema.StatusCommand.releaseSavepoint
     | Use _ -> Some InformationSchema.StatusCommand.changeDatabase
     | ShowVariables _ -> Some InformationSchema.StatusCommand.showVariables
-    | ShowStatus -> Some InformationSchema.StatusCommand.showStatus
+    | ShowStatus _ -> Some InformationSchema.StatusCommand.showStatus
     | ShowEngines -> Some InformationSchema.StatusCommand.showStorageEngines
     | ShowEngineInnodbStatus -> Some InformationSchema.StatusCommand.showEngineStatus
     | ShowPlugins -> Some InformationSchema.StatusCommand.showPlugins
@@ -3167,7 +3168,8 @@ let private tryProbe (sql: string) : Probe option =
         let scope = (showVariablesRe.Match sql).Groups.[1].Value
         Some(ShowVariables(scope.Trim().ToUpperInvariant() = "GLOBAL"))
     elif showStatusRe.IsMatch sql then
-        Some ShowStatus
+        let scope = (showStatusRe.Match sql).Groups.[1]
+        Some(ShowStatus(scope.Success && scope.Value.Equals("GLOBAL", StringComparison.OrdinalIgnoreCase)))
     elif showEnginesRe.IsMatch sql then
         Some ShowEngines
     elif showEngineInnodbStatusRe.IsMatch sql then
@@ -3323,7 +3325,9 @@ let private acquireExplicitTableLocks session sql =
                 | Error(code, message) -> session, Err(code, message)
 
 let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
-    probe |> probeStatusCommand |> Option.iter InformationSchema.recordCommand
+    probe
+    |> probeStatusCommand
+    |> Option.iter (InformationSchema.recordCommand session.StatusCounters)
 
     let session =
         match probe with
@@ -3451,9 +3455,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         else
             session, Err(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" session.User session.AccountHost dbName)
     | ShowVariables isGlobal -> session, handleShowVariables session isGlobal sql
-    | ShowStatus ->
+    | ShowStatus isGlobal ->
         session,
         InformationSchema.showStatus
+            isGlobal
+            session.StatusCounters
             (session.Capabilities &&& Protocol.ClientCompress <> 0u)
             session.TransportMetrics.BytesReceived
             session.TransportMetrics.BytesSent
@@ -4017,8 +4023,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_STATUS" [ "RELOAD"; "FLUSH_STATUS" ] with
         | Error(code, message) -> session, Err(code, message)
         | Ok() ->
-            InformationSchema.resetQuestions ()
-            InformationSchema.resetCommandCounts ()
+            InformationSchema.resetSessionStatuses ()
             session, Affected 0UL
     | FlushTables ->
         match checkAnySessionGlobalPrivilege session "RELOAD or FLUSH_TABLES" [ "RELOAD"; "FLUSH_TABLES" ] with
@@ -5626,7 +5631,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | ExecuteText _ -> InformationSchema.StatusCommand.executeSql
             | DeallocateText _ -> InformationSchema.StatusCommand.deallocateSql
 
-        InformationSchema.recordCommand statusCommand
+        InformationSchema.recordCommand session.StatusCounters statusCommand
 
         match command with
         | PrepareText(name, source) ->
@@ -5709,7 +5714,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | DropProcedure _ -> InformationSchema.StatusCommand.dropProcedure
             | DropFunction _ -> InformationSchema.StatusCommand.dropFunction
 
-        InformationSchema.recordCommand statusCommand
+        InformationSchema.recordCommand session.StatusCounters statusCommand
 
         let authorize privilege database =
             checkSessionAccess session session.Store [ privilege, Auth.OnDb database ]
@@ -6022,7 +6027,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | Event.Alter _ -> InformationSchema.StatusCommand.alterEvent
             | Event.Drop _ -> InformationSchema.StatusCommand.dropEvent
 
-        InformationSchema.recordCommand statusCommand
+        InformationSchema.recordCommand session.StatusCounters statusCommand
 
         let authorize database =
             checkSessionAccess session session.Store [ "EVENT", Auth.OnDb database ]
@@ -6273,7 +6278,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
         && (sql.Length = 2 || Char.IsWhiteSpace sql.[2])
 
     if Parser.isBlank sql then
-        InformationSchema.recordCommand InformationSchema.StatusCommand.emptyQuery
+        InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.emptyQuery
         session, Affected 0UL
     elif isXa then
         runXa parserOptions session sql
@@ -6288,7 +6293,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 | HandlerRead _ -> InformationSchema.StatusCommand.handlerRead
                 | HandlerClose _ -> InformationSchema.StatusCommand.handlerClose
 
-            InformationSchema.recordCommand statusCommand
+            InformationSchema.recordCommand session.StatusCounters statusCommand
 
             withStoredFunctionRegistry dispatch session (fun current ->
                 TableHandler.run (registryFor current) (lockWaitTimeout current) current command)
@@ -6297,7 +6302,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
         match StoredProgram.parseDiagnostics parserOptions sql with
         | Error _ -> session, syntaxError sql
         | Ok(Some diagnostics) ->
-            InformationSchema.recordCommand InformationSchema.StatusCommand.getDiagnostics
+            InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.getDiagnostics
             runTextDiagnostics session diagnostics
         | Ok None ->
             match Event.tryCommand parserOptions (validEventBody parserOptions) sql with

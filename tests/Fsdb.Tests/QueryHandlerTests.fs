@@ -5308,6 +5308,32 @@ let tests =
                   | ResultSet(_, [ [ Some actual; Some "1" ] ]) when actual = name -> ()
                   | other -> failtestf "expected %s to equal one, got %A" name other
 
+          TestSupport.processGlobalCase "SHOW SESSION STATUS isolates command counters"
+          <| fun _ ->
+              Fsdb.InformationSchema.resetCommandCounts ()
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let second = create 2 store
+
+              let first, _ = handle first "SELECT 1"
+              let first, _ = handle first "SELECT 2"
+              let second, _ = handle second "SELECT 3"
+
+              let expectValue session sql expected =
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ Some "Com_select"; Some value ] ]) ->
+                      Expect.equal (int64 value) expected sql
+                  | other -> failtestf "expected a Com_select row, got %A" other
+
+              expectValue first "SHOW SESSION STATUS LIKE 'Com_select'" 2L
+              expectValue second "SHOW SESSION STATUS LIKE 'Com_select'" 1L
+              expectValue first "SHOW GLOBAL STATUS LIKE 'Com_select'" 3L
+
+              let first, _ = handle first "FLUSH STATUS"
+              expectValue first "SHOW SESSION STATUS LIKE 'Com_select'" 0L
+              expectValue second "SHOW SESSION STATUS LIKE 'Com_select'" 0L
+              expectValue first "SHOW GLOBAL STATUS LIKE 'Com_select'" 3L
+
           testCase "SHOW STATUS reports connection compression and wire bytes"
           <| fun _ ->
               let metrics: Fsdb.Session.TransportMetrics =

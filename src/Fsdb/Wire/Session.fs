@@ -321,6 +321,7 @@ type Session =
       /// Effective handshake capabilities.
       Capabilities: uint32
       MultiStatementsEnabled: bool
+      StatusCounters: Fsdb.InformationSchema.StatusCounters
       TlsVersion: string option
       TlsCipher: string option
       TransportMetrics: TransportMetrics }
@@ -367,6 +368,7 @@ let create (connectionId: int) (store: Store) : Session =
       CustomFunctions = Fsdb.Functions.empty
       Capabilities = 0u
       MultiStatementsEnabled = false
+      StatusCounters = Fsdb.InformationSchema.createStatusCounters ()
       TlsVersion = None
       TlsCipher = None
       TransportMetrics =

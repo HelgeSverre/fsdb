@@ -1436,7 +1436,7 @@ let private handleConnection
 
                             command
                             |> Option.bind commandStatus
-                            |> Option.iter InformationSchema.recordCommand
+                            |> Option.iter (InformationSchema.recordCommand session.StatusCounters)
 
                             match command with
                             | None
@@ -1572,9 +1572,9 @@ let private handleConnection
 
                                     return! loop session
                             | Some(Query sql) ->
-                                InformationSchema.recordQuestion ()
+                                InformationSchema.recordQuestion session.StatusCounters
                                 if isShutdownStatement sql then
-                                    InformationSchema.recordCommand InformationSchema.StatusCommand.shutdown
+                                    InformationSchema.recordCommand session.StatusCounters InformationSchema.StatusCommand.shutdown
                                     match Auth.checkForAccount store (Auth.account session.User session.AccountHost) [ "SHUTDOWN", Auth.Global ] with
                                     | Ok() ->
                                         do!
@@ -1737,7 +1737,7 @@ let private handleConnection
 
                                 return! loop session
                             | Some ProcessInfo ->
-                                InformationSchema.recordQuestion ()
+                                InformationSchema.recordQuestion session.StatusCounters
 
                                 match runCancellable (fun () -> QueryHandler.handle session "SHOW PROCESSLIST") with
                                 | None -> ()
@@ -1757,7 +1757,7 @@ let private handleConnection
 
                                     return! loop session
                             | Some(ProcessKill connectionId) ->
-                                InformationSchema.recordQuestion ()
+                                InformationSchema.recordQuestion session.StatusCounters
 
                                 match runCancellable (fun () -> QueryHandler.handle session (sprintf "KILL CONNECTION %d" connectionId)) with
                                 | None -> ()
@@ -1903,7 +1903,7 @@ let private handleConnection
 
                                 return! loop session
                             | Some(StmtExecute payload) ->
-                                InformationSchema.recordQuestion ()
+                                InformationSchema.recordQuestion session.StatusCounters
                                 let r = Reader(payload)
                                 let stmtId = r.ReadInt32LE()
                                 let cursor = r.ReadByte() |> cursorRequest

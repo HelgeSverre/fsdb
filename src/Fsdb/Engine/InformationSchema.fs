@@ -998,8 +998,6 @@ type private AtomicCounter() =
     member _.Value = Threading.Interlocked.Read(&value)
     member _.Reset() = Threading.Interlocked.Exchange(&value, 0L) |> ignore
 
-let private questionCount = AtomicCounter()
-
 [<Struct>]
 type StatusCommand = private StatusCommand of string
 
@@ -1296,20 +1294,64 @@ let private reportedCommandNames =
       "stmt_reprepare" ]
     |> List.map (sprintf "Com_%s")
 
-let private commandCounters =
-    reportedCommandNames
-    |> List.map (fun name -> name, AtomicCounter())
-    |> Map.ofList
+type StatusCounters internal (id: int64) =
+    let questionCount = AtomicCounter()
 
-let recordQuestion () = questionCount.Increment()
-let questions () = questionCount.Value
-let resetQuestions () = questionCount.Reset()
+    let commandCounters =
+        reportedCommandNames
+        |> List.map (fun name -> name, AtomicCounter())
+        |> Map.ofList
 
-let recordCommand (StatusCommand name) =
-    commandCounters.[name].Increment()
+    member internal _.RecordQuestion() = questionCount.Increment()
+    member internal _.Id = id
+    member internal _.Questions = questionCount.Value
+    member internal _.RecordCommand name = commandCounters.[name].Increment()
+    member internal _.CommandCount name = commandCounters.[name].Value
 
-let resetCommandCounts () =
-    commandCounters |> Map.iter (fun _ counter -> counter.Reset())
+    member internal _.ResetQuestions() = questionCount.Reset()
+
+    member internal _.ResetCommands() =
+        commandCounters |> Map.iter (fun _ counter -> counter.Reset())
+
+    member internal this.Reset() =
+        this.ResetQuestions()
+        this.ResetCommands()
+
+let private processStatusCounters = StatusCounters 0L
+let private statusCounterId = ref 0L
+
+let private sessionStatusCounters =
+    Collections.Concurrent.ConcurrentDictionary<int64, WeakReference<StatusCounters>>()
+
+let createStatusCounters () =
+    let id = Threading.Interlocked.Increment statusCounterId
+    let counters = StatusCounters id
+    sessionStatusCounters.[id] <- WeakReference<StatusCounters>(counters)
+    counters
+
+let releaseStatusCounters (counters: StatusCounters) =
+    sessionStatusCounters.TryRemove counters.Id |> ignore
+
+let resetSessionStatuses () =
+    sessionStatusCounters
+    |> Seq.iter (fun (KeyValue(id, reference)) ->
+        match reference.TryGetTarget() with
+        | true, counters -> counters.Reset()
+        | _ -> sessionStatusCounters.TryRemove id |> ignore)
+
+let recordQuestion (sessionCounters: StatusCounters) =
+    processStatusCounters.RecordQuestion()
+    sessionCounters.RecordQuestion()
+
+let questions () = processStatusCounters.Questions
+
+let recordCommand (sessionCounters: StatusCounters) (StatusCommand name) =
+    processStatusCounters.RecordCommand name
+    sessionCounters.RecordCommand name
+
+let resetQuestions () = processStatusCounters.ResetQuestions()
+
+let resetCommandCounts () = processStatusCounters.ResetCommands()
 
 let registerProcessAs (id: int64) (account: Fsdb.Auth.Account) (user: string) (host: string) : ProcessEntry =
     let entry =
@@ -3231,6 +3273,8 @@ let showProcesslist (full: bool) : ShowResult =
     Ok([ "Id"; "User"; "Host"; "db"; "Command"; "Time"; "State"; "Info" ], rows)
 
 let showStatus
+    (isGlobal: bool)
+    (sessionCounters: StatusCounters)
     (compression: bool)
     (bytesReceived: int64)
     (bytesSent: int64)
@@ -3238,17 +3282,19 @@ let showStatus
     (sslVersion: string option)
     (likeOpt: string option)
     : ShowResult =
+    let statusCounters = if isGlobal then processStatusCounters else sessionCounters
+
     let rows =
         [ "Bytes_received", string bytesReceived
           "Bytes_sent", string bytesSent
           "Compression", if compression then "ON" else "OFF"
           "Ssl_cipher", sslCipher |> Option.defaultValue ""
           "Ssl_version", sslVersion |> Option.defaultValue ""
-          "Questions", string (questions ())
+          "Questions", string statusCounters.Questions
           "Threads_connected", string (connectedThreads ())
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds)
           for name in reportedCommandNames do
-              name, string commandCounters.[name].Value ]
+              name, string (statusCounters.CommandCount name) ]
         |> List.filter (fun (name, _) -> likeFilter likeOpt name)
         |> List.map (fun (name, value) -> [ Some name; Some value ])
 
