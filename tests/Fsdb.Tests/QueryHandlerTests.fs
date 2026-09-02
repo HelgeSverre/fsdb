@@ -539,9 +539,100 @@ let tests =
               | session, ResultSet(_, []) ->
                   Expect.equal
                       (session.LastResultColumnMetadata |> List.map _.TypeId)
-                      [ TypeLongLong; TypeVarString ]
+                      [ TypeLongLong; TypeJson ]
                       "function metadata"
               | _, other -> failtestf "expected an empty resultset, got %A" other
+
+          testCase "prepared builtins expose their static result families"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let sql =
+                  "SELECT GREATEST(1, 2), "
+                  + "GREATEST(1, CAST(2.5 AS DECIMAL(4,1))), "
+                  + "GREATEST(1, 2e0), "
+                  + "LEAST('a', 'bb'), "
+                  + "DATE_ADD(CAST('2024-01-01 00:00:00.123' AS DATETIME(3)), INTERVAL 1 SECOND), "
+                  + "TIMESTAMP('2024-01-01 01:02:03.1234'), "
+                  + "UNIX_TIMESTAMP(CAST('2024-01-01' AS DATE)), "
+                  + "FROM_UNIXTIME(0), "
+                  + "STR_TO_DATE('2024-01-02', '%Y-%m-%d'), "
+                  + "FORMAT(1.2, 2), CONV('10', 10, 16), BIN(3), HEX('a'), UUID(), SPACE(3), "
+                  + "DAYNAME(CAST('2024-01-01' AS DATE)), JSON_SET('{}', '$.a', 1), "
+                  + "STDDEV_POP(1), GROUP_CONCAT('x'), JSON_ARRAYAGG(1), "
+                  + "DATE_ADD(CAST('2024-01-01' AS DATE), INTERVAL 1 DAY), "
+                  + "DATE_ADD(CAST('2024-01-01' AS DATE), INTERVAL 1 SECOND), "
+                  + "ADDDATE(CAST('2024-01-01' AS DATE), 1), "
+                  + "TIMESTAMPADD(DAY, 1, CAST('2024-01-01' AS DATE)), "
+                  + "UNIX_TIMESTAMP(CAST('2024-01-01 00:00:00.123' AS DATETIME(3))), "
+                  + "FROM_UNIXTIME(CAST(1.2 AS DECIMAL(2,1))), "
+                  + "STR_TO_DATE('01:02:03.123456', '%H:%i:%s.%f'), "
+                  + "STR_TO_DATE('2024-01-01 01:02:03', '%Y-%m-%d %H:%i:%s'), "
+                  + "ADDTIME(TIME '01:00:00', TIME '00:01:00'), "
+                  + "IF(1, CAST(2.5 AS DECIMAL(4,1)), NULL), "
+                  + "COALESCE(NULL, CAST(2.5 AS DECIMAL(4,1))), "
+                  + "GREATEST(1, '2'), COALESCE(1, '2'), IF(1, 1, '2'), "
+                  + "CASE WHEN 1 THEN 1 ELSE '2' END"
+
+              match prepareStatementForSession session sql with
+              | Ok(statement, parameterCount) ->
+                  let _, columns = preparedMetadata session statement parameterCount
+
+                  Expect.equal
+                      (columns |> List.map (fun column -> column.Metadata.TypeId))
+                      [ TypeLongLong
+                        TypeNewDecimal
+                        TypeDouble
+                        TypeVarString
+                        TypeDateTime
+                        TypeDateTime
+                        TypeLongLong
+                        TypeDateTime
+                        TypeDate
+                        TypeVarString
+                        TypeVarString
+                        TypeVarString
+                        TypeVarString
+                        TypeVarString
+                        TypeVarString
+                        TypeVarString
+                        TypeJson
+                        TypeDouble
+                        TypeBlob
+                        TypeJson
+                        TypeDate
+                        TypeDateTime
+                        TypeDate
+                        TypeDate
+                        TypeNewDecimal
+                        TypeDateTime
+                        TypeTime
+                        TypeDateTime
+                        TypeTime
+                        TypeNewDecimal
+                        TypeNewDecimal
+                        TypeVarString
+                        TypeVarString
+                        TypeVarString
+                        TypeVarString ]
+                      "prepared result families"
+
+                  let metadata = columns |> List.map _.Metadata
+                  Expect.equal metadata.[1].Decimals 1uy "decimal scale"
+                  Expect.equal metadata.[2].Decimals 31uy "double scale marker"
+                  Expect.equal metadata.[4].Decimals 3uy "DATE_ADD precision"
+                  Expect.equal metadata.[5].Decimals 4uy "TIMESTAMP precision"
+                  Expect.equal metadata.[24].Decimals 3uy "UNIX_TIMESTAMP precision"
+                  Expect.equal metadata.[25].Decimals 1uy "FROM_UNIXTIME precision"
+                  Expect.equal metadata.[26].Decimals 6uy "STR_TO_DATE precision"
+                  Expect.isTrue (metadata.[0].Flags &&& NotNullFlag <> 0us) "GREATEST nullability"
+                  Expect.isTrue (metadata.[29].Flags &&& NotNullFlag = 0us) "IF nullability"
+                  Expect.isTrue (metadata.[30].Flags &&& NotNullFlag <> 0us) "COALESCE nullability"
+                  Expect.all
+                      metadata.[31..34]
+                      (fun item -> item.Flags &&& NotNullFlag <> 0us)
+                      "mixed textual expressions remain non-null"
+              | Error error -> failtestf "expected builtin statement to prepare, got %A" error
 
           testCase "recursive JSON schemas return the MySQL maximum-depth error"
           <| fun _ ->

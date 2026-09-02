@@ -406,7 +406,10 @@ configured system-variable set, including same-value assignments, plus the
 generic state-change tracker and transaction state/characteristics when enabled.
 Physical result columns report
 primary, unique, composite, and non-unique key membership consistently across
-queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`.
+queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`. Prepared
+descriptors derive schema, operator, aggregate, overloaded scalar, temporal,
+JSON, spatial, and registered-extension result families without evaluating
+the statement.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -416,7 +419,6 @@ queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`.
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and eight-flag transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateAccount` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
-| Prepared metadata | STMT_PREPARE_OK carries result columns and typed parameter definitions | result columns, schema/operator/DML contexts, common numeric, temporal, JSON, and spatial built-in arguments, and registered-extension signatures are derived statically without evaluating the statement; less-common overloaded built-ins remain generic VAR_STRING | low | divergence |
 | System variables | hundreds live | common connector, limit, transaction, password-lifetime, and week-format variables are live; most others are inert or absent, and time_zone remains a static string without conversion | medium | divergence |
 
 ## 13. Authentication and privileges

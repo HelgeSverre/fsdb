@@ -1507,11 +1507,6 @@ module private MySqlTemporal =
                 Some(d.ToDateTime(TimeOnly(0, 0)).AddHours(float h).AddMinutes(float mi).AddSeconds(float sec).AddTicks(micros * 10L))
             | _ -> None
 
-    /// `TIME` has no `Value` case of its own (see `Functions.timeFn`), so it
-    /// lands as the `[-]HH:MM:SS[.frac]` text MySQL renders — hours past 24
-    /// (up to the 838:59:59 ceiling) and a leading sign included, neither of
-    /// which `TimeOnly` can hold. The declared fraction width is preserved,
-    /// as MySQL does.
     let tryTime (s: string) : string option =
         let neg = s.StartsWith "-"
         let body = if neg || s.StartsWith "+" then s.Substring 1 else s
@@ -1584,11 +1579,8 @@ module private MySqlTemporal =
 /// has to be validated where it's written. Only a string literal follows the
 /// type word, so `DATE(x)`/`TIME(x)` calls are untouched.
 ///
-/// A DATETIME literal's declared fraction width is lost: `VDateTime`
-/// carries no fsp, so `Value.toText` always renders six digits where MySQL
-/// renders the three of `TIMESTAMP '2020-01-01 10:00:00.123'`. The value
-/// itself is exact; fixing the width needs an fsp channel on the value (or on
-/// expression column metadata), which reaches persistence and the protocol.
+/// A DATETIME literal's declared fraction width is lost because `VDateTime`
+/// carries no fsp. TIME retains it through an explicit typed expression.
 let private temporalLit: Parser<Expr, unit> =
     let asText v = match v with VString s -> s | _ -> ""
 
@@ -1619,7 +1611,13 @@ let private temporalLit: Parser<Expr, unit> =
                 |> Option.defaultWith (fun () -> refuse "DATETIME")
         | _ ->
             match MySqlTemporal.tryTime text with
-            | Some t -> preturn (Lit(VString t))
+            | Some normalized ->
+                let separator = normalized.LastIndexOf '.'
+                let fsp = if separator < 0 then 0 else normalized.Length - separator - 1
+
+                match tryParseTimeValue normalized with
+                | Some value -> preturn (Cast(Lit(VTime value), TTime fsp))
+                | None -> refuse "TIME"
             | None -> refuse "TIME"
 
 let private caseWhenThen: Parser<Expr * Expr, unit> = (keyword "WHEN" >>. expr .>> keyword "THEN") .>>. expr
