@@ -210,6 +210,28 @@ let private parseCommand (capabilities: uint32) (payload: byte[]) : Command opti
         with _ ->
             Some(Malformed payload.[0])
 
+let private commandStatus = function
+    | InitDb _ -> Some InformationSchema.StatusCommand.changeDatabase
+    | FieldList _ -> Some InformationSchema.StatusCommand.showFields
+    | Statistics
+    | Debug
+    | Ping
+    | ChangeUser _
+    | ResetConnection -> Some InformationSchema.StatusCommand.adminCommands
+    | StmtPrepare _ -> Some InformationSchema.StatusCommand.statementPrepare
+    | StmtExecute _ -> Some InformationSchema.StatusCommand.statementExecute
+    | StmtFetch _ -> Some InformationSchema.StatusCommand.statementFetch
+    | StmtSendLongData _ -> Some InformationSchema.StatusCommand.statementSendLongData
+    | StmtClose _ -> Some InformationSchema.StatusCommand.statementClose
+    | StmtReset _ -> Some InformationSchema.StatusCommand.statementReset
+    | SetOption _ -> Some InformationSchema.StatusCommand.setOption
+    | Quit
+    | Query _
+    | ProcessInfo
+    | ProcessKill _
+    | Unsupported _
+    | Malformed _ -> None
+
 let private isShutdownStatement (sql: string) : bool =
     let text = sql.Trim()
     let text = if text.EndsWith ';' then text.[..text.Length - 2].TrimEnd() else text
@@ -1410,8 +1432,13 @@ let private handleConnection
                         | None -> ()
                         | Some cmdPacket ->
                             let seqId = cmdPacket.SeqId + 1uy
+                            let command = parseCommand capabilities cmdPacket.Payload
 
-                            match parseCommand capabilities cmdPacket.Payload with
+                            command
+                            |> Option.bind commandStatus
+                            |> Option.iter InformationSchema.recordCommand
+
+                            match command with
                             | None
                             | Some Quit -> ()
                             | Some Ping ->
@@ -1547,6 +1574,7 @@ let private handleConnection
                             | Some(Query sql) ->
                                 InformationSchema.recordQuestion ()
                                 if isShutdownStatement sql then
+                                    InformationSchema.recordCommand InformationSchema.StatusCommand.shutdown
                                     match Auth.checkForAccount store (Auth.account session.User session.AccountHost) [ "SHUTDOWN", Auth.Global ] with
                                     | Ok() ->
                                         do!

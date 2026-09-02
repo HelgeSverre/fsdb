@@ -1939,6 +1939,17 @@ let private runXa (parserOptions: Parser.ParserOptions) (session: Session) sql =
     match Xa.parse parserOptions.NoBackslashEscapes charset sql with
     | Error detail -> session, parserError sql detail
     | Ok command ->
+        let statusCommand =
+            match command with
+            | Xa.Start _ -> InformationSchema.StatusCommand.xaStart
+            | Xa.End _ -> InformationSchema.StatusCommand.xaEnd
+            | Xa.Prepare _ -> InformationSchema.StatusCommand.xaPrepare
+            | Xa.Commit _ -> InformationSchema.StatusCommand.xaCommit
+            | Xa.Rollback _ -> InformationSchema.StatusCommand.xaRollback
+            | Xa.Recover _ -> InformationSchema.StatusCommand.xaRecover
+
+        InformationSchema.recordCommand statusCommand
+
         let executed, result =
             match command with
             | Xa.Start(_, true)
@@ -2245,20 +2256,57 @@ let private statementContainsLockingRead =
 let private statementContainsUpdateLock =
     statementContainsLockingReadWhere (fun locking -> locking.Strength = UpdateLock)
 
-let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
-    match stmt with
-    | Select _
-    | Union _ -> InformationSchema.recordCommand InformationSchema.SelectCommand
-    | Insert _
-    | InsertSelect _ -> InformationSchema.recordCommand InformationSchema.InsertCommand
+let rec private statementStatusCommand = function
+    | CreateDatabase _ -> Some InformationSchema.StatusCommand.createDatabase
+    | DropDatabase _ -> Some InformationSchema.StatusCommand.dropDatabase
+    | AlterDatabase _ -> Some InformationSchema.StatusCommand.alterDatabase
+    | CreateTable _
+    | CreateTableLike _
+    | CreateTableAs _ -> Some InformationSchema.StatusCommand.createTable
+    | DropTable _ -> Some InformationSchema.StatusCommand.dropTable
+    | AlterTable _ -> Some InformationSchema.StatusCommand.alterTable
+    | RenameTable _ -> Some InformationSchema.StatusCommand.renameTable
+    | CreateIndex _ -> Some InformationSchema.StatusCommand.createIndex
+    | DropIndexStmt _ -> Some InformationSchema.StatusCommand.dropIndex
+    | Insert _ -> Some InformationSchema.StatusCommand.insert
+    | InsertSelect _ -> Some InformationSchema.StatusCommand.insertSelect
     | Replace _
-    | ReplaceSelect _
-    | ReplaceSet _ -> InformationSchema.recordCommand InformationSchema.ReplaceCommand
-    | LoadData load when load.Replace -> InformationSchema.recordCommand InformationSchema.ReplaceCommand
-    | LoadData _ -> InformationSchema.recordCommand InformationSchema.InsertCommand
-    | Update _ -> InformationSchema.recordCommand InformationSchema.UpdateCommand
-    | Delete _ -> InformationSchema.recordCommand InformationSchema.DeleteCommand
-    | _ -> ()
+    | ReplaceSet _ -> Some InformationSchema.StatusCommand.replace
+    | ReplaceSelect _ -> Some InformationSchema.StatusCommand.replaceSelect
+    | LoadData _ -> Some InformationSchema.StatusCommand.load
+    | Select _
+    | Union _ -> Some InformationSchema.StatusCommand.select
+    | Do _ -> Some InformationSchema.StatusCommand.doStatement
+    | Update statement when statement.Joins.IsEmpty -> Some InformationSchema.StatusCommand.update
+    | Update _ -> Some InformationSchema.StatusCommand.updateMulti
+    | Delete statement when statement.Joins.IsEmpty && statement.Targets.Length = 1 ->
+        Some InformationSchema.StatusCommand.delete
+    | Delete _ -> Some InformationSchema.StatusCommand.deleteMulti
+    | Truncate _ -> Some InformationSchema.StatusCommand.truncate
+    | CreateUser _ -> Some InformationSchema.StatusCommand.createUser
+    | DropUser _ -> Some InformationSchema.StatusCommand.dropUser
+    | RenameUser _ -> Some InformationSchema.StatusCommand.renameUser
+    | AlterUser _ -> Some InformationSchema.StatusCommand.alterUser
+    | CreateRole _ -> Some InformationSchema.StatusCommand.createRole
+    | DropRole _ -> Some InformationSchema.StatusCommand.dropRole
+    | GrantRoles _ -> Some InformationSchema.StatusCommand.grantRoles
+    | RevokeRoles _ -> Some InformationSchema.StatusCommand.revokeRoles
+    | SetRole _ -> Some InformationSchema.StatusCommand.setRole
+    | SetDefaultRole _ -> Some InformationSchema.StatusCommand.alterUserDefaultRole
+    | Grant _ -> Some InformationSchema.StatusCommand.grant
+    | Revoke _ -> Some InformationSchema.StatusCommand.revoke
+    | CreateTrigger _ -> Some InformationSchema.StatusCommand.createTrigger
+    | DropTrigger _ -> Some InformationSchema.StatusCommand.dropTrigger
+    | CreateView _ -> Some InformationSchema.StatusCommand.createView
+    | DropView _ -> Some InformationSchema.StatusCommand.dropView
+    | ChecksumTables _ -> Some InformationSchema.StatusCommand.checksum
+    | Explain(_, statement) -> statementStatusCommand statement
+    | SetTriggerNew _ -> None
+
+let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
+    stmt
+    |> statementStatusCommand
+    |> Option.iter InformationSchema.recordCommand
 
     let dbName = session.Database |> Option.defaultValue defaultDatabase
 
@@ -2995,19 +3043,74 @@ let private beginProbeExecution session probe =
     | _ -> session
 
 let private probeStatusCommand = function
-    | Begin _ -> Some InformationSchema.BeginCommand
-    | Commit _ -> Some InformationSchema.CommitCommand
-    | Rollback -> Some InformationSchema.RollbackCommand
-    | RollbackTo _ -> Some InformationSchema.RollbackToSavepointCommand
-    | Savepoint _ -> Some InformationSchema.SavepointCommand
-    | Release _ -> Some InformationSchema.ReleaseSavepointCommand
+    | SetAutocommit _
+    | SetTransactionIsolation _
+    | SetTransactionAccess _
+    | SetCharacterSet _
+    | SetVar -> Some InformationSchema.StatusCommand.setOption
+    | SetRoleStatement -> Some InformationSchema.StatusCommand.setRole
+    | SetDefaultRoleStatement -> Some InformationSchema.StatusCommand.alterUserDefaultRole
+    | SetPassword _ -> Some InformationSchema.StatusCommand.setPassword
+    | Begin _ -> Some InformationSchema.StatusCommand.beginTransaction
+    | Commit _ -> Some InformationSchema.StatusCommand.commit
+    | Rollback -> Some InformationSchema.StatusCommand.rollback
+    | RollbackTo _ -> Some InformationSchema.StatusCommand.rollbackToSavepoint
+    | Savepoint _ -> Some InformationSchema.StatusCommand.savepoint
+    | Release _ -> Some InformationSchema.StatusCommand.releaseSavepoint
+    | Use _ -> Some InformationSchema.StatusCommand.changeDatabase
+    | ShowVariables _ -> Some InformationSchema.StatusCommand.showVariables
+    | ShowStatus -> Some InformationSchema.StatusCommand.showStatus
+    | ShowEngines -> Some InformationSchema.StatusCommand.showStorageEngines
+    | ShowEngineInnodbStatus -> Some InformationSchema.StatusCommand.showEngineStatus
+    | ShowPlugins -> Some InformationSchema.StatusCommand.showPlugins
+    | ShowBinaryLogs -> Some InformationSchema.StatusCommand.showBinaryLogs
+    | ShowBinaryLogStatus -> Some InformationSchema.StatusCommand.showBinaryLogStatus
+    | ShowReplicaStatus -> Some InformationSchema.StatusCommand.showReplicaStatus
+    | MaintainTables(operation, _) ->
+        match operation.ToUpperInvariant() with
+        | "ANALYZE" -> Some InformationSchema.StatusCommand.analyze
+        | "CHECK" -> Some InformationSchema.StatusCommand.check
+        | "OPTIMIZE" -> Some InformationSchema.StatusCommand.optimize
+        | "REPAIR" -> Some InformationSchema.StatusCommand.repair
+        | _ -> None
+    | ShowOpenTables _ -> Some InformationSchema.StatusCommand.showOpenTables
+    | ShowCreateDatabase _ -> Some InformationSchema.StatusCommand.showCreateDatabase
+    | ShowCharset -> Some InformationSchema.StatusCommand.showCharacterSets
+    | ShowProcesslist _ -> Some InformationSchema.StatusCommand.showProcesslist
+    | ShowTriggers _ -> Some InformationSchema.StatusCommand.showTriggers
+    | ShowEvents _ -> Some InformationSchema.StatusCommand.showEvents
+    | ShowRoutineStatus kind when kind.Equals("FUNCTION", StringComparison.OrdinalIgnoreCase) ->
+        Some InformationSchema.StatusCommand.showFunctionStatus
+    | ShowRoutineStatus _ -> Some InformationSchema.StatusCommand.showProcedureStatus
+    | Kill _ -> Some InformationSchema.StatusCommand.kill
+    | AlterKeysNoop _ -> Some InformationSchema.StatusCommand.alterTable
+    | ShowConditions true -> Some InformationSchema.StatusCommand.showErrors
+    | ShowConditions false -> Some InformationSchema.StatusCommand.showWarnings
+    | ShowMessageCount _ -> Some InformationSchema.StatusCommand.select
+    | ShowDatabases -> Some InformationSchema.StatusCommand.showDatabases
+    | ShowTableStatus -> Some InformationSchema.StatusCommand.showTableStatus
+    | ShowTables -> Some InformationSchema.StatusCommand.showTables
+    | ShowCreate _
+    | ShowCreateView _ -> Some InformationSchema.StatusCommand.showCreateTable
+    | ShowCreateTrigger _ -> Some InformationSchema.StatusCommand.showCreateTrigger
+    | ShowColumns _
+    | Describe _ -> Some InformationSchema.StatusCommand.showFields
+    | ShowIndex _ -> Some InformationSchema.StatusCommand.showIndexes
+    | ShowCollation -> Some InformationSchema.StatusCommand.showCollations
+    | ShowGrants _ -> Some InformationSchema.StatusCommand.showGrants
+    | ShowCreateUser _ -> Some InformationSchema.StatusCommand.showCreateUser
+    | ShowCreateProgram(kind, _) when kind.Equals("FUNCTION", StringComparison.OrdinalIgnoreCase) ->
+        Some InformationSchema.StatusCommand.showCreateFunction
+    | ShowCreateProgram _ -> Some InformationSchema.StatusCommand.showCreateProcedure
+    | ShowPrivileges -> Some InformationSchema.StatusCommand.showPrivileges
     | FlushPrivileges
     | FlushUserResources
     | FlushStatus
     | FlushTables
     | FlushOptimizerCosts
-    | FlushLogs -> Some InformationSchema.FlushCommand
-    | _ -> None
+    | FlushLogs -> Some InformationSchema.StatusCommand.flush
+    | LockTables -> Some InformationSchema.StatusCommand.lockTables
+    | UnlockTables -> Some InformationSchema.StatusCommand.unlockTables
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -5517,6 +5620,14 @@ and private dispatchNormalized session rawSql parserOptions sql =
     // no-op, same as real MySQL's `Query OK, 0 rows affected` for it —
     // not a syntax error.
     let runTextPrepared command =
+        let statusCommand =
+            match command with
+            | PrepareText _ -> InformationSchema.StatusCommand.prepareSql
+            | ExecuteText _ -> InformationSchema.StatusCommand.executeSql
+            | DeallocateText _ -> InformationSchema.StatusCommand.deallocateSql
+
+        InformationSchema.recordCommand statusCommand
+
         match command with
         | PrepareText(name, source) ->
             let session = { session with TextStatements = Map.remove name session.TextStatements }
@@ -5590,6 +5701,16 @@ and private dispatchNormalized session rawSql parserOptions sql =
         | Error _ -> []
 
     let runTextRoutine session command =
+        let statusCommand =
+            match command with
+            | CreateProcedure _ -> InformationSchema.StatusCommand.createProcedure
+            | CreateFunction _ -> InformationSchema.StatusCommand.createFunction
+            | CallProcedure _ -> InformationSchema.StatusCommand.callProcedure
+            | DropProcedure _ -> InformationSchema.StatusCommand.dropProcedure
+            | DropFunction _ -> InformationSchema.StatusCommand.dropFunction
+
+        InformationSchema.recordCommand statusCommand
+
         let authorize privilege database =
             checkSessionAccess session session.Store [ privilege, Auth.OnDb database ]
 
@@ -5895,6 +6016,14 @@ and private dispatchNormalized session rawSql parserOptions sql =
         | Error _ -> []
 
     let runTextEvent session command =
+        let statusCommand =
+            match command with
+            | Event.Create _ -> InformationSchema.StatusCommand.createEvent
+            | Event.Alter _ -> InformationSchema.StatusCommand.alterEvent
+            | Event.Drop _ -> InformationSchema.StatusCommand.dropEvent
+
+        InformationSchema.recordCommand statusCommand
+
         let authorize database =
             checkSessionAccess session session.Store [ "EVENT", Auth.OnDb database ]
 
@@ -6144,6 +6273,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
         && (sql.Length = 2 || Char.IsWhiteSpace sql.[2])
 
     if Parser.isBlank sql then
+        InformationSchema.recordCommand InformationSchema.StatusCommand.emptyQuery
         session, Affected 0UL
     elif isXa then
         runXa parserOptions session sql
@@ -6152,13 +6282,23 @@ and private dispatchNormalized session rawSql parserOptions sql =
     elif isHandler then
         match Parser.parseHandlerWithOptions parserOptions sql with
         | Ok command ->
+            let statusCommand =
+                match command with
+                | HandlerOpen _ -> InformationSchema.StatusCommand.handlerOpen
+                | HandlerRead _ -> InformationSchema.StatusCommand.handlerRead
+                | HandlerClose _ -> InformationSchema.StatusCommand.handlerClose
+
+            InformationSchema.recordCommand statusCommand
+
             withStoredFunctionRegistry dispatch session (fun current ->
                 TableHandler.run (registryFor current) (lockWaitTimeout current) current command)
         | Error detail -> session, parserError sql detail
     else
         match StoredProgram.parseDiagnostics parserOptions sql with
         | Error _ -> session, syntaxError sql
-        | Ok(Some diagnostics) -> runTextDiagnostics session diagnostics
+        | Ok(Some diagnostics) ->
+            InformationSchema.recordCommand InformationSchema.StatusCommand.getDiagnostics
+            runTextDiagnostics session diagnostics
         | Ok None ->
             match Event.tryCommand parserOptions (validEventBody parserOptions) sql with
             | Some _ when xaAssociation session |> Option.isSome -> session, xaRmFail "ACTIVE"

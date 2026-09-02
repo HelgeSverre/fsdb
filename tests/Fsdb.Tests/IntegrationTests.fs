@@ -2368,6 +2368,47 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          TestSupport.processGlobalCase "SHOW STATUS counts prepared-protocol commands"
+          <| fun _ ->
+              async {
+                  Fsdb.InformationSchema.resetCommandCounts ()
+                  let store = Fsdb.Storage.create ()
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+
+                  let prepare = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1")
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = prepare } |> Async.Ignore
+                  let! stmtId, _, _ = readPreparedReply stream
+
+                  let execute = Writer()
+                  execute.WriteByte 0x17uy
+                  execute.WriteInt32LE stmtId
+                  execute.WriteByte 0uy
+                  execute.WriteInt32LE 1
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = execute.ToArray() } |> Async.Ignore
+
+                  for _ in 1..5 do
+                      let! packet = readPacketAsync stream
+                      Expect.isTrue packet.IsSome "the prepared SELECT response is complete"
+
+                  let close = Writer()
+                  close.WriteByte 0x19uy
+                  close.WriteInt32LE stmtId
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = close.ToArray() } |> Async.Ignore
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = [| 0x0euy |] } |> Async.Ignore
+                  let! ping = readPacketAsync stream
+                  Expect.isTrue ping.IsSome "the ping orders the preceding close"
+
+                  let session = create 1 store
+
+                  for name in [ "Com_stmt_prepare"; "Com_stmt_execute"; "Com_stmt_close" ] do
+                      match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
+                      | ResultSet(_, [ [ Some actual; Some "1" ] ]) when actual = name -> ()
+                      | other -> failtestf "expected %s to equal one, got %A" name other
+              }
+              |> Async.RunSynchronously
+
           // A truncated COM_STMT_CLOSE (needs a 4-byte statement id, gets
           // none) must answer ERR and leave the connection usable — a
           // `Reader` throw inside `parseCommand` must not escape the

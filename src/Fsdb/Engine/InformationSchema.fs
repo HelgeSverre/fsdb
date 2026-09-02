@@ -1000,33 +1000,130 @@ type private AtomicCounter() =
 
 let private questionCount = AtomicCounter()
 
-type StatusCommand =
-    | BeginCommand
-    | CommitCommand
-    | DeleteCommand
-    | FlushCommand
-    | InsertCommand
-    | ReleaseSavepointCommand
-    | ReplaceCommand
-    | RollbackCommand
-    | RollbackToSavepointCommand
-    | SavepointCommand
-    | SelectCommand
-    | UpdateCommand
+[<Struct>]
+type StatusCommand = private StatusCommand of string
 
-let private commandName = function
-    | BeginCommand -> "Com_begin"
-    | CommitCommand -> "Com_commit"
-    | DeleteCommand -> "Com_delete"
-    | FlushCommand -> "Com_flush"
-    | InsertCommand -> "Com_insert"
-    | ReleaseSavepointCommand -> "Com_release_savepoint"
-    | ReplaceCommand -> "Com_replace"
-    | RollbackCommand -> "Com_rollback"
-    | RollbackToSavepointCommand -> "Com_rollback_to_savepoint"
-    | SavepointCommand -> "Com_savepoint"
-    | SelectCommand -> "Com_select"
-    | UpdateCommand -> "Com_update"
+[<RequireQualifiedAccess>]
+module StatusCommand =
+    let private create suffix = StatusCommand(sprintf "Com_%s" suffix)
+
+    let adminCommands = create "admin_commands"
+    let alterDatabase = create "alter_db"
+    let alterEvent = create "alter_event"
+    let alterTable = create "alter_table"
+    let alterUser = create "alter_user"
+    let alterUserDefaultRole = create "alter_user_default_role"
+    let analyze = create "analyze"
+    let beginTransaction = create "begin"
+    let callProcedure = create "call_procedure"
+    let changeDatabase = create "change_db"
+    let check = create "check"
+    let checksum = create "checksum"
+    let commit = create "commit"
+    let createDatabase = create "create_db"
+    let createEvent = create "create_event"
+    let createFunction = create "create_function"
+    let createIndex = create "create_index"
+    let createProcedure = create "create_procedure"
+    let createRole = create "create_role"
+    let createTable = create "create_table"
+    let createTrigger = create "create_trigger"
+    let createUser = create "create_user"
+    let createView = create "create_view"
+    let deallocateSql = create "dealloc_sql"
+    let delete = create "delete"
+    let deleteMulti = create "delete_multi"
+    let doStatement = create "do"
+    let dropDatabase = create "drop_db"
+    let dropEvent = create "drop_event"
+    let dropFunction = create "drop_function"
+    let dropIndex = create "drop_index"
+    let dropProcedure = create "drop_procedure"
+    let dropRole = create "drop_role"
+    let dropTable = create "drop_table"
+    let dropTrigger = create "drop_trigger"
+    let dropUser = create "drop_user"
+    let dropView = create "drop_view"
+    let emptyQuery = create "empty_query"
+    let executeSql = create "execute_sql"
+    let flush = create "flush"
+    let getDiagnostics = create "get_diagnostics"
+    let grant = create "grant"
+    let grantRoles = create "grant_roles"
+    let handlerClose = create "ha_close"
+    let handlerOpen = create "ha_open"
+    let handlerRead = create "ha_read"
+    let insert = create "insert"
+    let insertSelect = create "insert_select"
+    let kill = create "kill"
+    let load = create "load"
+    let lockTables = create "lock_tables"
+    let optimize = create "optimize"
+    let prepareSql = create "prepare_sql"
+    let releaseSavepoint = create "release_savepoint"
+    let renameTable = create "rename_table"
+    let renameUser = create "rename_user"
+    let repair = create "repair"
+    let replace = create "replace"
+    let replaceSelect = create "replace_select"
+    let revoke = create "revoke"
+    let revokeRoles = create "revoke_roles"
+    let rollback = create "rollback"
+    let rollbackToSavepoint = create "rollback_to_savepoint"
+    let savepoint = create "savepoint"
+    let select = create "select"
+    let setOption = create "set_option"
+    let setPassword = create "set_password"
+    let setRole = create "set_role"
+    let showBinaryLogs = create "show_binlogs"
+    let showCharacterSets = create "show_charsets"
+    let showCollations = create "show_collations"
+    let showCreateDatabase = create "show_create_db"
+    let showCreateEvent = create "show_create_event"
+    let showCreateFunction = create "show_create_func"
+    let showCreateProcedure = create "show_create_proc"
+    let showCreateTable = create "show_create_table"
+    let showCreateTrigger = create "show_create_trigger"
+    let showCreateUser = create "show_create_user"
+    let showDatabases = create "show_databases"
+    let showEngineStatus = create "show_engine_status"
+    let showErrors = create "show_errors"
+    let showEvents = create "show_events"
+    let showFields = create "show_fields"
+    let showFunctionStatus = create "show_function_status"
+    let showGrants = create "show_grants"
+    let showIndexes = create "show_keys"
+    let showBinaryLogStatus = create "show_binary_log_status"
+    let showOpenTables = create "show_open_tables"
+    let showPlugins = create "show_plugins"
+    let showPrivileges = create "show_privileges"
+    let showProcedureStatus = create "show_procedure_status"
+    let showProcesslist = create "show_processlist"
+    let showReplicaStatus = create "show_replica_status"
+    let showStatus = create "show_status"
+    let showStorageEngines = create "show_storage_engines"
+    let showTableStatus = create "show_table_status"
+    let showTables = create "show_tables"
+    let showTriggers = create "show_triggers"
+    let showVariables = create "show_variables"
+    let showWarnings = create "show_warnings"
+    let shutdown = create "shutdown"
+    let statementClose = create "stmt_close"
+    let statementExecute = create "stmt_execute"
+    let statementFetch = create "stmt_fetch"
+    let statementPrepare = create "stmt_prepare"
+    let statementReset = create "stmt_reset"
+    let statementSendLongData = create "stmt_send_long_data"
+    let truncate = create "truncate"
+    let unlockTables = create "unlock_tables"
+    let update = create "update"
+    let updateMulti = create "update_multi"
+    let xaCommit = create "xa_commit"
+    let xaEnd = create "xa_end"
+    let xaPrepare = create "xa_prepare"
+    let xaRecover = create "xa_recover"
+    let xaRollback = create "xa_rollback"
+    let xaStart = create "xa_start"
 
 let private reportedCommandNames =
     [ "admin_commands"
@@ -1204,12 +1301,12 @@ let private commandCounters =
     |> List.map (fun name -> name, AtomicCounter())
     |> Map.ofList
 
-let private commandCounter command = commandCounters |> Map.find (commandName command)
-
 let recordQuestion () = questionCount.Increment()
 let questions () = questionCount.Value
 let resetQuestions () = questionCount.Reset()
-let recordCommand command = (commandCounter command).Increment()
+
+let recordCommand (StatusCommand name) =
+    commandCounters.[name].Increment()
 
 let resetCommandCounts () =
     commandCounters |> Map.iter (fun _ counter -> counter.Reset())

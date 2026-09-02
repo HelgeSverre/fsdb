@@ -44,7 +44,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
-| Metadata | 25 INFORMATION_SCHEMA views, 13 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
+| Metadata | 25 INFORMATION_SCHEMA views, 13 mysql.* tables, and the complete MySQL 8.4 `Com_*` registry | Storage statistics and engine-specific status families are stand-ins or absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -458,13 +458,16 @@ GRANTS/TRIGGERS/WARNINGS/ERRORS with statement condition counts, DESCRIBE,
 ALTER TABLE DISABLE/ENABLE KEYS
 no-op for mysqldump, my.cnf parsing ([mysqld]/[server], loose- prefix,
 !include with depth cap), KILL QUERY/CONNECTION with PROCESS/SUPER checks,
-live Limits reporting.
+live Limits reporting. `SHOW STATUS` exposes the complete 168-row MySQL 8.4
+`Com_*` registry and updates every command family fsdb implements, including
+text and binary prepared statements, XA, HANDLER, routines, events, and
+administrative probes.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS | 25 views; role and privilege views are live, while ROUTINES, PARAMETERS, and EVENTS expose supported declarations | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
-| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, DML, transaction/savepoint, and FLUSH command counters; other command, engine, and latency families remain absent (`InformationSchema.fs`) | low | divergence |
+| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | all 168 `Com_*` names are exposed and supported commands are live; unsupported commands remain truthfully zero, but counters are process-wide rather than session-scoped and engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
 

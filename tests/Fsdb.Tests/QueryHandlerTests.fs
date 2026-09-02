@@ -5225,6 +5225,89 @@ let tests =
                       Expect.contains rows [ Some name; Some "0" ] (name + " starts at zero")
               | other -> failtestf "expected the complete command-counter registry, got %A" other
 
+          TestSupport.processGlobalCase "SHOW STATUS distinguishes supported command families"
+          <| fun _ ->
+              Fsdb.InformationSchema.resetCommandCounts ()
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let execute session sql =
+                  match handle session sql with
+                  | next, Err(code, message) -> failtestf "%s failed with %d: %s" sql code message
+                  | next, _ -> next
+
+              let session = execute session "CREATE TABLE status_family (id INT PRIMARY KEY, n INT)"
+              let session = execute session "INSERT INTO status_family VALUES (1, 10)"
+              let session = execute session "INSERT INTO status_family SELECT 2, n FROM status_family WHERE id = 1"
+              let session = execute session "REPLACE INTO status_family VALUES (1, 11)"
+              let session = execute session "REPLACE INTO status_family SELECT 2, n + 1 FROM status_family WHERE id = 2"
+              let session = execute session "DO 1"
+              let session = execute session "SHOW VARIABLES LIKE 'autocommit'"
+              let session = execute session "SHOW COUNT(*) ERRORS"
+              let session = execute session "ANALYZE TABLE status_family"
+              let session = execute session "LOCK TABLES status_family READ"
+              let session = execute session "UNLOCK TABLES"
+              let session = execute session "PREPARE status_select FROM 'SELECT n FROM status_family WHERE id = 1'"
+              let session = execute session "EXECUTE status_select"
+              let session = execute session "DEALLOCATE PREPARE status_select"
+              let session = execute session "HANDLER status_family OPEN AS status_cursor"
+              let session = execute session "HANDLER status_cursor READ FIRST"
+              let session = execute session "HANDLER status_cursor CLOSE"
+
+              let expected =
+                  [ "Com_create_table", 1L
+                    "Com_insert", 1L
+                    "Com_insert_select", 1L
+                    "Com_replace", 1L
+                    "Com_replace_select", 1L
+                    "Com_do", 1L
+                    "Com_show_variables", 1L
+                    "Com_select", 2L
+                    "Com_analyze", 1L
+                    "Com_lock_tables", 1L
+                    "Com_unlock_tables", 1L
+                    "Com_prepare_sql", 1L
+                    "Com_execute_sql", 1L
+                    "Com_dealloc_sql", 1L
+                    "Com_ha_open", 1L
+                    "Com_ha_read", 1L
+                    "Com_ha_close", 1L ]
+
+              for name, expectedValue in expected do
+                  match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
+                  | ResultSet(_, [ [ Some actual; Some value ] ]) when actual = name ->
+                      Expect.equal (int64 value) expectedValue name
+                  | other -> failtestf "expected a %s row, got %A" name other
+
+          TestSupport.processGlobalCase "SHOW STATUS counts XA and stored-routine commands"
+          <| fun _ ->
+              Fsdb.InformationSchema.resetCommandCounts ()
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let execute session sql =
+                  match handle session sql with
+                  | next, Err(code, message) -> failtestf "%s failed with %d: %s" sql code message
+                  | next, _ -> next
+
+              let session = execute session "XA START 'status_xa'"
+              let session = execute session "XA END 'status_xa'"
+              let session = execute session "XA PREPARE 'status_xa'"
+              let session = execute session "XA COMMIT 'status_xa'"
+              let session = execute session "CREATE PROCEDURE status_procedure() SELECT 1"
+              let session = execute session "CALL status_procedure()"
+              let session = execute session "DROP PROCEDURE status_procedure"
+
+              for name in
+                  [ "Com_xa_start"
+                    "Com_xa_end"
+                    "Com_xa_prepare"
+                    "Com_xa_commit"
+                    "Com_create_procedure"
+                    "Com_call_procedure"
+                    "Com_drop_procedure" ] do
+                  match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
+                  | ResultSet(_, [ [ Some actual; Some "1" ] ]) when actual = name -> ()
+                  | other -> failtestf "expected %s to equal one, got %A" name other
+
           testCase "SHOW STATUS reports connection compression and wire bytes"
           <| fun _ ->
               let metrics: Fsdb.Session.TransportMetrics =
