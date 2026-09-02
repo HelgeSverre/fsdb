@@ -841,6 +841,32 @@ let tests =
                                [ Some "geometry_metadata_view"; Some "shape"; None; None; Some "point" ] ]) -> ()
               | other -> failtestf "expected geometry metadata rows, got %A" other
 
+              match run store "SELECT * FROM information_schema.st_spatial_reference_systems" with
+              | ResultSet(
+                  [ "SRS_NAME"; "SRS_ID"; "ORGANIZATION"; "ORGANIZATION_COORDSYS_ID"; "DEFINITION"; "DESCRIPTION" ],
+                  [ [ Some ""; Some "0"; None; None; Some ""; None ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected the planar SRID metadata row, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT unit_name, unit_type, conversion_factor, description FROM information_schema.st_units_of_measure WHERE unit_name IN ('metre', 'foot', 'US survey mile') ORDER BY unit_name"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "foot"; Some "LINEAR"; Some "0.3048"; Some "" ]
+                    [ Some "metre"; Some "LINEAR"; Some "1"; Some "" ]
+                    [ Some "US survey mile"; Some "LINEAR"; Some "1609.3472186944375"; Some "" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected MySQL's linear-unit registry, got %A" other
+
+              match run store "SELECT COUNT(*) FROM information_schema.st_units_of_measure" with
+              | ResultSet(_, [ [ Some "47" ] ]) -> ()
+              | other -> failtestf "expected all 47 linear units, got %A" other
+
           testCase "view table usage reports direct dependencies"
           <| fun _ ->
               let store = setup ()

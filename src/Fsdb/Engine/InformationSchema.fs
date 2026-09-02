@@ -2852,6 +2852,73 @@ let private stGeometryColumnsColumns =
       col "SRS_ID" (TInt true)
       col "GEOMETRY_TYPE_NAME" TLongText ]
 
+let private stSpatialReferenceSystemsColumns =
+    [ requiredCol "SRS_NAME" (TVarchar 80)
+      requiredCol "SRS_ID" (TInt true)
+      col "ORGANIZATION" (TVarchar 256)
+      col "ORGANIZATION_COORDSYS_ID" (TInt true)
+      requiredCol "DEFINITION" (TVarchar 4096)
+      col "DESCRIPTION" (TVarchar 2048) ]
+
+let private stSpatialReferenceSystemsRows =
+    [ [| vs ""; VUInt 0UL; VNull; VNull; vs ""; VNull |] ]
+
+let private stUnitsOfMeasureColumns =
+    [ col "UNIT_NAME" (TVarchar 255)
+      col "UNIT_TYPE" (TVarchar 7)
+      col "CONVERSION_FACTOR" (TDouble false)
+      col "DESCRIPTION" (TVarchar 255) ]
+
+let private stUnitsOfMeasureRows =
+    [ "British chain (Benoit 1895 A)", 20.1167824
+      "British chain (Benoit 1895 B)", 20.116782494375872
+      "British chain (Sears 1922 truncated)", 20.116756
+      "British chain (Sears 1922)", 20.116765121552632
+      "British foot (1865)", 0.30480083333333335
+      "British foot (1936)", 0.3048007491
+      "British foot (Benoit 1895 A)", 0.3047997333333333
+      "British foot (Benoit 1895 B)", 0.30479973476327077
+      "British foot (Sears 1922 truncated)", 0.30479933333333337
+      "British foot (Sears 1922)", 0.3047994715386762
+      "British link (Benoit 1895 A)", 0.201167824
+      "British link (Benoit 1895 B)", 0.2011678249437587
+      "British link (Sears 1922 truncated)", 0.20116756
+      "British link (Sears 1922)", 0.2011676512155263
+      "British yard (Benoit 1895 A)", 0.9143992
+      "British yard (Benoit 1895 B)", 0.9143992042898124
+      "British yard (Sears 1922 truncated)", 0.914398
+      "British yard (Sears 1922)", 0.9143984146160288
+      "centimetre", 0.01
+      "chain", 20.1168
+      "Clarke's chain", 20.1166195164
+      "Clarke's foot", 0.3047972654
+      "Clarke's link", 0.201166195164
+      "Clarke's yard", 0.9143917962
+      "fathom", 1.8288
+      "foot", 0.3048
+      "German legal metre", 1.0000135965
+      "Gold Coast foot", 0.3047997101815088
+      "Indian foot", 0.30479951024814694
+      "Indian foot (1937)", 0.30479841
+      "Indian foot (1962)", 0.3047996
+      "Indian foot (1975)", 0.3047995
+      "Indian yard", 0.9143985307444408
+      "Indian yard (1937)", 0.91439523
+      "Indian yard (1962)", 0.9143988
+      "Indian yard (1975)", 0.9143985
+      "kilometre", 1000.0
+      "link", 0.201168
+      "metre", 1.0
+      "millimetre", 0.001
+      "nautical mile", 1852.0
+      "Statute mile", 1609.344
+      "US survey chain", 20.11684023368047
+      "US survey foot", 0.30480060960121924
+      "US survey link", 0.2011684023368047
+      "US survey mile", 1609.3472186944375
+      "yard", 0.9144 ]
+    |> List.map (fun (name, factor) -> [| vs name; vs "LINEAR"; VDouble factor; vs "" |])
+
 /// Every virtual table this module serves, name -> columns — `scan`'s
 /// dispatch source and the self-listing the `TABLES`/`COLUMNS` views and
 /// `SHOW TABLES FROM information_schema` append, so listing and resolution
@@ -2889,6 +2956,8 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "SCHEMA_PRIVILEGES", schemaPrivilegesColumns
       "STATISTICS", statisticsColumns
       "ST_GEOMETRY_COLUMNS", stGeometryColumnsColumns
+      "ST_SPATIAL_REFERENCE_SYSTEMS", stSpatialReferenceSystemsColumns
+      "ST_UNITS_OF_MEASURE", stUnitsOfMeasureColumns
       "TABLES", tablesColumns
       "TABLES_EXTENSIONS", tablesExtensionsColumns
       "TABLESPACES_EXTENSIONS", tablespacesExtensionsColumns
@@ -3132,6 +3201,8 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "ROLE_ROUTINE_GRANTS" -> Some []
         | "ROLE_TABLE_GRANTS" -> Some(roleTableGrantsRows catalog)
         | "ST_GEOMETRY_COLUMNS" -> Some(stGeometryColumnsRows catalog viewColumns)
+        | "ST_SPATIAL_REFERENCE_SYSTEMS" -> Some stSpatialReferenceSystemsRows
+        | "ST_UNITS_OF_MEASURE" -> Some stUnitsOfMeasureRows
         | "TABLES_EXTENSIONS" -> Some(tablesExtensionsRows catalog)
         | "TABLE_CONSTRAINTS_EXTENSIONS" -> Some(tableConstraintsExtensionsRows catalog)
         | "USER_ATTRIBUTES" -> Some(userAttributesRows catalog)
