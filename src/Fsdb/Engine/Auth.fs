@@ -2711,9 +2711,8 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | RevokeRoles _
     | SetRole _
     | SetDefaultRole _ -> []
-    // CREATE TRIGGER carries its subject table in the statement. DROP's
-    // subject is resolved by `requiredPrivilegesInStore` below.
-    | CreateTrigger(_, _, _, table, _, _) -> onTables "TRIGGER" [ split table ]
+    // DROP's subject table is resolved by `requiredPrivilegesInStore` below.
+    | CreateTrigger creation -> onTables "TRIGGER" [ split creation.Table ]
     | SetTriggerNew _ -> []
     | DropTrigger _ -> []
     | CreateView view ->

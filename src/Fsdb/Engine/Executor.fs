@@ -14501,6 +14501,56 @@ let private validateTriggerStatement
             | Some fn -> Error(Err(3102, sprintf "Expression of trigger contains a disallowed function: %s" fn))
             | None -> Ok()
 
+let private triggerNamed database name (rows: seq<Value[]>) : SystemCatalog.Trigger.Entry option =
+    rows
+    |> Seq.choose SystemCatalog.Trigger.tryRead
+    |> Seq.tryFind (fun trigger ->
+        equalsIgnoreCase trigger.Schema database
+        && equalsIgnoreCase trigger.Name name)
+
+type private TriggerCreationDisposition =
+    | StoreTrigger
+    | KeepExistingTrigger
+
+let private triggerCreationDisposition
+    database
+    table
+    (creation: TriggerCreation)
+    (existing: SystemCatalog.Trigger.Entry option)
+    : Result<TriggerCreationDisposition, QueryResult> =
+    match existing with
+    | None -> Ok StoreTrigger
+    | Some _ when not creation.IfNotExists -> Error(Err(1359, "Trigger already exists"))
+    | Some trigger when equalsIgnoreCase trigger.Table (normalizeTableName table) ->
+        Diagnostics.note
+            4099
+            (sprintf "Trigger '%s' already exists on the table '%s'.'%s'." creation.Name database trigger.Table)
+
+        Ok KeepExistingTrigger
+    | Some _ ->
+        Error(
+            Err(
+                4100,
+                sprintf
+                    "Trigger '%s'.'%s' already exists on a different table. The 'IF NOT EXISTS' clause is only supported for triggers associated with the same table."
+                    database
+                    creation.Name
+            )
+        )
+
+let private validateTriggerBody parserOptions registry (creation: TriggerCreation) columns =
+    match StoredProgram.parseTrigger parserOptions creation.Body with
+    | Result.Error message -> Error(Err(1064, sprintf "Trigger body has a syntax error: %s" message))
+    | Result.Ok statements ->
+        match StoredProgram.validate [] statements with
+        | Error validation ->
+            let code, message = StoredProgram.validationError validation
+            Error(Err(code, message))
+        | Ok() ->
+            statements
+            |> traverse (validateTriggerStatement registry creation.Timing creation.Event columns)
+            |> Result.map ignore
+
 let private storeTriggerDefinition
     (store: Store)
     (account: Auth.Account)
@@ -14517,10 +14567,7 @@ let private storeTriggerDefinition
     | Ok(_, existing) ->
         let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
-        let duplicateName =
-            existing
-            |> Seq.choose SystemCatalog.Trigger.tryRead
-            |> Seq.exists (fun trigger -> equals trigger.Schema db && equals trigger.Name name)
+        let duplicateName = triggerNamed db name existing |> Option.isSome
 
         let sameSlot = isTriggerSlot db table timing event
         let sameSlotRow row = row |> SystemCatalog.Trigger.tryRead |> Option.exists sameSlot
@@ -16702,15 +16749,15 @@ let rec executeAs
             ids, Affected 0UL
         | Error error -> ids, storageErr error
 
-    | CreateTrigger(name, timing, event, table, order, body) ->
-        let db, table = splitQualified dbName table
+    | CreateTrigger creation ->
+        let db, table = splitQualified dbName creation.Table
         let timingText =
-            match timing with
+            match creation.Timing with
             | Before -> "BEFORE"
             | After -> "AFTER"
 
         let eventText =
-            match event with
+            match creation.Event with
             | TriggerInsert -> "INSERT"
             | TriggerUpdate -> "UPDATE"
             | TriggerDelete -> "DELETE"
@@ -16718,18 +16765,34 @@ let rec executeAs
         match scan store db table with
         | Error e -> ids, storageErr e
         | Ok(columns, _) ->
-            match StoredProgram.parseTrigger (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText) body with
-            | Result.Error msg -> ids, Err(1064, sprintf "Trigger body has a syntax error: %s" msg)
-            | Result.Ok bodyStatements ->
-                match StoredProgram.validate [] bodyStatements with
-                | Error validation ->
-                    let code, message = StoredProgram.validationError validation
-                    ids, Err(code, message)
-                | Ok() ->
-                    match bodyStatements |> traverse (validateTriggerStatement registry timing event columns) with
+            match scan store "mysql" "triggers" with
+            | Error error -> ids, storageErr error
+            | Ok(_, triggers) ->
+                match triggerCreationDisposition db table creation (triggerNamed db creation.Name triggers) with
+                | Error result -> ids, result
+                | Ok KeepExistingTrigger -> ids, Affected 0UL
+                | Ok StoreTrigger ->
+                    match
+                        validateTriggerBody
+                            (SqlMode.parserOptionsFor store.ExecutionSettings.SqlModeText)
+                            registry
+                            creation
+                            columns
+                    with
                     | Error result -> ids, result
-                    | Ok _ ->
-                        match storeTriggerDefinition store currentAccount db table name timingText eventText order body with
+                    | Ok() ->
+                        match
+                            storeTriggerDefinition
+                                store
+                                currentAccount
+                                db
+                                table
+                                creation.Name
+                                timingText
+                                eventText
+                                creation.Order
+                                creation.Body
+                        with
                         | Error result -> ids, result
                         | Ok() -> ids, Affected 0UL
 

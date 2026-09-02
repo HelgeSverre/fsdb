@@ -40,7 +40,13 @@ let tests =
                   Fsdb.Parser.parse
                       "CREATE TRIGGER before_delete BEFORE DELETE ON t FOR EACH ROW DELETE FROM log WHERE n = OLD.n"
               with
-              | Ok(Fsdb.Ast.CreateTrigger("before_delete", Fsdb.Ast.Before, Fsdb.Ast.TriggerDelete, "t", None, _)) -> ()
+              | Ok(Fsdb.Ast.CreateTrigger creation) ->
+                  Expect.equal creation.Name "before_delete" "name"
+                  Expect.isFalse creation.IfNotExists "unconditional creation"
+                  Expect.equal creation.Timing Fsdb.Ast.Before "timing"
+                  Expect.equal creation.Event Fsdb.Ast.TriggerDelete "event"
+                  Expect.equal creation.Table "t" "table"
+                  Expect.isNone creation.Order "order"
               | other -> failtestf "expected BEFORE DELETE trigger AST, got %A" other
 
           testCase "BEFORE INSERT can assign NEW values"

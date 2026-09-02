@@ -108,6 +108,40 @@ let tests =
                   handle session "DROP TRIGGER IF EXISTS absent_trigger"
                   |> expectAffectedWithConditions "missing trigger is ignored" [ note 1360 "Trigger does not exist" ]
 
+              let session, _ = handle session "CREATE TABLE trigger_target (id INT)"
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TRIGGER present_trigger BEFORE INSERT ON trigger_target FOR EACH ROW SET NEW.id = NEW.id + 1"
+
+              let session =
+                  handle
+                      session
+                      "CREATE TRIGGER IF NOT EXISTS present_trigger BEFORE INSERT ON trigger_target FOR EACH ROW SET NEW.missing = 1"
+                  |> expectAffectedWithConditions
+                      "existing trigger is ignored"
+                      [ note 4099 "Trigger 'present_trigger' already exists on the table 'fsdb'.'trigger_target'." ]
+
+              let session, _ = handle session "CREATE TABLE other_trigger_target (id INT)"
+              let session, result =
+                  handle
+                      session
+                      "CREATE TRIGGER IF NOT EXISTS present_trigger BEFORE INSERT ON other_trigger_target FOR EACH ROW SET NEW.id = 1"
+
+              match result with
+              | Err(4100, message) ->
+                  Expect.equal
+                      message
+                      "Trigger 'fsdb'.'present_trigger' already exists on a different table. The 'IF NOT EXISTS' clause is only supported for triggers associated with the same table."
+                      "different-table error"
+              | other -> failtestf "expected different-table trigger error, got %A" other
+
+              let session, _ = handle session "INSERT INTO trigger_target VALUES (1)"
+
+              match handle session "SELECT id FROM trigger_target" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the original trigger body, got %A" other
+
               let session, _ = handle session "CREATE PROCEDURE present_procedure() SELECT 1 AS value"
               let session =
                   handle session "CREATE PROCEDURE IF NOT EXISTS present_procedure() SELECT 2 AS value"

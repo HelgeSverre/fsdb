@@ -4065,10 +4065,7 @@ let private dropRoleStmt: Parser<Statement, unit> =
 // CREATE TRIGGER / DROP TRIGGER.
 // ---------------------------------------------------------------------------
 
-/// The trigger body: everything after `FOR EACH ROW` to end of input,
-/// captured as raw text (validated by parsing in the executor, not here —
-/// the AST carries the text once, see `Ast.CreateTrigger`). A trailing `;`
-/// belongs to the outer statement, not the body, so it's trimmed off.
+/// A trailing semicolon terminates CREATE TRIGGER rather than its stored body.
 let private createTriggerStmt: Parser<Statement, unit> =
     let timing = (keyword "BEFORE" >>% Before) <|> (keyword "AFTER" >>% After)
     let event =
@@ -4082,7 +4079,11 @@ let private createTriggerStmt: Parser<Statement, unit> =
             <|> (keyword "PRECEDES" >>. identifier |>> Precedes)
         )
 
-    (keyword "CREATE" >>. keyword "TRIGGER" >>. identifier .>>. timing .>>. event
+    (keyword "CREATE" >>. keyword "TRIGGER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. identifier
+     .>>. timing
+     .>>. event
      .>> keyword "ON"
      .>>. qualifiedTableName
      .>> keyword "FOR"
@@ -4090,8 +4091,15 @@ let private createTriggerStmt: Parser<Statement, unit> =
      .>> keyword "ROW"
      .>>. order
      .>>. manyChars anyChar)
-    |>> fun (((((name, timing), event), table), order), body) ->
-        CreateTrigger(name, timing, event, table, order, body.Trim().TrimEnd(';').Trim())
+    |>> fun ((((((ifNotExists, name), timing), event), table), order), body) ->
+        CreateTrigger
+            { Name = name
+              IfNotExists = ifNotExists
+              Timing = timing
+              Event = event
+              Table = table
+              Order = order
+              Body = body.Trim().TrimEnd(';').Trim() }
 
 let private dropTriggerStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "TRIGGER"
