@@ -767,6 +767,12 @@ type ExplainFormat =
     | ExplainTree
     | ExplainAnalyze
 
+/// Parse-time evidence for diagnostics that semantic normalization erases.
+/// Replay deliberately reconstructs an empty list: warnings belong to the
+/// client statement, not to durable schema recovery.
+type SyntaxDeprecation =
+    | Utf8CharsetAlias
+
 type CreateTableSpec =
     { Name: string
       Columns: ColumnDef list
@@ -781,7 +787,8 @@ type CreateTableSpec =
       /// The table-option seed restored before any row is inserted.
       AutoIncrementSeed: int64 option
       Comment: string option
-      Partitioning: HashPartitioning option }
+      Partitioning: HashPartitioning option
+      Deprecations: SyntaxDeprecation list }
 
 type RoleSelection =
     | NoRoles
@@ -811,11 +818,11 @@ type LoadDataCommand =
       Ignore: bool }
 
 type Statement =
-    | CreateDatabase of name: string * ifNotExists: bool
+    | CreateDatabase of name: string * ifNotExists: bool * deprecations: SyntaxDeprecation list
     | DropDatabase of name: string * ifExists: bool
     /// `ALTER DATABASE [name] [CHARACTER SET x] [COLLATE y]`; an omitted
     /// name targets the current database.
-    | AlterDatabase of name: string option
+    | AlterDatabase of name: string option * deprecations: SyntaxDeprecation list
     | CreateTable of CreateTableSpec
     | CreateTableLike of name: string * source: string * ifNotExists: bool
     | CreateTableAs of name: string * query: Statement * ifNotExists: bool

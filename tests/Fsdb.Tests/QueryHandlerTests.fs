@@ -104,6 +104,47 @@ let tests =
                     "'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead" ]
                   "VALUES warnings do not require a duplicate row"
 
+          testCase "deprecated utf8 aliases report once per spelling"
+          <| fun _ ->
+              let warning =
+                  3719,
+                  "'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous."
+
+              let expectWarnings count session description =
+                  Expect.equal
+                      (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                      (List.replicate count warning)
+                      description
+
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE utf8_alias_db CHARACTER SET utf8"
+              expectWarnings 1 session "CREATE DATABASE alias"
+
+              let session, _ = handle session "ALTER DATABASE utf8_alias_db CHARACTER SET utf8"
+              expectWarnings 1 session "ALTER DATABASE alias"
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TABLE utf8_aliases (a VARCHAR(10) CHARACTER SET utf8, b VARCHAR(10) CHARACTER SET utf8) CHARACTER SET utf8"
+
+              expectWarnings 3 session "table and column aliases"
+
+              let session, _ = handle session "CREATE TABLE utf8_altered (a VARCHAR(10))"
+
+              let session, _ =
+                  handle
+                      session
+                      "ALTER TABLE utf8_altered ADD COLUMN b VARCHAR(10) CHARACTER SET utf8, ADD COLUMN c VARCHAR(10) CHARACTER SET utf8"
+
+              expectWarnings 2 session "ALTER TABLE column aliases"
+
+              let session, _ = handle session "SET NAMES utf8"
+              expectWarnings 1 session "SET NAMES alias"
+
+              let session, _ = handle session "SELECT CONVERT('x' USING utf8), CONVERT('y' USING utf8)"
+              expectWarnings 2 session "CONVERT aliases"
+
           testCase "AES result metadata remains binary when LIMIT 0 returns no rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

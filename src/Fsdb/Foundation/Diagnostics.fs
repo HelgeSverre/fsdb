@@ -53,6 +53,11 @@ let note code message =
           Message = message
           Information = Map.empty }
 
+let deprecatedUtf8Alias () =
+    warning
+        3719
+        "'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous."
+
 let fromErrorWithLevel level (error: SqlState.Error) =
     { Level = level
       Code = error.Code

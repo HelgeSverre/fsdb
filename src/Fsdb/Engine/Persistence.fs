@@ -742,7 +742,7 @@ let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterActi
 
 let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) : unit =
     match s with
-    | CreateDatabase(name, ifNotExists) -> w.WriteByte 0x01uy; writeStr w name; writeBool w ifNotExists
+    | CreateDatabase(name, ifNotExists, _) -> w.WriteByte 0x01uy; writeStr w name; writeBool w ifNotExists
     | DropDatabase(name, ifExists) -> w.WriteByte 0x02uy; writeStr w name; writeBool w ifExists
     | CreateTable table ->
         w.WriteByte 0x03uy
@@ -779,7 +779,7 @@ let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) 
 
 let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
     match r.ReadByte() with
-    | 0x01uy -> CreateDatabase(readStr r, readBool r)
+    | 0x01uy -> CreateDatabase(readStr r, readBool r, [])
     | 0x02uy -> DropDatabase(readStr r, readBool r)
     | 0x03uy ->
         let name = readStr r
@@ -803,7 +803,8 @@ let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
               Collation = tableCollation
               AutoIncrementSeed = autoIncrementSeed
               Comment = tableComment
-              Partitioning = partitioning }
+              Partitioning = partitioning
+              Deprecations = [] }
     | 0x04uy -> DropTable(readStrList r, readBool r)
     | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction format r))
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
@@ -1020,7 +1021,7 @@ let private warn (context: string) (result: Result<'a, StorageError>) : unit =
 
 let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     match stmt with
-    | CreateDatabase(name, _) -> warn "CreateDatabase" (createDatabase store name)
+    | CreateDatabase(name, _, _) -> warn "CreateDatabase" (createDatabase store name)
     | DropDatabase(name, _) -> warn "DropDatabase" (dropDatabase store name)
     | CreateTable table ->
         warn

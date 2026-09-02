@@ -1742,7 +1742,8 @@ let tests =
                         Collation = None
                         AutoIncrementSeed = None
                         Comment = None
-                        Partitioning = None }
+                        Partitioning = None
+                        Deprecations = [] }
               File.WriteAllBytes(walPath dir, encodeWalRecord (SchemaChanged(defaultDatabase, statement)))
 
               let reloaded = load dir

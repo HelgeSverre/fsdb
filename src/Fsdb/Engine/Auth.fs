@@ -2444,9 +2444,9 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | RenameTable pairs -> onTables "ALTER" (pairs |> List.map (fst >> split))
     | CreateIndex(_, table, _, _, _, _) -> onTables "INDEX" [ split table ]
     | DropIndexStmt(_, table, _) -> onTables "INDEX" [ split table ]
-    | CreateDatabase(name, _) -> [ "CREATE", OnDb name ]
+    | CreateDatabase(name, _, _) -> [ "CREATE", OnDb name ]
     | DropDatabase(name, _) -> [ "DROP", OnDb name ]
-    | AlterDatabase name -> [ "ALTER", OnDb(name |> Option.defaultValue defaultDb) ]
+    | AlterDatabase(name, _) -> [ "ALTER", OnDb(name |> Option.defaultValue defaultDb) ]
     | CreateUser _
     | DropUser _
     | RenameUser _

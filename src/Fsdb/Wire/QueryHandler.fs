@@ -1343,6 +1343,9 @@ let private parseSetFragment
 let private applySetAction (session: Session) (action: SetAction) : Session =
     match action with
     | SetNamesAction(charset, collation) ->
+        if String.Equals(charset, "utf8", StringComparison.OrdinalIgnoreCase) then
+            Diagnostics.deprecatedUtf8Alias ()
+
         // `SET NAMES` uses the charset default unless COLLATE is explicit.
         let connectionCollation =
             match collation |> Option.bind Collation.tryFind with

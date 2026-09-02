@@ -370,13 +370,18 @@ let rec rewriteStatement replace =
     | Explain(format, statement) -> Explain(format, rewriteStatement replace statement)
     | statement -> statement
 
-let statementExists predicate statement =
-    let mutable found = false
+let statementCount predicate statement =
+    let mutable count = 0
 
     statement
     |> rewriteStatement (fun expression ->
-        if predicate expression then found <- true
+        if predicate expression then
+            count <- count + 1
+
         None)
     |> ignore
 
-    found
+    count
+
+let statementExists predicate statement =
+    statementCount predicate statement > 0

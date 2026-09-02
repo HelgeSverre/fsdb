@@ -13637,68 +13637,49 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")
 
-let private selectClauseExpressions (select: SelectStmt) =
-    (select.Projections |> List.map fst)
-    @ Option.toList select.Where
-    @ Option.toList select.Having
-    @ select.GroupBy
-    @ (select.OrderBy |> List.map fst)
-    @ (select.Joins |> List.map _.On)
-    @ Option.toList select.Limit
-    @ Option.toList select.Offset
-
-let rec private countFunctionCallsInExpression name expression =
-    let current =
-        match expression with
-        | FuncCall(called, _) when called.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> 1
-        | _ -> 0
-
-    current
-    + (Expression.children expression |> List.sumBy (countFunctionCallsInExpression name))
-    + (Expression.subqueries expression |> List.sumBy (countFunctionCallsInSelect name))
-
-and private countFunctionCallsInSelect name (select: SelectStmt) =
-    let fromItem =
-        function
-        | FromTable _ -> 0
-        | FromSubquery(query, _)
-        | FromLateral(query, _) -> countFunctionCallsInQuery name query
-        | FromJsonTable(source, _, _, _) -> countFunctionCallsInExpression name source
-
-    (selectClauseExpressions select |> List.sumBy (countFunctionCallsInExpression name))
-    + (select.Windows
-       |> List.sumBy (snd >> OverSpec >> Expression.overExpressions >> List.sumBy (countFunctionCallsInExpression name)))
-    + (select.Ctes |> List.sumBy (fun cte -> countFunctionCallsInQuery name cte.Body))
-    + (select.From |> Option.map fromItem |> Option.defaultValue 0)
-    + (select.Joins |> List.sumBy (_.Table >> fromItem))
-
-and private countFunctionCallsInQuery name =
-    function
-    | PlainSelect select -> countFunctionCallsInSelect name select
-    | UnionSelect(first, rest, orderBy, limit, offset) ->
-        countFunctionCallsInSelect name first
-        + (rest |> List.sumBy (snd >> countFunctionCallsInSelect name))
-        + (orderBy |> List.sumBy (fst >> countFunctionCallsInExpression name))
-        + (limit |> Option.map (countFunctionCallsInExpression name) |> Option.defaultValue 0)
-        + (offset |> Option.map (countFunctionCallsInExpression name) |> Option.defaultValue 0)
-
-let private countFunctionCalls name expressions =
-    expressions |> List.sumBy (countFunctionCallsInExpression name)
+let private countFunctionCalls name statement =
+    Expression.statementCount
+        (function
+        | FuncCall(called, _) -> called.Equals(name, System.StringComparison.OrdinalIgnoreCase)
+        | _ -> false)
+        statement
 
 let private repeatWarning count code message =
     for _ in 1..count do
         Diagnostics.warning code message
 
-let private reportSelectDeprecations (select: SelectStmt) =
-    if select.CalculateFoundRows then
-        Diagnostics.warning
-            1287
-            "SQL_CALC_FOUND_ROWS is deprecated and will be removed in a future release. Consider using two separate queries instead."
+let private reportUtf8ConversionDeprecations statement =
+    Expression.statementCount
+        (function
+        | FuncCall(name, [ _; Lit(VString charset) ]) ->
+            name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase)
+            && charset.Equals("utf8", System.StringComparison.OrdinalIgnoreCase)
+        | _ -> false)
+        statement
+    |> fun count ->
+        for _ in 1..count do
+            Diagnostics.deprecatedUtf8Alias ()
+
+let private reportQueryDeprecations statement =
+    let reportCalculateFoundRows (select: SelectStmt) =
+        if select.CalculateFoundRows then
+            Diagnostics.warning
+                1287
+                "SQL_CALC_FOUND_ROWS is deprecated and will be removed in a future release. Consider using two separate queries instead."
+
+    match statement with
+    | Select select -> reportCalculateFoundRows select
+    | Union(first, rest, _, _, _) ->
+        reportCalculateFoundRows first
+        rest |> List.iter (snd >> reportCalculateFoundRows)
+    | _ -> ()
 
     repeatWarning
-        (countFunctionCallsInSelect "FOUND_ROWS" select)
+        (countFunctionCalls "FOUND_ROWS" statement)
         1287
         "FOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead."
+
+    reportUtf8ConversionDeprecations statement
 
 /// A top-level `SELECT`'s resultset plus its per-column MySQL wire types —
 /// `QueryHandler.executeStatement`'s type-preserving entry point into
@@ -13715,7 +13696,7 @@ let runTopLevelSelect
     : QueryResult * ColumnMetadata list * uint64 option * Value[] list =
     resetStatementMemo ()
     let executable = { select with IntoVariables = [] }
-    reportSelectDeprecations select
+    reportQueryDeprecations (Select select)
 
     if select.CalculateFoundRows then
         let unbounded =
@@ -13748,8 +13729,7 @@ let runTopLevelUnion
     (offset: Expr option)
     : QueryResult * ColumnMetadata list * uint64 option =
     resetStatementMemo ()
-    reportSelectDeprecations first
-    rest |> List.iter (snd >> reportSelectDeprecations)
+    reportQueryDeprecations (Union(first, rest, orderBy, limit, offset))
 
     if first.CalculateFoundRows then
         let result, types, values =
@@ -14649,9 +14629,28 @@ let private reportNumericDisplayWarnings columns =
         | None -> ()
 
 let private reportDeprecatedStatementSyntax =
+    let reportDeprecations deprecations =
+        deprecations
+        |> List.iter (function
+            | Utf8CharsetAlias -> Diagnostics.deprecatedUtf8Alias ())
+
+    let columnDeprecations (column: ColumnDef) =
+        match column.Charset with
+        | Some charset when charset.Equals("utf8", System.StringComparison.OrdinalIgnoreCase) -> [ Utf8CharsetAlias ]
+        | _ -> []
+
+    let alterTableDeprecations actions =
+        actions
+        |> List.collect (function
+            | AddColumn(column, _)
+            | ModifyColumn(column, _)
+            | ChangeColumn(_, column, _) -> columnDeprecations column
+            | ConvertCharset(charset, _) when charset.Equals("utf8", System.StringComparison.OrdinalIgnoreCase) ->
+                [ Utf8CharsetAlias ]
+            | _ -> [])
+
     let reportValuesFunctionDeprecations assignments =
-        assignments
-        |> List.map snd
+        Do(assignments |> List.map snd)
         |> countFunctionCalls "VALUES"
         |> fun count ->
             repeatWarning
@@ -14660,13 +14659,20 @@ let private reportDeprecatedStatementSyntax =
                 "'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead"
 
     function
-    | Select select -> reportSelectDeprecations select
-    | Union(first, rest, _, _, _) ->
-        reportSelectDeprecations first
-        rest |> List.iter (snd >> reportSelectDeprecations)
-    | Insert(_, _, _, assignments, _)
-    | InsertSelect(_, _, _, assignments, _) -> reportValuesFunctionDeprecations assignments
-    | _ -> ()
+    | (Select _ | Union _) as statement -> reportQueryDeprecations statement
+    | CreateDatabase(_, _, deprecations)
+    | AlterDatabase(_, deprecations) -> reportDeprecations deprecations
+    | CreateTable table ->
+        reportDeprecations table.Deprecations
+        reportUtf8ConversionDeprecations (CreateTable table)
+    | AlterTable(_, actions) as statement ->
+        reportDeprecations (alterTableDeprecations actions)
+        reportUtf8ConversionDeprecations statement
+    | (Insert(_, _, _, assignments, _)
+      | InsertSelect(_, _, _, assignments, _)) as statement ->
+        reportValuesFunctionDeprecations assignments
+        reportUtf8ConversionDeprecations statement
+    | statement -> reportUtf8ConversionDeprecations statement
 
 /// Executes a statement under `currentAccount`; `ids` carries the OK-packet
 /// and generated AUTO_INCREMENT identities between statements.
@@ -15581,7 +15587,7 @@ let rec executeAs
         nextIds, result
     | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
 
-    | CreateDatabase(name, ifNotExists) ->
+    | CreateDatabase(name, ifNotExists, _) ->
         match Storage.createDatabase store name with
         | Ok() -> ids, Affected 0UL
         | Error(DatabaseExists _) when ifNotExists -> ids, Affected 0UL
@@ -15610,7 +15616,7 @@ let rec executeAs
         | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
-    | AlterDatabase requestedName ->
+    | AlterDatabase(requestedName, _) ->
         // The charset/collate tail is parsed and discarded (see
         // `Parser.databaseOptions`'s doc) — nothing in the catalog needs to
         // record it, so this is just an existence check.
@@ -15713,7 +15719,8 @@ let rec executeAs
                               Collation = table.TableCollation
                               AutoIncrementSeed = None
                               Comment = if table.TableComment = "" then None else Some table.TableComment
-                              Partitioning = table.Partitioning })
+                              Partitioning = table.Partitioning
+                              Deprecations = [] })
 
     | CreateTable table ->
         let db, name = splitQualified dbName table.Name

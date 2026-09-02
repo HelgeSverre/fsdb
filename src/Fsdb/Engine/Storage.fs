@@ -787,7 +787,7 @@ let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> 
                 lock slot (fun () ->
                     if store.Databases.TryAdd(dbName, slot) then
                         invalidateDatabaseAutoIncrementCounters store dbName
-                        Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false)) ])
+                        Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false, [])) ])
                     else
                         Error(DatabaseExists dbName))))
 
@@ -4486,7 +4486,8 @@ let createTableSeeded
                   Collation = tableCollation
                   AutoIncrementSeed = autoIncrementSeed
                   Comment = tableComment
-                  Partitioning = partitioning }
+                  Partitioning = partitioning
+                  Deprecations = [] }
 
         [ SchemaChangedAt(dbName, statement, createTime) ]
 

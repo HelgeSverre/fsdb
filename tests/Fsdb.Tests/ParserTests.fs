@@ -27,7 +27,8 @@ let private createTableSpec name columns =
       Collation = None
       AutoIncrementSeed = None
       Comment = None
-      Partitioning = None }
+      Partitioning = None
+      Deprecations = [] }
 
 /// Builds a `Select` statement from a flat positional tuple, so every test
 /// below reads as a plain AST comparison instead of a record literal per
@@ -1572,17 +1573,17 @@ let tests =
           testList
               "DATABASE"
               [ testCase "CREATE DATABASE"
-                <| fun _ -> Expect.equal (parseOk "CREATE DATABASE foo") (CreateDatabase("foo", false)) "create database"
+                <| fun _ -> Expect.equal (parseOk "CREATE DATABASE foo") (CreateDatabase("foo", false, [])) "create database"
 
                 testCase "CREATE DATABASE IF NOT EXISTS"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE DATABASE IF NOT EXISTS foo")
-                        (CreateDatabase("foo", true))
+                        (CreateDatabase("foo", true, []))
                         "create database if not exists"
 
                 testCase "CREATE SCHEMA"
-                <| fun _ -> Expect.equal (parseOk "CREATE SCHEMA foo") (CreateDatabase("foo", false)) "create schema"
+                <| fun _ -> Expect.equal (parseOk "CREATE SCHEMA foo") (CreateDatabase("foo", false, [])) "create schema"
 
                 testCase "DROP DATABASE"
                 <| fun _ -> Expect.equal (parseOk "DROP DATABASE foo") (DropDatabase("foo", false)) "drop database"
@@ -1598,7 +1599,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE DATABASE IF NOT EXISTS crescat_testing CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-                        (CreateDatabase("crescat_testing", true))
+                        (CreateDatabase("crescat_testing", true, []))
                         "charset/collate tail parses and is ignored"
 
                 testCase "CREATE DATABASE with Laravel's exact DEFAULT CHARACTER SET/DEFAULT COLLATE, backticked, form"
@@ -1608,20 +1609,25 @@ let tests =
                     // to build each parallel worker's own database.
                     Expect.equal
                         (parseOk "create database `x` default character set `utf8mb4` default collate `utf8mb4_unicode_ci`")
-                        (CreateDatabase("x", false))
+                        (CreateDatabase("x", false, []))
                         "backticked default charset/collate tail parses and is ignored"
 
                 testCase "ALTER DATABASE with a CHARACTER SET/COLLATE tail parses"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "ALTER DATABASE x CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-                        (AlterDatabase(Some "x"))
+                        (AlterDatabase(Some "x", []))
                         "named database"
 
                     Expect.equal
                         (parseOk "ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs")
-                        (AlterDatabase None)
-                        "current database" ]
+                        (AlterDatabase(None, []))
+                        "current database"
+
+                    Expect.equal
+                        (parseOk "ALTER DATABASE CHARACTER SET utf8")
+                        (AlterDatabase(None, [ Utf8CharsetAlias ]))
+                        "deprecated charset spelling" ]
 
           testList
               "INSERT"

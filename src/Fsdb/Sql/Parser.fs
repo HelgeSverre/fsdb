@@ -2107,6 +2107,12 @@ let private generatedColumn: Parser<Expr * GeneratedKind, unit> =
 /// The charsets fsdb accepts in DDL (see `ColumnDef.Charset`'s doc for what
 /// each actually does at runtime), lowercased; anything else is a parse
 /// error. One validator shared by column mods and table options.
+let private charsetDeprecations charset =
+    if String.Equals(charset, "utf8", StringComparison.OrdinalIgnoreCase) then
+        [ Utf8CharsetAlias ]
+    else
+        []
+
 let private knownCharset: Parser<string, unit> =
     identOrString
     >>= fun name ->
@@ -2491,21 +2497,31 @@ let private tableOption: Parser<TableOption, unit> =
               | None -> fail (sprintf "Unknown collation '%s'" name)
           attempt hashPartitionOption ]
 
-let private tableOptions: Parser<string option * string option * int64 option * string option * HashPartitioning option, unit> =
+let private tableOptions:
+    Parser<string option * string option * int64 option * string option * HashPartitioning option * SyntaxDeprecation list, unit> =
     many (optional (sym ",") >>. tableOption)
     |>> fun opts ->
-        opts
-        |> List.fold
-            // A repeated option's last occurrence wins, same as MySQL.
-            (fun (cs, col, seed, comment, partitioning) opt ->
-                match opt with
-                | TableCharset c -> Some c, col, seed, comment, partitioning
-                | TableCollate l -> cs, Some l, seed, comment, partitioning
-                | TableAutoIncrement n -> cs, col, Some n, comment, partitioning
-                | TableComment value -> cs, col, seed, Some value, partitioning
-                | TablePartitioning value -> cs, col, seed, comment, Some value
-                | TableOptionIgnored -> cs, col, seed, comment, partitioning)
-            (None, None, None, None, None)
+        let charset, collation, seed, comment, partitioning =
+            opts
+            |> List.fold
+                // A repeated option's last occurrence wins, same as MySQL.
+                (fun (cs, col, seed, comment, partitioning) opt ->
+                    match opt with
+                    | TableCharset c -> Some c, col, seed, comment, partitioning
+                    | TableCollate l -> cs, Some l, seed, comment, partitioning
+                    | TableAutoIncrement n -> cs, col, Some n, comment, partitioning
+                    | TableComment value -> cs, col, seed, Some value, partitioning
+                    | TablePartitioning value -> cs, col, seed, comment, Some value
+                    | TableOptionIgnored -> cs, col, seed, comment, partitioning)
+                (None, None, None, None, None)
+
+        let deprecations =
+            opts
+            |> List.collect (function
+                | TableCharset value -> charsetDeprecations value
+                | _ -> [])
+
+        charset, collation, seed, comment, partitioning, deprecations
 
 let private createTable: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
@@ -2513,11 +2529,17 @@ let private createTable: Parser<Statement, unit> =
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>>. tableOptions)
-    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed, tableComment, partitioning)) ->
+    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed, tableComment, partitioning, tableDeprecations)) ->
         let primaryKeyParts = items |> List.collect (function CPrimaryKey columns -> columns | _ -> [])
         let pkNames = primaryKeyParts |> List.map _.Name
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
         let foreignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
+
+        let columnDeprecations =
+            items
+            |> List.collect (function
+                | CColumn(column, _) -> column.Charset |> Option.toList |> List.collect charsetDeprecations
+                | _ -> [])
 
         let columns =
             items
@@ -2614,7 +2636,8 @@ let private createTable: Parser<Statement, unit> =
               Collation = tableCollation
               AutoIncrementSeed = autoIncrementSeed
               Comment = tableComment
-              Partitioning = partitioning }
+              Partitioning = partitioning
+              Deprecations = tableDeprecations @ columnDeprecations }
 
 let private createTableLike: Parser<Statement, unit> =
     let source = keyword "LIKE" >>. qualifiedTableName
@@ -2669,12 +2692,12 @@ let private checksumTableStmt: Parser<Statement, unit> =
 
 /// `[DEFAULT] CHARACTER SET [=] x` / `[DEFAULT] COLLATE [=] y`, in either
 /// order, either/both/neither present — `CREATE`/`ALTER DATABASE`'s own
-/// tail, accepted and discarded like `tableOption`'s charset/collate
-/// alternatives, but with `COLLATE` also taking the `DEFAULT` prefix Laravel
-/// emits (`MySqlGrammar::compileCreateDatabase`, what
+/// tail. The catalog still discards the effective setting, while deprecated
+/// charset spellings remain available to the diagnostics pass. `COLLATE`
+/// also takes the `DEFAULT` prefix Laravel emits (`MySqlGrammar::compileCreateDatabase`, what
 /// `Illuminate\Testing\Concerns\TestDatabases` calls to build each parallel
 /// worker's own database) which `tableOption` doesn't need to.
-let private databaseOption: Parser<unit, unit> =
+let private databaseOption: Parser<SyntaxDeprecation list, unit> =
     choice
         [ attempt (
               optional (keyword "DEFAULT")
@@ -2682,17 +2705,17 @@ let private databaseOption: Parser<unit, unit> =
           )
           >>. opt (sym "=")
           >>. identOrString
-          >>% ()
-          optional (keyword "DEFAULT") >>. keyword "COLLATE" >>. opt (sym "=") >>. identOrString >>% () ]
+          |>> charsetDeprecations
+          optional (keyword "DEFAULT") >>. keyword "COLLATE" >>. opt (sym "=") >>. identOrString >>% [] ]
 
-let private databaseOptions: Parser<unit, unit> = skipMany databaseOption
+let private databaseOptions: Parser<SyntaxDeprecation list, unit> = many databaseOption |>> List.concat
 
 let private createDatabaseStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. (keyword "DATABASE" <|> keyword "SCHEMA")
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. identifier
-     .>> databaseOptions)
-    |>> fun (ifNotExists, name) -> CreateDatabase(name, ifNotExists)
+     .>>. databaseOptions)
+    |>> fun ((ifNotExists, name), deprecations) -> CreateDatabase(name, ifNotExists, deprecations)
 
 let private dropDatabaseStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. (keyword "DATABASE" <|> keyword "SCHEMA")
@@ -2711,8 +2734,8 @@ let private alterDatabaseStmt: Parser<Statement, unit> =
     (keyword "ALTER"
      >>. (keyword "DATABASE" <|> keyword "SCHEMA")
      >>. opt (notFollowedBy optionStart >>. identifier)
-     .>> databaseOptions)
-    |>> AlterDatabase
+     .>>. databaseOptions)
+    |>> fun (name, deprecations) -> AlterDatabase(name, deprecations)
 
 // ---------------------------------------------------------------------------
 // ALTER TABLE / RENAME TABLE
