@@ -45,6 +45,35 @@ module StoredExecutionContext =
     let legacyCollationConnection = "utf8mb4_0900_ai_ci"
     let legacyDatabaseCollation = "utf8mb4_0900_ai_ci"
 
+module ProxyGrant =
+    type Entry =
+        { GranteeName: string
+          GranteeHost: string
+          ProxiedName: string
+          ProxiedHost: string
+          WithGrant: bool
+          Grantor: string }
+
+    let tryRead (row: Value[]) : Entry option =
+        readCompleteRow 6
+            (fun row ->
+                { GranteeHost = textAt 0 row
+                  GranteeName = textAt 1 row
+                  ProxiedHost = textAt 2 row
+                  ProxiedName = textAt 3 row
+                  WithGrant = int64At 0L 4 row <> 0L
+                  Grantor = textAt 5 row })
+            row
+
+    let row granteeName granteeHost proxiedName proxiedHost withGrant grantor timestamp =
+        [| VString granteeHost
+           VString granteeName
+           VString proxiedHost
+           VString proxiedName
+           VInt(if withGrant then 1L else 0L)
+           VString grantor
+           VDateTime timestamp |]
+
 module Trigger =
     let legacySqlMode = StoredExecutionContext.legacySqlMode
     let legacyCharacterSetClient = StoredExecutionContext.legacyCharacterSetClient

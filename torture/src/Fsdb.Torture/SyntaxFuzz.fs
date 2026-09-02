@@ -146,6 +146,7 @@ module SyntaxFuzz =
            "dynamic_privilege", "GRANT XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* TO 'syntax_dynamic'@'%' WITH GRANT OPTION"
            "column_privilege",
            "GRANT SELECT(id), INSERT(n), UPDATE(label), REFERENCES(id) ON syntax_target TO 'syntax_dynamic'@'%' WITH GRANT OPTION"
+           "proxy_grant", "GRANT PROXY ON 'syntax_proxy_target'@'%' TO 'syntax_dynamic'@'%' WITH GRANT OPTION"
            "locked_user", sprintf "CREATE USER 'syntax_user_%s'@'%%' ACCOUNT LOCK" suffix
            "account_requirements",
            sprintf
@@ -233,6 +234,7 @@ module SyntaxFuzz =
         | "dynamic_privilege" -> Some "REVOKE XA_RECOVER_ADMIN, BACKUP_ADMIN ON *.* FROM 'syntax_dynamic'@'%'"
         | "column_privilege" ->
             Some "REVOKE SELECT(id), INSERT(n), UPDATE(label), REFERENCES(id) ON syntax_target FROM 'syntax_dynamic'@'%'"
+        | "proxy_grant" -> Some "REVOKE PROXY ON 'syntax_proxy_target'@'%' FROM 'syntax_dynamic'@'%'"
         | "locked_user" -> Some(sprintf "DROP USER IF EXISTS 'syntax_user_%s'@'%%', 'syntax_user_%s'@''" suffix suffix)
         | "account_requirements" -> Some(sprintf "DROP USER IF EXISTS 'syntax_secure_%s'@'%%', 'syntax_secure_%s'@''" suffix suffix)
         | _ -> None

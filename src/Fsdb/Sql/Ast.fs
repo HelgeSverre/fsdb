@@ -941,9 +941,11 @@ type Statement =
     /// `(None, Some t)` = bare `t`, resolved against the session database at
     /// execution time.
     | Grant of privs: PrivilegeSpec list * level: (string option * string option) * users: (string * string) list * withGrantOption: bool
+    | GrantProxy of proxied: (string * string) * users: (string * string) list * withGrantOption: bool
     /// `REVOKE privs ON level FROM users` — same shapes as `Grant`;
     /// `"GRANT OPTION"` may appear as a privilege name.
     | Revoke of privs: PrivilegeSpec list * level: (string option * string option) * users: (string * string) list
+    | RevokeProxy of proxied: (string * string) * users: (string * string) list
     /// `CREATE TRIGGER name timing event ON table FOR EACH ROW body` —
     /// `body` is the single statement after `FOR EACH ROW`, carried as the
     /// raw SQL text exactly as written: the executor validates it by

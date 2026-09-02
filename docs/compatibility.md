@@ -347,6 +347,10 @@ MySQL 8.4's registered dynamic global privileges are stored in
 `mysql.global_grants`, retain their individual grant options, appear in both
 metadata surfaces, and participate in authorization. Static `ALL PRIVILEGES`
 does not imply them.
+`GRANT/REVOKE PROXY` persist relationships in `mysql.proxies_priv`, enforce
+target-specific delegation, follow grantee rename/drop lifecycle, and appear
+in `SHOW GRANTS`. The built-in mysql_native_password flow cannot select an
+alternate proxied identity.
 `CREATE SERVER`, `ALTER SERVER`, and `DROP SERVER` persist foreign-server
 definitions in `mysql.servers` and require `SUPER`, matching MySQL 8.4.
 Roles use `mysql.role_edges` and `mysql.default_roles`; grants, admin option,
@@ -369,9 +373,8 @@ scoped SET, USE and protocol database selection, SHOW metadata and server
 status, table maintenance, FLUSH, KILL, and explicit table locks.
 
 Deliberate divergences (each marked `ponytail:` at its code site):
-- Proxy users, auth-plugin selection, password history/reuse/current policy,
-  and a mutable global default password lifetime are absent.
+- Pluggable authentication, proxy identity selection, and password
+  history/reuse/current policy are absent.
 - Every MySQL `mysql.*` table schema is exposed, but engine-owned help, log,
   GTID, statistics, NDB, and replication-channel rows remain empty unless
   ordinary fsdb DML populates them.
-- `SHOW GRANTS` omits PROXY lines.

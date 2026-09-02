@@ -5515,9 +5515,13 @@ let tests =
               | other -> failtestf "expected the privileges list, got %A" other
 
               match handle session "SHOW GRANTS FOR CURRENT_USER()" |> snd with
-              | ResultSet(_, [ [ Some staticGrant ]; [ Some dynamicGrant ] ]) ->
+              | ResultSet(_, rows) ->
+                  let grants = rows |> List.choose List.tryHead |> List.choose id
+                  let staticGrant = grants |> List.find (_.StartsWith("GRANT ALL PRIVILEGES", StringComparison.Ordinal))
+                  let dynamicGrant = grants |> List.find (_.Contains("XA_RECOVER_ADMIN", StringComparison.Ordinal))
                   Expect.stringContains staticGrant "GRANT ALL PRIVILEGES ON *.*" "static grant"
                   Expect.stringContains dynamicGrant "XA_RECOVER_ADMIN" "dynamic grant"
+                  Expect.contains grants "GRANT PROXY ON ``@`` TO `root`@`%` WITH GRANT OPTION" "proxy grant"
               | other -> failtestf "expected static and dynamic grant rows, got %A" other
 
           testCase "SHOW TRIGGERS/EVENTS/PROCEDURE STATUS are empty with real headers; unknown db still 1049"

@@ -2315,8 +2315,10 @@ let rec private statementStatusCommand = function
     | RevokeRoles _ -> Some InformationSchema.StatusCommand.revokeRoles
     | SetRole _ -> Some InformationSchema.StatusCommand.setRole
     | SetDefaultRole _ -> Some InformationSchema.StatusCommand.alterUserDefaultRole
-    | Grant _ -> Some InformationSchema.StatusCommand.grant
-    | Revoke _ -> Some InformationSchema.StatusCommand.revoke
+    | Grant _
+    | GrantProxy _ -> Some InformationSchema.StatusCommand.grant
+    | Revoke _
+    | RevokeProxy _ -> Some InformationSchema.StatusCommand.revoke
     | CreateTrigger _ -> Some InformationSchema.StatusCommand.createTrigger
     | DropTrigger _ -> Some InformationSchema.StatusCommand.dropTrigger
     | CreateView _ -> Some InformationSchema.StatusCommand.createView
@@ -2355,6 +2357,9 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                         session.ActiveRoles
                         (privileges |> List.map _.Name)
                         (Auth.targetOfLevel dbName level)
+                | GrantProxy(proxied, _, _)
+                | RevokeProxy(proxied, _) ->
+                    Auth.checkProxyGrantAuthority store (accountOf session) (Auth.account (fst proxied) (snd proxied))
                 | GrantRoles(roles, _, _)
                 | RevokeRoles(roles, _) ->
                     Auth.checkRoleGrantAuthorityForAccount store (accountOf session) session.ActiveRoles roles
@@ -2642,6 +2647,8 @@ let private causesImplicitCommit = function
     | DropRole _
     | Grant _
     | Revoke _
+    | GrantProxy _
+    | RevokeProxy _
     | GrantRoles _
     | RevokeRoles _
     | SetDefaultRole _
@@ -6531,6 +6538,8 @@ let private countsAsAccountUpdate = function
     | DropRole _
     | Grant _
     | Revoke _
+    | GrantProxy _
+    | RevokeProxy _
     | GrantRoles _
     | RevokeRoles _
     | SetDefaultRole _

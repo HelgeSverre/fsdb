@@ -273,7 +273,7 @@ applications:
 - Stored objects: views and `WITH CHECK OPTION`, procedures, functions,
   scheduled events, and `BEFORE`/`AFTER` triggers with compound bodies and
   nested procedure calls.
-- Accounts: `CREATE USER`, roles, `GRANT`/`REVOKE`, password, resource, and
+- Accounts: `CREATE USER`, roles, proxy grants, `GRANT`/`REVOKE`, password, resource, and
   attribute policy, plus database-, table-, and column-level privilege enforcement.
 - Bulk and batched work: `CLIENT_MULTI_STATEMENTS`/`CLIENT_MULTI_RESULTS` and
   client-side `LOAD DATA LOCAL INFILE`, including target columns, user

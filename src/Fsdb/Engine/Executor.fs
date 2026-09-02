@@ -16839,8 +16839,18 @@ let rec executeAs
         | Ok() -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 
+    | GrantProxy(proxied, users, withGrantOption) ->
+        match Auth.grantProxyAs store currentAccount proxied users withGrantOption with
+        | Ok() -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
     | Revoke(privs, level, users) ->
         match Auth.revokeSpecifications store privs (Auth.targetOfLevel dbName level) users with
+        | Ok() -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
+    | RevokeProxy(proxied, users) ->
+        match Auth.revokeProxyAs store currentAccount proxied users with
         | Ok() -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 

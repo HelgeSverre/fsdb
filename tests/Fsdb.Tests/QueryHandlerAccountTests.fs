@@ -1288,9 +1288,12 @@ let tests =
                   Expect.equal header "Grants for root@%" "header names the account"
                   let grants = rows |> List.map (List.head >> Option.get)
                   Expect.equal (List.head grants) "GRANT ALL PRIVILEGES ON *.* TO `root`@`%` WITH GRANT OPTION" "static grants"
-                  Expect.equal grants.Length 2 "static and dynamic global lines"
                   Expect.stringContains grants.[1] "XA_RECOVER_ADMIN" "bootstrap dynamic privileges"
                   Expect.stringEnds grants.[1] "WITH GRANT OPTION" "bootstrap dynamic privileges are grantable"
+                  Expect.contains
+                      grants
+                      "GRANT PROXY ON ``@`` TO `root`@`%` WITH GRANT OPTION"
+                      "bootstrap proxy authority"
               | other -> failtestf "expected root's grants, got %A" other
 
               let root, _ = handle root "CREATE USER worker"
@@ -1324,6 +1327,114 @@ let tests =
               match handle root "FLUSH PRIVILEGES" |> snd with
               | Affected 0UL -> ()
               | other -> failtestf "expected FLUSH PRIVILEGES to be an OK no-op, got %A" other
+
+          testCase "proxy grants persist in mysql.proxies_priv and render in SHOW GRANTS"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE USER 'target'@'localhost', 'actor'@'%', 'delegate'@'%'"
+              let root, granted = handle root "GRANT PROXY ON 'target'@'localhost' TO 'actor'@'%' WITH GRANT OPTION"
+              Expect.equal granted (Affected 0UL) "proxy grant"
+
+              match handle root "SHOW GRANTS FOR 'actor'@'%'" |> snd with
+              | ResultSet(_, rows) ->
+                  let grants = rows |> List.map (List.head >> Option.get)
+                  Expect.contains
+                      grants
+                      "GRANT USAGE ON *.* TO `actor`@`%` WITH GRANT OPTION"
+                      "account authority"
+                  Expect.contains
+                      grants
+                      "GRANT PROXY ON `target`@`localhost` TO `actor`@`%` WITH GRANT OPTION"
+                      "proxy authority"
+              | other -> failtestf "expected proxy grant lines, got %A" other
+
+              match
+                  handle
+                      root
+                      "SELECT Host, User, Proxied_host, Proxied_user, With_grant, Grantor FROM mysql.proxies_priv WHERE User = 'actor'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "%"; Some "actor"; Some "localhost"; Some "target"; Some "1"; Some "root@%" ] ]) -> ()
+              | other -> failtestf "expected proxy catalog row, got %A" other
+
+              let root, repeated = handle root "GRANT PROXY ON 'target'@'localhost' TO 'actor'@'%'"
+              Expect.equal repeated (Affected 0UL) "repeated grant"
+
+              match handle root "SHOW GRANTS FOR 'actor'@'%'" |> snd with
+              | ResultSet(_, rows) ->
+                  let grants = rows |> List.map (List.head >> Option.get)
+                  Expect.contains
+                      grants
+                      "GRANT USAGE ON *.* TO `actor`@`%` WITH GRANT OPTION"
+                      "global grant authority remains"
+                  Expect.contains
+                      grants
+                      "GRANT PROXY ON `target`@`localhost` TO `actor`@`%`"
+                      "the row grant option is replaced"
+              | other -> failtestf "expected repeated proxy grant lines, got %A" other
+
+              let root, revoked = handle root "REVOKE PROXY ON 'target'@'localhost' FROM 'actor'@'%'"
+              Expect.equal revoked (Affected 0UL) "proxy revoke"
+
+              match handle root "REVOKE PROXY ON 'target'@'localhost' FROM 'actor'@'%'" |> snd with
+              | Err(1141, _) -> ()
+              | other -> failtestf "expected absent proxy grant error, got %A" other
+
+          testCase "proxy grant delegation and grantee lifecycle match MySQL"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE USER 'target'@'localhost', 'other'@'localhost', 'actor'@'%', 'delegate'@'%'"
+              let root, _ = handle root "GRANT PROXY ON 'target'@'localhost' TO 'actor'@'%' WITH GRANT OPTION"
+              let actor = { create 2 store with User = "actor"; AccountHost = "%" }
+
+              match handle actor "GRANT PROXY ON 'target'@'localhost' TO 'delegate'@'%'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected target-specific delegation, got %A" other
+
+              match handle actor "GRANT PROXY ON 'other'@'localhost' TO 'delegate'@'%'" |> snd with
+              | Err(1698, _) -> ()
+              | other -> failtestf "expected unrelated proxy target denial, got %A" other
+
+              match handle root "GRANT PROXY ON 'missing'@'remote' TO 'delegate'@'%'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected a proxy target without an account to remain valid, got %A" other
+
+              match handle root "GRANT PROXY ON 'target'@'localhost' TO 'delegate'@'%', 'missing'@'%'" |> snd with
+              | Err(1410, _) -> ()
+              | other -> failtestf "expected unknown-grantee rejection, got %A" other
+
+              let root, _ = handle root "RENAME USER 'delegate'@'%' TO 'renamed'@'localhost'"
+
+              match handle root "SELECT Proxied_user, Proxied_host FROM mysql.proxies_priv WHERE User = 'renamed'" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.contains rows [ Some "target"; Some "localhost" ] "renamed grantee retains delegated target"
+                  Expect.contains rows [ Some "missing"; Some "remote" ] "renamed grantee retains missing target"
+              | other -> failtestf "expected renamed proxy grants, got %A" other
+
+              let root, _ = handle root "DROP USER 'target'@'localhost'"
+
+              match handle root "SELECT Proxied_user FROM mysql.proxies_priv WHERE User = 'renamed' AND Proxied_user = 'target'" |> snd with
+              | ResultSet(_, [ [ Some "target" ] ]) -> ()
+              | other -> failtestf "expected dropping a proxied account to retain the grant, got %A" other
+
+              let root, _ = handle root "DROP USER 'renamed'@'localhost'"
+
+              match handle root "SELECT Proxied_user FROM mysql.proxies_priv WHERE User = 'renamed'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected dropping the grantee to remove proxy grants, got %A" other
+
+              let root, _ = handle root "CREATE ROLE 'proxy_role'@'%'"
+              let root, _ = handle root "CREATE USER 'role_user'@'%'"
+              let root, _ = handle root "GRANT PROXY ON 'other'@'localhost' TO 'proxy_role'@'%' WITH GRANT OPTION"
+              let root, _ = handle root "GRANT 'proxy_role'@'%' TO 'role_user'@'%'"
+
+              match handle root "SHOW GRANTS FOR 'role_user'@'%' USING 'proxy_role'@'%'" |> snd with
+              | ResultSet(_, rows) ->
+                  let grants = rows |> List.map (List.head >> Option.get)
+                  Expect.isFalse (grants |> List.exists (_.StartsWith("GRANT PROXY", StringComparison.Ordinal))) "proxy grants are not inherited from roles"
+              | other -> failtestf "expected role materialization without proxy lines, got %A" other
 
           testCase "dynamic global privileges retain individual grant options and metadata"
           <| fun _ ->
@@ -1921,6 +2032,7 @@ let tests =
                           | "replication_group_configuration_version" -> 1
                           | "replication_group_member_actions" -> 2
                           | "server_cost" -> 6
+                          | "proxies_priv" -> 1
                           | _ -> 0
 
                       Expect.equal rows.Length expectedRows (table + " bootstrap rows")

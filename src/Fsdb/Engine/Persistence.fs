@@ -20,21 +20,24 @@ let private columnCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |] //
 let private tableCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x33uy |] // "FSN3"
 let private numericDisplaySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x34uy |] // "FSN4"
 let private partitionSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x35uy |] // "FSN5"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x36uy |] // "FSN6"
+let private dynamicPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x36uy |] // "FSN6"
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x37uy |] // "FSN7"
 
 type private SnapshotFormat =
     { ColumnComments: bool
       TableComments: bool
       NumericDisplays: bool
       Partitions: bool
-      DynamicPrivileges: bool }
+      DynamicPrivileges: bool
+      ProxyPrivileges: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
       TableComments = false
       NumericDisplays = false
       Partitions = false
-      DynamicPrivileges = false }
+      DynamicPrivileges = false
+      ProxyPrivileges = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -48,8 +51,11 @@ let private numericDisplaySnapshotFormat =
 let private partitionSnapshotFormat =
     { numericDisplaySnapshotFormat with Partitions = true }
 
-let private currentSnapshotFormat =
+let private dynamicPrivilegeSnapshotFormat =
     { partitionSnapshotFormat with DynamicPrivileges = true }
+
+let private currentSnapshotFormat =
+    { dynamicPrivilegeSnapshotFormat with ProxyPrivileges = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -58,6 +64,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = dynamicPrivilegeSnapshotMagic then
+        Some dynamicPrivilegeSnapshotFormat
     elif header = partitionSnapshotMagic then
         Some partitionSnapshotFormat
     elif header = numericDisplaySnapshotMagic then
@@ -1382,6 +1390,12 @@ let load (dataDir: string) : Store =
 
     let mutable loadedFormat = None
 
+    let ensureRootGrantsForFormat format =
+        if not format.DynamicPrivileges then
+            Storage.ensureRootGrants store
+        elif not format.ProxyPrivileges then
+            Storage.ensureRootProxyGrant store
+
     let loadSnapshot path =
         let catalog, format = readSnapshot path
         setCatalog store catalog
@@ -1398,8 +1412,7 @@ let load (dataDir: string) : Store =
                 false)
 
     if loadedFromNew then
-        if loadedFormat |> Option.exists (fun format -> not format.DynamicPrivileges) then
-            Storage.ensureRootDynamicPrivileges store
+        loadedFormat |> Option.iter ensureRootGrantsForFormat
 
         File.WriteAllText(walPath, "")
         File.Move(newPath, snapshotPath, true)
@@ -1411,8 +1424,7 @@ let load (dataDir: string) : Store =
         // Legacy snapshots need mysql.* before replay can apply account events.
         Storage.ensureMysqlSchema store
 
-        if loadedFormat |> Option.exists (fun format -> not format.DynamicPrivileges) then
-            Storage.ensureRootDynamicPrivileges store
+        loadedFormat |> Option.iter ensureRootGrantsForFormat
 
         // Physical events already passed the commit-time FK policy.
         store.ForeignKeyChecks <- false
@@ -1427,7 +1439,6 @@ let load (dataDir: string) : Store =
             use fs = new FileStream(walPath, FileMode.Open, FileAccess.Write)
             fs.SetLength goodOffset
 
-    Storage.ensureMysqlSchema store
     store
 
 /// Appends ordered WAL batches and acknowledges each commit after their shared fsync.

@@ -689,6 +689,7 @@ let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * s
         deleteWhere "tables_priv"
         deleteWhere "columns_priv"
         deleteWhere "global_grants"
+        deleteWhere "proxies_priv"
 
         let deleteRoleReferences table accountColumns =
             match scanList store "mysql" table with
@@ -800,7 +801,7 @@ let renameUser
                     |> Result.map ignore
                     |> Result.mapError toMySqlError)
 
-        [ for table in [ "user"; "db"; "tables_priv"; "columns_priv"; "global_grants" ] do
+        [ for table in [ "user"; "db"; "tables_priv"; "columns_priv"; "global_grants"; "proxies_priv" ] do
               yield renameRows table
           yield renameRoleRows "role_edges" [ "FROM_USER", "FROM_HOST"; "TO_USER", "TO_HOST" ]
           yield renameRoleRows "default_roles" [ "USER", "HOST"; "DEFAULT_ROLE_USER", "DEFAULT_ROLE_HOST" ] ]
@@ -979,6 +980,126 @@ let hasDynamicPrivilege (store: Store) (wanted: Account) (privilege: string) =
 let private hasGrantableDynamicPrivilege (store: Store) (wanted: Account) (privilege: string) =
     dynamicGrantsForAccount store wanted
     |> List.exists (fun grant -> eqI grant.Privilege privilege && grant.Grantable)
+
+type ProxyGrant =
+    { Grantee: Account
+      Proxied: Account
+      WithGrant: bool
+      Grantor: string }
+
+let proxyGrants (store: Store) : ProxyGrant list =
+    match scanList store "mysql" "proxies_priv" with
+    | Error _ -> []
+    | Ok(_, rows) ->
+        rows
+        |> List.choose (fun row ->
+            SystemCatalog.ProxyGrant.tryRead row
+            |> Option.map (fun grant ->
+                { Grantee = account grant.GranteeName grant.GranteeHost
+                  Proxied = account grant.ProxiedName grant.ProxiedHost
+                  WithGrant = grant.WithGrant
+                  Grantor = grant.Grantor }))
+
+let proxyGrantsForAccount store wanted =
+    proxyGrants store
+    |> List.filter (fun grant -> sameAccount grant.Grantee wanted)
+    |> List.sortWith (fun left right ->
+        Operators.compare
+            (left.Proxied.Name, left.Proxied.Host.ToLowerInvariant())
+            (right.Proxied.Name, right.Proxied.Host.ToLowerInvariant()))
+
+let private proxyTargetCoveredBy (grant: ProxyGrant) proxied =
+    (grant.Proxied.Name = "" && grant.Proxied.Host = "") || sameAccount grant.Proxied proxied
+
+let checkProxyGrantAuthority store grantor proxied =
+    proxyGrantsForAccount store grantor
+    |> List.exists (fun grant -> grant.WithGrant && proxyTargetCoveredBy grant proxied)
+    |> function
+        | true -> Ok()
+        | false -> Error(1698, sprintf "Access denied for user '%s'@'%s'" grantor.Name grantor.Host)
+
+let private proxyGrantRowMatches grantee proxied row =
+    SystemCatalog.ProxyGrant.tryRead row
+    |> Option.exists (fun grant ->
+        sameAccount (account grant.GranteeName grant.GranteeHost) grantee
+        && sameAccount (account grant.ProxiedName grant.ProxiedHost) proxied)
+
+let private proxyGrantMatches grantee proxied (_: ColumnDef list) row =
+    proxyGrantRowMatches grantee proxied row
+
+let grantProxyAs store grantor proxied grantees withGrantOption =
+    let proxied = account (fst proxied) (snd proxied)
+    let grantees = grantees |> List.map (fun (name, host) -> account name host)
+
+    checkProxyGrantAuthority store grantor proxied
+    |> Result.bind (fun () ->
+        match grantees |> List.tryFind (fun grantee -> tryUserRowForAccount store grantee |> Option.isNone) with
+        | Some _ -> Error(1410, "You are not allowed to create a user with GRANT")
+        | None ->
+            grantees
+            |> traverse (fun grantee ->
+                let existing =
+                    proxyGrantsForAccount store grantee
+                    |> List.exists (fun grant -> sameAccount grant.Proxied proxied)
+
+                let written =
+                    if existing then
+                        updateSystemRows
+                            store
+                            "proxies_priv"
+                            (proxyGrantMatches grantee proxied)
+                            [ "With_grant", VInt(if withGrantOption then 1L else 0L)
+                              "Grantor", VString(formatAccount grantor) ]
+                        |> Result.map ignore
+                    else
+                        insertRows
+                            store
+                            "mysql"
+                            "proxies_priv"
+                            (Some [ "Host"; "User"; "Proxied_host"; "Proxied_user"; "With_grant"; "Grantor" ])
+                            [ [ VString grantee.Host
+                                VString grantee.Name
+                                VString proxied.Host
+                                VString proxied.Name
+                                VInt(if withGrantOption then 1L else 0L)
+                                VString(formatAccount grantor) ] ]
+                        |> Result.map ignore
+                        |> Result.mapError toMySqlError
+
+                written
+                |> Result.bind (fun () ->
+                    if withGrantOption then
+                        updateSystemRows store "user" (matchUserRow grantee) [ "Grant_priv", VString "Y" ]
+                        |> Result.map ignore
+                    else
+                        Ok()))
+            |> Result.map ignore)
+
+let revokeProxyAs store grantor proxied grantees =
+    let proxied = account (fst proxied) (snd proxied)
+    let grantees = grantees |> List.map (fun (name, host) -> account name host)
+
+    checkProxyGrantAuthority store grantor proxied
+    |> Result.bind (fun () ->
+        match
+            grantees
+            |> List.tryFind (fun grantee ->
+                proxyGrantsForAccount store grantee
+                |> List.exists (fun grant -> sameAccount grant.Proxied proxied)
+                |> not)
+        with
+        | Some grantee ->
+            Error(
+                1141,
+                sprintf "There is no such grant defined for user '%s' on host '%s'" grantee.Name grantee.Host
+            )
+        | None ->
+            grantees
+            |> traverse (fun grantee ->
+                deleteRows store "mysql" "proxies_priv" (proxyGrantRowMatches grantee proxied >> Ok)
+                |> Result.map ignore
+                |> Result.mapError toMySqlError)
+            |> Result.map ignore)
 
 type RoleGrant =
     { Role: Account
@@ -1590,7 +1711,8 @@ let private revokeTablePrivilegesFromColumns store wanted database table (privil
                     |> Result.map ignore)
             |> Result.bind (fun _ -> syncTableColumnPrivileges store None wanted database table false)
 
-let private quotedAccount account = sprintf "`%s`@`%s`" account.Name account.Host
+let private quoteAccountPart (value: string) = "`" + value.Replace("`", "``") + "`"
+let private quotedAccount account = quoteAccountPart account.Name + "@" + quoteAccountPart account.Host
 
 let private distinctAccounts references =
     references
@@ -2583,6 +2705,8 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
             | Result.Error _ -> [], [] // invalid list — the executor reports it
 
         grantOptionRequirements @ privilegeRequirements
+    | GrantProxy _
+    | RevokeProxy _ -> []
     | GrantRoles _
     | RevokeRoles _
     | SetRole _
@@ -3216,7 +3340,18 @@ let renderGrantsForAccountUsing
                         quoted
                         (if adminOption then " WITH ADMIN OPTION" else ""))
 
-            sprintf "Grants for %s@%s" name host, globalLine :: dynamicLines @ dbLines @ tableLines @ roleLines)
+            let proxyLines =
+                proxyGrantsForAccount store wanted
+                |> List.groupBy _.Proxied
+                |> List.sortWith (fun (left, _) (right, _) -> compareAccounts left right)
+                |> List.map (fun (proxied, grants) ->
+                    sprintf
+                        "GRANT PROXY ON %s TO %s%s"
+                        (quotedAccount proxied)
+                        quoted
+                        (if grants |> List.exists _.WithGrant then " WITH GRANT OPTION" else ""))
+
+            sprintf "Grants for %s@%s" name host, globalLine :: dynamicLines @ dbLines @ tableLines @ proxyLines @ roleLines)
 
 let renderGrantsForAccount store wanted = renderGrantsForAccountUsing store wanted None
 

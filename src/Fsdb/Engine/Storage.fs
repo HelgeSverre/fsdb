@@ -3319,6 +3319,9 @@ let private rootDynamicGrantRows =
     Privileges.dynamic
     |> List.map (fun privilege -> [| VString "root"; VString "%"; VString privilege; VString "Y" |])
 
+let private rootProxyGrantRow =
+    SystemCatalog.ProxyGrant.row "root" "%" "" "" true "boot@" (Functions.truncateToSecond DateTime.Now)
+
 /// The bootstrap `root`@`%` row: every static privilege 'Y', empty
 /// authentication_string (= no password; the handshake accepts only an
 /// empty offered password for it), remaining columns their type's rest
@@ -3570,6 +3573,7 @@ let private compatibilityRows name =
              VString "INTERNAL"
              VUInt 10UL
              VString "CRITICAL" |] ]
+    | "proxies_priv" -> [ rootProxyGrantRow ]
     | _ -> []
 
 let private mysqlSystemDatabase () : Database =
@@ -3659,7 +3663,36 @@ let ensureMysqlSchema (store: Store) : unit =
     |> List.iter (fun (name, columns) ->
         ensureTable name columns (compatibilityIndexes name) (compatibilityRows name))
 
-let ensureRootDynamicPrivileges (store: Store) : unit =
+let private withBootstrapRows rows table =
+    let updated = { table with RowsArray = table.RowsArray.AddRange rows }
+
+    { updated with
+        UniqueIndex = rebuildUniqueIndex updated
+        SecondaryIndex = rebuildSecondaryIndex updated
+        SecondaryOrder = rebuildSecondaryOrder updated
+        FullTextIndexes = rebuildFullTextIndexes updated }
+
+let private ensureRootProxyGrantIn (dbRef: Database ref) =
+    let table = dbRef.Value.["proxies_priv"]
+
+    let exists =
+        table.Rows
+        |> List.exists (fun row ->
+            SystemCatalog.ProxyGrant.tryRead row
+            |> Option.exists (fun grant ->
+                grant.GranteeName = "root"
+                && grant.GranteeHost = "%"
+                && grant.ProxiedName = ""
+                && grant.ProxiedHost = ""))
+
+    if not exists then
+        dbRef.Value <- Map.add "proxies_priv" (withBootstrapRows [ rootProxyGrantRow ] table) dbRef.Value
+
+let ensureRootProxyGrant (store: Store) : unit =
+    ensureMysqlSchema store
+    ensureRootProxyGrantIn store.Databases.["mysql"]
+
+let ensureRootGrants (store: Store) : unit =
     ensureMysqlSchema store
     let dbRef = store.Databases.["mysql"]
     let table = dbRef.Value.["global_grants"]
@@ -3682,10 +3715,9 @@ let ensureRootDynamicPrivileges (store: Store) : unit =
 
     if not missing.IsEmpty then
         dbRef.Value <-
-            Map.add
-                "global_grants"
-                { table with RowsArray = table.RowsArray.AddRange missing }
-                dbRef.Value
+            Map.add "global_grants" (withBootstrapRows missing table) dbRef.Value
+
+    ensureRootProxyGrantIn dbRef
 
 let create () : Store =
     let databases = ConcurrentDictionary<string, Database ref>()

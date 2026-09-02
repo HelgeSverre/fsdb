@@ -4243,6 +4243,13 @@ let private grantPrivilegesStmt: Parser<Statement, unit> =
      .>>. (opt (keyword "WITH" >>. keyword "GRANT" >>. keyword "OPTION") |>> Option.isSome))
     |>> fun (((privs, level), users), wgo) -> Grant(privs, level, users, wgo)
 
+let private grantProxyStmt: Parser<Statement, unit> =
+    (keyword "GRANT" >>. keyword "PROXY" >>. keyword "ON" >>. userRef
+     .>> keyword "TO"
+     .>>. sepBy1 userRef (sym ",")
+     .>>. (opt (keyword "WITH" >>. keyword "GRANT" >>. keyword "OPTION") |>> Option.isSome))
+    |>> fun ((proxied, users), withGrantOption) -> GrantProxy(proxied, users, withGrantOption)
+
 let private grantRolesStmt: Parser<Statement, unit> =
     (keyword "GRANT" >>. sepBy1 userRef (sym ",")
      .>> keyword "TO"
@@ -4250,7 +4257,7 @@ let private grantRolesStmt: Parser<Statement, unit> =
      .>>. (opt (keyword "WITH" >>. keyword "ADMIN" >>. keyword "OPTION") |>> Option.isSome))
     |>> fun ((roles, users), withAdminOption) -> GrantRoles(roles, users, withAdminOption)
 
-let private grantStmt = attempt grantPrivilegesStmt <|> grantRolesStmt
+let private grantStmt = attempt grantProxyStmt <|> attempt grantPrivilegesStmt <|> grantRolesStmt
 
 let private revokePrivilegesStmt: Parser<Statement, unit> =
     (keyword "REVOKE" >>. sepBy1 privilegeSpec (sym ",")
@@ -4260,13 +4267,19 @@ let private revokePrivilegesStmt: Parser<Statement, unit> =
      .>>. sepBy1 userRef (sym ","))
     |>> fun ((privs, level), users) -> Revoke(privs, level, users)
 
+let private revokeProxyStmt: Parser<Statement, unit> =
+    (keyword "REVOKE" >>. keyword "PROXY" >>. keyword "ON" >>. userRef
+     .>> keyword "FROM"
+     .>>. sepBy1 userRef (sym ","))
+    |>> fun (proxied, users) -> RevokeProxy(proxied, users)
+
 let private revokeRolesStmt: Parser<Statement, unit> =
     (keyword "REVOKE" >>. sepBy1 userRef (sym ",")
      .>> keyword "FROM"
      .>>. sepBy1 userRef (sym ","))
     |>> fun (roles, users) -> RevokeRoles(roles, users)
 
-let private revokeStmt = attempt revokePrivilegesStmt <|> revokeRolesStmt
+let private revokeStmt = attempt revokeProxyStmt <|> attempt revokePrivilegesStmt <|> revokeRolesStmt
 
 let private roleSelection allowDefault =
     let defaultRole =

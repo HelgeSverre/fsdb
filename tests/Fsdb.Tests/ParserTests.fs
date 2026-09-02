@@ -3235,6 +3235,18 @@ let tests =
                         ))
                         "dynamic global privileges"
 
+                testCase "GRANT and REVOKE PROXY retain both account sides"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "GRANT/**/PROXY ON 'target'@'localhost' TO 'actor'@'%', delegate WITH GRANT OPTION")
+                        (GrantProxy(("target", "localhost"), [ "actor", "%"; "delegate", "%" ], true))
+                        "proxy grant"
+
+                    Expect.equal
+                        (parseOk "REVOKE PROXY ON target@localhost FROM actor@'%', 'delegate'")
+                        (RevokeProxy(("target", "localhost"), [ "actor", "%"; "delegate", "%" ]))
+                        "proxy revoke"
+
                 testCase "REVOKE parses, including GRANT OPTION in the list"
                 <| fun _ ->
                     Expect.equal

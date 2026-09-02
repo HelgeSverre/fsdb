@@ -989,14 +989,12 @@ let tests =
                       rowCount
                       reindexesDuringLoad)
 
-          testCase "the mysql system schema round-trips through snapshot + reload, and a mutated user row survives"
+          testCase "mysql account and proxy rows round-trip through snapshot reload"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
 
-              // Mutate mysql.user through the ordinary row path (what CREATE
-              // USER will do) so the WAL carries it.
               insertRows
                   store
                   "mysql"
@@ -1006,14 +1004,28 @@ let tests =
               |> Result.mapError (failtestf "insert into mysql.user failed: %A")
               |> ignore
 
+              let root = Fsdb.Session.create 1 store
+              let root, _ = handle root "CREATE USER 'target'@'localhost'"
+              let _, granted = handle root "GRANT PROXY ON 'target'@'localhost' TO 'alice'@'%' WITH GRANT OPTION"
+              Expect.equal granted (Affected 0UL) "proxy grant"
+              snapshotNow dir store
+
               let reloaded = load dir
 
               let users =
                   rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1]) |> List.sortBy string
 
-              Expect.equal users [ VString "alice"; VString "root" ] "root bootstrap row + the persisted alice row"
+              Expect.equal users [ VString "alice"; VString "root"; VString "target" ] "account rows survive"
 
-          testCase "snapshot loading restores compatibility system catalogs"
+              match handle (Fsdb.Session.create 2 reloaded) "SHOW GRANTS FOR 'alice'@'%'" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.contains
+                      (rows |> List.map (List.head >> Option.get))
+                      "GRANT PROXY ON `target`@`localhost` TO `alice`@`%` WITH GRANT OPTION"
+                      "proxy grant survives"
+              | other -> failtestf "expected persisted proxy grant, got %A" other
+
+          testCase "pre-proxy snapshots restore compatibility system catalogs"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -1040,7 +1052,14 @@ let tests =
                     "time_zone_name" ]
 
               mysql.Value <- removedTables |> List.fold (fun tables name -> Map.remove name tables) mysql.Value
+              truncate store "mysql" "proxies_priv" |> ignore
               snapshotNow dir store
+
+              do
+                  use snapshot = new FileStream(snapshotPath dir, FileMode.Open, FileAccess.Write)
+                  snapshot.Position <- 3L
+                  snapshot.WriteByte(byte '6')
+                  snapshot.Flush()
 
               let reloaded = load dir
 
@@ -1057,6 +1076,33 @@ let tests =
 
                       Expect.equal rows.Length expectedRows (table + " bootstrap rows restored")
                   | Error error -> failtestf "expected restored mysql.%s, got %A" table error
+
+              match scanList reloaded "mysql" "proxies_priv" with
+              | Ok(_, rows) ->
+                  Expect.isTrue
+                      (rows
+                       |> List.exists (fun row ->
+                           Fsdb.Engine.SystemCatalog.ProxyGrant.tryRead row
+                           |> Option.exists (fun grant ->
+                               grant.GranteeName = "root"
+                               && grant.GranteeHost = "%"
+                               && grant.ProxiedName = ""
+                               && grant.ProxiedHost = "")))
+                      "pre-proxy snapshots recover bootstrap proxy authority"
+              | Error error -> failtestf "expected restored mysql.proxies_priv, got %A" error
+
+          testCase "current snapshots preserve a revoked bootstrap proxy grant"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              truncate store "mysql" "proxies_priv" |> ignore
+              snapshotNow dir store
+
+              let reloaded = load dir
+
+              match scanList reloaded "mysql" "proxies_priv" with
+              | Ok(_, rows) -> Expect.isEmpty rows "the intentional revoke survives restart"
+              | Error error -> failtestf "expected mysql.proxies_priv, got %A" error
 
           testCase "SERVER DDL replays through the WAL"
           <| fun _ ->

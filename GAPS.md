@@ -45,7 +45,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap currently inventoried |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
-| Auth & privileges | Static, dynamic, and column privileges, per-host accounts, expiry sandboxes, resource caps, account locks, mandatory/default/session roles, and inherited authorization | No proxy users |
+| Auth & privileges | Static, dynamic, column, role, and proxy grants; per-host accounts; expiry sandboxes; resource caps; account locks; mandatory/default/session roles; inherited authorization | Auth plugins cannot select a proxied identity |
 | Metadata | Broad INFORMATION_SCHEMA coverage, every MySQL 8.4 `mysql.*` table schema, fsdb catalogs, active transaction metadata, and the complete keyword and `Com_*` registries | Engine-maintained physical contents remain absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
@@ -83,7 +83,6 @@ refuses it through the prepared-statement protocol.
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; `FLUSH PRIVILEGES`/`USER_RESOURCES`/`STATUS`, all log-channel forms, plain and named `TABLES` (including `LOCAL`/`NO_WRITE_TO_BINLOG` and named `WITH READ LOCK`/`FOR EXPORT`), and `OPTIMIZER_COSTS` work, while the global `FLUSH TABLES WITH READ LOCK` remains absent | low | divergence/refusal |
 | `ALTER TABLE` retains last-wins `ALGORITHM`/`LOCK` options and rejects unsupported operation, generated-column, foreign-key, and lock combinations with MySQL errors; InnoDB's COPY/INPLACE/INSTANT lock duration still collapses to one atomic immutable-root publication | low | divergence |
 | HASH and LINEAR HASH partition definitions, `pN` selection, INFORMATION_SCHEMA/SHOW metadata, `ADD`/`COALESCE`/`TRUNCATE PARTITION`, and logical `ANALYZE`/`CHECK`/`OPTIMIZE`/`REPAIR PARTITION` operate over the shared row store; `DROP PARTITION` returns MySQL's HASH-specific refusal, while physical pruning and partition renaming through `REORGANIZE PARTITION` remain absent | low | divergence/refusal |
-| `GRANT PROXY` remains absent; role DDL, grants, admin option, transitive inheritance, default roles, session activation, metadata, and `SHOW GRANTS ... USING` are supported | low | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, and `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
 | `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`/`X509`, per-account query/update/connection limits, explicit and global-default password lifetimes, mergeable JSON attributes/comments, and the expired-password reset sandbox. Auth-plugin selection, issuer/subject/cipher requirements, and password history/reuse/current policy remain absent | medium | refusal |
@@ -433,6 +432,7 @@ level-shaped denials (1045/1044/1142), GRANT OPTION checked at target level,
 fail-closed unknown privileges, dynamic global privileges with individual grant options,
 role grants with admin option, transitive inheritance, default/session activation,
 mandatory roles, login-wide activation, role-aware metadata visibility, and DROP USER/ROLE cleanup across grant tables,
+target-specific `GRANT/REVOKE PROXY` delegation through `mysql.proxies_priv`,
 privilege collection recursing through subqueries/derived tables/CTEs,
 column-scoped SELECT/INSERT/UPDATE/REFERENCES grants with role inheritance,
 grant-option delegation, metadata visibility, and view security,
@@ -444,8 +444,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 |---|---|---|---|---|
 | Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
 | Advanced account policy | auth-plugin selection and password history/reuse/current policy | explicit/default expiry lifetimes, resource limits, and account attributes/comments are enforced; advanced policy clauses remain absent | low | refusal |
-| Proxy users | supported | absent | low | refusal |
-| SHOW GRANTS completeness | includes role, dynamic-privilege, and PROXY lines | role/dynamic lines and `USING` materialization work; PROXY lines are absent | low | divergence |
+| Proxy identity selection | authentication plugins can map a login to an authorized proxied account | proxy declarations, target-specific grant-option delegation, lifecycle cleanup, persistence, and `SHOW GRANTS` lines work; mysql_native_password never returns an alternate identity and fsdb has no pluggable authentication provider | low | refusal |
 | System-table coverage | mysql.* tables with engine-maintained contents | MySQL 8.4 table schemas preserve column order, types, nullability, key membership, defaults, and generated columns alongside fsdb's stored-object catalogs; stock optimizer-cost and group-replication configuration/action rows are present, but native catalog collations and engine-maintained help, log, GTID, InnoDB-statistics, procedure-grant, NDB, and replication-channel rows still differ or remain empty unless ordinary fsdb DML populates them | low | divergence |
 
 ## 14. Metadata, server administration, logging, replication

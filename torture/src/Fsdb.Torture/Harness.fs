@@ -54,6 +54,8 @@ module AstKind =
         | DropRole _ -> "drop_role"
         | Grant _ -> "grant"
         | Revoke _ -> "revoke"
+        | GrantProxy _ -> "grant_proxy"
+        | RevokeProxy _ -> "revoke_proxy"
         | GrantRoles _ -> "grant_roles"
         | RevokeRoles _ -> "revoke_roles"
         | SetRole _ -> "set_role"
