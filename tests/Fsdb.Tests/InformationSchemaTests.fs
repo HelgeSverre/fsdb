@@ -8,6 +8,43 @@ open Fsdb.Executor
 
 let private run = TestSupport.Sql.executeDefault
 
+let private sqlStringList values =
+    values |> List.map (sprintf "'%s'") |> String.concat ","
+
+let private digestLines lines =
+    lines
+    |> String.concat "\n"
+    |> fun text -> text + "\n"
+    |> System.Text.Encoding.UTF8.GetBytes
+    |> System.Security.Cryptography.SHA256.HashData
+    |> System.Convert.ToHexString
+    |> _.ToLowerInvariant()
+
+let private resultDigest store query =
+    match run store query with
+    | ResultSet(_, rows) ->
+        rows
+        |> List.map (function
+            | [ Some line ] -> line
+            | row -> failtestf "expected one non-NULL descriptor field, got %A" row)
+        |> digestLines
+    | other -> failtestf "expected information-schema descriptors, got %A" other
+
+let private tabularDigest store query =
+    match run store query with
+    | ResultSet(_, rows) ->
+        rows
+        |> List.map (List.map (Option.defaultValue "<NULL>") >> String.concat "|")
+        |> digestLines
+    | other -> failtestf "expected information-schema rows, got %A" other
+
+let private descriptorDigest store tableNames =
+    resultDigest
+        store
+        (sprintf
+            "SELECT CONCAT_WS('|',table_name,ordinal_position,column_name,column_type,is_nullable,IF(column_default IS NULL,'<NULL>',CONCAT('<',column_default,'>')),IFNULL(collation_name,'-')) FROM information_schema.columns WHERE table_schema='information_schema' AND table_name IN (%s) ORDER BY table_name,ordinal_position"
+            (sqlStringList tableNames))
+
 let private setup () : Store =
     let store = create ()
 
@@ -101,6 +138,29 @@ let tests =
                         [ Some "plain"; Some "utf8mb4_0900_ai_ci"; Some "utf8mb4" ] ]
                       "explicit COLLATE reported, default otherwise"
               | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "an explicit column charset selects its own default collation"
+          <| fun _ ->
+              let store = setup ()
+
+              run
+                  store
+                  "CREATE TABLE charset_defaults (latin_value VARCHAR(10) CHARACTER SET latin1, ascii_value VARCHAR(10) CHARACTER SET ascii, utf8_value VARCHAR(10) CHARACTER SET utf8mb3) COLLATE utf8mb4_bin"
+              |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT column_name,character_set_name,collation_name FROM information_schema.columns WHERE table_schema='fsdb' AND table_name='charset_defaults' ORDER BY ordinal_position"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "latin_value"; Some "latin1"; Some "latin1_swedish_ci" ]
+                    [ Some "ascii_value"; Some "ascii"; Some "ascii_general_ci" ]
+                    [ Some "utf8_value"; Some "utf8mb3"; Some "utf8mb3_general_ci" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected charset-specific default collations, got %A" other
 
           testCase "SHOW CREATE TABLE renders per-column CHARACTER SET/COLLATE and table defaults"
           <| fun _ ->
@@ -735,7 +795,7 @@ let tests =
 
               match run store "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'information_schema' ORDER BY table_name" with
               | ResultSet(_, rows) ->
-                  Expect.isGreaterThan rows.Length 20 "all virtual tables listed"
+                  Expect.equal rows.Length 77 "the documented virtual-table surface"
                   Expect.all rows (fun r -> r.[1] = Some "SYSTEM VIEW") "typed SYSTEM VIEW"
 
                   // Every self-listed name must actually resolve through scan.
@@ -775,7 +835,7 @@ let tests =
                     "INNODB_TABLESPACES_BRIEF"
                     "INNODB_TEMP_TABLE_INFO" ]
 
-              let quotedNames = tableNames |> List.map (sprintf "'%s'") |> String.concat ","
+              let quotedNames = sqlStringList tableNames
 
               match
                   run
@@ -794,34 +854,133 @@ let tests =
                   | ResultSet(_, []) -> ()
                   | other -> failtestf "expected truthful empty rows from %s, got %A" tableName other
 
+              Expect.equal
+                  (descriptorDigest store tableNames)
+                  "af2baf75773c0073d6cb490ba8871556ed70ef0421a563dc984b074d1a866cba"
+                  "the complete MySQL 8.4 descriptor export"
+
+          testCase "InnoDB dictionary views project tables, columns, indexes, fields, statistics, and virtual dependencies"
+          <| fun _ ->
+              let store = setup ()
+
+              let tableNames =
+                  [ "INNODB_COLUMNS"
+                    "INNODB_FIELDS"
+                    "INNODB_INDEXES"
+                    "INNODB_TABLES"
+                    "INNODB_TABLESTATS"
+                    "INNODB_VIRTUAL" ]
+
+              Expect.equal
+                  (descriptorDigest store tableNames)
+                  "b58bd761fac74f00bad2ee512e52964e3eebeb2bcc903d9bd562dc3a69e179e1"
+                  "the complete MySQL 8.4 descriptor export"
+
+              run
+                  store
+                  "CREATE TABLE dictionary_probe (id BIGINT UNSIGNED AUTO_INCREMENT, a VARCHAR(20) DEFAULT 'x', b INT, v INT GENERATED ALWAYS AS (b + 1) VIRTUAL, s INT GENERATED ALWAYS AS (b + 2) STORED, PRIMARY KEY(id), UNIQUE KEY uq_a(a), KEY ix_ba(b DESC,a(5))) AUTO_INCREMENT=42"
+              |> ignore
+
+              run store "INSERT INTO dictionary_probe(a,b) VALUES ('alpha',10),('beta',20)" |> ignore
+
+              let dictionaryProbeId () =
+                  match
+                      run
+                          store
+                          "SELECT table_id FROM information_schema.innodb_tables WHERE name='fsdb/dictionary_probe'"
+                  with
+                  | ResultSet(_, [ [ Some tableId ] ]) -> tableId
+                  | other -> failtestf "expected the dictionary table identity, got %A" other
+
+              let originalTableId = dictionaryProbeId ()
+              run store "CREATE TABLE aaa_dictionary_prefix (id INT)" |> ignore
+              Expect.equal (dictionaryProbeId ()) originalTableId "unrelated catalog insertion keeps the identity stable"
+
               match
                   run
                       store
-                      (sprintf
-                          "SELECT CONCAT_WS('|',table_name,ordinal_position,column_name,column_type,is_nullable,IF(column_default IS NULL,'<NULL>',CONCAT('<',column_default,'>')),IFNULL(collation_name,'-')) FROM information_schema.columns WHERE table_schema='information_schema' AND table_name IN (%s) ORDER BY table_name,ordinal_position"
-                          quotedNames)
+                      "SELECT t.name,t.n_cols,t.row_format,s.num_rows,s.autoinc FROM information_schema.innodb_tables t JOIN information_schema.innodb_tablestats s USING(table_id) WHERE t.name='fsdb/dictionary_probe'"
               with
-              | ResultSet(_, rows) ->
-                  let canonical =
-                      rows
-                      |> List.map (function
-                          | [ Some line ] -> line
-                          | row -> failtestf "expected one non-NULL descriptor field, got %A" row)
-                      |> String.concat "\n"
-                      |> fun text -> text + "\n"
+              | ResultSet(_, [ [ Some "fsdb/dictionary_probe"; Some "7"; Some "Dynamic"; Some "2"; Some "44" ] ]) -> ()
+              | other -> failtestf "expected live table dictionary values, got %A" other
 
-                  let digest =
-                      canonical
-                      |> System.Text.Encoding.UTF8.GetBytes
-                      |> System.Security.Cryptography.SHA256.HashData
-                      |> System.Convert.ToHexString
-                      |> _.ToLowerInvariant()
+              match
+                  run
+                      store
+                      "SELECT c.name,c.pos,c.mtype,c.prtype,c.len FROM information_schema.innodb_columns c JOIN information_schema.innodb_tables t USING(table_id) WHERE t.name='fsdb/dictionary_probe' ORDER BY c.pos"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "id"; Some "0"; Some "6"; Some "1800"; Some "8" ]
+                    [ Some "a"; Some "1"; Some "12"; Some "16711695"; Some "80" ]
+                    [ Some "b"; Some "2"; Some "6"; Some "1027"; Some "4" ]
+                    [ Some "s"; Some "3"; Some "6"; Some "1027"; Some "4" ]
+                    [ Some "v"; Some "65539"; Some "6"; Some "9219"; Some "4" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected MySQL-compatible InnoDB column codes, got %A" other
 
-                  Expect.equal
-                      digest
-                      "af2baf75773c0073d6cb490ba8871556ed70ef0421a563dc984b074d1a866cba"
-                      "the complete MySQL 8.4 descriptor export"
-              | other -> failtestf "expected InnoDB view descriptors, got %A" other
+              match
+                  run
+                      store
+                      "SELECT i.name,i.type,i.n_fields,GROUP_CONCAT(f.name ORDER BY f.pos) FROM information_schema.innodb_indexes i JOIN information_schema.innodb_tables t USING(table_id) JOIN information_schema.innodb_fields f USING(index_id) WHERE t.name='fsdb/dictionary_probe' GROUP BY i.index_id,i.name,i.type,i.n_fields ORDER BY i.index_id"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "PRIMARY"; Some "3"; Some "6"; Some "id" ]
+                    [ Some "uq_a"; Some "2"; Some "2"; Some "a" ]
+                    [ Some "ix_ba"; Some "0"; Some "3"; Some "b,a" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected live index and field rows, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT v.pos,v.base_pos FROM information_schema.innodb_virtual v JOIN information_schema.innodb_tables t USING(table_id) WHERE t.name='fsdb/dictionary_probe'"
+              with
+              | ResultSet(_, [ [ Some "65539"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected the virtual-column dependency, got %A" other
+
+              run store "CREATE TABLE dictionary_heap (label VARCHAR(20), n INT, KEY ix_lower((LOWER(label))))"
+              |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT i.name,i.type,i.n_fields FROM information_schema.innodb_indexes i JOIN information_schema.innodb_tables t USING(table_id) WHERE t.name='fsdb/dictionary_heap' ORDER BY i.index_id"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "GEN_CLUST_INDEX"; Some "1"; Some "5" ]
+                    [ Some "ix_lower"; Some "0"; Some "2" ] ]
+                ) ->
+                  ()
+              | other -> failtestf "expected the generated clustered index, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT f.name,f.pos FROM information_schema.innodb_fields f JOIN information_schema.innodb_indexes i USING(index_id) JOIN information_schema.innodb_tables t USING(table_id) WHERE t.name='fsdb/dictionary_heap'"
+              with
+              | ResultSet(_, [ [ Some "!hidden!ix_lower!0!0"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected the functional-index field name, got %A" other
+
+          testCase "InnoDB column storage codes cover every MySQL 8.4 column family fsdb supports"
+          <| fun _ ->
+              let store = setup ()
+
+              run
+                  store
+                  "CREATE TABLE innodb_type_probe (c_tiny TINYINT, c_tiny_u TINYINT UNSIGNED NOT NULL, c_small SMALLINT, c_medium MEDIUMINT, c_int INT, c_big BIGINT, c_bit BIT(9), c_char CHAR(7), c_varchar VARCHAR(11), c_latin VARCHAR(11) CHARACTER SET latin1, c_binary BINARY(7), c_varbinary VARBINARY(11), c_tinytext TINYTEXT, c_text TEXT, c_mediumtext MEDIUMTEXT, c_longtext LONGTEXT, c_tinyblob TINYBLOB, c_blob BLOB, c_mediumblob MEDIUMBLOB, c_longblob LONGBLOB, c_enum ENUM('a','bb'), c_set SET('a','bb'), c_decimal DECIMAL(12,3), c_float FLOAT, c_double DOUBLE, c_date DATE, c_datetime DATETIME(3), c_timestamp TIMESTAMP(6) NULL, c_time TIME(4), c_year YEAR, c_json JSON, c_geometry POINT)"
+              |> ignore
+
+              Expect.equal
+                  (tabularDigest
+                      store
+                      "SELECT c.name,c.pos,c.mtype,c.prtype,c.len FROM information_schema.innodb_columns c JOIN information_schema.innodb_tables t USING(table_id) WHERE t.name='fsdb/innodb_type_probe' ORDER BY c.pos")
+                  "7bdd4bec9fcadb90cad4e9cda3139934256d0e9108687c2ac3347c1aded122e0"
+                  "the MySQL 8.4 internal storage code matrix"
 
           testCase "INNODB_FT_DEFAULT_STOPWORD exposes MySQL's duplicate-preserving registry"
           <| fun _ ->

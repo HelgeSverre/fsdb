@@ -472,13 +472,16 @@ let idAndSortlen : Map<string, int * int> =
 /// column definitions both route through here. `utf8_*` resolves as MySQL's
 /// deprecated alias for `utf8mb3_*` (accepted in SQL, listed only under the
 /// canonical name).
-let tryFind (name: string) : Collation option =
+let private canonicalName (name: string) =
     let lower = name.ToLowerInvariant()
 
-    let canonical =
-        if lower.StartsWith "utf8_" then "utf8mb3_" + lower.Substring 5 else lower
+    if lower.StartsWith "utf8_" then "utf8mb3_" + lower.Substring 5 else lower
 
-    Map.tryFind canonical registry
+let tryFind (name: string) : Collation option =
+    Map.tryFind (canonicalName name) registry
+
+let tryId (name: string) : int option =
+    idAndSortlen |> Map.tryFind (canonicalName name) |> Option.map fst
 
 let tryFindById (id: int) : Collation option =
     idAndSortlen

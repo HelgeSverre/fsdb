@@ -3056,7 +3056,7 @@ let private virtualTableDefs : (string * ColumnDef list) list =
       "VIEW_ROUTINE_USAGE", viewRoutineUsageColumns
       "VIEW_TABLE_USAGE", viewTableUsageColumns
       "VIEWS", viewsColumns ]
-    @ InnoDbMetadata.emptyTableDefs
+    @ InnoDbMetadata.tableDefs
 
 /// information_schema's own tables as `TABLES` rows — `SYSTEM VIEW`, NULL
 /// engine/format/collation like real MySQL's.
@@ -3282,7 +3282,7 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "INNODB_FOREIGN" -> Some(innodbForeignRows catalog)
         | "INNODB_FOREIGN_COLS" -> Some(innodbForeignColsRows catalog)
         | "INNODB_FT_DEFAULT_STOPWORD" -> Some innodbFtDefaultStopwordRows
-        | _ when InnoDbMetadata.contains upper -> Some []
+        | _ when InnoDbMetadata.contains upper -> InnoDbMetadata.tryRows catalog upper
         | "KEYWORDS" -> Some keywordsRows
         | "PLUGINS" -> Some pluginsRows
         | "OPTIMIZER_TRACE"

@@ -5687,7 +5687,7 @@ let tests =
               let root, _ = handle root "CREATE USER 'fkviewer'"
               let viewer = { create 2 store with User = "fkviewer" }
 
-              for table in [ "INNODB_FOREIGN"; "INNODB_FOREIGN_COLS"; "INNODB_BUFFER_POOL_STATS" ] do
+              for table in [ "INNODB_FOREIGN"; "INNODB_FOREIGN_COLS"; "INNODB_BUFFER_POOL_STATS"; "INNODB_TABLES" ] do
                   match handle viewer (sprintf "SELECT * FROM information_schema.%s" table) |> snd with
                   | Err(1227, message) ->
                       Expect.equal

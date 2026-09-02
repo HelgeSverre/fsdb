@@ -2566,21 +2566,32 @@ let private createTable: Parser<Statement, unit> =
 
                     let withDefaults =
                         if isStringy then
+                            let charset = c.Charset |> Option.orElse tableCharset
+
+                            let inheritedCollation =
+                                match c.Charset with
+                                | Some charset -> Some(Collation.defaultNameForCharset charset)
+                                | None ->
+                                    tableCollation
+                                    |> Option.orElseWith (fun () ->
+                                        charset |> Option.map Collation.defaultNameForCharset)
+                                    |> Option.orElse (Some Collation.defaultCollation.Name)
+
                             { c with
                                 // A real column always ends up with an
-                                // explicit collation — the column-level
-                                // COLLATE, else the table's declaration,
-                                // else the server default — exactly like
-                                // MySQL, where a plain `name VARCHAR(20)`
-                                // still reports utf8mb4_0900_ai_ci. The
+                                // explicit collation. A column-level charset
+                                // selects that charset's default before the
+                                // table collation; otherwise the table and
+                                // server defaults apply. A plain
+                                // `name VARCHAR(20)` therefore still reports
+                                // utf8mb4_0900_ai_ci. The
                                 // charset stays `None` unless declared, so
                                 // SHOW CREATE TABLE renders the default
                                 // case as plain `varchar(20)`.
                                 Collation =
                                     c.Collation
-                                    |> Option.orElse tableCollation
-                                    |> Option.orElse (Some Collation.defaultCollation.Name)
-                                Charset = c.Charset |> Option.orElse tableCharset }
+                                    |> Option.orElse inheritedCollation
+                                Charset = charset }
                         else
                             c
 
