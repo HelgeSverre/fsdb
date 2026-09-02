@@ -5212,6 +5212,19 @@ let tests =
                   | ResultSet(_, [ [ Some actual; Some "0" ] ]) when actual = name -> ()
                   | other -> failtestf "expected FLUSH STATUS to reset %s, got %A" name other
 
+          TestSupport.processGlobalCase "SHOW STATUS exposes the complete MySQL 8.4 command-counter registry"
+          <| fun _ ->
+              Fsdb.InformationSchema.resetCommandCounts ()
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW STATUS LIKE 'Com\\_%'" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows.Length 168 "MySQL 8.4 command counters are all present"
+
+                  for name in [ "Com_admin_commands"; "Com_binlog"; "Com_stmt_reprepare" ] do
+                      Expect.contains rows [ Some name; Some "0" ] (name + " starts at zero")
+              | other -> failtestf "expected the complete command-counter registry, got %A" other
+
           testCase "SHOW STATUS reports connection compression and wire bytes"
           <| fun _ ->
               let metrics: Fsdb.Session.TransportMetrics =

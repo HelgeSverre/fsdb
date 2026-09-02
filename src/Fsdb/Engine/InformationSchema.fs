@@ -1028,26 +1028,183 @@ let private commandName = function
     | SelectCommand -> "Com_select"
     | UpdateCommand -> "Com_update"
 
-let private reportedCommands =
-    [ BeginCommand
-      CommitCommand
-      DeleteCommand
-      FlushCommand
-      InsertCommand
-      ReleaseSavepointCommand
-      ReplaceCommand
-      RollbackCommand
-      RollbackToSavepointCommand
-      SavepointCommand
-      SelectCommand
-      UpdateCommand ]
+let private reportedCommandNames =
+    [ "admin_commands"
+      "assign_to_keycache"
+      "alter_db"
+      "alter_event"
+      "alter_function"
+      "alter_instance"
+      "alter_procedure"
+      "alter_resource_group"
+      "alter_server"
+      "alter_table"
+      "alter_tablespace"
+      "alter_user"
+      "alter_user_default_role"
+      "analyze"
+      "begin"
+      "binlog"
+      "call_procedure"
+      "change_db"
+      "change_repl_filter"
+      "change_replication_source"
+      "check"
+      "checksum"
+      "clone"
+      "commit"
+      "create_db"
+      "create_event"
+      "create_function"
+      "create_index"
+      "create_procedure"
+      "create_role"
+      "create_server"
+      "create_table"
+      "create_resource_group"
+      "create_trigger"
+      "create_udf"
+      "create_user"
+      "create_view"
+      "create_spatial_reference_system"
+      "dealloc_sql"
+      "delete"
+      "delete_multi"
+      "do"
+      "drop_db"
+      "drop_event"
+      "drop_function"
+      "drop_index"
+      "drop_procedure"
+      "drop_resource_group"
+      "drop_role"
+      "drop_server"
+      "drop_spatial_reference_system"
+      "drop_table"
+      "drop_trigger"
+      "drop_user"
+      "drop_view"
+      "empty_query"
+      "execute_sql"
+      "explain_other"
+      "flush"
+      "get_diagnostics"
+      "grant"
+      "grant_roles"
+      "ha_close"
+      "ha_open"
+      "ha_read"
+      "help"
+      "import"
+      "insert"
+      "insert_select"
+      "install_component"
+      "install_plugin"
+      "kill"
+      "load"
+      "lock_instance"
+      "lock_tables"
+      "optimize"
+      "preload_keys"
+      "prepare_sql"
+      "purge"
+      "purge_before_date"
+      "release_savepoint"
+      "rename_table"
+      "rename_user"
+      "repair"
+      "replace"
+      "replace_select"
+      "reset"
+      "resignal"
+      "restart"
+      "revoke"
+      "revoke_all"
+      "revoke_roles"
+      "rollback"
+      "rollback_to_savepoint"
+      "savepoint"
+      "select"
+      "set_option"
+      "set_password"
+      "set_resource_group"
+      "set_role"
+      "signal"
+      "show_binlog_events"
+      "show_binlogs"
+      "show_charsets"
+      "show_collations"
+      "show_create_db"
+      "show_create_event"
+      "show_create_func"
+      "show_create_proc"
+      "show_create_table"
+      "show_create_trigger"
+      "show_databases"
+      "show_engine_logs"
+      "show_engine_mutex"
+      "show_engine_status"
+      "show_events"
+      "show_errors"
+      "show_fields"
+      "show_function_code"
+      "show_function_status"
+      "show_grants"
+      "show_keys"
+      "show_binary_log_status"
+      "show_open_tables"
+      "show_parse_tree"
+      "show_plugins"
+      "show_privileges"
+      "show_procedure_code"
+      "show_procedure_status"
+      "show_processlist"
+      "show_profile"
+      "show_profiles"
+      "show_relaylog_events"
+      "show_replicas"
+      "show_replica_status"
+      "show_status"
+      "show_storage_engines"
+      "show_table_status"
+      "show_tables"
+      "show_triggers"
+      "show_variables"
+      "show_warnings"
+      "show_create_user"
+      "shutdown"
+      "replica_start"
+      "replica_stop"
+      "group_replication_start"
+      "group_replication_stop"
+      "stmt_execute"
+      "stmt_close"
+      "stmt_fetch"
+      "stmt_prepare"
+      "stmt_reset"
+      "stmt_send_long_data"
+      "truncate"
+      "uninstall_component"
+      "uninstall_plugin"
+      "unlock_instance"
+      "unlock_tables"
+      "update"
+      "update_multi"
+      "xa_commit"
+      "xa_end"
+      "xa_prepare"
+      "xa_recover"
+      "xa_rollback"
+      "xa_start"
+      "stmt_reprepare" ]
+    |> List.map (sprintf "Com_%s")
 
 let private commandCounters =
-    reportedCommands
-    |> List.map (fun command -> command, AtomicCounter())
+    reportedCommandNames
+    |> List.map (fun name -> name, AtomicCounter())
     |> Map.ofList
 
-let private commandCounter command = Map.find command commandCounters
+let private commandCounter command = commandCounters |> Map.find (commandName command)
 
 let recordQuestion () = questionCount.Increment()
 let questions () = questionCount.Value
@@ -1055,9 +1212,7 @@ let resetQuestions () = questionCount.Reset()
 let recordCommand command = (commandCounter command).Increment()
 
 let resetCommandCounts () =
-    reportedCommands |> List.iter (fun command -> (commandCounter command).Reset())
-
-let private commandCount command = (commandCounter command).Value
+    commandCounters |> Map.iter (fun _ counter -> counter.Reset())
 
 let registerProcessAs (id: int64) (account: Fsdb.Auth.Account) (user: string) (host: string) : ProcessEntry =
     let entry =
@@ -2995,9 +3150,8 @@ let showStatus
           "Questions", string (questions ())
           "Threads_connected", string (connectedThreads ())
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds)
-          for command in reportedCommands do
-              let name = commandName command
-              name, string (commandCount command) ]
+          for name in reportedCommandNames do
+              name, string commandCounters.[name].Value ]
         |> List.filter (fun (name, _) -> likeFilter likeOpt name)
         |> List.map (fun (name, value) -> [ Some name; Some value ])
 
