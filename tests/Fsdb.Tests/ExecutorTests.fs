@@ -8901,6 +8901,35 @@ let tests =
                           [ Some "4"; Some "16" ]
                           [ Some "5"; Some "25" ] ]
 
+                testCase "recursive CTE rows conform to their anchor types"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (cteStore ())
+                            "WITH RECURSIVE c(v) AS (SELECT CAST('x' AS CHAR(1)) UNION ALL SELECT CONCAT(v, 'x') FROM c WHERE LENGTH(v) < 2) SELECT v FROM c"
+                    with
+                    | Err(1406, "Data too long for column 'v' at row 1") -> ()
+                    | other -> failtestf "expected recursive CHAR overflow, got %A" other
+
+                    let nonStrict = cteStore ()
+                    setStrictMode nonStrict false
+
+                    match
+                        runDefault
+                            nonStrict
+                            "WITH RECURSIVE c(v) AS (SELECT CAST('x' AS CHAR(1)) UNION SELECT CONCAT(v, 'x') FROM c WHERE LENGTH(v) < 2) SELECT v FROM c"
+                    with
+                    | ResultSet(_, [ [ Some "x" ] ]) -> ()
+                    | other -> failtestf "expected the recursive CHAR value to truncate in non-strict mode, got %A" other
+
+                    expectRows
+                        "WITH RECURSIVE c(v) AS (SELECT CAST(1 AS SIGNED) UNION ALL SELECT v + 0.5 FROM c WHERE v < 2) SELECT v FROM c"
+                        [ [ Some "1" ]; [ Some "2" ] ]
+
+                    expectRows
+                        "WITH RECURSIVE c(v) AS (SELECT CAST(1 AS DECIMAL(3,1)) UNION ALL SELECT v + 0.25 FROM c WHERE v < 2) SELECT v FROM c"
+                        [ [ Some "1.0" ]; [ Some "1.3" ]; [ Some "1.6" ]; [ Some "1.9" ]; [ Some "2.2" ] ]
+
                 testCase "a recursive UNION (distinct) stops once a pass adds nothing new"
                 <| fun _ ->
                     expectRows

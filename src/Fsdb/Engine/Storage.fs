@@ -1960,6 +1960,9 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         col
         v
 
+let coerceStoredValue (store: Store) (col: ColumnDef) (value: Value) : Result<Value, StorageError> =
+    coerceStoredValueWithMode (temporalCoercionMode store) col value
+
 let private supportsCurrentTimestamp (col: ColumnDef) =
     match col.Type with
     | TDateTime _

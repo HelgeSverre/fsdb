@@ -7845,8 +7845,6 @@ and private withCteQueryResult
 
 /// Materializes self-referencing CTEs semi-naively until no new rows appear.
 /// The session recursion limit applies; zero permits unbounded expansion.
-/// ponytail: fix recursive column types from the anchor and raise 1406 when
-/// a recursive value exceeds them.
 and private materializeCte
     (store: Store)
     (registry: Registry)
@@ -7904,9 +7902,42 @@ and private materializeCte
             | Err(code, message), _, _ -> Error(Err(code, message))
             | _, _, typedRows -> Ok typedRows
 
+        let normalizeLiteralColumns (columns: ColumnDef list) =
+            let expressions = anchor.Projections |> List.map fst
+
+            if expressions.Length <> columns.Length || (expressions |> List.exists (function Star _ -> true | _ -> false)) then
+                columns
+            else
+                List.map2
+                    (fun expression column ->
+                        match expression with
+                        | Lit(VInt _) -> { column with Type = TBigInt false }
+                        | Lit(VUInt _) -> { column with Type = TBigInt true }
+                        | _ -> column)
+                    expressions
+                    columns
+
+        let conformRows (columns: ColumnDef list) rows =
+            rows
+            |> List.indexed
+            |> traverse (fun (rowIndex, row: Value[]) ->
+                if row.Length <> columns.Length then
+                    Error(Err(1222, "The used SELECT statements have a different number of columns"))
+                else
+                    Diagnostics.withRowNumber (rowIndex + 1) (fun () ->
+                        List.zip columns (List.ofArray row)
+                        |> traverse (fun (column, value) ->
+                            Storage.coerceStoredValue store column value
+                            |> Result.mapError (fun error ->
+                                let code, message = Storage.toMySqlError error
+                                Err(code, message)))
+                        |> Result.map Array.ofList))
+
         resolveFromSubquery store registry dbName (FromSubquery(PlainSelect anchor, cte.CteName)) outer
         |> Result.bind (fun (anchorColumns, anchorRows) ->
-            renamed anchorColumns
+            anchorColumns
+            |> normalizeLiteralColumns
+            |> renamed
             |> Result.map (fun columns -> columns, anchorRows))
         |> Result.bind (fun (columns, anchorRows) ->
             let key (row: Value[]) = row |> Array.map (fun v -> Value.toText v |> Option.defaultValue "\u0000NULL") |> List.ofArray
@@ -7935,12 +7966,15 @@ and private materializeCte
                     else
                         cteScope.Value <- saved |> Map.add (cte.CteName.ToLowerInvariant()) (columns, working)
 
-                        match recursiveBranches |> traverse (snd >> runBranch) with
+                        match
+                            recursiveBranches
+                            |> traverse (snd >> runBranch)
+                            |> Result.bind (List.concat >> conformRows columns)
+                        with
                         | Error err -> failure <- Some err
-                        | Ok branchRows ->
+                        | Ok freshRows ->
                             let fresh =
-                                branchRows
-                                |> List.concat
+                                freshRows
                                 |> List.filter (fun row -> not distinctUnion || seen.Add(key row))
 
                             accumulated.AddRange fresh
