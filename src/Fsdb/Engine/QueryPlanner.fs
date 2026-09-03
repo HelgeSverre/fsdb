@@ -49,3 +49,11 @@ let chooseEquality tableRows candidateRows =
         RowsRead = max 0 candidateRows
         RowLookups = max 0 candidateRows } ]
     |> choose equalityPreference
+
+let estimateUniformEqualityCandidates tableRows distinctKeys probeKeys =
+    if tableRows <= 0 || distinctKeys <= 0 || probeKeys <= 0 then
+        0
+    else
+        let selectedKeys = min distinctKeys probeKeys
+        let numerator = int64 tableRows * int64 selectedKeys
+        int ((numerator + int64 distinctKeys - 1L) / int64 distinctKeys)

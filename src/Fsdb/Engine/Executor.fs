@@ -8667,34 +8667,43 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
 
                 access
                 |> Option.bind (fun (table, index) ->
-                    let lookup (tuple: Value list) =
-                        orderedEqualityValues table index (probe.Columns |> List.map fst) tuple
-                        |> Option.bind (fun ordered ->
-                            if probe.Columns |> List.exists (snd >> Option.isSome) then
-                                Storage.tryProjectedEqualityRowIdsForIndex store table index ordered
-                            else
-                                Storage.tryEqualityRowIdsForIndex store table index ordered)
+                    let estimatedCandidates =
+                        QueryPlanner.estimateUniformEqualityCandidates
+                            table.RowsArray.Count
+                            (Storage.equalityIndexDistinctKeyCount table index)
+                            values.Length
 
-                    let rec collect candidateEstimate rowIdSets =
-                        function
-                        | [] -> Some rowIdSets
-                        | tuple :: remaining ->
-                            lookup tuple
-                            |> Option.bind (fun rowIds ->
-                                let estimate =
-                                    candidateEstimate
-                                    + min rowIds.Count (max 0 (table.RowsArray.Count - candidateEstimate))
-
-                                if isUsefulEqualityCardinality table.RowsArray.Count estimate then
-                                    collect estimate (rowIds :: rowIdSets) remaining
+                    if not (isUsefulEqualityCardinality table.RowsArray.Count estimatedCandidates) then
+                        None
+                    else
+                        let lookup (tuple: Value list) =
+                            orderedEqualityValues table index (probe.Columns |> List.map fst) tuple
+                            |> Option.bind (fun ordered ->
+                                if probe.Columns |> List.exists (snd >> Option.isSome) then
+                                    Storage.tryProjectedEqualityRowIdsForIndex store table index ordered
                                 else
-                                    None)
+                                    Storage.tryEqualityRowIdsForIndex store table index ordered)
 
-                    collect 0 [] values
-                    |> Option.map (fun rowIdSets ->
-                        rowIdSets
-                        |> List.fold Set.union Set.empty
-                        |> equalityAccessPlan table index))))
+                        let rec collect candidateEstimate rowIdSets =
+                            function
+                            | [] -> Some rowIdSets
+                            | tuple :: remaining ->
+                                lookup tuple
+                                |> Option.bind (fun rowIds ->
+                                    let estimate =
+                                        candidateEstimate
+                                        + min rowIds.Count (max 0 (table.RowsArray.Count - candidateEstimate))
+
+                                    if isUsefulEqualityCardinality table.RowsArray.Count estimate then
+                                        collect estimate (rowIds :: rowIdSets) remaining
+                                    else
+                                        None)
+
+                        collect 0 [] values
+                        |> Option.map (fun rowIdSets ->
+                            rowIdSets
+                            |> List.fold Set.union Set.empty
+                            |> equalityAccessPlan table index))))
 
 and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr

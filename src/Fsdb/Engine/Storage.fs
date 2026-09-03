@@ -4257,6 +4257,18 @@ let tryProjectedEqualityRowIdsForIndex
     : Set<RowId> option =
     equalityLookupRowIds store table index ProjectedValues values
 
+let equalityIndexDistinctKeyCount (table: Table) (index: EqualityIndex) =
+    if index.Unique then
+        table.UniqueIndex
+        |> Map.tryFind index.Name
+        |> Option.map Map.count
+        |> Option.defaultValue 0
+    else
+        table.SecondaryIndex
+        |> Map.tryFind index.Name
+        |> Option.map Map.count
+        |> Option.defaultValue 0
+
 let private trySecondaryOrderSliceInTable
     (store: Store)
     (table: Table)
