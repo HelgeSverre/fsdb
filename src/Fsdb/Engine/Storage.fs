@@ -3925,7 +3925,9 @@ type EqualityLookup =
       PrefixLengths: int option list
       Unique: bool
       LookupColumns: ColumnDef list
-      LookupRows: (RowId * Value[]) list }
+      LookupRowIds: Set<RowId>
+      TableRowCount: int
+      LookupRows: Lazy<(RowId * Value[]) list> }
 
 type EqualityIndex =
     { Name: string
@@ -4017,13 +4019,13 @@ let private equalityKeyGroup (index: EqualityIndex) =
       Directions = List.replicate index.ColumnIndices.Length Asc
       Visible = true }
 
-let private equalityLookupRows
+let private equalityLookupRowIds
     (store: Store)
     (table: Table)
     (index: EqualityIndex)
     (probeValues: EqualityProbeValues)
     (values: Value list)
-    : (RowId * Value[]) list option =
+    : Set<RowId> option =
     if index.ColumnIndices.Length <> values.Length then
         None
     else
@@ -4038,14 +4040,14 @@ let private equalityLookupRows
             exactValues |> List.iter (fun (columnIndex, value) -> probeRow.[columnIndex] <- value)
 
             if exactValues |> List.exists (snd >> (=) VNull) then
-                []
+                Set.empty
             elif index.Unique then
                 (match probeValues with
                  | ProjectedValues -> encodeConstraintKey table.Columns index.ColumnIndices probeRow
                  | StoredValues -> encodeUniqueKey table.Columns (equalityKeyGroup index) probeRow)
                 |> Option.bind (fun key -> table.UniqueIndex |> Map.tryFind index.Name |> Option.bind (Map.tryFind key))
-                |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
-                |> Option.toList
+                |> Option.map Set.singleton
+                |> Option.defaultValue Set.empty
             else
                 let key =
                     match probeValues with
@@ -4055,9 +4057,16 @@ let private equalityLookupRows
                 table.SecondaryIndex
                 |> Map.tryFind index.Name
                 |> Option.bind (Map.tryFind key)
-                |> Option.defaultValue Set.empty
-                |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
-                |> List.ofSeq)
+                |> Option.defaultValue Set.empty)
+
+let rowsForRowIds (table: Table) (rowIds: Set<RowId>) =
+    rowIds
+    |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+    |> List.ofSeq
+
+let private equalityLookupRows store table index probeValues values =
+    equalityLookupRowIds store table index probeValues values
+    |> Option.map (rowsForRowIds table)
 
 let private tryUniqueKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : EqualityIndex option =
     tryEqualityIndex table columnName
@@ -4177,14 +4186,16 @@ let tryCompositeEqualityLookupInTable
             |> Option.bind (fun values ->
                 let index = equalityIndex unique group
 
-                equalityLookupRows store table index StoredValues values
-                |> Option.map (fun rows ->
+                equalityLookupRowIds store table index StoredValues values
+                |> Option.map (fun rowIds ->
                     { IndexName = group.Name
                       ColumnIndices = group.Indices
                       PrefixLengths = group.PrefixLengths
                       Unique = unique
                       LookupColumns = table.Columns
-                      LookupRows = rows }))
+                      LookupRowIds = rowIds
+                      TableRowCount = table.RowsArray.Count
+                      LookupRows = lazy (rowsForRowIds table rowIds) }))
 
     (uniqueKeyGroups table |> visibleGroups |> List.map (fun group -> true, group))
     @ (secondaryKeyGroups table |> visibleGroups |> List.map (fun group -> false, group))
@@ -4222,6 +4233,14 @@ let tryEqualityLookupForIndex
     : (RowId * Value[]) list option =
     equalityLookupRows store table index StoredValues values
 
+let tryEqualityRowIdsForIndex
+    (store: Store)
+    (table: Table)
+    (index: EqualityIndex)
+    (values: Value list)
+    : Set<RowId> option =
+    equalityLookupRowIds store table index StoredValues values
+
 let tryProjectedEqualityLookupForIndex
     (store: Store)
     (table: Table)
@@ -4229,6 +4248,14 @@ let tryProjectedEqualityLookupForIndex
     (values: Value list)
     : (RowId * Value[]) list option =
     equalityLookupRows store table index ProjectedValues values
+
+let tryProjectedEqualityRowIdsForIndex
+    (store: Store)
+    (table: Table)
+    (index: EqualityIndex)
+    (values: Value list)
+    : Set<RowId> option =
+    equalityLookupRowIds store table index ProjectedValues values
 
 let private trySecondaryOrderSliceInTable
     (store: Store)

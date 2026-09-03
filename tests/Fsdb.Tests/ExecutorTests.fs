@@ -5232,6 +5232,10 @@ let tests =
                     let empty = runDefault store "EXPLAIN SELECT COUNT(*) FROM skewed WHERE bucket = 2" |> explainRow
                     Expect.equal empty.AccessType (Some "ref") "an empty equality bucket stops at the index"
 
+                    let point = runDefault store "EXPLAIN SELECT COUNT(*) FROM skewed WHERE bucket = 1 AND id = 100" |> explainRow
+                    Expect.equal point.AccessType (Some "const") "a broad first bucket does not hide a later point lookup"
+                    Expect.equal point.Key (Some "PRIMARY") "the most selective usable equality wins"
+
                     match runDefault store (sprintf "SELECT COUNT(*) FROM scores WHERE score IN (%s)" (inList 100)) with
                     | ResultSet(_, [ [ Some "100" ] ]) -> ()
                     | other -> failtestf "expected the broad IN result, got %A" other

@@ -2016,10 +2016,18 @@ let tests =
                     |> Result.defaultWith (failtestf "insert failed: %A")
                     |> ignore
 
+                    let lookup name age =
+                        tryCompositeEqualityLookup store defaultDatabase "users" [ "name", VString name; "age", VInt age ]
+                        |> Option.defaultWith (fun () -> failtest "expected a composite lookup")
+
+                    let inserted = lookup "alice" 30L
+                    Expect.equal inserted.LookupRowIds.Count 1 "the composite bucket exposes its cardinality"
+                    Expect.equal inserted.TableRowCount 2 "the lookup exposes the table cardinality"
+                    Expect.isFalse inserted.LookupRows.IsValueCreated "counting the bucket does not resolve its rows"
+
                     let ids name age =
-                        match tryCompositeEqualityLookup store defaultDatabase "users" [ "name", VString name; "age", VInt age ] with
-                        | Some lookup -> lookup.LookupRows |> List.map (fun (_, row) -> row.[0])
-                        | None -> failtest "expected a composite lookup"
+                        (lookup name age).LookupRows.Value
+                        |> List.map (fun (_, row) -> row.[0])
 
                     Expect.equal (ids "alice" 30L) [ VInt 1L ] "inserted rows enter the composite bucket"
 

@@ -102,7 +102,22 @@ type private EqualityAccessPlan =
       PrefixLengths: int option list
       Columns: ColumnDef list
       Unique: bool
-      Rows: (RowId * Value[]) list }
+      CandidateRowIds: Set<RowId>
+      TableRowCount: int
+      Rows: Lazy<(RowId * Value[]) list> }
+
+let private equalityAccessPlan (table: Table) (index: EqualityIndex) rowIds =
+    { KeyName = index.Name
+      ColumnIndices = index.ColumnIndices
+      PrefixLengths = index.PrefixLengths
+      Columns = table.Columns
+      Unique = index.Unique
+      CandidateRowIds = rowIds
+      TableRowCount = table.RowsArray.Count
+      Rows = lazy (Storage.rowsForRowIds table rowIds) }
+
+let private isUsefulEqualityAccess plan =
+    QueryPlanner.chooseEquality plan.TableRowCount plan.CandidateRowIds.Count = QueryPlanner.IndexLookup
 
 type private PointEquality =
     { Column: string
@@ -8202,10 +8217,10 @@ and private prepareLockingRead
                 let rowIdsFor (source: LockingReadSource) =
                     if sources.Length = 1 && select.Joins.IsEmpty then
                         tryEqualityAccess store dbName source.Reference select.Where
-                        |> Option.map (fun plan -> plan.Rows |> List.map fst)
+                        |> Option.map (fun plan -> plan.Rows.Value |> List.map fst)
                         |> Option.orElseWith (fun () ->
                             tryLiteralInAccess store dbName source.Reference select.Where
-                            |> Option.map (fun plan -> plan.Rows |> List.map fst))
+                            |> Option.map (fun plan -> plan.Rows.Value |> List.map fst))
                         |> Option.orElseWith (fun () ->
                             trySpatialLookup BareOrQualifiedColumn store dbName source.Reference select.Where
                             |> Option.map (fun (_, rows) -> rows |> List.map fst))
@@ -8595,7 +8610,10 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
                   PrefixLengths = lookup.PrefixLengths
                   Columns = lookup.LookupColumns
                   Unique = lookup.Unique
+                  CandidateRowIds = lookup.LookupRowIds
+                  TableRowCount = lookup.TableRowCount
                   Rows = lookup.LookupRows })
+            |> Option.filter isUsefulEqualityAccess
 
         composite
         |> Option.orElseWith (fun () ->
@@ -8610,16 +8628,11 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
                     equality.Value
                 |> Option.bind (fun (table, index) ->
                     (if equality.Transform.IsSome then
-                         Storage.tryProjectedEqualityLookupForIndex store table index [ equality.Value ]
+                         Storage.tryProjectedEqualityRowIdsForIndex store table index [ equality.Value ]
                      else
-                         Storage.tryEqualityLookupForIndex store table index [ equality.Value ])
-                    |> Option.map (fun rows ->
-                        { KeyName = index.Name
-                          ColumnIndices = index.ColumnIndices
-                          PrefixLengths = index.PrefixLengths
-                          Columns = table.Columns
-                          Unique = index.Unique
-                          Rows = rows }))))
+                         Storage.tryEqualityRowIdsForIndex store table index [ equality.Value ])
+                    |> Option.map (equalityAccessPlan table index)
+                    |> Option.filter isUsefulEqualityAccess)))
 
 and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : EqualityAccessPlan option =
     if not (storedValuesMatchReadValues store) then
@@ -8655,27 +8668,27 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
                         orderedEqualityValues table index (probe.Columns |> List.map fst) tuple
                         |> Option.bind (fun ordered ->
                             if probe.Columns |> List.exists (snd >> Option.isSome) then
-                                Storage.tryProjectedEqualityLookupForIndex store table index ordered
+                                Storage.tryProjectedEqualityRowIdsForIndex store table index ordered
                             else
-                                Storage.tryEqualityLookupForIndex store table index ordered)
+                                Storage.tryEqualityRowIdsForIndex store table index ordered)
 
                     let lookups = values |> List.map lookup
 
                     if lookups |> List.forall Option.isSome then
-                        Some
-                            { KeyName = index.Name
-                              ColumnIndices = index.ColumnIndices
-                              PrefixLengths = index.PrefixLengths
-                              Columns = table.Columns
-                              Unique = index.Unique
-                              Rows = lookups |> List.choose id |> List.collect id |> List.distinctBy fst |> List.sortBy fst }
+                        let plan =
+                            lookups
+                            |> List.choose id
+                            |> List.fold Set.union Set.empty
+                            |> equalityAccessPlan table index
+
+                        if isUsefulEqualityAccess plan then Some plan else None
                     else
                         None)))
 
 and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
     |> Option.orElseWith (fun () -> tryLiteralInAccess store dbName tref whereExpr)
-    |> Option.map (fun plan -> plan.Columns, plan.Rows)
+    |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryCorrelatedEqualityLookup
     (store: Store)
@@ -8728,7 +8741,7 @@ and private tryCorrelatedEqualityLookup
             let tableDb = tref.Database |> Option.defaultValue dbName
 
             Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
-            |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows)
+            |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows.Value)
             |> Option.orElseWith (fun () ->
                 equalities
                 |> List.tryPick (fun (column, value) ->
@@ -13268,7 +13281,7 @@ let rec private explainJoinBlock
             false
         else
             match tryEqualityAccess store dbName tref whereOpt with
-            | Some plan when plan.Unique && plan.Rows.IsEmpty ->
+            | Some plan when plan.Unique && plan.CandidateRowIds.IsEmpty ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
@@ -13288,7 +13301,7 @@ let rec private explainJoinBlock
                       Type = Some(if plan.Unique then "const" else "ref")
                       Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
                       Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
-                      Rows = Some(uint64 plan.Rows.Length)
+                      Rows = Some(uint64 plan.CandidateRowIds.Count)
                       Extra = if plan.Unique then extra |> List.filter ((<>) "Using where") else extra }
 
                 true
@@ -13302,7 +13315,7 @@ let rec private explainJoinBlock
                           Type = Some "range"
                           Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
                           Ref = None
-                          Rows = Some(uint64 plan.Rows.Length)
+                          Rows = Some(uint64 plan.CandidateRowIds.Count)
                           Extra = extra }
 
                     true
