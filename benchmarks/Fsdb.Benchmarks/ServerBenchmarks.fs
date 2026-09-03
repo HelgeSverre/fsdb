@@ -205,7 +205,7 @@ type ServerBenchmarks() =
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
     member this.CountSelectiveEqualityScan() =
-        this.Query "SELECT COUNT(*) FROM users WHERE age + 0 = 30"
+        this.Query "SELECT COUNT(*) FROM users WHERE scan_age = 30"
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
@@ -215,7 +215,7 @@ type ServerBenchmarks() =
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
     member this.CountHalfLiteralInScan() =
-        this.Query $"SELECT COUNT(*) FROM users WHERE age + 0 IN ({halfAgeList})"
+        this.Query $"SELECT COUNT(*) FROM users WHERE scan_age IN ({halfAgeList})"
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
@@ -225,7 +225,7 @@ type ServerBenchmarks() =
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
     member this.CountBroadLiteralInScan() =
-        this.Query $"SELECT COUNT(*) FROM users WHERE age + 0 IN ({allAgeList})"
+        this.Query $"SELECT COUNT(*) FROM users WHERE scan_age IN ({allAgeList})"
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Spatial")>]
