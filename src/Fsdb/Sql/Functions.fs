@@ -2109,7 +2109,7 @@ let private convertFn: Scalar =
         | "utf8"
         | "utf8mb3"
         | "latin1"
-        | "ascii" -> VString(Collation.Charset.transcodeText charset text)
+        | "ascii" -> VString(Charset.transcodeText charset text)
         | "binary" -> VBytes(Text.Encoding.UTF8.GetBytes text)
         | _ -> VNull
     | _ -> VNull

@@ -62,7 +62,7 @@ let private escapedCharacter noBackslashEscapes =
 let private xidPart noBackslashEscapes charset =
     let quoted =
         between (pchar '\'') (pchar '\'') (manyChars (escapedCharacter noBackslashEscapes))
-        |>> (Collation.Charset.encode charset >> List.ofArray)
+        |>> (Charset.encode charset >> List.ofArray)
 
     let quotedHex =
         attempt (pstringCI "X" >>. between (pchar '\'') (pchar '\'') (manyChars hex))

@@ -17,6 +17,7 @@
     <Compile Include="Foundation/Limits.fs" />
     <Compile Include="Foundation/ServerOptions.fs" />
     <Compile Include="Foundation/Binary.fs" />
+    <Compile Include="Sql/Charset.fs" />
     <Compile Include="Sql/Collation.fs" />
     <Compile Include="Sql/Regexp.fs" />
     <Compile Include="Sql/Temporal.fs" />

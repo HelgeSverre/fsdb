@@ -3124,8 +3124,7 @@ let private coercibilityOfExpr ctx expr =
 let private normalizeCompoundString descriptor value =
     match descriptor.Charset, value with
     | "binary", _ -> value
-    | "latin1", VBytes bytes -> VString(Collation.Charset.decodeLatin1Bytes bytes)
-    | "ascii", VBytes bytes -> VString(Collation.Charset.decodeAsciiBytes bytes)
+    | ("latin1" | "ascii"), VBytes bytes -> VString(Charset.decodeBytes descriptor.Charset bytes)
     | _, VBytes bytes -> VString(System.Text.Encoding.UTF8.GetString bytes)
     | _ -> value
 
@@ -4623,7 +4622,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         eval argument |> Result.map (Functions.weightStringChar (keyCollation ctx argument) length)
     | FuncCall(name, [ Cast(argument, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
         eval argument
-        |> Result.map (Functions.weightStringBinaryWith (Collation.Charset.encode (sourceCharset ctx argument)) length)
+        |> Result.map (Functions.weightStringBinaryWith (Charset.encode (sourceCharset ctx argument)) length)
     | FuncCall(name, [ argument ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
         let source =
             match argument with

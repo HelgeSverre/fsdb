@@ -99,66 +99,6 @@ let private countTrailingSpaces (s: string) : int =
 
     n
 
-/// CP1252's C1 bytes make `latin1` weights and stored-text transcoding agree.
-let private cp1252HighSlots : char option array =
-    [| Some '€'
-       None
-       Some '‚'
-       Some 'ƒ'
-       Some '„'
-       Some '…'
-       Some '†'
-       Some '‡'
-       Some 'ˆ'
-       Some '‰'
-       Some 'Š'
-       Some '‹'
-       Some 'Œ'
-       None
-       Some 'Ž'
-       None
-       None
-       Some '‘'
-       Some '’'
-       Some '“'
-       Some '”'
-       Some '•'
-       Some '–'
-       Some '—'
-       Some '˜'
-       Some '™'
-       Some 'š'
-       Some '›'
-       Some 'œ'
-       None
-       Some 'ž'
-       Some 'Ÿ' |]
-
-let private cp1252ByteByCode =
-    cp1252HighSlots
-    |> Array.indexed
-    |> Array.choose (fun (index, value) -> value |> Option.map (fun value -> int value, byte (index + 0x80)))
-    |> Map.ofArray
-
-let private encodeCharset (charset: string) (text: string) : byte[] =
-    let byteForRune (rune: Rune) : byte =
-        match charset with
-        | "latin1" ->
-            let code = rune.Value
-
-            if code < 0x80 || (code >= 0xA0 && code <= 0xFF) then
-                byte code
-            else
-                Map.tryFind code cp1252ByteByCode |> Option.defaultValue 0x3Fuy
-        | "ascii" ->
-            if rune.Value < 0x80 then byte rune.Value else 0x3Fuy
-        | _ -> 0uy
-
-    match charset with
-    | "latin1"
-    | "ascii" -> text.EnumerateRunes() |> Seq.map byteForRune |> Array.ofSeq
-    | _ -> Text.Encoding.UTF8.GetBytes text
-
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
@@ -179,7 +119,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             |> Array.ofSeq
         else
             let charset = name.Split('_').[0]
-            encodeCharset charset s
+            Charset.encode charset s
 
     let compareFull (a: string) (b: string) : int =
         if String.Equals(a, b, StringComparison.Ordinal) then
@@ -501,145 +441,17 @@ let charsetOfCollation (name: string) : string =
         | i -> lower.Substring(0, i)
 
 let defaultNameForCharset (charset: string) =
-    match charset.ToLowerInvariant() with
-    | "utf8"
-    | "utf8mb3" -> "utf8mb3_general_ci"
-    | "latin1" -> "latin1_swedish_ci"
-    | "ascii" -> "ascii_general_ci"
-    | "binary" -> "binary"
-    | _ -> "utf8mb4_0900_ai_ci"
+    Charset.defaultCollationName charset |> Option.defaultValue "utf8mb4_0900_ai_ci"
 
 let belongsToCharset (charset: string) (collation: string) =
-    let charset = charset.ToLowerInvariant()
+    let charset = Charset.canonicalName charset
     let owner = charsetOfCollation collation
-
-    match charset with
-    | "utf8"
-    | "utf8mb3" -> owner = "utf8" || owner = "utf8mb3"
-    | _ -> owner = charset
+    owner = charset
 
 let maxBytesPerCharacter (charset: string option) =
-    match charset |> Option.map _.ToLowerInvariant() with
-    | Some "ascii"
-    | Some "latin1"
-    | Some "binary" -> 1
-    | Some "utf8"
-    | Some "utf8mb3" -> 3
-    | _ -> 4
+    charset |> Option.bind Charset.maxBytes |> Option.defaultValue 4
 
 /// The engine's one active default — a `Store`-level default today, the
 /// seam a per-session/per-column `COLLATE` resolves against.
 let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry
 let metadataIdentifierCollation = Map.find "utf8mb3_tolower_ci" registry
-
-// ---------------------------------------------------------------------------
-// Charset write-time transcoding. MySQL's `latin1` is really cp1252, not
-// ISO-8859-1: `€` stores fine as byte 0x80, and the 0x80–0x9F range holds
-// printable punctuation (quotes, dashes, ™, …) where ISO-8859-1 has control
-// characters — verified against 8.4. `ascii` is 7-bit. Both map anything
-// unencodable to '?' rather than erroring (`ascii` columns still reject in
-// strict mode at the storage layer; this mapping is the lossy fallback).
-// ---------------------------------------------------------------------------
-
-module Charset =
-    let private cp1252Extras = cp1252HighSlots |> Array.choose id |> Array.map int |> Set.ofArray
-    let private strictUtf8 = UTF8Encoding(false, true)
-
-    /// Maps text to what a `latin1` (cp1252) column can hold: ASCII and
-    /// 0xA0–0xFF pass through, the cp1252 extras pass through, everything
-    /// else (including the C1 range 0x80–0x9F) becomes '?'. The engine
-    /// stores text, not bytes, so a representable char keeps its Unicode
-    /// form — `€` reads back as `€`, exactly what MySQL displays.
-    let transcodeLatin1 (s: string) : string =
-        s
-        |> _.EnumerateRunes()
-        |> Seq.map (fun rune ->
-            let code = rune.Value
-
-            if code < 0x80 || (code >= 0xA0 && code <= 0xFF) || cp1252Extras.Contains code then
-                rune.ToString()
-            else
-                "?")
-        |> String.concat ""
-
-    /// Maps supplementary Unicode scalars to MySQL utf8mb3's replacement
-    /// character while preserving BMP text.
-    let transcodeUtf8mb3 (s: string) : string =
-        s.EnumerateRunes()
-        |> Seq.map (fun rune -> if rune.Value <= 0xFFFF then rune.ToString() else "?")
-        |> String.concat ""
-
-    /// Decodes raw bytes as cp1252 — what a `_latin1'...'` introducer needs,
-    /// since MySQL labels the literal's client-encoded bytes without
-    /// converting them (verified: `_latin1'é'` reads back as the two cp1252
-    /// chars `Ã©`).
-    let decodeLatin1Bytes (bytes: byte[]) : string =
-        bytes
-        |> Array.map (fun b ->
-            if b < 0x80uy then
-                char (int b)
-            elif b >= 0xA0uy then
-                char (int b)
-            else
-                match cp1252HighSlots.[int b - 0x80] with
-                | Some c -> c
-                | None -> '?')
-        |> System.String
-
-    let supportsLoadData (charset: string) =
-        match charset.ToLowerInvariant() with
-        | "utf8"
-        | "utf8mb3"
-        | "utf8mb4"
-        | "latin1"
-        | "ascii" -> true
-        | _ -> false
-
-    let decodeLoadData (charset: string) (bytes: byte[]) : Result<string, string> =
-        let charset = charset.ToLowerInvariant()
-
-        try
-            match charset with
-            | "latin1" -> Ok(decodeLatin1Bytes bytes)
-            | "ascii" when bytes |> Array.exists (fun value -> value >= 0x80uy) ->
-                Error "Invalid ascii character string"
-            | "ascii" -> Ok(Encoding.ASCII.GetString bytes)
-            | "utf8"
-            | "utf8mb3" ->
-                let text = strictUtf8.GetString bytes
-
-                if text.EnumerateRunes() |> Seq.exists (fun rune -> rune.Value > 0xFFFF) then
-                    Error "Invalid utf8mb3 character string"
-                else
-                    Ok text
-            | "utf8mb4" -> Ok(strictUtf8.GetString bytes)
-            | _ -> Error(sprintf "Unsupported character set '%s'" charset)
-        with :? DecoderFallbackException ->
-            Error(sprintf "Invalid %s character string" (if charset = "utf8" then "utf8mb3" else charset))
-
-    /// Maps text to what an `ascii` column can hold: 7-bit passes through,
-    /// everything else becomes '?'.
-    let transcodeAscii (s: string) : string =
-        s
-        |> _.EnumerateRunes()
-        |> Seq.map (fun rune -> if rune.Value < 0x80 then rune.ToString() else "?")
-        |> String.concat ""
-
-    let transcodeText (charset: string) (text: string) =
-        match charset.ToLowerInvariant() with
-        | "ascii" -> transcodeAscii text
-        | "latin1" -> transcodeLatin1 text
-        | "utf8"
-        | "utf8mb3" -> transcodeUtf8mb3 text
-        | _ -> text
-
-    /// Encodes a text value with the byte mapping MySQL applies before a
-    /// binary string operation observes a column's character set.
-    let encode (charset: string) (text: string) : byte[] =
-        encodeCharset charset text
-
-    /// Decodes raw bytes as ASCII — the `_ascii'...'` introducer's byte
-    /// labeling, where each non-7-bit byte becomes one '?' (verified:
-    /// `_ascii'å'` reads back as `??`, one per byte).
-    let decodeAsciiBytes (bytes: byte[]) : string =
-        bytes |> Array.map (fun b -> if b < 0x80uy then char (int b) else '?') |> System.String

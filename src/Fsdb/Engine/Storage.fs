@@ -1326,7 +1326,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
 
     let charsetChecked (text: string) : Result<string, StorageError> =
-        let converted = col.Charset |> Option.map (fun charset -> Collation.Charset.transcodeText charset text) |> Option.defaultValue text
+        let converted = col.Charset |> Option.map (fun charset -> Charset.transcodeText charset text) |> Option.defaultValue text
 
         if text = converted then
             Ok text
@@ -2007,7 +2007,7 @@ let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Res
         let charsetLoss =
             match col.Type, col.Charset with
             | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TJson), Some charset ->
-                Collation.Charset.transcodeText charset text <> text
+                Charset.transcodeText charset text <> text
             | _ -> false
 
         let defaultIsInvalid = widthOverflow || charsetLoss
@@ -5079,7 +5079,7 @@ let private normalizePrimaryKeyNullability (columns: ColumnDef list) =
             column)
 
 let private normalizeUtf8mb3Text (text: string) =
-    let normalized = Collation.Charset.transcodeUtf8mb3 text
+    let normalized = Charset.transcodeText "utf8mb3" text
 
     if normalized <> text then
         let bytes = Encoding.UTF8.GetBytes text
@@ -8416,7 +8416,7 @@ let private normalizeForeignServerOptions (options: ForeignServerOptions) =
     let host =
         options.Host
         |> Option.map (fun host ->
-            let converted = Collation.Charset.transcodeAscii host
+            let converted = Charset.transcodeText "ascii" host
 
             if converted <> host then
                 Diagnostics.warning

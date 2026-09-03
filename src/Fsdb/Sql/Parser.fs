@@ -708,8 +708,8 @@ let private introducedStringLit: Parser<Expr, unit> =
         | "utf8mb3"
         | "utf8" -> preturn (Lit(VString text))
         | "binary" -> preturn (Lit(VBytes bytes))
-        | "latin1" -> preturn (Lit(VString(Collation.Charset.decodeLatin1Bytes bytes)))
-        | "ascii" -> preturn (Lit(VString(Collation.Charset.decodeAsciiBytes bytes)))
+        | "latin1" -> preturn (Lit(VString(Charset.decodeBytes charset bytes)))
+        | "ascii" -> preturn (Lit(VString(Charset.decodeBytes charset bytes)))
         | _ -> fail (sprintf "Unknown character set: '%s'" charset)
 
 /// MySQL's quoted hexadecimal binary literal (`X'00ff'`, case-insensitive

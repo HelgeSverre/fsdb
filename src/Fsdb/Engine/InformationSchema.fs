@@ -860,24 +860,11 @@ let private schemataRows (catalog: Catalog) : Value[] list =
 let private collationCharacterSetApplicabilityColumns =
     [ strCol "COLLATION_NAME"; strCol "CHARACTER_SET_NAME" ]
 
-/// Real MySQL's version lists all ~280 collations the server ships with,
-/// regardless of whether anything actually uses them. This only needs to
-/// cover collations fsdb itself can ever hand back (`tablesRows`'s/
-/// `columnsRows`'s hardcoded `utf8mb4_unicode_ci`, the session defaults in
-/// `Session.defaultVariables`, and MySQL 8's own server default) — enough
-/// for Doctrine DBAL's `getListTableMetadataSQL`
-/// (`... JOIN information_schema.COLLATION_CHARACTER_SET_APPLICABILITY
-/// ccsa ON ccsa.COLLATION_NAME = t.TABLE_COLLATION`, behind Laravel's
-/// `Blueprint::change()`) to find a match, not a full reference table.
 let private collationCharacterSetApplicabilityRows: Value[] list =
     Collation.registry
     |> Map.toList
     |> List.map (fun (name, _) -> [| vs name; vs (Collation.charsetOfCollation name) |])
 
-/// The character sets fsdb knows about, with MySQL 8.4's defaults — the
-/// metadata a schema-compare tool (Doctrine's platform setup, DB-browser
-/// dropdowns) reads to learn which charsets exist and what each defaults
-/// to.
 let private characterSetsColumns =
     [ strCol "CHARACTER_SET_NAME"
       strCol "DEFAULT_COLLATE_NAME"
@@ -885,18 +872,13 @@ let private characterSetsColumns =
       strCol "MAXLEN" ]
 
 let private characterSetsRows: Value[] list =
-    [ "utf8mb4", "utf8mb4_0900_ai_ci", "UTF-8 Unicode", "4"
-      "utf8mb3", "utf8mb3_general_ci", "UTF-8 Unicode", "3"
-      "latin1", "latin1_swedish_ci", "cp1252 West European", "1"
-      "ascii", "ascii_general_ci", "US ASCII", "1"
-      "binary", "binary", "Binary pseudo charset", "1" ]
-    |> List.map (fun (cs, defaultCollation, description, maxlen) ->
-        [| vs cs; vs defaultCollation; vs description; vs maxlen |])
+    Charset.all
+    |> List.map (fun charset ->
+        [| vs charset.Name
+           vs charset.DefaultCollation
+           vs charset.Description
+           vs (string charset.MaxBytesPerCharacter) |])
 
-/// One row per registered collation — name, its utf8mb4 charset, MySQL's
-/// real id/sortlen (`Collation.idAndSortlen`), and its pad attribute —
-/// shared by the `information_schema.COLLATIONS` view and `SHOW COLLATION`
-/// so the two can't disagree.
 let private registeredCollationRows : (string * string * int * int * string) list =
     Collation.registry
     |> Map.toList
@@ -904,10 +886,8 @@ let private registeredCollationRows : (string * string * int * int * string) lis
         let id, sortlen = Collation.idAndSortlen |> Map.tryFind name |> Option.defaultValue (0, 0)
         name, Collation.charsetOfCollation name, id, sortlen, (if col.PadSpace then "PAD SPACE" else "NO PAD"))
 
-/// Each charset's default collation, mirroring `characterSetsRows` — drives
-/// `IS_DEFAULT` in the COLLATIONS view.
 let private defaultCollationPerCharset =
-    Set.ofList [ "utf8mb4_0900_ai_ci"; "utf8mb3_general_ci"; "latin1_swedish_ci"; "ascii_general_ci"; "binary" ]
+    Charset.all |> List.map _.DefaultCollation |> Set.ofList
 
 let private collationsColumns =
     [ strCol "COLLATION_NAME"

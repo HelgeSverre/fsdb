@@ -6796,7 +6796,7 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
             | Result.Error _ -> Result.Error(syntaxError sql)
             | Result.Ok load ->
                 match load.Charset |> Option.map _.ToLowerInvariant() with
-                | Some value when not (Collation.Charset.supportsLoadData value) ->
+                | Some value when not (Charset.supportsLoadData value) ->
                     Result.Error(Err(1235, sprintf "LOAD DATA CHARACTER SET %s is not supported" value))
                 | _ ->
                     let inputVariables =

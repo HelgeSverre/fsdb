@@ -636,7 +636,7 @@ let private decodeLocalLoad (load: Parser.LocalLoad) (bytes: byte[]) : Result<Va
     try
         let charset = load.Charset |> Option.defaultValue "utf8mb4"
         let text =
-            match Collation.Charset.decodeLoadData charset bytes with
+            match Charset.decodeLoadData charset bytes with
             | Ok text -> text
             | Error message -> raise (DecoderFallbackException message)
         let enclosedBy = load.EnclosedBy |> Option.bind singleCharacter
