@@ -122,6 +122,15 @@ let private isUsefulEqualityCardinality tableRows candidateRows =
 let private isUsefulEqualityAccess plan =
     isUsefulEqualityCardinality plan.TableRowCount plan.CandidateRowIds.Count
 
+type private IndexAccessPolicy =
+    | CostedRead
+    | CandidateNarrowing
+
+let private acceptsEqualityAccess policy plan =
+    match policy with
+    | CostedRead -> isUsefulEqualityAccess plan
+    | CandidateNarrowing -> true
+
 type private PointEquality =
     { Column: string
       Transform: IndexTransform option
@@ -8595,7 +8604,7 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
         | _ -> None)
 
 and private tryEqualityAccessWith
-    (accept: EqualityAccessPlan -> bool)
+    (policy: IndexAccessPolicy)
     (store: Store)
     (dbName: string)
     (tref: TableRef)
@@ -8622,7 +8631,7 @@ and private tryEqualityAccessWith
                   CandidateRowIds = lookup.LookupRowIds
                   TableRowCount = lookup.TableRowCount
                   Rows = lookup.LookupRows })
-            |> Option.filter accept
+            |> Option.filter (acceptsEqualityAccess policy)
 
         composite
         |> Option.orElseWith (fun () ->
@@ -8641,7 +8650,7 @@ and private tryEqualityAccessWith
                      else
                          Storage.tryEqualityRowIdsForIndex store table index [ equality.Value ])
                     |> Option.map (equalityAccessPlan table index)
-                    |> Option.filter accept)))
+                    |> Option.filter (acceptsEqualityAccess policy))))
 
 and private tryEqualityAccess
     (store: Store)
@@ -8649,7 +8658,7 @@ and private tryEqualityAccess
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryEqualityAccessWith isUsefulEqualityAccess store dbName tref whereExpr
+    tryEqualityAccessWith CostedRead store dbName tref whereExpr
 
 and private tryEqualityCandidates
     (store: Store)
@@ -8657,10 +8666,10 @@ and private tryEqualityCandidates
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryEqualityAccessWith (fun _ -> true) store dbName tref whereExpr
+    tryEqualityAccessWith CandidateNarrowing store dbName tref whereExpr
 
 and private tryLiteralInAccessWith
-    (useCost: bool)
+    (policy: IndexAccessPolicy)
     (store: Store)
     (dbName: string)
     (tref: TableRef)
@@ -8701,7 +8710,7 @@ and private tryLiteralInAccessWith
                             (Storage.equalityIndexDistinctKeyCount table index)
                             values.Length
 
-                    if useCost && not (isUsefulEqualityCardinality table.RowsArray.Count estimatedCandidates) then
+                    if policy = CostedRead && not (isUsefulEqualityCardinality table.RowsArray.Count estimatedCandidates) then
                         None
                     else
                         let lookup (tuple: Value list) =
@@ -8722,7 +8731,7 @@ and private tryLiteralInAccessWith
                                         candidateEstimate
                                         + min rowIds.Count (max 0 (table.RowsArray.Count - candidateEstimate))
 
-                                    if not useCost || isUsefulEqualityCardinality table.RowsArray.Count estimate then
+                                    if policy = CandidateNarrowing || isUsefulEqualityCardinality table.RowsArray.Count estimate then
                                         collect estimate (rowIds :: rowIdSets) remaining
                                     else
                                         None)
@@ -8739,7 +8748,7 @@ and private tryLiteralInAccess
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryLiteralInAccessWith true store dbName tref whereExpr
+    tryLiteralInAccessWith CostedRead store dbName tref whereExpr
 
 and private tryLiteralInCandidates
     (store: Store)
@@ -8747,7 +8756,7 @@ and private tryLiteralInCandidates
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryLiteralInAccessWith false store dbName tref whereExpr
+    tryLiteralInAccessWith CandidateNarrowing store dbName tref whereExpr
 
 and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr

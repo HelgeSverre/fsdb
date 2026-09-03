@@ -27,6 +27,8 @@ let private equalityPreference estimate =
     | TableScan, _ -> 2
     | IndexRange, _ -> 3
 
+let private equalityScanFloor = 64
+
 let private choose preference estimates =
     estimates
     |> List.minBy (fun estimate -> work estimate, preference estimate)
@@ -42,8 +44,6 @@ let chooseRange tableRows candidateRows =
     |> choose rangePreference
 
 let chooseEquality tableRows candidateRows =
-    let equalityScanFloor = 64
-
     if tableRows < equalityScanFloor then
         IndexLookup
     else

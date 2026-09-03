@@ -4059,7 +4059,7 @@ let private equalityLookupRowIds
                 |> Option.bind (Map.tryFind key)
                 |> Option.defaultValue Set.empty)
 
-let rowsForRowIds (table: Table) (rowIds: Set<RowId>) =
+let internal rowsForRowIds (table: Table) (rowIds: Set<RowId>) =
     rowIds
     |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
     |> List.ofSeq
@@ -4233,7 +4233,7 @@ let tryEqualityLookupForIndex
     : (RowId * Value[]) list option =
     equalityLookupRows store table index StoredValues values
 
-let tryEqualityRowIdsForIndex
+let internal tryEqualityRowIdsForIndex
     (store: Store)
     (table: Table)
     (index: EqualityIndex)
@@ -4249,7 +4249,7 @@ let tryProjectedEqualityLookupForIndex
     : (RowId * Value[]) list option =
     equalityLookupRows store table index ProjectedValues values
 
-let tryProjectedEqualityRowIdsForIndex
+let internal tryProjectedEqualityRowIdsForIndex
     (store: Store)
     (table: Table)
     (index: EqualityIndex)
@@ -4257,7 +4257,7 @@ let tryProjectedEqualityRowIdsForIndex
     : Set<RowId> option =
     equalityLookupRowIds store table index ProjectedValues values
 
-let equalityIndexDistinctKeyCount (table: Table) (index: EqualityIndex) =
+let internal equalityIndexDistinctKeyCount (table: Table) (index: EqualityIndex) =
     if index.Unique then
         table.UniqueIndex
         |> Map.tryFind index.Name
