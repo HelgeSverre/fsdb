@@ -11,6 +11,7 @@ open Fsdb.Executor
 open Fsdb.QueryHandler
 
 let private note code message = Fsdb.Diagnostics.Note, code, message
+let private warning code message = Fsdb.Diagnostics.Warning, code, message
 
 let private conditionTriples session =
     session.Diagnostics
@@ -96,6 +97,66 @@ let tests =
               let session, result = handle session "DROP DATABASE IF EXISTS absent_database"
               Expect.equal result (Affected 0UL) "missing database is ignored"
               Expect.isEmpty session.Diagnostics "DROP DATABASE IF EXISTS remains silent"
+
+          testCase "CREATE TABLE unknown engines follow NO_ENGINE_SUBSTITUTION"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, strictResult =
+                  handle session "CREATE TABLE strict_engine (id INT) ENGINE=totally_unknown"
+
+              match strictResult with
+              | Err(1286, "Unknown storage engine 'totally_unknown'") -> ()
+              | other -> failtestf "expected strict unknown-engine rejection, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode=''"
+
+              let session =
+                  handle session "CREATE TABLE lax_engine (id INT) ENGINE totally_unknown"
+                  |> expectAffectedWithConditions
+                      "unknown engine is substituted"
+                      [ warning 1286 "Unknown storage engine 'totally_unknown'"
+                        warning 1266 "Using storage engine InnoDB for table 'lax_engine'" ]
+
+              let session, ctasResult =
+                  handle session "CREATE TABLE lax_ctas ENGINE=totally_unknown AS SELECT 1 AS id"
+
+              Expect.equal ctasResult (Affected 1UL) "unknown CTAS engine is substituted"
+
+              Expect.equal
+                  (conditionTriples session)
+                  [ warning 1286 "Unknown storage engine 'totally_unknown'"
+                    warning 1266 "Using storage engine InnoDB for table 'lax_ctas'" ]
+                  "unknown CTAS engine diagnostics"
+
+              match handle session "SELECT id FROM lax_ctas" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected substituted CTAS contents, got %A" other
+
+              let session =
+                  handle session "CREATE TABLE IF NOT EXISTS lax_engine (other INT) ENGINE=totally_unknown"
+                  |> expectAffectedWithConditions
+                      "engine substitution precedes the existence note"
+                      [ warning 1286 "Unknown storage engine 'totally_unknown'"
+                        warning 1266 "Using storage engine InnoDB for table 'lax_engine'"
+                        note 1050 "Table 'lax_engine' already exists" ]
+
+              let session, knownResult = handle session "CREATE TABLE memory_engine (id INT) ENGINE=MEMORY"
+              Expect.equal knownResult (Affected 0UL) "known engines remain accepted"
+              Expect.isEmpty session.Diagnostics "known engines do not warn"
+
+              let session, invalidResult =
+                  handle session "CREATE TABLE invalid_performance_schema (id INT) ENGINE=PERFORMANCE_SCHEMA"
+
+              match invalidResult with
+              | Err(1683, "Invalid performance_schema usage.") -> ()
+              | other -> failtestf "expected performance_schema rejection, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+
+              match handle session "CREATE TABLE IF NOT EXISTS lax_engine (id INT) ENGINE=totally_unknown" |> snd with
+              | Err(1286, "Unknown storage engine 'totally_unknown'") -> ()
+              | other -> failtestf "expected engine validation before IF NOT EXISTS, got %A" other
 
           testCase "conditional object and account DDL records MySQL notes"
           <| fun _ ->

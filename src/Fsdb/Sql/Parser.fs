@@ -2423,6 +2423,7 @@ let private createTableItem: Parser<CreateItem, unit> =
           parsedColumnDef |>> CColumn ]
 
 type private TableOption =
+    | TableEngine of string
     | TableCharset of string
     | TableCollate of string
     | TableAutoIncrement of int64
@@ -2431,7 +2432,8 @@ type private TableOption =
     | IgnoredTableOption
 
 type private ParsedTableOptions =
-    { Charset: string option
+    { RequestedEngine: string option
+      Charset: string option
       Collation: string option
       AutoIncrementSeed: int64 option
       Comment: string option
@@ -2441,7 +2443,8 @@ type private ParsedTableOptions =
 [<RequireQualifiedAccess>]
 module private ParsedTableOptions =
     let empty =
-        { Charset = None
+        { RequestedEngine = None
+          Charset = None
           Collation = None
           AutoIncrementSeed = None
           Comment = None
@@ -2450,6 +2453,7 @@ module private ParsedTableOptions =
 
     let apply (options: ParsedTableOptions) (tableOption: TableOption) =
         match tableOption with
+        | TableEngine value -> { options with RequestedEngine = Some value }
         | TableCharset value ->
             { options with
                 Charset = Some value
@@ -2491,7 +2495,7 @@ let private ignoredTableOption names =
 
 let private tableOption: Parser<TableOption, unit> =
     choice
-        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% IgnoredTableOption
+        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString |>> TableEngine
           attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> TableAutoIncrement
           keyword "COMMENT" >>. opt (sym "=") >>. stringLit
           |>> (function VString value -> TableComment value | value -> TableComment(toText value |> Option.defaultValue ""))
@@ -2628,6 +2632,7 @@ let private createTable: Parser<Statement, unit> =
               ForeignKeys = foreignKeys
               Checks = checks
               IfNotExists = ifNotExists
+              RequestedEngine = options.RequestedEngine
               Charset = options.Charset
               Collation = options.Collation
               AutoIncrementSeed = options.AutoIncrementSeed
@@ -3683,10 +3688,11 @@ let private createTableAs: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. qualifiedTableName
-     .>> tableOptions
+     .>>. tableOptions
      .>> optional (keyword "AS")
      .>>. selectOrUnionStmt)
-    |>> fun ((ifNotExists, name), query) -> CreateTableAs(name, query, ifNotExists)
+    |>> fun (((ifNotExists, name), options), query) ->
+        CreateTableAs(name, query, ifNotExists, options.RequestedEngine)
 
 let private querySelect projections from orderBy limit offset =
     { Projections = projections

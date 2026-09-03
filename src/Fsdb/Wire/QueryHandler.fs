@@ -2720,7 +2720,7 @@ let private temporaryTargets (dbName: string) (action: TemporaryAction option) (
     match action, stmt with
     | Some CreateTemporary, CreateTable table -> [ splitQualified dbName table.Name ]
     | Some CreateTemporary, CreateTableLike(name, _, _)
-    | Some CreateTemporary, CreateTableAs(name, _, _) -> [ splitQualified dbName name ]
+    | Some CreateTemporary, CreateTableAs(name, _, _, _) -> [ splitQualified dbName name ]
     | Some DropTemporary, DropTable(names, _) -> names |> List.map (splitQualified dbName)
     | _ -> []
 
@@ -2848,7 +2848,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
                         (fun () -> executeParsedCore session stmt)
 
             match stmt with
-            | CreateTableAs(name, _, _) ->
+            | CreateTableAs(name, _, _, _) ->
                 DynamicScope.withValue creatingTable (Some(splitQualified dbName name |> snd)) execute
             | _ -> execute ()
         else

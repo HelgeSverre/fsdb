@@ -313,8 +313,8 @@ let rec rewriteStatement replace =
     let rewriteAssignment assignment = { assignment with Value = rewriteExpression assignment.Value }
 
     function
-    | CreateTableAs(name, query, ifNotExists) ->
-        CreateTableAs(name, rewriteStatement replace query, ifNotExists)
+    | CreateTableAs(name, query, ifNotExists, requestedEngine) ->
+        CreateTableAs(name, rewriteStatement replace query, ifNotExists, requestedEngine)
     | Select select -> Select(rewriteSelect replace select)
     | Do expressions -> Do(List.map rewriteExpression expressions)
     | Union(first, rest, orderBy, limit, offset) ->

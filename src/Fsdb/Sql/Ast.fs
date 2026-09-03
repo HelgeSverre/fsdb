@@ -833,6 +833,8 @@ type CreateTableSpec =
       ForeignKeys: ForeignKeyDef list
       Checks: CheckConstraintDef list
       IfNotExists: bool
+      /// Syntax-only request validated before the shared row store is created.
+      RequestedEngine: string option
       /// The table's own declared `[DEFAULT] CHARSET`/`COLLATE` options;
       /// `None` means the server default.
       Charset: string option
@@ -878,7 +880,7 @@ type Statement =
     | AlterDatabase of name: string option * deprecations: SyntaxDeprecation list
     | CreateTable of CreateTableSpec
     | CreateTableLike of name: string * source: string * ifNotExists: bool
-    | CreateTableAs of name: string * query: Statement * ifNotExists: bool
+    | CreateTableAs of name: string * query: Statement * ifNotExists: bool * requestedEngine: string option
     | DropTable of names: string list * ifExists: bool
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list

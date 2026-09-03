@@ -1883,6 +1883,7 @@ let tests =
                         ForeignKeys = []
                         Checks = []
                         IfNotExists = false
+                        RequestedEngine = None
                         Charset = None
                         Collation = None
                         AutoIncrementSeed = None

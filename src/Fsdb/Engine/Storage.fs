@@ -4970,6 +4970,7 @@ let createTableSeeded
                   ForeignKeys = foreignKeys
                   Checks = []
                   IfNotExists = false
+                  RequestedEngine = None
                   Charset = tableCharset
                   Collation = tableCollation
                   AutoIncrementSeed = autoIncrementSeed

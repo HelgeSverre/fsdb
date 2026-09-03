@@ -7,6 +7,7 @@ type Settings =
       NoZeroDate: bool
       NoZeroInDate: bool
       OnlyFullGroupBy: bool
+      NoEngineSubstitution: bool
       NoAutoValueOnZero: bool
       ErrorForDivisionByZero: bool
       TimeTruncateFractional: bool
@@ -42,6 +43,7 @@ let settingsFor (value: string) : Settings =
       NoZeroDate = enabled modes "NO_ZERO_DATE"
       NoZeroInDate = enabled modes "NO_ZERO_IN_DATE"
       OnlyFullGroupBy = enabled modes "ONLY_FULL_GROUP_BY"
+      NoEngineSubstitution = enabled modes "NO_ENGINE_SUBSTITUTION"
       NoAutoValueOnZero = enabled modes "NO_AUTO_VALUE_ON_ZERO"
       ErrorForDivisionByZero = enabled modes "ERROR_FOR_DIVISION_BY_ZERO"
       TimeTruncateFractional = enabled modes "TIME_TRUNCATE_FRACTIONAL"

@@ -830,6 +830,7 @@ let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
               ForeignKeys = fks
               Checks = []
               IfNotExists = ifNotExists
+              RequestedEngine = None
               Charset = tableCharset
               Collation = tableCollation
               AutoIncrementSeed = autoIncrementSeed

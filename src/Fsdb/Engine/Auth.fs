@@ -2509,7 +2509,7 @@ let rec private statementColumnRequirements store defaultDb =
            |> List.collect (snd >> expressionColumnRequirements store defaultDb [ source ] [] Map.empty Set.empty))
     | Update update -> updateColumnRequirements store defaultDb update
     | Delete delete -> deleteColumnRequirements store defaultDb delete
-    | CreateTableAs(_, query, _) -> statementColumnRequirements store defaultDb query
+    | CreateTableAs(_, query, _, _) -> statementColumnRequirements store defaultDb query
     | CreateView view ->
         let database, _ = splitQualified defaultDb view.Name
 
@@ -2657,7 +2657,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         @ onTables "SELECT" ((cteTables @ readInExprs) |> List.distinct)
     | CreateTable table -> onTables "CREATE" [ split table.Name ]
     | CreateTableLike(name, source, _) -> onTables "CREATE" [ split name ] @ onTables "SELECT" [ split source ]
-    | CreateTableAs(name, query, _) -> onTables "CREATE" [ split name ] @ requiredPrivileges defaultDb query
+    | CreateTableAs(name, query, _, _) -> onTables "CREATE" [ split name ] @ requiredPrivileges defaultDb query
     | DropTable(names, _) -> onTables "DROP" (names |> List.map split)
     | Truncate table -> onTables "DROP" [ split table ]
     | AlterTable(table, _) -> onTables "ALTER" [ split table ]

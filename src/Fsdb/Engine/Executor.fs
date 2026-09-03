@@ -1200,6 +1200,22 @@ let private noteAuthorizationExists name host =
 let private noteAuthorizationMissing name host =
     Diagnostics.note 3162 (sprintf "Authorization ID '%s'@'%s' does not exist." name host)
 
+let private creatableStorageEngines =
+    set [ "archive"; "blackhole"; "csv"; "heap"; "innodb"; "memory"; "merge"; "mrg_myisam"; "myisam" ]
+
+let private validateCreateEngine (store: Store) tableName =
+    function
+    | None -> None
+    | Some engine when equalsIgnoreCase engine "performance_schema" ->
+        Some(Err(1683, "Invalid performance_schema usage."))
+    | Some engine when creatableStorageEngines.Contains(engine.ToLowerInvariant()) -> None
+    | Some engine when store.ExecutionSettings.SqlMode.NoEngineSubstitution ->
+        Some(Err(1286, sprintf "Unknown storage engine '%s'" engine))
+    | Some engine ->
+        Diagnostics.warning 1286 (sprintf "Unknown storage engine '%s'" engine)
+        Diagnostics.warning 1266 (sprintf "Using storage engine InnoDB for table '%s'" tableName)
+        None
+
 /// The leading numeric run of `s`, the way MySQL's numeric `CAST`/implicit
 /// string-to-number conversion reads a string — `"12abc"` yields
 /// `Some "12"`, `"abc"` yields `None`. Unlike `Storage.coerceValue`'s
@@ -15820,50 +15836,53 @@ let rec executeAs
         | Error(ExpressionError(1477, _)) when ifExists -> ids, Affected 0UL
         | Error error -> ids, storageErr error
 
-    | CreateTableAs(name, query, ifNotExists) ->
+    | CreateTableAs(name, query, ifNotExists, requestedEngine) ->
         let destinationDb, destinationName = splitQualified dbName name
         let destinationExists = scan store destinationDb destinationName |> Result.isOk
         let viewExists = tryStoredView store destinationDb destinationName |> Option.isSome
 
-        if ifNotExists && (destinationExists || viewExists) then
-            noteTableExists destinationName
-            ids, Affected 0UL
-        elif destinationExists || viewExists then
-            ids, storageErr (TableExists destinationName)
-        else
-            let selected =
-                match query with
-                | Select select ->
-                    let result, metadata, rows = runSelectStmt store registry dbName select None
-                    let names = match result with ResultSet(names, _) -> names | _ -> []
-                    result, metadata, rows, selectColumnCollations store registry dbName select names
-                | Union(first, rest, orderBy, limit, offset) ->
-                    let result, metadata, rows = runUnionStmtWithOuter store registry dbName first rest orderBy limit offset None
-                    let names = match result with ResultSet(names, _) -> names | _ -> []
-                    result, metadata, rows, List.replicate names.Length Collation.defaultCollation
-                | _ -> Err(1064, "CREATE TABLE ... AS requires a query"), [], [], []
+        match validateCreateEngine store destinationName requestedEngine with
+        | Some error -> ids, error
+        | None ->
+            if ifNotExists && (destinationExists || viewExists) then
+                noteTableExists destinationName
+                ids, Affected 0UL
+            elif destinationExists || viewExists then
+                ids, storageErr (TableExists destinationName)
+            else
+                let selected =
+                    match query with
+                    | Select select ->
+                        let result, metadata, rows = runSelectStmt store registry dbName select None
+                        let names = match result with ResultSet(names, _) -> names | _ -> []
+                        result, metadata, rows, selectColumnCollations store registry dbName select names
+                    | Union(first, rest, orderBy, limit, offset) ->
+                        let result, metadata, rows = runUnionStmtWithOuter store registry dbName first rest orderBy limit offset None
+                        let names = match result with ResultSet(names, _) -> names | _ -> []
+                        result, metadata, rows, List.replicate names.Length Collation.defaultCollation
+                    | _ -> Err(1064, "CREATE TABLE ... AS requires a query"), [], [], []
 
-            match selected with
-            | Err(code, message), _, _, _ -> ids, Err(code, message)
-            | ResultSet(names, _), metadata, rows, collations ->
-                let columns = deriveColumns names collations metadata
-                let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-                Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
+                match selected with
+                | Err(code, message), _, _, _ -> ids, Err(code, message)
+                | ResultSet(names, _), metadata, rows, collations ->
+                    let columns = deriveColumns names collations metadata
+                    let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+                    Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
-                let created =
-                    createTableSeeded snapshot destinationDb destinationName columns [] [] None None None None None
-                    |> Result.bind (fun () ->
-                        rows
-                        |> List.map Array.toList
-                        |> insertRows snapshot destinationDb destinationName None
-                        |> Result.map _.Affected)
+                    let created =
+                        createTableSeeded snapshot destinationDb destinationName columns [] [] None None None None None
+                        |> Result.bind (fun () ->
+                            rows
+                            |> List.map Array.toList
+                            |> insertRows snapshot destinationDb destinationName None
+                            |> Result.map _.Affected)
 
-                match created with
-                | Ok affected ->
-                    Storage.commitCatalogInto store baseCatalog snapshot
-                    ids, Affected(uint64 affected)
-                | Error error -> ids, storageErr error
-            | _ -> ids, Err(1064, "CREATE TABLE ... AS requires a query")
+                    match created with
+                    | Ok affected ->
+                        Storage.commitCatalogInto store baseCatalog snapshot
+                        ids, Affected(uint64 affected)
+                    | Error error -> ids, storageErr error
+                | _ -> ids, Err(1064, "CREATE TABLE ... AS requires a query")
 
     | CreateTableLike(name, source, ifNotExists) ->
         let destinationDb, destinationName = splitQualified dbName name
@@ -15910,6 +15929,7 @@ let rec executeAs
                               ForeignKeys = []
                               Checks = checks
                               IfNotExists = ifNotExists
+                              RequestedEngine = None
                               Charset = table.TableCharset
                               Collation = table.TableCollation
                               AutoIncrementSeed = None
@@ -15920,59 +15940,62 @@ let rec executeAs
     | CreateTable table ->
         let db, name = splitQualified dbName table.Name
 
-        match tryStoredView store db name with
-        | Some _ when table.IfNotExists ->
-            noteTableExists name
-            ids, Affected 0UL
-        | Some _ -> ids, storageErr (TableExists name)
+        match validateCreateEngine store name table.RequestedEngine with
+        | Some error -> ids, error
         | None ->
-            match
-                rejectDirectOnlyGenerated registry table.Columns,
-                rejectQuantifiedComparisonsInGenerated table.Columns,
-                rejectSessionVariablesInGenerated table.Columns,
-                validateFunctionalDefaults registry table.Columns,
-                validateIndexExpressions registry table.Columns table.Indexes
-            with
-            | Some err, _, _, _, _
-            | _, Some err, _, _, _
-            | _, _, Some err, _, _
-            | _, _, _, Error err, _ -> ids, err
-            | _, _, _, _, Error error -> ids, storageErr error
-            | None, None, None, Ok(), Ok() ->
-                let alreadyExists = scan store db name |> Result.isOk
+            match tryStoredView store db name with
+            | Some _ when table.IfNotExists ->
+                noteTableExists name
+                ids, Affected 0UL
+            | Some _ -> ids, storageErr (TableExists name)
+            | None ->
+                match
+                    rejectDirectOnlyGenerated registry table.Columns,
+                    rejectQuantifiedComparisonsInGenerated table.Columns,
+                    rejectSessionVariablesInGenerated table.Columns,
+                    validateFunctionalDefaults registry table.Columns,
+                    validateIndexExpressions registry table.Columns table.Indexes
+                with
+                | Some err, _, _, _, _
+                | _, Some err, _, _, _
+                | _, _, Some err, _, _
+                | _, _, _, Error err, _ -> ids, err
+                | _, _, _, _, Error error -> ids, storageErr error
+                | None, None, None, Ok(), Ok() ->
+                    let alreadyExists = scan store db name |> Result.isOk
 
-                if alreadyExists && table.IfNotExists then
-                    noteTableExists name
-                    ids, Affected 0UL
-                else
-                    let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
-                    Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
-
-                    let created =
-                        createTableSeeded
-                            snapshot
-                            db
-                            name
-                            table.Columns
-                            table.Indexes
-                            table.ForeignKeys
-                            table.Charset
-                            table.Collation
-                            table.AutoIncrementSeed
-                            table.Comment
-                            table.Partitioning
-                        |> Result.bind (fun () -> storeCheckDefinitions snapshot registry db name table.Columns table.Checks)
-                        |> Result.bind (fun () -> validateCheckForeignKeys snapshot db name table.ForeignKeys)
-
-                    match created with
-                    | Ok() ->
-                        Storage.commitCatalogInto store baseCatalog snapshot
-                        Deprecation.reportNumericDisplays table.Columns
-                        ids, Affected 0UL
-                    | Error(TableExists _) when table.IfNotExists ->
+                    if alreadyExists && table.IfNotExists then
                         noteTableExists name
                         ids, Affected 0UL
-                    | Error e -> ids, storageErr e
+                    else
+                        let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+                        Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
+
+                        let created =
+                            createTableSeeded
+                                snapshot
+                                db
+                                name
+                                table.Columns
+                                table.Indexes
+                                table.ForeignKeys
+                                table.Charset
+                                table.Collation
+                                table.AutoIncrementSeed
+                                table.Comment
+                                table.Partitioning
+                            |> Result.bind (fun () -> storeCheckDefinitions snapshot registry db name table.Columns table.Checks)
+                            |> Result.bind (fun () -> validateCheckForeignKeys snapshot db name table.ForeignKeys)
+
+                        match created with
+                        | Ok() ->
+                            Storage.commitCatalogInto store baseCatalog snapshot
+                            Deprecation.reportNumericDisplays table.Columns
+                            ids, Affected 0UL
+                        | Error(TableExists _) when table.IfNotExists ->
+                            noteTableExists name
+                            ids, Affected 0UL
+                        | Error e -> ids, storageErr e
 
     | DropTable(names, ifExists) ->
         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store

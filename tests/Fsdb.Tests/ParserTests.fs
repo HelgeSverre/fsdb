@@ -23,6 +23,7 @@ let private createTableSpec name columns =
       ForeignKeys = []
       Checks = []
       IfNotExists = false
+      RequestedEngine = None
       Charset = None
       Collation = None
       AutoIncrementSeed = None
@@ -1067,11 +1068,11 @@ let tests =
                 testCase "CREATE TABLE AS SELECT"
                 <| fun _ ->
                     match parseOk "CREATE TABLE IF NOT EXISTS archive AS SELECT id, name FROM source" with
-                    | CreateTableAs("archive", Select { Projections = [ Col "id", None; Col "name", None ] }, true) -> ()
+                    | CreateTableAs("archive", Select { Projections = [ Col "id", None; Col "name", None ] }, true, None) -> ()
                     | other -> failtestf "expected CREATE TABLE AS SELECT, got %A" other
 
                     match parseOk "CREATE TABLE archive ENGINE=MEMORY SELECT name FROM source" with
-                    | CreateTableAs("archive", Select { Projections = [ Col "name", None ] }, false) -> ()
+                    | CreateTableAs("archive", Select { Projections = [ Col "name", None ] }, false, Some "MEMORY") -> ()
                     | other -> failtestf "expected CREATE TABLE AS SELECT with options, got %A" other
 
                 testCase "IF NOT EXISTS"
@@ -1219,6 +1220,7 @@ let tests =
                                     Collation = None
                                     Charset = None
                                     OnUpdateCurrentTimestamp = false } ] with
+                                RequestedEngine = Some "InnoDB"
                                 Charset = Some "utf8mb4"
                                 Collation = Some "utf8mb4_unicode_ci" })
                         "table defaults kept on the table; an INT column inherits nothing"
@@ -1227,10 +1229,11 @@ let tests =
                 <| fun _ ->
                     match
                         parseOk
-                            "CREATE TABLE repeated (id INT) AUTO_INCREMENT=2 AUTO_INCREMENT=7 COMMENT='first' COMMENT='last' DEFAULT CHARSET=latin1 DEFAULT CHARSET=utf8mb4"
+                            "CREATE TABLE repeated (id INT) ENGINE=MEMORY ENGINE=InnoDB AUTO_INCREMENT=2 AUTO_INCREMENT=7 COMMENT='first' COMMENT='last' DEFAULT CHARSET=latin1 DEFAULT CHARSET=utf8mb4"
                     with
                     | CreateTable
-                        { AutoIncrementSeed = Some 7L
+                        { RequestedEngine = Some "InnoDB"
+                          AutoIncrementSeed = Some 7L
                           Comment = Some "last"
                           Charset = Some "utf8mb4" } ->
                         ()
