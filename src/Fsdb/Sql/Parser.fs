@@ -703,13 +703,9 @@ let private introducedStringLit: Parser<Expr, unit> =
 
         let bytes = Text.Encoding.UTF8.GetBytes text
 
-        match charset.ToLowerInvariant() with
-        | "utf8mb4"
-        | "utf8mb3"
-        | "utf8" -> preturn (Lit(VString text))
+        match Charset.canonicalName charset with
         | "binary" -> preturn (Lit(VBytes bytes))
-        | "latin1" -> preturn (Lit(VString(Charset.decodeBytes charset bytes)))
-        | "ascii" -> preturn (Lit(VString(Charset.decodeBytes charset bytes)))
+        | charset when Charset.tryFind charset |> Option.isSome -> preturn (Lit(VString(Charset.decodeBytes charset bytes)))
         | _ -> fail (sprintf "Unknown character set: '%s'" charset)
 
 /// MySQL's quoted hexadecimal binary literal (`X'00ff'`, case-insensitive
@@ -2112,14 +2108,9 @@ let private charsetDeprecations (charset: string) =
 let private knownCharset: Parser<string, unit> =
     identOrString
     >>= fun name ->
-        match name.ToLowerInvariant() with
-        | "utf8mb4"
-        | "utf8mb3"
-        | "utf8"
-        | "latin1"
-        | "ascii"
-        | "binary" as cs -> preturn cs
-        | _ -> fail (sprintf "Unknown character set: '%s'" name)
+        match Charset.tryFind name with
+        | Some _ -> preturn (name.ToLowerInvariant())
+        | None -> fail (sprintf "Unknown character set: '%s'" name)
 
 let private checkEnforcement: Parser<bool, unit> =
     opt ((attempt (keyword "NOT" >>. keyword "ENFORCED") >>% false) <|> (keyword "ENFORCED" >>% true))

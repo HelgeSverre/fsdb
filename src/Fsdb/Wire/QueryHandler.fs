@@ -3466,17 +3466,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Ok(SetDefaultRole _ as statement) -> applyRoleStatement session statement
         | _ -> session, parserError sql "Invalid SET DEFAULT ROLE statement"
     | SetCharacterSet charset ->
-        let charset = charset.ToLowerInvariant()
-
-        let collation =
-            match charset with
-            | "utf8mb4" -> Some "utf8mb4_general_ci"
-            | "utf8"
-            | "utf8mb3" -> Some "utf8mb3_general_ci"
-            | "latin1" -> Some "latin1_swedish_ci"
-            | "ascii" -> Some "ascii_general_ci"
-            | "binary" -> Some "binary"
-            | _ -> None
+        let charset = Charset.canonicalName charset
+        let collation = Charset.defaultCollationName charset
 
         match collation with
         | None -> session, Err(1115, sprintf "Unknown character set: '%s'" charset)

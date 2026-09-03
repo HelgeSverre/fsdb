@@ -102,6 +102,19 @@ let private countTrailingSpaces (s: string) : int =
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
+    let charset =
+        match name.IndexOf '_' with
+        | -1 -> name
+        | index -> name[..index - 1]
+        |> Charset.canonicalName
+    let binaryBytes (s: string) = Charset.encode charset (trim s)
+    let compareBinary (a: string) (b: string) =
+        (binaryBytes a).AsSpan().SequenceCompareTo((binaryBytes b).AsSpan())
+    let binaryPrefix (value: string) (prefix: string) =
+        let value = binaryBytes value
+        let prefix = binaryBytes prefix
+        value.AsSpan().StartsWith(prefix.AsSpan())
+
     let foldText (value: string) =
         if name = "utf8mb4_general_ci" then
             value.Replace("ß", "s").Replace("ẞ", "s")
@@ -118,14 +131,13 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 [ byte (value >>> 16); byte (value >>> 8); byte value ])
             |> Array.ofSeq
         else
-            let charset = name.Split('_').[0]
             Charset.encode charset s
 
     let compareFull (a: string) (b: string) : int =
         if String.Equals(a, b, StringComparison.Ordinal) then
             0
         elif spec.ByteOrder then
-            let c = String.Compare(trim a, trim b, StringComparison.Ordinal)
+            let c = compareBinary a b
             // trimmed-equal under PAD SPACE: the extra-space side sorts
             // first (MySQL-verified), same tie-break as the ICU branch.
             if c <> 0 then c else countTrailingSpaces b - countTrailingSpaces a
@@ -148,7 +160,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         if String.Equals(a, b, StringComparison.Ordinal) then
             0
         elif spec.ByteOrder then
-            String.Compare(trim a, trim b, StringComparison.Ordinal)
+            compareBinary a b
         else
             ci.Compare(primaryText a, primaryText b, spec.Fold)
 
@@ -159,7 +171,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
       KeyOf =
         fun s ->
             if spec.ByteOrder then
-                "B" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(trim s))
+                "B" + Convert.ToHexString(binaryBytes s)
             else
                 Convert.ToHexString(ci.GetSortKey(primaryText s, spec.Fold).KeyData)
       WeightOf =
@@ -171,17 +183,17 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
       HashOf =
         fun s ->
             if spec.ByteOrder then
-                StringComparer.Ordinal.GetHashCode(trim s)
+                hash (binaryBytes s)
             else
                 ci.GetHashCode(primaryText s, spec.Fold)
       CharEquals =
         if spec.ByteOrder then
-            fun a b -> a = b
+            fun a b -> binaryBytes (string a) = binaryBytes (string b)
         else
             fun a b -> ci.Compare(primaryText (string a), primaryText (string b), spec.Fold) = 0
       IsPrefix =
         if spec.ByteOrder then
-            fun value prefix -> value.StartsWith(prefix, StringComparison.Ordinal)
+            binaryPrefix
         else
             fun value prefix -> ci.IsPrefix(foldText value, foldText prefix, spec.Fold)
       PadSpace = spec.PadSpace }
@@ -233,6 +245,34 @@ let private language =
 
 let private register (name: string) (spec: Spec) (map: Map<string, Collation>) : Map<string, Collation> =
     Map.add name (makeCollation name spec) map
+
+let private additionalCharsetCollations =
+    [ "big5_chinese_ci", 1, 1, "big5_bin", 84, Some "zh-Hant-TW"
+      "cp1250_general_ci", 26, 1, "cp1250_bin", 66, None
+      "cp1251_general_ci", 51, 1, "cp1251_bin", 50, Some "ru-RU"
+      "cp1256_general_ci", 57, 1, "cp1256_bin", 67, Some "ar-SA"
+      "cp1257_general_ci", 59, 1, "cp1257_bin", 58, None
+      "cp850_general_ci", 4, 1, "cp850_bin", 80, None
+      "cp852_general_ci", 40, 1, "cp852_bin", 81, None
+      "cp866_general_ci", 36, 1, "cp866_bin", 68, Some "ru-RU"
+      "cp932_japanese_ci", 95, 1, "cp932_bin", 96, Some "ja-JP"
+      "euckr_korean_ci", 19, 1, "euckr_bin", 85, Some "ko-KR"
+      "gb18030_chinese_ci", 248, 2, "gb18030_bin", 249, Some "zh-Hans-CN"
+      "gbk_chinese_ci", 28, 1, "gbk_bin", 87, Some "zh-Hans-CN"
+      "greek_general_ci", 25, 1, "greek_bin", 70, Some "el-GR"
+      "hebrew_general_ci", 16, 1, "hebrew_bin", 71, Some "he-IL"
+      "koi8r_general_ci", 7, 1, "koi8r_bin", 74, Some "ru-RU"
+      "koi8u_general_ci", 22, 1, "koi8u_bin", 75, Some "uk-UA"
+      "latin2_general_ci", 9, 1, "latin2_bin", 77, None
+      "latin5_turkish_ci", 30, 1, "latin5_bin", 78, Some "tr-TR"
+      "latin7_general_ci", 41, 1, "latin7_bin", 79, None
+      "macce_general_ci", 38, 1, "macce_bin", 43, None
+      "macroman_general_ci", 39, 1, "macroman_bin", 53, None
+      "ucs2_general_ci", 35, 1, "ucs2_bin", 90, None
+      "ujis_japanese_ci", 12, 1, "ujis_bin", 91, Some "ja-JP"
+      "utf16_general_ci", 54, 1, "utf16_bin", 55, None
+      "utf16le_general_ci", 56, 1, "utf16le_bin", 62, None
+      "utf32_general_ci", 60, 1, "utf32_bin", 61, None ]
 
 let registry : Map<string, Collation> =
     Map.empty
@@ -301,6 +341,12 @@ let registry : Map<string, Collation> =
     |> register "ascii_general_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "ascii_bin" { Locale = None; Fold = asCs; PadSpace = pad; ByteOrder = true }
     |> register "binary" { Locale = None; Fold = asCs; PadSpace = noPad; ByteOrder = true }
+    |> fun map ->
+        additionalCharsetCollations
+        |> List.fold (fun map (defaultName, _, _, binaryName, _, locale) ->
+            map
+            |> register defaultName { Locale = locale; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+            |> register binaryName { Locale = locale; Fold = asCs; PadSpace = pad; ByteOrder = true }) map
 
 /// MySQL 8.4's `information_schema.collations` `ID` and `SORTLEN` for every
 /// registered collation — harvested from a real 8.4.11 server
@@ -409,6 +455,12 @@ let idAndSortlen : Map<string, int * int> =
           "ascii_general_ci", (11, 1)
           "ascii_bin", (65, 1)
           "binary", (63, 1) ]
+    |> fun map ->
+        additionalCharsetCollations
+        |> List.fold (fun map (defaultName, defaultId, defaultSortlen, binaryName, binaryId, _) ->
+            map
+            |> Map.add defaultName (defaultId, defaultSortlen)
+            |> Map.add binaryName (binaryId, 1)) map
 
 /// Looks a collation up by its MySQL name — `COLLATE x` resolution and
 /// column definitions both route through here. `utf8_*` resolves as MySQL's

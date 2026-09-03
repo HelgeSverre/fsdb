@@ -829,6 +829,38 @@ let tests =
                     | Err(1366, _) -> ()
                     | other -> failtestf "expected 1366 for an unencodable latin1 value, got %A" other
 
+                testCase "expanded character sets preserve text and binary ordering"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE encoded (c VARCHAR(20) CHARACTER SET cp1251 COLLATE cp1251_bin, g VARCHAR(20) CHARACTER SET gb18030, u VARCHAR(20) CHARACTER SET utf16)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO encoded VALUES ('Ё', '中文', '😀'), ('€', '汉字', '𐐷')" |> ignore
+
+                    match runDefault store "SELECT c FROM encoded ORDER BY c" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "€" ]; [ Some "Ё" ] ] "cp1251_bin follows encoded bytes"
+                    | other -> failtestf "expected cp1251 ordering, got %A" other
+
+                    match runDefault store "SELECT g,u FROM encoded ORDER BY c" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "汉字"; Some "𐐷" ]; [ Some "中文"; Some "😀" ] ] "multibyte text round-trips"
+                    | other -> failtestf "expected multibyte rows, got %A" other
+
+                    match runDefault store "SELECT HEX(WEIGHT_STRING(c AS BINARY(6))) FROM encoded WHERE c = 'Ё'" with
+                    | ResultSet(_, [ [ Some "A80000000000" ] ]) -> ()
+                    | other -> failtestf "expected cp1251 bytes in WEIGHT_STRING, got %A" other
+
+                    match runDefault store "SELECT CONVERT('Привет' USING cp1251), _cp1251'Привет', CHARSET(CONVERT('x' USING cp1251)), COLLATION(CONVERT('x' USING cp1251))" with
+                    | ResultSet(_, [ [ Some "Привет"; Some "РџСЂРёРІРµС‚"; Some "cp1251"; Some "cp1251_general_ci" ] ]) -> ()
+                    | other -> failtestf "expected cp1251 conversion metadata and introducer decoding, got %A" other
+
+                    match runDefault store "INSERT INTO encoded VALUES ('😀', 'x', 'x')" with
+                    | Err(1366, _) -> ()
+                    | other -> failtestf "expected cp1251 to reject an unencodable scalar, got %A" other
+
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->
                     let store = newStore ()

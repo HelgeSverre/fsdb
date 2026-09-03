@@ -575,6 +575,32 @@ let tests =
                     Expect.equal (compare (VString "a") (VString "a ")) -1 "'a' < 'a '"
                     Expect.equal (compare (VString "a ") (VString "a")) 1 "'a ' > 'a'"
 
+                testTheory
+                    "character set codecs match MySQL byte encodings"
+                    [ "cp1250", "Zażółć", "5A61BFF3B3E6"
+                      "cp1251", "Привет", "CFF0E8E2E5F2"
+                      "cp932", "日本", "93FA967B"
+                      "euckr", "한글", "C7D1B1DB"
+                      "gb18030", "中文", "D6D0CEC4"
+                      "big5", "中文", "A4A4A4E5"
+                      "greek", "Ελλάδα", "C5EBEBDCE4E1"
+                      "hebrew", "שלום", "F9ECE5ED"
+                      "koi8r", "Привет", "F0D2C9D7C5D4"
+                      "latin2", "Zażółć", "5A61BFF3B3E6"
+                      "ujis", "日本", "C6FCCBDC"
+                      "utf16", "😀", "D83DDE00"
+                      "utf16le", "😀", "3DD800DE"
+                      "utf32", "😀", "0001F600" ]
+                    <| fun (charset, value, expected) ->
+                        Expect.equal (Fsdb.Charset.encode charset value |> Convert.ToHexString) expected charset
+
+                testCase "character set descriptors govern transcoding and LOAD DATA eligibility"
+                <| fun _ ->
+                    Expect.equal (Fsdb.Charset.transcodeText "cp1251" "Привет😀") "Привет?" "unencodable scalars are replaced once"
+                    Expect.equal (Fsdb.Charset.transcodeText "ucs2" "a😀b") "a?b" "UCS-2 rejects supplementary scalars"
+                    Expect.equal (Fsdb.Charset.decodeLoadData "cp1251" [| 0xCFuy; 0xF0uy; 0xE8uy; 0xE2uy; 0xE5uy; 0xF2uy |]) (Ok "Привет") "legacy file bytes decode strictly"
+                    Expect.isFalse (Fsdb.Charset.supportsLoadData "utf16") "MySQL forbids UTF-16 LOAD DATA input"
+
                 // Every expectation below was verified against a live MySQL
                 // 8.4 (utf8mb4_0900_ai_ci, the server default) — equality is
                 // primary-weight based (accents and case fold; digraphs

@@ -2092,25 +2092,15 @@ let private weightStringFn: Scalar =
     | [ value ] -> weightString Collation.defaultCollation value
     | _ -> VNull
 
-/// `CONVERT(expr USING charset)` — MySQL's transcode form, desugared by the
-/// parser into this scalar (second argument = the charset name). Same
-/// write-time semantics as column charsets: latin1 is cp1252 (so `€`
-/// survives, unencodables map to '?'), ascii keeps 7-bit and maps the rest
-/// to '?', binary returns raw UTF-8 bytes; the common utf8mb4 aliases pass
-/// text through unchanged.
 let private convertFn: Scalar =
     function
     | [ VNull; _ ] -> VNull
     | [ v; VString charset ] ->
         let text = v |> toText |> Option.defaultValue ""
 
-        match charset.ToLowerInvariant() with
-        | "utf8mb4" -> VString text
-        | "utf8"
-        | "utf8mb3"
-        | "latin1"
-        | "ascii" -> VString(Charset.transcodeText charset text)
+        match Charset.canonicalName charset with
         | "binary" -> VBytes(Text.Encoding.UTF8.GetBytes text)
+        | charset when Charset.tryFind charset |> Option.isSome -> VString(Charset.transcodeText charset text)
         | _ -> VNull
     | _ -> VNull
 

@@ -424,6 +424,24 @@ let tests =
                   Expect.equal rows [ [ Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "4" ] ] "utf8mb4 with its MySQL 8.4 default"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "CHARACTER_SETS exposes expanded codec families"
+          <| fun _ ->
+              let store = setup ()
+
+              match
+                  run
+                      store
+                      "SELECT character_set_name,default_collate_name,maxlen FROM information_schema.character_sets WHERE character_set_name IN ('cp1251','gb18030','utf16') ORDER BY character_set_name"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "cp1251"; Some "cp1251_general_ci"; Some "1" ]
+                        [ Some "gb18030"; Some "gb18030_chinese_ci"; Some "4" ]
+                        [ Some "utf16"; Some "utf16_general_ci"; Some "4" ] ]
+                      "the codec catalog drives Information Schema"
+              | other -> failtestf "expected expanded character sets, got %A" other
+
               match
                   run
                       store

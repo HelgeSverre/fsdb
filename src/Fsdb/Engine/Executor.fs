@@ -3124,8 +3124,7 @@ let private coercibilityOfExpr ctx expr =
 let private normalizeCompoundString descriptor value =
     match descriptor.Charset, value with
     | "binary", _ -> value
-    | ("latin1" | "ascii"), VBytes bytes -> VString(Charset.decodeBytes descriptor.Charset bytes)
-    | _, VBytes bytes -> VString(System.Text.Encoding.UTF8.GetString bytes)
+    | charset, VBytes bytes -> VString(Charset.decodeBytes charset bytes)
     | _ -> value
 
 /// The collation an equality-classified key resolves under: an explicit
