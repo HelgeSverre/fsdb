@@ -86,7 +86,7 @@ type private Spec =
       /// and in sorting a trailing space sorts *before* end-of-string
       /// (MySQL-verified: ['a '] < ['a'] < ['ab']). NO PAD: significant.
       PadSpace: bool
-      /// `_bin`: compare by UTF-8 code-unit bytes, not ICU weights.
+      /// `_bin`: compare by charset-encoded bytes, not ICU weights.
       ByteOrder: bool }
 
 let private countTrailingSpaces (s: string) : int =

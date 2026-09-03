@@ -246,14 +246,14 @@ joins expressed with `USING` or `NATURAL JOIN`.
 
 ### Collations & charsets
 
-MySQL 8.4's utf8mb4 collations are registered alongside the legacy
-`utf8mb3`/`latin1`/`ascii`/`binary` families (`utf8_*` is accepted as
-MySQL's deprecated alias). Each carries a locale, fold level, and pad
-attribute, with ICU sort keys doing the work. Honored per-column and per
-`SET collation_connection` in grouping, dedup, joins, and unique keys.
-Charsets `utf8mb4`/`utf8mb3`/`latin1` (cp1252)/`ascii`/`binary` follow
-MySQL's write-time semantics, with `CONVERT(x USING …)` and `_charset'…'`
-introducers.
+MySQL 8.4's utf8mb4 collations are registered alongside common Unicode,
+Windows, DOS, CJK, ISO Latin, KOI8, and Mac character sets (`utf8_*` is
+accepted as MySQL's deprecated alias). Each collation carries a locale,
+fold level, and pad attribute, with ICU sort keys doing the work. Honored
+per-column and per `SET collation_connection` in grouping, dedup, joins,
+and unique keys. DDL, write coercion, `CONVERT(x USING …)`, charset
+introducers, `LOAD DATA`, and the byte length, hex, hashing, base64,
+checksum, and compression functions share the same codec registry.
 
 ### Prepared statements
 

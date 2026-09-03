@@ -206,8 +206,11 @@ maintained for constraints while staying out of ordinary plans.
 
 Working: ICU-backed registry covering the utf8mb4 0900 attribute matrix,
 legacy unicode/general and language-tailored collations, ja_0900_as_cs_ks,
-utf8mb3/latin1(cp1252)/ascii/binary; real MySQL collation ids and SORTLENs
-for SHOW COLLATION/I_S; PAD SPACE semantics; connection collation for
+and common Unicode, Windows, DOS, CJK, ISO Latin, KOI8, and Mac codecs; real
+MySQL collation ids and SORTLENs for SHOW COLLATION/I_S; charset-aware DDL,
+write coercion, introducers, LOAD DATA, CONVERT, binary collation keys, and
+byte length/hex/hash/base64/checksum/compression functions; PAD SPACE
+semantics; connection collation for
 literal-vs-literal comparison; symmetric MySQL coercibility precedence for
 scalar, row, `IN`, subquery, quantified, `CASE`, `BETWEEN`, `LIKE`, and join
 comparisons; default utf8mb4_0900_ai_ci.
@@ -219,7 +222,7 @@ and JSON results without a second builtin-name list.
 |---|---|---|---|---|
 | Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | `Collation` uses ICU CLDR tailoring; tie-break order among primary-equal strings and `WEIGHT_STRING()` textual bytes can differ (equality never does) | low | divergence |
 | Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with common POSIX character classes and mapped malformed patterns; remaining ICU-only grammar and error-code distinctions can differ | low | divergence |
-| Usable charsets | MySQL's charset catalog with transcoding | `Collation.Charset` supports utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) has the same ceiling | low | refusal |
+| Remaining charset catalog | every bundled charset and collation | armscii8, dec8, eucjpms, gb2312, geostd8, hp8, keybcs2, sjis, swe7, and tis620 remain refused; expanded families register their default and binary collations rather than every legacy language collation | low | refusal |
 
 ## 7. Transactions and concurrency
 
