@@ -175,6 +175,36 @@ type private MutationSource =
       PhysicalTable: TableRef option
       Columns: ColumnDef list }
 
+type private MutationTargetGroups =
+    { Tables: TableRef array
+      RepresentativeSources: int array
+      SourceGroups: Map<int, int> }
+
+let private physicalTableKey defaultDatabase (tableRef: TableRef) =
+    tableRef.Database |> Option.defaultValue defaultDatabase, normalizeTableName tableRef.Table
+
+let private groupMutationTargets defaultDatabase (targets: (int * TableRef) list) =
+    let key = physicalTableKey defaultDatabase
+    let representatives = targets |> List.distinctBy (snd >> key) |> Array.ofList
+
+    let groupByTable =
+        representatives
+        |> Array.mapi (fun group (_, tableRef) -> key tableRef, group)
+        |> Map.ofArray
+
+    { Tables = representatives |> Array.map snd
+      RepresentativeSources = representatives |> Array.map fst
+      SourceGroups =
+        targets
+        |> List.map (fun (source, tableRef) -> source, Map.find (key tableRef) groupByTable)
+        |> Map.ofList }
+
+let private columnOffsets (sources: MutationSource list) =
+    sources
+    |> List.mapFold (fun offset source -> offset, offset + source.Columns.Length) 0
+    |> fst
+    |> Array.ofList
+
 type private MutationSourceOverride =
     { Columns: ColumnDef list
       Rows: Value[] list
@@ -1874,12 +1904,8 @@ let private fspOfType (ty: ColumnType) : int option =
     | TDecimal(_, scale, _) -> Some scale
     | _ -> None
 
-/// The fsp an output *expression* renders at, so an explicit precision request
-/// shows exactly its digits (an exact-second `.000000` and all): `CAST(x AS
-/// DATETIME(6))` takes the cast's declared fsp, and `MAX`/`MIN` of a temporal
-/// column inherit that column's fsp (they return one of the stored, already
-/// rounded-to-fsp values unchanged). A plain column resolves through its
-/// `ColumnDef`; everything else is `None` and falls back to `Value.toText`.
+/// Output precision follows explicit requests and stored column definitions,
+/// including zero-valued fractional digits.
 let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
     let fspOfValue value =
         match Value.toText value with
@@ -1921,8 +1947,6 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         | [ Lit value ] -> Some(Value.toDouble value |> int |> max 0 |> min 6)
         | _ -> Some 0
     | FuncCall(name, args) when (let n = name.ToUpperInvariant() in n = "NOW" || n = "CURRENT_TIMESTAMP") ->
-        // `NOW(N)` renders exactly N digits (matching the precision `nowFn`
-        // rounds the clock to); bare `NOW()` renders none (precision 0).
         match args with
         | [ Lit v ] -> Some(Value.toDouble v |> int |> max 0 |> min 6)
         | _ -> Some 0
@@ -3248,13 +3272,8 @@ let private keyClassOf (leftType: ColumnType) (rightType: ColumnType) : bool opt
     elif isJoinTextType leftType && isJoinTextType rightType then Some false
     else None
 
-/// Runtime twin of `keyClassOf`: every value actually occupying a hash key
-/// column must be `NULL` or the shape its declared class promises. Guards
-/// the gap a *declared* type alone can't close — a derived table's every
-/// column reports the synthetic `TText` (`deriveColumns`) no matter what
-/// `Value` shape its rows really carry — so a mismatch here falls the whole
-/// join back to the nested loop instead of building a bucket that silently
-/// drops rows it can't classify.
+/// Derived columns can carry runtime values outside their synthetic metadata;
+/// unsafe hash-key domains fall back to the nested loop.
 let private valueMatchesKeyClass (isNumeric: bool) (v: Value) : bool =
     match v with
     | VNull -> true
@@ -3269,11 +3288,7 @@ let private rowsMatchKeyClasses (classes: bool list) (keyIndices: int list) (row
     rows
     |> Seq.forall (fun row -> List.forall2 (fun idx cls -> valueMatchesKeyClass cls row.[idx]) keyIndices classes)
 
-/// One equi-join key (however many `AND`-ed `=` conjuncts contributed a
-/// pair) read off one side's row, `None` if any column is `NULL` — SQL's
-/// `NULL = anything` is never true, so a `NULL`-keyed row can never join
-/// and is simply never added to (or looked up in) the hash bucket, the same
-/// way it would silently fail every `Eq` check in the nested loop.
+/// NULL equi-join components exclude the row from hash buckets.
 let private equiKeyBy (keyIndices: int[]) (valueAt: int -> Value) : Value[] option =
     let key = keyIndices |> Array.map valueAt
     if key |> Array.contains VNull then None else Some key
@@ -3333,26 +3348,9 @@ type private SqlValueKeyComparer(collations: Collation.Collation list, coerceNum
             | [| v |] -> (bucketOf 0 v).GetHashCode()
             | _ -> a |> Array.mapi (fun i v -> (bucketOf i v).GetHashCode()) |> Array.fold (fun h x -> h * 31 + x) 17
 
-/// Like `Storage.traverse`, but over a lazy `seq` rather than a strict
-/// `list` — short-circuits on the first `Error` without ever visiting (or
-/// allocating a combined row for) later elements — and match-only: `f`
-/// returns `None` for an element that doesn't belong in the result (the
-/// non-equi `JOIN` fallback's `ON` came back false), and only `Some` is
-/// added to the accumulator. That's the difference between "streams pairs
-/// instead of materializing" actually being true and merely not true: the
-/// non-equi fallback below hands this one `(left row, right row)` tuple per
-/// candidate pair, and without the `option` filter here, every one of those
-/// tuples (and its `Array.append`-combined row) still piled up in `acc`
-/// before the caller's own `List.filter (fun (..., ok) -> ok)` threw most of
-/// them away — an `a * b * bool` triple, not the pair itself, is small, but
-/// at cross-product scale (a 10k x 50k `ON a.x + 1 = b.y` is 500M candidate
-/// pairs) "small per element" was still O(left x right) overall. Filtering
-/// inside the fold makes memory O(output) instead.
-///
-/// The non-equi `JOIN` fallback (`applyJoin`'s/`applyMutationJoin`'s "not
-/// hashEligible" branch) is also the one caller with no build-side key to
-/// hash on, so it's the case most likely to run long enough for
-/// `queryCancellation` to matter (see that doc).
+/// Traverses lazily and retains only accepted values, so rejected join
+/// candidates do not consume result memory. Stops at the first error, limit,
+/// or cancellation.
 let private traverseSeqWithLimit (limit: (int * 'e) option) (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
     let token = queryCancellation.Value
     let acc = ResizeArray()
@@ -3385,21 +3383,8 @@ let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'
 
 let private maxJoinCandidateRows = 1_000_000
 
-/// Bounded top-`capacity` selection for `ORDER BY ... LIMIT n [OFFSET m]`
-/// (`capacity` = `n + m`, already clamped to a sane `int` by the caller):
-/// evaluates each item through `f` and keeps only the `capacity` best in a
-/// sorted `ResizeArray`, binary-search-inserting and dropping whichever
-/// item currently sorts last the moment a new one beats it. `f`'s output is
-/// never accumulated anywhere but this buffer, so peak memory is
-/// O(capacity), not O(matched rows) — the buffer also starts empty and
-/// grows with `Add`/`Insert` rather than preallocating `capacity` slots up
-/// front, so a client-supplied `LIMIT` can't size an allocation before a
-/// single row has been read. O(rows * log capacity) comparisons instead of
-/// a full O(rows * log rows) sort holding every matched row. Still visits
-/// every item in `items` (an `ORDER BY` that needs a real sort sees the
-/// whole scan in real MySQL too — confirmed against the oracle: a poison
-/// row past a `LIMIT`'s cut still raises once `ORDER BY` forces a
-/// filesort), so this bounds what gets *kept*, not what gets *evaluated*.
+/// Keeps memory proportional to `capacity` without preallocating from a
+/// client-supplied LIMIT. Filesort semantics still evaluate every row.
 let private boundedTopN (capacity: int) (cmp: 'b -> 'b -> int) (f: 'a -> Result<'b option, 'e>) (items: 'a seq) : Result<'b list, 'e> =
     if capacity <= 0 then
         Ok []
@@ -7163,15 +7148,8 @@ and private applyResolvedJoin
                     |> Result.mapError Err
                     |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
 
-/// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
-/// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,
-/// each combined row also keeps every source's own physical `Value[]`
-/// (`None` on an outer-join side that matched nothing — there's no real row
-/// there to update/delete). A separate, smaller near-duplicate of
-/// `applyJoin`'s equi-key hash-join/lazy-nested-loop split (see its doc)
-/// rather than threading identity through the shared `SELECT` path. A
-/// derived source contributes columns and values but no physical row
-/// identity, so it can filter target rows without becoming writable.
+/// Multi-table mutations retain each source row beside the flattened row.
+/// Derived sources can filter targets but have no writable identity.
 and private applyMutationJoin
     (store: Store)
     (registry: Registry)
@@ -17503,15 +17481,13 @@ let rec executeAs
                 let checkAssignments row =
                     indexedAssignments |> traverse (fun (_, expr) -> evalExpr (ctxFor row) expr)
 
-                // Type-check WHERE/SET against a synthetic all-NULL row
-                // first — same reasoning as `runSelect`'s `probeRow`: an
-                // unknown column/function is a schema error, not a data
-                // one, and shouldn't depend on whether any row happens to
-                // match (or exist at all).
+                // Schema errors do not depend on whether a data row exists.
+                let metadataRow = probeRow columns
+
                 match
                     withMetadataProbe (fun () ->
-                        whereMatches ctxFor probePredicate (probeRow columns)
-                        |> Result.bind (fun _ -> checkAssignments (probeRow columns)))
+                        whereMatches ctxFor probePredicate metadataRow
+                        |> Result.bind (fun _ -> checkAssignments metadataRow))
                 with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
@@ -17573,15 +17549,7 @@ let rec executeAs
                         | Error e -> ids, storageErr e
 
     | Update updateStmt ->
-        // Multi-table `UPDATE t1 JOIN t2 ON ... SET ...` — resolves the
-        // whole join, then for each matched combined row, assigns to
-        // whichever source table each `SET` target names, claiming a
-        // physical row (by reference) the first time a matched row touches
-        // it so a row reached through more than one join match is still
-        // updated at most once (see `Ast.UpdateStmt`'s doc). Runs the writes
-        // against a private snapshot store, merged back via
-        // `Storage.commitCatalogInto` (see its doc), so disjoint row changes
-        // can combine while overlapping changes fail with a retryable conflict.
+        // Physical rows are claimed once even when multiple join rows reach them.
         (
             let matchNodes =
                 (updateStmt.Assignments |> List.collect (_.Value >> collectMatchAgainst))
@@ -17608,12 +17576,7 @@ let rec executeAs
                 let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
                 let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
 
-                // Byte offset of each source's columns within the flat
-                // combined row `ctxFor` expects — lets the left-to-right
-                // fold below patch an assignment's new value straight into
-                // a working copy of that row for the next assignment to see.
-                let sourceOffsets =
-                    combinedColumns |> List.fold (fun (offset, acc) (_, cols) -> offset + List.length cols, acc @ [ offset ]) (0, []) |> snd |> Array.ofList
+                let sourceOffsets = columnOffsets sources
 
                 let resolveAssignment (a: Assignment) : Result<(int * int * Expr), EvalError> =
                     match a.Table with
@@ -17651,34 +17614,18 @@ let rec executeAs
                 | Ok resolvedAssignments ->
                     let check = whereMatches ctxFor updateStmt.Where
 
-                    // Two aliases resolving to the same physical table (a
-                    // self-join) must share one claim/pending bucket, keyed
-                    // by the physical table rather than by source index —
-                    // otherwise the same row reached through both aliases
-                    // gets written by two separate `Storage.updateRows`
-                    // passes below, and the first pass's row-array
-                    // replacement (`updateRows` returns *new* `Value[]`s for
-                    // every row it changes) breaks the second pass's
-                    // by-reference match, silently dropping its write.
-                    let physicalKey (tableRef: TableRef) : string * string =
-                        (tableRef.Database |> Option.defaultValue dbName), Storage.normalizeTableName tableRef.Table
-
-                    let physicalGroups =
+                    // Self-join aliases share one pending batch per physical table.
+                    let grouped =
                         sources
-                        |> List.choose _.PhysicalTable
-                        |> List.distinctBy physicalKey
-                        |> Array.ofList
+                        |> List.indexed
+                        |> List.choose (fun (index, source) -> source.PhysicalTable |> Option.map (fun tableRef -> index, tableRef))
+                        |> groupMutationTargets dbName
 
-                    let sourcePhys =
-                        sources
-                        |> List.map (fun source -> source.PhysicalTable |> Option.map (fun tableRef -> physicalGroups |> Array.findIndex (fun t -> physicalKey t = physicalKey tableRef)))
-                        |> Array.ofList
+                    let sourceGroups =
+                        sources |> List.mapi (fun index _ -> Map.tryFind index grouped.SourceGroups) |> Array.ofList
 
-                    // Aliases claim rows independently, while pending changes
-                    // share one batch per physical table. This preserves
-                    // self-join roles without publishing competing row arrays.
-                    let claims = sources |> List.map (fun _ -> System.Collections.Generic.HashSet<Value[]>(HashIdentity.Reference)) |> Array.ofList
-                    let pending = physicalGroups |> Array.map (fun _ -> System.Collections.Generic.Dictionary<Value[], (int * Value) list>(HashIdentity.Reference))
+                    let claims = sources |> List.map (fun _ -> HashSet<Value[]>(HashIdentity.Reference)) |> Array.ofList
+                    let pending = grouped.Tables |> Array.map (fun _ -> Dictionary<Value[], ResizeArray<int * Value>>(HashIdentity.Reference))
 
                     let processRow ((identities, flat): Value[] option list * Value[]) : Result<unit, EvalError> =
                         check flat
@@ -17686,15 +17633,9 @@ let rec executeAs
                             if not isMatch then
                                 Ok()
                             else
-                                // Left-to-right: each assignment's RHS is
-                                // evaluated against `working`, patched with
-                                // every earlier assignment in this same
-                                // statement — matching MySQL's documented
-                                // `SET a = x, b = a` evaluation order, now
-                                // across tables too.
+                                // Later assignments observe earlier assignments in the statement.
                                 let working = Array.copy flat
 
-                                // One claim covers every assignment to the alias.
                                 let claimedThisRow =
                                     identities
                                     |> List.mapi (fun srcIdx identity ->
@@ -17719,10 +17660,17 @@ let rec executeAs
                                             match List.item srcIdx identities with
                                             | None -> ()
                                             | Some physRow ->
-                                                match sourcePhys.[srcIdx] with
+                                                match sourceGroups.[srcIdx] with
                                                 | Some physIdx when claimedThisRow.[srcIdx] ->
-                                                    let existing = match pending.[physIdx].TryGetValue physRow with true, vs -> vs | false, _ -> []
-                                                    pending.[physIdx].[physRow] <- existing @ [ colIdx, v ]
+                                                    let assignments =
+                                                        match pending.[physIdx].TryGetValue physRow with
+                                                        | true, values -> values
+                                                        | false, _ ->
+                                                            let values = ResizeArray()
+                                                            pending.[physIdx].[physRow] <- values
+                                                            values
+
+                                                    assignments.Add(colIdx, v)
                                                 | _ -> ()
 
                                             go rest)
@@ -17737,24 +17685,20 @@ let rec executeAs
                         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
                         let physicalColumns =
-                            physicalGroups
-                            |> Array.mapi (fun i _ ->
-                                sources
-                                |> List.find (fun source -> source.PhysicalTable |> Option.exists (fun tableRef -> physicalKey tableRef = physicalKey physicalGroups.[i]))
-                                |> _.Columns)
+                            grouped.RepresentativeSources |> Array.map (fun source -> sources.[source].Columns)
 
-                        let assignedIdxsByPhys =
-                            physicalGroups
+                        let assignedIndicesByGroup =
+                            grouped.Tables
                             |> Array.mapi (fun i _ ->
                                 resolvedAssignments
-                                |> List.choose (fun (srcIdx, colIdx, _) -> if sourcePhys.[srcIdx] = Some i then Some colIdx else None)
+                                |> List.choose (fun (srcIdx, colIdx, _) -> if sourceGroups.[srcIdx] = Some i then Some colIdx else None)
                                 |> Set.ofList)
 
-                        let invocationTables = physicalGroups |> Array.map physicalKey |> Set.ofArray
+                        let invocationTables = grouped.Tables |> Array.map (physicalTableKey dbName) |> Set.ofArray
 
                         let apply =
                             withTriggerInvocationTables invocationTables (fun () ->
-                                physicalGroups
+                                grouped.Tables
                                 |> Array.mapi (fun i tableRef ->
                                     if pending.[i].Count = 0 then
                                         Ok 0
@@ -17778,7 +17722,7 @@ let rec executeAs
                                                         applyOnUpdateTimestamps
                                                             (temporalCoercionMode snapshot)
                                                             physicalColumns.[i]
-                                                            assignedIdxsByPhys.[i]
+                                                            assignedIndicesByGroup.[i]
                                                             row
                                                             newRow
                                                     )
@@ -17983,23 +17927,14 @@ let rec executeAs
                 let check = whereMatches ctxFor deleteStmt.Where
                 let targetIndices = List.distinct targetIndices
 
-                let physicalKey (tableRef: TableRef) =
-                    tableRef.Database |> Option.defaultValue dbName, normalizeTableName tableRef.Table
-
                 let targetTables =
                     targetIndices
                     |> List.choose (fun index -> sources.[index].PhysicalTable |> Option.map (fun tableRef -> index, tableRef))
 
-                let physicalGroups = targetTables |> List.map snd |> List.distinctBy physicalKey |> Array.ofList
+                let grouped = groupMutationTargets dbName targetTables
 
-                let physicalIndex =
-                    targetTables
-                    |> List.map (fun (sourceIndex, tableRef) ->
-                        sourceIndex, physicalGroups |> Array.findIndex (fun candidate -> physicalKey candidate = physicalKey tableRef))
-                    |> Map.ofList
-
-                let claimed = physicalGroups |> Array.map (fun _ -> HashSet<Value[]>(HashIdentity.Reference))
-                let claimedRows = physicalGroups |> Array.map (fun _ -> ResizeArray<Value[]>())
+                let claimed = grouped.Tables |> Array.map (fun _ -> HashSet<Value[]>(HashIdentity.Reference))
+                let claimedRows = grouped.Tables |> Array.map (fun _ -> ResizeArray<Value[]>())
 
                 let processRow ((identities, flat): Value[] option list * Value[]) : Result<unit, EvalError> =
                     check flat
@@ -18008,7 +17943,7 @@ let rec executeAs
                             for i in targetIndices do
                                 match List.item i identities with
                                 | Some physRow ->
-                                    let group = physicalIndex.[i]
+                                    let group = grouped.SourceGroups.[i]
 
                                     if claimed.[group].Add physRow then
                                         claimedRows.[group].Add physRow
@@ -18021,12 +17956,12 @@ let rec executeAs
                     let invocationTables =
                         sources
                         |> List.choose _.PhysicalTable
-                        |> List.map physicalKey
+                        |> List.map (physicalTableKey dbName)
                         |> Set.ofList
 
                     let apply =
                         withTriggerInvocationTables invocationTables (fun () ->
-                            physicalGroups
+                            grouped.Tables
                             |> Array.mapi (fun index tableRef ->
                                 if claimedRows.[index].Count = 0 then
                                     Ok 0

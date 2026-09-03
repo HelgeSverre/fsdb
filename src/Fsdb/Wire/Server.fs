@@ -140,9 +140,7 @@ type private Command =
     | ChangeUser of ChangeUserRequest
     | FieldList of table: string
     | StmtPrepare of sql: string
-    /// Payload with the COM_STMT_EXECUTE command byte already stripped —
-    /// decoding needs a `Reader` positioned right after it, easier built at
-    /// the call site than threaded through this DU field by field.
+    /// COM_STMT_EXECUTE payload after the command byte.
     | StmtExecute of payload: byte[]
     | StmtFetch of stmtId: int * rowCount: uint32
     | StmtSendLongData of payload: byte[]
@@ -151,11 +149,8 @@ type private Command =
     | SetOption of option: int
     | ResetConnection
     | Unsupported of code: byte
-    /// A command byte this server recognizes, but whose payload was too
-    /// short/malformed to decode (e.g. a truncated COM_STMT_CLOSE with no
-    /// 4-byte statement id). Answered with an ERR rather than let the
-    /// `Reader`/`Encoding` exception escape the command loop and drop the
-    /// connection.
+    /// A recognized command whose malformed payload must return ERR without
+    /// terminating the connection.
     | Malformed of code: byte
 
 type private CursorRequest =
@@ -170,10 +165,8 @@ let private cursorRequest = function
 
 let private stmtExecuteHeaderLength = 9
 let private stmtLongDataHeaderLength = 6
-/// None means a completely empty command packet — treat as disconnect (real
-/// clients never send one). A non-empty payload always decodes to `Some`,
-/// falling back to `Malformed` if the command byte's own payload is too
-/// short to parse — see that case's doc.
+/// Empty command packets signal disconnect; malformed non-empty packets
+/// remain protocol errors on the live connection.
 let private parseCommand (capabilities: uint32) (payload: byte[]) : Command option =
     if payload.Length = 0 then
         None

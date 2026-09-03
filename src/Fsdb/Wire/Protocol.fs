@@ -223,13 +223,15 @@ let private boundedLen (len: uint64) : int =
 
 exception SslRequestException
 
+let private sslRequestPayloadLength = 32
+
 /// The fixed-size SSLRequest packet sent before the encrypted handshake response.
 type SslRequest =
     { Capabilities: uint32 }
 
 /// Recognizes SSLRequest without attempting to parse it as a login response.
 let tryParseSslRequest (payload: byte[]) : SslRequest option =
-    if payload.Length = 32 then
+    if payload.Length = sslRequestPayloadLength then
         let capabilities = uint32 (Reader(payload).ReadInt32LE())
 
         if capabilities &&& ClientSsl <> 0u then
