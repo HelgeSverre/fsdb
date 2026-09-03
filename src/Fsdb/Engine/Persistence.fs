@@ -520,10 +520,12 @@ let private encodeColumnDef (format: SnapshotFormat) (w: Writer) (c: ColumnDef) 
 
             writeBool w display.ZeroFill
 
-    if format.SpatialReferences then
+    match format.SpatialReferences, c.Type with
+    | true, TGeometry _ ->
         match c.Srid with
         | None -> w.WriteByte 0uy
         | Some srid -> w.WriteByte 1uy; w.WriteUInt32LE srid
+    | _ -> ()
 
 let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
     let name = readStr r
@@ -553,10 +555,9 @@ let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
         else
             None
     let srid =
-        if format.SpatialReferences && r.ReadByte() <> 0uy then
-            Some(uint32 (r.ReadInt32LE()))
-        else
-            None
+        match format.SpatialReferences, columnType with
+        | true, TGeometry _ when r.ReadByte() <> 0uy -> Some(uint32 (r.ReadInt32LE()))
+        | _ -> None
 
     { Name = name
       Type = columnType
