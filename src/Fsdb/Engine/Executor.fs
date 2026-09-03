@@ -116,8 +116,11 @@ let private equalityAccessPlan (table: Table) (index: EqualityIndex) rowIds =
       TableRowCount = table.RowsArray.Count
       Rows = lazy (Storage.rowsForRowIds table rowIds) }
 
+let private isUsefulEqualityCardinality tableRows candidateRows =
+    QueryPlanner.chooseEquality tableRows candidateRows = QueryPlanner.IndexLookup
+
 let private isUsefulEqualityAccess plan =
-    QueryPlanner.chooseEquality plan.TableRowCount plan.CandidateRowIds.Count = QueryPlanner.IndexLookup
+    isUsefulEqualityCardinality plan.TableRowCount plan.CandidateRowIds.Count
 
 type private PointEquality =
     { Column: string
@@ -8675,13 +8678,22 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
                     let lookups = values |> List.map lookup
 
                     if lookups |> List.forall Option.isSome then
-                        let plan =
-                            lookups
-                            |> List.choose id
+                        let rowIdSets = lookups |> List.choose id
+
+                        let candidateEstimate =
+                            rowIdSets
+                            |> List.fold
+                                (fun count rowIds ->
+                                    count + min rowIds.Count (max 0 (table.RowsArray.Count - count)))
+                                0
+
+                        if isUsefulEqualityCardinality table.RowsArray.Count candidateEstimate then
+                            rowIdSets
                             |> List.fold Set.union Set.empty
                             |> equalityAccessPlan table index
-
-                        if isUsefulEqualityAccess plan then Some plan else None
+                            |> Some
+                        else
+                            None
                     else
                         None)))
 
