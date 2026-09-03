@@ -174,6 +174,16 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, name FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 1}"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Spatial")>]
+    member this.FilterBySpatialBounds() =
+        let center = randomUserId ()
+        let lower = center - 1
+        let upper = center + 1
+
+        this.Query
+            $"SELECT id FROM places WHERE MBRINTERSECTS(location, ST_GeomFromText('POLYGON(({lower} {lower},{upper} {lower},{upper} {upper},{lower} {upper},{lower} {lower}))',0))"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale", "SecondaryOrder")>]
     member this.OrderBySecondaryRange() =
         let lower = rng.Next(1, max 2 (Schema.userCount - 63))

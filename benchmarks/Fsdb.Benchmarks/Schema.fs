@@ -81,6 +81,16 @@ let createSchema (conn: MySqlConnection) =
     exec
         conn
         """
+        CREATE TABLE places (
+            id INT PRIMARY KEY,
+            location POINT NOT NULL SRID 0,
+            SPATIAL KEY sx_places_location (location)
+        )
+        """
+
+    exec
+        conn
+        """
         CREATE TABLE articles (
             id INT PRIMARY KEY AUTO_INCREMENT,
             title VARCHAR(200) NOT NULL,
@@ -145,6 +155,16 @@ let seed (conn: MySqlConnection) =
                 $"('user_{i}','user_{i}@bench.test',{age},'{{\"plan\":\"{plan}\"}}','{randomDate ()}',{i})" ]
 
         runBatch "users (name, email, age, meta, created_at, sort_key)" (String.Join(",", rows))
+
+    for batchStart in 0 .. batchSize .. userCount - 1 do
+        let batchEnd = min (batchStart + batchSize - 1) (userCount - 1)
+
+        let rows =
+            [ for i in batchStart..batchEnd ->
+                let coordinate = i + 1
+                $"({coordinate},ST_GeomFromText('POINT({coordinate} {coordinate})',0))" ]
+
+        runBatch "places (id, location)" (String.Join(",", rows))
 
     for batchStart in 0 .. batchSize .. orderCount - 1 do
         let batchEnd = min (batchStart + batchSize - 1) (orderCount - 1)
