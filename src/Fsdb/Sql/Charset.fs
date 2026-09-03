@@ -12,8 +12,8 @@ type Info =
 
 type private Codec =
     { Info: Info
-      Encoding: unit -> Encoding
-      StrictEncoding: unit -> Encoding
+      Encoding: Lazy<Encoding>
+      StrictEncoding: Lazy<Encoding>
       AllowsSupplementaryCharacters: bool }
 
 let private codePagesReady =
@@ -48,8 +48,8 @@ let private codec name defaultCollation description maxBytes supportsLoadData en
           Description = description
           MaxBytesPerCharacter = maxBytes
           SupportsLoadData = supportsLoadData }
-      Encoding = encoding
-      StrictEncoding = strictEncoding
+      Encoding = lazy encoding ()
+      StrictEncoding = lazy strictEncoding ()
       AllowsSupplementaryCharacters = allowsSupplementary }
 
 let private codecs =
@@ -121,34 +121,45 @@ let private replaceSupplementaryCharacters (text: string) =
 let private textAcceptedBy (codec: Codec) (text: string) =
     if codec.AllowsSupplementaryCharacters then text else replaceSupplementaryCharacters text
 
+let private canEncode (encoding: Encoding) (text: string) =
+    try
+        encoding.GetByteCount text |> ignore
+        true
+    with :? EncoderFallbackException ->
+        false
+
 let transcodeText (name: string) (text: string) =
     match tryCodec name with
     | None -> text
     | Some codec ->
-        let strict = codec.StrictEncoding()
+        let strict = codec.StrictEncoding.Value
+        let hasForbiddenSupplementary =
+            not codec.AllowsSupplementaryCharacters
+            && text.EnumerateRunes() |> Seq.exists (fun rune -> rune.Value > 0xFFFF)
 
-        text.EnumerateRunes()
-        |> Seq.map (fun rune ->
-            if not codec.AllowsSupplementaryCharacters && rune.Value > 0xFFFF then
-                "?"
-            else
-                let value = rune.ToString()
+        let fullyRepresentable =
+            not hasForbiddenSupplementary && canEncode strict text
 
-                try
-                    strict.GetBytes value |> ignore
-                    value
-                with :? EncoderFallbackException ->
-                    "?")
-        |> String.concat ""
+        if fullyRepresentable then
+            text
+        else
+            text.EnumerateRunes()
+            |> Seq.map (fun rune ->
+                if not codec.AllowsSupplementaryCharacters && rune.Value > 0xFFFF then
+                    "?"
+                else
+                    let value = rune.ToString()
+                    if canEncode strict value then value else "?")
+            |> String.concat ""
 
 let encode (name: string) (text: string) =
     match tryCodec name with
-    | Some codec -> codec.Encoding().GetBytes(textAcceptedBy codec text)
+    | Some codec -> codec.Encoding.Value.GetBytes(textAcceptedBy codec text)
     | None -> Encoding.UTF8.GetBytes text
 
 let decodeBytes (name: string) (bytes: byte[]) =
     match tryCodec name with
-    | Some codec -> codec.Encoding().GetString bytes
+    | Some codec -> codec.Encoding.Value.GetString bytes
     | None -> Encoding.UTF8.GetString bytes
 
 let decodeLoadData (name: string) (bytes: byte[]) =
@@ -158,7 +169,7 @@ let decodeLoadData (name: string) (bytes: byte[]) =
         Error(sprintf "Unsupported character set '%s'" codec.Info.Name)
     | Some codec ->
         try
-            let encoding = codec.StrictEncoding()
+            let encoding = codec.StrictEncoding.Value
 
             let text = encoding.GetString bytes
 
