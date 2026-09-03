@@ -8675,27 +8675,26 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
                             else
                                 Storage.tryEqualityRowIdsForIndex store table index ordered)
 
-                    let lookups = values |> List.map lookup
+                    let rec collect candidateEstimate rowIdSets =
+                        function
+                        | [] -> Some rowIdSets
+                        | tuple :: remaining ->
+                            lookup tuple
+                            |> Option.bind (fun rowIds ->
+                                let estimate =
+                                    candidateEstimate
+                                    + min rowIds.Count (max 0 (table.RowsArray.Count - candidateEstimate))
 
-                    if lookups |> List.forall Option.isSome then
-                        let rowIdSets = lookups |> List.choose id
+                                if isUsefulEqualityCardinality table.RowsArray.Count estimate then
+                                    collect estimate (rowIds :: rowIdSets) remaining
+                                else
+                                    None)
 
-                        let candidateEstimate =
-                            rowIdSets
-                            |> List.fold
-                                (fun count rowIds ->
-                                    count + min rowIds.Count (max 0 (table.RowsArray.Count - count)))
-                                0
-
-                        if isUsefulEqualityCardinality table.RowsArray.Count candidateEstimate then
-                            rowIdSets
-                            |> List.fold Set.union Set.empty
-                            |> equalityAccessPlan table index
-                            |> Some
-                        else
-                            None
-                    else
-                        None)))
+                    collect 0 [] values
+                    |> Option.map (fun rowIdSets ->
+                        rowIdSets
+                        |> List.fold Set.union Set.empty
+                        |> equalityAccessPlan table index))))
 
 and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
