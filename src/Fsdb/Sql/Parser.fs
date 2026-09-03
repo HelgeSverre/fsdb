@@ -2322,20 +2322,24 @@ let private indexVisibility: Parser<bool, unit> =
     opt explicitIndexVisibility
     |>> Option.defaultValue true
 
+let private indexAlgorithm: Parser<IndexKind, unit> =
+    (keyword "RTREE" >>% SpatialIndex)
+    <|> ((keyword "BTREE" <|> keyword "HASH") >>% BTree)
+
 let private indexItem: Parser<IndexDef, unit> =
     (indexPrefix .>>. opt identifier
-     .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH"))
+     .>>. opt (keyword "USING" >>. indexAlgorithm)
      .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ","))
      // `USING BTREE|HASH` — parsed and discarded, every index here is the
      // same structure either way.
      .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH"))
      .>>. indexVisibility)
-    |>> fun ((((unique, kind), name), cols), visible) ->
+    |>> fun (((((unique, kind), name), algorithm), cols), visible) ->
         { Name = name |> Option.defaultValue (List.head cols).Name
           KeyColumns = cols
           Unique = unique
           Visible = visible
-          Kind = kind }
+          Kind = if algorithm = Some SpatialIndex then SpatialIndex else kind }
 
 let private namedUniqueConstraint: Parser<IndexDef, unit> =
     (keyword "CONSTRAINT"
@@ -2664,11 +2668,14 @@ let private createIndexStmt: Parser<Statement, unit> =
           <|> preturn (false, BTree))
      .>> keyword "INDEX"
      .>>. identifier
+     .>>. opt (keyword "USING" >>. indexAlgorithm)
      .>> keyword "ON"
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 indexedColumn (sym ","))
      .>>. indexVisibility)
-    |>> fun (((((unique, kind), name), table), cols), visible) -> CreateIndex(name, table, cols, unique, kind, visible)
+    |>> fun ((((((unique, kind), name), algorithm), table), cols), visible) ->
+        let kind = if algorithm = Some SpatialIndex then SpatialIndex else kind
+        CreateIndex(name, table, cols, unique, kind, visible)
 
 let private dropIndexStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "INDEX"

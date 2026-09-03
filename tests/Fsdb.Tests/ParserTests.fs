@@ -1487,6 +1487,16 @@ let tests =
                         ()
                     | other -> failtestf "expected a restricted spatial column and index, got %A" other
 
+                testCase "RTREE index syntax maps to the spatial index kind"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE places (shape GEOMETRY NOT NULL SRID 0, INDEX sx USING RTREE(shape))" with
+                    | CreateTable { Indexes = [ { Name = "sx"; Kind = SpatialIndex } ] } -> ()
+                    | other -> failtestf "expected a table spatial index, got %A" other
+
+                    match parseOk "CREATE INDEX sx USING RTREE ON places(shape)" with
+                    | CreateIndex("sx", "places", [ { Name = "shape" } ], false, SpatialIndex, true) -> ()
+                    | other -> failtestf "expected a standalone spatial index, got %A" other
+
                 testCase "CHAR/TEXT/BLOB family and TINY/MEDIUM/SMALL int variants all parse"
                 <| fun _ ->
                     match

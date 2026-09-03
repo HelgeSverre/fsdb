@@ -8726,6 +8726,20 @@ let tests =
                         Expect.stringContains ddl "SPATIAL KEY `sx` (`shape`)" "spatial key"
                     | other -> failtestf "expected spatial SHOW CREATE output, got %A" other
 
+                    runDefault store "CREATE TABLE standalone (shape GEOMETRY NOT NULL SRID 0)" |> ignore
+
+                    match runDefault store "CREATE INDEX standalone_sx USING RTREE ON standalone(shape)" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected standalone RTREE creation, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT index_name, column_name, index_type FROM information_schema.statistics WHERE table_schema='fsdb' AND table_name='standalone'"
+                    with
+                    | ResultSet(_, [ [ Some "standalone_sx"; Some "shape"; Some "SPATIAL" ] ]) -> ()
+                    | other -> failtestf "expected standalone spatial index metadata, got %A" other
+
                 testCase "spatial MBR probes match a scan twin and retain residual predicates"
                 <| fun _ ->
                     let mutable calls = 0
