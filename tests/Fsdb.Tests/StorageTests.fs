@@ -857,6 +857,51 @@ let tests =
                     Expect.equal (SpatialIndex.search SpatialIndex.Intersects replacementBounds replaced) (set [ 1 ]) "replacement bounds"
                     Expect.equal (SpatialIndex.count removed) 0 "removed entry"
 
+                testCase "interval pruning agrees with an exhaustive bounds scan"
+                <| fun _ ->
+                    let rng = System.Random 42
+
+                    let randomBounds () =
+                        let x = rng.NextDouble() * 100.0
+                        let y = rng.NextDouble() * 100.0
+
+                        { MinX = x
+                          MinY = y
+                          MaxX = x + rng.NextDouble() * 10.0
+                          MaxY = y + rng.NextDouble() * 10.0 }
+
+                    let entries = [ for id in 1 .. 500 -> id, randomBounds () ]
+                    let index = entries |> List.fold (fun index (id, bounds) -> SpatialIndex.add id bounds index) SpatialIndex.empty
+
+                    let matches relation query candidate =
+                        match relation with
+                        | SpatialIndex.Intersects ->
+                            candidate.MinX <= query.MaxX
+                            && candidate.MaxX >= query.MinX
+                            && candidate.MinY <= query.MaxY
+                            && candidate.MaxY >= query.MinY
+                        | SpatialIndex.Within ->
+                            candidate.MinX >= query.MinX
+                            && candidate.MaxX <= query.MaxX
+                            && candidate.MinY >= query.MinY
+                            && candidate.MaxY <= query.MaxY
+                        | SpatialIndex.Contains ->
+                            candidate.MinX <= query.MinX
+                            && candidate.MaxX >= query.MaxX
+                            && candidate.MinY <= query.MinY
+                            && candidate.MaxY >= query.MaxY
+
+                    for _ in 1 .. 100 do
+                        let query = randomBounds ()
+
+                        for relation in [ SpatialIndex.Intersects; SpatialIndex.Within; SpatialIndex.Contains ] do
+                            let expected =
+                                entries
+                                |> List.choose (fun (id, candidate) -> if matches relation query candidate then Some id else None)
+                                |> Set.ofList
+
+                            Expect.equal (SpatialIndex.search relation query index) expected "indexed bounds match the scan"
+
                 testCase "stored spatial indexes follow row mutations incrementally"
                 <| fun _ ->
                     let store = create ()
