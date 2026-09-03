@@ -736,6 +736,10 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected _utf8mb4 to fold under ai_ci, got %A" other
 
+                    match runDefault store "SELECT _utf8mb3'ÅGE' = 'age', _utf8mb3'😀'" with
+                    | ResultSet(_, [ [ Some "1"; Some "😀" ] ]) -> ()
+                    | other -> failtestf "expected utf8mb3 introducers to retain their labeled bytes, got %A" other
+
                     // latin1 labels the UTF-8 bytes: é's two bytes decode as
                     // the cp1252 pair Ã©, which doesn't equal é
                     match runDefault store "SELECT _latin1'é'" with
@@ -783,6 +787,10 @@ let tests =
                     match runDefault store "SELECT CONVERT('é' USING ascii)" with
                     | ResultSet(_, [ [ Some "?" ] ]) -> ()
                     | other -> failtestf "expected é to lossy-map to ? under ascii, got %A" other
+
+                    match runDefault store "SELECT CONVERT('😀x' USING utf8mb3), CONVERT('😀x' USING utf8), CONVERT('å' USING utf8mb3)" with
+                    | ResultSet(_, [ [ Some "?x"; Some "?x"; Some "å" ] ]) -> ()
+                    | other -> failtestf "expected utf8mb3 to replace supplementary scalars and retain BMP text, got %A" other
 
                 testCase "CONVERT(expr USING binary) compares byte-for-byte, not via the connection collation"
                 <| fun _ ->

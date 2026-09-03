@@ -13662,17 +13662,16 @@ let private repeatWarning count code message =
     for _ in 1..count do
         Diagnostics.warning code message
 
-let private reportUtf8ConversionDeprecations statement =
-    Expression.statementCount
-        (function
-        | FuncCall(name, [ _; Lit(VString charset) ]) ->
-            name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase)
-            && charset.Equals("utf8", System.StringComparison.OrdinalIgnoreCase)
-        | _ -> false)
-        statement
-    |> fun count ->
-        for _ in 1..count do
-            Diagnostics.deprecatedUtf8Alias ()
+let private reportCharsetConversionDeprecations statement =
+    statement
+    |> Expression.iterStatement (function
+        | FuncCall(name, [ _; Lit(VString charset) ])
+            when name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase) ->
+            match charset.ToLowerInvariant() with
+            | "utf8" -> Diagnostics.deprecatedUtf8Alias ()
+            | "utf8mb3" -> Diagnostics.deprecatedUtf8mb3 ()
+            | _ -> ()
+        | _ -> ())
 
 let private reportQueryDeprecations statement =
     let reportCalculateFoundRows (select: SelectStmt) =
@@ -13693,7 +13692,7 @@ let private reportQueryDeprecations statement =
         1287
         "FOUND_ROWS() is deprecated and will be removed in a future release. Consider using COUNT(*) instead."
 
-    reportUtf8ConversionDeprecations statement
+    reportCharsetConversionDeprecations statement
 
 /// A top-level `SELECT`'s resultset plus its per-column MySQL wire types —
 /// `QueryHandler.executeStatement`'s type-preserving entry point into
@@ -14693,12 +14692,17 @@ let private reportDeprecatedStatementSyntax =
     let reportDeprecations deprecations =
         deprecations
         |> List.iter (function
-            | Utf8CharsetAlias -> Diagnostics.deprecatedUtf8Alias ())
+            | Utf8CharsetAlias -> Diagnostics.deprecatedUtf8Alias ()
+            | Utf8mb3Charset -> Diagnostics.deprecatedUtf8mb3 ())
+
+    let charsetDeprecation (charset: string) =
+        match charset.ToLowerInvariant() with
+        | "utf8" -> Some Utf8CharsetAlias
+        | "utf8mb3" -> Some Utf8mb3Charset
+        | _ -> None
 
     let columnDeprecations (column: ColumnDef) =
-        match column.Charset with
-        | Some charset when charset.Equals("utf8", System.StringComparison.OrdinalIgnoreCase) -> [ Utf8CharsetAlias ]
-        | _ -> []
+        column.Charset |> Option.bind charsetDeprecation |> Option.toList
 
     let alterTableDeprecations actions =
         actions
@@ -14706,8 +14710,7 @@ let private reportDeprecatedStatementSyntax =
             | AddColumn(column, _)
             | ModifyColumn(column, _)
             | ChangeColumn(_, column, _) -> columnDeprecations column
-            | ConvertCharset(charset, _) when charset.Equals("utf8", System.StringComparison.OrdinalIgnoreCase) ->
-                [ Utf8CharsetAlias ]
+            | ConvertCharset(charset, _) -> charsetDeprecation charset |> Option.toList
             | _ -> [])
 
     let reportValuesFunctionDeprecations assignments =
@@ -14725,15 +14728,15 @@ let private reportDeprecatedStatementSyntax =
     | AlterDatabase(_, deprecations) -> reportDeprecations deprecations
     | CreateTable table ->
         reportDeprecations table.Deprecations
-        reportUtf8ConversionDeprecations (CreateTable table)
+        reportCharsetConversionDeprecations (CreateTable table)
     | AlterTable(_, actions) as statement ->
         reportDeprecations (alterTableDeprecations actions)
-        reportUtf8ConversionDeprecations statement
+        reportCharsetConversionDeprecations statement
     | (Insert(_, _, _, assignments, _)
       | InsertSelect(_, _, _, assignments, _)) as statement ->
         reportValuesFunctionDeprecations assignments
-        reportUtf8ConversionDeprecations statement
-    | statement -> reportUtf8ConversionDeprecations statement
+        reportCharsetConversionDeprecations statement
+    | statement -> reportCharsetConversionDeprecations statement
 
 let private validateAlterExecutionOptions foreignKeyChecks (existingColumns: ColumnDef list) actions =
     let algorithm =

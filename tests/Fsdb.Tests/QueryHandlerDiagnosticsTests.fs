@@ -660,12 +660,14 @@ let tests =
               expectInvalid session "CREATE TABLE strict_varbinary (v VARBINARY(3) DEFAULT X'61626364')"
               expectInvalid session "CREATE TABLE strict_ascii (v VARCHAR(3) CHARACTER SET ascii DEFAULT 'å')"
               expectInvalid session "CREATE TABLE strict_latin1 (v VARCHAR(3) CHARACTER SET latin1 DEFAULT '😀')"
+              expectInvalid session "CREATE TABLE strict_utf8mb3 (v VARCHAR(3) CHARACTER SET utf8mb3 DEFAULT '😀')"
 
               let session, _ = handle session "SET SESSION sql_mode = ''"
               expectInvalid session "CREATE TABLE nonstrict_binary (v BINARY(3) DEFAULT X'61626364')"
               expectInvalid session "CREATE TABLE nonstrict_varbinary (v VARBINARY(3) DEFAULT X'61626364')"
               expectInvalid session "CREATE TABLE nonstrict_ascii (v VARCHAR(3) CHARACTER SET ascii DEFAULT 'å')"
               expectInvalid session "CREATE TABLE nonstrict_latin1 (v VARCHAR(3) CHARACTER SET latin1 DEFAULT '😀')"
+              expectInvalid session "CREATE TABLE nonstrict_utf8mb3 (v VARCHAR(3) CHARACTER SET utf8mb3 DEFAULT '😀')"
 
           testCase "lossy column charsets retain MySQL conversion warnings"
           <| fun _ ->
@@ -693,5 +695,29 @@ let tests =
               match handle session "INSERT INTO t VALUES ('å')" |> snd with
               | Err(1366, "Incorrect string value: '\\xC3\\xA5' for column 'a' at row 1") -> ()
               | other -> failtestf "expected MySQL's incorrect-string error, got %A" other
+
+          testCase "utf8mb3 columns reject or replace supplementary scalars according to strictness"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE utf8mb3_values (v VARCHAR(20) CHARACTER SET utf8mb3)"
+
+              match handle session "INSERT INTO utf8mb3_values VALUES ('😀')" |> snd with
+              | Err(1366, "Incorrect string value: '\\xF0\\x9F\\x98\\x80' for column 'v' at row 1") -> ()
+              | other -> failtestf "expected strict utf8mb3 rejection, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode = ''"
+              let session, inserted = handle session "INSERT INTO utf8mb3_values VALUES ('😀')"
+              Expect.equal inserted (Affected 1UL) "non-strict insert"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Warning,
+                    1366,
+                    "Incorrect string value: '\\xF0\\x9F\\x98\\x80' for column 'v' at row 1" ]
+                  "non-strict replacement warning"
+
+              match handle session "SELECT v FROM utf8mb3_values" |> snd with
+              | ResultSet(_, [ [ Some "?" ] ]) -> ()
+              | other -> failtestf "expected the replacement character, got %A" other
 
         ]

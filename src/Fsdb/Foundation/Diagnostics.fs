@@ -58,6 +58,11 @@ let deprecatedUtf8Alias () =
         3719
         "'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous."
 
+let deprecatedUtf8mb3 () =
+    warning
+        1287
+        "'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
+
 let fromErrorWithLevel level (error: SqlState.Error) =
     { Level = level
       Code = error.Code

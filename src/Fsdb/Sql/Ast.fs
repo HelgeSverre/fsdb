@@ -824,6 +824,7 @@ type ExplainFormat =
 /// client statement, not to durable schema recovery.
 type SyntaxDeprecation =
     | Utf8CharsetAlias
+    | Utf8mb3Charset
 
 type CreateTableSpec =
     { Name: string

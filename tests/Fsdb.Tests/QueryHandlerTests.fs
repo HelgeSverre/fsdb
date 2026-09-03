@@ -104,31 +104,45 @@ let tests =
                     "'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead" ]
                   "VALUES warnings do not require a duplicate row"
 
-          testCase "deprecated utf8 aliases report once per spelling"
+          testCase "deprecated utf8 charsets report once per spelling"
           <| fun _ ->
-              let warning =
+              let aliasWarning =
                   3719,
                   "'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous."
 
-              let expectWarnings count session description =
+              let utf8mb3Warning =
+                  1287,
+                  "'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead"
+
+              let expectWarnings expected session description =
                   Expect.equal
                       (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
-                      (List.replicate count warning)
+                      expected
                       description
 
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE DATABASE utf8_alias_db CHARACTER SET utf8"
-              expectWarnings 1 session "CREATE DATABASE alias"
+              expectWarnings [ aliasWarning ] session "CREATE DATABASE alias"
 
               let session, _ = handle session "ALTER DATABASE utf8_alias_db CHARACTER SET utf8"
-              expectWarnings 1 session "ALTER DATABASE alias"
+              expectWarnings [ aliasWarning ] session "ALTER DATABASE alias"
+
+              let session, _ = handle session "ALTER DATABASE utf8_alias_db CHARACTER SET utf8mb3"
+              expectWarnings [ utf8mb3Warning ] session "ALTER DATABASE utf8mb3"
 
               let session, _ =
                   handle
                       session
                       "CREATE TABLE utf8_aliases (a VARCHAR(10) CHARACTER SET utf8, b VARCHAR(10) CHARACTER SET utf8) CHARACTER SET utf8"
 
-              expectWarnings 3 session "table and column aliases"
+              expectWarnings [ aliasWarning; aliasWarning; aliasWarning ] session "table and column aliases"
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TABLE utf8mb3_deprecated (a VARCHAR(10) CHARACTER SET utf8mb3, b VARCHAR(10)) CHARACTER SET utf8mb3"
+
+              expectWarnings [ utf8mb3Warning; utf8mb3Warning ] session "table and column utf8mb3 declarations"
 
               let session, _ = handle session "CREATE TABLE utf8_altered (a VARCHAR(10))"
 
@@ -137,13 +151,22 @@ let tests =
                       session
                       "ALTER TABLE utf8_altered ADD COLUMN b VARCHAR(10) CHARACTER SET utf8, ADD COLUMN c VARCHAR(10) CHARACTER SET utf8"
 
-              expectWarnings 2 session "ALTER TABLE column aliases"
+              expectWarnings [ aliasWarning; aliasWarning ] session "ALTER TABLE column aliases"
+
+              let session, _ = handle session "ALTER TABLE utf8_altered CONVERT TO CHARACTER SET utf8mb3"
+              expectWarnings [ utf8mb3Warning ] session "ALTER TABLE utf8mb3 conversion"
 
               let session, _ = handle session "SET NAMES utf8"
-              expectWarnings 1 session "SET NAMES alias"
+              expectWarnings [ aliasWarning ] session "SET NAMES alias"
 
-              let session, _ = handle session "SELECT CONVERT('x' USING utf8), CONVERT('y' USING utf8)"
-              expectWarnings 2 session "CONVERT aliases"
+              let session, _ = handle session "SET NAMES utf8mb3"
+              expectWarnings [ utf8mb3Warning ] session "SET NAMES utf8mb3"
+
+              let session, _ = handle session "SELECT CONVERT('x' USING utf8), CONVERT('y' USING utf8mb3)"
+              expectWarnings [ aliasWarning; utf8mb3Warning ] session "CONVERT charsets"
+
+              let session, _ = handle session "SELECT CONVERT('x' USING utf8mb3), CONVERT('y' USING utf8)"
+              expectWarnings [ utf8mb3Warning; aliasWarning ] session "CONVERT warnings follow expression order"
 
           testCase "AES result metadata remains binary when LIMIT 0 returns no rows"
           <| fun _ ->

@@ -370,16 +370,20 @@ let rec rewriteStatement replace =
     | Explain(format, statement) -> Explain(format, rewriteStatement replace statement)
     | statement -> statement
 
+let iterStatement visit statement =
+    statement
+    |> rewriteStatement (fun expression ->
+        visit expression
+        None)
+    |> ignore
+
 let statementCount predicate statement =
     let mutable count = 0
 
     statement
-    |> rewriteStatement (fun expression ->
+    |> iterStatement (fun expression ->
         if predicate expression then
-            count <- count + 1
-
-        None)
-    |> ignore
+            count <- count + 1)
 
     count
 

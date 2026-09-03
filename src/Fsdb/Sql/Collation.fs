@@ -562,6 +562,13 @@ module Charset =
                 "?")
         |> String.concat ""
 
+    /// Maps supplementary Unicode scalars to MySQL utf8mb3's replacement
+    /// character while preserving BMP text.
+    let transcodeUtf8mb3 (s: string) : string =
+        s.EnumerateRunes()
+        |> Seq.map (fun rune -> if rune.Value <= 0xFFFF then rune.ToString() else "?")
+        |> String.concat ""
+
     /// Decodes raw bytes as cp1252 — what a `_latin1'...'` introducer needs,
     /// since MySQL labels the literal's client-encoded bytes without
     /// converting them (verified: `_latin1'é'` reads back as the two cp1252
@@ -617,6 +624,14 @@ module Charset =
         |> _.EnumerateRunes()
         |> Seq.map (fun rune -> if rune.Value < 0x80 then rune.ToString() else "?")
         |> String.concat ""
+
+    let transcodeText (charset: string) (text: string) =
+        match charset.ToLowerInvariant() with
+        | "ascii" -> transcodeAscii text
+        | "latin1" -> transcodeLatin1 text
+        | "utf8"
+        | "utf8mb3" -> transcodeUtf8mb3 text
+        | _ -> text
 
     /// Encodes a text value with the byte mapping MySQL applies before a
     /// binary string operation observes a column's character set.

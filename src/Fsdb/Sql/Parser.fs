@@ -705,6 +705,7 @@ let private introducedStringLit: Parser<Expr, unit> =
 
         match charset.ToLowerInvariant() with
         | "utf8mb4"
+        | "utf8mb3"
         | "utf8" -> preturn (Lit(VString text))
         | "binary" -> preturn (Lit(VBytes bytes))
         | "latin1" -> preturn (Lit(VString(Collation.Charset.decodeLatin1Bytes bytes)))
@@ -2103,11 +2104,11 @@ let private generatedColumn: Parser<Expr * GeneratedKind, unit> =
 /// The charsets fsdb accepts in DDL (see `ColumnDef.Charset`'s doc for what
 /// each actually does at runtime), lowercased; anything else is a parse
 /// error. One validator shared by column mods and table options.
-let private charsetDeprecations charset =
-    if String.Equals(charset, "utf8", StringComparison.OrdinalIgnoreCase) then
-        [ Utf8CharsetAlias ]
-    else
-        []
+let private charsetDeprecations (charset: string) =
+    match charset.ToLowerInvariant() with
+    | "utf8" -> [ Utf8CharsetAlias ]
+    | "utf8mb3" -> [ Utf8mb3Charset ]
+    | _ -> []
 
 let private knownCharset: Parser<string, unit> =
     identOrString

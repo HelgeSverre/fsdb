@@ -1323,11 +1323,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
 
     let charsetChecked (text: string) : Result<string, StorageError> =
-        let converted =
-            match col.Charset with
-            | Some "ascii" -> Collation.Charset.transcodeAscii text
-            | Some "latin1" -> Collation.Charset.transcodeLatin1 text
-            | _ -> text
+        let converted = col.Charset |> Option.map (fun charset -> Collation.Charset.transcodeText charset text) |> Option.defaultValue text
 
         if text = converted then
             Ok text
@@ -1992,10 +1988,8 @@ let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Res
 
         let charsetLoss =
             match col.Type, col.Charset with
-            | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TJson), Some "ascii" ->
-                Collation.Charset.transcodeAscii text <> text
-            | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TJson), Some "latin1" ->
-                Collation.Charset.transcodeLatin1 text <> text
+            | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TJson), Some charset ->
+                Collation.Charset.transcodeText charset text <> text
             | _ -> false
 
         let defaultIsInvalid = widthOverflow || charsetLoss
@@ -4920,10 +4914,7 @@ let private normalizePrimaryKeyNullability (columns: ColumnDef list) =
             column)
 
 let private normalizeUtf8mb3Text (text: string) =
-    let normalized =
-        text.EnumerateRunes()
-        |> Seq.map (fun rune -> if rune.Value <= 0xFFFF then rune.ToString() else "?")
-        |> String.concat ""
+    let normalized = Collation.Charset.transcodeUtf8mb3 text
 
     if normalized <> text then
         let bytes = Encoding.UTF8.GetBytes text

@@ -2101,10 +2101,11 @@ let private convertFn: Scalar =
         let text = v |> toText |> Option.defaultValue ""
 
         match charset.ToLowerInvariant() with
-        | "utf8mb4"
-        | "utf8" -> VString text
-        | "latin1" -> VString(Collation.Charset.transcodeLatin1 text)
-        | "ascii" -> VString(Collation.Charset.transcodeAscii text)
+        | "utf8mb4" -> VString text
+        | "utf8"
+        | "utf8mb3"
+        | "latin1"
+        | "ascii" -> VString(Collation.Charset.transcodeText charset text)
         | "binary" -> VBytes(Text.Encoding.UTF8.GetBytes text)
         | _ -> VNull
     | _ -> VNull
