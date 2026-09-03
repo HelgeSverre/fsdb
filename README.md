@@ -235,6 +235,11 @@ after stored keys fixed by literal equalities. Other expression orderings and
 full-value ordering through a prefix key still sort. Equality buckets and
 ordered entries are separate derived structures, deliberately trading memory
 and write work for efficient equality buckets and bounded range seeks.
+Planar `SPATIAL`/`RTREE` indexes maintain immutable minimum-bounding-rectangle
+entries and narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS`
+predicates, including single-table updates and deletes. The residual predicate
+still runs on every candidate, and `EXPLAIN` reports the same `range` access
+shape and key length as MySQL.
 Equi-joins use a hash join. A physical inner, left, or right join can instead
 probe an index when the rows already in scope bind its complete key, including
 joins expressed with `USING` or `NATURAL JOIN`.

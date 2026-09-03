@@ -36,8 +36,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 | SQL statements | Broad core; large admin/programmatic tail missing | Replication and admin SQL |
 | Query execution | Composite equality/range access, index ordering, restricted join reordering, and stable/correlated index probes | General cost-based planning and broader correlated forms |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, non-point buffers, and geographic SRS semantics |
-| Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
-| Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner/left/right joins, PK/unique/secondary range, grouping, and index-order probes | Arbitrary expression ordering and broader grouping paths still scan |
+| Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry with planar MBR indexing | Binary JSON representation |
+| Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner/left/right joins, PK/unique/secondary/spatial range, grouping, and index-order probes | Arbitrary expression ordering and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Remaining coarse write shapes |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
@@ -182,7 +182,7 @@ accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes, overlays, general buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar point `ST_Buffer`, `ST_Distance`, `ST_Envelope`, topology predicates, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
+| Spatial indexes and operations | R-tree indexes, overlays, general buffers, geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; the internal four-axis structure is not an R-tree, and the remaining operations stay unsupported | low | subset |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
@@ -515,7 +515,7 @@ implementation effort:
    cover nested calls with local OUT/INOUT targets, typed locals, condition
    handlers, SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential
    data-changing statements.
-4. Spatial indexes, overlay/buffer operations, and geographic SRS behavior.
-   The common planar topology family includes equality and convex hull.
+4. Overlay/buffer operations and geographic SRS behavior. Planar spatial
+   indexes, the common topology family, equality, and convex hull are covered.
 5. Replication, logging, broad engine counters, and the remaining metadata
    tail. Core command counters are live; replication remains architectural.
