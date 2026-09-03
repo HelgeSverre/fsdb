@@ -1,7 +1,9 @@
 # Range selectivity benchmark
 
-Date: 2026-09-03  
-Platform: Apple M4 Pro, .NET 10.0.0, MySQL 8.4.11  
+Date: 2026-09-03
+
+Platform: Apple M4 Pro, .NET 10.0.0, MySQL 8.4.11
+
 Mode: BenchmarkDotNet ShortRun, three measured iterations
 
 The workload compares a direct indexed range with an expression-equivalent

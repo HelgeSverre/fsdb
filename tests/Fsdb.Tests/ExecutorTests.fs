@@ -5182,6 +5182,13 @@ let tests =
                     Expect.equal selective.AccessType (Some "range") "a one-row range uses the index"
                     Expect.equal selective.EstimatedRows (Some "1") "the selective estimate comes from the index slice"
 
+                    let empty = runDefault store "EXPLAIN SELECT COUNT(*) FROM scores WHERE score > 100" |> explainRow
+                    Expect.equal empty.AccessType (Some "range") "an empty range stops at the index"
+                    Expect.equal empty.EstimatedRows (Some "0") "the empty estimate comes from the index slice"
+
+                    let tied = runDefault store "EXPLAIN SELECT COUNT(*) FROM scores WHERE score >= 51" |> explainRow
+                    Expect.equal tied.AccessType (Some "ALL") "a tied estimate prefers the sequential scan"
+
                     let broad = runDefault store "EXPLAIN SELECT COUNT(*) FROM scores WHERE score >= 1" |> explainRow
                     Expect.equal broad.AccessType (Some "ALL") "an all-row range uses the table scan"
                     Expect.equal broad.EstimatedRows (Some "100") "the scan estimate is the table cardinality"
