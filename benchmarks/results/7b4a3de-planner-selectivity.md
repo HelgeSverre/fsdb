@@ -2,7 +2,7 @@
 
 Date: 2026-09-03
 
-Platform: Apple M4 Pro, .NET 10.0.0, MySQL 8.4.11
+Platform: Apple M2 Max, .NET 10.0.0, MySQL 8.4.11
 
 Mode: BenchmarkDotNet ShortRun, three measured iterations
 

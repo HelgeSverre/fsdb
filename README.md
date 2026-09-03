@@ -226,6 +226,9 @@ the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
 exactly as MySQL's do. Scalar and composite-row literal `IN` lists, along with
 direct literal ranges in single-table reads and writes, can seek matching
 primary, unique, and secondary B-trees and report `range` in `EXPLAIN`.
+Equality and literal-`IN` probes use immutable bucket cardinalities before
+resolving rows; broad probes fall back to the row-store scan instead of
+materializing an all-row index union.
 `ORDER BY` and compatible `GROUP BY` operations can stream a
 whole-column left prefix of a composite index, or a suffix whose preceding
 keys are fixed by literal equalities, including `LIMIT`, `OFFSET`, and literal
