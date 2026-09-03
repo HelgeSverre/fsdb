@@ -118,11 +118,11 @@ from the client and never resolves or opens that path on the server. Uploads
 are capped by `max_load_data_bytes` (64 MiB by default), drained to their empty
 packet terminator, and then rejected with 1153 when over the cap.
 
-The supported load subset is UTF-8/utf8mb4 input with string field/line
-delimiters, optional single-character enclosure and escape markers, `REPLACE`
-or `IGNORE`, header-line skipping, target columns or user variables, and
-ordered `SET` transformations. Server-side `LOAD DATA INFILE` remains
-unsupported.
+The supported load subset accepts utf8mb4, utf8mb3/utf8, latin1 (cp1252),
+and ASCII input with string field/line delimiters, optional single-character
+enclosure and escape markers, `REPLACE` or `IGNORE`, header-line skipping,
+target columns or user variables, and ordered `SET` transformations.
+Server-side `LOAD DATA INFILE` remains unsupported.
 
 ## Views and triggers
 

@@ -679,6 +679,65 @@ let tests =
                   }
                   |> Async.RunSynchronously)
 
+          TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE decodes its declared character set"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
+                  async {
+                      let store = Fsdb.Storage.create ()
+                      use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                      let! client, stream = connectRawAsWithCapabilities server.Port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                      use client = client
+
+                      let query (sql: string) =
+                          writePacketAsync
+                              stream
+                              { SeqId = 0uy
+                                Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      let load charset payload =
+                          async {
+                              do!
+                                  query (sprintf "LOAD DATA LOCAL INFILE 'charset.tsv' INTO TABLE charset_load CHARACTER SET %s" charset)
+                                  |> Async.Ignore
+
+                              let! request = readPacketAsync stream
+                              Expect.equal request.Value.Payload.[0] 0xfbuy "LOCAL request"
+                              do! writePacketAsync stream { SeqId = 2uy; Payload = payload } |> Async.Ignore
+                              do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                              return! readPacketAsync stream
+                          }
+
+                      do! query "CREATE TABLE charset_load (kind VARCHAR(10), value VARCHAR(10))" |> Async.Ignore
+                      let! _ = readPacketAsync stream
+
+                      let latin1Payload =
+                          Array.concat [ Text.Encoding.ASCII.GetBytes "latin\t"; [| 0x80uy; byte '\n' |] ]
+
+                      let! latin1 = load "latin1" latin1Payload
+                      Expect.equal latin1.Value.Payload.[0] 0uy "latin1 load"
+
+                      let! ascii = load "ascii" (Text.Encoding.ASCII.GetBytes "ascii\tplain\n")
+                      Expect.equal ascii.Value.Payload.[0] 0uy "ASCII load"
+
+                      let! utf8mb3 = load "utf8mb3" (Text.Encoding.UTF8.GetBytes "utf3\tå\n")
+                      Expect.equal utf8mb3.Value.Payload.[0] 0uy "utf8mb3 load"
+
+                      let! invalidUtf8mb3 = load "utf8" (Text.Encoding.UTF8.GetBytes "bad\t😀\n")
+                      Expect.equal invalidUtf8mb3.Value.Payload.[0] 0xffuy "four-byte utf8mb3 input is rejected"
+                      Expect.equal (Reader(invalidUtf8mb3.Value.Payload.[1..]).ReadInt16LE()) 1300 "invalid charset error"
+
+                      match Fsdb.Storage.scanList store "fsdb" "charset_load" with
+                      | Ok(_, rows) ->
+                          Expect.sequenceEqual
+                              (rows |> List.map Array.toList)
+                              [ [ VString "latin"; VString "€" ]
+                                [ VString "ascii"; VString "plain" ]
+                                [ VString "utf3"; VString "å" ] ]
+                              "declared input decoding"
+                      | Error error -> failtestf "table scan failed: %A" error
+                  }
+                  |> Async.RunSynchronously)
+
           TestSupport.processGlobalCase "LOAD DATA LOCAL INFILE transforms user-variable fields"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->

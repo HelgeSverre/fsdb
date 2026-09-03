@@ -641,7 +641,11 @@ let private singleCharacter (value: string) =
 
 let private decodeLocalLoad (load: Parser.LocalLoad) (bytes: byte[]) : Result<Value list list, int * string> =
     try
-        let text = UTF8Encoding(false, true).GetString bytes
+        let charset = load.Charset |> Option.defaultValue "utf8mb4"
+        let text =
+            match Collation.Charset.decodeLoadData charset bytes with
+            | Ok text -> text
+            | Error message -> raise (DecoderFallbackException message)
         let enclosedBy = load.EnclosedBy |> Option.bind singleCharacter
         let escape = load.Escape |> Option.bind singleCharacter
         let nullMarker = escape |> Option.map (fun value -> string value + "N")
@@ -723,8 +727,8 @@ let private decodeLocalLoad (load: Parser.LocalLoad) (bytes: byte[]) : Result<Va
                 endRow ()
 
             Result.Ok(rows |> Seq.skip (min load.IgnoreLines rows.Count) |> List.ofSeq)
-    with :? DecoderFallbackException ->
-        Result.Error(1300, "Invalid utf8mb4 character string")
+    with :? DecoderFallbackException as error ->
+        Result.Error(1300, error.Message)
 
 /// A dead socket, detected without consuming any data: `Poll(SelectRead)`
 /// returns true both when the peer closed/reset the connection *and* when

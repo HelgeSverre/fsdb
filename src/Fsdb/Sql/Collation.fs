@@ -540,6 +540,7 @@ let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry
 
 module Charset =
     let private cp1252Extras = cp1252HighSlots |> Array.choose id |> Array.map int |> Set.ofArray
+    let private strictUtf8 = UTF8Encoding(false, true)
 
     /// Maps text to what a `latin1` (cp1252) column can hold: ASCII and
     /// 0xA0–0xFF pass through, the cp1252 extras pass through, everything
@@ -574,6 +575,37 @@ module Charset =
                 | Some c -> c
                 | None -> '?')
         |> System.String
+
+    let supportsLoadData (charset: string) =
+        match charset.ToLowerInvariant() with
+        | "utf8"
+        | "utf8mb3"
+        | "utf8mb4"
+        | "latin1"
+        | "ascii" -> true
+        | _ -> false
+
+    let decodeLoadData (charset: string) (bytes: byte[]) : Result<string, string> =
+        let charset = charset.ToLowerInvariant()
+
+        try
+            match charset with
+            | "latin1" -> Ok(decodeLatin1Bytes bytes)
+            | "ascii" when bytes |> Array.exists (fun value -> value >= 0x80uy) ->
+                Error "Invalid ascii character string"
+            | "ascii" -> Ok(Encoding.ASCII.GetString bytes)
+            | "utf8"
+            | "utf8mb3" ->
+                let text = strictUtf8.GetString bytes
+
+                if text.EnumerateRunes() |> Seq.exists (fun rune -> rune.Value > 0xFFFF) then
+                    Error "Invalid utf8mb3 character string"
+                else
+                    Ok text
+            | "utf8mb4" -> Ok(strictUtf8.GetString bytes)
+            | _ -> Error(sprintf "Unsupported character set '%s'" charset)
+        with :? DecoderFallbackException ->
+            Error(sprintf "Invalid %s character string" (if charset = "utf8" then "utf8mb3" else charset))
 
     /// Maps text to what an `ascii` column can hold: 7-bit passes through,
     /// everything else becomes '?'.
