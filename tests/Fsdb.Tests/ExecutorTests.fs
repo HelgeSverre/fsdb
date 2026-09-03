@@ -5167,6 +5167,29 @@ let tests =
                         ()
                     | other -> failtestf "expected a secondary-index range plan, got %A" other
 
+                testCase "range planning weighs candidate cardinality against a table scan"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE scores (id INT PRIMARY KEY, score INT, KEY ix_score (score))" |> ignore
+
+                    [ for id in 1..100 -> sprintf "(%d, %d)" id id ]
+                    |> String.concat ", "
+                    |> sprintf "INSERT INTO scores VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    let selective = runDefault store "EXPLAIN SELECT COUNT(*) FROM scores WHERE score >= 100" |> explainRow
+                    Expect.equal selective.AccessType (Some "range") "a one-row range uses the index"
+                    Expect.equal selective.EstimatedRows (Some "1") "the selective estimate comes from the index slice"
+
+                    let broad = runDefault store "EXPLAIN SELECT COUNT(*) FROM scores WHERE score >= 1" |> explainRow
+                    Expect.equal broad.AccessType (Some "ALL") "an all-row range uses the table scan"
+                    Expect.equal broad.EstimatedRows (Some "100") "the scan estimate is the table cardinality"
+
+                    match runDefault store "SELECT COUNT(*) FROM scores WHERE score >= 1" with
+                    | ResultSet(_, [ [ Some "100" ] ]) -> ()
+                    | other -> failtestf "expected all rows through the selected access path, got %A" other
+
                 testCase "a secondary string range follows collation boundaries with a reversed lower comparison"
                 <| fun _ ->
                     let store = newStore ()
