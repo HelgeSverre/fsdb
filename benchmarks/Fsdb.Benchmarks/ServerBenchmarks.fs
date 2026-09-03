@@ -32,6 +32,8 @@ type ServerBenchmarks() =
     let mutable dataDir : string option = None
     let mutable rng = Random(1234)
     let mutable insertCounter = 0
+    let halfAgeList = [ 18..47 ] |> List.map string |> String.concat ","
+    let allAgeList = [ 18..77 ] |> List.map string |> String.concat ","
 
     // Draw from the seeded id range so every read hits a real row.
     let randomUserId () = rng.Next(1, Schema.userCount + 1)
@@ -194,6 +196,36 @@ type ServerBenchmarks() =
     [<BenchmarkCategory("Scale", "Planner")>]
     member this.CountUnselectiveScan() =
         this.Query "SELECT COUNT(*) FROM users WHERE age + 0 >= 18"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountSelectiveIndexedEquality() =
+        this.Query "SELECT COUNT(*) FROM users WHERE age = 30"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountSelectiveEqualityScan() =
+        this.Query "SELECT COUNT(*) FROM users WHERE age + 0 = 30"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
+    member this.CountHalfIndexedLiteralIn() =
+        this.Query $"SELECT COUNT(*) FROM users WHERE age IN ({halfAgeList})"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
+    member this.CountHalfLiteralInScan() =
+        this.Query $"SELECT COUNT(*) FROM users WHERE age + 0 IN ({halfAgeList})"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
+    member this.CountBroadIndexedLiteralIn() =
+        this.Query $"SELECT COUNT(*) FROM users WHERE age IN ({allAgeList})"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
+    member this.CountBroadLiteralInScan() =
+        this.Query $"SELECT COUNT(*) FROM users WHERE age + 0 IN ({allAgeList})"
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Spatial")>]
