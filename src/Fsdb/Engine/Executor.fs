@@ -1200,20 +1200,35 @@ let private noteAuthorizationExists name host =
 let private noteAuthorizationMissing name host =
     Diagnostics.note 3162 (sprintf "Authorization ID '%s'@'%s' does not exist." name host)
 
-let private creatableStorageEngines =
+let private recognizedStorageEngines =
     set [ "archive"; "blackhole"; "csv"; "heap"; "innodb"; "memory"; "merge"; "mrg_myisam"; "myisam" ]
+
+let private isRecognizedStorageEngine (engine: string) =
+    recognizedStorageEngines.Contains(engine.ToLowerInvariant())
 
 let private validateCreateEngine (store: Store) tableName =
     function
     | None -> None
     | Some engine when equalsIgnoreCase engine "performance_schema" ->
         Some(Err(1683, "Invalid performance_schema usage."))
-    | Some engine when creatableStorageEngines.Contains(engine.ToLowerInvariant()) -> None
+    | Some engine when isRecognizedStorageEngine engine -> None
     | Some engine when store.ExecutionSettings.SqlMode.NoEngineSubstitution ->
         Some(Err(1286, sprintf "Unknown storage engine '%s'" engine))
     | Some engine ->
         Diagnostics.warning 1286 (sprintf "Unknown storage engine '%s'" engine)
         Diagnostics.warning 1266 (sprintf "Using storage engine InnoDB for table '%s'" tableName)
+        None
+
+let private validateAlterEngine (store: Store) tableName =
+    function
+    | None -> None
+    | Some engine when isRecognizedStorageEngine engine -> None
+    | Some engine when equalsIgnoreCase engine "performance_schema" ->
+        Some(Err(1031, sprintf "Table storage engine for '%s' doesn't have this option" tableName))
+    | Some engine when store.ExecutionSettings.SqlMode.NoEngineSubstitution ->
+        Some(Err(1286, sprintf "Unknown storage engine '%s'" engine))
+    | Some engine ->
+        Diagnostics.warning 1286 (sprintf "Unknown storage engine '%s'" engine)
         None
 
 /// The leading numeric run of `s`, the way MySQL's numeric `CAST`/implicit
@@ -16047,11 +16062,14 @@ let rec executeAs
             | Ok(columns, _) -> validateAlterExecutionOptions store.ForeignKeyChecks columns actions
             | Error _ -> None
 
-        let unsupportedEngine =
+        let requestedEngine =
             actions
-            |> List.tryPick (function
-                | SetEngine name when not (System.String.Equals(name, "InnoDB", System.StringComparison.OrdinalIgnoreCase)) -> Some name
+            |> List.choose (function
+                | SetEngine name -> Some name
                 | _ -> None)
+            |> List.tryLast
+
+        let engineError = validateAlterEngine store table requestedEngine
 
         let addedColumns =
             actions
@@ -16061,9 +16079,9 @@ let rec executeAs
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match executionOptionError, unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectQuantifiedComparisonsInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
+        match executionOptionError, engineError, rejectDirectOnlyGenerated registry addedColumns, rejectQuantifiedComparisonsInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
         | Some err, _, _, _, _ -> ids, err
-        | None, Some engine, _, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
+        | None, Some error, _, _, _ -> ids, error
         | None, None, Some err, _, _
         | None, None, _, Some err, _
         | None, None, _, _, Some err -> ids, err

@@ -158,6 +158,34 @@ let tests =
               | Err(1286, "Unknown storage engine 'totally_unknown'") -> ()
               | other -> failtestf "expected engine validation before IF NOT EXISTS, got %A" other
 
+          testCase "ALTER TABLE engine selection follows NO_ENGINE_SUBSTITUTION"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE altered_engine (id INT)"
+
+              let session, strictResult =
+                  handle session "ALTER TABLE altered_engine ENGINE=totally_unknown"
+
+              match strictResult with
+              | Err(1286, "Unknown storage engine 'totally_unknown'") -> ()
+              | other -> failtestf "expected strict ALTER engine rejection, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode=''"
+
+              let session =
+                  handle session "ALTER TABLE altered_engine ENGINE=totally_unknown"
+                  |> expectAffectedWithConditions
+                      "unknown ALTER engine is ignored"
+                      [ warning 1286 "Unknown storage engine 'totally_unknown'" ]
+
+              let session, knownResult = handle session "ALTER TABLE altered_engine ENGINE=ARCHIVE"
+              Expect.equal knownResult (Affected 0UL) "known ALTER engines are accepted"
+              Expect.isEmpty session.Diagnostics "known ALTER engines do not warn"
+
+              match handle session "ALTER TABLE altered_engine ENGINE=PERFORMANCE_SCHEMA" |> snd with
+              | Err(1031, "Table storage engine for 'altered_engine' doesn't have this option") -> ()
+              | other -> failtestf "expected performance_schema ALTER rejection, got %A" other
+
           testCase "conditional object and account DDL records MySQL notes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

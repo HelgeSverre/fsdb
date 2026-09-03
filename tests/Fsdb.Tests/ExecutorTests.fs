@@ -1832,13 +1832,14 @@ let tests =
                     Expect.isFalse (companies.Indexes |> List.exists (fun index -> index.Name = "invalid_expression")) "rejected index is not published"
                     Expect.isFalse (companies.Indexes |> List.exists (fun index -> index.Name = "invalid_alter")) "rejected ALTER index is not published"
 
-                testCase "ALTER TABLE ENGINE accepts InnoDB and rejects unsupported engines"
+                testCase "ALTER TABLE ENGINE accepts known engines and rejects unknown engines in strict mode"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT)" |> ignore
                     Expect.equal (runDefault store "ALTER TABLE t ENGINE=InnoDB") (Affected 0UL) "InnoDB remains selected"
+                    Expect.equal (runDefault store "ALTER TABLE t ENGINE=MEMORY") (Affected 0UL) "known engines are accepted"
 
-                    match runDefault store "ALTER TABLE t ENGINE=MEMORY" with
+                    match runDefault store "ALTER TABLE t ENGINE=totally_unknown" with
                     | Err(1286, _) -> ()
                     | other -> failtestf "expected unknown storage engine error, got %A" other
 
