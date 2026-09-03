@@ -7023,12 +7023,15 @@ and private applyResolvedJoin
                 |> Option.filter (fun probe ->
                     match consumption with
                     | MayStopEarly -> true
-                    | ConsumesAllRows when not hashCompatible.Value -> true
                     | ConsumesAllRows ->
-                        (QueryPlanner.chooseJoin
-                            leftIndexed.Value.Length
-                            probe.Table.RowsArray.Count
-                            (Storage.equalityIndexDistinctKeyCount probe.Table probe.Index)) = QueryPlanner.IndexProbe)
+                        match
+                            QueryPlanner.chooseJoin
+                                leftIndexed.Value.Length
+                                probe.Table.RowsArray.Count
+                                (Storage.equalityIndexDistinctKeyCount probe.Table probe.Index)
+                        with
+                        | QueryPlanner.IndexProbe -> true
+                        | QueryPlanner.HashJoin -> not hashCompatible.Value)
 
             let hashEligible = indexedJoinProbe.IsNone && hashCompatible.Value
 
