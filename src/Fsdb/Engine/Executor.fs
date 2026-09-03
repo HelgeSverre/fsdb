@@ -5638,8 +5638,6 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
 /// Narrows single-source `information_schema` scans by literal schema and
 /// table equalities before catalog rows are materialized. The full predicate
 /// still validates every retained row.
-/// ponytail: use the query collation instead of OrdinalIgnoreCase before
-/// accepting noncanonical names in this pre-filter.
 and private tryInformationSchemaNarrow
     (store: Store)
     (registry: Registry)
@@ -5660,6 +5658,14 @@ and private tryInformationSchemaNarrow
         with
         | [] -> None
         | eqs ->
+            let metadataNameEquals = Collation.metadataIdentifierCollation.Equals
+
+            let literalEquals column left right =
+                if equalsIgnoreCase column "TABLE_SCHEMA" || equalsIgnoreCase column "TABLE_NAME" then
+                    metadataNameEquals left right
+                else
+                    equalsIgnoreCase left right
+
             let eqFor col =
                 eqs
                 |> List.tryPick (fun (name, value) ->
@@ -5676,14 +5682,14 @@ and private tryInformationSchemaNarrow
                 if selfContained then
                     let bySchema =
                         match eqFor "TABLE_SCHEMA" with
-                        | Some schema -> store.Catalog |> Map.filter (fun db _ -> equalsIgnoreCase db schema)
+                        | Some schema -> store.Catalog |> Map.filter (fun db _ -> metadataNameEquals db schema)
                         | None -> store.Catalog
 
                     match eqFor "TABLE_NAME" with
                     | Some table ->
                         bySchema
                         |> Map.map (fun _ db ->
-                            db |> Map.filter (fun _ stored -> equalsIgnoreCase stored.OriginalName table))
+                            db |> Map.filter (fun _ stored -> metadataNameEquals stored.OriginalName table))
                     | None -> bySchema
                 else
                     store.Catalog
@@ -5709,7 +5715,7 @@ and private tryInformationSchemaNarrow
                     filters
                     |> List.forall (fun (i, v) ->
                         match row.[i] with
-                        | VString text -> equalsIgnoreCase text v
+                        | VString text -> literalEquals cols.[i].Name text v
                         | _ -> false)
 
                 cols, rows |> List.filter keep)

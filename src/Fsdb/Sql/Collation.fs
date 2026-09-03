@@ -353,6 +353,7 @@ let registry : Map<string, Collation> =
     // strings either way, so only the comparison semantics differ.
     |> register "utf8mb3_general_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb3_unicode_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+    |> register "utf8mb3_tolower_ci" { Locale = None; Fold = asCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb3_bin" { Locale = None; Fold = asCs; PadSpace = pad; ByteOrder = true }
     |> register "latin1_swedish_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "latin1_general_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
@@ -460,6 +461,7 @@ let idAndSortlen : Map<string, int * int> =
           "utf8mb4_vietnamese_ci", (247, 8)
           "utf8mb3_general_ci", (33, 1)
           "utf8mb3_unicode_ci", (192, 8)
+          "utf8mb3_tolower_ci", (76, 1)
           "utf8mb3_bin", (83, 1)
           "latin1_swedish_ci", (8, 1)
           "latin1_general_ci", (48, 1)
@@ -528,6 +530,7 @@ let maxBytesPerCharacter (charset: string option) =
 /// The engine's one active default — a `Store`-level default today, the
 /// seam a per-session/per-column `COLLATE` resolves against.
 let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry
+let metadataIdentifierCollation = Map.find "utf8mb3_tolower_ci" registry
 
 // ---------------------------------------------------------------------------
 // Charset write-time transcoding. MySQL's `latin1` is really cp1252, not

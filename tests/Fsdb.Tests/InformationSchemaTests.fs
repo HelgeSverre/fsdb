@@ -728,17 +728,13 @@ let tests =
                       "every schema present"
               | other -> failtestf "expected a resultset, got %A" other
 
-          testCase "the COLUMNS equality pre-filter narrows without changing results (case-insensitive, OR untouched)"
+          testCase "the COLUMNS equality pre-filter follows metadata identifier collation"
           <| fun _ ->
-              // `Executor.tryInformationSchemaNarrow` pre-filters by
-              // top-level `col = 'lit'` conjuncts; these shapes are the ones
-              // that must not over-filter.
+              // Only top-level equality conjuncts participate; OR remains residual.
               let store = setup ()
               run store "CREATE TABLE narrow_probe (id INT PRIMARY KEY, body TEXT)" |> ignore
               run store "CREATE VIEW narrow_view AS SELECT id FROM narrow_probe" |> ignore
 
-              // Different case than the stored names — both the pre-filter
-              // and the WHERE proper are case-insensitive.
               match run store "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'FSDB' AND TABLE_NAME = 'NARROW_PROBE' ORDER BY ORDINAL_POSITION" with
               | ResultSet(_, rows) ->
                   Expect.equal rows [ [ Some "id" ]; [ Some "body" ] ] "case-insensitive match survives the narrow"
@@ -751,15 +747,41 @@ let tests =
               match
                   run
                       store
-                      "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'information_schema' AND TABLE_NAME = 'COLUMNS'"
+                      "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'information_schema' AND TABLE_NAME = 'COLUMNS' AND COLUMN_NAME = 'TABLE_NAME'"
               with
-              | ResultSet(_, [ [ Some count ] ]) -> Expect.isGreaterThan (int count) 20 "the virtual COLUMNS table describes itself"
+              | ResultSet(_, [ [ Some "TABLE_NAME" ] ]) -> ()
               | other -> failtestf "expected information_schema's own columns, got %A" other
 
-              // An OR of equalities must NOT be treated as conjuncts.
               match run store "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_NAME = 'narrow_probe' OR TABLE_NAME = 'nope'" with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected the OR filter to still find narrow_probe, got %A" other
+
+              run store "CREATE DATABASE `résumé_probe`" |> ignore
+              run store "CREATE TABLE `résumé_probe`.`résumé_table` (value INT)" |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'RÉSUMÉ_PROBE' AND TABLE_NAME = 'RÉSUMÉ_TABLE'"
+              with
+              | ResultSet(_, [ [ Some "value" ] ]) -> ()
+              | other -> failtestf "expected case-folded metadata identifiers, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'resume_probe' AND TABLE_NAME = 'resume_table'"
+              with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected accents to remain significant for metadata identifiers, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA COLLATE utf8mb3_general_ci = 'resume_probe' AND TABLE_NAME COLLATE utf8mb3_general_ci = 'resume_table'"
+              with
+              | ResultSet(_, [ [ Some "value" ] ]) -> ()
+              | other -> failtestf "expected an explicit accent-folding collation to override metadata defaults, got %A" other
 
           testCase "an unknown information_schema table is a plain 1146"
           <| fun _ ->
