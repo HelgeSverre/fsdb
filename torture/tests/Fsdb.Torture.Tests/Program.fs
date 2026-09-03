@@ -51,7 +51,8 @@ let private column name primary unique autoIncrement =
       Collation = None
       Charset = None
       OnUpdateCurrentTimestamp = false
-      Comment = "" }
+      Comment = ""
+      Srid = None }
 
 let private emptyComparison =
     { Equal = true
@@ -638,7 +639,8 @@ let tests =
                           UniqueIndex = Map.empty
                           SecondaryIndex = Map.empty
                           SecondaryOrder = Map.empty
-                          FullTextIndexes = Map.empty }
+                          FullTextIndexes = Map.empty
+                          SpatialIndexes = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
                     Expect.isEmpty (Invariants.validate store) "valid store"
@@ -661,7 +663,8 @@ let tests =
                           UniqueIndex = Map.empty
                           SecondaryIndex = Map.empty
                           SecondaryOrder = Map.empty
-                          FullTextIndexes = Map.empty }
+                          FullTextIndexes = Map.empty
+                          SpatialIndexes = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
                     let errors = Invariants.validate store

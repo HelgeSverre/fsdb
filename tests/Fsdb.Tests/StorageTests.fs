@@ -804,6 +804,120 @@ let tests =
                     | other -> failtestf "expected an SRID mismatch, got %A" other ]
 
           testList
+              "spatial indexes"
+              [ testCase "minimum bounds narrow each supported relation"
+                <| fun _ ->
+                    let bounds minX minY maxX maxY =
+                        { MinX = minX
+                          MinY = minY
+                          MaxX = maxX
+                          MaxY = maxY }
+
+                    let index =
+                        SpatialIndex.empty
+                        |> SpatialIndex.add 1 (bounds 0.0 0.0 2.0 2.0)
+                        |> SpatialIndex.add 2 (bounds 1.0 1.0 4.0 4.0)
+                        |> SpatialIndex.add 3 (bounds 5.0 5.0 6.0 6.0)
+
+                    Expect.equal
+                        (SpatialIndex.search SpatialIndex.Intersects (bounds 1.5 1.5 3.0 3.0) index)
+                        (set [ 1; 2 ])
+                        "intersections"
+
+                    Expect.equal
+                        (SpatialIndex.search SpatialIndex.Within (bounds -1.0 -1.0 3.0 3.0) index)
+                        (set [ 1 ])
+                        "contained bounds"
+
+                    Expect.equal
+                        (SpatialIndex.search SpatialIndex.Contains (bounds 1.5 1.5 1.75 1.75) index)
+                        (set [ 1; 2 ])
+                        "containing bounds"
+
+                testCase "replacement and removal preserve immutable roots"
+                <| fun _ ->
+                    let originalBounds =
+                        { MinX = 0.0
+                          MinY = 0.0
+                          MaxX = 1.0
+                          MaxY = 1.0 }
+
+                    let replacementBounds =
+                        { MinX = 10.0
+                          MinY = 10.0
+                          MaxX = 11.0
+                          MaxY = 11.0 }
+
+                    let original = SpatialIndex.empty |> SpatialIndex.add 1 originalBounds
+                    let replaced = original |> SpatialIndex.add 1 replacementBounds
+                    let removed = replaced |> SpatialIndex.remove 1
+
+                    Expect.equal (SpatialIndex.search SpatialIndex.Intersects originalBounds original) (set [ 1 ]) "original root"
+                    Expect.isEmpty (SpatialIndex.search SpatialIndex.Intersects originalBounds replaced) "replacement removed the old bounds"
+                    Expect.equal (SpatialIndex.search SpatialIndex.Intersects replacementBounds replaced) (set [ 1 ]) "replacement bounds"
+                    Expect.equal (SpatialIndex.count removed) 0 "removed entry"
+
+                testCase "stored spatial indexes follow row mutations incrementally"
+                <| fun _ ->
+                    let store = create ()
+                    let id = { col "id" (TInt false) false with PrimaryKey = true }
+                    let shape = { col "shape" (TGeometry Geometry) false with Srid = Some 0u }
+                    let index = { Name = "sx"; KeyColumns = indexColumns [ "shape" ]; Unique = false; Visible = true; Kind = SpatialIndex }
+                    let geometry text = VGeometry(tryGeometryFromText 0 text |> Option.get)
+                    let bounds text = tryGeometryFromText 0 text |> Option.bind geometryBounds |> Option.get
+
+                    createTable store defaultDatabase "places" [ id; shape ] [ index ] [] None None
+                    |> Result.defaultWith (failtestf "create failed: %A")
+                    |> ignore
+
+                    let reindexesBefore = reindexCallCount ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "places"
+                        None
+                        [ [ VInt 1L; geometry "POINT(1 1)" ]
+                          [ VInt 2L; geometry "POINT(10 10)" ] ]
+                    |> Result.defaultWith (failtestf "insert failed: %A")
+                    |> ignore
+
+                    let matchingIds query =
+                        match trySpatialLookup store defaultDatabase "places" "shape" SpatialIndex.Intersects (bounds query) with
+                        | Some lookup -> lookup.SpatialRows |> List.map (fun (_, row) -> row.[0])
+                        | None -> failtest "expected a spatial lookup"
+
+                    Expect.equal (matchingIds "POLYGON((0 0,2 0,2 2,0 2,0 0))") [ VInt 1L ] "inserted bounds"
+
+                    updateRows
+                        store
+                        defaultDatabase
+                        "places"
+                        None
+                        (fun row -> Ok(row.[0] = VInt 1L))
+                        (fun row -> Ok [| row.[0]; geometry "POINT(20 20)" |])
+                    |> Result.defaultWith (failtestf "update failed: %A")
+                    |> ignore
+
+                    replaceRows
+                        store
+                        defaultDatabase
+                        "places"
+                        None
+                        [ [ VInt 2L; geometry "POINT(5 5)" ] ]
+                        prepareRow
+                    |> Result.defaultWith (failtestf "replace failed: %A")
+                    |> ignore
+
+                    deleteRows store defaultDatabase "places" (fun row -> Ok(row.[0] = VInt 1L))
+                    |> Result.defaultWith (failtestf "delete failed: %A")
+                    |> ignore
+
+                    Expect.equal (matchingIds "POLYGON((4 4,6 4,6 6,4 6,4 4))") [ VInt 2L ] "replacement bounds"
+                    Expect.isEmpty (matchingIds "POLYGON((19 19,21 19,21 21,19 21,19 19))") "deleted bounds"
+                    Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve spatial entries incrementally" ]
+
+          testList
               "unique constraints"
               [ let emailsTable store =
                     createTable

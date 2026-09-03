@@ -169,6 +169,7 @@ type SecondaryOrderEntry = private { CollationNames: string option list; Directi
 
 type SecondaryOrder = Map<string, ImmutableSortedSet<SecondaryOrderEntry>>
 type FullTextIndexes = Map<string, FullText.Index<RowId>>
+type SpatialIndexes = Map<string, SpatialIndex.Index<RowId>>
 
 type private SecondaryOrderSlice =
     { IndexName: string
@@ -234,7 +235,9 @@ type Table =
       SecondaryOrder: SecondaryOrder
       /// FULLTEXT indexes retain token postings and row-local positions.
       /// They are derived from rows and rebuilt after persistence recovery.
-      FullTextIndexes: FullTextIndexes }
+      FullTextIndexes: FullTextIndexes
+      /// SPATIAL indexes retain immutable minimum-bounding-rectangle entries.
+      SpatialIndexes: SpatialIndexes }
 
     /// `RowsArray` as a plain list, in scan order — a fresh O(row count)
     /// copy on every access, for external validators/tools that walk a
@@ -2195,6 +2198,29 @@ let private fullTextKeyGroups (table: Table) : FullTextKeyGroup list =
                             |> Option.bind Collation.tryFind
                             |> Option.defaultValue Collation.defaultCollation }))
 
+type private SpatialKeyGroup =
+    { Name: string
+      ColumnIndex: int
+      Visible: bool }
+
+let private spatialKeyGroups (table: Table) : SpatialKeyGroup list =
+    table.Indexes
+    |> List.choose (fun index ->
+        match index.Kind, index.Columns with
+        | SpatialIndex, [ column ] ->
+            resolveColumn table.Columns column
+            |> Result.toOption
+            |> Option.map (fun columnIndex ->
+                { Name = index.Name
+                  ColumnIndex = columnIndex
+                  Visible = index.Visible })
+        | _ -> None)
+
+let private spatialBoundsAt columnIndex (row: Value[]) =
+    match row.[columnIndex] with
+    | VGeometry geometry -> geometryBounds geometry
+    | _ -> None
+
 let private fullTextDocument (indices: int list) (row: Value[]) =
     indices
     |> List.map (fun index -> Value.toText row.[index] |> Option.defaultValue "")
@@ -2417,6 +2443,20 @@ let private rebuildFullTextIndexes (table: Table) : FullTextIndexes =
          |> FullText.buildIndexWith group.CollationSpec))
     |> Map.ofList
 
+let private rebuildSpatialIndexes (table: Table) : SpatialIndexes =
+    spatialKeyGroups table
+    |> List.map (fun group ->
+        let index =
+            table.RowsArray.Indexed
+            |> Seq.fold
+                (fun index (rowId, row) ->
+                    spatialBoundsAt group.ColumnIndex row
+                    |> Option.fold (fun index bounds -> SpatialIndex.add rowId bounds index) index)
+                SpatialIndex.empty
+
+        group.Name, index)
+    |> Map.ofList
+
 /// Bumped once per `reindexTable` call — the full-scan rebuild it wraps is
 /// the O(table size) cost a replay must pay a constant number of times, not
 /// once per replayed event. `AsyncLocal`, not a plain mutable: Expecto runs
@@ -2438,7 +2478,8 @@ let reindexTable (table: Table) : Table =
         UniqueIndex = rebuildUniqueIndex table
         SecondaryIndex = rebuildSecondaryIndex table
         SecondaryOrder = rebuildSecondaryOrder table
-        FullTextIndexes = rebuildFullTextIndexes table }
+        FullTextIndexes = rebuildFullTextIndexes table
+        SpatialIndexes = rebuildSpatialIndexes table }
 
 let private sameTableSchema (left: Table) (right: Table) =
     left.OriginalName = right.OriginalName
@@ -2536,7 +2577,9 @@ let private publishRows (before: Table) (after: Table) : Table =
             { after with RowsArray = compactedRows }
 
     if before.Indexes <> after.Indexes || before.Columns <> after.Columns then
-        { after with FullTextIndexes = rebuildFullTextIndexes after }
+        { after with
+            FullTextIndexes = rebuildFullTextIndexes after
+            SpatialIndexes = rebuildSpatialIndexes after }
     else
         let changes = after.RowsArray.ChangesFrom before.RowsArray |> Array.ofSeq
 
@@ -2561,7 +2604,25 @@ let private publishRows (before: Table) (after: Table) : Table =
                     Map.add group.Name index indexes)
                 before.FullTextIndexes
 
-        { after with FullTextIndexes = indexes }
+        let spatialIndexes =
+            spatialKeyGroups after
+            |> List.fold
+                (fun indexes group ->
+                    let update index (rowId, removed: Value[] option, added: Value[] option) =
+                        index
+                        |> fun current -> removed |> Option.fold (fun current _ -> SpatialIndex.remove rowId current) current
+                        |> fun current ->
+                            added
+                            |> Option.bind (spatialBoundsAt group.ColumnIndex)
+                            |> Option.fold (fun current bounds -> SpatialIndex.add rowId bounds current) current
+
+                    let index = changes |> Array.fold update (Map.find group.Name indexes)
+                    Map.add group.Name index indexes)
+                before.SpatialIndexes
+
+        { after with
+            FullTextIndexes = indexes
+            SpatialIndexes = spatialIndexes }
 
 let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
     let conflict () = raise (LockWaitTimeout dbName)
@@ -3376,7 +3437,8 @@ let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexe
           UniqueIndex = Map.empty
           SecondaryIndex = Map.empty
           SecondaryOrder = Map.empty
-          FullTextIndexes = Map.empty }
+          FullTextIndexes = Map.empty
+          SpatialIndexes = Map.empty }
 
     // `rebuildUniqueIndex` directly, not `reindexTable`: the latter bumps the
     // replay-cost counter tests use to catch per-event reindexing, and
@@ -3385,7 +3447,8 @@ let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexe
         UniqueIndex = rebuildUniqueIndex table
         SecondaryIndex = rebuildSecondaryIndex table
         SecondaryOrder = rebuildSecondaryOrder table
-        FullTextIndexes = rebuildFullTextIndexes table }
+        FullTextIndexes = rebuildFullTextIndexes table
+        SpatialIndexes = rebuildSpatialIndexes table }
 
 let private sysTable name columns rows =
     sysTableWithIndexes name columns [] rows
@@ -3658,7 +3721,8 @@ let ensureMysqlSchema (store: Store) : unit =
                             UniqueIndex = rebuildUniqueIndex updated
                             SecondaryIndex = rebuildSecondaryIndex updated
                             SecondaryOrder = rebuildSecondaryOrder updated
-                            FullTextIndexes = rebuildFullTextIndexes updated }
+                            FullTextIndexes = rebuildFullTextIndexes updated
+                            SpatialIndexes = rebuildSpatialIndexes updated }
                         dbRef.Value
 
     // Old trigger rows receive an empty definer and therefore fail closed;
@@ -3686,7 +3750,8 @@ let private withBootstrapRows rows table =
         UniqueIndex = rebuildUniqueIndex updated
         SecondaryIndex = rebuildSecondaryIndex updated
         SecondaryOrder = rebuildSecondaryOrder updated
-        FullTextIndexes = rebuildFullTextIndexes updated }
+        FullTextIndexes = rebuildFullTextIndexes updated
+        SpatialIndexes = rebuildSpatialIndexes updated }
 
 let private ensureRootProxyGrantIn (dbRef: Database ref) =
     let table = dbRef.Value.["proxies_priv"]
@@ -4039,6 +4104,45 @@ let trySecondaryLookup
     : (ColumnDef list * (RowId * Value[]) list) option =
     tableAt store dbName tableName
     |> Option.bind (fun table -> trySecondaryLookupInTable store table columnName literal)
+
+type SpatialLookup =
+    { SpatialIndexName: string
+      SpatialColumnIndex: int
+      SpatialColumns: ColumnDef list
+      SpatialRows: (RowId * Value[]) list }
+
+let trySpatialLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (relation: SpatialIndex.Relation)
+    (bounds: GeometryBounds)
+    : SpatialLookup option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table ->
+        resolveColumn table.Columns columnName
+        |> Result.toOption
+        |> Option.bind (fun columnIndex ->
+            spatialKeyGroups table
+            |> List.filter _.Visible
+            |> List.filter (fun group -> group.ColumnIndex = columnIndex)
+            |> List.tryHead
+            |> Option.bind (fun group ->
+                table.SpatialIndexes
+                |> Map.tryFind group.Name
+                |> Option.map (fun index ->
+                    let rows =
+                        SpatialIndex.search relation bounds index
+                        |> Seq.choose (fun rowId ->
+                            table.RowsArray.TryFind rowId
+                            |> Option.map (fun row -> rowId, row))
+                        |> List.ofSeq
+
+                    { SpatialIndexName = group.Name
+                      SpatialColumnIndex = columnIndex
+                      SpatialColumns = table.Columns
+                      SpatialRows = rows }))))
 
 /// Uses a fully-bound composite key. Residual predicate evaluation remains
 /// responsible for contradictory or repeated equalities.
@@ -5105,7 +5209,8 @@ let createTableSeeded
                                               UniqueIndex = Map.empty
                                               SecondaryIndex = Map.empty
                                               SecondaryOrder = Map.empty
-                                              FullTextIndexes = Map.empty }
+                                              FullTextIndexes = Map.empty
+                                              SpatialIndexes = Map.empty }
 
                                         let database = Map.add key (reindexTable table) db
                                         invalidateAutoIncrementCounter store dbName tableName

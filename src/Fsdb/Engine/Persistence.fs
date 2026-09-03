@@ -1299,7 +1299,8 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
           UniqueIndex = Map.empty
           SecondaryIndex = Map.empty
           SecondaryOrder = Map.empty
-          FullTextIndexes = Map.empty }
+          FullTextIndexes = Map.empty
+          SpatialIndexes = Map.empty }
 
 /// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or
 /// CRC doesn't match what's actually on disk — the guard `load` needs before
