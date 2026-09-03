@@ -2422,18 +2422,43 @@ let private createTableItem: Parser<CreateItem, unit> =
           attempt (indexItem |>> CIndex)
           parsedColumnDef |>> CColumn ]
 
-/// `ENGINE=`, `CHARSET=`/`DEFAULT CHARSET=` table options: accepted and
-/// discarded, same treatment as column display widths. `COLLATE=` is the
-/// one tracked option — it becomes the table's column default (validated
-/// against the collation registry), which `createTable` bakes into every
-/// column that didn't name one explicitly.
 type private TableOption =
     | TableCharset of string
     | TableCollate of string
     | TableAutoIncrement of int64
     | TableComment of string
     | TablePartitioning of HashPartitioning
-    | TableOptionIgnored
+    | IgnoredTableOption
+
+type private ParsedTableOptions =
+    { Charset: string option
+      Collation: string option
+      AutoIncrementSeed: int64 option
+      Comment: string option
+      Partitioning: HashPartitioning option
+      Deprecations: SyntaxDeprecation list }
+
+[<RequireQualifiedAccess>]
+module private ParsedTableOptions =
+    let empty =
+        { Charset = None
+          Collation = None
+          AutoIncrementSeed = None
+          Comment = None
+          Partitioning = None
+          Deprecations = [] }
+
+    let apply (options: ParsedTableOptions) (tableOption: TableOption) =
+        match tableOption with
+        | TableCharset value ->
+            { options with
+                Charset = Some value
+                Deprecations = options.Deprecations @ charsetDeprecations value }
+        | TableCollate value -> { options with Collation = Some value }
+        | TableAutoIncrement value -> { options with AutoIncrementSeed = Some value }
+        | TableComment value -> { options with Comment = Some value }
+        | TablePartitioning value -> { options with Partitioning = Some value }
+        | IgnoredTableOption -> options
 
 let private hashPartitionOption: Parser<TableOption, unit> =
     keyword "PARTITION"
@@ -2456,26 +2481,29 @@ let private hashPartitionOption: Parser<TableOption, unit> =
 /// One table-option tail entry. Options fsdb has no behavior for
 /// (ROW_FORMAT, KEY_BLOCK_SIZE, the STATS_* family) are accepted and
 /// discarded so their dump-file tails restore.
+let private ignoredTableOption names =
+    names
+    |> List.map keyword
+    |> choice
+    >>. opt (sym "=")
+    >>. identOrString
+    >>% IgnoredTableOption
+
 let private tableOption: Parser<TableOption, unit> =
     choice
-        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% TableOptionIgnored
+        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% IgnoredTableOption
           attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> TableAutoIncrement
           keyword "COMMENT" >>. opt (sym "=") >>. stringLit
           |>> (function VString value -> TableComment value | value -> TableComment(toText value |> Option.defaultValue ""))
-          (keyword "ROW_FORMAT" <|> keyword "CHECKSUM" <|> keyword "DELAY_KEY_WRITE" <|> keyword "PACK_KEYS")
-          >>. opt (sym "=")
-          >>. identOrString
-          >>% TableOptionIgnored
-          (keyword "KEY_BLOCK_SIZE"
-           <|> keyword "STATS_PERSISTENT"
-           <|> keyword "STATS_AUTO_RECALC"
-           <|> keyword "STATS_SAMPLE_PAGES"
-           <|> keyword "AVG_ROW_LENGTH"
-           <|> keyword "MAX_ROWS"
-           <|> keyword "MIN_ROWS")
-          >>. opt (sym "=")
-          >>. identOrString
-          >>% TableOptionIgnored
+          ignoredTableOption [ "ROW_FORMAT"; "CHECKSUM"; "DELAY_KEY_WRITE"; "PACK_KEYS" ]
+          ignoredTableOption
+              [ "KEY_BLOCK_SIZE"
+                "STATS_PERSISTENT"
+                "STATS_AUTO_RECALC"
+                "STATS_SAMPLE_PAGES"
+                "AVG_ROW_LENGTH"
+                "MAX_ROWS"
+                "MIN_ROWS" ]
           attempt (
               optional (keyword "DEFAULT")
               >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET"))
@@ -2492,31 +2520,41 @@ let private tableOption: Parser<TableOption, unit> =
               | None -> fail (sprintf "Unknown collation '%s'" name)
           attempt hashPartitionOption ]
 
-let private tableOptions:
-    Parser<string option * string option * int64 option * string option * HashPartitioning option * SyntaxDeprecation list, unit> =
+let private tableOptions: Parser<ParsedTableOptions, unit> =
     many (optional (sym ",") >>. tableOption)
-    |>> fun opts ->
-        let charset, collation, seed, comment, partitioning =
-            opts
-            |> List.fold
-                // A repeated option's last occurrence wins, same as MySQL.
-                (fun (cs, col, seed, comment, partitioning) opt ->
-                    match opt with
-                    | TableCharset c -> Some c, col, seed, comment, partitioning
-                    | TableCollate l -> cs, Some l, seed, comment, partitioning
-                    | TableAutoIncrement n -> cs, col, Some n, comment, partitioning
-                    | TableComment value -> cs, col, seed, Some value, partitioning
-                    | TablePartitioning value -> cs, col, seed, comment, Some value
-                    | TableOptionIgnored -> cs, col, seed, comment, partitioning)
-                (None, None, None, None, None)
+    |>> List.fold ParsedTableOptions.apply ParsedTableOptions.empty
 
-        let deprecations =
-            opts
-            |> List.collect (function
-                | TableCharset value -> charsetDeprecations value
-                | _ -> [])
+let private supportsCharacterAttributes =
+    function
+    | TChar _
+    | TVarchar _
+    | TTinyText
+    | TText
+    | TMediumText
+    | TLongText
+    | TEnum _
+    | TSet _ -> true
+    | _ -> false
 
-        charset, collation, seed, comment, partitioning, deprecations
+let private applyTableCharacterDefaults (options: ParsedTableOptions) column =
+    if not (supportsCharacterAttributes column.Type) then
+        column
+    else
+        let charset = column.Charset |> Option.orElse options.Charset
+
+        let collation =
+            column.Collation
+            |> Option.defaultWith (fun () ->
+                match column.Charset with
+                | Some declared -> Collation.defaultNameForCharset declared
+                | None ->
+                    options.Collation
+                    |> Option.orElseWith (fun () -> charset |> Option.map Collation.defaultNameForCharset)
+                    |> Option.defaultValue Collation.defaultCollation.Name)
+
+        { column with
+            Collation = Some collation
+            Charset = charset }
 
 let private createTable: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
@@ -2524,7 +2562,7 @@ let private createTable: Parser<Statement, unit> =
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>>. tableOptions)
-    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed, tableComment, partitioning, tableDeprecations)) ->
+    |>> fun (((ifNotExists, name), items), options) ->
         let primaryKeyParts = items |> List.collect (function CPrimaryKey columns -> columns | _ -> [])
         let pkNames = primaryKeyParts |> List.map _.Name
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
@@ -2540,55 +2578,7 @@ let private createTable: Parser<Statement, unit> =
             items
             |> List.choose (function
                 | CColumn(c, _) ->
-                    // Table-level COLLATE is the default for columns that
-                    // didn't name one; the explicit column COLLATE wins.
-                    // String-typed columns only — MySQL doesn't attach the
-                    // table charset/collation to numeric/temporal columns
-                    // (verified: `CREATE TABLE t (id INT) COLLATE=utf8mb4_bin`
-                    // shows plain `id int` in SHOW CREATE and NULLs in
-                    // information_schema.COLUMNS).
-                    let isStringy =
-                        match c.Type with
-                        | TChar _
-                        | TVarchar _
-                        | TTinyText
-                        | TText
-                        | TMediumText
-                        | TLongText
-                        | TEnum _
-                        | TSet _ -> true
-                        | _ -> false
-
-                    let withDefaults =
-                        if isStringy then
-                            let charset = c.Charset |> Option.orElse tableCharset
-
-                            let collation =
-                                c.Collation
-                                |> Option.defaultWith (fun () ->
-                                    match c.Charset with
-                                    | Some declared -> Collation.defaultNameForCharset declared
-                                    | None ->
-                                        tableCollation
-                                        |> Option.orElseWith (fun () ->
-                                            charset |> Option.map Collation.defaultNameForCharset)
-                                        |> Option.defaultValue Collation.defaultCollation.Name)
-
-                            { c with
-                                // A real column always ends up with an
-                                // explicit collation. A column-level charset
-                                // selects that charset's default before the
-                                // table collation; otherwise the table and
-                                // server defaults apply. A plain
-                                // `name VARCHAR(20)` therefore still reports
-                                // utf8mb4_0900_ai_ci. The
-                                // charset stays `None` unless declared, so
-                                // SHOW CREATE TABLE renders the default
-                                // case as plain `varchar(20)`.
-                                Collation = Some collation
-                                Charset = charset }
-                        else
-                            c
+                    let withDefaults = applyTableCharacterDefaults options c
 
                     Some(if List.contains c.Name pkNames then { withDefaults with PrimaryKey = true } else withDefaults)
                 | _ -> None)
@@ -2638,12 +2628,12 @@ let private createTable: Parser<Statement, unit> =
               ForeignKeys = foreignKeys
               Checks = checks
               IfNotExists = ifNotExists
-              Charset = tableCharset
-              Collation = tableCollation
-              AutoIncrementSeed = autoIncrementSeed
-              Comment = tableComment
-              Partitioning = partitioning
-              Deprecations = tableDeprecations @ columnDeprecations }
+              Charset = options.Charset
+              Collation = options.Collation
+              AutoIncrementSeed = options.AutoIncrementSeed
+              Comment = options.Comment
+              Partitioning = options.Partitioning
+              Deprecations = options.Deprecations @ columnDeprecations }
 
 let private createTableLike: Parser<Statement, unit> =
     let source = keyword "LIKE" >>. qualifiedTableName

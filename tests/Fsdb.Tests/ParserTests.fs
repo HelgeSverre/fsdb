@@ -1198,7 +1198,7 @@ let tests =
                         when name.Equals("ABS", System.StringComparison.OrdinalIgnoreCase) -> ()
                     | other -> failtestf "expected a functional default, got %A" other
 
-                testCase "ENGINE=/CHARSET= are accepted; the table's defaults stay table-level (numeric columns don't inherit them)"
+                testCase "table character defaults do not attach to numeric columns"
                 <| fun _ ->
                     Expect.equal
                         (parseOk
@@ -1222,6 +1222,19 @@ let tests =
                                 Charset = Some "utf8mb4"
                                 Collation = Some "utf8mb4_unicode_ci" })
                         "table defaults kept on the table; an INT column inherits nothing"
+
+                testCase "final repeated table options win"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "CREATE TABLE repeated (id INT) AUTO_INCREMENT=2 AUTO_INCREMENT=7 COMMENT='first' COMMENT='last' DEFAULT CHARSET=latin1 DEFAULT CHARSET=utf8mb4"
+                    with
+                    | CreateTable
+                        { AutoIncrementSeed = Some 7L
+                          Comment = Some "last"
+                          Charset = Some "utf8mb4" } ->
+                        ()
+                    | other -> failtestf "expected the final repeated table options, got %A" other
 
                 testCase "application-generated indexes, negative defaults, and comma-separated table options parse"
                 <| fun _ ->
