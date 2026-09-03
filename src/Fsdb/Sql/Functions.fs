@@ -111,6 +111,7 @@ type Registry =
       ScalarMetadata: Map<string, ColumnMetadata>
       ScalarParameters: Map<string, ColumnMetadata list>
       TextArguments: Map<string, int -> bool>
+      ByteArguments: Map<string, int -> bool>
       ResultCollations: Map<string, ResultCollation>
       Aggregates: Map<string, Aggregate>
       /// Rich (`QueryContext`-aware) registrations, kept separate from
@@ -126,6 +127,7 @@ let empty: Registry =
       ScalarMetadata = Map.empty
       ScalarParameters = Map.empty
       TextArguments = Map.empty
+      ByteArguments = Map.empty
       ResultCollations = Map.empty
       Aggregates = Map.empty
       Extensions = Map.empty }
@@ -138,6 +140,7 @@ let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
         ScalarMetadata = Map.remove name registry.ScalarMetadata
         ScalarParameters = Map.remove name registry.ScalarParameters
         TextArguments = Map.remove name registry.TextArguments
+        ByteArguments = Map.remove name registry.ByteArguments
         ResultCollations = Map.remove name registry.ResultCollations }
 
 let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
@@ -148,6 +151,7 @@ let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: R
         ScalarMetadata = Map.add name metadata registry.ScalarMetadata
         ScalarParameters = Map.remove name registry.ScalarParameters
         TextArguments = Map.remove name registry.TextArguments
+        ByteArguments = Map.remove name registry.ByteArguments
         ResultCollations = Map.remove name registry.ResultCollations }
 
 let internal registerScalarWithSignature
@@ -166,6 +170,19 @@ let internal registerTextScalar (name: string) (textArgument: int -> bool) (fn: 
     let registry = registerScalar name fn registry
     { registry with TextArguments = Map.add name textArgument registry.TextArguments }
 
+let private registerByteArguments (name: string) (byteArgument: int -> bool) (registry: Registry) =
+    { registry with ByteArguments = Map.add (name.ToUpperInvariant()) byteArgument registry.ByteArguments }
+
+let private registerByteScalar name byteArgument fn registry =
+    registry
+    |> registerScalar name fn
+    |> registerByteArguments name byteArgument
+
+let private registerByteTextScalar name byteArgument fn registry =
+    registry
+    |> registerTextScalar name byteArgument fn
+    |> registerByteArguments name byteArgument
+
 let private registerResultCollation (name: string) (policy: ResultCollation) (registry: Registry) =
     { registry with
         ResultCollations = Map.add (name.ToUpperInvariant()) policy registry.ResultCollations }
@@ -174,6 +191,11 @@ let internal registerStringScalar name textArgument resultCollation fn registry 
     registry
     |> registerTextScalar name textArgument fn
     |> registerResultCollation name resultCollation
+
+let private registerByteStringScalar name byteArgument resultCollation fn registry =
+    registry
+    |> registerStringScalar name byteArgument resultCollation fn
+    |> registerByteArguments name byteArgument
 
 let private registerScalarResult name resultCollation fn registry =
     registry
@@ -201,6 +223,11 @@ let internal lookupScalarParameters (name: string) (registry: Registry) : Column
 
 let internal isTextArgument (name: string) index (registry: Registry) =
     registry.TextArguments
+    |> Map.tryFind (name.ToUpperInvariant())
+    |> Option.exists (fun predicate -> predicate index)
+
+let internal isByteArgument (name: string) index (registry: Registry) =
+    registry.ByteArguments
     |> Map.tryFind (name.ToUpperInvariant())
     |> Option.exists (fun predicate -> predicate index)
 
@@ -5606,9 +5633,9 @@ let builtins: Registry =
     |> registerStringScalar "UCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
     |> registerStringScalar "LOWER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
     |> registerStringScalar "LCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
-    |> registerTextScalar "LENGTH" firstArgument lengthFn
-    |> registerTextScalar "OCTET_LENGTH" firstArgument lengthFn
-    |> registerTextScalar "BIT_LENGTH" firstArgument bitLengthFn
+    |> registerByteTextScalar "LENGTH" firstArgument lengthFn
+    |> registerByteTextScalar "OCTET_LENGTH" firstArgument lengthFn
+    |> registerByteTextScalar "BIT_LENGTH" firstArgument bitLengthFn
     |> registerTextScalar "CHAR_LENGTH" firstArgument charLengthFn
     |> registerTextScalar "CHARACTER_LENGTH" firstArgument charLengthFn
     |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
@@ -5775,14 +5802,14 @@ let builtins: Registry =
     |> registerTextScalar "ASCII" firstArgument asciiFn
     |> registerTextScalar "ORD" firstArgument ordFn
     |> registerScalarResult "CHAR" binaryResult charFn
-    |> registerScalar "HEX" hexFn
+    |> registerByteScalar "HEX" firstArgument hexFn
     |> registerStringScalar "UNHEX" firstArgument binaryResult unhexFn
     |> registerStringScalar "AES_ENCRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesEncrypt "aes-128-ecb")
     |> registerStringScalar "AES_DECRYPT" (arguments (set [ 0; 1 ])) binaryResult (aesDecrypt "aes-128-ecb")
-    |> registerTextScalar "MD5" firstArgument md5Fn
-    |> registerTextScalar "SHA1" firstArgument sha1Fn
-    |> registerTextScalar "SHA" firstArgument sha1Fn
-    |> registerTextScalar "SHA2" firstArgument sha2Fn
+    |> registerByteTextScalar "MD5" firstArgument md5Fn
+    |> registerByteTextScalar "SHA1" firstArgument sha1Fn
+    |> registerByteTextScalar "SHA" firstArgument sha1Fn
+    |> registerByteTextScalar "SHA2" firstArgument sha2Fn
     |> registerScalar "FORMAT" formatFn
     |> registerStringScalar "SUBSTRING_INDEX" (arguments (set [ 0; 1 ])) (InheritArgument 0) substringIndexFn
     |> registerStringScalar "CONCAT_WS" everyArgument (CombineArguments everyArgument) concatWsFn
@@ -5794,11 +5821,11 @@ let builtins: Registry =
     |> registerStringScalar "QUOTE" firstArgument (InheritArgument 0) quoteFn
     |> registerTextScalar "STRCMP" everyArgument strcmpFn
     |> registerStringScalar "SOUNDEX" firstArgument (InheritArgument 0) soundexFn
-    |> registerTextScalar "TO_BASE64" firstArgument toBase64Fn
+    |> registerByteTextScalar "TO_BASE64" firstArgument toBase64Fn
     |> registerStringScalar "FROM_BASE64" firstArgument binaryResult fromBase64Fn
-    |> registerStringScalar "COMPRESS" firstArgument binaryResult compressFn
+    |> registerByteStringScalar "COMPRESS" firstArgument binaryResult compressFn
     |> registerStringScalar "UNCOMPRESS" firstArgument binaryResult uncompressFn
-    |> registerTextScalar "UNCOMPRESSED_LENGTH" firstArgument uncompressedLengthFn
+    |> registerByteTextScalar "UNCOMPRESSED_LENGTH" firstArgument uncompressedLengthFn
     |> registerScalarResult "RANDOM_BYTES" binaryResult randomBytesFn
     |> registerScalar "UUID_SHORT" uuidShortFn
     |> registerScalarResult "NAME_CONST" (InheritArgument 1) nameConstFn
@@ -5847,7 +5874,7 @@ let builtins: Registry =
     |> registerScalar "BITWISE_SHIFT_LEFT" (bitwiseShift (fun value count -> value <<< count))
     |> registerScalar "BITWISE_SHIFT_RIGHT" (bitwiseShift (fun value count -> value >>> count))
     |> registerScalar "OCT" octFn
-    |> registerTextScalar "CRC32" firstArgument crc32Fn
+    |> registerByteTextScalar "CRC32" firstArgument crc32Fn
     |> registerScalar "UUID" uuidFn
     |> registerScalarResult "UUID_TO_BIN" binaryResult uuidToBinFn
     |> registerScalar "BIN_TO_UUID" binToUuidFn

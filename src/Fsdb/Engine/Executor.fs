@@ -1993,6 +1993,8 @@ let rec private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
     match expr with
     | Collate(_, name) -> Collation.charsetOfCollation name
     | Cast(value, _) -> sourceCharset ctx value
+    | FuncCall(name, [ _; Lit(VString charset) ]) when name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase) ->
+        Charset.canonicalName charset
     | _ ->
         tryColumnDefForExpr ctx expr
         |> Option.bind (fun column ->
@@ -4685,10 +4687,16 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         let values =
                             List.zip args values
                             |> List.mapi (fun index (expression, value) ->
-                                if Functions.isTextArgument name index ctx.Registry then
-                                    displayValueForText ctx expression value
-                                else
-                                    value)
+                                let value =
+                                    if Functions.isTextArgument name index ctx.Registry then
+                                        displayValueForText ctx expression value
+                                    else
+                                        value
+
+                                match value with
+                                | VString text when Functions.isByteArgument name index ctx.Registry ->
+                                    VBytes(Charset.encode (sourceCharset ctx expression) text)
+                                | _ -> value)
 
                         let invoke () =
                             let value = fn values

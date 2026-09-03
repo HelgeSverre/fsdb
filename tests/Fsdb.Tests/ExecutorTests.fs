@@ -857,6 +857,14 @@ let tests =
                     | ResultSet(_, [ [ Some "Привет"; Some "РџСЂРёРІРµС‚"; Some "cp1251"; Some "cp1251_general_ci" ] ]) -> ()
                     | other -> failtestf "expected cp1251 conversion metadata and introducer decoding, got %A" other
 
+                    match
+                        runDefault
+                            store
+                            "SELECT HEX(CONVERT('Привет' USING cp1251)), LENGTH(CONVERT('Привет' USING cp1251)), CHAR_LENGTH(CONVERT('Привет' USING cp1251)), BIT_LENGTH(CONVERT('Привет' USING cp1251)), MD5(CONVERT('Привет' USING cp1251)), TO_BASE64(CONVERT('Привет' USING cp1251)), CRC32(CONVERT('Привет' USING cp1251))"
+                    with
+                    | ResultSet(_, [ [ Some "CFF0E8E2E5F2"; Some "6"; Some "6"; Some "48"; Some "43a3f987a7af93811b7682e43ed0752a"; Some "z/Do4uXy"; Some "3495928863" ] ]) -> ()
+                    | other -> failtestf "expected byte functions to use cp1251 bytes, got %A" other
+
                     match runDefault store "INSERT INTO encoded VALUES ('😀', 'x', 'x')" with
                     | Err(1366, _) -> ()
                     | other -> failtestf "expected cp1251 to reject an unencodable scalar, got %A" other
