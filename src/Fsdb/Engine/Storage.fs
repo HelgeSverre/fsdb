@@ -2609,12 +2609,15 @@ let private publishRows (before: Table) (after: Table) : Table =
             |> List.fold
                 (fun indexes group ->
                     let update index (rowId, removed: Value[] option, added: Value[] option) =
-                        index
-                        |> fun current -> removed |> Option.fold (fun current _ -> SpatialIndex.remove rowId current) current
-                        |> fun current ->
-                            added
-                            |> Option.bind (spatialBoundsAt group.ColumnIndex)
-                            |> Option.fold (fun current bounds -> SpatialIndex.add rowId bounds current) current
+                        let removedBounds = removed |> Option.bind (spatialBoundsAt group.ColumnIndex)
+                        let addedBounds = added |> Option.bind (spatialBoundsAt group.ColumnIndex)
+
+                        if removedBounds = addedBounds then
+                            index
+                        else
+                            index
+                            |> SpatialIndex.remove rowId
+                            |> fun current -> addedBounds |> Option.fold (fun current bounds -> SpatialIndex.add rowId bounds current) current
 
                     let index = changes |> Array.fold update (Map.find group.Name indexes)
                     Map.add group.Name index indexes)

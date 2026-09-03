@@ -182,7 +182,7 @@ accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes, overlays, general buffers, geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; the internal four-axis structure is not an R-tree, and the remaining operations stay unsupported | low | subset |
+| Spatial indexes and operations | R-tree indexes, overlays, general buffers, geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; the internal augmented interval tree is not an R-tree, and the remaining operations stay unsupported | low | subset |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
