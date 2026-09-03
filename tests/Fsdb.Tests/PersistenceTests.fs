@@ -363,11 +363,35 @@ let tests =
               Expect.equal reloadedTable.Columns.Head.Srid (Some 0u) "WAL column SRID"
               Expect.equal reloadedTable.Indexes.Head.Kind SpatialIndex "WAL index kind"
 
+              match
+                  trySpatialLookup
+                      reloaded
+                      defaultDatabase
+                      "places"
+                      "shape"
+                      Fsdb.SpatialIndex.Intersects
+                      (tryGeometryFromText 0 "POINT(1.5 -2)" |> Option.get)
+              with
+              | Some lookup -> Expect.equal lookup.SpatialRows.Length 1 "WAL spatial entries"
+              | None -> failtest "expected the WAL spatial index"
+
               snapshotNow dir store
               let snapshotted = load dir
               let snapshottedTable = snapshotted.Catalog.[defaultDatabase].["places"]
               Expect.equal snapshottedTable.Columns.Head.Srid (Some 0u) "snapshot column SRID"
               Expect.equal snapshottedTable.Indexes.Head.Kind SpatialIndex "snapshot index kind"
+
+              match
+                  trySpatialLookup
+                      snapshotted
+                      defaultDatabase
+                      "places"
+                      "shape"
+                      Fsdb.SpatialIndex.Intersects
+                      (tryGeometryFromText 0 "POINT(1.5 -2)" |> Option.get)
+              with
+              | Some lookup -> Expect.equal lookup.SpatialRows.Length 1 "snapshot spatial entries"
+              | None -> failtest "expected the snapshot spatial index"
 
           testCase "WAL and snapshot recovery retain typed TIME values"
           <| fun _ ->

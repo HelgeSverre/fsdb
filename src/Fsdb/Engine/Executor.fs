@@ -87,9 +87,14 @@ type private RangeLookupBounds =
       Lower: (Value * bool) option
       Upper: (Value * bool) option }
 
-type private RangeColumnScope =
-    | BareOrQualifiedRange
-    | QualifiedRange
+type private SpatialLookupPredicate =
+    { Column: string
+      Relation: SpatialIndex.Relation
+      Geometry: Geometry }
+
+type private ColumnReferenceScope =
+    | BareOrQualifiedColumn
+    | QualifiedColumn
 
 type private EqualityAccessPlan =
     { KeyName: string
@@ -8196,6 +8201,9 @@ and private prepareLockingRead
                             tryLiteralInAccess store dbName source.Reference select.Where
                             |> Option.map (fun plan -> plan.Rows |> List.map fst))
                         |> Option.orElseWith (fun () ->
+                            trySpatialLookup BareOrQualifiedColumn store dbName source.Reference select.Where
+                            |> Option.map (fun (_, rows) -> rows |> List.map fst))
+                        |> Option.orElseWith (fun () ->
                             tryRangeLookup store dbName source.Reference select.Where
                             |> Option.map (fun (_, rows) -> rows |> List.map fst))
                         |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
@@ -8356,24 +8364,28 @@ and private runUnlockedSelectStmt
                     match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
                     | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                     | None ->
-                        match tryIndexOrder store registry dbName tref select with
-                        | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
+                        match trySpatialLookup BareOrQualifiedColumn store dbName tref select.Where with
+                        | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                         | None ->
-                            let resolved =
-                                tryRangeLookup store dbName tref select.Where
-                                |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
-                                |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store registry dbName tref select.Where |> Option.map Ok)
-                                |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+                            match tryIndexOrder store registry dbName tref select with
+                            | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
+                            | None ->
+                                let resolved =
+                                    tryRangeLookup store dbName tref select.Where
+                                    |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
+                                    |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store registry dbName tref select.Where |> Option.map Ok)
+                                    |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
 
-                            match resolved with
-                            | Error e -> e, [], []
-                            | Ok(columns, rows) -> runArbitrary columns rows None select
+                                match resolved with
+                                | Error e -> e, [], []
+                                | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then
                     None
                 else
-                    tryQualifiedRangeLookup store dbName tref select.Where
+                    trySpatialLookup QualifiedColumn store dbName tref select.Where
+                    |> Option.orElseWith (fun () -> tryQualifiedRangeLookup store dbName tref select.Where)
 
             match rangeLookup with
             | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
@@ -8465,14 +8477,14 @@ and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralI
                       Values = values |> List.map (List.choose id) }
         | _ -> None)
 
-and private rangeLookupBounds (scope: RangeColumnScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
+and private rangeLookupBounds (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
     match whereExpr with
     | None -> []
     | Some whereExpr ->
         let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
         let columnName = function
-            | Col name when scope = BareOrQualifiedRange -> Some name
+            | Col name when scope = BareOrQualifiedColumn -> Some name
             | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
             | _ -> None
 
@@ -8503,6 +8515,60 @@ and private rangeLookupBounds (scope: RangeColumnScope) (tref: TableRef) (whereE
             { Column = name
               Lower = lower
               Upper = upper })
+
+and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : SpatialLookupPredicate list =
+    let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
+
+    let isGeometryTextConstructor (name: string) =
+        match name.ToUpperInvariant() with
+        | "ST_GEOMFROMTEXT"
+        | "ST_GEOMETRYFROMTEXT"
+        | "GEOMFROMTEXT"
+        | "GEOMETRYFROMTEXT" -> true
+        | _ -> false
+
+    let columnName = function
+        | Col name when scope = BareOrQualifiedColumn -> Some name
+        | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
+        | _ -> None
+
+    let geometry = function
+        | Lit(VGeometry value) -> Some value
+        | FuncCall(name, [ Lit(VString wkt) ]) when isGeometryTextConstructor name ->
+            tryGeometryFromText 0 wkt
+        | FuncCall(name, [ Lit(VString wkt); Lit(VInt srid) ])
+            when srid >= int64 System.Int32.MinValue
+                 && srid <= int64 System.Int32.MaxValue
+                 && isGeometryTextConstructor name ->
+            tryGeometryFromText (int32 srid) wkt
+        | _ -> None
+
+    let predicate relation column value =
+        Option.map2
+            (fun column geometry ->
+                { Column = column
+                  Relation = relation
+                  Geometry = geometry })
+            (columnName column)
+            (geometry value)
+
+    whereExpr
+    |> Option.toList
+    |> List.collect flattenAnd
+    |> List.choose (function
+        | FuncCall(name, [ left; right ]) ->
+            match name.ToUpperInvariant() with
+            | "MBRINTERSECTS" ->
+                predicate SpatialIndex.Intersects left right
+                |> Option.orElseWith (fun () -> predicate SpatialIndex.Intersects right left)
+            | "MBRWITHIN" ->
+                predicate SpatialIndex.Within left right
+                |> Option.orElseWith (fun () -> predicate SpatialIndex.Contains right left)
+            | "MBRCONTAINS" ->
+                predicate SpatialIndex.Contains left right
+                |> Option.orElseWith (fun () -> predicate SpatialIndex.Within right left)
+            | _ -> None
+        | _ -> None)
 
 and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : EqualityAccessPlan option =
     if not (storedValuesMatchReadValues store) then
@@ -8666,15 +8732,32 @@ and private tryCorrelatedEqualityLookup
 and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    (if storedValuesMatchReadValues store then rangeLookupBounds BareOrQualifiedRange tref whereExpr else [])
+    (if storedValuesMatchReadValues store then rangeLookupBounds BareOrQualifiedColumn tref whereExpr else [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows))
 
+and private trySpatialAccess
+    (scope: ColumnReferenceScope)
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : Storage.SpatialLookup option =
+    let tableDb = tref.Database |> Option.defaultValue dbName
+
+    (if storedValuesMatchReadValues store then spatialLookupPredicates scope tref whereExpr else [])
+    |> List.tryPick (fun predicate ->
+        Storage.trySpatialLookup store tableDb tref.Table predicate.Column predicate.Relation predicate.Geometry)
+
+and private trySpatialLookup scope store dbName tref whereExpr =
+    trySpatialAccess scope store dbName tref whereExpr
+    |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows)
+
 and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    (if storedValuesMatchReadValues store then rangeLookupBounds QualifiedRange tref whereExpr else [])
+    (if storedValuesMatchReadValues store then rangeLookupBounds QualifiedColumn tref whereExpr else [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows))
@@ -8764,7 +8847,7 @@ and private tryIndexOrder
                 match orderedColumns with
                 | [ { Transform = None } as term ] ->
                     let lower, upper =
-                        rangeLookupBounds BareOrQualifiedRange tref select.Where
+                        rangeLookupBounds BareOrQualifiedColumn tref select.Where
                         |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, term.Column, System.StringComparison.OrdinalIgnoreCase))
                         |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
                         |> Option.defaultValue (None, None)
@@ -13213,46 +13296,60 @@ let rec private explainJoinBlock
 
                     true
                 | None ->
-                    match indexOrderPlan with
+                    match trySpatialAccess BareOrQualifiedColumn store dbName tref whereOpt with
                     | Some plan ->
-                        let hasBounds =
-                            match plan.ColumnIndices with
-                            | [ index ] ->
-                                rangeLookupBounds BareOrQualifiedRange tref whereOpt
-                                |> List.exists (fun bounds ->
-                                    System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
-                            | _ -> false
-
                         acc.Add
                             { Id = Some id
                               SelectType = selectType
                               Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                              Type = Some(if hasBounds then "range" else "index")
-                              Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
+                              Type = Some "range"
+                              Key = Some(plan.SpatialIndexName, Some 34)
                               Ref = None
-                              Rows = Some(uint64 plan.EstimatedRows)
+                              Rows = Some(uint64 plan.SpatialRows.Length)
                               Extra = extra }
 
                         true
                     | None ->
-                        rangeLookupBounds BareOrQualifiedRange tref whereOpt
-                        |> List.tryPick (fun bounds ->
-                            Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper)
-                        |> Option.map (fun lookup ->
+                        match indexOrderPlan with
+                        | Some plan ->
+                            let hasBounds =
+                                match plan.ColumnIndices with
+                                | [ index ] ->
+                                    rangeLookupBounds BareOrQualifiedColumn tref whereOpt
+                                    |> List.exists (fun bounds ->
+                                        System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
+                                | _ -> false
+
                             acc.Add
                                 { Id = Some id
                                   SelectType = selectType
                                   Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                                  Type = Some "range"
-                                  Key =
-                                    Some(
-                                        lookup.RangeIndexName,
-                                        explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
-                                    )
+                                  Type = Some(if hasBounds then "range" else "index")
+                                  Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
                                   Ref = None
-                                  Rows = Some(uint64 lookup.RangeRows.Length)
-                                  Extra = extra })
-                        |> Option.isSome
+                                  Rows = Some(uint64 plan.EstimatedRows)
+                                  Extra = extra }
+
+                            true
+                        | None ->
+                            rangeLookupBounds BareOrQualifiedColumn tref whereOpt
+                            |> List.tryPick (fun bounds ->
+                                Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper)
+                            |> Option.map (fun lookup ->
+                                acc.Add
+                                    { Id = Some id
+                                      SelectType = selectType
+                                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                                      Type = Some "range"
+                                      Key =
+                                        Some(
+                                            lookup.RangeIndexName,
+                                            explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
+                                        )
+                                      Ref = None
+                                      Rows = Some(uint64 lookup.RangeRows.Length)
+                                      Extra = extra })
+                            |> Option.isSome
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
@@ -17380,6 +17477,7 @@ let rec executeAs
             fullTextPlan
             |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
             |> Option.orElseWith (fun () -> tryIndexedLookup store dbName updateStmt.From updateStmt.Where)
+            |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName updateStmt.From updateStmt.Where)
             |> Option.orElseWith (fun () -> tryRangeLookup store dbName updateStmt.From updateStmt.Where)
 
         let candidateRowsResult = mutationCandidateRows tableRootResult narrowed
@@ -17765,6 +17863,7 @@ let rec executeAs
             fullTextPlan
             |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
             |> Option.orElseWith (fun () -> tryIndexedLookup targetStore dbName deleteStmt.From deleteStmt.Where)
+            |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn targetStore dbName deleteStmt.From deleteStmt.Where)
             |> Option.orElseWith (fun () -> tryRangeLookup targetStore dbName deleteStmt.From deleteStmt.Where)
 
         let candidateRowsResult = mutationCandidateRows tableRootResult narrowed
@@ -17946,6 +18045,7 @@ let transactionWriteTargets (store: Store) (dbName: string) (statement: Statemen
         let database = tableRef.Database |> Option.defaultValue dbName
 
         tryIndexedLookup store dbName tableRef predicate
+        |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tableRef predicate)
         |> Option.orElseWith (fun () -> tryRangeLookup store dbName tableRef predicate)
         |> Option.map (fun (_, rows) ->
             database,

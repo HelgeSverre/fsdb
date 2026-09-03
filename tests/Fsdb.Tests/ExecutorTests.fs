@@ -8724,7 +8724,76 @@ let tests =
                     | Ok(_, [ [ _; Some ddl ] ]) ->
                         Expect.stringContains ddl "/*!80003 SRID 0 */" "SRID restriction"
                         Expect.stringContains ddl "SPATIAL KEY `sx` (`shape`)" "spatial key"
-                    | other -> failtestf "expected spatial SHOW CREATE output, got %A" other ]
+                    | other -> failtestf "expected spatial SHOW CREATE output, got %A" other
+
+                testCase "spatial MBR probes match a scan twin and retain residual predicates"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, shape GEOMETRY NOT NULL SRID 0, hit INT, SPATIAL INDEX sx(shape))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, shape GEOMETRY NOT NULL SRID 0, hit INT)" |> ignore
+
+                    let values =
+                        [ 1 .. 100 ]
+                        |> List.map (fun id -> sprintf "(%d, ST_GeomFromText('POINT(%d %d)', 0), 0)" id id id)
+                        |> String.concat ","
+
+                    runDefault store ("INSERT INTO indexed VALUES " + values) |> ignore
+                    runDefault store ("INSERT INTO scanned VALUES " + values) |> ignore
+
+                    let predicate table residual =
+                        sprintf
+                            "SELECT id FROM %s WHERE MBRINTERSECTS(shape, ST_GeomFromText('POLYGON((40 40,42 40,42 42,40 42,40 40))', 0))%s ORDER BY id"
+                            table
+                            residual
+
+                    let rows sql =
+                        match run store registry sql with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected spatial rows, got %A" other
+
+                    let indexed = rows (predicate "indexed" " AND TOUCH(id) = id")
+                    let scanned = rows (predicate "scanned" "")
+
+                    Expect.equal indexed scanned "indexed and scanned results"
+                    Expect.equal indexed [ [ Some "40" ]; [ Some "41" ]; [ Some "42" ] ] "boundary intersections"
+                    Expect.isLessThan calls 8 "the residual only sees spatial candidates"
+
+                    match runDefault store ("EXPLAIN " + predicate "indexed" "") with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "sx"; Some "sx"; Some "34"; None; Some "3"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a spatial range plan, got %A" other
+
+                testCase "spatial candidates narrow UPDATE and DELETE"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE places (id INT PRIMARY KEY, shape GEOMETRY NOT NULL SRID 0, hit INT, SPATIAL INDEX sx(shape))" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO places VALUES (1,ST_GeomFromText('POINT(1 1)',0),0),(2,ST_GeomFromText('POINT(2 2)',0),0),(3,ST_GeomFromText('POINT(10 10)',0),0)"
+                    |> ignore
+
+                    let area = "ST_GeomFromText('POLYGON((0 0,3 0,3 3,0 3,0 0))',0)"
+
+                    match runDefault store (sprintf "UPDATE places SET hit = 1 WHERE MBRWITHIN(shape, %s)" area) with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected two updated rows, got %A" other
+
+                    match runDefault store (sprintf "DELETE FROM places WHERE MBRCONTAINS(%s, shape) AND hit = 1" area) with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected two deleted rows, got %A" other
+
+                    match runDefault store "SELECT id FROM places" with
+                    | ResultSet(_, [ [ Some "3" ] ]) -> ()
+                    | other -> failtestf "expected the outside row, got %A" other ]
 
           // Expectations read off the MySQL 8.4.11 oracle over
           //   t = (1,10,1) (2,20,1) (3,30,2) (4,40,2) (5,50,2)  [id, v, g]

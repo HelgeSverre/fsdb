@@ -4117,32 +4117,34 @@ let trySpatialLookup
     (tableName: string)
     (columnName: string)
     (relation: SpatialIndex.Relation)
-    (bounds: GeometryBounds)
+    (geometry: Geometry)
     : SpatialLookup option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
         resolveColumn table.Columns columnName
         |> Result.toOption
         |> Option.bind (fun columnIndex ->
-            spatialKeyGroups table
-            |> List.filter _.Visible
-            |> List.filter (fun group -> group.ColumnIndex = columnIndex)
-            |> List.tryHead
-            |> Option.bind (fun group ->
-                table.SpatialIndexes
-                |> Map.tryFind group.Name
-                |> Option.map (fun index ->
-                    let rows =
-                        SpatialIndex.search relation bounds index
-                        |> Seq.choose (fun rowId ->
-                            table.RowsArray.TryFind rowId
-                            |> Option.map (fun row -> rowId, row))
-                        |> List.ofSeq
+            match table.Columns.[columnIndex].Srid, geometryBounds geometry with
+            | Some srid, Some bounds when int64 srid = int64 geometry.Srid ->
+                spatialKeyGroups table
+                |> List.filter _.Visible
+                |> List.tryFind (fun group -> group.ColumnIndex = columnIndex)
+                |> Option.bind (fun group ->
+                    table.SpatialIndexes
+                    |> Map.tryFind group.Name
+                    |> Option.map (fun index ->
+                        let rows =
+                            SpatialIndex.search relation bounds index
+                            |> Seq.choose (fun rowId ->
+                                table.RowsArray.TryFind rowId
+                                |> Option.map (fun row -> rowId, row))
+                            |> List.ofSeq
 
-                    { SpatialIndexName = group.Name
-                      SpatialColumnIndex = columnIndex
-                      SpatialColumns = table.Columns
-                      SpatialRows = rows }))))
+                        { SpatialIndexName = group.Name
+                          SpatialColumnIndex = columnIndex
+                          SpatialColumns = table.Columns
+                          SpatialRows = rows }))
+            | _ -> None))
 
 /// Uses a fully-bound composite key. Residual predicate evaluation remains
 /// responsible for contradictory or repeated equalities.

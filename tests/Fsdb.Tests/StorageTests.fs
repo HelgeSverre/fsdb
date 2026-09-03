@@ -864,7 +864,7 @@ let tests =
                     let shape = { col "shape" (TGeometry Geometry) false with Srid = Some 0u }
                     let index = { Name = "sx"; KeyColumns = indexColumns [ "shape" ]; Unique = false; Visible = true; Kind = SpatialIndex }
                     let geometry text = VGeometry(tryGeometryFromText 0 text |> Option.get)
-                    let bounds text = tryGeometryFromText 0 text |> Option.bind geometryBounds |> Option.get
+                    let parsed text = tryGeometryFromText 0 text |> Option.get
 
                     createTable store defaultDatabase "places" [ id; shape ] [ index ] [] None None
                     |> Result.defaultWith (failtestf "create failed: %A")
@@ -883,7 +883,7 @@ let tests =
                     |> ignore
 
                     let matchingIds query =
-                        match trySpatialLookup store defaultDatabase "places" "shape" SpatialIndex.Intersects (bounds query) with
+                        match trySpatialLookup store defaultDatabase "places" "shape" SpatialIndex.Intersects (parsed query) with
                         | Some lookup -> lookup.SpatialRows |> List.map (fun (_, row) -> row.[0])
                         | None -> failtest "expected a spatial lookup"
 
