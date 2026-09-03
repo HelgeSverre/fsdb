@@ -5197,6 +5197,45 @@ let tests =
                     | ResultSet(_, [ [ Some "100" ] ]) -> ()
                     | other -> failtestf "expected all rows through the selected access path, got %A" other
 
+                testCase "equality planning avoids broad index bucket unions"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE scores (id INT PRIMARY KEY, score INT, KEY ix_score (score))" |> ignore
+                    runDefault store "CREATE TABLE skewed (id INT PRIMARY KEY, bucket INT, KEY ix_bucket (bucket))" |> ignore
+
+                    [ for id in 1..100 -> sprintf "(%d, %d)" id id ]
+                    |> String.concat ", "
+                    |> sprintf "INSERT INTO scores VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    [ for id in 1..100 -> sprintf "(%d, 1)" id ]
+                    |> String.concat ", "
+                    |> sprintf "INSERT INTO skewed VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    let inList last =
+                        [ 1..last ] |> List.map string |> String.concat ","
+
+                    let half = runDefault store (sprintf "EXPLAIN SELECT COUNT(*) FROM scores WHERE score IN (%s)" (inList 50)) |> explainRow
+                    Expect.equal half.AccessType (Some "range") "a half-table IN list retains indexed buckets"
+                    Expect.equal half.EstimatedRows (Some "50") "the IN estimate is the distinct bucket union"
+
+                    let broad = runDefault store (sprintf "EXPLAIN SELECT COUNT(*) FROM scores WHERE score IN (%s)" (inList 100)) |> explainRow
+                    Expect.equal broad.AccessType (Some "ALL") "an all-row IN list uses the table scan"
+                    Expect.equal broad.EstimatedRows (Some "100") "the broad IN estimate is the table cardinality"
+
+                    let skewed = runDefault store "EXPLAIN SELECT COUNT(*) FROM skewed WHERE bucket = 1" |> explainRow
+                    Expect.equal skewed.AccessType (Some "ALL") "an all-row equality bucket uses the table scan"
+
+                    let empty = runDefault store "EXPLAIN SELECT COUNT(*) FROM skewed WHERE bucket = 2" |> explainRow
+                    Expect.equal empty.AccessType (Some "ref") "an empty equality bucket stops at the index"
+
+                    match runDefault store (sprintf "SELECT COUNT(*) FROM scores WHERE score IN (%s)" (inList 100)) with
+                    | ResultSet(_, [ [ Some "100" ] ]) -> ()
+                    | other -> failtestf "expected the broad IN result, got %A" other
+
                 testCase "a secondary string range follows collation boundaries with a reversed lower comparison"
                 <| fun _ ->
                     let store = newStore ()
