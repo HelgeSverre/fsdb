@@ -235,6 +235,24 @@ let tests =
               let response = parseHandshakeResponse (w.ToArray())
               Expect.equal response.Database None "empty database names do not request USE"
 
+          testCase "parseHandshakeResponse reads the Zstandard compression level"
+          <| fun _ ->
+              let capabilities =
+                  ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth ||| ClientZstdCompressionAlgorithm
+
+              let writer = Writer()
+              writer.WriteInt32LE(int capabilities)
+              writer.WriteInt32LE 16777216
+              writer.WriteByte 45uy
+              writer.WriteBytes(Array.zeroCreate<byte> 23)
+              writer.WriteNullTerminatedString "root"
+              writer.WriteByte 0uy
+              writer.WriteNullTerminatedString "mysql_native_password"
+              writer.WriteByte 7uy
+
+              let response = parseHandshakeResponse (writer.ToArray())
+              Expect.equal response.ZstdCompressionLevel (Some 7) "the trailing compression level"
+
           testCase "parseChangeUserRequest follows negotiated field layout"
           <| fun _ ->
               let capabilities = ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
@@ -289,9 +307,33 @@ let tests =
               Expect.equal (serverCapabilities false &&& ClientSsl) 0u "plaintext servers omit CLIENT_SSL"
               Expect.equal (serverCapabilities true &&& ClientSsl) ClientSsl "TLS servers advertise CLIENT_SSL"
 
-          testCase "zlib compression is advertised"
+          testCase "zlib and Zstandard compression are advertised"
           <| fun _ ->
               Expect.equal (serverCapabilities false &&& ClientCompress) ClientCompress "clients can negotiate CLIENT_COMPRESS"
+              Expect.equal
+                  (serverCapabilities false &&& ClientZstdCompressionAlgorithm)
+                  ClientZstdCompressionAlgorithm
+                  "clients can negotiate CLIENT_ZSTD_COMPRESSION_ALGORITHM"
+
+          testCase "compression negotiation follows MySQL priority and level bounds"
+          <| fun _ ->
+              let zlib = Fsdb.Compression.Algorithm.Zlib
+              let zstd level = Fsdb.Compression.Algorithm.Zstandard level
+
+              Expect.equal
+                  (negotiatedCompression (ClientCompress ||| ClientZstdCompressionAlgorithm) (Some 7))
+                  (Ok(Some zlib))
+                  "zlib wins when both algorithms are requested"
+
+              Expect.equal
+                  (negotiatedCompression ClientZstdCompressionAlgorithm (Some 7))
+                  (Ok(Some(zstd 7)))
+                  "a valid Zstandard level is retained"
+
+              for level in [ None; Some 0; Some 23; Some 255 ] do
+                  match negotiatedCompression ClientZstdCompressionAlgorithm level with
+                  | Error(3923, "Invalid zstd compression level for algorithm 'zstd'.") -> ()
+                  | other -> failtestf "expected MySQL's invalid Zstandard level error, got %A" other
 
           testCase "typed text rows encode BLOB values as raw bytes"
           <| fun _ ->

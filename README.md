@@ -255,8 +255,8 @@ introducers.
 `COM_STMT_PREPARE`/`COM_STMT_EXECUTE` bind parameter `Value`s into the
 parsed AST (`?` → `Placeholder` → `Lit`), so a bound value keeps its real
 type for every statement the grammar parses; only the text-probed `SET`/
-`SHOW` forms still re-splice literals. Forward-only prepared cursors and zlib
-protocol compression are supported as well.
+`SHOW` forms still re-splice literals. Forward-only prepared cursors and
+zlib/Zstandard protocol compression are supported as well.
 
 ## SQL surface
 

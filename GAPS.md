@@ -44,7 +44,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
 | Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap currently inventoried |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
-| Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
+| Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib/Zstandard compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, column, role, and proxy grants; per-host accounts; expiry sandboxes; resource caps; account locks; mandatory/default/session roles; inherited authorization | Auth plugins cannot select a proxied identity |
 | Metadata | Broad INFORMATION_SCHEMA coverage, every MySQL 8.4 `mysql.*` table schema, fsdb catalogs, active transaction metadata, and the complete keyword and `Com_*` registries | Engine-maintained physical contents remain absent |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
@@ -399,7 +399,7 @@ constant-time credential verification, COM_QUERY/INIT_DB/PING/FIELD_LIST/
 QUIT/RESET_CONNECTION, full COM_STMT_PREPARE/EXECUTE/FETCH/CLOSE/SEND_LONG_DATA/
 RESET with read-only cursors, type reuse, and 1153-on-overflow long-data accounting, text and
 binary row encodings including µs-precision temporals and 16 MiB multi-packet
-framing, zlib CLIENT_COMPRESS transport, TLS 1.2/1.3 with optional PEM server and client-CA certificates,
+framing, zlib CLIENT_COMPRESS and Zstandard transport, TLS 1.2/1.3 with optional PEM server and client-CA certificates,
 require_secure_transport, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_connections/
 max_prepared_stmt_count enforced with honest advertising, COM_SET_OPTION
 multi-statement toggling, mid-query
@@ -417,7 +417,7 @@ the statement.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
-| Compression | CLIENT_COMPRESS/ZSTD | CLIENT_COMPRESS zlib framing is negotiated; Zstandard is not offered | low | subset |
+| Compression policy | `protocol_compression_algorithms` changes the algorithms offered to new connections | zlib and Zstandard are always offered; the global variable reports that static policy and refuses assignment | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, conditional DDL and unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |

@@ -1284,11 +1284,30 @@ let private handleConnection
                     | _ -> clientHost |> Option.defaultValue "unknown"
                 // Effective capabilities: never claim something the client didn't ask for.
                 capabilities <- resp.Capabilities &&& offeredCapabilities
+                let compressionResult = negotiatedCompression capabilities resp.ZstdCompressionLevel
+
+                let compression =
+                    match compressionResult with
+                    | Ok value -> value
+                    | Error _ -> None
+
                 // Authenticate before any session state exists; on denial the
                 // 1045 is already written and the command loop below never
                 // runs (see the guard on `do! loop session` at the bottom).
                 let! authenticated =
-                    if options.RequireSecureTransport && tlsVersion.IsNone then
+                    match compressionResult with
+                    | Error(code, message) ->
+                        async {
+                            do!
+                                writePacketAsync
+                                    stream
+                                    { SeqId = handshakeResp.SeqId + 1uy
+                                      Payload = errPayload capabilities code message }
+                                |> Async.Ignore
+
+                            return None
+                        }
+                    | Ok _ when options.RequireSecureTransport && tlsVersion.IsNone ->
                         async {
                             do!
                                 writePacketAsync
@@ -1303,7 +1322,7 @@ let private handleConnection
 
                             return None
                         }
-                    else
+                    | Ok _ ->
                         authenticateAccount
                             client
                             stream
@@ -1348,6 +1367,7 @@ let private handleConnection
                         Database = database
                         CustomFunctions = customFunctions
                         Capabilities = capabilities
+                        Compression = compression
                         MultiStatementsEnabled = capabilities &&& ClientMultiStatements <> 0u
                         TlsVersion = tlsVersion
                         TlsCipher = tlsCipher
@@ -1391,10 +1411,12 @@ let private handleConnection
                                   Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
                             |> Async.Ignore
 
-                        if capabilities &&& ClientCompress <> 0u then
-                            let compressed = new CompressedStream(stream, true)
+                        match compression with
+                        | Some algorithm ->
+                            let compressed = new CompressedStream(stream, true, algorithm)
                             compressedStream <- Some compressed
                             stream <- compressed
+                        | None -> ()
 
                 // Runs a statement dispatch under `withCancellationWatch`,
                 // catching the `OperationCanceledException` a killed
@@ -1461,7 +1483,8 @@ let private handleConnection
                                       Username = request.Username
                                       AuthResponse = request.AuthResponse
                                       ClientPlugin = request.ClientPlugin
-                                      Database = request.Database }
+                                      Database = request.Database
+                                      ZstdCompressionLevel = None }
 
                                 let! authenticated =
                                     authenticateAccount

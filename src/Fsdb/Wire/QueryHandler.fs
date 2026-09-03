@@ -255,10 +255,15 @@ let private globalScopeOnlyVariables =
           "ft_query_expansion_limit"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
-          "mandatory_roles" ]
+          "mandatory_roles"
+          "protocol_compression_algorithms" ]
 
 let private readOnlySystemVariables =
-    Set.ofList [ "ft_query_expansion_limit"; "innodb_ft_max_token_size"; "innodb_ft_min_token_size" ]
+    Set.ofList
+        [ "ft_query_expansion_limit"
+          "innodb_ft_max_token_size"
+          "innodb_ft_min_token_size"
+          "protocol_compression_algorithms" ]
 
 let private globalOnlyVariables =
     Set.union
@@ -3535,7 +3540,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         InformationSchema.showStatus
             isGlobal
             session.StatusCounters
-            (session.Capabilities &&& Protocol.ClientCompress <> 0u)
+            (session.Compression |> Option.map Compression.Algorithm.name)
+            (session.Compression |> Option.map Compression.Algorithm.level |> Option.defaultValue 0)
             session.TransportMetrics.BytesReceived
             session.TransportMetrics.BytesSent
             session.TlsCipher

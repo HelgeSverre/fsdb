@@ -5484,15 +5484,53 @@ let tests =
 
               let session =
                   { create 1 (Fsdb.Storage.create ()) with
-                      Capabilities = Fsdb.Protocol.ClientCompress
+                      Capabilities = Fsdb.Protocol.ClientZstdCompressionAlgorithm
+                      Compression = Some(Fsdb.Compression.Algorithm.Zstandard 7)
                       TransportMetrics = metrics }
 
-              for name, expected in [ "Compression", "ON"; "Bytes_received", "123"; "Bytes_sent", "456" ] do
+              let expectStatus session name expected =
                   match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
                   | ResultSet(_, [ [ Some actual; Some value ] ]) ->
                       Expect.equal actual name "the status name"
                       Expect.equal value expected (name + " value")
                   | other -> failtestf "expected %s status, got %A" name other
+
+              for name, expected in
+                  [ "Compression", "ON"
+                    "Compression_algorithm", "zstd"
+                    "Compression_level", "7"
+                    "Bytes_received", "123"
+                    "Bytes_sent", "456" ] do
+                  expectStatus session name expected
+
+              let zlib = { session with Compression = Some Fsdb.Compression.Algorithm.Zlib }
+              expectStatus zlib "Compression_algorithm" "zlib"
+              expectStatus zlib "Compression_level" "6"
+
+              let uncompressed = { session with Compression = None }
+              expectStatus uncompressed "Compression" "OFF"
+              expectStatus uncompressed "Compression_algorithm" ""
+              expectStatus uncompressed "Compression_level" "0"
+
+              match handle session "SHOW GLOBAL STATUS LIKE 'Compression_algorithm'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected connection-only compression status to be absent globally, got %A" other
+
+          testCase "compression algorithm variable is global and read only"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT @@global.protocol_compression_algorithms" |> snd with
+              | ResultSet(_, [ [ Some "zlib,zstd,uncompressed" ] ]) -> ()
+              | other -> failtestf "expected the advertised compression algorithms, got %A" other
+
+              match handle session "SELECT @@session.protocol_compression_algorithms" |> snd with
+              | Err(1238, _) -> ()
+              | other -> failtestf "expected a global-only variable error, got %A" other
+
+              match handle session "SET GLOBAL protocol_compression_algorithms = 'zstd'" |> snd with
+              | Err(1238, _) -> ()
+              | other -> failtestf "expected the static setting to be read only, got %A" other
 
           TestSupport.processGlobalCase
               "SHOW SESSION/GLOBAL VARIABLES match like the bare form; GLOBAL reads the store scope"

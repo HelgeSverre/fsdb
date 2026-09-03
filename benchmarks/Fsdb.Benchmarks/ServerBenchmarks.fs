@@ -22,6 +22,7 @@ open Fsdb.Benchmarks.Schema
 type ServerBenchmarks() =
 
     let mutable conn : MySqlConnection = Unchecked.defaultof<_>
+    let mutable compressedConn : MySqlConnection = Unchecked.defaultof<_>
     // A second connection authenticated as the SELECT-only `bench_reader`
     // account (created in Setup) — statements on it exercise the db-level
     // privilege-check path instead of root's all-global fast path.
@@ -61,6 +62,11 @@ type ServerBenchmarks() =
         conn <- new MySqlConnection(Schema.connectionString this.Target)
         conn.Open()
 
+        let compressedConnection = MySqlConnectionStringBuilder(Schema.connectionString this.Target)
+        compressedConnection.UseCompression <- true
+        compressedConn <- new MySqlConnection(compressedConnection.ConnectionString)
+        compressedConn.Open()
+
         // The limited account the auth/enforcement benchmarks use — created
         // idempotently per case (fsdb restarts fresh; the long-lived mysql
         // just re-creates it).
@@ -87,6 +93,7 @@ type ServerBenchmarks() =
         concurrentConnections |> Array.iter _.Dispose()
         concurrentConnections <- [||]
         limitedConn.Dispose()
+        compressedConn.Dispose()
         conn.Dispose()
 
         if this.Target = "fsdb" || this.Target = "fsdb-wal" then
@@ -106,12 +113,14 @@ type ServerBenchmarks() =
         cmd.CommandText <- sql
         cmd.ExecuteNonQuery() |> ignore
 
-    member private this.Query(sql: string) =
-        use cmd = conn.CreateCommand()
+    member private _.QueryOn(connection: MySqlConnection, sql: string) =
+        use cmd = connection.CreateCommand()
         cmd.CommandText <- sql
         use reader = cmd.ExecuteReader()
         while reader.Read() do
             ()
+
+    member private this.Query(sql: string) = this.QueryOn(conn, sql)
 
     member private _.ConcurrentExec(commandText: int -> string) =
         concurrentConnections
@@ -129,6 +138,16 @@ type ServerBenchmarks() =
     [<BenchmarkCategory("Scale")>]
     member this.PointSelectByPk() =
         this.Query $"SELECT id, name, email, age, meta, created_at FROM users WHERE id = {randomUserId ()}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Wire")>]
+    member this.SelectCompressiblePayload() =
+        this.Query "SELECT REPEAT('compressible-', 512)"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Wire")>]
+    member this.SelectCompressiblePayloadZlib() =
+        this.QueryOn(compressedConn, "SELECT REPEAT('compressible-', 512)")
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "LiteralIn")>]

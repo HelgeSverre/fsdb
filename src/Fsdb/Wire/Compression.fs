@@ -6,9 +6,24 @@ open System.IO.Compression
 open System.Threading
 open System.Threading.Tasks
 open Fsdb.Binary
+open ZstdSharp
+
+[<RequireQualifiedAccess>]
+type Algorithm =
+    | Zlib
+    | Zstandard of level: int
+
+module Algorithm =
+    let name = function
+        | Algorithm.Zlib -> "zlib"
+        | Algorithm.Zstandard _ -> "zstd"
+
+    let level = function
+        | Algorithm.Zlib -> 6
+        | Algorithm.Zstandard value -> value
 
 let private compressedHeaderLength = 7
-// Leaves room for zlib framing when incompressible input expands slightly.
+// Keeps raw fallbacks below the compressed frame's 3-byte length ceiling.
 let private maxInputChunk = 0xff0000
 let private minimumCompressionLength = 50
 
@@ -86,25 +101,54 @@ let private compressZlib (payload: byte[]) (cancellationToken: CancellationToken
 
         do!
             task {
-                use compressor = new ZLibStream(output, CompressionLevel.Fastest, true)
+                use compressor = new ZLibStream(output, CompressionLevel.Optimal, true)
                 do! compressor.WriteAsync(payload, 0, payload.Length, cancellationToken)
             }
 
         return output.ToArray()
     }
 
+let private exactLength (buffer: byte[]) length =
+    if length = buffer.Length then buffer else buffer.[.. length - 1]
+
+let private compressZstandard compressionLevel (payload: byte[]) (cancellationToken: CancellationToken) =
+    cancellationToken.ThrowIfCancellationRequested()
+    use compressor = new Compressor(compressionLevel)
+    let buffer = Array.zeroCreate<byte> (Compressor.GetCompressBound payload.Length)
+    let length = compressor.Wrap(payload, buffer, 0)
+    Task.FromResult(exactLength buffer length)
+
+let private decompressZstandard expectedLength (payload: byte[]) (cancellationToken: CancellationToken) =
+    cancellationToken.ThrowIfCancellationRequested()
+    use decompressor = new Decompressor()
+    let buffer = Array.zeroCreate<byte> expectedLength
+    let length = decompressor.Unwrap(payload, buffer, 0)
+
+    if length <> expectedLength then
+        raise (InvalidDataException("Compressed packet length does not match its header"))
+
+    Task.FromResult buffer
+
 let private zlib =
     { Compress = compressZlib
       Decompress = decompressZlib }
 
+let private codecFor = function
+    | Algorithm.Zlib -> zlib
+    | Algorithm.Zstandard compressionLevel ->
+        { Compress = compressZstandard compressionLevel
+          Decompress = decompressZstandard }
+
 /// Translates MySQL compressed packets to the ordinary packet byte stream.
-type CompressedStream(inner: Stream, leaveOpen: bool) =
+type CompressedStream(inner: Stream, leaveOpen: bool, algorithm: Algorithm) =
     inherit Stream()
 
-    let codec = zlib
+    let codec = codecFor algorithm
     let mutable readBuffer = Array.empty<byte>
     let mutable readOffset = 0
     let mutable sequenceId = 0uy
+
+    new(inner, leaveOpen) = new CompressedStream(inner, leaveOpen, Algorithm.Zlib)
 
     member _.BeginCommand() =
         if readOffset <> readBuffer.Length then

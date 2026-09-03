@@ -101,6 +101,7 @@ let ClientPluginAuthLenencClientData = 0x00200000u
 let ClientCanHandleExpiredPasswords = 0x00400000u
 let ClientSessionTrack = 0x00800000u
 let ClientDeprecateEof = 0x01000000u
+let ClientZstdCompressionAlgorithm = 0x04000000u
 
 /// What this server offers during the handshake. Effective per-connection
 /// capabilities are this AND-ed with whatever the client requests.
@@ -120,6 +121,7 @@ let ServerCapabilities =
     ||| ClientCanHandleExpiredPasswords
     ||| ClientSessionTrack
     ||| ClientDeprecateEof
+    ||| ClientZstdCompressionAlgorithm
 
 /// Adds capabilities enabled by the current transport and server settings.
 let serverCapabilities (tlsEnabled: bool) =
@@ -206,7 +208,8 @@ type HandshakeResponse =
       /// `Server` sends an AuthSwitchRequest when this isn't
       /// mysql_native_password and the account needs verification.
       ClientPlugin: string option
-      Database: string option }
+      Database: string option
+      ZstdCompressionLevel: int option }
 
 type ChangeUserRequest =
     { Username: string
@@ -280,11 +283,28 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
         else
             None
 
+    let zstdCompressionLevel =
+        if capabilities &&& ClientZstdCompressionAlgorithm <> 0u && r.Remaining > 0 then
+            Some(int (r.ReadByte()))
+        else
+            None
+
     { Capabilities = capabilities
       Username = username
       AuthResponse = authResponse
       ClientPlugin = clientPlugin
-      Database = database }
+      Database = database
+      ZstdCompressionLevel = zstdCompressionLevel }
+
+let negotiatedCompression capabilities zstdCompressionLevel =
+    if capabilities &&& ClientCompress <> 0u then
+        Ok(Some Compression.Algorithm.Zlib)
+    elif capabilities &&& ClientZstdCompressionAlgorithm <> 0u then
+        match zstdCompressionLevel with
+        | Some level when level >= 1 && level <= 22 -> Ok(Some(Compression.Algorithm.Zstandard level))
+        | _ -> Error(3923, "Invalid zstd compression level for algorithm 'zstd'.")
+    else
+        Ok None
 
 /// Parses the COM_CHANGE_USER payload after its command byte. Optional
 /// fields follow the capabilities negotiated during the initial handshake.

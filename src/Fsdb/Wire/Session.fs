@@ -54,6 +54,7 @@ let defaultVariables: Map<string, string option> =
           "performance_schema", "0"
           "query_cache_size", "0"
           "query_cache_type", "OFF"
+          "protocol_compression_algorithms", "zlib,zstd,uncompressed"
           "block_encryption_mode", "aes-128-ecb"
           "default_storage_engine", "InnoDB"
           "event_scheduler", "ON"
@@ -324,6 +325,7 @@ type Session =
       CustomFunctions: Fsdb.Functions.Registry
       /// Effective handshake capabilities.
       Capabilities: uint32
+      Compression: Fsdb.Compression.Algorithm option
       MultiStatementsEnabled: bool
       StatusCounters: Fsdb.InformationSchema.StatusCounters
       TlsVersion: string option
@@ -372,6 +374,7 @@ let create (connectionId: int) (store: Store) : Session =
       LongDataOverflow = Set.empty
       CustomFunctions = Fsdb.Functions.empty
       Capabilities = 0u
+      Compression = None
       MultiStatementsEnabled = false
       StatusCounters = Fsdb.InformationSchema.createStatusCounters ()
       TlsVersion = None

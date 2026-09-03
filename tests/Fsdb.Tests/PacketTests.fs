@@ -69,49 +69,51 @@ let tests =
           testCase "compressed transport round-trips compressible and raw frames"
           <| fun _ ->
               async {
-                  for payload in [ Array.create 4096 0x61uy; [| 1uy .. 20uy |] ] do
-                      use wire = new IO.MemoryStream()
+                  for algorithm in [ Algorithm.Zlib; Algorithm.Zstandard 3 ] do
+                      for payload in [ Array.create 4096 0x61uy; [| 1uy .. 20uy |]; [| 1uy .. 100uy |] ] do
+                          use wire = new IO.MemoryStream()
 
-                      let writer = new CompressedStream(wire, true)
-                      writer.BeginCommand()
-                      do! writer.WriteAsync(payload, 0, payload.Length) |> Async.AwaitTask
-                      writer.Dispose()
+                          let writer = new CompressedStream(wire, true, algorithm)
+                          writer.BeginCommand()
+                          do! writer.WriteAsync(payload, 0, payload.Length) |> Async.AwaitTask
+                          writer.Dispose()
 
-                      wire.Position <- 0L
-                      use reader = new CompressedStream(wire, true)
-                      reader.BeginCommand()
-                      let actual = Array.zeroCreate<byte> payload.Length
-                      let mutable offset = 0
+                          wire.Position <- 0L
+                          use reader = new CompressedStream(wire, true, algorithm)
+                          reader.BeginCommand()
+                          let actual = Array.zeroCreate<byte> payload.Length
+                          let mutable offset = 0
 
-                      while offset < actual.Length do
-                          let! read = reader.ReadAsync(actual, offset, actual.Length - offset) |> Async.AwaitTask
-                          offset <- offset + read
+                          while offset < actual.Length do
+                              let! read = reader.ReadAsync(actual, offset, actual.Length - offset) |> Async.AwaitTask
+                              offset <- offset + read
 
-                      Expect.equal actual payload "the compressed layer preserves the ordinary packet stream"
+                          Expect.equal actual payload (sprintf "%s preserves the ordinary packet stream" (Algorithm.name algorithm))
               }
               |> Async.RunSynchronously
 
           testCase "compressed transport rejects expansion and sequence mismatches"
           <| fun _ ->
               async {
-                  use encoded = new IO.MemoryStream()
-                  let writer = new CompressedStream(encoded, true)
-                  writer.BeginCommand()
-                  let source = Array.create 4096 0x61uy
-                  do! writer.WriteAsync(source, 0, source.Length) |> Async.AwaitTask
-                  writer.Dispose()
+                  for algorithm in [ Algorithm.Zlib; Algorithm.Zstandard 3 ] do
+                      use encoded = new IO.MemoryStream()
+                      let writer = new CompressedStream(encoded, true, algorithm)
+                      writer.BeginCommand()
+                      let source = Array.create 4096 0x61uy
+                      do! writer.WriteAsync(source, 0, source.Length) |> Async.AwaitTask
+                      writer.Dispose()
 
-                  let oversized = encoded.ToArray()
-                  oversized.[4] <- 1uy
-                  oversized.[5] <- 0uy
-                  oversized.[6] <- 0uy
-                  use oversizedWire = new IO.MemoryStream(oversized)
-                  use oversizedReader = new CompressedStream(oversizedWire, true)
-                  oversizedReader.BeginCommand()
-                  let! oversizedResult = Async.Catch(oversizedReader.ReadAsync(Array.zeroCreate 1, 0, 1) |> Async.AwaitTask)
-                  match oversizedResult with
-                  | Choice2Of2 _ -> ()
-                  | outcome -> failtestf "inflation must stay within the declared buffer: %A" outcome
+                      let oversized = encoded.ToArray()
+                      oversized.[4] <- 1uy
+                      oversized.[5] <- 0uy
+                      oversized.[6] <- 0uy
+                      use oversizedWire = new IO.MemoryStream(oversized)
+                      use oversizedReader = new CompressedStream(oversizedWire, true, algorithm)
+                      oversizedReader.BeginCommand()
+                      let! oversizedResult = Async.Catch(oversizedReader.ReadAsync(Array.zeroCreate 1, 0, 1) |> Async.AwaitTask)
+                      match oversizedResult with
+                      | Choice2Of2 _ -> ()
+                      | outcome -> failtestf "%s inflation must stay within the declared buffer: %A" (Algorithm.name algorithm) outcome
 
                   let wrongSequence = [| 1uy; 0uy; 0uy; 1uy; 0uy; 0uy; 0uy; 42uy |]
                   use wrongSequenceWire = new IO.MemoryStream(wrongSequence)

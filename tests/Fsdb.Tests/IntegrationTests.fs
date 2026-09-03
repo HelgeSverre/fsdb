@@ -16,7 +16,11 @@ open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
-let private passwordlessHandshakeResponse (capabilities: uint32) (username: string) =
+let private passwordlessHandshakeResponseWithZstdLevel
+    (capabilities: uint32)
+    (username: string)
+    (zstdCompressionLevel: int option)
+    =
     let writer = Writer()
     writer.WriteInt32LE(int capabilities)
     writer.WriteInt32LE 16777216
@@ -24,7 +28,11 @@ let private passwordlessHandshakeResponse (capabilities: uint32) (username: stri
     writer.WriteBytes(Array.zeroCreate<byte> 23)
     writer.WriteNullTerminatedString username
     writer.WriteByte 0uy
+    zstdCompressionLevel |> Option.iter (byte >> writer.WriteByte)
     writer.ToArray()
+
+let private passwordlessHandshakeResponse (capabilities: uint32) (username: string) =
+    passwordlessHandshakeResponseWithZstdLevel capabilities username None
 
 let private nativePasswordResponse (password: string) (scramble: byte[]) =
     let stage1 = SHA1.HashData(Text.Encoding.UTF8.GetBytes password)
@@ -340,6 +348,62 @@ let tests =
                   let! hasRow = reader.ReadAsync() |> Async.AwaitTask
                   Expect.isTrue hasRow "compression status has one row"
                   Expect.equal (reader.GetString 1) "ON" "the negotiated compressed connection is reported"
+              }
+              |> Async.RunSynchronously
+
+          testCase "raw clients can negotiate Zstandard compression"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  use client = new Net.Sockets.TcpClient()
+                  do! client.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                  let rawStream = client.GetStream()
+                  let! handshake = readPacketAsync rawStream
+                  let capabilities = ClientProtocol41 ||| ClientZstdCompressionAlgorithm
+
+                  let response =
+                      passwordlessHandshakeResponseWithZstdLevel capabilities "root" (Some 7)
+
+                  do!
+                      writePacketAsync rawStream { SeqId = handshake.Value.SeqId + 1uy; Payload = response }
+                      |> Async.Ignore
+
+                  let! connected = readPacketAsync rawStream
+                  Expect.equal connected.Value.Payload.[0] 0uy "authentication finishes before compression starts"
+
+                  use stream = new Fsdb.Compression.CompressedStream(rawStream, true, Fsdb.Compression.Algorithm.Zstandard 7)
+                  stream.BeginCommand()
+                  let sql = Text.Encoding.UTF8.GetBytes "SELECT REPEAT('compressible-', 512)"
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] sql } |> Async.Ignore
+
+                  let! columnCount = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! row = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  Expect.equal columnCount.Value.Payload.[0] 1uy "the compressed result has one column"
+                  let reader = Reader(row.Value.Payload)
+                  Expect.equal (reader.ReadLenEncString().Value.Length) (13 * 512) "a compressed result round-trips"
+              }
+              |> Async.RunSynchronously
+
+          testCase "invalid Zstandard handshake levels return MySQL error 3923"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+
+                  for level in [ None; Some 0; Some 23 ] do
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                      let stream = client.GetStream()
+                      let! handshake = readPacketAsync stream
+                      let capabilities = ClientProtocol41 ||| ClientZstdCompressionAlgorithm
+                      let response = passwordlessHandshakeResponseWithZstdLevel capabilities "root" level
+                      do! writePacketAsync stream { SeqId = handshake.Value.SeqId + 1uy; Payload = response } |> Async.Ignore
+                      let! rejected = readPacketAsync stream
+                      let reader = Reader(rejected.Value.Payload)
+                      Expect.equal (reader.ReadByte()) 0xffuy "the handshake is rejected"
+                      Expect.equal (reader.ReadInt16LE()) 3923 "the error code matches MySQL"
               }
               |> Async.RunSynchronously
 

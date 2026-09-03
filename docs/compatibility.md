@@ -65,7 +65,7 @@ version.
 ## Implemented surface
 
 The implemented surface covers the wire protocol, including forward-only
-prepared cursors and zlib compression, PDO/mysql-CLI compatibility, the SQL
+prepared cursors and zlib/Zstandard compression, PDO/mysql-CLI compatibility, the SQL
 engine core, Laravel
 migrations, test-suite parity,
 the embedding API, opt-in persistence, EXPLAIN, multi-table DML, and the

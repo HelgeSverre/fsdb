@@ -4193,7 +4193,8 @@ let showProcesslist (full: bool) : ShowResult =
 let showStatus
     (isGlobal: bool)
     (sessionCounters: StatusCounters)
-    (compression: bool)
+    (compressionAlgorithm: string option)
+    (compressionLevel: int)
     (bytesReceived: int64)
     (bytesSent: int64)
     (sslCipher: string option)
@@ -4202,15 +4203,24 @@ let showStatus
     : ShowResult =
     let statusCounters = if isGlobal then processStatusCounters else sessionCounters
 
+    let compressionRows =
+        if isGlobal then
+            []
+        else
+            [ "Compression", if compressionAlgorithm.IsSome then "ON" else "OFF"
+              "Compression_algorithm", compressionAlgorithm |> Option.defaultValue ""
+              "Compression_level", string compressionLevel ]
+
     let rows =
         [ "Bytes_received", string bytesReceived
           "Bytes_sent", string bytesSent
-          "Compression", if compression then "ON" else "OFF"
           "Ssl_cipher", sslCipher |> Option.defaultValue ""
           "Ssl_version", sslVersion |> Option.defaultValue ""
           "Questions", string statusCounters.Questions
           "Threads_connected", string (connectedThreads ())
-          "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds)
+          "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
+        @ compressionRows
+        @ [
           for name in reportedCommandNames do
               name, string (statusCounters.CommandCount name) ]
         |> List.filter (fun (name, _) -> likeFilter likeOpt name)
