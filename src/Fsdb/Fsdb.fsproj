@@ -26,6 +26,7 @@
     <Compile Include="Sql/FullText.fs" />
     <Compile Include="Sql/Ast.fs" />
     <Compile Include="Sql/Expression.fs" />
+    <Compile Include="Sql/Deprecation.fs" />
     <Compile Include="Sql/ColumnWire.fs" />
     <Compile Include="Sql/Parser.fs" />
     <Compile Include="Sql/Xa.fs" />
