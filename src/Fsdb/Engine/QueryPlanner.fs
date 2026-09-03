@@ -42,13 +42,18 @@ let chooseRange tableRows candidateRows =
     |> choose rangePreference
 
 let chooseEquality tableRows candidateRows =
-    [ { Path = TableScan
-        RowsRead = max 0 tableRows
-        RowLookups = 0 }
-      { Path = IndexLookup
-        RowsRead = max 0 candidateRows
-        RowLookups = max 0 candidateRows } ]
-    |> choose equalityPreference
+    let equalityScanFloor = 64
+
+    if tableRows < equalityScanFloor then
+        IndexLookup
+    else
+        [ { Path = TableScan
+            RowsRead = max 0 tableRows
+            RowLookups = 0 }
+          { Path = IndexLookup
+            RowsRead = max 0 candidateRows
+            RowLookups = max 0 candidateRows } ]
+        |> choose equalityPreference
 
 let estimateUniformEqualityCandidates tableRows distinctKeys probeKeys =
     if tableRows <= 0 || distinctKeys <= 0 || probeKeys <= 0 then

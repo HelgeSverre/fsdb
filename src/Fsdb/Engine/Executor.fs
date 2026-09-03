@@ -8219,10 +8219,10 @@ and private prepareLockingRead
             | None ->
                 let rowIdsFor (source: LockingReadSource) =
                     if sources.Length = 1 && select.Joins.IsEmpty then
-                        tryEqualityAccess store dbName source.Reference select.Where
+                        tryEqualityCandidates store dbName source.Reference select.Where
                         |> Option.map (fun plan -> plan.Rows.Value |> List.map fst)
                         |> Option.orElseWith (fun () ->
-                            tryLiteralInAccess store dbName source.Reference select.Where
+                            tryLiteralInCandidates store dbName source.Reference select.Where
                             |> Option.map (fun plan -> plan.Rows.Value |> List.map fst))
                         |> Option.orElseWith (fun () ->
                             trySpatialLookup BareOrQualifiedColumn store dbName source.Reference select.Where
@@ -8594,7 +8594,13 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
             | _ -> None
         | _ -> None)
 
-and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : EqualityAccessPlan option =
+and private tryEqualityAccessWith
+    (accept: EqualityAccessPlan -> bool)
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : EqualityAccessPlan option =
     if not (storedValuesMatchReadValues store) then
         None
     else
@@ -8616,7 +8622,7 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
                   CandidateRowIds = lookup.LookupRowIds
                   TableRowCount = lookup.TableRowCount
                   Rows = lookup.LookupRows })
-            |> Option.filter isUsefulEqualityAccess
+            |> Option.filter accept
 
         composite
         |> Option.orElseWith (fun () ->
@@ -8635,9 +8641,31 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
                      else
                          Storage.tryEqualityRowIdsForIndex store table index [ equality.Value ])
                     |> Option.map (equalityAccessPlan table index)
-                    |> Option.filter isUsefulEqualityAccess)))
+                    |> Option.filter accept)))
 
-and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : EqualityAccessPlan option =
+and private tryEqualityAccess
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : EqualityAccessPlan option =
+    tryEqualityAccessWith isUsefulEqualityAccess store dbName tref whereExpr
+
+and private tryEqualityCandidates
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : EqualityAccessPlan option =
+    tryEqualityAccessWith (fun _ -> true) store dbName tref whereExpr
+
+and private tryLiteralInAccessWith
+    (useCost: bool)
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : EqualityAccessPlan option =
     if not (storedValuesMatchReadValues store) then
         None
     else
@@ -8673,7 +8701,7 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
                             (Storage.equalityIndexDistinctKeyCount table index)
                             values.Length
 
-                    if not (isUsefulEqualityCardinality table.RowsArray.Count estimatedCandidates) then
+                    if useCost && not (isUsefulEqualityCardinality table.RowsArray.Count estimatedCandidates) then
                         None
                     else
                         let lookup (tuple: Value list) =
@@ -8694,7 +8722,7 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
                                         candidateEstimate
                                         + min rowIds.Count (max 0 (table.RowsArray.Count - candidateEstimate))
 
-                                    if isUsefulEqualityCardinality table.RowsArray.Count estimate then
+                                    if not useCost || isUsefulEqualityCardinality table.RowsArray.Count estimate then
                                         collect estimate (rowIds :: rowIdSets) remaining
                                     else
                                         None)
@@ -8705,9 +8733,35 @@ and private tryLiteralInAccess (store: Store) (dbName: string) (tref: TableRef) 
                             |> List.fold Set.union Set.empty
                             |> equalityAccessPlan table index))))
 
+and private tryLiteralInAccess
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : EqualityAccessPlan option =
+    tryLiteralInAccessWith true store dbName tref whereExpr
+
+and private tryLiteralInCandidates
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : EqualityAccessPlan option =
+    tryLiteralInAccessWith false store dbName tref whereExpr
+
 and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
     |> Option.orElseWith (fun () -> tryLiteralInAccess store dbName tref whereExpr)
+    |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
+
+and private tryIndexedCandidates
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    tryEqualityCandidates store dbName tref whereExpr
+    |> Option.orElseWith (fun () -> tryLiteralInCandidates store dbName tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryCorrelatedEqualityLookup
@@ -17518,7 +17572,7 @@ let rec executeAs
         let narrowed =
             fullTextPlan
             |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
-            |> Option.orElseWith (fun () -> tryIndexedLookup store dbName updateStmt.From updateStmt.Where)
+            |> Option.orElseWith (fun () -> tryIndexedCandidates store dbName updateStmt.From updateStmt.Where)
             |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName updateStmt.From updateStmt.Where)
             |> Option.orElseWith (fun () -> tryRangeLookup store dbName updateStmt.From updateStmt.Where)
 
@@ -17904,7 +17958,7 @@ let rec executeAs
         let narrowed =
             fullTextPlan
             |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
-            |> Option.orElseWith (fun () -> tryIndexedLookup targetStore dbName deleteStmt.From deleteStmt.Where)
+            |> Option.orElseWith (fun () -> tryIndexedCandidates targetStore dbName deleteStmt.From deleteStmt.Where)
             |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn targetStore dbName deleteStmt.From deleteStmt.Where)
             |> Option.orElseWith (fun () -> tryRangeLookup targetStore dbName deleteStmt.From deleteStmt.Where)
 
@@ -18086,7 +18140,7 @@ let transactionWriteTargets (store: Store) (dbName: string) (statement: Statemen
     let targets (tableRef: TableRef) predicate =
         let database = tableRef.Database |> Option.defaultValue dbName
 
-        tryIndexedLookup store dbName tableRef predicate
+        tryIndexedCandidates store dbName tableRef predicate
         |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tableRef predicate)
         |> Option.orElseWith (fun () -> tryRangeLookup store dbName tableRef predicate)
         |> Option.map (fun (_, rows) ->
