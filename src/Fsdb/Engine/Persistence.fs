@@ -21,7 +21,8 @@ let private tableCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x33uy |] // 
 let private numericDisplaySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x34uy |] // "FSN4"
 let private partitionSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x35uy |] // "FSN5"
 let private dynamicPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x36uy |] // "FSN6"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x37uy |] // "FSN7"
+let private proxyPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x37uy |] // "FSN7"
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x38uy |] // "FSN8"
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -29,7 +30,8 @@ type private SnapshotFormat =
       NumericDisplays: bool
       Partitions: bool
       DynamicPrivileges: bool
-      ProxyPrivileges: bool }
+      ProxyPrivileges: bool
+      SpatialReferences: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -37,7 +39,8 @@ let private legacySnapshotFormat =
       NumericDisplays = false
       Partitions = false
       DynamicPrivileges = false
-      ProxyPrivileges = false }
+      ProxyPrivileges = false
+      SpatialReferences = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -54,8 +57,11 @@ let private partitionSnapshotFormat =
 let private dynamicPrivilegeSnapshotFormat =
     { partitionSnapshotFormat with DynamicPrivileges = true }
 
-let private currentSnapshotFormat =
+let private proxyPrivilegeSnapshotFormat =
     { dynamicPrivilegeSnapshotFormat with ProxyPrivileges = true }
+
+let private currentSnapshotFormat =
+    { proxyPrivilegeSnapshotFormat with SpatialReferences = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -64,6 +70,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = proxyPrivilegeSnapshotMagic then
+        Some proxyPrivilegeSnapshotFormat
     elif header = dynamicPrivilegeSnapshotMagic then
         Some dynamicPrivilegeSnapshotFormat
     elif header = partitionSnapshotMagic then
@@ -512,6 +520,11 @@ let private encodeColumnDef (format: SnapshotFormat) (w: Writer) (c: ColumnDef) 
 
             writeBool w display.ZeroFill
 
+    if format.SpatialReferences then
+        match c.Srid with
+        | None -> w.WriteByte 0uy
+        | Some srid -> w.WriteByte 1uy; w.WriteUInt32LE srid
+
 let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
     let name = readStr r
     let columnType = decodeColumnType r
@@ -539,6 +552,11 @@ let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
                   ZeroFill = readBool r }
         else
             None
+    let srid =
+        if format.SpatialReferences && r.ReadByte() <> 0uy then
+            Some(uint32 (r.ReadInt32LE()))
+        else
+            None
 
     { Name = name
       Type = columnType
@@ -552,13 +570,15 @@ let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
       Collation = collation
       Charset = charset
       OnUpdateCurrentTimestamp = onUpdateCurrentTimestamp
-      Comment = comment }
+      Comment = comment
+      Srid = srid }
 
 let private lowercaseIndexColumnPrefix = "\u0000L:"
 let private uppercaseIndexColumnPrefix = "\u0000U:"
 let private expressionIndexColumnPrefix = "\u0000E:"
 let private descendingIndexColumnPrefix = "\u0000D:"
 let private invisibleIndexNamePrefix = "\u0000I:"
+let private spatialIndexNamePrefix = "\u0000S:"
 let private lengthIndexColumnPrefix = "\u0001"
 
 let private (|Prefixed|_|) (prefix: string) (value: string) =
@@ -613,7 +633,8 @@ let private decodeIndexColumn (encoded: string) =
     | _ -> column encoded None None
 
 let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
-    writeStr w (if ix.Visible then ix.Name else invisibleIndexNamePrefix + ix.Name)
+    let encodedName = if ix.Kind = SpatialIndex then spatialIndexNamePrefix + ix.Name else ix.Name
+    writeStr w (if ix.Visible then encodedName else invisibleIndexNamePrefix + encodedName)
     ix.KeyColumns |> List.map encodeIndexColumn |> writeStrList w
     writeBool w ix.Unique
     writeBool w (ix.Kind = FullTextIndex)
@@ -625,11 +646,16 @@ let private decodeIndexDef (r: #IReader) : IndexDef =
         | Prefixed invisibleIndexNamePrefix name -> false, name
         | _ -> true, encodedName
 
+    let kind, name =
+        match name with
+        | Prefixed spatialIndexNamePrefix name -> SpatialIndex, name
+        | _ -> BTree, name
+
     { Name = name
       KeyColumns = readStrList r |> List.map decodeIndexColumn
       Unique = readBool r
       Visible = visible
-      Kind = (if readBool r then FullTextIndex else BTree) }
+      Kind = (if readBool r then FullTextIndex else kind) }
 
 // Qualifiers reuse the legacy table-name field so older snapshots remain readable.
 let private qualifiedForeignKeyPrefix = "\u0000Q:"
@@ -862,6 +888,8 @@ let private KindXaPrepared = 0x0Fuy
 let private KindXaCommitted = 0x10uy
 let private KindXaRolledBack = 0x11uy
 let private KindAutoIncrementAdvanced = 0x12uy
+let private KindSchemaChangedV6 = 0x13uy
+let private KindSchemaChangedAtV6 = 0x14uy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -929,11 +957,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteLenEncString table
         w.WriteInt64LE nextId
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV5
+        w.WriteByte KindSchemaChangedV6
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV5
+        w.WriteByte KindSchemaChangedAtV6
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
@@ -1014,8 +1042,14 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
         SchemaChangedAt(db, decodeStatement numericDisplaySnapshotFormat r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV5 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement currentSnapshotFormat r)
+        SchemaChanged(db, decodeStatement proxyPrivilegeSnapshotFormat r)
     | k when k = KindSchemaChangedAtV5 ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement proxyPrivilegeSnapshotFormat r, DateTime(r.ReadInt64LE()))
+    | k when k = KindSchemaChangedV6 ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement currentSnapshotFormat r)
+    | k when k = KindSchemaChangedAtV6 ->
         let db = str ()
         SchemaChangedAt(db, decodeStatement currentSnapshotFormat r, DateTime(r.ReadInt64LE()))
     | k when k = KindXaPrepared ->

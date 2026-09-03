@@ -2052,6 +2052,7 @@ type private ColMod =
     | MCollate of string
     /// A validated `CHARACTER SET name` (utf8mb4/latin1/ascii).
     | MCharset of string
+    | MSrid of uint32
     | MBinary
     | MOnUpdateCurrentTimestamp
     | MCheck of name: string option * expression: Expr * enforced: bool
@@ -2189,6 +2190,13 @@ let private colMod: Parser<ColMod, unit> =
           )
           >>% MOnUpdateCurrentTimestamp
           keyword "COMMENT" >>. stringLit |>> (function VString text -> MComment text | _ -> MComment "")
+          keyword "SRID"
+          >>. (puint64 .>> ws)
+          >>= fun value ->
+              if value <= uint64 UInt32.MaxValue then
+                  preturn (MSrid(uint32 value))
+              else
+                  fail "SRID value is out of range"
           attempt characterTypeMod
           attempt generatedColumn |>> MGenerated ]
 
@@ -2210,7 +2218,8 @@ let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
               Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
               Comment = mods |> List.rev |> List.tryPick (function MComment text -> Some text | _ -> None) |> Option.defaultValue ""
               Collation = collation
-              Charset = charset }
+              Charset = charset
+              Srid = mods |> List.rev |> List.tryPick (function MSrid value -> Some value | _ -> None) }
 
         let checks =
             mods
@@ -2303,9 +2312,7 @@ let private indexedColumn: Parser<IndexColumn, unit> =
 let private indexPrefix: Parser<bool * IndexKind, unit> =
     (keyword "UNIQUE" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (true, BTree))
     <|> (keyword "FULLTEXT" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, FullTextIndex))
-    // SPATIAL collapses to an ordinary index; the storage layer has no
-    // spatial access path.
-    <|> (keyword "SPATIAL" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
+    <|> (keyword "SPATIAL" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, SpatialIndex))
     <|> ((keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
 
 let private explicitIndexVisibility: Parser<bool, unit> =
@@ -2653,7 +2660,7 @@ let private createIndexStmt: Parser<Statement, unit> =
     (keyword "CREATE"
      >>. ((keyword "UNIQUE" >>% (true, BTree))
           <|> (keyword "FULLTEXT" >>% (false, FullTextIndex))
-          <|> (keyword "SPATIAL" >>% (false, BTree))
+          <|> (keyword "SPATIAL" >>% (false, SpatialIndex))
           <|> preturn (false, BTree))
      .>> keyword "INDEX"
      .>>. identifier

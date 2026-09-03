@@ -1660,7 +1660,22 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | TJson -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VJson
         | TGeometry requiredKind ->
             match v with
-            | VGeometry geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> Ok(VGeometry geometry)
+            | VGeometry geometry
+                when (requiredKind = Geometry || geometryKind geometry.Shape = requiredKind)
+                     && (col.Srid |> Option.forall ((=) (uint32 geometry.Srid))) ->
+                Ok(VGeometry geometry)
+            | VGeometry geometry when col.Srid.IsSome ->
+                let columnSrid = Option.defaultValue 0u col.Srid
+                Error(
+                    ExpressionError(
+                        3643,
+                        sprintf
+                            "The SRID of the geometry does not match the SRID of the column '%s'. The SRID of the geometry is %d, but the SRID of the column is %u. Consider changing the SRID of the geometry or the SRID property of the column."
+                            col.Name
+                            geometry.Srid
+                            columnSrid
+                    )
+                )
             | _ -> fail ()
         | TSet values ->
             // Same 1265 "Data truncated" MySQL raises for a rejected ENUM
@@ -2926,7 +2941,8 @@ let private sysCol (name: string) (ty: ColumnType) (nullable: bool) (dflt: Value
       Generated = None
       Comment = ""
       Collation = None
-      Charset = None }
+      Charset = None
+      Srid = None }
 
 let private privCol (name: string) = sysCol name (TEnum [ "N"; "Y" ]) false (Some(VString "N"))
 
@@ -4611,6 +4627,10 @@ let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
     | Some error -> Error error
     | None when c.OnUpdateCurrentTimestamp && not (supportsCurrentTimestamp c) ->
         Error(ExpressionError(1294, sprintf "Invalid ON UPDATE clause for '%s' column" c.Name))
+    | None when c.Srid.IsSome && (match c.Type with TGeometry _ -> false | _ -> true) ->
+        Error(ExpressionError(1221, "Incorrect usage of SRID and non-geometry column"))
+    | None when c.Srid |> Option.exists ((<>) 0u) ->
+        Error(ExpressionError(3548, sprintf "There's no spatial reference system with SRID %u." (Option.defaultValue 0u c.Srid)))
     | None ->
         match c.Type with
         | TChar length when length < 1 || length > 255 ->
@@ -4668,6 +4688,23 @@ let private checkVectorKeyColumns (columns: ColumnDef list) (indexes: IndexDef l
             | Some name -> vectorKeyError name
             | None -> Ok()
 
+let private geometryColumn (columns: ColumnDef list) name =
+    columns
+    |> List.tryFind (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
+    |> Option.filter (fun column -> match column.Type with TGeometry _ -> true | _ -> false)
+
+let private normalizeGeometryIndexes (columns: ColumnDef list) (indexes: IndexDef list) =
+    indexes
+    |> List.map (fun index ->
+        if
+            index.Kind = BTree
+            && not index.Unique
+            && (index.Columns |> List.exists (geometryColumn columns >> Option.isSome))
+        then
+            { index with Kind = SpatialIndex }
+        else
+            index)
+
 let private checkGeometryKeyColumns (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
     let isGeometry (column: ColumnDef) =
         match column.Type with
@@ -4678,11 +4715,30 @@ let private checkGeometryKeyColumns (columns: ColumnDef list) (indexes: IndexDef
     | Some _ -> Error(ExpressionError(3728, "Spatial indexes can't be primary or unique indexes."))
     | None ->
         indexes
-        |> List.collect _.Columns
-        |> List.tryFind (fun name -> columns |> List.exists (fun column -> isGeometry column && String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)))
-        |> function
-            | Some _ -> Error(ExpressionError(1235, "This version of MySQL doesn't yet support 'SPATIAL indexes'"))
-            | None -> Ok()
+        |> List.tryPick (fun index ->
+            if index.Unique && (index.Columns |> List.exists (geometryColumn columns >> Option.isSome)) then
+                Some(ExpressionError(3728, "Spatial indexes can't be primary or unique indexes."))
+            elif index.Kind <> SpatialIndex then
+                None
+            elif index.KeyColumns.Length > 1 then
+                Some(ExpressionError(1070, "Too many key parts specified; max 1 parts allowed"))
+            else
+                match index.KeyColumns with
+                | [ key ] ->
+                    match geometryColumn columns key.Name with
+                    | None -> Some(ExpressionError(1687, "A SPATIAL index may only contain a geometrical type column"))
+                    | Some _ when key.PrefixLength.IsSome ->
+                        Some(ExpressionError(1089, "Incorrect prefix key; the used key part isn't a string, the used length is longer than the key part, or the storage engine doesn't support unique prefix keys"))
+                    | Some _ when key.Direction <> Asc ->
+                        Some(ExpressionError(1221, "Incorrect usage of spatial/fulltext/hash index and explicit index order"))
+                    | Some _ when key.Transform.IsSome ->
+                        Some(ExpressionError(1687, "A SPATIAL index may only contain a geometrical type column"))
+                    | Some column when column.Nullable ->
+                        Some(ExpressionError(1252, "All parts of a SPATIAL index must be NOT NULL"))
+                    | Some _ -> None
+                | _ -> Some(ExpressionError(1064, "A SPATIAL index requires one column")))
+        |> Option.map Error
+        |> Option.defaultValue (Ok())
 
 let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
     let fullLength column =
@@ -4738,7 +4794,7 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
 
                     Ok(prefix * multiplier)
                 | None, Some length -> Ok length
-                | None, None when index.Kind = FullTextIndex -> Ok 0
+                | None, None when index.Kind = FullTextIndex || index.Kind = SpatialIndex -> Ok 0
                 | None, None ->
                     Error(ExpressionError(1170, sprintf "BLOB/TEXT column '%s' used in key specification without a key length" definition.Name))
 
@@ -4958,6 +5014,7 @@ let createTableSeeded
         columns
         |> List.map (fun column -> { column with Comment = normalizeUtf8mb3Text column.Comment })
         |> normalizePrimaryKeyNullability
+    let indexes = normalizeGeometryIndexes columns indexes
 
     let tableComment = tableComment |> Option.map normalizeUtf8mb3Text
 
@@ -5339,6 +5396,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeUtf8mb3Text column.Comment }, position)
         | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeUtf8mb3Text column.Comment }, position)
         | SetTableComment comment -> SetTableComment(normalizeUtf8mb3Text comment)
+        | AddIndex index -> AddIndex(normalizeGeometryIndexes table.Columns [ index ] |> List.head)
         | action -> action
 
     let strict = mode.Strict

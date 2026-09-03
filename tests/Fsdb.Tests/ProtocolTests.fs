@@ -590,7 +590,8 @@ let tests =
                     Generated = None
                     Comment = ""
                     Collation = None
-                    Charset = None }
+                    Charset = None
+                    Srid = None }
 
               let requiredMetadata = metadataOfColumn required
               Expect.isTrue (requiredMetadata.Flags &&& NotNullFlag <> 0us) "not null"

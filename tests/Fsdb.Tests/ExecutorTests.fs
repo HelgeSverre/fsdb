@@ -8696,11 +8696,35 @@ let tests =
                     | Err(1366, _) -> ()
                     | other -> failtestf "expected type coercion error, got %A" other
 
-                testCase "spatial columns refuse primary and secondary indexes"
+                testCase "spatial index DDL follows MySQL constraints"
                 <| fun _ ->
-                    match runDefault (newStore ()) "CREATE TABLE places (shape POINT PRIMARY KEY)" with
+                    let store = newStore ()
+
+                    match runDefault store "CREATE TABLE bad_primary (shape POINT PRIMARY KEY)" with
                     | Err(3728, _) -> ()
-                    | other -> failtestf "expected spatial primary key refusal, got %A" other ]
+                    | other -> failtestf "expected spatial primary key refusal, got %A" other
+
+                    match runDefault store "CREATE TABLE bad_nullable (shape POINT, SPATIAL INDEX sx(shape))" with
+                    | Err(1252, "All parts of a SPATIAL index must be NOT NULL") -> ()
+                    | other -> failtestf "expected nullable spatial index refusal, got %A" other
+
+                    match runDefault store "CREATE TABLE bad_type (n INT NOT NULL, SPATIAL INDEX sx(n))" with
+                    | Err(1687, "A SPATIAL index may only contain a geometrical type column") -> ()
+                    | other -> failtestf "expected non-geometry spatial index refusal, got %A" other
+
+                    match runDefault store "CREATE TABLE places (shape POINT NOT NULL SRID 0, INDEX sx(shape))" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected implicit spatial index creation, got %A" other
+
+                    match runDefault store "SELECT index_name, column_name, index_type FROM information_schema.statistics WHERE table_schema='fsdb' AND table_name='places'" with
+                    | ResultSet(_, [ [ Some "sx"; Some "shape"; Some "SPATIAL" ] ]) -> ()
+                    | other -> failtestf "expected SPATIAL index metadata, got %A" other
+
+                    match Fsdb.InformationSchema.showCreateTable store.Catalog defaultDatabase "places" with
+                    | Ok(_, [ [ _; Some ddl ] ]) ->
+                        Expect.stringContains ddl "/*!80003 SRID 0 */" "SRID restriction"
+                        Expect.stringContains ddl "SPATIAL KEY `sx` (`shape`)" "spatial key"
+                    | other -> failtestf "expected spatial SHOW CREATE output, got %A" other ]
 
           // Expectations read off the MySQL 8.4.11 oracle over
           //   t = (1,10,1) (2,20,1) (3,30,2) (4,40,2) (5,50,2)  [id, v, g]

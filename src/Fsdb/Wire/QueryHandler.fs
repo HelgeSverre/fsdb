@@ -4571,7 +4571,8 @@ let private routineColumn name columnType =
       Generated = None
       Comment = ""
       Collation = None
-      Charset = None }
+      Charset = None
+      Srid = None }
 
 let private parameterColumn (parameter: StoredProgram.Parameter) =
     { routineColumn parameter.Name parameter.ColumnType with

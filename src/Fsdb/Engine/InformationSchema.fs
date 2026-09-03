@@ -27,7 +27,8 @@ let private col (name: string) (ty: ColumnType) : ColumnDef =
       Comment = ""
       Collation = None
       Charset = None
-      OnUpdateCurrentTimestamp = false }
+      OnUpdateCurrentTimestamp = false
+      Srid = None }
 
 let private strCol name = col name (TVarchar 255)
 let private intCol name = col name (TInt false)
@@ -553,7 +554,7 @@ let private columnRowWith (privileges: string) (dbName: string) (tableName: stri
        vs privileges
        vs c.Comment
        vs (c.Generated |> Option.map (fst >> exprToSql) |> Option.defaultValue "")
-       VNull |]
+       (c.Srid |> Option.map (uint64 >> VUInt) |> Option.defaultValue VNull) |]
 
 let private columnRow = columnRowWith "select,insert,update,references"
 
@@ -639,6 +640,11 @@ let private indexDirectionText (keyColumn: IndexColumn) =
 let private indexVisibilityText (index: IndexDef) =
     if index.Visible then "YES" else "NO"
 
+let private indexTypeText = function
+    | BTree -> "BTREE"
+    | FullTextIndex -> "FULLTEXT"
+    | SpatialIndex -> "SPATIAL"
+
 /// One row per `(index, column)` pair.
 let private statisticsRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -670,7 +676,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    (effectivePrefixLength t keyColumn |> Option.map vi |> Option.defaultValue VNull)
                    VNull
                    vs nullable
-                   vs (if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")
+                   vs (indexTypeText ix.Kind)
                    vs ""
                    vs ""
                    vs (indexVisibilityText ix)
@@ -3816,9 +3822,11 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
                 | None, None -> []
                 | cs, col -> [ sprintf "CHARACTER SET %s" (cs |> Option.defaultValue "utf8mb4"); sprintf "COLLATE %s" (col |> Option.defaultValue "utf8mb4_0900_ai_ci") ]
 
+        let srid = c.Srid |> Option.map (sprintf "/*!80003 SRID %u */") |> Option.defaultValue ""
+
         [ backtick c.Name; columnTypeTextOfColumn c ]
         @ charsetCollate
-        @ [ generatedPart; notNull; defaultPart; onUpdatePart; extra; if c.Comment = "" then "" else sprintf "COMMENT '%s'" (showCreateString c.Comment) ]
+        @ [ srid; generatedPart; notNull; defaultPart; onUpdatePart; extra; if c.Comment = "" then "" else sprintf "COMMENT '%s'" (showCreateString c.Comment) ]
         |> List.filter ((<>) "")
         |> String.concat " "
 
@@ -3848,6 +3856,7 @@ let private showCreateTableDDL (temporary: bool) (catalog: Catalog) (dbName: str
             let prefix =
                 if ix.Unique then "UNIQUE "
                 elif ix.Kind = FullTextIndex then "FULLTEXT "
+                elif ix.Kind = SpatialIndex then "SPATIAL "
                 else ""
 
             sprintf "%sKEY %s (%s)%s" prefix (backtick ix.Name) (indexColumnsText ix) (if ix.Visible then "" else " /*!80000 INVISIBLE */"))
@@ -4017,7 +4026,7 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       (effectivePrefixLength t keyColumn |> Option.map string)
                       None
                       Some "YES"
-                      Some(if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")
+                      Some(indexTypeText ix.Kind)
                       Some ""
                       Some ""
                       Some(indexVisibilityText ix)

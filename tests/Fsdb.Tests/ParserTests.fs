@@ -1007,6 +1007,7 @@ let tests =
                                     Comment = ""
                                     Collation = None
                                     Charset = None
+                                    Srid = None
                                     OnUpdateCurrentTimestamp = false };
                               { Name = "name"
                                 Type = TVarchar 255
@@ -1020,6 +1021,7 @@ let tests =
                                 Comment = ""
                                 Collation = Some "utf8mb4_0900_ai_ci"
                                 Charset = None
+                                Srid = None
                                 OnUpdateCurrentTimestamp = false };
                               { Name = "score"
                                 Type = TDecimal(5, 2, false)
@@ -1033,6 +1035,7 @@ let tests =
                                 Comment = ""
                                 Collation = None
                                 Charset = None
+                                Srid = None
                                 OnUpdateCurrentTimestamp = false } ] with
                                 Indexes =
                                     [ { Name = "PRIMARY"
@@ -1094,6 +1097,7 @@ let tests =
                                     Comment = ""
                                     Collation = None
                                     Charset = None
+                                    Srid = None
                                     OnUpdateCurrentTimestamp = false } ] with
                                 IfNotExists = true })
                         "if not exists"
@@ -1117,6 +1121,7 @@ let tests =
                                     Comment = ""
                                     Collation = None
                                     Charset = None
+                                    Srid = None
                                     OnUpdateCurrentTimestamp = false };
                                   { Name = "name"
                                     Type = TVarchar 10
@@ -1130,6 +1135,7 @@ let tests =
                                     Comment = ""
                                     Collation = Some "utf8mb4_0900_ai_ci"
                                     Charset = None
+                                    Srid = None
                                     OnUpdateCurrentTimestamp = false } ] with
                                 Indexes =
                                     [ { Name = "PRIMARY"
@@ -1219,6 +1225,7 @@ let tests =
                                     Comment = ""
                                     Collation = None
                                     Charset = None
+                                    Srid = None
                                     OnUpdateCurrentTimestamp = false } ] with
                                 RequestedEngine = Some "InnoDB"
                                 Charset = Some "utf8mb4"
@@ -1470,6 +1477,15 @@ let tests =
                           Checks = []
                           IfNotExists = false } -> ()
                     | other -> failtestf "expected spatial column types, got %A" other
+
+                testCase "spatial columns retain SRID restrictions and spatial index kind"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE places (shape GEOMETRY NOT NULL SRID 0, SPATIAL INDEX sx(shape))" with
+                    | CreateTable
+                        { Columns = [ { Type = TGeometry Geometry; Srid = Some 0u } ]
+                          Indexes = [ { Name = "sx"; Kind = SpatialIndex; Unique = false } ] } ->
+                        ()
+                    | other -> failtestf "expected a restricted spatial column and index, got %A" other
 
                 testCase "CHAR/TEXT/BLOB family and TINY/MEDIUM/SMALL int variants all parse"
                 <| fun _ ->

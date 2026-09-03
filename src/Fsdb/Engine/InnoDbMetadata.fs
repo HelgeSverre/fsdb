@@ -20,7 +20,8 @@ let private column name columnType nullable defaultValue charset collation =
       Generated = None
       Comment = ""
       Charset = charset
-      Collation = collation }
+      Collation = collation
+      Srid = None }
 
 let private blank name columnType nullable =
     column name columnType nullable (Some(DConst(VString ""))) None None

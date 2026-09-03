@@ -1385,7 +1385,8 @@ let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : C
       Comment = ""
       Collation = None
       Charset = None
-      OnUpdateCurrentTimestamp = false }
+      OnUpdateCurrentTimestamp = false
+      Srid = None }
 
 /// Every `MATCH ... AGAINST` node in an expression tree — the fulltext
 /// pre-pass (`runFullTextSelect`) computes one owning-table score column per
@@ -4817,7 +4818,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   Comment = ""
                   Collation = None
                   Charset = None
-                  OnUpdateCurrentTimestamp = false }
+                  OnUpdateCurrentTimestamp = false
+                  Srid = None }
 
             let v =
                 match v, ty with
@@ -5290,7 +5292,8 @@ and private describeQueryColumns
           Comment = ""
           Collation = collation
           Charset = collation |> Option.map Collation.charsetOfCollation
-          OnUpdateCurrentTimestamp = false }
+          OnUpdateCurrentTimestamp = false
+          Srid = None }
 
     let isNullable (column: ColumnDef) = column.Nullable && not column.PrimaryKey
 
@@ -5790,7 +5793,8 @@ and private deriveColumns
               Comment = ""
               Collation = Some col.Name
               Charset = None
-              OnUpdateCurrentTimestamp = false })
+              OnUpdateCurrentTimestamp = false
+              Srid = None })
         names
         collations
         metadata
@@ -5889,7 +5893,8 @@ and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list
                 Comment = ""
                 Collation = None
                 Charset = None
-                OnUpdateCurrentTimestamp = false } ]
+                OnUpdateCurrentTimestamp = false
+                Srid = None } ]
 
         match c with
         | ForOrdinality name -> def name (TInt true)
@@ -9380,7 +9385,8 @@ and private runUnionStmtWithOuter
                       Comment = ""
                       Collation = None
                       Charset = None
-                      OnUpdateCurrentTimestamp = false })
+                      OnUpdateCurrentTimestamp = false
+                      Srid = None })
 
             let ctxForOrder = contextFactory store registry dbName (columnIndexOf orderColumns) Map.empty None
 
@@ -14981,7 +14987,8 @@ let rec executeAs
                           Comment = ""
                           Collation = None
                           Charset = None
-                          OnUpdateCurrentTimestamp = false }
+                          OnUpdateCurrentTimestamp = false
+                          Srid = None }
 
                     let localContext () =
                         let bindings = locals.Value |> Map.toList

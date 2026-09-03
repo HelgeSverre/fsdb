@@ -26,6 +26,7 @@ let private col name ty : ColumnDef =
       Comment = ""
       Collation = None
       Charset = None
+      Srid = None
       OnUpdateCurrentTimestamp = false }
 
 /// Runs `sql` on a fresh in-memory session, threading each statement's

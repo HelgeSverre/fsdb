@@ -348,11 +348,16 @@ and ColumnDef =
       /// write-time validation (`ascii` rejects non-ASCII with 1366 in
       /// strict mode, `latin1` lossy-maps unencodables to '?' — both
       /// MySQL-verified).
-      Charset: string option }
+      Charset: string option
+      /// An explicit spatial reference constraint for geometry columns.
+      /// `None` permits mixed SRIDs and makes a spatial index ineligible
+      /// for query planning, matching MySQL 8.4.
+      Srid: uint32 option }
 
 and IndexKind =
     | BTree
     | FullTextIndex
+    | SpatialIndex
 
 and MatchMode =
     | NaturalLanguage
@@ -375,9 +380,7 @@ and IndexDef =
       KeyColumns: IndexColumn list
       Unique: bool
       Visible: bool
-      /// `FULLTEXT KEY` vs an ordinary index — drives `MATCH ... AGAINST`
-      /// eligibility and the `Index_type` introspection column. SPATIAL
-      /// collapses to `BTree` until fsdb has a spatial-index implementation.
+      /// The physical access family used by planning and introspection.
       Kind: IndexKind }
 
     member this.Columns =

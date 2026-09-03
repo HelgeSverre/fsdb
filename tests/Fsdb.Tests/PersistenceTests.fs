@@ -29,6 +29,7 @@ let private usersColumns =
         Comment = ""
         Collation = None
         Charset = None
+        Srid = None
         OnUpdateCurrentTimestamp = false }
       { Name = "name"
         Type = TVarchar 255
@@ -42,6 +43,7 @@ let private usersColumns =
         Comment = ""
         Collation = None
         Charset = None
+        Srid = None
         OnUpdateCurrentTimestamp = false }
       { Name = "note"
         Type = TText
@@ -55,6 +57,7 @@ let private usersColumns =
         Comment = ""
         Collation = None
         Charset = None
+        Srid = None
         OnUpdateCurrentTimestamp = false } ]
 
 /// No PK/AUTO_INCREMENT/UNIQUE at all — unlike `usersColumns`, a row
@@ -74,6 +77,7 @@ let private tagColumns =
         Comment = ""
         Collation = None
         Charset = None
+        Srid = None
         OnUpdateCurrentTimestamp = false } ]
 
 let private walPath dir = Path.Combine(dir, "wal.bin")
@@ -92,6 +96,7 @@ let private mkCol (name: string) (typ: ColumnType) : ColumnDef =
       Comment = ""
       Collation = None
       Charset = None
+      Srid = None
       OnUpdateCurrentTimestamp = false }
 
 let private writeLegacyColumn (w: Writer) (name: string) =
@@ -341,17 +346,28 @@ let tests =
               // actually carries and replay should reproduce.
               Expect.contains rows [| VInt 42L; VString "unicode héllo 🎉"; VString """{"a":1}""" |] "unicode/JSON-text round-trip"
 
-          testCase "attach + reload retains a typed spatial column"
+          testCase "WAL and snapshot recovery retain spatial column metadata"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "places" [ mkCol "shape" (TGeometry Point) ] [] [] None None |> ignore
-              let point = VGeometry(tryGeometryFromText 4326 "POINT(1.5 -2)" |> Option.get)
+              let column = { mkCol "shape" (TGeometry Point) with Nullable = false; Srid = Some 0u }
+              let index = { Name = "sx"; KeyColumns = indexColumns [ "shape" ]; Unique = false; Visible = true; Kind = SpatialIndex }
+              createTable store defaultDatabase "places" [ column ] [ index ] [] None None |> ignore
+              let point = VGeometry(tryGeometryFromText 0 "POINT(1.5 -2)" |> Option.get)
               insertRows store defaultDatabase "places" None [ [ point ] ] |> ignore
 
               let reloaded = load dir
               Expect.equal (rowsOf reloaded defaultDatabase "places") [ [| point |] ] "geometry row survives WAL replay"
+              let reloadedTable = reloaded.Catalog.[defaultDatabase].["places"]
+              Expect.equal reloadedTable.Columns.Head.Srid (Some 0u) "WAL column SRID"
+              Expect.equal reloadedTable.Indexes.Head.Kind SpatialIndex "WAL index kind"
+
+              snapshotNow dir store
+              let snapshotted = load dir
+              let snapshottedTable = snapshotted.Catalog.[defaultDatabase].["places"]
+              Expect.equal snapshottedTable.Columns.Head.Srid (Some 0u) "snapshot column SRID"
+              Expect.equal snapshottedTable.Indexes.Head.Kind SpatialIndex "snapshot index kind"
 
           testCase "WAL and snapshot recovery retain typed TIME values"
           <| fun _ ->
@@ -476,6 +492,7 @@ let tests =
                     Comment = ""
                     Collation = None
                     Charset = None
+                    Srid = None
                     OnUpdateCurrentTimestamp = false }
 
               createTable store defaultDatabase "narrow" [ cCol ] [] [] None None |> ignore
@@ -514,6 +531,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false }
                     { Name = "created_at"
                       // fsp 6 preserves the stand-in's fraction so replay is
@@ -529,6 +547,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false }
                     { Name = "token"
                       Type = TVarchar 64
@@ -542,6 +561,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false } ]
 
               createTable store defaultDatabase "events" eventsColumns [] [] None None |> ignore
@@ -662,6 +682,7 @@ let tests =
                     Comment = ""
                     Collation = None
                     Charset = None
+                    Srid = None
                     OnUpdateCurrentTimestamp = false }
 
               alterTable
@@ -799,6 +820,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false } ]
                   []
                   []
@@ -938,6 +960,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false }
                     { Name = "n"
                       Type = TInt false
@@ -951,6 +974,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false } ]
                   []
                   []
@@ -1465,6 +1489,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false } ]
                   []
                   []
@@ -1514,6 +1539,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false }
                     { Name = "n"
                       Type = TInt false
@@ -1527,6 +1553,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false } ]
                   []
                   []
@@ -1573,6 +1600,7 @@ let tests =
                     Comment = ""
                     Collation = None
                     Charset = None
+                    Srid = None
                     OnUpdateCurrentTimestamp = false }
 
               createTable store defaultDatabase "p" [ idCol "id" ] [] [] None None |> ignore
@@ -1620,6 +1648,7 @@ let tests =
                     Comment = ""
                     Collation = None
                     Charset = None
+                    Srid = None
                     OnUpdateCurrentTimestamp = false }
 
               createTable
@@ -1638,6 +1667,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false }
                     genCol ]
                   []
@@ -1919,6 +1949,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = false }
                     { Name = "stamp"
                       Type = TDateTime 3
@@ -1932,6 +1963,7 @@ let tests =
                       Comment = ""
                       Collation = None
                       Charset = None
+                      Srid = None
                       OnUpdateCurrentTimestamp = true } ]
 
               createTable store defaultDatabase "stamped" stampColumns [] [] None None |> ignore

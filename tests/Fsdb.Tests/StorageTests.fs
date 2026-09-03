@@ -23,6 +23,7 @@ let private col name ty nullable =
       Comment = ""
       Collation = None
       Charset = None
+      Srid = None
       OnUpdateCurrentTimestamp = false }
 
 let private idCol =
@@ -789,7 +790,18 @@ let tests =
 
                     match coerceValue true column line with
                     | Error(InvalidValueForColumn("location", _)) -> ()
-                    | other -> failtestf "expected geometry type rejection, got %A" other ]
+                    | other -> failtestf "expected geometry type rejection, got %A" other
+
+                testCase "an SRID-restricted column rejects a mismatched geometry"
+                <| fun _ ->
+                    let column = { col "location" (TGeometry Point) false with Srid = Some 0u }
+                    let point = VGeometry(tryGeometryFromText 4326 "POINT(1 2)" |> Option.get)
+
+                    match coerceValue true column point with
+                    | Error(ExpressionError(3643, message)) ->
+                        Expect.stringContains message "SRID of the geometry is 4326" "value SRID"
+                        Expect.stringContains message "SRID of the column is 0" "column SRID"
+                    | other -> failtestf "expected an SRID mismatch, got %A" other ]
 
           testList
               "unique constraints"

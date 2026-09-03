@@ -83,7 +83,8 @@ module VirtualTable =
           Generated = None
           Comment = ""
           Collation = None
-          Charset = None }
+          Charset = None
+          Srid = None }
 
     let text (name: string) : Ast.ColumnDef = col name Ast.TText
     let int (name: string) : Ast.ColumnDef = col name (Ast.TInt false)
