@@ -13267,8 +13267,6 @@ let rec private explainJoinBlock
         if tableCount <> 1 then
             false
         else
-            let tableDb = tref.Database |> Option.defaultValue dbName
-
             match tryEqualityAccess store dbName tref whereOpt with
             | Some plan when plan.Unique && plan.Rows.IsEmpty ->
                 acc.Add

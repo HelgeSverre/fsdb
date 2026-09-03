@@ -1970,10 +1970,17 @@ let tests =
                         | Ok _ -> ()
                         | Error e -> failtestf "expected Ok, got %A" e
 
+                    let rangeLookup =
+                        trySecondaryRangeLookup store defaultDatabase "users" "age" (Some(VInt 0L, true)) None
+                        |> Option.defaultWith (fun () -> failtest "expected an ordered secondary range lookup")
+
+                    Expect.equal rangeLookup.RangeRowCount 2 "the index slice exposes its cardinality"
+                    Expect.equal rangeLookup.TableRowCount 2 "the lookup exposes the table cardinality"
+                    Expect.isFalse rangeLookup.RangeRows.IsValueCreated "counting the range does not resolve its rows"
+
                     let entries =
-                        match trySecondaryRangeLookup store defaultDatabase "users" "age" (Some(VInt 0L, true)) None with
-                        | Some lookup -> lookup.RangeRows.Value |> List.map (fun (_, row) -> row.[2], row.[0])
-                        | None -> failtest "expected an ordered secondary range lookup"
+                        rangeLookup.RangeRows.Value
+                        |> List.map (fun (_, row) -> row.[2], row.[0])
 
                     Expect.equal entries [ VInt 26L, VInt 2L; VInt 28L, VInt 3L ] "ordered entries reflect the live rows"
 
