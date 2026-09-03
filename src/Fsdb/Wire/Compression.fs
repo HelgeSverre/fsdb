@@ -12,18 +12,30 @@ let private compressedHeaderLength = 7
 let private maxInputChunk = 0xff0000
 let private minimumCompressionLength = 50
 
-let private readExact (stream: Stream) count (cancellationToken: CancellationToken) =
+let private readExactlyInto
+    (stream: Stream)
+    (buffer: byte[])
+    offset
+    count
+    (cancellationToken: CancellationToken)
+    =
     task {
-        let bytes = Array.zeroCreate<byte> count
-        let mutable offset = 0
+        let mutable position = offset
+        let endPosition = offset + count
 
-        while offset < count do
-            let! read = stream.ReadAsync(bytes, offset, count - offset, cancellationToken)
+        while position < endPosition do
+            let! read = stream.ReadAsync(buffer, position, endPosition - position, cancellationToken)
 
             if read = 0 then
                 raise (EndOfStreamException())
 
-            offset <- offset + read
+            position <- position + read
+    }
+
+let private readExact (stream: Stream) count (cancellationToken: CancellationToken) =
+    task {
+        let bytes = Array.zeroCreate<byte> count
+        do! readExactlyInto stream bytes 0 count cancellationToken
 
         return bytes
     }
@@ -31,26 +43,20 @@ let private readExact (stream: Stream) count (cancellationToken: CancellationTok
 let private readHeader (stream: Stream) (cancellationToken: CancellationToken) =
     task {
         let bytes = Array.zeroCreate<byte> compressedHeaderLength
-        let mutable offset = 0
-        let mutable eof = false
+        let! firstByte = stream.ReadAsync(bytes, 0, 1, cancellationToken)
 
-        while offset < bytes.Length && not eof do
-            let! read = stream.ReadAsync(bytes, offset, bytes.Length - offset, cancellationToken)
-
-            if read = 0 then
-                eof <- true
-            else
-                offset <- offset + read
-
-        if offset = 0 then
+        if firstByte = 0 then
             return None
-        elif offset <> bytes.Length then
-            return raise (EndOfStreamException())
         else
+            do! readExactlyInto stream bytes 1 (bytes.Length - 1) cancellationToken
             return Some bytes
     }
 
-let private inflate (expectedLength: int) (payload: byte[]) (cancellationToken: CancellationToken) =
+type private Codec =
+    { Compress: byte[] -> CancellationToken -> Task<byte[]>
+      Decompress: int -> byte[] -> CancellationToken -> Task<byte[]> }
+
+let private decompressZlib (expectedLength: int) (payload: byte[]) (cancellationToken: CancellationToken) =
     task {
         use source = new MemoryStream(payload, false)
         use inflater = new ZLibStream(source, CompressionMode.Decompress)
@@ -74,23 +80,28 @@ let private inflate (expectedLength: int) (payload: byte[]) (cancellationToken: 
         return bytes
     }
 
-let private deflate (payload: byte[]) (cancellationToken: CancellationToken) =
+let private compressZlib (payload: byte[]) (cancellationToken: CancellationToken) =
     task {
         use output = new MemoryStream()
-        let compressor = new ZLibStream(output, CompressionLevel.Fastest, true)
 
-        try
-            do! compressor.WriteAsync(payload, 0, payload.Length, cancellationToken)
-        finally
-            compressor.Dispose()
+        do!
+            task {
+                use compressor = new ZLibStream(output, CompressionLevel.Fastest, true)
+                do! compressor.WriteAsync(payload, 0, payload.Length, cancellationToken)
+            }
 
         return output.ToArray()
     }
+
+let private zlib =
+    { Compress = compressZlib
+      Decompress = decompressZlib }
 
 /// Translates MySQL compressed packets to the ordinary packet byte stream.
 type CompressedStream(inner: Stream, leaveOpen: bool) =
     inherit Stream()
 
+    let codec = zlib
     let mutable readBuffer = Array.empty<byte>
     let mutable readOffset = 0
     let mutable sequenceId = 0uy
@@ -120,7 +131,7 @@ type CompressedStream(inner: Stream, leaveOpen: bool) =
                     if uncompressedLength = 0 then
                         Task.FromResult payload
                     else
-                        inflate uncompressedLength payload cancellationToken
+                        codec.Decompress uncompressedLength payload cancellationToken
 
                 readBuffer <- bytes
                 readOffset <- 0
@@ -154,7 +165,7 @@ type CompressedStream(inner: Stream, leaveOpen: bool) =
                 if payload.Length < minimumCompressionLength then
                     Task.FromResult Array.empty<byte>
                 else
-                    deflate payload cancellationToken
+                    codec.Compress payload cancellationToken
 
             let useCompressed = compressed.Length > 0 && compressed.Length < payload.Length
             let body = if useCompressed then compressed else payload
@@ -170,14 +181,14 @@ type CompressedStream(inner: Stream, leaveOpen: bool) =
 
     member private this.WriteCoreAsync(buffer: byte[], offset: int, count: int, cancellationToken: CancellationToken) =
         task {
-            let mutable offset = offset
+            let mutable sourceOffset = offset
             let mutable remaining = count
 
             while remaining > 0 do
                 let length = min remaining maxInputChunk
-                let payload = buffer.[offset .. offset + length - 1]
+                let payload = Array.sub buffer sourceOffset length
                 do! this.WriteFrameAsync(payload, cancellationToken)
-                offset <- offset + length
+                sourceOffset <- sourceOffset + length
                 remaining <- remaining - length
         }
 
