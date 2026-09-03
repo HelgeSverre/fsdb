@@ -4336,7 +4336,9 @@ type RangeLookup =
       RangeColumnIndex: int
       RangePrefixLength: int option
       RangeColumns: ColumnDef list
-      RangeRows: (RowId * Value[]) list }
+      RangeRowCount: int
+      TableRowCount: int
+      RangeRows: Lazy<(RowId * Value[]) list> }
 
 let private trySecondaryRangeLookupInTable
     (store: Store)
@@ -4353,15 +4355,18 @@ let private trySecondaryRangeLookupInTable
             let count = max 0 (slice.AfterLast - slice.First)
 
             let rows =
-                Seq.init count (fun offset -> slice.Entries.[slice.First + offset])
-                |> Seq.sortBy (fun entry -> RowId.value entry.RowId)
-                |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
-                |> List.ofSeq
+                lazy
+                    (Seq.init count (fun offset -> slice.Entries.[slice.First + offset])
+                     |> Seq.sortBy (fun entry -> RowId.value entry.RowId)
+                     |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
+                     |> List.ofSeq)
 
             { RangeIndexName = slice.IndexName
               RangeColumnIndex = columnIndex
               RangePrefixLength = slice.PrefixLengths.Head
               RangeColumns = table.Columns
+              RangeRowCount = count
+              TableRowCount = table.RowsArray.Count
               RangeRows = rows }))
 
 let trySecondaryRangeLookup

@@ -47,6 +47,7 @@
     <Compile Include="Engine/InnoDbMetadata.fs" />
     <Compile Include="Engine/InformationSchemaKeywords.fs" />
     <Compile Include="Engine/InformationSchema.fs" />
+    <Compile Include="Engine/QueryPlanner.fs" />
     <Compile Include="Engine/Executor.fs" />
     <Compile Include="Wire/Compression.fs" />
     <Compile Include="Wire/Packet.fs" />

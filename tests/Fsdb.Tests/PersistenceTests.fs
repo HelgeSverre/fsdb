@@ -946,11 +946,11 @@ let tests =
               | None -> failtest "expected a recovered prefix-index probe"
 
               match trySecondaryRangeLookup reloaded defaultDatabase "items" "category" (Some(VString "books", true)) (Some(VString "music", false)) with
-              | Some lookup -> Expect.equal (lookup.RangeRows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered ordered entries preserve row order"
+              | Some lookup -> Expect.equal (lookup.RangeRows.Value |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered ordered entries preserve row order"
               | None -> failtest "expected a recovered ordered secondary-index probe"
 
               match trySecondaryRangeLookup reloaded defaultDatabase "prefix_items" "category" (Some(VString "books", true)) (Some(VString "boz", false)) with
-              | Some lookup -> Expect.equal (lookup.RangeRows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered prefix ranges include matching buckets"
+              | Some lookup -> Expect.equal (lookup.RangeRows.Value |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered prefix ranges include matching buckets"
               | None -> failtest "expected a recovered prefix range probe"
 
           testCase "WAL replay of many single-row UPDATEs against a UNIQUE-indexed table doesn't rebuild the index once per event"

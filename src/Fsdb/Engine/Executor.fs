@@ -8735,13 +8735,24 @@ and private tryCorrelatedEqualityLookup
                     Storage.tryEqualityLookup store tableDb tref.Table column value
                     |> Option.orElseWith (fun () -> transientLookup tableDb column value))))
 
-and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
+and private tryRangeAccess
+    (scope: ColumnReferenceScope)
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : Storage.RangeLookup option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    (if storedValuesMatchReadValues store then rangeLookupBounds BareOrQualifiedColumn tref whereExpr else [])
+    (if storedValuesMatchReadValues store then rangeLookupBounds scope tref whereExpr else [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
-        |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows))
+        |> Option.filter (fun lookup ->
+            QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange))
+
+and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
+    tryRangeAccess BareOrQualifiedColumn store dbName tref whereExpr
+    |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
 
 and private trySpatialAccess
     (scope: ColumnReferenceScope)
@@ -8761,12 +8772,8 @@ and private trySpatialLookup scope store dbName tref whereExpr =
     |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows)
 
 and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
-    let tableDb = tref.Database |> Option.defaultValue dbName
-
-    (if storedValuesMatchReadValues store then rangeLookupBounds QualifiedColumn tref whereExpr else [])
-    |> List.tryPick (fun bounds ->
-        Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
-        |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows))
+    tryRangeAccess QualifiedColumn store dbName tref whereExpr
+    |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
 
 and private indexOrderTerms (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -13338,9 +13345,7 @@ let rec private explainJoinBlock
 
                             true
                         | None ->
-                            rangeLookupBounds BareOrQualifiedColumn tref whereOpt
-                            |> List.tryPick (fun bounds ->
-                                Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper)
+                            tryRangeAccess BareOrQualifiedColumn store dbName tref whereOpt
                             |> Option.map (fun lookup ->
                                 acc.Add
                                     { Id = Some id
@@ -13353,7 +13358,7 @@ let rec private explainJoinBlock
                                             explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
                                         )
                                       Ref = None
-                                      Rows = Some(uint64 lookup.RangeRows.Length)
+                                      Rows = Some(uint64 lookup.RangeRowCount)
                                       Extra = extra })
                             |> Option.isSome
 
