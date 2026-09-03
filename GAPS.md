@@ -205,7 +205,7 @@ maintained for constraints while staying out of ordinary plans.
 ## 6. Charsets and collations
 
 Working: ICU-backed registry covering the utf8mb4 0900 attribute matrix,
-legacy unicode/general collations, ~21 language collations, ja_0900_as_cs_ks,
+legacy unicode/general and language-tailored collations, ja_0900_as_cs_ks,
 utf8mb3/latin1(cp1252)/ascii/binary; real MySQL collation ids and SORTLENs
 for SHOW COLLATION/I_S; PAD SPACE semantics; connection collation for
 literal-vs-literal comparison; symmetric MySQL coercibility precedence for
@@ -482,7 +482,7 @@ administrative probes.
 
 | Open campaign | Current gap |
 |---|---|
-| Planner constant factors | The latest tracked scale matrices measure indexed joins at 302 µs versus MySQL's 194 µs, uncorrelated `IN` at 519 µs versus 163 µs, and secondary ranges at 195 µs versus 46 µs. Input-sensitive work remains in grouping (313 ms versus 200 ms), non-indexed update (105 ms versus 41 ms), decimal membership (132 ms versus 81 ms), and full-text joins (25.0 ms versus 3.94 ms). Shared statement setup and scan-shaped plans remain the principal measured seams. |
+| Planner constant factors | Indexed joins, uncorrelated `IN`, and secondary ranges retain a constant-factor gap. Grouping, scan-shaped updates, decimal membership, and full-text joins remain input-sensitive. Benchmark result artifacts carry the measurements; shared statement setup and scan-shaped plans remain the principal measured seams. |
 | Transaction fault scheduling | The torture harness lacks matched connection churn during transactions, cancellation while queued, savepoints under contention, and concurrent campaigns across every isolation level. |
 | Catalog churn | Concurrent `CREATE/DROP DATABASE` under query and transaction traffic lacks a differential campaign. |
 | Snapshot rotation volume | Crash/restart campaigns cover acknowledged-commit and atomicity invariants; longer high-volume checkpoint-rotation campaigns remain useful stress coverage. |
