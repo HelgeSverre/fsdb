@@ -243,9 +243,12 @@ entries and narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS`
 predicates, including single-table updates and deletes. The residual predicate
 still runs on every candidate, and `EXPLAIN` reports the same `range` access
 shape and key length as MySQL.
-Equi-joins use a hash join. A physical inner, left, or right join can instead
-probe an index when the rows already in scope bind its complete key, including
-joins expressed with `USING` or `NATURAL JOIN`.
+Equi-joins choose between one hash build and repeated index probes. A physical
+inner, left, or right join can probe an index when the rows already in scope
+bind its complete key, including joins expressed with `USING` or `NATURAL
+JOIN`. Full-result joins use the index's observed distinct-key count to avoid
+repeated broad bucket probes; queries that may stop at `LIMIT` retain the
+streaming index path.
 
 ### Collations & charsets
 

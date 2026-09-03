@@ -130,6 +130,12 @@ state transitions rather than the 100-row recursive body itself. That makes
 shared statement setup the next profiling seam, not a special-purpose CTE
 container.
 
+The [low-cardinality join profile](results/1c2270d-low-cardinality-joins.md)
+compares an indexed join with an otherwise identical unindexed hash-join
+twin. fsdb now uses observed distinct-key counts to avoid repeated broad index
+bucket resolution when the full join result is consumed, while preserving the
+index path for early-stopping queries.
+
 ### Durability-matched (single-connection latency, `ebc3fca-durable.md`)
 
 fsdb in-memory vs fsdb `--data-dir` (binary WAL) vs MySQL durable vs MySQL no-fsync:
