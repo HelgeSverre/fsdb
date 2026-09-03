@@ -4220,9 +4220,7 @@ let showStatus
           "Threads_connected", string (connectedThreads ())
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
         @ compressionRows
-        @ [
-          for name in reportedCommandNames do
-              name, string (statusCounters.CommandCount name) ]
+        @ (reportedCommandNames |> List.map (fun name -> name, string (statusCounters.CommandCount name)))
         |> List.filter (fun (name, _) -> likeFilter likeOpt name)
         |> List.map (fun (name, value) -> [ Some name; Some value ])
 

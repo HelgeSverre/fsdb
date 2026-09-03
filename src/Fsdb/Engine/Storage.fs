@@ -8525,9 +8525,7 @@ let appendRowsForReplay (store: Store) (dbName: string) (tableName: string) (row
 
     changeTableForReplay store dbName tableName append onMissing
 
-/// Rebuilds derived indexes once after loading a snapshot and its WAL tail.
-/// This also repairs snapshots written by older versions whose index formats
-/// are not persisted.
+/// Rebuilds derived indexes after loading a snapshot and its WAL tail because index structures are not persisted.
 let reindexAllForReplay (store: Store) : unit =
     for KeyValue(_, slot) in store.Databases do
         slot.Value <- slot.Value |> Map.map (fun _ table -> reindexTable table)
