@@ -181,8 +181,19 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountSelectiveScan() =
+        let lower = randomUserId () - 1
+        this.Query $"SELECT COUNT(*) FROM users WHERE sort_key + 0 >= {lower} AND sort_key + 0 < {lower + 1}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CountUnselectiveIndexedRange() =
         this.Query "SELECT COUNT(*) FROM users WHERE age >= 18"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountUnselectiveScan() =
+        this.Query "SELECT COUNT(*) FROM users WHERE age + 0 >= 18"
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Spatial")>]
