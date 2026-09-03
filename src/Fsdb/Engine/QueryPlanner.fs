@@ -5,6 +5,10 @@ type AccessPath =
     | IndexLookup
     | IndexRange
 
+type JoinPath =
+    | IndexProbe
+    | HashJoin
+
 type private AccessEstimate =
     { Path: AccessPath
       RowsRead: int
@@ -28,6 +32,7 @@ let private equalityPreference estimate =
     | IndexRange, _ -> 3
 
 let private equalityScanFloor = 64
+let private hashJoinFloor = 64
 
 let private choose preference estimates =
     estimates
@@ -62,3 +67,16 @@ let estimateUniformEqualityCandidates tableRows distinctKeys probeKeys =
         let selectedKeys = min distinctKeys probeKeys
         let numerator = int64 tableRows * int64 selectedKeys
         int ((numerator + int64 distinctKeys - 1L) / int64 distinctKeys)
+
+let chooseJoin leftRows rightRows distinctRightKeys =
+    let leftRows = max 0 leftRows
+    let rightRows = max 0 rightRows
+
+    if rightRows < hashJoinFloor then
+        IndexProbe
+    else
+        let candidatesPerProbe = estimateUniformEqualityCandidates rightRows distinctRightKeys 1
+        let indexWork = int64 leftRows * (int64 candidatesPerProbe + 1L)
+        let hashWork = int64 leftRows + int64 rightRows
+
+        if indexWork <= hashWork then IndexProbe else HashJoin

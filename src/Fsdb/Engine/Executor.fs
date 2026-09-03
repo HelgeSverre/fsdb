@@ -177,6 +177,13 @@ type private IndexedJoinProbe =
       Index: EqualityIndex
       ProbeIndices: int list }
 
+type private JoinConsumption =
+    | MayStopEarly
+    | ConsumesAllRows
+
+let private joinConsumptionFor limit =
+    if Option.isSome limit then MayStopEarly else ConsumesAllRows
+
 type private FullTextPredicatePlan =
     { Rows: (RowId * Value[]) list
       PredicateFor: RowId -> Expr
@@ -6464,13 +6471,14 @@ and private applyJoin
     (outer: EvalContext option)
     (sourceOverrides: JoinSourceOverrides)
     (leftPhysicalTable: Table option)
+    (consumption: JoinConsumption)
     (state: (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Table with
     | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName outer state join source path columns alias
     | FromLateral(body, alias) -> applyLateralJoin store registry dbName outer state join body alias
-    | _ -> applyResolvedJoin store registry dbName outer sourceOverrides leftPhysicalTable state join
+    | _ -> applyResolvedJoin store registry dbName outer sourceOverrides leftPhysicalTable consumption state join
 
 /// `applyJoin`'s LATERAL branch — the derived table re-runs once per left
 /// row, with that row (over the columns joined so far) as its outer context,
@@ -6836,6 +6844,7 @@ and private applyResolvedJoin
     (outer: EvalContext option)
     (sourceOverrides: JoinSourceOverrides)
     (leftPhysicalTable: Table option)
+    (consumption: JoinConsumption)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
@@ -6977,7 +6986,7 @@ and private applyResolvedJoin
 
             let rightIndexTable = physicalTable |> Option.filter (fun table -> table.Columns.Length = joinColumns.Length)
             let leftIndexTable = leftPhysicalTable |> Option.filter (fun table -> table.Columns.Length = combinedColumnsSoFar.Length)
-            let indexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns rightIndexTable equiKeys
+            let candidateIndexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns rightIndexTable equiKeys
             let preservedRightProbe =
                 tryIndexedPreservedRightProbe store join combinedColumnsSoFar joinColumns leftIndexTable equiKeys
 
@@ -7000,14 +7009,28 @@ and private applyResolvedJoin
                     safeLeftFilter left && safeLeftFilter right
                 | _ -> false
 
-            let hashEligible =
-                storedValuesMatchReadValues store
-                && indexedJoinProbe.IsNone
-                && not equiKeys.IsEmpty
-                && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
-                && keyClasses |> List.forall Option.isSome
-                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
-                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
+            let hashCompatible =
+                lazy
+                    (storedValuesMatchReadValues store
+                     && not equiKeys.IsEmpty
+                     && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
+                     && keyClasses |> List.forall Option.isSome
+                     && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
+                     && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows)
+
+            let indexedJoinProbe =
+                candidateIndexedJoinProbe
+                |> Option.filter (fun probe ->
+                    match consumption with
+                    | MayStopEarly -> true
+                    | ConsumesAllRows when not hashCompatible.Value -> true
+                    | ConsumesAllRows ->
+                        (QueryPlanner.chooseJoin
+                            leftIndexed.Value.Length
+                            probe.Table.RowsArray.Count
+                            (Storage.equalityIndexDistinctKeyCount probe.Table probe.Index)) = QueryPlanner.IndexProbe)
+
+            let hashEligible = indexedJoinProbe.IsNone && hashCompatible.Value
 
             let isConstantTrue =
                 function
@@ -8333,6 +8356,7 @@ and private runUnlockedSelectStmt
             (select: SelectStmt)
             =
             let baseQualifier = fromItemQualifier fromItem
+            let joinConsumption = joinConsumptionFor select.Limit
 
             match prepareVirtualRows store registry dbName baseQualifier baseColumns baseRows with
             | Error error -> error, [], []
@@ -8346,7 +8370,7 @@ and private runUnlockedSelectStmt
                         (fun acc join ->
                             acc
                             |> Result.bind (fun ((sources, rows, leftPhysicalTable), namesPerJoin) ->
-                                applyJoin store registry dbName outer Map.empty leftPhysicalTable (sources, rows) join
+                                applyJoin store registry dbName outer Map.empty leftPhysicalTable joinConsumption (sources, rows) join
                                 |> Result.map (fun (sources', rows', names) -> (sources', rows', None), names :: namesPerJoin)))
                         initial
                 with
@@ -12167,6 +12191,7 @@ and private runFullTextSelect
                 | Error error -> error, [], []
                 | Ok(baseColumns, baseRows) ->
                     let initial = Ok(([ fromItemQualifier fromItem, baseColumns ], baseRows), [])
+                    let joinConsumption = joinConsumptionFor select.Limit
 
                     let joined =
                         select.Joins
@@ -12176,7 +12201,7 @@ and private runFullTextSelect
                                 |> Result.bind (fun ((resolved, rows), namesPerJoin) ->
                                     let rewrittenJoin = { join with On = sub join.On }
 
-                                    applyJoin store registry dbName outer overrides None (resolved, rows) rewrittenJoin
+                                    applyJoin store registry dbName outer overrides None joinConsumption (resolved, rows) rewrittenJoin
                                     |> Result.map (fun (sources, rows, names) -> (sources, rows), names :: namesPerJoin)))
                             initial
 
@@ -13246,6 +13271,7 @@ let private leftColumnReference (sources: (string * ColumnDef list * Table) list
 let private indexedJoinExplainPlans
     (store: Store)
     (dbName: string)
+    (consumption: JoinConsumption)
     (from: FromItem option)
     (joins: Join list)
     : Result<Map<int, IndexedJoinPlan>, QueryResult> =
@@ -13300,6 +13326,15 @@ let private indexedJoinExplainPlans
                         accessKeys
                         |> Option.bind (fun (equiKeys, residual) ->
                             tryIndexedJoinProbe store join leftColumns rightColumns (Some table) equiKeys
+                            |> Option.filter (fun probe ->
+                                match consumption, leftSources with
+                                | MayStopEarly, _ -> true
+                                | ConsumesAllRows, [ _, _, leftTable ] ->
+                                    (QueryPlanner.chooseJoin
+                                        leftTable.RowsArray.Count
+                                        probe.Table.RowsArray.Count
+                                        (Storage.equalityIndexDistinctKeyCount probe.Table probe.Index)) = QueryPlanner.IndexProbe
+                                | ConsumesAllRows, _ -> true)
                             |> Option.map (fun probe ->
                                 joinIndex + 1,
                                 { Table = probe.Table
@@ -13345,6 +13380,7 @@ let rec private explainJoinBlock
     (extra: string list)
     (subqueryExprs: Expr list)
     (indexOrderPlan: IndexOrderPlan option)
+    (consumption: JoinConsumption)
     : Result<unit, QueryResult> =
     let tableCount = (from |> Option.toList |> List.length) + joins.Length
 
@@ -13508,7 +13544,7 @@ let rec private explainJoinBlock
             |> Result.map ignore
 
 
-    indexedJoinExplainPlans store dbName from joins
+    indexedJoinExplainPlans store dbName consumption from joins
     |> Result.bind (fun joinPlans ->
         let fromResult = from |> Option.map (explainFromItem joinPlans 0) |> Option.defaultValue (Ok())
 
@@ -13561,7 +13597,9 @@ and private explainSelectBlock
           if not select.OrderBy.IsEmpty && indexOrderPlan.IsNone then "Using filesort"
           if (not select.GroupBy.IsEmpty && indexOrderPlan.IsNone) || select.Distinct then "Using temporary" ]
 
-    explainJoinBlock store registry dbName nextId acc id selectType select.From joins select.Where extra (selectSubqueryExprs select) indexOrderPlan
+    let consumption = joinConsumptionFor select.Limit
+
+    explainJoinBlock store registry dbName nextId acc id selectType select.From joins select.Where extra (selectSubqueryExprs select) indexOrderPlan consumption
 
 /// Renders every collected `ExplainRow` into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the
@@ -13817,7 +13855,10 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
 
         finish (
             checkMutationWhere u.From u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
-            |> Result.bind (fun () -> explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs None)
+            |> Result.bind (fun () ->
+                let consumption = joinConsumptionFor u.Limit
+
+                explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs None consumption)
         )
     | Delete d when not d.Ctes.IsEmpty ->
         let expressions =
@@ -13834,7 +13875,10 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
 
         finish (
             checkMutationWhere d.From d.Joins (d.Where |> Option.toList)
-            |> Result.bind (fun () -> explainJoinBlock store registry dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs None)
+            |> Result.bind (fun () ->
+                let consumption = joinConsumptionFor d.Limit
+
+                explainJoinBlock store registry dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs None consumption)
         )
     | Insert(table, _, rowsExprs, _, _)
     | Replace(table, _, rowsExprs) ->

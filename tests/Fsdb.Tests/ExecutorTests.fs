@@ -6073,6 +6073,46 @@ let tests =
                     Expect.equal (rows "indexed" "Alphabet") [] "the old prefix bucket loses the row"
                     Expect.equal (rows "indexed" "Gamma") [ [ Some "1" ] ] "the new prefix bucket gains the row"
 
+                testCase "low-cardinality joins prefer one hash build over repeated index probes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE left_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
+                    runDefault store "CREATE TABLE indexed_rows (id INT PRIMARY KEY, bucket INT, KEY ix_bucket (bucket))" |> ignore
+                    runDefault store "CREATE TABLE scanned_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
+
+                    let values =
+                        [ 1..100 ]
+                        |> List.map (fun id -> sprintf "(%d, %d)" id (id % 2))
+                        |> String.concat ","
+
+                    runDefault store $"INSERT INTO left_rows VALUES {values}" |> ignore
+                    runDefault store $"INSERT INTO indexed_rows VALUES {values}" |> ignore
+                    runDefault store $"INSERT INTO scanned_rows VALUES {values}" |> ignore
+
+                    let count table =
+                        match runDefault store $"SELECT COUNT(*) FROM left_rows l JOIN {table} r ON r.bucket = l.bucket" with
+                        | ResultSet(_, [ [ Some value ] ]) -> value
+                        | other -> failtestf "expected a join count, got %A" other
+
+                    Expect.equal (count "indexed_rows") (count "scanned_rows") "the chosen hash path agrees with an unindexed twin"
+                    Expect.equal (count "indexed_rows") "5000" "every row joins its half of the right table"
+
+                    let fullPlan =
+                        runDefault store "EXPLAIN SELECT l.id, r.id FROM left_rows l JOIN indexed_rows r ON r.bucket = l.bucket"
+                        |> explainRows
+                        |> List.item 1
+
+                    Expect.equal fullPlan.AccessType (Some "ALL") "a broad probe yields to one hash build"
+                    Expect.equal fullPlan.Key None "the unused index is not reported"
+
+                    let limitedPlan =
+                        runDefault store "EXPLAIN SELECT l.id, r.id FROM left_rows l JOIN indexed_rows r ON r.bucket = l.bucket LIMIT 1"
+                        |> explainRows
+                        |> List.item 1
+
+                    Expect.equal limitedPlan.AccessType (Some "ref") "an early-stopping query retains streaming index probes"
+                    Expect.equal limitedPlan.Key (Some "ix_bucket") "the streaming key remains visible"
+
                 testCase "prefix indexes probe inner joins without weakening equality"
                 <| fun _ ->
                     let store = newStore ()
