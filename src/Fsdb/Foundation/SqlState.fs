@@ -59,3 +59,8 @@ let createDetailed code state message information =
       State = state
       Message = message
       Information = information }
+
+let isValidSignalState (state: string) =
+    state.Length = 5
+    && not (state.StartsWith("00", System.StringComparison.Ordinal))
+    && state |> Seq.forall System.Char.IsLetterOrDigit

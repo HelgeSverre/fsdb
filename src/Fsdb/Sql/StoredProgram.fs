@@ -1492,20 +1492,15 @@ let private validateProgram allowReturn (parameters: Parameter list) (statements
         | Some name when labels |> List.exists (fun (active, _) -> active = name) -> Error(RedefiningLabel name)
         | Some name -> Ok((name, kind) :: labels)
 
-    let validSqlState (state: string) =
-        state.Length = 5
-        && not (state.StartsWith("00", StringComparison.Ordinal))
-        && state |> Seq.forall Char.IsLetterOrDigit
-
     let resolve scope condition =
         match condition with
-        | SqlState state when not (validSqlState state) -> Error(InvalidSqlState state)
+        | SqlState state when not (SqlState.isValidSignalState state) -> Error(InvalidSqlState state)
         | NamedCondition name ->
             match Map.tryFind name scope.Conditions with
             | None -> Error(UnknownCondition name)
             | Some condition ->
                 match condition with
-                | SqlState state when not (validSqlState state) -> Error(InvalidSqlState state)
+                | SqlState state when not (SqlState.isValidSignalState state) -> Error(InvalidSqlState state)
                 | resolved -> Ok resolved
         | resolved -> Ok resolved
 

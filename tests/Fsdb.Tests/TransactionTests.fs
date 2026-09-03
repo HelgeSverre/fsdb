@@ -785,9 +785,8 @@ let tests =
 
               Expect.isTrue session.Tx.IsNone "expected the broken statement to abort the whole transaction"
 
-              // A stray COMMIT against the now-transactionless session must
-              // be the no-op real MySQL gives after a fatal statement error
-              // — not a merge of the aborted transaction's stale snapshot.
+              // COMMIT after a fatal statement error is a no-op, not a merge
+              // of the aborted transaction's stale snapshot.
               let session, _ = handle session "COMMIT"
               ignore session
 

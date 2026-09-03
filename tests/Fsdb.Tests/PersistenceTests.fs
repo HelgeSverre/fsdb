@@ -1967,7 +1967,7 @@ let tests =
               attach dir store
               createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
               insertRows store defaultDatabase "t" None [ [ VNull; VString "keep-me"; VNull ] ] |> ignore
-              snapshotNow dir store // a real, valid snapshot.fsdb now exists
+              snapshotNow dir store
 
               // Simulate a crash mid-`writeCatalog`: `.new` exists but is
               // truncated to a handful of zero bytes — `decodeCatalog` alone

@@ -2101,9 +2101,7 @@ let private generatedColumn: Parser<Expr * GeneratedKind, unit> =
     .>>. (opt ((keyword "VIRTUAL" >>% Virtual) <|> (keyword "STORED" >>% Stored))
           |>> Option.defaultValue Virtual)
 
-/// The charsets fsdb accepts in DDL (see `ColumnDef.Charset`'s doc for what
-/// each actually does at runtime), lowercased; anything else is a parse
-/// error. One validator shared by column mods and table options.
+/// Character sets accepted in DDL; parsed names are normalized to lowercase.
 let private charsetDeprecations (charset: string) =
     match charset.ToLowerInvariant() with
     | "utf8" -> [ Utf8CharsetAlias ]

@@ -4008,7 +4008,6 @@ let tests =
                   let! _ = readPacketAsync stream // row
                   let! _ = readPacketAsync stream // trailing EOF
 
-                  // The closed statement id is now unknown.
                   let execPayload =
                       let w = Writer()
                       w.WriteByte 0x17uy

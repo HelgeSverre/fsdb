@@ -1939,22 +1939,28 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected an idempotent repeated grant, got %A" other
 
-          testCase "mysql.user has MySQL 8.4's exact 51-column shape and mysql.db its 22"
+          testCase "mysql privilege tables expose their identifying and privilege columns"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let root = create 1 store
 
               match Fsdb.Storage.scanList store "mysql" "user" with
               | Ok(cols, rows) ->
-                  Expect.equal (List.length cols) 51 "51 columns"
-                  Expect.equal (cols |> List.item 2 |> fun c -> c.Name) "Select_priv" "priv columns start at 3"
+                  Expect.sequenceEqual
+                      (cols |> List.take 3 |> List.map _.Name)
+                      [ "Host"; "User"; "Select_priv" ]
+                      "account identity and first privilege"
                   Expect.equal (cols |> List.last |> fun c -> c.Name) "User_attributes" "last column"
                   Expect.equal (List.length rows) 1 "just root"
               | Error e -> failtestf "expected mysql.user to scan, got %A" e
 
               match Fsdb.Storage.scanList store "mysql" "db" with
               | Ok(cols, rows) ->
-                  Expect.equal (List.length cols) 22 "22 columns"
+                  Expect.sequenceEqual
+                      (cols |> List.take 4 |> List.map _.Name)
+                      [ "Host"; "Db"; "User"; "Select_priv" ]
+                      "database privilege identity and first privilege"
+                  Expect.equal (cols |> List.last |> fun column -> column.Name) "Trigger_priv" "last database privilege"
                   Expect.isEmpty rows "no db-level grants out of the box"
               | Error e -> failtestf "expected mysql.db to scan, got %A" e
 

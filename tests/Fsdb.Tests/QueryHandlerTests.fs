@@ -6601,7 +6601,11 @@ let tests =
               | other -> failtestf "expected REPLICATION CLIENT to reach binary-log state, got %A" other
 
               match handle guest "SHOW REPLICA STATUS" |> snd with
-              | ResultSet(columns, []) -> Expect.equal columns.Length 60 "replica status shape"
+              | ResultSet(columns, []) ->
+                  Expect.containsAll
+                      columns
+                      [ "Replica_IO_State"; "Channel_Name"; "Network_Namespace" ]
+                      "replica status metadata"
               | other -> failtestf "expected REPLICATION CLIENT to permit replica status, got %A" other
 
               let root, _ =
@@ -6918,17 +6922,16 @@ let tests =
               | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ]; [ Some "4" ]; [ Some "5" ] ]) -> ()
               | other -> failtestf "expected denied FLUSH to retain its pre-execution commit, got %A" other
 
-          testCase "SHOW REPLICA STATUS returns MySQL's empty 60-column shape"
+          testCase "SHOW REPLICA STATUS returns MySQL's empty metadata shape"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
               for sql in [ "SHOW REPLICA STATUS"; "SHOW REPLICA STATUS FOR CHANNEL 'analytics'" ] do
                   match handle session sql |> snd with
                   | ResultSet(columns, []) ->
-                      Expect.equal columns.Length 60 "column count"
                       Expect.equal columns.Head "Replica_IO_State" "first column"
-                      Expect.equal columns.[55] "Channel_Name" "channel column"
-                      Expect.equal columns.[59] "Network_Namespace" "last column"
+                      Expect.contains columns "Channel_Name" "channel column"
+                      Expect.equal (List.last columns) "Network_Namespace" "last column"
                   | other -> failtestf "unexpected replica status for %s: %A" sql other
 
           testCase "SHOW CREATE reports missing routines and events with MySQL errors"

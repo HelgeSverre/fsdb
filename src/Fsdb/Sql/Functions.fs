@@ -1759,6 +1759,9 @@ let rec private pairsOf (args: Value list) : (Value * Value) list =
     | p :: v :: rest -> (p, v) :: pairsOf rest
     | _ -> []
 
+let private hasPathValuePairs (values: Value list) =
+    not values.IsEmpty && values.Length % 2 = 0
+
 let private appendedJson (current: JsonNode) (value: JsonNode) : JsonNode =
     match current with
     | :? JsonArray as array ->
@@ -1785,7 +1788,7 @@ let private appendJsonPath (root: JsonNode) (segments: JPath list) (value: JsonN
 
 let private jsonArrayAppendFn: Scalar =
     function
-    | document :: rest when rest.Length >= 2 && rest.Length % 2 = 0 && not (anyNull (document :: rest)) ->
+    | document :: rest when hasPathValuePairs rest && not (anyNull (document :: rest)) ->
         match tryParseJsonValue document with
         | Some rootNode ->
             let mutable root = rootNode
@@ -1801,7 +1804,7 @@ let private jsonArrayAppendFn: Scalar =
 
 let private jsonArrayInsertFn: Scalar =
     function
-    | document :: rest when rest.Length >= 2 && rest.Length % 2 = 0 && not (anyNull (document :: rest)) ->
+    | document :: rest when hasPathValuePairs rest && not (anyNull (document :: rest)) ->
         match tryParseJsonValue document with
         | Some root ->
             for path, value in pairsOf rest do
@@ -1892,7 +1895,7 @@ let private jsonStorageFreeFn: Scalar =
 
 let private jsonWriteFn (mode: JsonWriteMode) : Scalar =
     function
-    | doc :: rest when rest.Length >= 2 && rest.Length % 2 = 0 && not (anyNull (doc :: rest)) ->
+    | doc :: rest when hasPathValuePairs rest && not (anyNull (doc :: rest)) ->
         match tryParseJsonValue doc with
         | None -> VNull
         | Some root0 ->
@@ -5007,6 +5010,11 @@ let private normalizeUuidHex (s: string) : string option =
     else
         None
 
+let private uuidByteLength = 16
+
+let private hasUuidByteLength (bytes: byte[]) =
+    bytes.Length = uuidByteLength
+
 /// Swapped byte order moves the time-high and time-mid fields ahead of
 /// time-low (`time_hi | time_mid | time_low | clock_seq | node` instead of
 /// the RFC 4122 field order) so a UUIDv1's mostly-incrementing time-low
@@ -5031,7 +5039,7 @@ let private uuidToBinFn: Scalar =
 
 let private binToUuidFn: Scalar =
     let format (b: byte[]) : Value =
-        if b.Length <> 16 then
+        if not (hasUuidByteLength b) then
             VNull
         else
             let hex = b |> Array.map (fun x -> x.ToString "x2") |> String.concat ""
@@ -5051,7 +5059,7 @@ let private binToUuidFn: Scalar =
     | [ v; s ] when not (anyNull [ v; s ]) ->
         let raw = Text.Encoding.Latin1.GetBytes(req v)
 
-        if raw.Length <> 16 then
+        if not (hasUuidByteLength raw) then
             VNull
         else
             format (if toDouble s <> 0.0 then unswapUuidBytes raw else raw)
@@ -5079,10 +5087,13 @@ let private inetNtoaFn: Scalar =
         VString(sprintf "%d.%d.%d.%d" ((n >>> 24) &&& 0xFFu) ((n >>> 16) &&& 0xFFu) ((n >>> 8) &&& 0xFFu) (n &&& 0xFFu))
     | _ -> VNull
 
+let private ipv4ByteLength = 4
+let private ipv6ByteLength = 16
+
 let private tryParseIpv4 (text: string) =
     let parts = text.Split '.'
 
-    if parts.Length <> 4 then
+    if parts.Length <> ipv4ByteLength then
         None
     else
         parts
@@ -5090,7 +5101,7 @@ let private tryParseIpv4 (text: string) =
             match Byte.TryParse(part, NumberStyles.None, CultureInfo.InvariantCulture) with
             | true, value when part.Length > 0 -> Some value
             | _ -> None)
-        |> fun bytes -> if bytes.Length = 4 then Some bytes else None
+        |> fun bytes -> if bytes.Length = ipv4ByteLength then Some bytes else None
 
 let private tryParseIpv6 (text: string) =
     if text.IndexOfAny [| '%'; '['; ']' |] >= 0 then
@@ -5114,12 +5125,18 @@ let private packedAddressBytes =
     function
     | value -> tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.Latin1.GetBytes(req value))
 
+let private hasPackedAddressLength (bytes: byte[]) =
+    bytes.Length = ipv4ByteLength || bytes.Length = ipv6ByteLength
+
+let private hasIpv6Length (bytes: byte[]) =
+    bytes.Length = ipv6ByteLength
+
 let private inet6NtoaFn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
         let bytes = packedAddressBytes value
 
-        if bytes.Length = 4 || bytes.Length = 16 then
+        if hasPackedAddressLength bytes then
             VString(IPAddress(bytes).ToString())
         else
             VNull
@@ -5139,7 +5156,7 @@ let private isIpv4CompatFn =
     addressPredicate (fun value ->
         let bytes = packedAddressBytes value
 
-        bytes.Length = 16
+        hasIpv6Length bytes
         && bytes.[0..11] |> Array.forall ((=) 0uy)
         && bytes.[12..15] <> [| 0uy; 0uy; 0uy; 0uy |]
         && bytes.[12..15] <> [| 0uy; 0uy; 0uy; 1uy |])
@@ -5147,7 +5164,7 @@ let private isIpv4CompatFn =
 let private isIpv4MappedFn =
     addressPredicate (fun value ->
         let bytes = packedAddressBytes value
-        bytes.Length = 16 && bytes.[0..9] |> Array.forall ((=) 0uy) && bytes.[10] = 0xffuy && bytes.[11] = 0xffuy)
+        hasIpv6Length bytes && bytes.[0..9] |> Array.forall ((=) 0uy) && bytes.[10] = 0xffuy && bytes.[11] = 0xffuy)
 
 // ---------------------------------------------------------------------------
 // Aggregates: COUNT/SUM/AVG/MIN/MAX. Each `Aggregate` here only ever sees a

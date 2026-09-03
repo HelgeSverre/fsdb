@@ -2933,7 +2933,7 @@ let private privCol (name: string) = sysCol name (TEnum [ "N"; "Y" ]) false (Som
 let private keyCol (name: string) (len: int) =
     { sysCol name (TChar len) false (Some(VString "")) with PrimaryKey = true }
 
-/// mysql.user's 51 columns, in MySQL 8.4's exact order.
+/// mysql.user columns in MySQL 8.4 order.
 let private mysqlUserColumns: ColumnDef list =
     [ keyCol "Host" 255; keyCol "User" 32 ]
     @ ([ "Select"; "Insert"; "Update"; "Delete"; "Create"; "Drop"; "Reload"; "Shutdown"; "Process"; "File"
@@ -2965,7 +2965,7 @@ let private mysqlUserColumns: ColumnDef list =
         sysCol "Password_require_current" (TEnum [ "N"; "Y" ]) true None
         sysCol "User_attributes" TJson true None ]
 
-/// mysql.db's 22 columns (per-database privilege rows).
+/// mysql.db columns for per-database privilege rows.
 let private mysqlDbColumns: ColumnDef list =
     [ keyCol "Host" 255; keyCol "Db" 64; keyCol "User" 32 ]
     @ ([ "Select"; "Insert"; "Update"; "Delete"; "Create"; "Drop"; "Grant"; "References"; "Index"; "Alter"
@@ -5262,10 +5262,7 @@ let private addedColumnFill (mode: TemporalCoercionMode) (col: ColumnDef) : Resu
         else
             implicitZeroSeed col |> Result.bind (coerceStoredValueWithMode mode col)
 
-/// Inserts `x` at `idx` (clamped to `xs`'s length, so `idx = List.length xs`
-/// appends) — used by `AFTER`/`FIRST` column positioning, since `Columns`
-/// and each row's `Value[]` are both plain lists/arrays with no built-in
-/// "insert at" the way a `ResizeArray` would have.
+/// Inserts at a clamped list index; an index at or beyond the end appends.
 let private insertAt (idx: int) (x: 'a) (xs: 'a list) : 'a list =
     let before, after = xs |> List.splitAt (min idx (List.length xs))
     before @ [ x ] @ after
@@ -5291,15 +5288,8 @@ let private removeIndexColumn columnName (indexes: IndexDef list) =
 
         if columns.IsEmpty then None else Some { index with KeyColumns = columns })
 
-/// Resolves `FIRST`/`AFTER col`/no-clause-given to a concrete 0-based index
-/// into `columnsExcludingSelf` (the table's columns with the column being
-/// added/moved already removed, so an `AFTER`/`FIRST` offset means the same
-/// thing whether this is a brand new column or one already elsewhere in the
-/// list) — `fallback` is what `PositionDefault` (no `AFTER`/`FIRST` written)
-/// resolves to, which differs by caller: `AddColumn` wants the end of the
-/// table (a plain `ADD COLUMN` with no position appends), `ModifyColumn`/
-/// `ChangeColumn` want the column's own current index (a plain `MODIFY`/
-/// `CHANGE COLUMN` with no position leaves it exactly where it was).
+/// Resolves a column position against a list that excludes the moved column.
+/// The fallback distinguishes ADD's append from MODIFY/CHANGE's retained position.
 let private resolvePosition (columnsExcludingSelf: ColumnDef list) (fallback: int) (position: ColumnPosition) : Result<int, StorageError> =
     match position with
     | PositionDefault -> Ok fallback
