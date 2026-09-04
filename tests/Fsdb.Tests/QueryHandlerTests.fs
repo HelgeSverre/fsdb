@@ -1495,6 +1495,10 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected JSON_TABLE USING to compare padded CHAR values, got %A" other
 
+              match handle paddedSession "SELECT c FROM JSON_TABLE('[\"x\"]', '$[*]' COLUMNS(c CHAR(500000000) PATH '$')) jt" |> snd with
+              | Err(1074, _) -> ()
+              | other -> failtestf "expected an oversized JSON_TABLE CHAR column to fail with 1074, got %A" other
+
           testCase "NO_UNSIGNED_SUBTRACTION produces signed integer results"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

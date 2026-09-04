@@ -209,6 +209,9 @@ let tests =
                         (Some "GEOMETRYCOLLECTION EMPTY")
                         "empty collection"
 
+                    let undersizedLine = Array.concat [ [| 1uy; 2uy; 0uy; 0uy; 0uy; 160uy; 134uy; 1uy; 0uy |]; Array.zeroCreate 100_000 ]
+                    Expect.isNone (tryGeometryFromWkb 0 undersizedLine) "declared element counts must fit the remaining payload"
+
                 testCase "planar distance covers points, boundaries, holes, and collections"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]
@@ -1435,6 +1438,22 @@ let tests =
                     Expect.equal (weightStringChar utf8Bin 2 (VBytes [| 0x61uy; 0x00uy |])) (VBytes [| 0x61uy; 0x00uy |]) "CHAR preserves raw bytes"
                     Expect.equal (weightStringChar utf8Bin 3 (VBit(8, 128UL))) (VBytes [| 0x80uy |]) "CHAR preserves BIT bytes"
 
+                    let oversized, conditions =
+                        Fsdb.Diagnostics.capture (fun () ->
+                            weightStringChar utf8Bin (Fsdb.Limits.maxAllowedPacket / 3 + 1) (VString "a"))
+
+                    Expect.equal oversized VNull "an oversized generated weight returns NULL"
+                    Expect.equal (conditions |> List.map _.Code) [ 1301 ] "the allocation is rejected with MySQL's warning"
+
+                    for name, factor in [ "utf8mb4_0900_bin", 4; "utf8mb4_general_ci", 16 ] do
+                        let collation = tryFind name |> Option.get
+                        let value, conditions =
+                            Fsdb.Diagnostics.capture (fun () ->
+                                weightStringChar collation (Fsdb.Limits.maxAllowedPacket / factor + 1) (VString "😀"))
+
+                        Expect.equal value VNull (name + " rejects before creating an oversized weight")
+                        Expect.equal (conditions |> List.map _.Code) [ 1301 ] (name + " records the allocation warning")
+
                 testList
                     "Dates"
                     [ testCase "component and calendar functions distinguish zero dates"
@@ -1850,6 +1869,13 @@ let tests =
                       testCase "REPLACE substitutes every occurrence"
                       <| fun _ -> Expect.equal (call "REPLACE" [ VString "a-b-c"; VString "-"; VString "+" ]) (VString "a+b+c") "replace"
 
+                      testCase "INSERT scans Unicode scalars without materializing the source"
+                      <| fun _ ->
+                          Expect.equal (call "INSERT" [ VString "a😀c"; VInt 2L; VInt 1L; VString "b" ]) (VString "abc") "supplementary scalar"
+
+                          let source = String.replicate 1_000_000 "a"
+                          Expect.equal (call "INSERT" [ VString source; VInt 0L; VInt 1L; VString "b" ]) (VString source) "an invalid position returns the source"
+
                       testCase "TRIM/LTRIM/RTRIM strip whitespace"
                       <| fun _ ->
                           Expect.equal (call "TRIM" [ VString "  hi  " ]) (VString "hi") "trim"
@@ -1877,6 +1903,8 @@ let tests =
                           Expect.equal (call "REPEAT" [ VString "ab"; VInt 3L ]) (VString "ababab") "repeat"
                           Expect.equal (call "SPACE" [ VInt 3L ]) (VString "   ") "space"
                           Expect.equal (call "REPEAT" [ VString "ab"; VInt 100_000_000L ]) VNull "repeat past max_allowed_packet is null, not an OOM"
+                          Expect.equal (call "REPEAT" [ VBytes [||]; VInt 100_000_000L ]) (VBytes [||]) "an empty binary value needs no per-repeat storage"
+                          Expect.equal (call "REPEAT" [ VBytes [| 1uy; 2uy |]; VInt 3L ]) (VBytes [| 1uy; 2uy; 1uy; 2uy; 1uy; 2uy |]) "binary repeat"
                           Expect.equal (call "SPACE" [ VInt 100_000_000L ]) VNull "space past max_allowed_packet is null"
 
                       testCase "ASCII returns the first UTF-8 byte's code, 0 for empty"
@@ -2115,6 +2143,14 @@ let tests =
 
                       testCase "REGEXP_LIKE propagates NULL"
                       <| fun _ -> Expect.equal (call "REGEXP_LIKE" [ VNull; VString "a" ]) VNull "null subject"
+
+                      testCase "REGEXP source offsets only record removed CR characters"
+                      <| fun _ ->
+                          let unchanged = Fsdb.Regexp.prepareInput None "." (String.replicate 1_000_000 "a")
+                          Expect.isNone unchanged.RemovedCrOffsets "an unchanged subject needs no offset array"
+
+                          let normalized = Fsdb.Regexp.prepareInput None "." ("a\r\n" + String.replicate 1_000_000 "b")
+                          Expect.equal (normalized.RemovedCrOffsets |> Option.map Array.length) (Some 1) "only removed CR offsets are retained"
 
                       testCase "REGEXP functions report malformed patterns and match types"
                       <| fun _ ->

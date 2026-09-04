@@ -1314,10 +1314,23 @@ let private escapedUtf8Suffix (text: string) (converted: string) =
         |> Seq.tryFindIndex (fun (original, replacement) -> original <> replacement)
         |> Option.defaultValue 0
 
-    text.Substring(firstChanged)
-    |> Text.Encoding.UTF8.GetBytes
-    |> Array.map (fun b -> if b < 0x80uy then string (char b) else sprintf "\\x%02X" b)
-    |> String.concat ""
+    let previewCharacters = min 8 (text.Length - firstChanged)
+    let bytes = Text.Encoding.UTF8.GetBytes(text.Substring(firstChanged, previewCharacters))
+    let shown = min 6 bytes.Length
+    let builder = Text.StringBuilder(shown * 4 + 3)
+
+    for index in 0 .. shown - 1 do
+        let value = bytes.[index]
+
+        if value < 0x80uy then
+            builder.Append(char value) |> ignore
+        else
+            builder.AppendFormat("\\x{0:X2}", value) |> ignore
+
+    if bytes.Length > shown || firstChanged + previewCharacters < text.Length then
+        builder.Append "..." |> ignore
+
+    builder.ToString()
 
 let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     let strict = mode.Strict
@@ -1447,6 +1460,9 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | _ -> numericFallback (Some "integer") (fun () -> VInt 0L)
 
     match col.Type, v with
+    | TBit width, _ when width < 1 -> Error(ExpressionError(3013, sprintf "Invalid size for column '%s'." col.Name))
+    | TBit width, _ when width > 64 ->
+        Error(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 64)" col.Name))
     | TDecimal(precision, _, _), _ when precision < 1 || precision > 65 ->
         Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision col.Name))
     | TDecimal(_, scale, _), _ when scale < 0 || scale > 30 ->
@@ -4761,7 +4777,7 @@ let private withTable
 /// Validates type parameters at DDL time, where the real column name is in
 /// scope for MySQL-compatible errors. Runtime coercion repeats DECIMAL's
 /// bounds because CAST and JSON_TABLE create synthetic column definitions.
-let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
+let internal validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
     let maxVarcharLength = 65535 / Collation.maxBytesPerCharacter c.Charset
 
     let displayError =
@@ -4795,6 +4811,10 @@ let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
                     sprintf "Column length too big for column '%s' (max = %d); use BLOB or TEXT instead" c.Name maxVarcharLength
                 )
             )
+        | TBinary length when length < 1 || length > 255 ->
+            Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 255); use BLOB or TEXT instead" c.Name))
+        | TVarBinary length when length < 1 || length > 65535 ->
+            Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 65535); use BLOB or TEXT instead" c.Name))
         | TBit width when width < 1 -> Error(ExpressionError(3013, sprintf "Invalid size for column '%s'." c.Name))
         | TBit width when width > 64 ->
             Error(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 64)" c.Name))
@@ -5126,22 +5146,16 @@ let private normalizeUtf8mb3Text (text: string) =
     let normalized = Charset.transcodeText "utf8mb3" text
 
     if normalized <> text then
-        let bytes = Encoding.UTF8.GetBytes text
-
-        let preview =
-            bytes
-            |> Seq.truncate 6
-            |> Seq.map (fun value ->
-                if value >= 0x20uy && value <= 0x7Euy then
-                    string (char value)
-                else
-                    sprintf "\\x%02X" value)
-            |> String.concat ""
-            |> fun text -> if bytes.Length > 6 then text + "..." else text
-
+        let preview = escapedUtf8Suffix text normalized
         Diagnostics.warning 1300 (sprintf "Cannot convert string '%s' from utf8mb4 to utf8mb3" preview)
 
     normalized
+
+let private normalizeBoundedUtf8mb3Text maxRunes (text: string) =
+    if text.EnumerateRunes() |> Seq.truncate (maxRunes + 1) |> Seq.length > maxRunes then
+        text
+    else
+        normalizeUtf8mb3Text text
 
 let private validateTableComment (tableName: string) (comment: string) =
     if comment.EnumerateRunes() |> Seq.length > 2048 then
@@ -5165,11 +5179,11 @@ let createTableSeeded
     ensureDatabase store dbName
     let columns =
         columns
-        |> List.map (fun column -> { column with Comment = normalizeUtf8mb3Text column.Comment })
+        |> List.map (fun column -> { column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment })
         |> normalizePrimaryKeyNullability
     let indexes = normalizeGeometryIndexes columns indexes
 
-    let tableComment = tableComment |> Option.map normalizeUtf8mb3Text
+    let tableComment = tableComment |> Option.map (normalizeBoundedUtf8mb3Text 2048)
 
     let createEvent (createTime, columns) =
         let statement =
@@ -5546,10 +5560,10 @@ let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: IndexKeyGr
 let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
     let action =
         match action with
-        | AddColumn(column, position) -> AddColumn({ column with Comment = normalizeUtf8mb3Text column.Comment }, position)
-        | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeUtf8mb3Text column.Comment }, position)
-        | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeUtf8mb3Text column.Comment }, position)
-        | SetTableComment comment -> SetTableComment(normalizeUtf8mb3Text comment)
+        | AddColumn(column, position) -> AddColumn({ column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment }, position)
+        | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment }, position)
+        | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment }, position)
+        | SetTableComment comment -> SetTableComment(normalizeBoundedUtf8mb3Text 2048 comment)
         | AddIndex index -> AddIndex(normalizeGeometryIndexes table.Columns [ index ] |> List.head)
         | action -> action
 

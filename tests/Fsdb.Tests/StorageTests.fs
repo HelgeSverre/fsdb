@@ -182,6 +182,14 @@ let tests =
                     | Error(ExpressionError(1074, _)) -> ()
                     | other -> failtestf "expected oversized CHAR to fail, got %A" other
 
+                    match createTable store defaultDatabase "wide_binary" [ col "value" (TBinary 256) true ] [] [] None None with
+                    | Error(ExpressionError(1074, _)) -> ()
+                    | other -> failtestf "expected oversized BINARY to fail, got %A" other
+
+                    match createTable store defaultDatabase "wide_varbinary" [ col "value" (TVarBinary 65536) true ] [] [] None None with
+                    | Error(ExpressionError(1074, _)) -> ()
+                    | other -> failtestf "expected oversized VARBINARY to fail, got %A" other
+
                     match createTable store defaultDatabase "wide_utf8" [ col "value" (TVarchar 16384) true ] [] [] None None with
                     | Error(ExpressionError(1074, "Column length too big for column 'value' (max = 16383); use BLOB or TEXT instead")) -> ()
                     | other -> failtestf "expected oversized utf8mb4 VARCHAR to fail, got %A" other
@@ -220,12 +228,17 @@ let tests =
                     let store = create ()
                     let atLimit = { col "ok" (TInt false) true with Comment = String.replicate 1024 "😀" }
                     let tooLong = { col "too_long" (TInt false) true with Comment = String.replicate 1025 "x" }
+                    let hugeSupplementary = { col "huge" (TInt false) true with Comment = "😀" + String.replicate 100_000 "x" }
 
                     Expect.equal (createTable store defaultDatabase "comment_limit" [ atLimit ] [] [] None None) (Ok()) "1024 scalars are valid"
 
                     match createTable store defaultDatabase "comment_too_long" [ tooLong ] [] [] None None with
                     | Error(ExpressionError(1629, "Comment for field 'too_long' is too long (max = 1024)")) -> ()
                     | other -> failtestf "expected comment-length error, got %A" other
+
+                    match createTable store defaultDatabase "comment_huge" [ hugeSupplementary ] [] [] None None with
+                    | Error(ExpressionError(1629, "Comment for field 'huge' is too long (max = 1024)")) -> ()
+                    | other -> failtestf "expected a bounded supplementary comment error, got %A" other
 
                 testCase "scan on an unknown table returns NoSuchTable"
                 <| fun _ ->

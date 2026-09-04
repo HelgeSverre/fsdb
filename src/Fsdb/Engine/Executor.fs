@@ -1779,7 +1779,7 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
         | Error Regexp.InvalidMatchType -> Error(1210, "Incorrect arguments to regexp function")
         | Ok regex ->
             try
-                Ok(boolToValue (regex.IsMatch((Regexp.prepareInput None pat text).Text)))
+                Ok(boolToValue (regex.IsMatch(Regexp.prepareText None pat text)))
             with :? RegexMatchTimeoutException ->
                 Error(3699, "Timeout exceeded in regular expression match.")
 
@@ -1893,10 +1893,14 @@ let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
 
 let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : Value =
     match store.ExecutionSettings.SqlMode.PadCharToFullLength, column.Type, value with
+    | true, TChar length, VString _ when length > 255 ->
+        raise (SqlError(1074, sprintf "Column length too big for column '%s' (max = 255); use BLOB or TEXT instead" column.Name))
     | true, TChar length, VString text ->
         let padding = length - (text.EnumerateRunes() |> Seq.length)
 
-        if padding > 0 then
+        if padding > Limits.maxAllowedPacket then
+            raise (SqlError(1153, "Padded CHAR value exceeds max_allowed_packet"))
+        elif padding > 0 then
             VString(text + System.String(' ', padding))
         else
             value
@@ -4868,6 +4872,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | Ok node -> Ok(VJson(Functions.jsonNodeText node))
                 | Error() ->
                     Error(3141, "Invalid JSON text in argument 1 to function cast_as_json: \"Invalid value.\" at position 0."))
+    | Cast(_, TBit width) when width < 1 -> Error(3013, "Invalid size for CAST.")
+    | Cast(_, TBit width) when width > 64 -> Error(1439, "Display width out of range for CAST (max = 64)")
+    | Cast(_, (TBinary length | TVarBinary length)) when length > Limits.maxAllowedPacket ->
+        Diagnostics.warning
+            1301
+            (sprintf "Result of cast_as_binary() was larger than max_allowed_packet (%d) - truncated" Limits.maxAllowedPacket)
+
+        Ok VNull
     | Cast(e, ty) ->
         eval e
         // Casting an ENUM to a number reads its declaration ordinal, the same
@@ -6010,6 +6022,20 @@ and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list
         | NestedColumns(_, nested) -> jsonTableColumnDefs nested)
     |> List.collect id
 
+and private validateJsonTableAllocationBounds (columns: JsonTableColumn list) : Result<ColumnDef list, QueryResult> =
+    let definitions = jsonTableColumnDefs columns
+
+    definitions
+    |> traverse (fun definition ->
+        match definition.Type with
+        | TChar _
+        | TBinary _
+        | TVarBinary _
+        | TBit _ -> Storage.validateColumnType definition
+        | _ -> Ok())
+    |> Result.map (fun _ -> definitions)
+    |> Result.mapError storageErr
+
 /// Expands one already-evaluated JSON_TABLE source document into rows — the
 /// one expansion both eval sites (`resolveFromItem`'s uncorrelated case and
 /// `applyJsonTableJoin`'s per-left-row lateral branch) share. Oracle-pinned
@@ -6187,15 +6213,17 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
         // FROM list — a forward reference is illegal, and MySQL-compatible
         // clients match on the 1109 code), and a bare one is 1054 with the
         // same context string, not the literal context's 'field list'.
-        match firstColumnRef source with
-        | Some(QualifiedCol(table, _)) -> Error(Err(1109, sprintf "Unknown table '%s' in a table function argument" table))
-        | Some(Col name) -> Error(Err(1054, sprintf "Unknown column '%s' in 'a table function argument'" name))
-        | _ ->
-            let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
+        validateJsonTableAllocationBounds columns
+        |> Result.bind (fun definitions ->
+            match firstColumnRef source with
+            | Some(QualifiedCol(table, _)) -> Error(Err(1109, sprintf "Unknown table '%s' in a table function argument" table))
+            | Some(Col name) -> Error(Err(1054, sprintf "Unknown column '%s' in 'a table function argument'" name))
+            | _ ->
+                let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
 
-            match evalExpr literalCtx source with
-            | Error(code, message) -> Error(Err(code, message))
-            | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> jsonTableColumnDefs columns, rows)
+                match evalExpr literalCtx source with
+                | Error(code, message) -> Error(Err(code, message))
+                | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> definitions, rows))
     | FromSubquery _ ->
         // Serve a derived table from the per-statement memo if already
         // resolved through the statement memo, else compute and record it.
@@ -6657,11 +6685,9 @@ and private applyJsonTableJoin
     (columns: JsonTableColumn list)
     (alias: string)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
-    match join.Kind with
-    | InnerJoin
-    | CrossJoin
-    | LeftJoin ->
-        let joinColumns = jsonTableColumnDefs columns
+    match join.Kind, validateJsonTableAllocationBounds columns with
+    | _, Error error -> Error error
+    | (InnerJoin | CrossJoin | LeftJoin), Ok joinColumns ->
         let newSources = sourcesSoFar @ [ alias, joinColumns ]
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
         let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer

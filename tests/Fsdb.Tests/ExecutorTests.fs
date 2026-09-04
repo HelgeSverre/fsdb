@@ -7947,6 +7947,24 @@ let tests =
                         Expect.equal (uint64 second) (uint64 first + 1UL) "UUID_SHORT is monotonic"
                     | other -> failtestf "unexpected result: %A" other
 
+                testCase "allocation-sensitive casts and decompression reject hostile declared sizes"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT UNCOMPRESS(X'FFFFFFFF789C')" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected an oversized compressed frame to return NULL, got %A" other
+
+                    match runDefault (newStore ()) "SELECT CAST(1 AS BIT(1000000000))" with
+                    | Err(1439, _) -> ()
+                    | other -> failtestf "expected an oversized BIT cast to fail with 1439, got %A" other
+
+                    match runDefault (newStore ()) "SELECT CAST('' AS BINARY(1000000000))" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected an oversized BINARY cast to return NULL, got %A" other
+
+                    match runDefault (newStore ()) "SELECT c FROM JSON_TABLE('[\"\"]', '$[*]' COLUMNS(c BINARY(500000000) PATH '$')) jt" with
+                    | Err(1074, _) -> ()
+                    | other -> failtestf "expected an oversized JSON_TABLE BINARY column to fail with 1074, got %A" other
+
                 testCase "standalone TABLE and VALUES ROW queries use the ordinary query pipeline"
                 <| fun _ ->
                     let store = newStore ()

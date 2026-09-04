@@ -258,9 +258,10 @@ let geometryToMySqlBinary (geometry: Geometry) : byte[] =
 
 let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
     let mutable position = 0
+    let mutable remainingElements = 1_000_000
 
     let take count =
-        if count < 0 || position + count > bytes.Length then
+        if count < 0 || count > bytes.Length - position then
             None
         else
             let start = position
@@ -297,9 +298,15 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                     | Some x, Some y -> Some(x, y)
                     | _ -> None
 
-                let readMany readOne =
+                let readMany minimumBytes readOne =
                     match readInt32 littleEndian with
-                    | Some count when count >= 0 && count <= (bytes.Length - position) ->
+                    | Some count when
+                        count >= 0
+                        && count <= remainingElements
+                        && (count = 0 || minimumBytes <= (bytes.Length - position) / count)
+                        ->
+                        remainingElements <- remainingElements - count
+
                         let rec loop remaining values =
                             if remaining = 0 then Some(List.rev values)
                             else readOne () |> Option.bind (fun value -> loop (remaining - 1) (value :: values))
@@ -317,12 +324,12 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                             if finitePair (x, y) then Some(GPoint(x, y))
                             else None)
                     | 2 ->
-                        readMany readPair
+                        readMany 16 readPair
                         |> Option.bind (fun points ->
                             if List.length points >= 2 && points |> List.forall finitePair then Some(GLineString points)
                             else None)
                     | 3 ->
-                        readMany (fun () -> readMany readPair)
+                        readMany 4 (fun () -> readMany 16 readPair)
                         |> Option.bind (fun rings ->
                             let closed ring = List.length ring >= 4 && List.head ring = List.last ring
 
@@ -331,7 +338,7 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                             else
                                 None)
                     | 4 ->
-                        readMany (fun () -> readGeometry (depth + 1))
+                        readMany 5 (fun () -> readGeometry (depth + 1))
                         |> Option.bind (fun shapes ->
                             shapes
                             |> List.fold (fun points shape ->
@@ -340,7 +347,7 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                                 | _ -> None) (Some [])
                             |> Option.bind (fun points -> if List.isEmpty points then None else Some(GMultiPoint(List.rev points))))
                     | 5 ->
-                        readMany (fun () -> readGeometry (depth + 1))
+                        readMany 5 (fun () -> readGeometry (depth + 1))
                         |> Option.bind (fun shapes ->
                             shapes
                             |> List.fold (fun lines shape ->
@@ -349,7 +356,7 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                                 | _ -> None) (Some [])
                             |> Option.bind (fun lines -> if List.isEmpty lines || lines |> List.exists (fun line -> List.length line < 2) then None else Some(GMultiLineString(List.rev lines))))
                     | 6 ->
-                        readMany (fun () -> readGeometry (depth + 1))
+                        readMany 5 (fun () -> readGeometry (depth + 1))
                         |> Option.bind (fun shapes ->
                             shapes
                             |> List.fold (fun polygons shape ->
@@ -364,7 +371,7 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                                 else
                                     Some(GMultiPolygon(List.rev polygons))))
                     | 7 ->
-                        readMany (fun () -> readGeometry (depth + 1))
+                        readMany 5 (fun () -> readGeometry (depth + 1))
                         |> Option.map (fun shapes ->
                             if List.isEmpty shapes then GEmpty
                             else shapes |> List.map (fun shape -> { Srid = srid; Shape = shape }) |> GGeometryCollection)
