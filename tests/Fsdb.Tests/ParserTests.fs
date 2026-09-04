@@ -3431,6 +3431,14 @@ let tests =
                       "only statement delimiters split the batch"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "compound detection does not rescan repeated header tokens"
+          <| fun _ ->
+              let sql = "CREATE DEFINER=x " + String.replicate 10000 "TRIGGER " + "BEGIN"
+
+              match splitStatements sql with
+              | Ok [ statement ] -> Expect.equal statement sql "the invalid statement remains one batch member"
+              | other -> failtestf "unexpected split result: %A" other
+
           testCase "statement batches preserve compound trigger bodies"
           <| fun _ ->
               let sql =

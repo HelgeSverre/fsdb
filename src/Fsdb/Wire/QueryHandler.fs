@@ -901,13 +901,15 @@ let private catalogWithOverlay (session: Session) (dbName: string) (table: strin
 let private showColumnsRe =
     Regex(@"^SHOW\s+(FULL\s+)?COLUMNS\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
+let private showColumnsFieldFilterRe =
+    Regex(
+        @"\s+WHERE\s+`?Field`?\s*=\s*(?<value>'(?:\\.|''|[^'])*')\s*$",
+        RegexOptions.IgnoreCase ||| RegexOptions.NonBacktracking,
+        Limits.regexpMatchTimeout
+    )
+
 let private showColumnsFieldFilter (sql: string) =
-    let matched =
-        Regex.Match(
-            sql,
-            @"\s+WHERE\s+`?Field`?\s*=\s*(?<value>'(?:\\.|''|[^'])*')\s*$",
-            RegexOptions.IgnoreCase
-        )
+    let matched = showColumnsFieldFilterRe.Match sql
 
     if not matched.Success then
         None
@@ -1563,7 +1565,8 @@ let private alterCurrentUserPasswordRe =
 let private showGrantsRe =
     Regex(
         @"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?(?:\s+USING\s+(.+?))?\s*;?$",
-        RegexOptions.IgnoreCase
+        RegexOptions.IgnoreCase ||| RegexOptions.NonBacktracking,
+        Limits.regexpMatchTimeout
     )
 
 /// `FLUSH [LOCAL] PRIVILEGES` — a no-op OK: privilege reads always hit the

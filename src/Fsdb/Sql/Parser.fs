@@ -4698,29 +4698,31 @@ let splitStatements (sql: string) : Result<string list, string> =
     let mutable lineComment = false
     let mutable compoundDepth = 0
     let mutable compoundStatementStart = false
+    let headerWords = ResizeArray<string>()
+    let mutable compoundHeader = None
 
     let isWordStart c = Char.IsLetter c || c = '_'
     let isWordPart c = Char.IsLetterOrDigit c || c = '_'
 
-    let startsCompound at =
-        let prefix = sql.[start .. at - 1]
+    let startsCompound () =
+        match compoundHeader with
+        | Some result -> result
+        | None ->
+            let words = headerWords |> Seq.map _.ToUpperInvariant() |> List.ofSeq
+            let containsSequence (expected: string list) =
+                words
+                |> List.windowed expected.Length
+                |> List.exists ((=) expected)
 
-        let options = System.Text.RegularExpressions.RegexOptions.IgnoreCase
-        let createHeader objectType requiredClause =
-            let definer = @"(?:DEFINER\s*=\s*[\s\S]+?\s+)?"
-            let required = requiredClause |> Option.map (fun clause -> @"[\s\S]*\b" + clause + @"\b") |> Option.defaultValue ""
+            let result =
+                match words with
+                | "CREATE" :: _ when List.contains "PROCEDURE" words -> true
+                | "CREATE" :: _ when List.contains "FUNCTION" words -> List.contains "RETURNS" words
+                | "CREATE" :: _ when List.contains "TRIGGER" words -> containsSequence [ "FOR"; "EACH"; "ROW" ]
+                | _ -> false
 
-            System.Text.RegularExpressions.Regex.IsMatch(
-                prefix,
-                @"^\s*CREATE\s+" + definer + objectType + @"\b" + required + @"[\s\S]*$",
-                options
-            )
-
-        // Detailed header validity belongs to the object parser; splitting
-        // only needs to recognize which CREATE statement owns this BEGIN.
-        createHeader "TRIGGER" (Some @"FOR\s+EACH\s+ROW")
-        || createHeader "PROCEDURE" None
-        || createHeader "FUNCTION" (Some "RETURNS")
+            compoundHeader <- Some result
+            result
 
     let addStatement stop =
         if stop > start then
@@ -4772,9 +4774,10 @@ let splitStatements (sql: string) : Result<string list, string> =
                 stop <- stop + 1
 
             let word = sql.[i .. stop - 1]
+            headerWords.Add word
 
             if word.Equals("BEGIN", StringComparison.OrdinalIgnoreCase) then
-                if compoundDepth > 0 || startsCompound i then
+                if compoundDepth > 0 || startsCompound () then
                     compoundDepth <- compoundDepth + 1
                     compoundStatementStart <- true
             elif compoundDepth > 0 && compoundStatementStart && word.Equals("IF", StringComparison.OrdinalIgnoreCase) then
@@ -4795,6 +4798,8 @@ let splitStatements (sql: string) : Result<string list, string> =
         | None when sql.[i] = ';' && compoundDepth = 0 ->
             addStatement i
             start <- i + 1
+            headerWords.Clear()
+            compoundHeader <- None
             i <- i + 1
         | None when sql.[i] = ';' ->
             compoundStatementStart <- true

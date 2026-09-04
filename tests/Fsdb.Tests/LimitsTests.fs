@@ -46,6 +46,20 @@ let tests =
                           | other -> failtestf "expected 1153, got %A" other)
                   | None -> failtest "REGEXP_REPLACE is registered")
 
+          testCase "REGEXP_REPLACE handles many normalized CRLF boundaries in one pass"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let input = String.replicate 2000 "a\r\n"
+                  let expected = String.replicate 2000 "aX\r\n"
+
+                  match lookup "REGEXP_REPLACE" builtins with
+                  | Some function_ ->
+                      Expect.equal
+                          (function_ [ VString input; VString "(?<=a)(?=\\n)"; VString "X"; VInt 1L; VInt 0L; VString "m" ])
+                          (VString expected)
+                          "each zero-width normalized match is handled without suffix searching"
+                  | None -> failtest "REGEXP_REPLACE is registered")
+
           testCase "a value that isn't a plain number with an optional K/M/G suffix is rejected, not guessed at"
           <| fun _ ->
               withSettings [] (fun () ->

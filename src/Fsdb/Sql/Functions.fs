@@ -4641,7 +4641,7 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
            && m.Index + 1 < input.SourceOffsets.Length
            && input.SourceOffsets[m.Index + 1] = matchStart + 2
            && source[matchStart] = '\r' then
-            let next = sourceRegex.Match(source, matchStart + 1)
+            let next = sourceRegex.Match(source, matchStart + 1, 1)
 
             if next.Success && next.Index = matchStart + 1 && next.Length = 0 then
                 emit sourceInput next (matchStart + 1) (matchStart + 1)

@@ -717,14 +717,14 @@ let private resignalPattern =
     )
 
 let private quotedUserVariablePattern =
-    @"(?:`(?:``|[^`])+`|'(?:''|\\.|[^'])*'|""(?:""""|\\.|[^""])*""|[A-Za-z0-9_.$]+)"
+    @"(?:`(?:``|[^`])+`|'(?:''|\\.|[^'\\])*'|""(?:""""|\\.|[^""\\])*""|[A-Za-z0-9_.$]+)"
 
 let private diagnosticsTargetPattern =
     sprintf "(?:@%s|%s)" quotedUserVariablePattern labelPattern
 
 let private conditionNumberPattern =
     let numeric = @"(?:0[xX][0-9A-Fa-f]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"
-    let text = @"(?:_[A-Za-z0-9_]+)?'(?:''|\\.|[^'])*'"
+    let text = @"(?:_[A-Za-z0-9_]+)?'(?:''|\\.|[^'\\])*'"
 
     sprintf
         "(?:@@(?:GLOBAL\\.|SESSION\\.)?[A-Za-z_][A-Za-z0-9_$]*|@%s|%s|%s|%s)"
@@ -760,7 +760,8 @@ let private diagnosticsAssignmentPattern =
             diagnosticsTargetPattern
             triviaPattern
             triviaPattern,
-        RegexOptions.IgnoreCase
+        RegexOptions.IgnoreCase,
+        Limits.regexpMatchTimeout
     )
 
 let private signalInformationPattern =
