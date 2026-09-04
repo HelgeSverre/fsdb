@@ -127,6 +127,17 @@ let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql
     let positions = ResizeArray<int>()
     let mutable i = 0
 
+    let skipLineComment () =
+        let carriageReturn = sql.IndexOf('\r', i)
+        let lineFeed = sql.IndexOf('\n', i)
+
+        i <-
+            match carriageReturn, lineFeed with
+            | -1, -1 -> n
+            | -1, index
+            | index, -1 -> index + 1
+            | cr, lf -> min cr lf + 1
+
     while i < n do
         match sql.[i] with
         | ('\'' | '"' | '`') as quote ->
@@ -151,11 +162,8 @@ let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql
         | '-' when i + 1 < n && sql.[i + 1] = '-' && (i + 2 >= n || System.Char.IsWhiteSpace sql.[i + 2]) ->
             // MySQL only treats `--` as a comment when whitespace/EOL follows
             // (`5--3` is arithmetic) — same rule as `Parser.stripVersionComments`.
-            let idx = sql.IndexOf('\n', i)
-            i <- if idx = -1 then n else idx + 1
-        | '#' ->
-            let idx = sql.IndexOf('\n', i)
-            i <- if idx = -1 then n else idx + 1
+            skipLineComment ()
+        | '#' -> skipLineComment ()
         | '/' when i + 1 < n && sql.[i + 1] = '*' ->
             let idx = sql.IndexOf("*/", i + 2)
             i <- if idx = -1 then n else idx + 2
