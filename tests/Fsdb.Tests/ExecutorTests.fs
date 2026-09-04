@@ -9009,6 +9009,44 @@ let tests =
                 testCase "a CTE shadows a real table of the same name"
                 <| fun _ -> expectRows "WITH t AS (SELECT 99 AS id) SELECT * FROM t" [ [ Some "99" ] ]
 
+                testCase "indexed fast paths preserve CTE shadowing"
+                <| fun _ ->
+                    let store = cteStore ()
+                    runDefault store "CREATE TABLE secret (id INT, password VARCHAR(20), KEY ix_id(id))" |> ignore
+                    runDefault store "INSERT INTO secret VALUES (1, 'physical-secret')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "WITH secret AS (SELECT 0 AS id, 'cte' AS password), ids AS (SELECT 1 AS id) SELECT (SELECT password FROM secret WHERE secret.id = ids.id) FROM ids"
+                    with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected the correlated lookup to read the CTE, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "WITH secret AS (SELECT 0 AS id, 'cte' AS password) SELECT secret.id FROM secret JOIN t ON t.id = 1 WHERE secret.id >= 0"
+                    with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the joined range lookup to read the CTE, got %A" other
+
+                testCase "DML CTE bindings do not leak into trigger bodies"
+                <| fun _ ->
+                    let store = cteStore ()
+                    runDefault store "CREATE TABLE policy_log (n INT)" |> ignore
+                    runDefault store "CREATE TABLE audit (n INT)" |> ignore
+                    runDefault store "INSERT INTO policy_log VALUES (7)" |> ignore
+                    runDefault store "CREATE TRIGGER audit_t AFTER UPDATE ON t FOR EACH ROW INSERT INTO audit SELECT n FROM policy_log" |> ignore
+
+                    match runDefault store "WITH policy_log AS (SELECT 99 AS n) UPDATE t SET v = v + 1 WHERE id = 1" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one update, got %A" other
+
+                    match runDefault store "SELECT n FROM audit" with
+                    | ResultSet(_, [ [ Some "7" ] ]) -> ()
+                    | other -> failtestf "expected the trigger to resolve the real policy table, got %A" other
+
                 testCase "a CTE carrying a window function filters on its rank"
                 <| fun _ ->
                     expectRows

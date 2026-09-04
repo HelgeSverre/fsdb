@@ -1217,6 +1217,10 @@ let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
 let private currentCteOriginScope () : Map<string, ColumnOrigin option list> =
     DynamicScope.valueOrDefault Map.empty cteOriginScope
 
+let private withoutCteScope (body: unit -> 'a) : 'a =
+    DynamicScope.withValue cteScope Map.empty (fun () ->
+        DynamicScope.withValue cteOriginScope Map.empty body)
+
 let private unknownColumn (name: string) : EvalError =
     1054, sprintf "Unknown column '%s' in 'field list'" name
 
@@ -5713,6 +5717,8 @@ and private tryInformationSchemaNarrow
 
     if not (System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase)) then
         None
+    elif informationSchemaRequiresProcess tableRef.Table && not (InformationSchema.canViewProcessMetadata ()) then
+        None
     else
         match
             pointLookupEqualities tableRef where
@@ -6403,6 +6409,11 @@ and private tryPhysicalTableRef (store: Store) (dbName: string) (tableRef: Table
         |> Result.map (filterLockingReadTable tableRef)
         |> Result.map Some
         |> Result.mapError storageErr
+
+and private physicalFastPathTable (store: Store) (dbName: string) (tableRef: TableRef) =
+    tryPhysicalTableRef store dbName tableRef
+    |> Result.toOption
+    |> Option.flatten
 
 and private sameIndexSemantics (left: ColumnDef) (right: ColumnDef) : bool =
     left.Type = right.Type
@@ -8637,7 +8648,7 @@ and private tryEqualityAccessWith
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedValuesMatchReadValues store) then
+    if not (storedValuesMatchReadValues store) || (physicalFastPathTable store dbName tref).IsNone then
         None
     else
         let tableDb = tref.Database |> Option.defaultValue dbName
@@ -8702,7 +8713,7 @@ and private tryLiteralInAccessWith
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedValuesMatchReadValues store) then
+    if not (storedValuesMatchReadValues store) || (physicalFastPathTable store dbName tref).IsNone then
         None
     else
         let tableDb = tref.Database |> Option.defaultValue dbName
@@ -8833,7 +8844,7 @@ and private tryCorrelatedEqualityLookup
             lookup.FindRows value
             |> Option.map (fun rows -> lookup.TableColumns, rows))
 
-    (if storedValuesMatchReadValues store then outer else None)
+    (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then outer else None)
     |> Option.bind (fun context ->
         whereExpr
         |> Option.toList
@@ -8867,7 +8878,10 @@ and private tryRangeAccess
     : Storage.RangeLookup option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    (if storedValuesMatchReadValues store then rangeLookupBounds scope tref whereExpr else [])
+    (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then
+         rangeLookupBounds scope tref whereExpr
+     else
+         [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.filter (fun lookup ->
@@ -8886,7 +8900,10 @@ and private trySpatialAccess
     : Storage.SpatialLookup option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    (if storedValuesMatchReadValues store then spatialLookupPredicates scope tref whereExpr else [])
+    (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then
+         spatialLookupPredicates scope tref whereExpr
+     else
+         [])
     |> List.tryPick (fun predicate ->
         Storage.trySpatialLookup store tableDb tref.Table predicate.Column predicate.Relation predicate.Geometry)
 
@@ -10227,8 +10244,7 @@ and private orderedIndexPrefixMatches
     : (string * IndexPrefixMatch) list =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    InformationSchema.findTable store.Catalog tableDb tref.Table
-    |> Result.toOption
+    physicalFastPathTable store dbName tref
     |> Option.map (fun table ->
         let pinned = whereEqualityPinnedColumns whereExpr
 
@@ -12774,7 +12790,7 @@ let private validateCheckRow
             match Parser.parseExpression check.Clause with
             | Result.Error _ -> Error(ExpressionError(3812, sprintf "Check constraint '%s' is invalid." check.Name))
             | Result.Ok expression ->
-                evalExpr ctx expression
+                withoutCteScope (fun () -> evalExpr ctx expression)
                 |> Result.mapError ExpressionError
                 |> Result.bind (fun value ->
                     if truthy value = Some false then
@@ -12807,7 +12823,7 @@ let private computeGeneratedRow
         // generated columns.
         generated
         |> traverse (fun (col, expr) ->
-            evalExpr ctx expr
+            withoutCteScope (fun () -> evalExpr ctx expr)
             |> Result.mapError ExpressionError
             |> Result.bind (fun v -> coerceValue store.ExecutionSettings.SqlMode.Strict col v)
             |> Result.map (fun v' ->
@@ -15259,6 +15275,7 @@ let rec executeAs
                           Old = oldRow
                           New = newRow }
                         (fun () ->
+                          withoutCteScope (fun () ->
                             let runDml statement =
                                 withRoutineVariableState locals (fun () ->
                                     match statement with
@@ -15615,7 +15632,7 @@ let rec executeAs
                                   ActiveError = None
                                   StackedDiagnostics = None }
 
-                            runStatements scope statements |> fst)
+                            runStatements scope statements |> fst))
 
                 try
                     rows

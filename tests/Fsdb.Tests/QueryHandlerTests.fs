@@ -5876,6 +5876,14 @@ let tests =
                           (table + " denial")
                   | other -> failtestf "expected PROCESS denial for %s, got %A" table other
 
+              for query in
+                  [ "SELECT * FROM information_schema.INNODB_FOREIGN WHERE ID = 'fsdb/fk_process'"
+                    "SELECT * FROM information_schema.INNODB_FOREIGN_COLS WHERE ID = 'fsdb/fk_process'"
+                    "SELECT * FROM information_schema.INNODB_TRX WHERE trx_state = 'RUNNING'" ] do
+                  match handle viewer query |> snd with
+                  | Err(1227, _) -> ()
+                  | other -> failtestf "expected narrowed PROCESS denial, got %A" other
+
               let _, granted = handle root "GRANT PROCESS ON *.* TO 'fkviewer'"
 
               match granted with
