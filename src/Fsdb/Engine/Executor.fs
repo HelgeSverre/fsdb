@@ -4658,17 +4658,27 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
             if value = VNull || System.Double.IsNaN seconds || System.Double.IsInfinity seconds || seconds < 0.0 then
                 Error(1210, "Incorrect arguments to sleep.")
+            elif seconds > Limits.maxSleepSeconds then
+                Error(1235, "This version of MySQL doesn't yet support SLEEP durations beyond its resource limit")
             else
                 let cancellation = Storage.queryCancellation.Value
                 let mutable remaining = seconds
                 let mutable interrupted = false
+                let mutable deadlineExpired = false
 
-                while remaining > 0.0 && not interrupted do
-                    let interval = min remaining 0.1
+                while remaining > 0.0 && not interrupted && not deadlineExpired do
+                    deadlineExpired <- Limits.queryWorkDeadlineExpired ()
+                    let deadlineRemaining = Limits.queryWorkDeadlineRemaining () |> Option.map _.TotalSeconds
+                    let interval = min remaining 0.1 |> fun value -> deadlineRemaining |> Option.map (min value) |> Option.defaultValue value
                     interrupted <- cancellation.WaitHandle.WaitOne(System.TimeSpan.FromSeconds interval)
                     remaining <- remaining - interval
 
-                Ok(VInt(if interrupted then 1L else 0L)))
+                if interrupted then
+                    Ok(VInt 1L)
+                elif deadlineExpired || remaining > 0.0 && Limits.queryWorkDeadlineExpired () then
+                    Error(1235, "This version of MySQL doesn't yet support BENCHMARK execution beyond its resource limit")
+                else
+                    Ok(VInt 0L))
     | FuncCall(name, [ countExpr; body ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
         eval countExpr
         |> Result.bind (fun value ->
@@ -4682,21 +4692,40 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         System.Int64.MaxValue
                     else
                         int64 repetitions
-                let cancellation = Storage.queryCancellation.Value
-                let mutable iteration = 0L
-                let mutable failure = None
 
-                while iteration < count && failure.IsNone do
-                    if iteration % int64 Storage.cancellationCheckInterval = 0L then
-                        cancellation.ThrowIfCancellationRequested()
+                if count > Limits.maxBenchmarkIterations then
+                    Error(1235, "This version of MySQL doesn't yet support BENCHMARK counts beyond its resource limit")
+                else
+                    let cancellation = Storage.queryCancellation.Value
+                    let stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    let previousDeadline = Limits.queryWorkDeadline.Value
+                    let benchmarkDeadline = Limits.queryWorkDeadlineAfter Limits.maxBenchmarkDuration
+                    let effectiveDeadline = previousDeadline |> Option.map (min benchmarkDeadline) |> Option.defaultValue benchmarkDeadline
+                    let mutable iteration = 0L
+                    let mutable failure = None
 
-                    match eval body with
-                    | Ok _ -> iteration <- iteration + 1L
-                    | Error error -> failure <- Some error
+                    try
+                        Limits.queryWorkDeadline.Value <- Some effectiveDeadline
 
-                match failure with
-                | Some error -> Error error
-                | None -> Ok(VInt 0L))
+                        while iteration < count && failure.IsNone do
+                            if iteration % int64 Storage.cancellationCheckInterval = 0L then
+                                cancellation.ThrowIfCancellationRequested()
+
+                            match eval body with
+                            | Ok _ when stopwatch.Elapsed > Limits.maxBenchmarkDuration ->
+                                failure <-
+                                    Some(
+                                        1235,
+                                        "This version of MySQL doesn't yet support BENCHMARK execution beyond its resource limit"
+                                    )
+                            | Ok _ -> iteration <- iteration + 1L
+                            | Error error -> failure <- Some error
+                    finally
+                        Limits.queryWorkDeadline.Value <- previousDeadline
+
+                    match failure with
+                    | Some error -> Error error
+                    | None -> Ok(VInt 0L))
     | FuncCall(name, [ Cast(argument, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
         eval argument |> Result.map (Functions.weightStringChar (keyCollation ctx argument) length)
     | FuncCall(name, [ Cast(argument, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
@@ -8280,21 +8309,38 @@ and private tryIndexedSemiJoin
                         match index with
                         | None -> Ok None
                         | Some index ->
-                            let rec probe acc =
-                                function
-                                | [] -> Some acc
-                                | tuple :: rest when tuple |> List.contains VNull -> probe acc rest
-                                | tuple :: rest ->
-                                    orderedEqualityValues table index columnNames tuple
-                                    |> Option.bind (Storage.tryEqualityLookupForIndex store table index)
-                                    |> Option.bind (fun rows -> probe (List.fold (fun found row -> row :: found) acc rows) rest)
+                            let candidates = Dictionary<RowId, Value[]>()
+                            let probedKeys = HashSet<string>(System.StringComparer.Ordinal)
 
-                            match probe [] values with
+                            let rec probe processed =
+                                function
+                                | [] -> Some()
+                                | tuple :: rest when tuple |> List.contains VNull ->
+                                    Limits.checkQueryCancellation processed
+                                    probe (processed + 1) rest
+                                | tuple :: rest ->
+                                    Limits.checkQueryCancellation processed
+
+                                    orderedEqualityValues table index columnNames tuple
+                                    |> Option.bind (fun ordered ->
+                                        Storage.tryEqualityProbeKeyForIndex store table index ordered
+                                        |> Option.bind (fun key ->
+                                            if probedKeys.Add key then
+                                                Storage.tryEqualityLookupForIndex store table index ordered
+                                                |> Option.map (fun rows ->
+                                                    for rowId, row in rows do
+                                                        candidates.[rowId] <- row)
+                                            else
+                                                Some()))
+                                    |> Option.bind (fun () -> probe (processed + 1) rest)
+
+                            match probe 0 values with
                             | None -> Ok None
-                            | Some candidates ->
+                            | Some() ->
                                 let rows =
                                     candidates
-                                    |> Map.ofList
+                                    |> Seq.map (fun entry -> entry.Key, entry.Value)
+                                    |> Map.ofSeq
                                     |> Map.toSeq
                                     |> Seq.map snd
 
@@ -9791,7 +9837,14 @@ and private evalAggregate
         | e -> false, e
 
     match args with
-    | [ Star _ ] when isCount -> Ok(VInt(int64 (List.length rows)))
+    | [ Star _ ] when isCount ->
+        let mutable count = 0L
+
+        for _ in rows do
+            Limits.checkQueryCancellation (int (count % int64 System.Int32.MaxValue))
+            count <- count + 1L
+
+        Ok(VInt count)
     | [ innerExpr ]
         when (upper = "COUNT" || upper = "SUM" || upper = "AVG")
              && (match innerExpr with Distinct _ -> false | _ -> true)
@@ -9800,6 +9853,7 @@ and private evalAggregate
         let mutable exactTotal = 0M
         let mutable total: Value option = None
         let mutable failure: EvalError option = None
+        let mutable processed = 0
 
         let add value =
             count <- count + 1L
@@ -9815,6 +9869,8 @@ and private evalAggregate
 
         for row in rows do
             if failure.IsNone then
+                Limits.checkQueryCancellation processed
+                processed <- processed + 1
                 let ctx = ctxFor row
 
                 match evalExpr ctx innerExpr with
@@ -13870,9 +13926,16 @@ let private checksumTables (store: Store) (dbName: string) (tables: string list)
             match scan store database table with
             | Error _ -> [ Some label; None ]
             | Ok(_, rows) ->
-                let writer = Fsdb.Binary.Writer()
-                rows |> Seq.iter (Array.iter (encodeValue writer))
-                [ Some label; Some(string (Fsdb.Binary.crc32 (writer.ToArray()))) ]
+                let checksum = Fsdb.Binary.Crc32()
+
+                rows
+                |> Seq.iteri (fun index row ->
+                    Limits.checkQueryCancellation index
+                    let writer = Fsdb.Binary.Writer()
+                    row |> Array.iter (encodeValue writer)
+                    checksum.Append(writer.ToArray()))
+
+                [ Some label; Some(string checksum.Value) ]
 
     ResultSet([ "Table"; "Checksum" ], tables |> List.map checksum)
 

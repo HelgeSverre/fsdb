@@ -241,6 +241,17 @@ let tests =
                         VNull
                         "empty distance"
 
+                    use cancellation = new System.Threading.CancellationTokenSource()
+                    cancellation.Cancel()
+                    Fsdb.Limits.queryCancellation.Value <- cancellation.Token
+
+                    try
+                        Expect.throwsT<System.OperationCanceledException>
+                            (fun () -> call "ST_Distance" [ geometry "LINESTRING(0 0,1 1)"; geometry "LINESTRING(2 2,3 3)" ] |> ignore)
+                            "distance work observes query cancellation"
+                    finally
+                        Fsdb.Limits.queryCancellation.Value <- System.Threading.CancellationToken.None
+
                 testCase "planar intersections distinguish contacts, holes, and empty shapes"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]
@@ -971,6 +982,23 @@ let tests =
                                   (VBytes(Convert.FromHexString expected))
                                   mode
 
+                      testCase "AES feedback modes reject work beyond their per-call budgets"
+                      <| fun _ ->
+                          let key = VString "secret"
+                          let vector = VString "1234567890123456"
+
+                          for mode, limit in
+                              [ "aes-128-cfb1", Fsdb.Limits.maxAesCfb1Bytes
+                                "aes-128-cfb8", Fsdb.Limits.maxAesCfb8Bytes ] do
+                              let input = VBytes(Array.zeroCreate (limit + 1))
+
+                              for operation in [ Fsdb.Functions.aesEncrypt mode; Fsdb.Functions.aesDecrypt mode ] do
+                                  Expect.throwsC
+                                      (fun () -> operation [ input; key; vector ] |> ignore)
+                                      (function
+                                      | Fsdb.Functions.SqlError(1153, _) -> ()
+                                      | other -> failtestf "expected %s to reject oversized input, got %A" mode other)
+
                       testCase "AES KDF output agrees with MySQL's HKDF and PBKDF2-HMAC vectors"
                       <| fun _ ->
                           Expect.equal
@@ -1184,18 +1212,17 @@ let tests =
                               (VInt 1L)
                               "format annotations do not reject an otherwise valid string"
 
-                      testCase "JSON schema resolves local references and refuses remote references"
+                      testCase "JSON schema refuses local and remote references like MySQL"
                       <| fun _ ->
-                          let local = VString """{"$ref":"#/definitions/integer","definitions":{"integer":{"type":"integer"}}}"""
-                          Expect.equal (call "JSON_SCHEMA_VALID" [ local; VString "1" ]) (VInt 1L) "local reference"
-                          Expect.equal (call "JSON_SCHEMA_VALID" [ local; VString "\"x\"" ]) (VInt 0L) "local reference violation"
-
-                          Expect.throwsC
-                              (fun () -> call "JSON_SCHEMA_VALID" [ VString """{"$ref":"https://example.invalid/schema"}"""; VString "{}" ] |> ignore)
-                              (fun error ->
-                                  match error with
-                                  | Fsdb.Functions.SqlError(1235, _) -> ()
-                                  | other -> failtestf "expected 1235, got %A" other)
+                          for schema in
+                              [ VString """{"$ref":"#/definitions/integer","definitions":{"integer":{"type":"integer"}}}"""
+                                VString """{"$ref":"https://example.invalid/schema"}""" ] do
+                              Expect.throwsC
+                                  (fun () -> call "JSON_SCHEMA_VALID" [ schema; VString "{}" ] |> ignore)
+                                  (fun error ->
+                                      match error with
+                                      | Fsdb.Functions.SqlError(1235, _) -> ()
+                                      | other -> failtestf "expected 1235, got %A" other)
 
                       testCase "JSON schema enforces property dependencies"
                       <| fun _ ->
@@ -1279,16 +1306,19 @@ let tests =
                                   | Fsdb.Functions.SqlError(1235, _) -> ()
                                   | other -> failtestf "expected 1235, got %A" other)
 
-                      testCase "JSON schema ignores siblings of a local reference"
+                      testCase "JSON schema rejects references even when they have siblings"
                       <| fun _ ->
                           let schema =
                               VString
                                   """{"$ref":"#/definitions/letters","pattern":"^b+$","definitions":{"letters":{"type":"string","pattern":"^a+$"}}}"""
 
-                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "\"aaa\"" ]) (VInt 1L) "reference target"
-                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "\"bbb\"" ]) (VInt 0L) "reference target violation"
+                          Expect.throwsC
+                              (fun () -> call "JSON_SCHEMA_VALID" [ schema; VString "\"aaa\"" ] |> ignore)
+                              (function
+                              | Fsdb.Functions.SqlError(1235, _) -> ()
+                              | other -> failtestf "expected 1235, got %A" other)
 
-                      testCase "JSON schema reports recursive local references as maximum depth"
+                      testCase "JSON schema rejects recursive local references"
                       <| fun _ ->
                           let schema =
                               VString
@@ -1302,9 +1332,8 @@ let tests =
                                   (fun () -> call functionName [ recursiveSchema; document ] |> ignore)
                                   (fun error ->
                                       match error with
-                                      | Fsdb.Functions.SqlError(3157, message) ->
-                                          Expect.equal message "The JSON document exceeds the maximum depth." "maximum-depth error"
-                                      | other -> failtestf "expected 3157, got %A" other)
+                                      | Fsdb.Functions.SqlError(1235, _) -> ()
+                                      | other -> failtestf "expected 1235, got %A" other)
 
                       testCase "JSON schema functions return NULL for a SQL NULL argument and reject invalid JSON"
                       <| fun _ ->

@@ -1197,21 +1197,17 @@ let resolveAssignableColumn (columns: ColumnDef list) (tableName: string) (name:
 /// Ambient per-thread cancellation for the query currently executing on
 /// this thread — armed by the connection loop's disconnect watcher
 /// (`Server.withCancellationWatch`) right before dispatching a statement and
-/// cleared right after. `traverse` below (and `Executor.traverseSeq`, the
-/// non-equi join's lazy nested loop) is the only reader: a client that
-/// vanishes mid-query flips this token, and the next periodic check unwinds
-/// the row fold instead of computing into a closed connection. A plain
-/// per-thread field rather than something threaded through every one of
-/// `traverse`'s ~50 call sites — there is exactly one query running per
-/// thread at a time, so "current thread's token" is all a check needs.
-let queryCancellation = new ThreadLocal<CancellationToken>(fun () -> CancellationToken.None)
+/// cleared right after. Engine folds and bounded SQL functions share the
+/// token, so a client that vanishes mid-query can unwind synchronous work
+/// instead of computing into a closed connection.
+let queryCancellation = Limits.queryCancellation
 
 /// How often a row-pipeline fold checks `queryCancellation` — a modulo and
 /// an occasional `IsCancellationRequested` read, cheap enough against a
 /// row's own `evalExpr` cost to be unmeasurable, frequent enough that a
 /// killed client's query unwinds within a few hundred rows rather than
 /// running to completion.
-let cancellationCheckInterval = 256
+let cancellationCheckInterval = Limits.cancellationCheckInterval
 
 /// Applies `f` to each element, short-circuiting on the first `Error` —
 /// generalized over any error type (not just `StorageError`) and public, so
@@ -4034,6 +4030,26 @@ let private equalityKeyGroup (index: EqualityIndex) =
       Transforms = index.Transforms
       Directions = List.replicate index.ColumnIndices.Length Asc
       Visible = true }
+
+let internal tryEqualityProbeKeyForIndex
+    (store: Store)
+    (table: Table)
+    (index: EqualityIndex)
+    (values: Value list)
+    : string option =
+    if index.ColumnIndices.Length <> values.Length then
+        None
+    else
+        List.zip index.ColumnIndices values
+        |> traverse (fun (columnIndex, value) ->
+            match exactProbeValue store table columnIndex value with
+            | Some exact -> Ok(columnIndex, exact)
+            | None -> Error())
+        |> Result.toOption
+        |> Option.map (fun exactValues ->
+            let probeRow = Array.create table.Columns.Length VNull
+            exactValues |> List.iter (fun (columnIndex, value) -> probeRow.[columnIndex] <- value)
+            encodeIndexKey table.Columns (equalityKeyGroup index) probeRow)
 
 let private equalityLookupRowIds
     (store: Store)

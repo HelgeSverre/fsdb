@@ -785,13 +785,13 @@ let tests =
                       "mixed textual expressions remain non-null"
               | Error error -> failtestf "expected builtin statement to prepare, got %A" error
 
-          testCase "recursive JSON schemas return the MySQL maximum-depth error"
+          testCase "JSON Schema references return MySQL's unsupported-feature error"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT JSON_SCHEMA_VALID('{\"$ref\":\"#\"}', '{}')" |> snd with
-              | Err(3157, message) -> Expect.equal message "The JSON document exceeds the maximum depth." "error text"
-              | other -> failtestf "expected recursive schema error 3157, got %A" other
+              | Err(1235, message) -> Expect.stringContains message "references in JSON Schema" "error text"
+              | other -> failtestf "expected reference error 1235, got %A" other
 
           testCase "planar geometry functions compose through SQL expressions"
           <| fun _ ->

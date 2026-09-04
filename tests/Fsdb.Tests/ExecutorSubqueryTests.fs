@@ -407,6 +407,28 @@ let tests =
                   Expect.equal rows [ [ Some "1"; Some "one" ]; [ Some "3"; Some "three" ] ] "outer index candidates retain set semantics"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "duplicate IN-subquery keys do not multiply non-unique index candidates"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE duplicate_outer (id INT PRIMARY KEY, k INT, INDEX ix_k (k))" |> ignore
+              runDefault store "CREATE TABLE duplicate_inner (k INT)" |> ignore
+
+              [ 1..200 ]
+              |> List.map (fun id -> sprintf "(%d,1)" id)
+              |> String.concat ","
+              |> sprintf "INSERT INTO duplicate_outer VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              String.replicate 199 "(1)," + "(1)"
+              |> sprintf "INSERT INTO duplicate_inner VALUES %s"
+              |> runDefault store
+              |> ignore
+
+              match runDefault store "SELECT COUNT(*) FROM duplicate_outer WHERE k IN (SELECT k FROM duplicate_inner)" with
+              | ResultSet(_, [ [ Some "200" ] ]) -> ()
+              | other -> failtestf "expected each outer row once, got %A" other
+
           testCase "stable string and decimal IN subqueries narrow indexed outer rows"
           <| fun _ ->
               let mutable touches = 0

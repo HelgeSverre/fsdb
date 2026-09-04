@@ -13,6 +13,7 @@
 module Fsdb.Limits
 
 open System
+open System.Threading
 
 /// Safety ceiling for a reassembled multi-packet payload, and the value
 /// advertised as `max_allowed_packet`. A malicious or buggy client can't
@@ -38,6 +39,44 @@ let mutable maxConnections = 500
 /// The narrower scope still bounds every individual connection's retained
 /// ASTs without coupling otherwise independent sessions.
 let mutable maxPreparedStmtCount = 16382
+
+/// Ambient cancellation for synchronous query work. Long-running SQL and
+/// engine loops share this token so disconnect and KILL do not depend on a
+/// particular row-pipeline helper being on the call path.
+let queryCancellation = new ThreadLocal<CancellationToken>(fun () -> CancellationToken.None)
+let queryWorkDeadline = new ThreadLocal<int64 option>(fun () -> None)
+
+let cancellationCheckInterval = 256
+
+let checkQueryCancellation iteration =
+    if iteration % cancellationCheckInterval = 0 then
+        queryCancellation.Value.ThrowIfCancellationRequested()
+
+let queryWorkDeadlineAfter (duration: TimeSpan) =
+    System.Diagnostics.Stopwatch.GetTimestamp()
+    + int64 (duration.TotalSeconds * float System.Diagnostics.Stopwatch.Frequency)
+
+let queryWorkDeadlineExpired () =
+    queryWorkDeadline.Value
+    |> Option.exists (fun deadline -> System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
+
+let queryWorkDeadlineRemaining () =
+    queryWorkDeadline.Value
+    |> Option.map (fun deadline ->
+        let ticks = max 0L (deadline - System.Diagnostics.Stopwatch.GetTimestamp())
+        TimeSpan.FromSeconds(float ticks / float System.Diagnostics.Stopwatch.Frequency))
+
+/// Explicit ceilings for functions whose successful result is constant-size
+/// regardless of the requested work.
+let maxSleepSeconds = 60.0
+let maxBenchmarkIterations = 10_000_000L
+let maxBenchmarkDuration = TimeSpan.FromSeconds 1.0
+
+/// Feedback modes perform one AES block operation per bit or byte.
+let maxAesCfb1Bytes = 1024
+let maxAesCfb8Bytes = 16 * 1024
+
+let maxGeometryDistanceComparisons = 10_000_000
 
 /// Password lifetime inherited by accounts whose mysql.user row stores NULL.
 let mutable defaultPasswordLifetimeDays = 0
