@@ -740,6 +740,8 @@ let renameUser
 
     if (tryUserRowForAccount store oldAccount).IsNone || (tryUserRowForAccount store newAccount).IsSome then
         operationFailed "RENAME USER" oldName oldHost
+    elif isMandatoryRole store oldAccount then
+        mandatoryRoleError oldAccount
     elif isRoleIdentifier then
         Error(3532, "Renaming of a role identifier is forbidden")
     else
@@ -1066,13 +1068,7 @@ let grantProxyAs store grantor proxied grantees withGrantOption =
                         |> Result.map ignore
                         |> Result.mapError toMySqlError
 
-                written
-                |> Result.bind (fun () ->
-                    if withGrantOption then
-                        updateSystemRows store "user" (matchUserRow grantee) [ "Grant_priv", VString "Y" ]
-                        |> Result.map ignore
-                    else
-                        Ok()))
+                written)
             |> Result.map ignore)
 
 let revokeProxyAs store grantor proxied grantees =
@@ -2703,15 +2699,18 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         // A dynamic privilege carries its own grant option in
         // mysql.global_grants. Static privileges still share the grant
         // option stored at the target level.
+        let names = privilegeNames privs
+        let explicitGrantOption = names |> List.contains "GRANT OPTION"
+
         let privilegeRequirements, grantOptionRequirements =
-            match expandPrivs (privilegeNames privs |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target with
+            match expandPrivs (names |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target with
             | Result.Ok resolved ->
                 let privileges =
                     (resolved.Static |> List.map (fun privilege -> privilege.Sql)) @ resolved.Dynamic
                     |> List.map (fun privilege -> privilege, target)
 
                 let grantOption =
-                    if resolved.Static.IsEmpty && not resolved.Dynamic.IsEmpty then
+                    if resolved.Static.IsEmpty && not resolved.Dynamic.IsEmpty && not explicitGrantOption then
                         []
                     else
                         [ "GRANT OPTION", target ]

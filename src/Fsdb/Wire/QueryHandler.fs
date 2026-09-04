@@ -2220,7 +2220,10 @@ let private divisionByZeroPolicy (store: Store) (statement: Statement) =
         Diagnostics.DivisionByZeroPolicy.Warn
 
 let private requiredPrivilegesForStatement session store dbName = function
-    | AlterUser(name, host, Some _, _, _) when Auth.sameAccount (Auth.account name host) (accountOf session) -> []
+    | AlterUser(name, host, Some _, _, options) when
+        options = AccountOptions.empty && Auth.sameAccount (Auth.account name host) (accountOf session)
+        ->
+        []
     | statement -> Auth.requiredPrivilegesInStore store dbName statement
 
 let private statementContainsLockingReadWhere predicate statement =
@@ -6670,7 +6673,7 @@ let private resetsOwnPassword session = function
         |> Option.map accountRefOf
         |> Option.defaultValue (accountOf session)
         |> Auth.sameAccount (accountOf session)
-    | ParsedAccountStatement(AlterUser(name, host, Some _, _, _)) ->
+    | ParsedAccountStatement(AlterUser(name, host, Some _, _, options)) when options = AccountOptions.empty ->
         Auth.sameAccount (Auth.account name host) (accountOf session)
     | _ -> false
 
