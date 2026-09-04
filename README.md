@@ -421,15 +421,15 @@ connections or serving traffic.
 
 ### Create an embedded host
 
-Inside this checkout, create an F# console project and reference fsdb:
+Create an F# console project inside this checkout and reference fsdb:
 
 ```sh
 dotnet new console --language F# --framework net10.0 --output examples/MyHost
 dotnet add examples/MyHost/MyHost.fsproj reference src/Fsdb/Fsdb.fsproj
 ```
 
-This complete `Program.fs` registers `SLUGIFY` and starts a listener on an
-available local port:
+This `Program.fs` registers `SLUGIFY`, then carries the configured database
+straight into a listener on an available local port:
 
 ```fsharp
 module MyHost.Program
@@ -452,9 +452,11 @@ let slugify =
 
 [<EntryPoint>]
 let main _ =
-    let db = Db.create () |> Db.registerScalar "SLUGIFY" slugify
+    use server =
+        Db.create ()
+        |> Db.registerScalar "SLUGIFY" slugify
+        |> Db.serve IPAddress.Loopback 0
 
-    use server = db |> Db.serve IPAddress.Loopback 0
     printfn "fsdb listening on 127.0.0.1:%d" server.Port
     Console.ReadLine() |> ignore
     0
