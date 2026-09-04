@@ -930,6 +930,49 @@ let private sessionWaitTimeout (session: Session) =
 
 let private sessionNetReadTimeout = sessionTimeout "net_read_timeout" Limits.netReadTimeoutSeconds
 
+let private managedStringBytes (value: string) = 32L + int64 value.Length * 2L
+
+let internal preparedCursorBytes (metadata: ColumnMetadata list) (rows: string option list list) =
+    let mutable retained = 24L
+    let mutable overLimit = false
+
+    for column in metadata do
+        if not overLimit then
+            retained <- retained + 128L
+
+            match column.Origin with
+            | Some origin ->
+                retained <-
+                    retained
+                    + managedStringBytes origin.Schema
+                    + managedStringBytes origin.Table
+                    + managedStringBytes origin.OriginalTable
+                    + managedStringBytes origin.OriginalName
+            | None -> ()
+
+            overLimit <- retained > Limits.maxPreparedCursorBytes
+
+    for row in rows do
+        if not overLimit then
+            retained <- retained + 8L
+
+            for cell in row do
+                if not overLimit then
+                    retained <- retained + 24L
+
+                    match cell with
+                    | Some value -> retained <- retained + 24L + managedStringBytes value
+                    | None -> ()
+
+                    overLimit <- retained > Limits.maxPreparedCursorBytes
+
+    retained
+
+let internal preparedCursorFits retainedCursorCount retainedCursorBytes rowCount retainedBytes =
+    rowCount <= Limits.maxPreparedCursorRows
+    && retainedCursorCount < Limits.maxPreparedCursors
+    && retainedBytes <= Limits.maxPreparedCursorBytes - retainedCursorBytes
+
 /// Polls `client`'s socket while a query runs, cancelling `queryCts` the
 /// moment the peer is gone — the only way to notice a disconnect while
 /// `QueryHandler.handle` is busy inside a synchronous row fold with nothing
@@ -2054,25 +2097,53 @@ let private handleConnection
                                             match cursor, result with
                                             | ReadOnlyCursor, ResultSet(columns, rows) ->
                                                 let metadata = resultMetadata columns rows session.LastResultColumnMetadata
-                                                let cursor =
-                                                    { Metadata = metadata
-                                                      Rows = List.toArray rows
-                                                      Offset = 0 }
-                                                let session = { session with Cursors = Map.add stmtId cursor session.Cursors }
-                                                activeSession <- Some session
+                                                let retainedBytes = preparedCursorBytes metadata rows
+                                                let existingBytes = session.Cursors |> Seq.sumBy (fun (KeyValue(_, cursor)) -> cursor.RetainedBytes)
 
-                                                do!
-                                                    sendCursorHead
-                                                        stream
-                                                        capabilities
-                                                        seqId
-                                                        (statusFlagsFor session ||| StatusCursorExists)
-                                                        (warningCountFor session)
-                                                        columns
-                                                        metadata
+                                                if
+                                                    not
+                                                    <| preparedCursorFits
+                                                        session.Cursors.Count
+                                                        existingBytes
+                                                        rows.Length
+                                                        retainedBytes
+                                                then
+                                                    activeSession <- Some session
 
-                                                if not session.CloseAfterReply then
-                                                    return! loop session
+                                                    do!
+                                                        writePacketAsync
+                                                            stream
+                                                            { SeqId = seqId
+                                                              Payload =
+                                                                errPayload
+                                                                    capabilities
+                                                                    1235
+                                                                    "This version of MySQL doesn't yet support retaining a larger prepared cursor result" }
+                                                        |> Async.Ignore
+
+                                                    if not session.CloseAfterReply then
+                                                        return! loop session
+                                                else
+                                                    let cursor =
+                                                        { Metadata = metadata
+                                                          Rows = List.toArray rows
+                                                          Offset = 0
+                                                          RetainedBytes = retainedBytes }
+                                                    let session = { session with Cursors = Map.add stmtId cursor session.Cursors }
+                                                    activeSession <- Some session
+
+                                                    do!
+                                                        sendCursorHead
+                                                            stream
+                                                            capabilities
+                                                            seqId
+                                                            (statusFlagsFor session ||| StatusCursorExists)
+                                                            (warningCountFor session)
+                                                            columns
+                                                            metadata
+
+                                                    if not session.CloseAfterReply then
+                                                        return! loop session
                                             | _ ->
                                                 activeSession <- Some session
 

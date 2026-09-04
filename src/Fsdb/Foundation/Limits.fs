@@ -86,6 +86,15 @@ let maxZstdCompressionLevel = 3
 /// every parameter in an attacker-sized prepared-statement collection.
 let maxLongDataParameters = 4096
 
+let maxOpenTableHandlers = 256
+let maxTableHandlerAliasRunes = 256
+let maxTrackedSystemVariablesLength = 4096
+let maxTrackedSystemVariableNames = 256
+let maxAdvisoryLocksPerSession = 64
+let maxPreparedCursors = 64
+let maxPreparedCursorRows = 100_000
+let maxPreparedCursorBytes = 64L * 1024L * 1024L
+
 /// Password lifetime inherited by accounts whose mysql.user row stores NULL.
 let mutable defaultPasswordLifetimeDays = 0
 

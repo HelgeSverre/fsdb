@@ -221,6 +221,9 @@ let lookupScalarMetadata (name: string) (registry: Registry) : ColumnMetadata op
 let internal lookupScalarParameters (name: string) (registry: Registry) : ColumnMetadata list option =
     Map.tryFind (name.ToUpperInvariant()) registry.ScalarParameters
 
+let internal lookupScalarParametersNormalized (name: string) (registry: Registry) : ColumnMetadata list option =
+    Map.tryFind name registry.ScalarParameters
+
 let internal isTextArgument (name: string) index (registry: Registry) =
     registry.TextArguments
     |> Map.tryFind (name.ToUpperInvariant())

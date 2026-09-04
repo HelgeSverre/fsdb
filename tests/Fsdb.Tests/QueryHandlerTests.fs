@@ -567,6 +567,20 @@ let tests =
                       "prepared derived origin"
               | Error error -> failtestf "expected the derived query to prepare, got %A" error
 
+          testCase "prepared metadata normalizes a long function name once"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let functionName = String.replicate 10_000 "f"
+              let arguments = List.replicate 128 "?" |> String.concat ","
+              let sql = sprintf "SELECT %s(%s)" functionName arguments
+
+              match prepareStatementForSession session sql with
+              | Ok(statement, count) ->
+                  let parameters, _ = preparedMetadata session statement count
+                  Expect.equal count 128 "all placeholders are parsed"
+                  Expect.equal parameters.Length 128 "all parameters receive metadata"
+              | Error error -> failtestf "expected the long function call to prepare, got %A" error
+
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -2182,6 +2196,35 @@ let tests =
               match prepareStatementForSession session "HANDLER h READ FIRST" with
               | Error(1295, _) -> ()
               | other -> failtestf "expected prepared protocol refusal, got %A" other
+
+          testCase "HANDLER bounds retained aliases and their names"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let mutable session, _ = handle session "CREATE TABLE handler_quota (id INT)"
+
+              for index in 0 .. Fsdb.Limits.maxOpenTableHandlers - 1 do
+                  let next, result = handle session (sprintf "HANDLER handler_quota OPEN AS h%d" index)
+                  Expect.equal result (Affected 0UL) "an alias below the cap opens"
+                  session <- next
+
+              let unchanged, overLimit = handle session "HANDLER handler_quota OPEN AS one_too_many"
+              Expect.equal unchanged.TableHandlers.Count Fsdb.Limits.maxOpenTableHandlers "the rejected alias is not retained"
+
+              match overLimit with
+              | Err(1235, _) -> ()
+              | other -> failtestf "expected the handler quota error, got %A" other
+
+              let session, _ = handle session "HANDLER h0 CLOSE"
+              let session, reopened = handle session "HANDLER handler_quota OPEN AS replacement"
+              Expect.equal reopened (Affected 0UL) "closing an alias frees quota"
+
+              let longAlias = String.replicate (Fsdb.Limits.maxTableHandlerAliasRunes + 1) "a"
+              let unchanged, result = handle session (sprintf "HANDLER handler_quota OPEN AS `%s`" longAlias)
+              Expect.equal unchanged.TableHandlers.Count Fsdb.Limits.maxOpenTableHandlers "an overlong name is not retained"
+
+              match result with
+              | Err(1059, _) -> ()
+              | other -> failtestf "expected the identifier-length error, got %A" other
 
           testCase "HANDLER follows temporary and schema lifetimes"
           <| fun _ ->
@@ -5090,6 +5133,29 @@ let tests =
               let session, _ = handle session "SELECT 1"
               Expect.isEmpty session.SessionStateChanges "the next statement starts with an empty tracker"
 
+          testCase "session tracker configuration is bounded and skipped without negotiation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let oversized = String.replicate (Fsdb.Limits.maxTrackedSystemVariablesLength + 1) "a"
+              let hostile = { session with Variables = Map.add "session_track_system_variables" (Some oversized) session.Variables }
+              let unchanged = Fsdb.Session.trackSystemVariableAssignments true [ "autocommit" ] hostile
+              Expect.isEmpty unchanged.SessionStateChanges "a client without CLIENT_SESSION_TRACK does not parse the tracker list"
+
+              match handle session (sprintf "SET session_track_system_variables = REPEAT('a', %d)" oversized.Length) with
+              | unchanged, Err(1231, _) ->
+                  Expect.equal unchanged.Variables.["session_track_system_variables"] session.Variables.["session_track_system_variables"] "invalid value is not stored"
+              | _, other -> failtestf "expected an oversized tracker configuration error, got %A" other
+
+              let tooMany = String.replicate Fsdb.Limits.maxTrackedSystemVariableNames "a,"
+
+              match handle session (sprintf "SET session_track_system_variables = '%s'" tooMany) |> snd with
+              | Err(1231, _) -> ()
+              | other -> failtestf "expected a tracker-name cardinality error, got %A" other
+
+              let negotiated = { hostile with Capabilities = ClientProtocol41 ||| ClientSessionTrack }
+              let unchanged = Fsdb.Session.trackSystemVariableAssignments true [ "autocommit" ] negotiated
+              Expect.isEmpty unchanged.SessionStateChanges "defensive parsing skips an invalid retained configuration"
+
           testCase "transaction tracking reports replay characteristics and state transitions"
           <| fun _ ->
               let session =
@@ -6141,6 +6207,28 @@ let tests =
 
               closeSession second
               Expect.equal (scalar first "SELECT GET_LOCK('migration', 0)") (Some "1") "disconnect releases locks"
+
+          testCase "advisory locks enforce a distinct-name quota per session"
+          <| fun _ ->
+              let session = create 10 (Fsdb.Storage.create ())
+
+              let scalar sql =
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ value ] ]) -> value
+                  | other -> failtestf "expected one scalar value, got %A" other
+
+              for index in 0 .. Fsdb.Limits.maxAdvisoryLocksPerSession - 1 do
+                  Expect.equal (scalar (sprintf "SELECT GET_LOCK('quota-%d', 0)" index)) (Some "1") "lock below quota"
+
+              Expect.equal (scalar "SELECT GET_LOCK('quota-0', 0)") (Some "1") "reentrant acquisition is quota-neutral"
+
+              match handle session "SELECT GET_LOCK('one-too-many', 0)" |> snd with
+              | Err(1235, _) -> ()
+              | other -> failtestf "expected the advisory-lock quota error, got %A" other
+
+              Expect.equal (scalar "SELECT RELEASE_LOCK('quota-1')") (Some "1") "release frees one name"
+              Expect.equal (scalar "SELECT GET_LOCK('replacement', 0)") (Some "1") "a new name fits after release"
+              closeSession session
 
           testCase "comments ahead of text-probed statements are stripped like real MySQL's lexer"
           <| fun _ ->

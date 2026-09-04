@@ -452,14 +452,37 @@ type private AdvisoryLock =
     { Owner: int
       Count: int }
 
+type private AdvisoryLockTable =
+    { Locks: System.Collections.Generic.Dictionary<string, AdvisoryLock>
+      OwnedNames: System.Collections.Generic.Dictionary<int, System.Collections.Generic.HashSet<string>> }
+
 let private advisoryLocksByStore =
-    ConditionalWeakTable<obj, System.Collections.Generic.Dictionary<string, AdvisoryLock>>()
+    ConditionalWeakTable<obj, AdvisoryLockTable>()
 
 let private advisoryLocks (session: Session) =
     advisoryLocksByStore.GetValue(
         session.Store.Lock,
-        fun _ -> System.Collections.Generic.Dictionary(StringComparer.Ordinal)
+        fun _ ->
+            { Locks = System.Collections.Generic.Dictionary(StringComparer.Ordinal)
+              OwnedNames = System.Collections.Generic.Dictionary() }
     )
+
+let private advisoryNamesForOwner (table: AdvisoryLockTable) owner =
+    match table.OwnedNames.TryGetValue owner with
+    | true, names -> names
+    | false, _ ->
+        let names = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+        table.OwnedNames.[owner] <- names
+        names
+
+let private forgetAdvisoryName (table: AdvisoryLockTable) owner name =
+    match table.OwnedNames.TryGetValue owner with
+    | true, names ->
+        names.Remove name |> ignore
+
+        if names.Count = 0 then
+            table.OwnedNames.Remove owner |> ignore
+    | false, _ -> ()
 
 let private advisoryLockName = function
     | VNull -> None
@@ -484,16 +507,22 @@ let private getAdvisoryLock (session: Session) = function
             else
                 let infinite = seconds < 0.0 || Double.IsPositiveInfinity seconds
                 let deadline = Stopwatch.StartNew()
-                let locks = advisoryLocks session
+                let table = advisoryLocks session
 
-                lock locks (fun () ->
+                lock table (fun () ->
                     let rec acquire () =
-                        match locks.TryGetValue name with
+                        match table.Locks.TryGetValue name with
                         | false, _ ->
-                            locks.[name] <- { Owner = session.ConnectionId; Count = 1 }
+                            let owned = advisoryNamesForOwner table session.ConnectionId
+
+                            if owned.Count >= Limits.maxAdvisoryLocksPerSession then
+                                raise (Functions.SqlError(1235, "This version of MySQL doesn't yet support more user-level locks in one session"))
+
+                            table.Locks.[name] <- { Owner = session.ConnectionId; Count = 1 }
+                            owned.Add name |> ignore
                             VInt 1L
                         | true, current when current.Owner = session.ConnectionId ->
-                            locks.[name] <- { current with Count = current.Count + 1 }
+                            table.Locks.[name] <- { current with Count = current.Count + 1 }
                             VInt 1L
                         | _ when not infinite && deadline.Elapsed.TotalSeconds >= seconds -> VInt 0L
                         | _ ->
@@ -502,7 +531,7 @@ let private getAdvisoryLock (session: Session) = function
                             let waitMilliseconds =
                                 if infinite then 50 else max 1 (min 50 (int ((seconds - deadline.Elapsed.TotalSeconds) * 1000.0)))
 
-                            Threading.Monitor.Wait(locks, waitMilliseconds) |> ignore
+                            Threading.Monitor.Wait(table, waitMilliseconds) |> ignore
                             acquire ()
 
                     acquire ())
@@ -513,35 +542,42 @@ let private releaseAdvisoryLock (session: Session) = function
         match advisoryLockName value with
         | None -> VNull
         | Some name ->
-            let locks = advisoryLocks session
+            let table = advisoryLocks session
 
-            lock locks (fun () ->
-                match locks.TryGetValue name with
+            lock table (fun () ->
+                match table.Locks.TryGetValue name with
                 | false, _ -> VNull
                 | true, current when current.Owner <> session.ConnectionId -> VInt 0L
                 | true, current when current.Count > 1 ->
-                    locks.[name] <- { current with Count = current.Count - 1 }
+                    table.Locks.[name] <- { current with Count = current.Count - 1 }
                     VInt 1L
                 | true, _ ->
-                    locks.Remove name |> ignore
-                    Threading.Monitor.PulseAll locks
+                    table.Locks.Remove name |> ignore
+                    forgetAdvisoryName table session.ConnectionId name
+                    Threading.Monitor.PulseAll table
                     VInt 1L)
     | _ -> raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'RELEASE_LOCK'"))
 
 let private releaseAllAdvisoryLocks (session: Session) =
-    let locks = advisoryLocks session
+    let table = advisoryLocks session
 
-    lock locks (fun () ->
+    lock table (fun () ->
         let owned =
-            locks
-            |> Seq.filter (fun pair -> pair.Value.Owner = session.ConnectionId)
-            |> Seq.map (fun pair -> pair.Key, pair.Value.Count)
-            |> List.ofSeq
+            match table.OwnedNames.TryGetValue session.ConnectionId with
+            | true, names ->
+                names
+                |> Seq.choose (fun name ->
+                    match table.Locks.TryGetValue name with
+                    | true, entry -> Some(name, entry.Count)
+                    | false, _ -> None)
+                |> List.ofSeq
+            | false, _ -> []
 
-        owned |> List.iter (fst >> locks.Remove >> ignore)
+        owned |> List.iter (fst >> table.Locks.Remove >> ignore)
+        table.OwnedNames.Remove session.ConnectionId |> ignore
 
         if not owned.IsEmpty then
-            Threading.Monitor.PulseAll locks
+            Threading.Monitor.PulseAll table
 
         owned |> List.sumBy snd)
 
@@ -550,10 +586,10 @@ let private inspectAdvisoryLock (session: Session) inUse = function
         match advisoryLockName value with
         | None -> VNull
         | Some name ->
-            let locks = advisoryLocks session
+            let table = advisoryLocks session
 
-            lock locks (fun () ->
-                match locks.TryGetValue name with
+            lock table (fun () ->
+                match table.Locks.TryGetValue name with
                 | true, current when inUse -> VInt(int64 current.Owner)
                 | true, _ -> VInt 0L
                 | false, _ when inUse -> VNull
@@ -1436,6 +1472,10 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, _, true) when readOnlySystemVariables.Contains name ->
         Error(Err(1238, sprintf "Variable '%s' is a read only variable" name))
+    | SetVarAction("session_track_system_variables", Some value, _)
+        when value.Length > Limits.maxTrackedSystemVariablesLength
+             || (value |> Seq.filter ((=) ',') |> Seq.length) >= Limits.maxTrackedSystemVariableNames ->
+        Error(Err(1231, "Variable 'session_track_system_variables' exceeds its resource limit"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | SetVarAction(name, _, false) when globalOnlyVariables.Contains name ->
