@@ -34,6 +34,28 @@ let tests =
                   Int32.MaxValue
                   "a configured timeout beyond Task.Delay's int range saturates instead of wrapping negative"
 
+          testCase "long-data payload limits do not charge per-parameter page slack"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "max_allowed_packet", "1024" ] (fun () ->
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let session = Fsdb.Server.accumulateLongData (1, 0) [| 1uy |] session
+                  let session = Fsdb.Server.accumulateLongData (1, 1) [| 2uy |] session
+                  Expect.equal session.LongDataBytes 2L "the protocol limit counts logical payload bytes"
+                  Expect.isEmpty session.LongDataOverflow "valid parameters do not overflow due to page slack"
+                  Expect.equal session.LongData.Count 2 "each parameter retains its own paged stream")
+
+          testCase "long-data parameter buffers have a session-wide cardinality limit"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+
+              for parameter in 0 .. Fsdb.Limits.maxLongDataParameters - 1 do
+                  session <- Fsdb.Server.accumulateLongData (1, parameter) [| 1uy |] session
+
+              Expect.isEmpty session.LongDataOverflow "the configured number of parameter streams is accepted"
+              session <- Fsdb.Server.accumulateLongData (1, Fsdb.Limits.maxLongDataParameters) [| 1uy |] session
+              Expect.contains session.LongDataOverflow 1 "one more parameter stream defers an overflow to EXECUTE"
+              Expect.equal session.LongData.Count Fsdb.Limits.maxLongDataParameters "the rejected stream reserves no page"
+
           // MySqlConnector always negotiates CLIENT_DEPRECATE_EOF; PDO/mysqlnd
           // can still require the legacy terminator sequence.
           for caps, label, terminator in

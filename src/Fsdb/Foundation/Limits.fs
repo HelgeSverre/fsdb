@@ -78,6 +78,14 @@ let maxAesCfb8Bytes = 16 * 1024
 
 let maxGeometryDistanceComparisons = 10_000_000
 
+/// Compression work is chosen by the server even when the client advertises
+/// a more expensive level in its handshake response.
+let maxZstdCompressionLevel = 3
+
+/// A session can stream large values without retaining one backing page for
+/// every parameter in an attacker-sized prepared-statement collection.
+let maxLongDataParameters = 4096
+
 /// Password lifetime inherited by accounts whose mysql.user row stores NULL.
 let mutable defaultPasswordLifetimeDays = 0
 
@@ -86,6 +94,10 @@ let mutable defaultWeekFormat = 0
 
 /// Idle timeout waiting for the next command packet.
 let mutable waitTimeoutSeconds = 28800
+
+/// Bounds greeting, TLS, and authentication exchanges before a session has
+/// an account whose ordinary idle policy can apply.
+let mutable connectTimeoutSeconds = 10
 
 /// Idle timeout inherited by clients that negotiate CLIENT_INTERACTIVE.
 let mutable interactiveTimeoutSeconds = 28800
@@ -190,6 +202,12 @@ let private knobs =
         Max = 31536000L
         Set = fun v -> waitTimeoutSeconds <- int v
         Get = fun () -> int64 waitTimeoutSeconds
+        Reportable = true }
+      { Name = "connect_timeout"
+        Min = 2L
+        Max = 31536000L
+        Set = fun v -> connectTimeoutSeconds <- int v
+        Get = fun () -> int64 connectTimeoutSeconds
         Reportable = true }
       { Name = "interactive_timeout"
         Min = 1L

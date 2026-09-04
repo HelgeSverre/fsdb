@@ -579,9 +579,10 @@ let tests =
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
-              match handle session "SELECT @@wait_timeout, @@interactive_timeout" |> snd with
-              | ResultSet(_, [ [ Some wait; Some interactive ] ]) ->
+              match handle session "SELECT @@wait_timeout, @@interactive_timeout, @@connect_timeout" |> snd with
+              | ResultSet(_, [ [ Some wait; Some interactive; Some connect ] ]) ->
                   Expect.equal wait "28800" "MySQL's default"
                   Expect.equal wait (string waitTimeoutSeconds) "advertised value matches the command idle timeout"
                   Expect.equal interactive "28800" "MySQL's interactive default"
+                  Expect.equal connect "10" "pre-authentication uses MySQL's connect timeout"
               | other -> failtestf "expected both values, got %A" other ]

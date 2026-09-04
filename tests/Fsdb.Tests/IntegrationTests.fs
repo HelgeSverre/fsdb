@@ -1427,6 +1427,26 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          TestSupport.processGlobalCase "connect_timeout reaps a peer that stalls before authentication"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "connect_timeout", "2" ] (fun () ->
+                  async {
+                      use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                      let stream = client.GetStream()
+                      let! greeting = readPacketAsync stream
+                      Expect.isSome greeting "the server sends its greeting before waiting for authentication"
+
+                      let stopwatch = Diagnostics.Stopwatch.StartNew()
+                      let buffer = Array.zeroCreate<byte> 1
+                      use deadline = new Threading.CancellationTokenSource(TimeSpan.FromSeconds 5.0)
+                      let! read = stream.ReadAsync(buffer, 0, 1, deadline.Token) |> Async.AwaitTask
+                      Expect.equal read 0 "the unauthenticated socket is closed"
+                      Expect.isLessThan stopwatch.Elapsed (TimeSpan.FromSeconds 4.0) "connect_timeout, not wait_timeout, governs the peer"
+                  }
+                  |> Async.RunSynchronously)
+
           testCase "PROCESSLIST shows the live connection and KILL CONNECTION tears a victim down"
           <| fun _ ->
               async {

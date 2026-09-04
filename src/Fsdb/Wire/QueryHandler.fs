@@ -252,6 +252,7 @@ let private isSessionScope (scope: string) : bool =
 let private globalScopeOnlyVariables =
     Set.ofList
         [ "activate_all_roles_on_login"
+          "connect_timeout"
           "ft_query_expansion_limit"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
@@ -309,6 +310,7 @@ let private numericSystemVariables =
     Set.ofList
         [ "auto_increment_increment"
           "autocommit"
+          "connect_timeout"
           "cte_max_recursion_depth"
           "foreign_key_checks"
           "ft_query_expansion_limit"

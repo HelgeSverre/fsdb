@@ -1039,7 +1039,7 @@ let private authenticateAccount
             if forceAuthSwitch then
                 async {
                     do! writePacketAsync stream { SeqId = firstSeq; Payload = authSwitchPayload authData } |> Async.Ignore
-                    let! response = readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream
+                    let! response = readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream
                     return response |> Option.map (fun response -> response.SeqId + 1uy, response.Payload)
                 }
             else
@@ -1083,36 +1083,41 @@ let private authenticateAccount
                 else
                     do! writePacketAsync stream { SeqId = authSeq; Payload = authSwitchPayload authData } |> Async.Ignore
 
-                    match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
+                    match! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream with
                     | None -> return None
                     | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
                         return! accept (switchResp.SeqId + 1uy) selected cols row
                     | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
     }
 
-let private accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =
-    let existing = session.LongData |> Map.tryFind key |> Option.defaultValue []
+let internal accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =
+    let existing = session.LongData |> Map.tryFind key |> Option.defaultWith LongDataBuffer
     let room = int64 Limits.maxAllowedPacket - session.LongDataBytes
+    let newParameterBeyondLimit =
+        not (session.LongData.ContainsKey key)
+        && session.LongData.Count >= Limits.maxLongDataParameters
 
     if chunk.Length = 0 then
         session
-    elif int64 chunk.Length > room then
-        { session with LongDataOverflow = Set.add key session.LongDataOverflow }
+    elif int64 chunk.Length > room || newParameterBeyondLimit then
+        { session with LongDataOverflow = Set.add (fst key) session.LongDataOverflow }
     else
+        existing.Append chunk
+
         { session with
-            LongData = Map.add key (chunk :: existing) session.LongData
+            LongData = Map.add key existing session.LongData
             LongDataBytes = session.LongDataBytes + int64 chunk.Length }
 
 let private discardLongData (statementId: int) (session: Session) : Session =
     let retained = session.LongData |> Map.filter (fun (id, _) _ -> id <> statementId)
     let retainedBytes =
         retained
-        |> Seq.sumBy (fun (KeyValue(_, chunks)) -> chunks |> List.sumBy (fun bytes -> int64 bytes.Length))
+        |> Seq.sumBy (fun (KeyValue(_, buffer)) -> int64 buffer.Length)
 
     { session with
         LongData = retained
         LongDataBytes = retainedBytes
-        LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (id, _) -> id <> statementId) }
+        LongDataOverflow = Set.remove statementId session.LongDataOverflow }
 
 let private resolveChangeUserCharacterSet (characterSet: int option) =
     characterSet
@@ -1196,7 +1201,7 @@ let private handleConnection
                             clientCertificateValidated <- valid
                             valid
 
-                use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(float Limits.waitTimeoutSeconds))
+                use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(float Limits.connectTimeoutSeconds))
 
                 try
                     do!
@@ -1234,7 +1239,7 @@ let private handleConnection
                 writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10WithCapabilities offeredCapabilities connectionId authData }
                 |> Async.Ignore
 
-            match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
+            match! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream with
             | None -> ()
             | Some firstHandshakePacket ->
                 let! handshakeResp =
@@ -1256,7 +1261,7 @@ let private handleConnection
                                 return None
                             | Some certificate ->
                                 do! upgradeToTls certificate
-                                return! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream
+                                return! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream
                     }
 
                 match handshakeResp with
@@ -1944,7 +1949,7 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
-                                | Some _ when session.LongDataOverflow |> Set.exists (fun (sid, _) -> sid = stmtId) ->
+                                | Some _ when session.LongDataOverflow.Contains stmtId ->
                                     // A COM_STMT_SEND_LONG_DATA chunk for this statement
                                     // overflowed the accumulation cap (see there) — that
                                     // command got no reply, so the failure surfaces here
@@ -2012,8 +2017,8 @@ let private handleConnection
                                                         // force-decoding them as UTF-8 corrupts any byte
                                                         // sequence that isn't valid UTF-8 (an image, a
                                                         // compressed column, ...). Only text types decode.
-                                                        | Some chunks ->
-                                                            let bytes = chunks |> List.rev |> Array.concat
+                                                        | Some buffer ->
+                                                            let bytes = buffer.ToArray()
                                                             if typeId = TypeBlob then
                                                                 VBytes bytes
                                                             elif typeId = TypeGeometry then
@@ -2147,7 +2152,8 @@ let private handleConnection
                                 let paramIndex = r.ReadInt16LE()
                                 let chunk = r.ReadBytes(max 0 r.Remaining)
 
-                                if session.Statements.ContainsKey stmtId then
+                                match Map.tryFind stmtId session.Statements with
+                                | Some statement when paramIndex >= 0 && paramIndex < statement.ParamCount ->
                                     let key = stmtId, paramIndex
                                     // Cap accumulated long-data for the whole connection at
                                     // the same ceiling `readPacketAsync` enforces for a
@@ -2159,7 +2165,7 @@ let private handleConnection
                                     // TOO_LARGE (1153) rather than silently truncating the
                                     // parameter's data and executing on short input.
                                     return! loop (accumulateLongData key chunk session)
-                                else
+                                | _ ->
                                     return! loop session
                             | Some(StmtClose stmtId) ->
                                 // No reply, per protocol.

@@ -11,6 +11,38 @@ open Fsdb.Storage
 open Fsdb.Value
 open Fsdb.Sql
 
+type LongDataBuffer() =
+    let pageSize = 1024
+    let pages = ResizeArray<byte[]>()
+    let mutable length = 0
+
+    member _.Length = length
+    member _.ReservedBytes = int64 pages.Count * int64 pageSize
+
+    member _.Append(bytes: byte[]) =
+        let mutable sourceOffset = 0
+
+        while sourceOffset < bytes.Length do
+            if length = pages.Count * pageSize then
+                pages.Add(Array.zeroCreate pageSize)
+
+            let pageOffset = length % pageSize
+            let copied = min (pageSize - pageOffset) (bytes.Length - sourceOffset)
+            Array.Copy(bytes, sourceOffset, pages.[pages.Count - 1], pageOffset, copied)
+            sourceOffset <- sourceOffset + copied
+            length <- length + copied
+
+    member _.ToArray() =
+        let bytes = Array.zeroCreate<byte> length
+        let mutable destinationOffset = 0
+
+        for page in pages do
+            let copied = min pageSize (length - destinationOffset)
+            Array.Copy(page, 0, bytes, destinationOffset, copied)
+            destinationOffset <- destinationOffset + copied
+
+        bytes
+
 /// Session defaults not backed by a live Limits setting.
 let defaultVariables: Map<string, string option> =
     Map.ofList
@@ -313,14 +345,13 @@ type Session =
       RoutineStack: (string * string * string) list
       /// The next id COM_STMT_PREPARE will assign.
       NextStmtId: int
-      /// Bytes buffered by COM_STMT_SEND_LONG_DATA, keyed by (statement id,
-      /// param index), newest chunk first so each arrival is constant-time.
-      /// EXECUTE reverses and concatenates once, then clears the chunks.
-      LongData: Map<int * int, byte[] list>
-      /// Total bytes held in `LongData` for constant-time limit checks.
+      /// Paged COM_STMT_SEND_LONG_DATA buffers keyed by statement and param.
+      LongData: Map<int * int, LongDataBuffer>
+      /// Logical payload bytes held in `LongData` for limit checks.
       LongDataBytes: int64
-      /// Overflows surface on EXECUTE because SEND_LONG_DATA has no reply.
-      LongDataOverflow: Set<int * int>
+      /// Statements with an overflow surface it on EXECUTE because
+      /// SEND_LONG_DATA has no reply.
+      LongDataOverflow: Set<int>
       /// Embedding functions layered over built-ins by QueryHandler.
       CustomFunctions: Fsdb.Functions.Registry
       /// Effective handshake capabilities.
