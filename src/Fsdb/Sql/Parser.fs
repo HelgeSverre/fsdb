@@ -938,6 +938,155 @@ let private columnType: Parser<ColumnType, unit> = columnTypeWithDisplay |>> fst
 /// the two.
 let private exprDepth = System.Threading.AsyncLocal<int>()
 let private maxExprDepth = 32
+// Nested plain SELECT groups take both speculative set-operation branches.
+// Eight levels keep ordinary redundant grouping while bounding that retry
+// tree to 256 leaves before the general 32-level stack guard is relevant.
+let private maxAmbiguousSelectParenthesisDepth = 8
+
+let private exceedsAmbiguousSelectParenthesisDepth (sql: string) =
+    let mutable index = 0
+    let mutable leadingParentheses = 0
+    let mutable quote: char option = None
+    let mutable blockComment = false
+    let mutable lineComment = false
+    let mutable exceeded = false
+
+    while index < sql.Length && not exceeded do
+        match quote with
+        | Some q when
+            not currentOptions.Value.NoBackslashEscapes
+            && sql.[index] = '\\'
+            && q <> '`'
+            && index + 1 < sql.Length
+            ->
+            index <- index + 2
+        | Some q when sql.[index] = q && index + 1 < sql.Length && sql.[index + 1] = q -> index <- index + 2
+        | Some q when sql.[index] = q ->
+            quote <- None
+            leadingParentheses <- 0
+            index <- index + 1
+        | Some _ -> index <- index + 1
+        | None when blockComment && sql.[index] = '*' && index + 1 < sql.Length && sql.[index + 1] = '/' ->
+            blockComment <- false
+            index <- index + 2
+        | None when blockComment -> index <- index + 1
+        | None when lineComment && (sql.[index] = '\n' || sql.[index] = '\r') ->
+            lineComment <- false
+            index <- index + 1
+        | None when lineComment -> index <- index + 1
+        | None when sql.[index] = '\'' || sql.[index] = '"' || sql.[index] = '`' ->
+            quote <- Some sql.[index]
+            index <- index + 1
+        | None when sql.[index] = '#' ->
+            lineComment <- true
+            index <- index + 1
+        | None when
+            sql.[index] = '-'
+            && index + 1 < sql.Length
+            && sql.[index + 1] = '-'
+            && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2])
+            ->
+            lineComment <- true
+            index <- index + 2
+        | None when sql.[index] = '/' && index + 1 < sql.Length && sql.[index + 1] = '*' ->
+            blockComment <- true
+            index <- index + 2
+        | None when Char.IsWhiteSpace sql.[index] -> index <- index + 1
+        | None when sql.[index] = '(' ->
+            leadingParentheses <- leadingParentheses + 1
+            index <- index + 1
+        | None when isIdentStart sql.[index] ->
+            let start = index
+            index <- index + 1
+
+            while index < sql.Length && isIdentChar sql.[index] do
+                index <- index + 1
+
+            let word = sql.AsSpan(start, index - start)
+
+            if
+                leadingParentheses > maxAmbiguousSelectParenthesisDepth
+                && (word.Equals("SELECT".AsSpan(), StringComparison.OrdinalIgnoreCase)
+                    || word.Equals("WITH".AsSpan(), StringComparison.OrdinalIgnoreCase))
+            then
+                exceeded <- true
+
+            leadingParentheses <- 0
+        | None ->
+            leadingParentheses <- 0
+            index <- index + 1
+
+    exceeded
+
+let private exceedsHighNotDepth (sql: string) =
+    let mutable index = 0
+    let mutable consecutive = 0
+    let mutable quote: char option = None
+    let mutable blockComment = false
+    let mutable lineComment = false
+    let mutable exceeded = false
+
+    while index < sql.Length && not exceeded do
+        match quote with
+        | Some q when not currentOptions.Value.NoBackslashEscapes && q <> '`' && sql.[index] = '\\' ->
+            index <- min sql.Length (index + 2)
+        | Some q when sql.[index] = q && index + 1 < sql.Length && sql.[index + 1] = q -> index <- index + 2
+        | Some q when sql.[index] = q ->
+            quote <- None
+            consecutive <- 0
+            index <- index + 1
+        | Some _ -> index <- index + 1
+        | None when blockComment && sql.[index] = '*' && index + 1 < sql.Length && sql.[index + 1] = '/' ->
+            blockComment <- false
+            index <- index + 2
+        | None when blockComment -> index <- index + 1
+        | None when lineComment && (sql.[index] = '\n' || sql.[index] = '\r') ->
+            lineComment <- false
+            index <- index + 1
+        | None when lineComment -> index <- index + 1
+        | None when sql.[index] = '\'' || sql.[index] = '"' || sql.[index] = '`' ->
+            quote <- Some sql.[index]
+            index <- index + 1
+        | None when sql.[index] = '#' ->
+            lineComment <- true
+            index <- index + 1
+        | None when
+            sql.[index] = '-'
+            && index + 1 < sql.Length
+            && sql.[index + 1] = '-'
+            && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2])
+            ->
+            lineComment <- true
+            index <- index + 2
+        | None when sql.[index] = '/' && index + 1 < sql.Length && sql.[index + 1] = '*' ->
+            blockComment <- true
+            index <- index + 2
+        | None when Char.IsWhiteSpace sql.[index] -> index <- index + 1
+        | None when isIdentStart sql.[index] ->
+            let mutable finish = index + 1
+
+            while finish < sql.Length && isIdentChar sql.[finish] do
+                finish <- finish + 1
+
+            if sql.AsSpan(index, finish - index).Equals("NOT".AsSpan(), StringComparison.OrdinalIgnoreCase) then
+                consecutive <- consecutive + 1
+                exceeded <- consecutive > maxExprDepth
+            else
+                consecutive <- 0
+
+            index <- finish
+        | None when
+            sql.[index] = '('
+            || sql.[index] = ')'
+            || sql.[index] = '-'
+            || sql.[index] = '~'
+            ->
+            index <- index + 1
+        | None ->
+            consecutive <- 0
+            index <- index + 1
+
+    exceeded
 
 let private exceedsParenthesisDepthLimit (sql: string) =
     let mutable index = 0
@@ -2459,7 +2608,7 @@ module private ParsedTableOptions =
         | TableCharset value ->
             { options with
                 Charset = Some value
-                Deprecations = options.Deprecations @ charsetDeprecations value }
+                Deprecations = List.rev (charsetDeprecations value) @ options.Deprecations }
         | TableCollate value -> { options with Collation = Some value }
         | TableAutoIncrement value -> { options with AutoIncrementSeed = Some value }
         | TableComment value -> { options with Comment = Some value }
@@ -2640,7 +2789,7 @@ let private createTable: Parser<Statement, unit> =
               AutoIncrementSeed = options.AutoIncrementSeed
               Comment = options.Comment
               Partitioning = options.Partitioning
-              Deprecations = options.Deprecations @ columnDeprecations }
+              Deprecations = List.rev options.Deprecations @ columnDeprecations }
 
 let private createTableLike: Parser<Statement, unit> =
     let source = keyword "LIKE" >>. qualifiedTableName
@@ -4450,6 +4599,10 @@ let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Res
     try
         if exceedsParenthesisDepthLimit sql then
             Result.Error "expression nested too deeply"
+        elif exceedsAmbiguousSelectParenthesisDepth sql then
+            Result.Error "SELECT nested too deeply"
+        elif currentOptions.Value.HighNotPrecedence && exceedsHighNotDepth sql then
+            Result.Error "expression nested too deeply"
         else
             match run parser sql with
             | Success(value, _, _) -> Result.Ok value
@@ -4527,12 +4680,20 @@ let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<Lo
 
     withParserState options sql (runWithDepthLimit parser)
     |> Result.bind (fun load ->
-        let validCharacter value = value = "" || value.Length = 1
+        let validMarker (value: string) = value = "" || value.Length = 1
+        // Multi-character terminators are useful for imports, but matching
+        // an attacker-sized prefix at every upload position is quadratic.
+        let validTerminator (value: string) = value.Length <= 16
 
-        if (load.EnclosedBy |> Option.forall validCharacter) && (load.Escape |> Option.forall validCharacter) then
+        if
+            validTerminator load.FieldTerminator
+            && validTerminator load.LineTerminator
+            && (load.EnclosedBy |> Option.forall validMarker)
+            && (load.Escape |> Option.forall validMarker)
+        then
             Result.Ok load
         else
-            Result.Error "LOAD DATA enclosure and escape markers must be empty or one character")
+            Result.Error "LOAD DATA terminators may be at most 16 characters; enclosure and escape markers at most one")
 
 let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
     parseLocalLoadWithOptions defaultOptions sql
@@ -4555,8 +4716,25 @@ let private explicitTableLock =
           Alias = alias
           Mode = mode }
 
+let private boundedLockList (tableLock: Parser<ExplicitTableLock, unit>) =
+    let mutable count = 0
+
+    let bounded =
+        tableLock
+        >>= fun parsed ->
+            count <- count + 1
+
+            // These commands retain one parsed record per name even though
+            // their handlers need no multi-million-entry lock request.
+            if count > 1024 then
+                fail "table lock list contains too many references"
+            else
+                preturn parsed
+
+    sepBy1 bounded (sym ",")
+
 let parseTableLocksWithOptions (options: ParserOptions) (sql: string) : Result<ExplicitTableLock list, string> =
-    let parser = ws >>. keyword "LOCK" >>. keyword "TABLES" >>. sepBy1 explicitTableLock (sym ",") .>> opt (sym ";") .>> eof
+    let parser = ws >>. keyword "LOCK" >>. keyword "TABLES" >>. boundedLockList explicitTableLock .>> opt (sym ";") .>> eof
     withParserState options sql (runWithDepthLimit parser)
 
 let parseTableLocks (sql: string) : Result<ExplicitTableLock list, string> =
@@ -4580,7 +4758,7 @@ let parseFlushTableLocksWithOptions (options: ParserOptions) (sql: string) : Res
         >>. keyword "FLUSH"
         >>. opt (choice [ attempt (keyword "NO_WRITE_TO_BINLOG"); keyword "LOCAL" ])
         >>. keyword "TABLES"
-        >>. sepBy1 table (sym ",")
+        >>. boundedLockList table
         .>> modifier
         .>> opt (sym ";")
         .>> eof

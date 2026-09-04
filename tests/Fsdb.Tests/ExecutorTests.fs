@@ -8799,6 +8799,17 @@ let tests =
                         3583
                         "Window 'w2' cannot inherit 'w' since both contain an ORDER BY clause."
 
+                testCase "deep named-window inheritance resolves without recursion"
+                <| fun _ ->
+                    let definitions =
+                        [ "w1 AS ()"
+                          yield! [ 2..2000 ] |> List.map (fun index -> sprintf "w%d AS (w%d)" index (index - 1)) ]
+                        |> String.concat ","
+
+                    match runDefault (windowStore ()) (sprintf "SELECT SUM(v) OVER w2000 FROM t WINDOW %s" definitions) with
+                    | ResultSet(_, rows) -> Expect.equal rows.Length 6 "every source row remains"
+                    | other -> failtestf "expected a deep valid window chain to execute, got %A" other
+
                 testCase "frame bound rules match the oracle's 3584/3585/3586/3587"
                 <| fun _ ->
                     expectError

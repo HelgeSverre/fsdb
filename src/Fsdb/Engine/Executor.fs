@@ -11093,40 +11093,71 @@ and private runWindowedSelect
         // binds to this SELECT's own `WINDOW w AS (...)` list, an inline
         // one is already a spec. MySQL's own error (3579) for an undefined
         // name.
-        let rec resolveWindow (windowName: string) (visited: Set<string>) (spec: WindowSpec) : Result<WindowSpec, EvalError> =
+        let windowDefinitions = Dictionary<string, string * WindowSpec>(System.StringComparer.OrdinalIgnoreCase)
+
+        for name, spec in select.Windows do
+            windowDefinitions.TryAdd(name, (name, spec)) |> ignore
+
+        let resolvedWindows = Dictionary<string, Result<WindowSpec, EvalError>>(System.StringComparer.OrdinalIgnoreCase)
+
+        let inheritWindow (windowName: string) (name: string) (spec: WindowSpec) (inherited: WindowSpec) =
+            if not spec.PartitionBy.IsEmpty then
+                Error(3581, "A window which depends on another cannot define partitioning.")
+            elif inherited.Frame.IsSome then
+                Error(3582, sprintf "Window '%s' has a frame definition, so cannot be referenced by another window." name)
+            elif not inherited.OrderBy.IsEmpty && not spec.OrderBy.IsEmpty then
+                Error(3583, sprintf "Window '%s' cannot inherit '%s' since both contain an ORDER BY clause." windowName name)
+            else
+                Ok
+                    { Inherit = None
+                      PartitionBy = inherited.PartitionBy
+                      OrderBy = if spec.OrderBy.IsEmpty then inherited.OrderBy else spec.OrderBy
+                      Frame = spec.Frame }
+
+        let resolveNamedWindow (name: string) : Result<WindowSpec, EvalError> =
+            let pending = ResizeArray<string * string * WindowSpec>()
+            let visited = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+            let mutable current = name
+            let mutable resolved: Result<WindowSpec, EvalError> option = None
+
+            // Keep long valid chains off the call stack. Cached suffixes also
+            // make resolving several OVER clauses linear in the definition count.
+            while resolved.IsNone do
+                match resolvedWindows.TryGetValue current with
+                | true, result -> resolved <- Some result
+                | false, _ when not (visited.Add current) ->
+                    resolved <- Some(Error(3580, "There is a circularity in the window dependency graph."))
+                | false, _ ->
+                    match windowDefinitions.TryGetValue current with
+                    | false, _ -> resolved <- Some(Error(3579, sprintf "Window name '%s' is not defined." current))
+                    | true, (candidate, spec) ->
+                        match spec.Inherit with
+                        | None ->
+                            let result = Ok spec
+                            resolvedWindows.[candidate] <- result
+                            resolved <- Some result
+                        | Some parent ->
+                            pending.Add(candidate, parent, spec)
+                            current <- parent
+
+            let mutable result = resolved.Value
+
+            for index = pending.Count - 1 downto 0 do
+                let candidate, parent, spec = pending.[index]
+                result <- result |> Result.bind (inheritWindow candidate parent spec)
+                resolvedWindows.[candidate] <- result
+
+            result
+
+        let resolveWindow (windowName: string) (spec: WindowSpec) : Result<WindowSpec, EvalError> =
             match spec.Inherit with
             | None -> Ok spec
-            | Some name ->
-                resolveNamedWindow visited name
-                |> Result.bind (fun inherited ->
-                    if not spec.PartitionBy.IsEmpty then
-                        Error(3581, "A window which depends on another cannot define partitioning.")
-                    elif inherited.Frame.IsSome then
-                        Error(3582, sprintf "Window '%s' has a frame definition, so cannot be referenced by another window." name)
-                    elif not inherited.OrderBy.IsEmpty && not spec.OrderBy.IsEmpty then
-                        Error(3583, sprintf "Window '%s' cannot inherit '%s' since both contain an ORDER BY clause." windowName name)
-                    else
-                        Ok
-                            { Inherit = None
-                              PartitionBy = inherited.PartitionBy
-                              OrderBy = if spec.OrderBy.IsEmpty then inherited.OrderBy else spec.OrderBy
-                              Frame = spec.Frame })
-
-        and resolveNamedWindow (visited: Set<string>) (name: string) : Result<WindowSpec, EvalError> =
-            let key = name.ToLowerInvariant()
-
-            if visited.Contains key then
-                Error(3580, "There is a circularity in the window dependency graph.")
-            else
-                select.Windows
-                |> List.tryFind (fun (candidate, _) -> System.String.Equals(candidate, name, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.map (fun (candidate, spec) -> resolveWindow candidate (visited.Add key) spec)
-                |> Option.defaultValue (Error(3579, sprintf "Window name '%s' is not defined." name))
+            | Some name -> resolveNamedWindow name |> Result.bind (inheritWindow windowName name spec)
 
         let resolveOver (over: OverClause) : Result<WindowSpec, EvalError> =
             match over with
-            | OverSpec spec -> resolveWindow "<unnamed window>" Set.empty spec
-            | OverName name -> resolveNamedWindow Set.empty name
+            | OverSpec spec -> resolveWindow "<unnamed window>" spec
+            | OverName name -> resolveNamedWindow name
 
         // A frame offset (`ROWS BETWEEN <n> PRECEDING ...`) must be a
         // constant — MySQL rejects a column reference there — so it
