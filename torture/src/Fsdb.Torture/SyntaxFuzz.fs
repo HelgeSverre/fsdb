@@ -62,6 +62,7 @@ module SyntaxFuzz =
            "set_group_precedence", "(SELECT 1 AS n UNION SELECT 2) INTERSECT SELECT 2 ORDER BY n"
            "planned_join",
            "SELECT t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1 ORDER BY t.id"
+           "low_cardinality_join", "SELECT COUNT(*) FROM syntax_target AS l JOIN syntax_target AS r ON r.n = l.n"
            "straight_join",
            "SELECT STRAIGHT_JOIN t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1"
            "correlated_index", "SELECT t.id, (SELECT COUNT(*) FROM syntax_source AS s WHERE s.n = t.n) FROM syntax_target AS t"
@@ -162,7 +163,7 @@ module SyntaxFuzz =
            "bit_type", sprintf "CREATE TABLE syntax_bit_%s (b BIT(64) DEFAULT b'1')" suffix |]
 
     let private fixtures =
-        [| "CREATE TABLE syntax_target (id INT PRIMARY KEY, n INT, label VARCHAR(40), INDEX ix_n_label (n, label))"
+        [| "CREATE TABLE syntax_target (id INT PRIMARY KEY, n INT, label VARCHAR(40), INDEX ix_n (n), INDEX ix_n_label (n, label))"
            "INSERT INTO syntax_target VALUES (1, 10, 'seed')"
            "CREATE TABLE syntax_source (id INT, n INT, label VARCHAR(40), update_label VARCHAR(40), INDEX ix_syntax_source_n (n))"
            "INSERT INTO syntax_source VALUES (1, 11, 'candidate', 'source')"

@@ -516,7 +516,8 @@ let tests =
                           "collation_quantified"
                           "collation_cte"
                           "collation_case_between"
-                          "collation_join" ] do
+                          "collation_join"
+                          "low_cardinality_join" ] do
                         Expect.contains features feature feature
 
                     for feature in
@@ -536,6 +537,13 @@ let tests =
                     Expect.stringContains commentedReplace.Sql "'$1'" "replacement literal is untouched"
                     Expect.stringContains commentedReplace.Sql "'(?=(.))'" "pattern punctuation is untouched"
                     Expect.stringContains commentedReplace.Sql "/**/(" "comments reach punctuation boundaries"
+
+                testCase "covers complete and early-stopping low-cardinality joins"
+                <| fun _ ->
+                    let probes = ScenarioProbes.all Relational |> Array.map fst |> Set.ofArray
+
+                    Expect.contains probes "low_cardinality_indexed_join_complete" "complete join"
+                    Expect.contains probes "low_cardinality_indexed_join_limited" "early-stopping join"
 
                 testCase "covers declared product gaps with executable baselines"
                 <| fun _ ->

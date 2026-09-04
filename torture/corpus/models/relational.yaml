@@ -121,6 +121,8 @@ tables:
         - { name: assignee_id, type: bigint, nullable: true }
         - { name: title, type: "varchar(240)", nullable: false }
         - { name: status, type: "enum('open','active','done','blocked')", nullable: false }
+      indexes:
+        - { name: idx_tasks_status, columns: [status] }
       relationships:
         - { name: task_project, columns: [project_id], referenced_table: projects, referenced_columns: [id] }
         - { name: task_assignee, columns: [assignee_id], referenced_table: users, referenced_columns: [id] }

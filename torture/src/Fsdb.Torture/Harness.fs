@@ -1210,6 +1210,10 @@ module ScenarioProbes =
                "SELECT COUNT(*) AS joined_rows, COUNT(DISTINCT tenant_id) AS distinct_tenants FROM memberships NATURAL JOIN projects"
                "self_join_tasks_same_project",
                "SELECT COUNT(*) AS sibling_pairs FROM tasks AS a JOIN tasks AS b ON a.project_id = b.project_id AND a.id < b.id"
+               "low_cardinality_indexed_join_complete",
+               "SELECT COUNT(*) AS status_pairs FROM tasks AS a JOIN tasks AS b ON b.status = a.status WHERE a.id <= 50"
+               "low_cardinality_indexed_join_limited",
+               "SELECT a.id AS left_id, b.id AS right_id, a.status FROM tasks AS a JOIN tasks AS b ON b.status = a.status WHERE a.id <= 50 ORDER BY a.id, b.id LIMIT 25"
 
                // Aggregation: COUNT variants, the empty group, GROUP_CONCAT
                // ordering, HAVING, expression keys, and ORDER BY ordinal/alias.
