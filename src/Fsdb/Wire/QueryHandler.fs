@@ -2736,6 +2736,67 @@ let private temporaryTargets (dbName: string) (action: TemporaryAction option) (
     | Some DropTemporary, DropTable(names, _) -> names |> List.map (splitQualified dbName)
     | _ -> []
 
+let private moveTemporaryKey sourceDb sourceTable targetTable keys =
+    let source = tableKey sourceDb sourceTable
+
+    if Set.contains source keys then
+        keys |> Set.remove source |> Set.add (tableKey sourceDb targetTable)
+    else
+        keys
+
+let private temporaryKeysAfterStatement dbName beforeKeys stmt =
+    match stmt with
+    | RenameTable pairs ->
+        pairs
+        |> List.fold
+            (fun keys (sourceName, targetName) ->
+                let sourceDb, sourceTable = splitQualified dbName sourceName
+                let _, targetTable = splitQualified dbName targetName
+                moveTemporaryKey sourceDb sourceTable targetTable keys)
+            beforeKeys
+    | AlterTable(sourceName, actions) ->
+        let sourceDb, sourceTable = splitQualified dbName sourceName
+
+        actions
+        |> List.choose (function RenameTo target -> Some target | _ -> None)
+        |> List.tryLast
+        |> Option.map (fun target -> moveTemporaryKey sourceDb sourceTable target beforeKeys)
+        |> Option.defaultValue beforeKeys
+    | _ -> beforeKeys
+
+let private temporaryRenameSourceKinds dbName beforeKeys pairs =
+    pairs
+    |> List.fold
+        (fun (hasTemporary, hasPermanent, keys) (sourceName, targetName) ->
+            let sourceDb, sourceTable = splitQualified dbName sourceName
+            let _, targetTable = splitQualified dbName targetName
+            let source = tableKey sourceDb sourceTable
+
+            if Set.contains source keys then
+                true,
+                hasPermanent,
+                keys |> Set.remove source |> Set.add (tableKey sourceDb targetTable)
+            else
+                hasTemporary, true, keys)
+        (false, false, beforeKeys)
+
+let private mixesTemporaryAndPermanentRenames dbName beforeKeys = function
+    | RenameTable pairs ->
+        let hasTemporary, hasPermanent, _ = temporaryRenameSourceKinds dbName beforeKeys pairs
+        hasTemporary && hasPermanent
+    | _ -> false
+
+let private changesOnlyTemporaryCatalog dbName beforeKeys action stmt =
+    match action, stmt with
+    | Some _, _ -> true
+    | None, AlterTable(sourceName, _) ->
+        let sourceDb, sourceTable = splitQualified dbName sourceName
+        Set.contains (tableKey sourceDb sourceTable) beforeKeys
+    | None, RenameTable pairs ->
+        let hasTemporary, hasPermanent, _ = temporaryRenameSourceKinds dbName beforeKeys pairs
+        hasTemporary && not hasPermanent
+    | _ -> false
+
 let private statementUsesTemporary (catalog: Catalog) (dbName: string) (stmt: Statement) =
     Auth.requiredPrivileges dbName stmt
     |> List.exists (function
@@ -2790,7 +2851,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             match action with
             | Some CreateTemporary -> Set.union beforeKeys targets
             | Some DropTemporary -> Set.difference beforeKeys targets
-            | None -> beforeKeys
+            | None -> temporaryKeysAfterStatement dbName beforeKeys stmt
 
         let temporaryCatalog =
             afterKeys
@@ -2804,8 +2865,11 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
         let overlayKeys = Set.unionMany [ beforeKeys; afterKeys; targets ]
 
         let permanentCatalog =
-            overlayKeys
-            |> Set.fold (fun catalog (db, table) -> setCatalogTable catalog db table (catalogTable baseCatalog (db, table))) working.Catalog
+            if changesOnlyTemporaryCatalog dbName beforeKeys action stmt then
+                baseCatalog
+            else
+                overlayKeys
+                |> Set.fold (fun catalog (db, table) -> setCatalogTable catalog db table (catalogTable baseCatalog (db, table))) working.Catalog
 
         working.Catalog <- permanentCatalog
 
@@ -2826,6 +2890,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
 let private executeParsedWithTemporaryAction (action: TemporaryAction option) (session: Session) (stmt: Statement) =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let usesTemporary = action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt
+    let beforeKeys = temporaryKeys session.TemporaryCatalog
 
     let statementAccesses () =
         TableLocks.accessesForStatement
@@ -2835,7 +2900,9 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
             stmt
 
     let executed, result =
-        if usesTemporary && xaAssociation session |> Option.isSome then
+        if mixesTemporaryAndPermanentRenames dbName beforeKeys stmt then
+            session, Err(1105, "RENAME TABLE cannot mix temporary and permanent tables")
+        elif usesTemporary && xaAssociation session |> Option.isSome then
             session, Err(4091, "XA: Temporary tables cannot be accessed inside XA transactions when xa_detach_on_prepare=ON")
         elif usesTemporary then
             executeWithStatementAccess session (statementAccesses ()) (fun () ->

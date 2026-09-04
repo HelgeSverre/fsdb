@@ -8262,6 +8262,73 @@ let tests =
 
               Expect.isFalse published "temporary table was not published"
 
+          testCase "renamed temporary tables remain private and preserve permanent namesakes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let second = create 2 store
+              let first, _ = handle first "CREATE TABLE victim (n INT PRIMARY KEY)"
+              let first, _ = handle first "CREATE TABLE dependent (n INT, FOREIGN KEY (n) REFERENCES victim(n))"
+              let first, _ = handle first "CREATE TABLE movable (n INT)"
+              let first, _ = handle first "INSERT INTO victim VALUES (1)"
+              let commits = ResizeArray<Fsdb.Storage.CommitEvent>()
+              store.OnCommit.Add commits.Add
+              let first, _ = handle first "CREATE TEMPORARY TABLE staging (n INT)"
+              let first, _ = handle first "INSERT INTO staging VALUES (2)"
+
+              let first, renamed = handle first "RENAME TABLE staging TO renamed_staging"
+              Expect.equal renamed (Affected 0UL) "temporary rename succeeds"
+
+              match handle first "SELECT n FROM renamed_staging" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the renamed temporary table, got %A" other
+
+              match handle second "SELECT n FROM renamed_staging" |> snd with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected the renamed table to remain session-local, got %A" other
+
+              let first, altered = handle first "ALTER TABLE renamed_staging RENAME TO victim"
+              Expect.equal altered (Affected 0UL) "temporary ALTER rename succeeds"
+
+              match handle first "SELECT n FROM victim" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the temporary namesake in its owning session, got %A" other
+
+              match handle second "SELECT n FROM victim" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the permanent namesake to remain intact, got %A" other
+
+              let first, _ = handle first "ALTER TABLE victim RENAME TO final_staging"
+
+              match handle second "SHOW CREATE TABLE dependent" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "REFERENCES `victim` (`n`)" "temporary rename does not retarget permanent foreign keys"
+              | other -> failtestf "expected the permanent dependent table, got %A" other
+
+              match handle first "RENAME TABLE final_staging TO mixed_staging, movable TO moved" |> snd with
+              | Err(1105, _) -> ()
+              | other -> failtestf "expected mixed temporary and permanent renames to be rejected atomically, got %A" other
+
+              match handle first "SELECT n FROM final_staging" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the rejected temporary rename to leave its source intact, got %A" other
+
+              match handle second "SELECT n FROM movable" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected the rejected permanent rename to leave its source intact, got %A" other
+
+              Expect.equal
+                  (first.TemporaryCatalog.[Fsdb.Storage.defaultDatabase] |> Map.keys |> Seq.toList)
+                  [ "final_staging" ]
+                  "only the final temporary name is retained"
+
+              Expect.equal
+                  (store.Catalog.[Fsdb.Storage.defaultDatabase] |> Map.keys |> Seq.toList)
+                  [ "dependent"; "movable"; "victim" ]
+                  "the shared catalog contains only the permanent tables"
+
+              Expect.isEmpty commits "temporary renames emit no shared commit events"
+
           testCase "temporary tables support engine-qualified create-as-select"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
