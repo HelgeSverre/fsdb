@@ -4628,6 +4628,20 @@ let private parseFunctionDefinition options parameters returnType body =
         Error(Err(1336, "Dynamic SQL is not allowed in stored function or trigger"))
     | _, _, Error _ -> Error(syntaxError body)
 
+let private firstUnsafeStoredRoutineCall (registry: Functions.Registry) statements =
+    statements
+    |> List.collect StoredProgram.expressions
+    |> List.tryPick (fun expression ->
+        Expression.tryPick
+            (function
+            | FuncCall(name, _) ->
+                registry.Extensions
+                |> Map.tryFind (name.ToUpperInvariant())
+                |> Option.filter (fun extension -> extension.DirectOnly || not extension.Deterministic)
+                |> Option.map (fun _ -> name)
+            | _ -> None)
+            expression)
+
 let private routineColumn name columnType =
     { Name = name
       Type = columnType
@@ -5611,6 +5625,11 @@ let rec private invokeStoredFunction
         | Ok definition -> definition
         | Error error -> raiseFunctionError error
 
+    match Executor.currentDirectOnlyRestriction (), firstUnsafeStoredRoutineCall caller.CustomFunctions statements with
+    | Some what, Some name ->
+        raise (Diagnostics.EvaluationError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name))
+    | _ -> ()
+
     let expressionPrivileges =
         let expressions =
             statements
@@ -5976,6 +5995,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 with
                 | Error error, _
                 | _, Error error -> session, error
+                | _, Ok(_, _, statements) when firstUnsafeStoredRoutineCall session.CustomFunctions statements |> Option.isSome ->
+                    let functionName = firstUnsafeStoredRoutineCall session.CustomFunctions statements |> Option.get
+                    session, Err(3102, sprintf "Stored function '%s' contains a disallowed function: %s" name functionName)
                 | Ok(securityType, deterministic, dataAccess), Ok(_, parsedReturnType, _) ->
                     if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
                         Diagnostics.note

@@ -8183,6 +8183,77 @@ let tests =
               | ResultSet(_, [ [ Some "x" ] ]) -> ()
               | other -> failtestf "expected direct SELECT still fine after the backstop fired, got %A" other
 
+          testCase "stored functions cannot hide DirectOnly extension calls from stored expressions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, created =
+                  handle session "CREATE FUNCTION late_wrap(value VARCHAR(10)) RETURNS VARCHAR(10) RETURN LATE_EFFECT(value)"
+
+              Expect.equal created (Affected 0UL) "the catalog can predate the extension registration"
+
+              let lateEffect =
+                  Fsdb.Functions.ScalarFunction.create "LATE_EFFECT" (fun _ _ -> VString "called")
+                  |> Fsdb.Functions.ScalarFunction.effectful
+
+              let customFunctions =
+                  Fsdb.Functions.empty
+                  |> Fsdb.Functions.registerExtension lateEffect
+
+              let session = { session with CustomFunctions = customFunctions }
+
+              match handle session "CREATE FUNCTION direct_wrap(value VARCHAR(10)) RETURNS VARCHAR(10) RETURN LATE_EFFECT(value)" |> snd with
+              | Err(3102, message) -> Expect.stringContains message "LATE_EFFECT" "creation rejects the direct dependency"
+              | other -> failtestf "expected CREATE FUNCTION to reject DirectOnly, got %A" other
+
+              let session, tableCreated =
+                  handle session "CREATE TABLE wrapped_effect (source VARCHAR(10), computed VARCHAR(10) AS (late_wrap(source)))"
+
+              Expect.equal tableCreated (Affected 0UL) "the legacy wrapper remains loadable"
+
+              match handle session "INSERT INTO wrapped_effect (source) VALUES ('secret')" |> snd with
+              | Err(3102, message) -> Expect.stringContains message "LATE_EFFECT" "runtime backstop follows the wrapper"
+              | other -> failtestf "expected stored-expression backstop, got %A" other
+
+          testCase "EXPLAIN validates custom-function expressions without invoking them"
+          <| fun _ ->
+              let mutable calls = 0
+              let observer =
+                  Fsdb.Functions.ScalarFunction.create "OBSERVE" (fun _ arguments ->
+                      calls <- calls + 1
+                      arguments |> List.tryHead |> Option.defaultValue VNull)
+
+              let session =
+                  { create 1 (Fsdb.Storage.create ()) with
+                      CustomFunctions = Fsdb.Functions.empty |> Fsdb.Functions.registerExtension observer }
+
+              let session, _ = handle session "CREATE TABLE observed (value INT)"
+              let session, _ = handle session "INSERT INTO observed VALUES (1), (2), (3)"
+
+              match handle session "EXPLAIN SELECT OBSERVE(value) FROM observed WHERE OBSERVE(value) > 0 ORDER BY OBSERVE(value)" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected an EXPLAIN plan, got %A" other
+
+              Expect.equal calls 0 "ordinary EXPLAIN is non-executing"
+
+              let session, viewCreated =
+                  handle session "CREATE VIEW observed_view AS SELECT OBSERVE(value) AS value FROM observed"
+
+              Expect.equal viewCreated (Affected 0UL) "the view is available to EXPLAIN"
+              calls <- 0
+
+              match handle session "EXPLAIN SELECT value FROM observed_view" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected a view EXPLAIN plan, got %A" other
+
+              Expect.equal calls 0 "EXPLAIN does not materialize a view"
+
+              match handle session "EXPLAIN ANALYZE SELECT OBSERVE(value) FROM observed" |> snd with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected EXPLAIN ANALYZE output, got %A" other
+
+              Expect.isGreaterThan calls 0 "EXPLAIN ANALYZE still executes the statement"
+
           testCase "a rich function's QueryContext agrees with DATABASE() and CURRENT_USER()"
           <| fun _ ->
               let probe =

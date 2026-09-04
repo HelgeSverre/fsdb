@@ -341,6 +341,8 @@ let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVa
 let private triggerTextExecutor = System.Threading.AsyncLocal<(TriggerTextExecution -> string -> QueryResult) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private metadataProbe = System.Threading.AsyncLocal<bool>()
+let private planningProbe = System.Threading.AsyncLocal<bool>()
+let private directOnlyRestriction = System.Threading.AsyncLocal<string option>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
@@ -377,6 +379,11 @@ let private withMetadataProbe (body: unit -> 'a) : 'a =
     DynamicScope.withValue metadataProbe true body
 
 let internal isMetadataProbe () = metadataProbe.Value
+
+let private withPlanningProbe (body: unit -> 'a) : 'a =
+    DynamicScope.withValue planningProbe true body
+
+let internal currentDirectOnlyRestriction () = directOnlyRestriction.Value
 
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
     DynamicScope.withValue triggerRowScope (Some scope) body
@@ -4171,17 +4178,24 @@ and private isStatementStableSelect
 /// Prevents indirect evaluation of extension functions registered as
 /// direct-only, including definitions loaded from older persisted catalogs.
 let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
-    registry.Extensions
-    |> Map.fold
-        (fun current name extension ->
-            if extension.DirectOnly then
-                registerScalar
-                    name
-                    (fun _ -> raise (SqlError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name)))
-                    current
-            else
-                current)
-        registry
+    let shadowed =
+        registry.Extensions
+        |> Map.fold
+            (fun current name extension ->
+                if extension.DirectOnly then
+                    registerScalar
+                        name
+                        (fun _ -> raise (SqlError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name)))
+                        current
+                else
+                    current)
+            registry
+
+    { shadowed with
+        Scalars =
+            shadowed.Scalars
+            |> Map.map (fun _ scalar arguments ->
+                DynamicScope.withValue directOnlyRestriction (Some what) (fun () -> scalar arguments)) }
 
 let private informationSchemaRequiresProcess (tableName: string) =
     tableName.StartsWith("INNODB_", System.StringComparison.OrdinalIgnoreCase)
@@ -5118,11 +5132,11 @@ and private resolveTableRef
     // An unqualified name resolves against the statement's `WITH` bindings
     // first — a CTE shadows a real table of the same name, as in MySQL.
     match (if tableRef.Database.IsSome then None else currentCteScope () |> Map.tryFind (tableRef.Table.ToLowerInvariant())) with
-    | Some materialized -> Ok materialized
+    | Some(columns, rows) -> Ok(columns, if planningProbe.Value then [] else rows)
     | None ->
 
     if tableRef.Database.IsNone && System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase) then
-        Ok([], [ [||] ])
+        Ok([], if planningProbe.Value then [] else [ [||] ])
     elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
         let tableName = tableRef.Table.ToUpperInvariant()
 
@@ -5133,7 +5147,7 @@ and private resolveTableRef
             Error(Err(1227, "Access denied; you need (at least one of) the PROCESS privilege(s) for this operation"))
         else
             match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
-            | Some(columns, rows) -> Ok(columns, rows)
+            | Some(columns, rows) -> Ok(columns, if planningProbe.Value then [] else rows)
             | None -> Error(storageErr (NoSuchTable tableRef.Table))
     elif
         System.String.Equals(tableDb, "fsdb", System.StringComparison.OrdinalIgnoreCase)
@@ -5148,7 +5162,7 @@ and private resolveTableRef
         // information_schema-style narrowing analogue until a big virtual
         // table hurts.
         let vt = store.VirtualTables.[tableRef.Table.ToLowerInvariant()]
-        Ok(vt.Columns, vt.Rows())
+        Ok(vt.Columns, if planningProbe.Value then [] else vt.Rows())
     else
         match tryStoredView store tableDb tableRef.Table with
         | Some view ->
@@ -5222,7 +5236,20 @@ and private resolveTableRef
                     cteScope.Value <- savedCtes
                     cteOriginScope.Value <- savedCteOrigins
         | None ->
-            if tableRef.Partitions.IsEmpty then
+            if planningProbe.Value then
+                tableSnapshot store tableDb tableRef.Table
+                |> Result.mapError storageErr
+                |> Result.bind (fun table ->
+                    match tableRef.Partitions, table.Partitioning with
+                    | [], _ -> Ok(table.Columns, [])
+                    | _ :: _, None -> Error(Err(1747, "PARTITION () clause on non partitioned table"))
+                    | requested, Some partitioning ->
+                        let names = hashPartitionNames partitioning
+
+                        match requested |> List.tryFind (fun name -> not (Map.containsKey (name.ToLowerInvariant()) names)) with
+                        | Some name -> Error(Err(1735, sprintf "Unknown partition '%s' in table '%s'" name table.OriginalName))
+                        | None -> Ok(table.Columns, []))
+            elif tableRef.Partitions.IsEmpty then
                 match tryLockingReadRows tableRef with
                 | None -> scanList store tableDb tableRef.Table |> Result.mapError storageErr
                 | Some _ ->
@@ -13190,17 +13217,14 @@ let private selectSubqueryExprs (select: SelectStmt) : Expr list =
 /// too, same as it would be if the statement actually ran — not a fake
 /// plan with `rows = NULL`.
 let private explainTableStats (store: Store) (registry: Registry) (dbName: string) (tableRef: TableRef) : Result<uint64 option * string, QueryResult> =
-    let tableDb = tableRef.Database |> Option.defaultValue dbName
-
-    let rowCountResult =
-        if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-            match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
-            | Some(_, rows) -> Ok(uint64 (List.length rows))
-            | None -> Error(storageErr (NoSuchTable tableRef.Table))
-        else
-            scan store tableDb tableRef.Table |> Result.mapError storageErr |> Result.map (snd >> Seq.length >> uint64)
-
-    rowCountResult |> Result.map (fun n -> Some n, (if n <= 1UL then "system" else "ALL"))
+    match tryPhysicalTableRef store dbName tableRef with
+    | Ok(Some table) when tableRef.Partitions.IsEmpty ->
+        let count = uint64 table.RowsArray.Count
+        Ok(Some count, if count <= 1UL then "system" else "ALL")
+    | Ok _ ->
+        withPlanningProbe (fun () -> resolveTableRef store registry dbName tableRef)
+        |> Result.map (fun _ -> None, "ALL")
+    | Error error -> Error error
 
 /// One `EXPLAIN` block's table rows (`from` plus every `join`, in order),
 /// recursing into a `FROM (SELECT ...) AS alias`'s own block (`DERIVED`)
@@ -13762,9 +13786,9 @@ let private checksumTables (store: Store) (dbName: string) (tables: string list)
 /// gives 1146 for a table `EXPLAIN` describes that doesn't exist and 1054
 /// for a column it doesn't recognize, not a fake plan; `explainJoinBlock`/
 /// `explainTableStats` carry that check for every table an `UPDATE`/
-/// `DELETE`/`SELECT`/subquery touches, `runSelectStmt` (read-only, so safe
-/// to call purely to typecheck and discard) covers a `SELECT`'s columns the
-/// same way `QueryHandler`'s real execution path would.
+/// `DELETE`/`SELECT`/subquery touches. A planning probe checks expressions
+/// against empty sources and inert scalar implementations, so validation
+/// cannot invoke an extension or walk the underlying rows.
 /// Covers every statement shape real MySQL allows `EXPLAIN` on that this
 /// engine has a join/subquery structure to describe (`SELECT`, `UNION`,
 /// `UPDATE`, `DELETE`, `INSERT` — plain or `... SELECT`); anything else
@@ -13780,6 +13804,11 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     let mutable analyzedMilliseconds = 0.0
     let mutable analyzedRows = 0
     let mutable analyzedStatements = 0
+
+    let validationRegistry =
+        { registry with
+            Scalars = registry.Scalars |> Map.map (fun _ _ _ -> VNull)
+            Aggregates = registry.Aggregates |> Map.map (fun _ _ _ -> VNull) }
 
     let finish (result: Result<unit, QueryResult>) =
         match result with
@@ -13798,11 +13827,18 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     /// `INSERT` has no `FROM`), so it needs its own existence check.
     let checkTableExists (table: string) : Result<unit, QueryResult> =
         let db, tname = splitQualified dbName table
-        resolveTableRef store registry dbName { Database = Some db; Table = tname; Alias = None; Partitions = [] } |> Result.map ignore
+        withPlanningProbe (fun () ->
+            resolveTableRef store validationRegistry dbName { Database = Some db; Table = tname; Alias = None; Partitions = [] })
+        |> Result.map ignore
 
     let checkSelect (select: SelectStmt) : Result<unit, QueryResult> =
         let stopwatch = System.Diagnostics.Stopwatch.StartNew()
-        let result, _, rows = runSelectStmt store registry dbName select None
+        let result, _, rows =
+            if format = ExplainAnalyze then
+                runSelectStmt store registry dbName select None
+            else
+                withPlanningProbe (fun () ->
+                    withMetadataProbe (fun () -> runSelectStmt store validationRegistry dbName select None))
         stopwatch.Stop()
 
         if format = ExplainAnalyze then
@@ -13823,21 +13859,23 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         let resolveJoinSource (j: Join) =
             match j.Table with
             | FromSubquery _ ->
-                resolveFromSubquery store registry dbName j.Table None
+                resolveFromSubquery store validationRegistry dbName j.Table None
                 |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
             | FromLateral _ -> Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
             | FromJsonTable _ -> Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
-            | FromTable tref -> resolveTableRef store registry dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
+            | FromTable tref -> resolveTableRef store validationRegistry dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
 
-        resolveTableRef store registry dbName fromRef
-        |> Result.bind (fun (fromCols, _) ->
-            joins
-            |> traverse resolveJoinSource
-            |> Result.map (fun joinSources -> ((fromRef.Alias |> Option.defaultValue fromRef.Table), fromCols) :: joinSources))
-        |> Result.bind (fun sources ->
-            let allCols = sources |> List.collect snd
-            let ctx = contextFactory store registry dbName (columnIndexOf allCols) (qualifierRanges sources) None (probeRow allCols)
-            exprs |> traverse (fun e -> evalExpr ctx e |> Result.map ignore) |> Result.map ignore |> Result.mapError Err)
+        withPlanningProbe (fun () ->
+            withMetadataProbe (fun () ->
+                resolveTableRef store validationRegistry dbName fromRef
+                |> Result.bind (fun (fromCols, _) ->
+                    joins
+                    |> traverse resolveJoinSource
+                    |> Result.map (fun joinSources -> ((fromRef.Alias |> Option.defaultValue fromRef.Table), fromCols) :: joinSources))
+                |> Result.bind (fun sources ->
+                    let allCols = sources |> List.collect snd
+                    let ctx = contextFactory store validationRegistry dbName (columnIndexOf allCols) (qualifierRanges sources) None (probeRow allCols)
+                    exprs |> traverse (fun e -> evalExpr ctx e |> Result.map ignore) |> Result.map ignore |> Result.mapError Err)))
 
     match stmt with
     | Do _ -> Err(1064, "EXPLAIN does not support DO")
