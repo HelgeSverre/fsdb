@@ -86,6 +86,10 @@ let tests =
                     | Err(1659, _) -> ()
                     | other -> failtestf "expected string HASH keys to be rejected, got %A" other
 
+                    match runDefault store "CREATE TABLE hidden_partition (id INT) PARTITION BY HASH((SELECT 1)) PARTITIONS 2" with
+                    | Err(1564, _) -> ()
+                    | other -> failtestf "expected HASH subqueries to be rejected, got %A" other
+
                 testCase "HASH partition truncation removes only selected rows"
                 <| fun _ ->
                     let store = newStore ()
@@ -1432,6 +1436,13 @@ let tests =
                         match runDefault store sql with
                         | Err(actual, _) -> Expect.equal actual code sql
                         | other -> failtestf "expected error %d for %s, got %A" code sql other
+
+                    runDefault store "CREATE TABLE alter_default_guard (id INT)" |> ignore
+                    runDefault store "INSERT INTO alter_default_guard VALUES (1)" |> ignore
+
+                    match runDefault store "ALTER TABLE alter_default_guard ADD COLUMN leaked INT DEFAULT ((SELECT SLEEP(0)))" with
+                    | Err(3769, _) -> ()
+                    | other -> failtestf "expected ALTER to reject the unsafe default before backfill, got %A" other
 
                 testCase "DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) parses, and an omitted column stores 6 fractional digits"
                 <| fun _ ->
@@ -4345,6 +4356,16 @@ let tests =
                         match runDefault store sql with
                         | Err(3772, "Default value expression of column 'g' cannot refer user or system variables.") -> ()
                         | other -> failtestf "expected generated-column variable rejection, got %A" other)
+
+                    match runDefault store "CREATE TABLE generated_subquery (n INT, g INT AS ((SELECT 1)))" with
+                    | Err(3102, _) -> ()
+                    | other -> failtestf "expected CREATE generated subquery rejection, got %A" other
+
+                    runDefault store "CREATE TABLE generated_alter (n INT)" |> ignore
+
+                    match runDefault store "ALTER TABLE generated_alter ADD COLUMN g INT AS ((SELECT 1))" with
+                    | Err(3102, _) -> ()
+                    | other -> failtestf "expected ALTER generated subquery rejection, got %A" other
 
                 testCase "a generated column recomputes after UPDATE of a column it depends on"
                 <| fun _ ->

@@ -8145,19 +8145,12 @@ let tests =
               | Err(3102, _) -> ()
               | other -> failtestf "expected 3102 at ALTER time, got %A" other
 
-              // A subquery smuggles the call past the DDL traversal — the
-              // eval-time backstop must still refuse to invoke the function
-              // when the engine evaluates the generated column on INSERT.
-              let session, createResult =
+              let _, createResult =
                   handle session "CREATE TABLE d3 (a VARCHAR(10), b VARCHAR(10) AS ((SELECT EMBEDDISH(a))))"
 
               match createResult with
-              | Affected _ -> ()
-              | other -> failtestf "expected the subquery-smuggled definition to slip past DDL, got %A" other
-
-              match handle session "INSERT INTO d3 (a) VALUES ('x')" |> snd with
-              | Err(3102, msg) -> Expect.stringContains msg "EMBEDDISH" "names the offending function"
-              | other -> failtestf "expected the eval-time backstop's 3102 on INSERT, got %A" other
+              | Err(3102, msg) -> Expect.stringContains msg "generated column 'b'" "subqueries are rejected at definition time"
+              | other -> failtestf "expected the subquery definition to be rejected, got %A" other
 
               match handle session "SELECT EMBEDDISH('a')" |> snd with
               | ResultSet(_, [ [ Some "x" ] ]) -> ()
@@ -8358,6 +8351,44 @@ let tests =
               | other -> failtestf "expected temporary SHOW CREATE output, got %A" other
 
               Expect.isFalse (Map.containsKey "staging" store.Catalog.[Fsdb.Storage.defaultDatabase]) "temporary table was not published"
+
+          testCase "expression subqueries retain caller and definer SELECT checks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+
+              let apply session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let root = apply root "CREATE TABLE secret_expression_source (n INT)"
+              let root = apply root "INSERT INTO secret_expression_source VALUES (9)"
+              let root = apply root "CREATE TABLE expression_target (n INT)"
+              let root = apply root "CREATE USER expression_user"
+              let root = apply root "GRANT INSERT, TRIGGER ON fsdb.expression_target TO expression_user"
+              let root = apply root "GRANT EXECUTE ON fsdb.* TO expression_user"
+              let root = apply root "CREATE PROCEDURE echo_expression(IN x INT) SQL SECURITY INVOKER SELECT x"
+              let user = { create 2 store with User = "expression_user" }
+
+              for sql in
+                  [ "SET @leak = (SELECT n FROM secret_expression_source)"
+                    "CALL echo_expression((SELECT n FROM secret_expression_source))"
+                    "SELECT 0 AS bit UNION ALL SELECT 1 ORDER BY (SELECT n FROM secret_expression_source) LIMIT 1" ] do
+                  match handle user sql |> snd with
+                  | Err(1142, message) -> Expect.stringContains message "secret_expression_source" sql
+                  | other -> failtestf "expected SELECT denial for %s, got %A" sql other
+
+              let user, created =
+                  handle
+                      user
+                      "CREATE TRIGGER expression_guard BEFORE INSERT ON expression_target FOR EACH ROW BEGIN DECLARE x INT; SET x = (SELECT n FROM secret_expression_source); IF (SELECT n FROM secret_expression_source) = 9 THEN SET NEW.n = (SELECT n FROM secret_expression_source); END IF; END"
+
+              TestSupport.Sql.expectOk created "create trigger"
+
+              match handle root "INSERT INTO expression_target VALUES (1)" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "secret_expression_source" "trigger definer denial"
+              | other -> failtestf "expected trigger expression SELECT denial, got %A" other
 
           testCase "a bare ? over COM_QUERY, incl. in a DDL generated column, is a 1064 (never reaches storage)"
           <| fun _ ->

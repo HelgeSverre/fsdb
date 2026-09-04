@@ -5238,6 +5238,8 @@ and private resolveTableRef
 
                     match table.Partitioning with
                     | None -> Error(Err(1747, "PARTITION () clause on non partitioned table"))
+                    | Some partitioning when not (Expression.collectSubqueries partitioning.Expression).IsEmpty ->
+                        Error(Err(1564, "This partition function is not allowed"))
                     | Some partitioning ->
                         let partitionNames = hashPartitionNames partitioning
 
@@ -6804,13 +6806,16 @@ and private prepareVirtualRows
 
             generated
             |> traverse (fun (index, column, expression) ->
-                evalExpr ctx expression
-                |> Result.bind (fun value ->
-                    match Storage.coerceValue store.ExecutionSettings.SqlMode.Strict column value with
-                    | Ok value ->
-                        current.[index] <- value
-                        Ok()
-                    | Error error -> Error(Storage.toMySqlError error)))
+                if not (Expression.collectSubqueries expression).IsEmpty then
+                    Error(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column.Name)
+                else
+                    evalExpr ctx expression
+                    |> Result.bind (fun value ->
+                        match Storage.coerceValue store.ExecutionSettings.SqlMode.Strict column value with
+                        | Ok value ->
+                            current.[index] <- value
+                            Ok()
+                        | Error error -> Error(Storage.toMySqlError error)))
             |> Result.map (fun _ -> Some current))
         |> Result.mapError (fun (code, message) -> Err(code, message))
         |> Result.map (fun rows -> rows :> Value[] seq)
@@ -12823,13 +12828,16 @@ let private computeGeneratedRow
         // generated columns.
         generated
         |> traverse (fun (col, expr) ->
-            withoutCteScope (fun () -> evalExpr ctx expr)
-            |> Result.mapError ExpressionError
-            |> Result.bind (fun v -> coerceValue store.ExecutionSettings.SqlMode.Strict col v)
-            |> Result.map (fun v' ->
-                match resolveColumn columns col.Name with
-                | Ok idx -> row'.[idx] <- v'
-                | Error _ -> ()))
+            if not (Expression.collectSubqueries expr).IsEmpty then
+                Error(ExpressionError(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col.Name))
+            else
+                withoutCteScope (fun () -> evalExpr ctx expr)
+                |> Result.mapError ExpressionError
+                |> Result.bind (fun v -> coerceValue store.ExecutionSettings.SqlMode.Strict col v)
+                |> Result.map (fun v' ->
+                    match resolveColumn columns col.Name with
+                    | Ok idx -> row'.[idx] <- v'
+                    | Error _ -> ()))
         |> Result.bind (fun _ -> validateCheckRow store registry dbName table columns row')
 
 /// Backfills generated columns after ALTER adds or changes one. Ordinary
@@ -14079,6 +14087,13 @@ let private rejectQuantifiedComparisonsInGenerated (columns: Ast.ColumnDef list)
     |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsQuantifiedComparison expression then Some column.Name else None))
     |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
 
+let private rejectSubqueriesInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
+    columns
+    |> List.tryPick (fun column ->
+        column.Generated
+        |> Option.bind (fun (expression, _) -> if containsSubqueryExpr expression then Some column.Name else None))
+    |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
+
 let rec private containsSessionVariable (expression: Expr) : bool =
     Expression.fold
         (fun found node ->
@@ -14133,6 +14148,43 @@ let private rejectSessionVariablesInGenerated (columns: Ast.ColumnDef list) : Qu
     columns
     |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsSessionVariable expression then Some column.Name else None))
     |> Option.map (fun column -> Err(3772, sprintf "Default value expression of column '%s' cannot refer user or system variables." column))
+
+let private containsEffectfulStorageFunction =
+    Expression.exists (function
+        | FuncCall(name, _) ->
+            let name = name.ToUpperInvariant()
+            name = "SLEEP" || name = "BENCHMARK"
+        | _ -> false)
+
+let private rejectUnsafePartitionExpression (registry: Registry) (partitioning: HashPartitioning option) =
+    partitioning
+    |> Option.bind (fun partitioning ->
+        let expression = partitioning.Expression
+
+        if
+            containsSubqueryExpr expression
+            || containsSessionVariable expression
+            || containsAggregate registry expression
+            || containsEffectfulStorageFunction expression
+            || (firstDirectOnlyCall registry expression).IsSome
+        then
+            Some(Err(1564, "This partition function is not allowed"))
+        else
+            None)
+
+let private rejectUnsafeFunctionalDefaults (registry: Registry) (columns: ColumnDef list) =
+    columns
+    |> List.tryPick (fun column ->
+        column.Default
+        |> Option.bind (function
+            | DExpression expression
+                when containsSubqueryExpr expression
+                     || containsSessionVariable expression
+                     || containsAggregate registry expression
+                     || containsEffectfulStorageFunction expression
+                     || (firstDirectOnlyCall registry expression).IsSome ->
+                Some(Err(3769, sprintf "Default value expression of column '%s' contains a disallowed function." column.Name))
+            | _ -> None))
 
 let private viewContainsSessionVariable =
     function
@@ -15128,6 +15180,8 @@ let private truncateHashPartitions
         | None, _ -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
         | Some _, None ->
             deleteRows store dbName tableName (fun _ -> Ok true) |> Result.map ignore
+        | Some partitioning, Some _ when containsSubqueryExpr partitioning.Expression ->
+            Error(ExpressionError(1564, "This partition function is not allowed"))
         | Some partitioning, Some selectedPartitions ->
             let partitionNames = hashPartitionNames partitioning
             let requested =
@@ -15208,14 +15262,29 @@ let rec executeAs
                                 Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name)
                             )
                         else
-                            let privileges =
-                                dmlStatements |> traverse (checkStoredDefiner runStore trigger.Definer db)
+                            match Auth.tryParseAccount trigger.Definer with
+                            | Some account when Auth.tryUserRowForAccount runStore account |> Option.isSome ->
+                                let expressionPrivileges =
+                                    bodyStatements
+                                    |> List.collect StoredProgram.expressions
+                                    |> List.collect (Auth.requiredPrivilegesForExpression db)
+                                    |> List.distinct
 
-                            match Auth.tryParseAccount trigger.Definer, privileges with
-                            | Some account, Result.Ok _ -> Result.Ok(trigger, bodyStatements, account)
-                            | _, Result.Error(code, msg) -> Result.Error(Err(code, msg))
-                            | None, Result.Ok _ ->
-                                Result.Error(Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name))
+                                let access =
+                                    dmlStatements
+                                    |> traverse (checkStoredDefiner runStore trigger.Definer db)
+                                    |> Result.bind (fun _ -> Auth.checkForAccount runStore account expressionPrivileges)
+
+                                match access with
+                                | Ok() -> Result.Ok(trigger, bodyStatements, account)
+                                | Error(code, msg) -> Result.Error(Err(code, msg))
+                            | _ ->
+                                Result.Error(
+                                    Err(
+                                        1449,
+                                        sprintf "The user specified as a definer ('%s') does not exist for trigger '%s'" trigger.Definer trigger.Name
+                                    )
+                                )
 
             match triggers |> traverse checkBody with
             | Result.Error err -> Some err
@@ -16240,16 +16309,20 @@ let rec executeAs
                 match
                     rejectDirectOnlyGenerated registry table.Columns,
                     rejectQuantifiedComparisonsInGenerated table.Columns,
+                    rejectSubqueriesInGenerated table.Columns,
                     rejectSessionVariablesInGenerated table.Columns,
+                    rejectUnsafePartitionExpression registry table.Partitioning,
                     validateFunctionalDefaults registry table.Columns,
                     validateIndexExpressions registry table.Columns table.Indexes
                 with
-                | Some err, _, _, _, _
-                | _, Some err, _, _, _
-                | _, _, Some err, _, _
-                | _, _, _, Error err, _ -> ids, err
-                | _, _, _, _, Error error -> ids, storageErr error
-                | None, None, None, Ok(), Ok() ->
+                | Some err, _, _, _, _, _, _
+                | _, Some err, _, _, _, _, _
+                | _, _, Some err, _, _, _, _
+                | _, _, _, Some err, _, _, _
+                | _, _, _, _, Some err, _, _
+                | _, _, _, _, _, Error err, _ -> ids, err
+                | _, _, _, _, _, _, Error error -> ids, storageErr error
+                | None, None, None, None, None, Ok(), Ok() ->
                     let alreadyExists = scan store db name |> Result.isOk
 
                     if alreadyExists && table.IfNotExists then
@@ -16352,13 +16425,23 @@ let rec executeAs
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match executionOptionError, engineError, rejectDirectOnlyGenerated registry addedColumns, rejectQuantifiedComparisonsInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
-        | Some err, _, _, _, _ -> ids, err
-        | None, Some error, _, _, _ -> ids, error
-        | None, None, Some err, _, _
-        | None, None, _, Some err, _
-        | None, None, _, _, Some err -> ids, err
-        | None, None, None, None, None ->
+        match
+            executionOptionError,
+            engineError,
+            rejectDirectOnlyGenerated registry addedColumns,
+            rejectQuantifiedComparisonsInGenerated addedColumns,
+            rejectSubqueriesInGenerated addedColumns,
+            rejectSessionVariablesInGenerated addedColumns,
+            rejectUnsafeFunctionalDefaults registry addedColumns
+        with
+        | Some err, _, _, _, _, _, _ -> ids, err
+        | None, Some error, _, _, _, _, _ -> ids, error
+        | None, None, Some err, _, _, _, _
+        | None, None, _, Some err, _, _, _
+        | None, None, _, _, Some err, _, _
+        | None, None, _, _, _, Some err, _
+        | None, None, _, _, _, _, Some err -> ids, err
+        | None, None, None, None, None, None, None ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 

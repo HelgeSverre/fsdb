@@ -1013,10 +1013,14 @@ let private resolveUserSetRhs
             let variables = expressionVariablesFor session userVariables
             let store = Session.currentStore session
             let dbName = session.Database |> Option.defaultValue defaultDatabase
+            let privileges = Auth.requiredPrivilegesForExpression dbName expression
 
-            Executor.withVariableContext variables (fun () ->
-                Executor.evaluateExpression store (registryFor session) dbName expression
-                |> Result.map (fun value -> value, variables.UserVariables.Value))
+            match checkSessionAccess session store privileges with
+            | Error(code, message) -> Error(Err(code, message))
+            | Ok() ->
+                Executor.withVariableContext variables (fun () ->
+                    Executor.evaluateExpression store (registryFor session) dbName expression
+                    |> Result.map (fun value -> value, variables.UserVariables.Value))
 
 let private resolveSystemSetRhs
     (session: Session)
@@ -4654,8 +4658,11 @@ let private evaluateRoutineExpression (session: Session) expression =
     let database = session.Database |> Option.defaultValue defaultDatabase
 
     let result =
-        Executor.withVariableContext variables (fun () ->
-            Executor.evaluateExpression store (registryFor session) database expression)
+        match checkSessionAccess session store (Auth.requiredPrivilegesForExpression database expression) with
+        | Error(code, message) -> Error(Err(code, message))
+        | Ok() ->
+            Executor.withVariableContext variables (fun () ->
+                Executor.evaluateExpression store (registryFor session) database expression)
 
     { session with UserVariables = variables.UserVariables.Value }, result
 
