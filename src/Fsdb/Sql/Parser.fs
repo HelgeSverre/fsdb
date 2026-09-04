@@ -4869,9 +4869,7 @@ let parseRoutineParameterTypeWithOptions
                     | TMediumText -> preturn (TMediumBlob, None, None)
                     | TLongText -> preturn (TLongBlob, None, None)
                     | _ -> preturn (columnType, charset, collation)
-                | _ ->
-                    let collation = if binaryCount = 0 then collation else None
-                    preturn (columnType, charset, collation)
+                | _ -> preturn (columnType, charset, collation)
 
     withParserState options sql (runWithDepthLimit (ws >>. parameterType .>> eof))
 

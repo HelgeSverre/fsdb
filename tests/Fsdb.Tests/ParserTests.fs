@@ -3637,7 +3637,7 @@ let tests =
                   | other -> failtestf "expected invalid character metadata to be refused, got %A" other)
 
               match Fsdb.StoredProgram.parseParameters defaultOptions "IN raw VARCHAR(10) CHARACTER SET binary, IN label CHAR(4) BINARY" with
-              | Ok [ { ColumnType = TVarBinary 10; Charset = None; Collation = None }; { ColumnType = TChar 4; Charset = None; Collation = None } ] -> ()
+              | Ok [ { ColumnType = TVarBinary 10; Charset = None; Collation = None }; { ColumnType = TChar 4; Charset = None; Collation = Some "utf8mb4_bin" } ] -> ()
               | other -> failtestf "unexpected binary character parameters: %A" other
 
               match Fsdb.StoredProgram.parse defaultOptions "BEGIN DECLARE amount DECIMAL(8, 2) DEFAULT 1.25; SET amount = amount + 1; END" with

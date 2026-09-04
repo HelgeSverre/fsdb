@@ -3137,6 +3137,7 @@ let private probeCausesImplicitCommit = function
 let private probeForbiddenInFunctionOrTrigger probe =
     probeCausesImplicitCommit probe
     || (match probe with
+        | SetAutocommit _
         | Begin _
         | Commit _
         | Rollback _
@@ -5579,7 +5580,9 @@ let rec private invokeStoredFunction
         | Some account ->
             { caller with
                 User = account.Name
-                AccountHost = account.Host }
+                AccountHost = account.Host
+                ActiveRoles =
+                    if Auth.sameAccount account (accountOf caller) then caller.ActiveRoles else [] }
         | None -> caller
 
     let caller = withStoredFunctions executeText caller
@@ -6082,6 +6085,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                                 { callerSession with
                                     User = account.Name
                                     AccountHost = account.Host
+                                    ActiveRoles =
+                                        if Auth.sameAccount account (accountOf callerSession) then callerSession.ActiveRoles else []
                                     Database = Some routine.Schema
                                     RoutineStack = ("PROCEDURE", routine.Schema, routine.Name) :: callerSession.RoutineStack
                                     Variables =

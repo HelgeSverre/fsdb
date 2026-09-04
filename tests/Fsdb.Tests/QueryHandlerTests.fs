@@ -3973,6 +3973,33 @@ let tests =
               | Err(1415, _) -> ()
               | other -> failtestf "expected function result-set refusal, got %A" other
 
+              expectAffected "CREATE PROCEDURE enable_autocommit() SET @@SESSION.autocommit = 1"
+              expectAffected
+                  "CREATE FUNCTION commit_escape() RETURNS INT MODIFIES SQL DATA BEGIN INSERT INTO function_effects(marker) VALUES ('uncommitted'); CALL enable_autocommit(); RETURN 1; END"
+              expectAffected "BEGIN"
+
+              match execute "SELECT commit_escape()" with
+              | Err(1422, _) -> ()
+              | other -> failtestf "expected indirect autocommit refusal, got %A" other
+
+              expectAffected "ROLLBACK"
+
+              match execute "SELECT COUNT(*) FROM function_effects" with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected the rejected function write to roll back, got %A" other
+
+          testCase "BINARY routine parameters retain exact comparison semantics"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, created =
+                  handle session "CREATE FUNCTION exact_token(token VARCHAR(10) BINARY) RETURNS INT RETURN token = 'Secret'"
+
+              TestSupport.Sql.expectOk created "create function"
+
+              match handle session "SELECT exact_token('Secret'), exact_token('secret')" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "0" ] ]) -> ()
+              | other -> failtestf "expected case-sensitive routine comparisons, got %A" other
+
           testCase "stored functions select into typed local variables"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())
