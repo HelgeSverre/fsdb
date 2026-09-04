@@ -5,17 +5,23 @@ F# style guide. Every comment in this repo should survive the grading below.
 
 ## Taxonomy (McConnell)
 
-A comment is one of: **repeat** (restates the code), **explanation**
-(explains what confusing code does), **marker** (TODO/debt), **summary**
-(condenses a block), **intent** (why, at problem level). Only *intent*,
-*summary*, and *marker* comments earn their keep. A *repeat* comment is
-deleted on sight; an *explanation* comment is a prompt to clarify the code
-instead — comment only if the confusion is external (protocol quirk, MySQL
-behavior), which makes it an intent comment.
+Comments fall into five categories:
+
+| Kind | Meaning | Rule |
+|---|---|---|
+| **Repeat** | Restates the code | Delete it. |
+| **Explanation** | Explains confusing code | Clarify the code instead. |
+| **Marker** | Records bounded debt | Keep it when it names the ceiling and upgrade path. |
+| **Summary** | Condenses a block | Keep it when the structure cannot say the same thing. |
+| **Intent** | Explains why | Keep it. |
+
+An explanation survives only when the source of confusion is external, such
+as a protocol quirk or MySQL behavior. At that point it documents intent.
 
 ## Grades
 
-**KEEP**
+### Keep
+
 - Why, not what: intent, invariants, constraints the code cannot express.
 - External facts: MySQL protocol/semantics quirks, spec links, oracle-verified
   behaviors ("MySQL returns NULL here, not 0").
@@ -23,7 +29,8 @@ behavior), which makes it an intent comment.
 - `ponytail:` debt markers (project convention: named ceiling + upgrade path).
 - `///` XML docs on public API — one line preferred (F# style guide).
 
-**DELETE**
+### Delete
+
 - Repeats the code in English.
 - Session narration / meta-commentary: references to reviews, findings,
   agents, tasks, prior versions, or the act of writing the code ("moved from
@@ -38,19 +45,23 @@ behavior), which makes it an intent comment.
 - Journal/history comments — git owns history.
 - Placeholder scaffolding comments left from stubs.
 
-**REWRITE**
+### Rewrite
+
 - A KEEP-worthy fact wrapped in narration: strip to the fact, present tense,
   no first person.
 
 ## Style
 
-Present tense, declarative, no "we"/"our". No apologies, no hedging, no
-"note that". A comment that needs three sentences is usually one fact plus
-two sentences of fluff.
+Use present tense and declarative language. Avoid "we", "our", apologies,
+hedging, and "note that".
+
+A comment that needs three sentences usually contains one useful fact and two
+sentences of removable context.
 
 ## Markdown documents
 
-No emojis, including check-mark and box symbols as status markers. Status
-markers are words ("Status: done", "Status: open") or task-list checkboxes
-(`[x]`/`[ ]`). The same DELETE rules apply to prose: no session narration,
-no milestone-name-as-explanation.
+Do not use emojis, including check-mark and box symbols, as status markers.
+Use words such as "Status: done" or task-list checkboxes (`[x]` and `[ ]`).
+
+The same DELETE rules apply to prose. Markdown documents do not need session
+narration or milestone names as explanations.

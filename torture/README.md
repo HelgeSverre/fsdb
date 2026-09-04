@@ -6,7 +6,7 @@ the same statements through MySqlConnector against MySQL and FSDB, and records
 enough evidence to classify and replay the first divergence.
 
 The durable strategy and scale-up guidance live in
-[`TORTURE-TESTING.md`](TORTURE-TESTING.md). Dated, reviewed discovery notes
+[`TORTURE-TESTING.md`](TORTURE-TESTING.md). Reviewed discovery reports
 live under `findings/`; raw run bundles remain ignored under `artifacts/`.
 
 Nothing here is part of the root solution or its normal test/benchmark gates.
@@ -36,6 +36,8 @@ they are understood and minimized.
 
 ## Quick start
 
+### Differential suite
+
 ```bash
 cd torture
 ./scripts/run.sh suite
@@ -58,6 +60,8 @@ Run one scenario or replay a prior artifact bundle:
 ./scripts/run.sh replay --case artifacts/runs/<run>/<case>
 ```
 
+### Transaction concurrency
+
 Run the independent prepared-transaction concurrency lane:
 
 ```bash
@@ -75,6 +79,8 @@ prepared-command counts, throughput, and p50/p95/p99 latency. Its reusable
 phase barrier is asynchronous so the harness does not manufacture thread-pool
 starvation at high connection counts.
 
+### Crash recovery
+
 Run the crash/restart durability lane without Docker or a MySQL oracle:
 
 ```bash
@@ -90,6 +96,8 @@ never expose one side of a transaction, and never invent an operation. The
 last restart follows a graceful snapshot checkpoint and must preserve the
 same recovered sets.
 
+### Syntax mutation
+
 Run the bounded syntax-mutation lane:
 
 ```bash
@@ -99,26 +107,33 @@ Run the bounded syntax-mutation lane:
 ./scripts/run.sh syntax --seed 101 --syntax-cases 0
 ```
 
-Every feature seed is first executed unchanged on both servers. Deterministic
-token deletion, truncation, duplication, delimiter, parenthesis, whitespace,
-comment, punctuation-boundary comment, and case mutations then exercise parser
-and server error boundaries. Collation seeds reverse operands and cross scalar,
-row, quantified, CTE, CASE, BETWEEN, LIKE, and join comparison paths.
-Mutation depth one tests isolated edits; depths two and three sample unique
-chained edits, with a hard ceiling of 10,000 executed mutations per run. MySQL
-error `1064` is matched by numeric code and SQLSTATE; message text is retained
-as evidence but excluded from parity because its location prose is not a stable
-interface. Mutations that remain valid on MySQL must remain valid on FSDB.
-Mutations that reach a different MySQL semantic error are recorded separately
-and do not claim syntax parity.
+Every feature seed first executes unchanged on both servers. The harness then
+applies deterministic token deletion, truncation, duplication, delimiter,
+parenthesis, whitespace, comment, punctuation-boundary comment, and case
+mutations.
 
-The baseline corpus includes implemented features and declared gaps. Implemented
-baselines include HASH partition selection and growth, compound stored programs,
-data-changing stored functions invoked from SELECT and UPDATE, account options,
-all four transaction isolation settings, and common administration statements. Declared gaps cover remaining administration and
-event-scheduling statements and missing spatial operations. A
-baseline-only run therefore acts as an executable gap inventory; it is expected
-to exit with findings until those features land.
+Collation seeds reverse operands and cross scalar, row, quantified, CTE,
+`CASE`, `BETWEEN`, `LIKE`, and join comparison paths. Mutation depth one tests
+isolated edits; depths two and three sample unique chained edits. A run executes
+at most 10,000 mutations.
+
+MySQL error `1064` is matched by numeric code and SQLSTATE. Message text remains
+in the evidence but is excluded from parity because error-location prose is not
+a stable interface. MySQL-valid mutations must remain valid on FSDB. A mutation
+that reaches another MySQL semantic error is classified separately.
+
+The baseline corpus covers:
+
+- implemented features such as HASH partitioning, compound stored programs,
+  data-changing stored functions, account options, transaction isolation, and
+  administration statements;
+- declared gaps in administration, event scheduling, and spatial operations.
+
+A baseline-only run is an executable gap inventory. Declared refusals remain
+findings until they are implemented or added to the hand-reviewed known-gap
+ledger.
+
+### Corpus scale and tools
 
 `--scale` multiplies the declared model row counts before `--max-rows` applies.
 `--invariant-every 0` runs catalog invariants once after the load; use it for
@@ -158,17 +173,21 @@ still retained.
 
 ## Artifacts and classification
 
+### Differential cases
+
 Each case directory contains the exact model and SQL hashes, generator output,
-the generated SQL, split-statement byte ranges and hashes, parser/target
-outcomes, FSDB commit-event summaries, catalog invariant results, semantic
-probe outcomes, schema/data snapshots, comparison, timings, and a versioned
-`manifest.json`. Very large statement text is represented in JSON by a bounded
-prefix/suffix preview; `generated.sql` remains the byte-exact authority.
-`failure.sql` is written in full for statement- or probe-local failures.
-Post-load mismatches are localized by 4,096-row typed-data chunk hashes and
-bounded first/last samples rather than embedding millions of rows in JSON.
-Probe type mismatches and DML affected-row mismatches have distinct
-classifications and signatures.
+the generated SQL, split-statement byte ranges and hashes, parser and target
+outcomes, commit summaries, catalog invariants, semantic probes, snapshots,
+comparison, timings, and a versioned `manifest.json`.
+
+Large statements use bounded prefix and suffix previews in JSON;
+`generated.sql` remains the byte-exact source. `failure.sql` preserves a local
+failing statement or probe in full. Large post-load comparisons use 4,096-row
+typed-data chunk hashes and bounded samples rather than embedding entire tables
+in JSON.
+Probe-type and affected-row mismatches have distinct signatures.
+
+### Syntax cases
 
 Syntax runs write their complete bounded corpus and mutation chains to
 `mutations.sql` and a schema-versioned `manifest.json` containing the parser
@@ -180,6 +199,8 @@ execution gaps, contained internal errors, protocol faults, timeouts, schema or
 data mismatches, invariant failures, and infrastructure failures. The harness
 never adds a finding to `support/known-gaps.json`; entries are reviewed and
 added manually by exact failure signature.
+
+### Concurrency and durability
 
 Concurrency cases use their own schema-versioned manifest and classifications:
 `oracle_concurrency_failure`, `fsdb_concurrency_execution_gap`, and

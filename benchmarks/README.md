@@ -8,7 +8,7 @@ hotspots, not to chase parity — fsdb optimizes for readable F# first.
 
 ```sh
 just bench               # full latency suite, results -> results/<git-sha>.md
-just bench-features      # recent SQL features only, results -> results/<git-sha>-features.md
+just bench-features      # selected SQL features, results -> results/<git-sha>-features.md
 just bench-quick         # ShortRun validation, results -> results/<git-sha>-quick.md
 just bench-load          # 8-worker throughput, results -> results/<git-sha>-load.md
 just bench-load-scale    # throughput at 1/2/4/8/16 workers
@@ -17,57 +17,75 @@ just bench-scale         # scale-sensitive cases at 100k/500k rows
 just bench-comprehensive # latency, durability, data scale, and worker scale
 ```
 
-Prerequisites and rules:
+Prerequisites and isolation rules:
 
-- MySQL 8.4's `mysql`/`mysqld`/`mysqladmin` on PATH (no brew services — the
-  recipe runs `mysqld` ad hoc on port 3316 with a throwaway datadir at
-  `benchmarks/mysql-data`, recreated automatically if deleted).
-  `bench-durable` also starts a second mysqld on port 3317 with
+- Put MySQL 8.4's `mysql`, `mysqld`, and `mysqladmin` on `PATH`. The recipes
+  start `mysqld` directly rather than using a Homebrew service.
+- The primary MySQL process uses port 3316 and the disposable
+  `benchmarks/mysql-data` directory. `bench-durable` also starts a process on
+  port 3317 with
   `--skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0`
-  (datadir `benchmarks/mysql-data-nofsync`).
+  under `benchmarks/mysql-data-nofsync`.
 - Port 3307 must be free — the recipe refuses to run if anything answers
   there, because benchmarking against a shared server corrupts both runs.
-- Don't run a bench while a heavy workload (test suites, agents) shares the
-  machine; the numbers will be noise. Two consecutive runs should agree on
-  `PointSelectByPk` within ~20% — if they don't, the run is not trustworthy.
+- Keep other heavy workloads off the machine. Two consecutive runs should
+  agree on `PointSelectByPk` within roughly 20%; otherwise, discard the run.
 
 ## Methodology
 
-- fsdb and the benchmark host both build and run Release (`DebugType=none`
-  in the bench fsproj — the SDK's default portable PDBs otherwise make
-  BenchmarkDotNet report DEBUG; the recipe uses `dotnet exec`, not
-  `dotnet run`, which sets hot-reload env vars).
-- Both databases are reset and reseeded per benchmark case. fsdb also
-  restarts, so a pathological case cannot poison later measurements. This
-  keeps mutation benchmarks independent of BenchmarkDotNet's case order.
-- The default run measures fsdb in-memory (no `--data-dir`, so no WAL/fsync).
-  `bench-durable` adds the matched configs: fsdb `--data-dir` (binary WAL,
-  one plain `fsync` per commit — see `Persistence.attach`; .NET's
-  `FileStream.Flush(true)` would instead issue macOS `F_FULLFSYNC` at ~5 ms)
-  against durable MySQL, and in-memory fsdb against a no-fsync MySQL. A
-  write-number only means something when both engines pay (or both skip) the
-  same durability cost.
-- `bench-load` measures throughput, not latency. Its disjoint and hot-row
-  writes separate publication throughput from genuine contention, alongside
-  reads, inserts, upserts, REPLACE, explicit transactions, and mixed traffic.
-  `FSDB_LOAD_WORKERS` accepts a comma-separated worker-count matrix;
-  `FSDB_LOAD_TRIALS` controls repetition. Engine order alternates between
-  trials. The report includes relative standard deviation and the share of
-  attempts retried after lock-timeout or deadlock errors; throughput counts
-  completed operations only.
-- Connection pooling is off (fsdb doesn't implement COM_RESET_CONNECTION).
-- The wire+client floor is ~200 µs/op on this machine (`SELECT 1` round
-  trip ≈ 0.26 ms via MySqlConnector over loopback) — sub-millisecond rows
-  are bounded by the harness as much as the engine.
-- Workloads: 10k users + 50k orders + 10k FULLTEXT articles, deterministic
-  seed (override with `FSDB_BENCH_USERS`, `FSDB_BENCH_ORDERS`, and
-  `FSDB_BENCH_ARTICLES`). The feature matrix covers views, triggers, CHECK
-  constraints, generated columns, CTEs, windows, JSON_TABLE, natural,
-  boolean, prefix, and accent-aware FULLTEXT,
-  computed projections, transactions, and upserts. One operation runs per
-  invocation; BenchmarkDotNet handles warmup, outliers, and statistics.
-- BenchmarkDotNet's allocation column covers the benchmark client process,
-  including MySqlConnector; it does not measure allocations in either server.
+### Process isolation
+
+fsdb and the benchmark host build and run in Release mode. The benchmark
+project disables portable PDBs so BenchmarkDotNet does not classify the run as
+DEBUG, and the recipes use `dotnet exec` to avoid hot-reload environment state.
+
+Both databases reset and reseed before each case. fsdb also restarts, which
+prevents a timed-out or pathological query from affecting later measurements.
+Mutation cases are therefore independent of BenchmarkDotNet's execution order.
+
+Connection pooling is disabled so connection lifecycle behavior does not enter
+per-operation measurements.
+
+### Durability
+
+The default suite measures in-memory fsdb without a WAL or `fsync`.
+`bench-durable` adds two matched comparisons:
+
+- WAL-backed fsdb against durable MySQL;
+- in-memory fsdb against MySQL configured without commit-time `fsync`.
+
+WAL-backed fsdb uses a plain `fsync` per commit. `Persistence.attach` avoids
+.NET's `FileStream.Flush(true)`, which would issue macOS `F_FULLFSYNC` and add
+roughly 5 ms on the reference machine. A write result is meaningful only when
+both engines pay, or both skip, the same durability cost.
+
+### Concurrent load
+
+`bench-load` measures completed operations per second rather than latency. Its
+disjoint and hot-row writes separate publication throughput from genuine
+contention, alongside reads, inserts, upserts, `REPLACE`, explicit
+transactions, and mixed traffic.
+
+`FSDB_LOAD_WORKERS` accepts a comma-separated worker matrix, and
+`FSDB_LOAD_TRIALS` controls repetition. Engine order alternates between trials.
+Reports include relative standard deviation and retryable lock or deadlock
+errors; throughput counts completed operations only.
+
+### Workloads and reporting
+
+The default deterministic corpus contains 10,000 users, 50,000 orders, and
+10,000 full-text articles. Override those sizes with `FSDB_BENCH_USERS`,
+`FSDB_BENCH_ORDERS`, and `FSDB_BENCH_ARTICLES`. The feature matrix covers
+views, triggers, constraints, generated columns, CTEs, windows, `JSON_TABLE`,
+full-text modes, computed projections, transactions, and upserts.
+
+One operation runs per invocation. BenchmarkDotNet controls warmup, outliers,
+and statistics. Its allocation column measures the benchmark client process,
+including MySqlConnector, but not either database server.
+
+On the reference machine, a loopback `SELECT 1` through MySqlConnector costs
+roughly 0.26 ms. Sub-millisecond cases therefore include a substantial fixed
+wire and client cost.
 
 ## Results history
 
@@ -95,9 +113,9 @@ O(n²) list-append in the UPDATE path, PK/unique hash indexes, a hash
 equi-join, and `TcpClient.NoDelay` (Nagle's algorithm had been taxing every
 round trip from the start).
 
-### Current latency and scale
+### Latency and scale snapshot
 
-The current [10k/50k latency](results/98bc883-quick.md) and
+The [10k/50k latency](results/98bc883-quick.md) and
 [100k/500k scale](results/98bc883-scale.md) runs separate indexed paths from
 work that still scans or replans its input:
 
@@ -164,7 +182,7 @@ row-conflict merging:
 | insert | 5,673 | 22,703 |
 | mixed read/write | 20,537 | 47,801 |
 
-The latest [eight-worker run](results/98bc883-load.md) records completed
+The [eight-worker `98bc883` run](results/98bc883-load.md) records completed
 throughput with no retryable lock/deadlock errors:
 
 | Workload | fsdb ops/s | MySQL ops/s | fsdb/MySQL |

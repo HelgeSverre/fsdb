@@ -1,6 +1,6 @@
 # Compatibility
 
-How fsdb's MySQL compatibility is validated, and the current evidence.
+How fsdb validates MySQL compatibility and records the supporting evidence.
 
 ## Validation method
 
@@ -14,7 +14,7 @@ fsdb and a MySQL 8.4 oracle, and the first divergence is classified and
 replayable (`torture/scripts/run.sh suite`; exit 0 = pass/known gaps, 2 = new
 fsdb findings).
 
-The separate syntax lane starts from valid statements for recent features,
+The separate syntax lane starts from valid feature statements,
 applies up to three deterministic bounded mutations, and compares MySQL and
 fsdb error codes and SQLSTATEs
 (`torture/scripts/run.sh syntax --syntax-cases 2000 --syntax-depth 3`). Its
@@ -64,26 +64,29 @@ version.
 
 ## Implemented surface
 
-The implemented surface covers the wire protocol, including forward-only
-prepared cursors and zlib/Zstandard compression, PDO/mysql-CLI compatibility, the SQL
-engine core, Laravel
-migrations, test-suite parity,
-the embedding API, opt-in persistence, EXPLAIN, multi-table DML, and the
-streaming pipeline. Each area has a runnable acceptance gate: a real external
-client, a reference application suite, or a benchmark threshold.
+The implemented surface includes:
+
+- the MySQL wire protocol, forward-only prepared cursors, and zlib or
+  Zstandard compression;
+- PDO and mysql CLI compatibility;
+- the SQL engine, Laravel migrations, multi-table DML, and `EXPLAIN`;
+- the embedding API, opt-in persistence, and lazy result streaming.
+
+Each area has a runnable acceptance gate through an external client, a
+reference application suite, or a benchmark threshold.
 
 ## GUI clients and introspection
 
-The introspection surface was built from what real clients actually send:
-TablePlus 26.9.6's queries extracted verbatim from its binary, and
-phpMyAdmin 5.2.x's query builders read from source. The supported
-`information_schema` tables have column descriptors pinned against a
-live MySQL 8.4.11, and a replay fixture covering both clients'
-connect/browse/structure flows runs
-with a single divergence: `SHOW SLAVE STATUS`, which real 8.4 also rejects
-with 1064. Stored views, triggers, procedures, functions, their parameter
-metadata, and events populate their object catalogs. PROCESSLIST,
-`Threads_connected`, and `KILL` operate on the real connection registry.
+The introspection surface follows queries sent by real clients. Fixtures cover
+TablePlus connect, browse, and structure flows and phpMyAdmin query builders.
+Their supported `information_schema` descriptors are pinned against MySQL
+8.4. The fixture includes `SHOW SLAVE STATUS`, which MySQL 8.4 also rejects
+with 1064.
+
+Stored views, triggers, procedures, functions, parameters, and events populate
+their corresponding catalogs. `PROCESSLIST`, `Threads_connected`, and `KILL`
+operate on the live connection registry.
+
 `information_schema.INNODB_TRX` exposes active seeded transactions, including
 their isolation mode, logical write weight, and held row stripes. InnoDB-only
 lock-memory and scheduling fields remain zero or NULL.
@@ -95,13 +98,14 @@ listener. The same `ssl-cert`, `ssl-key`, `ssl-ca`, and
 `require-secure-transport` options work in the server sections of an option
 file. `ssl-ca` requests client certificates and validates them against every
 CA certificate in the PEM file.
+
 `--require-secure-transport` rejects plaintext handshakes with 3159.
 Embedding hosts supply already-loaded `X509Certificate2` values through
 `Db.withTlsCertificate` and `Db.withClientCertificateAuthority`;
 `Db.requireSecureTransport` enables the same plaintext restriction. Accounts
 created with `REQUIRE SSL` reject plaintext authentication. Accounts created
-with `REQUIRE X509` additionally require a client certificate that chains to
-a configured client CA and, when extended key usage is present, permits client
+with `REQUIRE X509` also require a client certificate that chains to a
+configured client CA. When extended key usage is present, it must permit client
 authentication.
 
 ## Bulk wire commands
@@ -156,41 +160,54 @@ fsdb supports stored queries broadly and a narrow writable subset:
 - Numeric display widths and `ZEROFILL` survive direct view projections;
   computed expressions and unions discard them as MySQL does.
 
+### Writable views
+
 Single-table views and nested views over that shape accept `UPDATE` and
 `DELETE`, including predicates over computed projections. Direct physical
 inner-join views accept `UPDATE` against one component table and `INSERT` with
 an explicit column list against one insertable component. Outer joins,
 join-view `DELETE`/`REPLACE`, and one statement that writes multiple component
-tables are refused with MySQL's corresponding errors. Only direct column
-projections are assignable; computed columns return 1348. A component is
-insertable only when every selected projection for that component is direct,
-no base column is repeated, and every required base column is exposed.
+tables are refused with MySQL's corresponding errors.
+
+Only direct column projections are assignable; computed columns return 1348.
+A component is insertable only when each selected projection for that
+component is direct, no base column is repeated, and every required base column
+is exposed.
+
 Uncorrelated scalar subqueries in the projection keep direct columns
 updatable but make the view noninsertable; a dependent projection is refused
 for writes. Scalar and correlated subqueries in a view predicate remain part
 of the lowered base-table write.
+
 Mergeable component views and a simple outer view layer retain the join's
 writable targets, predicates, and per-component checks when their stored
 security identity is unchanged. A nested component with a different definer
 or security mode remains a read-only source in the outer view.
+
 For UPDATE, an aggregate or UNION component may remain materialized and
 read-only while another component supplies the writable columns. INSERT
 through a join still requires every component to be mergeable.
+
 Single-table insertable views additionally accept `INSERT`, `INSERT ...
 SELECT`, `REPLACE` in each supported source form, and `ON DUPLICATE KEY
 UPDATE`. Every written or referenced column must be exposed, and the privilege
 identity is checked at every nested view boundary. `LOCAL` and `CASCADED`
 check predicates compose through nested views and are reported by `SHOW CREATE
 VIEW` and `information_schema.VIEWS`. `SQL SECURITY DEFINER` and `SQL SECURITY
-INVOKER` use their respective privilege identities. Explicit definers require
-the selected account or SUPER authority; missing definers are retained with a
-1449 note and fail closed when executed. ALTER preserves omitted declaration
-options. `TEMPTABLE` views are non-updatable; `MERGE` and `UNDEFINED` remain
-planner hints over fsdb's shape-driven execution, and incompatible `MERGE`
-definitions become `UNDEFINED` with warning 1354. Creation validates
-the saved SQL grammar but defers missing dependency and output-shape errors
-until the first read; `SELECT *` follows the base table's current columns
-instead of freezing them at creation.
+INVOKER` use their respective privilege identities.
+
+Explicit definers require the selected account or `SUPER` authority. Missing
+definers are retained with a 1449 note and fail closed when executed. `ALTER`
+preserves omitted declaration options.
+
+`TEMPTABLE` views are non-updatable. `MERGE` and `UNDEFINED` remain planner
+hints over fsdb's shape-driven execution; incompatible `MERGE` definitions
+become `UNDEFINED` with warning 1354. Creation validates the saved SQL grammar
+but defers missing dependency and output-shape errors until the first read.
+`SELECT *` follows the base table's current columns instead of freezing them at
+creation.
+
+### Triggers
 
 Trigger execution has stronger behavioral coverage than its syntax breadth:
 
@@ -226,9 +243,9 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
 `REPLACE` fires BEFORE INSERT, each conflicting row's DELETE pair, and AFTER
 INSERT in row order; every phase rolls back together on failure. Compound
 bodies support CASE and labeled loops, scoped conditions, read-only cursors,
-handlers,
-SIGNAL/RESIGNAL, and GET CURRENT/STACKED DIAGNOSTICS. The full MySQL surface is
-documented under
+handlers, `SIGNAL`/`RESIGNAL`, and `GET CURRENT/STACKED DIAGNOSTICS`.
+
+The full MySQL surface is documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
 ## ALTER execution options
@@ -290,9 +307,11 @@ through `SHOW WARNINGS`; the OK/EOF warning count reports the same conditions.
 
 The tunables an operator would plausibly change live in `Fsdb.Limits` and are
 set from the standard server option files or an explicit `--defaults-file`:
-`max_allowed_packet`, `max_connections`, `wait_timeout`, `interactive_timeout`, `net_read_timeout`,
-`innodb_lock_wait_timeout`, `cte_max_recursion_depth`, plus fsdb's own WAL
-rotation thresholds.
+
+- `max_allowed_packet` and `max_connections`;
+- `wait_timeout`, `interactive_timeout`, and `net_read_timeout`;
+- `innodb_lock_wait_timeout` and `cte_max_recursion_depth`;
+- fsdb's WAL rotation thresholds.
 
 The option-file parser follows MySQL's format rather than a generic ini
 dialect: `[mysqld]` and `[server]` groups, `name = value` and the bare-name
@@ -303,11 +322,10 @@ option fsdb doesn't have, and `!include`/`!includedir`. Reading the real format
 is what lets `skip-name-resolve` be reported as an option fsdb lacks instead of
 as a syntax error.
 
-Groups other than `[mysqld]`/`[mysqld-8.4]`/`[server]` are skipped, so a shared
-my.cnf is safe to point at. Within those groups an unrecognised option is a startup
-error naming the file and line, matching mysqld, which also refuses to start on
-an unknown option; `loose-` is the escape hatch for both. Every bad line is
-reported, not just the first.
+Groups other than `[mysqld]`, `[mysqld-8.4]`, and `[server]` are skipped, so a
+shared `my.cnf` is safe to use. Within those groups, an unrecognised option is a
+startup error naming the file and line. `loose-` is the escape hatch for options
+that fsdb does not implement. Every bad line is reported, not only the first.
 
 `wait_timeout` and `interactive_timeout` default to MySQL's 28800 seconds and
 remain independently configurable. A client that negotiates
@@ -328,41 +346,54 @@ before closing the connection.
 
 ## Users, authentication, and privileges
 
+### Catalogs and accounts
+
 fsdb has a real account system backed by the native MySQL 8.4 catalog schemas
 plus fsdb's stored-object catalogs. Native tables use their MySQL column order,
 types, nullability, key membership, defaults, and generated columns. The
-optimizer cost tables include MySQL's stock bootstrap rows and remain writable, although
-fsdb's planner does not consume their overrides. The three stock group-action
-configuration rows are present without replication execution. Native catalog
-collations and engine-maintained help, log, statistics, GTID, NDB, and
-replication-channel rows still differ or remain empty. `CREATE USER` /
-`DROP USER` / `ALTER USER` /
-`SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
-path; passwords are mysql_native_password hashes verified at the handshake
-(with an AuthSwitchRequest for clients that answer with caching_sha2 first);
-account locks, TLS requirements, explicit and global-default password lifetimes,
-mergeable JSON attributes/comments, the expired-password reset sandbox, and
-per-hour/per-connection resource limits are enforced;
-statements are privilege-checked at global, database, table, and column scope with
-MySQL's 1045/1142/1044/1227 error shapes. `SHOW GRANTS [FOR user]`,
-`SHOW PRIVILEGES`, `information_schema.USER_PRIVILEGES`, and
-`FLUSH PRIVILEGES` (no-op OK) are served; `DROP DATABASE mysql` is 3552.
+optimizer cost tables include MySQL's bootstrap rows and remain writable,
+although fsdb's planner does not consume their overrides. Group-action
+configuration rows are present without replication execution. Engine-maintained
+help, log, statistics, GTID, NDB, and replication-channel data still differ or
+remain empty.
+
+`CREATE USER`, `DROP USER`, `ALTER USER`, `SET PASSWORD`, `GRANT`, and `REVOKE`
+persist through the WAL and snapshot path. Passwords use
+`mysql_native_password` hashes verified during the handshake; clients that begin
+with `caching_sha2_password` receive an auth switch.
+
+Account locks, TLS requirements, password lifetimes, JSON attributes and
+comments, the expired-password reset sandbox, and resource limits are enforced.
+Statements are checked at global, database, table, and column scope with MySQL's
+1045, 1142, 1044, and 1227 error shapes.
+
+`SHOW GRANTS [FOR user]`, `SHOW PRIVILEGES`,
+`information_schema.USER_PRIVILEGES`, and the no-op `FLUSH PRIVILEGES` are
+served. `DROP DATABASE mysql` returns 3552.
+
+### Grants, proxy grants, and roles
+
 MySQL 8.4's registered dynamic global privileges are stored in
 `mysql.global_grants`, retain their individual grant options, appear in both
 metadata surfaces, and participate in authorization. Static `ALL PRIVILEGES`
 does not imply them.
+
 `GRANT/REVOKE PROXY` persist relationships in `mysql.proxies_priv`, enforce
 target-specific delegation, follow grantee rename/drop lifecycle, and appear
 in `SHOW GRANTS`. The built-in mysql_native_password flow cannot select an
 alternate proxied identity.
+
 `CREATE SERVER`, `ALTER SERVER`, and `DROP SERVER` persist foreign-server
 definitions in `mysql.servers` and require `SUPER`, matching MySQL 8.4.
+
 Roles use `mysql.role_edges` and `mysql.default_roles`; grants, admin option,
 transitive inheritance, default activation during authentication, session
 `SET ROLE`, global mandatory roles, `activate_all_roles_on_login`, role-aware
 metadata visibility, and `SHOW GRANTS ... USING` are enforced through the same
 authorization path as direct account privileges. Mandatory roles are applicable
 to every account but, as in MySQL, remain inactive after `SET ROLE NONE`.
+
+### Host matching
 
 Accounts select an exact peer address before CIDR/netmask, `localhost`
 loopback, and `%`/`_` patterns; `CURRENT_USER()` reports the selected
@@ -371,12 +402,17 @@ without a host still default to `'%'`. Hostname accounts are not resolved:
 the server accepts numeric peer addresses and the loopback `localhost`
 alias, avoiding unauthenticated reverse-DNS identity claims.
 
+### Text-probed statements
+
 Text-probed forms carry their own privilege checks because they do not pass
 through the parsed-statement authorization gate. This includes global and
 scoped SET, USE and protocol database selection, SHOW metadata and server
 status, table maintenance, FLUSH, KILL, and explicit table locks.
 
+### Deliberate limits
+
 Deliberate divergences (each marked `ponytail:` at its code site):
+
 - Pluggable authentication, proxy identity selection, and password
   history/reuse/current policy are absent.
 - Every MySQL `mysql.*` table schema is exposed, but engine-owned help, log,

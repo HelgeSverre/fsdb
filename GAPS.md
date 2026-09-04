@@ -1,12 +1,13 @@
 # MySQL 8.4 feature gaps
 
 A map of where fsdb diverges from or lacks MySQL 8.4 functionality. Oracle for
-every row is real MySQL 8.4 (never sqlite). Audit refreshed 2026-09-02 from a
-full static exploration of `src/Fsdb/` plus the documented records
-(`docs/compatibility.md`, `torture/findings/`, `torture/support/known-gaps.json`,
-`benchmarks/results/`) and the adversarial parser, wire, privilege, logging,
-and persistence paths. Evidence anchors name files and definitions instead
-of line numbers so routine refactors do not silently make them misleading.
+every row is real MySQL 8.4, never sqlite. Evidence comes from source review,
+compatibility and torture records, benchmark artifacts, and adversarial parser,
+wire, privilege, logging, and persistence tests.
+
+Evidence anchors name files and definitions instead of line numbers so routine
+refactors do not silently make them misleading.
+
 This is an open ledger: remove resolved rows, and narrow partially resolved
 rows to only the behavior that still differs in the same commit as the fix.
 
@@ -24,10 +25,9 @@ still gaps (the statement does not work), but they are safer than silent
 divergences; rows marked *refusal* fail loudly, rows marked *divergence*
 behave differently from MySQL without erroring.
 
-The torture ledger `torture/support/known-gaps.json` is currently empty;
-everything below is either undocumented in code, deliberately
-accepted (marked `ponytail:` in source), or recorded only in
-`torture/findings/`.
+The torture ledger `torture/support/known-gaps.json` is hand-reviewed. This
+document also covers deliberate divergences marked `ponytail:` in source and
+findings recorded under `torture/findings/`.
 
 ## Summary by area
 
@@ -42,7 +42,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Remaining coarse write shapes |
 | Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
-| Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap currently inventoried |
+| Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap recorded |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
 | Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib/Zstandard compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
 | Auth & privileges | Static, dynamic, column, role, and proxy grants; per-host accounts; expiry sandboxes; resource caps; account locks; mandatory/default/session roles; inherited authorization | Auth plugins cannot select a proxied identity |
@@ -51,23 +51,25 @@ accepted (marked `ponytail:` in source), or recorded only in
 
 ## 1. SQL statements and parser
 
-Working core: full DML (INSERT/REPLACE/UPDATE/DELETE incl. INSERT/REPLACE SET
-and multi-table forms,
-ODKU, IGNORE), SELECT with joins (INNER/LEFT/RIGHT/CROSS/NATURAL/USING),
-derived/LATERAL/JSON_TABLE sources, expression subqueries over set operations,
-query-scoped CTEs (ordinary and recursive,
-including leading UPDATE/DELETE and branch-local WITH), set
-operations, window functions with numeric and temporal interval frames, GROUP BY WITH ROLLUP + GROUPING,
-DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
-SELECT, session-scoped temporary tables, TRUNCATE,
-RENAME TABLE, EXPLAIN (TRADITIONAL/JSON/ANALYZE). Transaction control, SET, SHOW,
-USE, KILL, and DESCRIBE are text-probed before the grammar
-(`QueryHandler.dispatch`).
-XA supports start/end/prepare, one- and two-phase commit, rollback, detached
+The SQL core supports full DML, including `INSERT`/`REPLACE ... SET`, ODKU,
+`IGNORE`, and multi-table forms. `SELECT` covers joins, derived and lateral
+sources, `JSON_TABLE`, expression subqueries, set operations, windows, rollups,
+and ordinary or recursive query-scoped CTEs. CTEs can lead UPDATE or DELETE and
+appear within set-operation branches.
+
+DDL covers databases, tables, indexes, views, triggers, users, grants,
+`CREATE TABLE ... AS SELECT`, temporary tables, `TRUNCATE`, and `RENAME TABLE`.
+`EXPLAIN` supports traditional, JSON, and ANALYZE forms. Transaction control,
+`SET`, `SHOW`, `USE`, `KILL`, and `DESCRIBE` are text-probed before the grammar
+by `QueryHandler.dispatch`.
+
+XA supports start, end, prepare, one- and two-phase commit, rollback, detached
 recovery, binary transaction identifiers, and durable prepared branches.
+
 `LOCK TABLES` enforces READ/WRITE ownership, aliases, atomic lock lists,
 temporary-table exemptions, transaction boundaries, and implicit view/trigger
 dependencies; `UNLOCK TABLE[S]` and disconnect release ownership.
+
 `HANDLER` supports session-local table aliases, natural and named-index
 navigation, prefix comparisons, WHERE/LIMIT filtering, temporary tables,
 live row roots, declared result metadata, and DDL invalidation; MySQL likewise
@@ -102,21 +104,20 @@ splicing `/*!NNNNN … */`; and MySQL's single-row `FROM DUAL` source.
 
 ## 2. Query execution
 
-Working: hash joins for equi-joins with collation-folded keys, lazy nested
-loops otherwise, statement-stable scalar/EXISTS/IN/ANY/SOME/ALL subqueries
-materialized once per statement, compatible integer/string/decimal scalar
-`IN`/equality-quantifier and row-value `IN` materializations with reusable membership sets and direct indexed
-outer-table narrowing, correlated
-scalar/EXISTS/IN/ANY/SOME/ALL
-subqueries with correct NULL
-semantics, statement-local equality buckets for direct physical inner tables,
-bounded top-N sort for ORDER BY+LIMIT, GROUP_CONCAT byte cap,
-WITH ROLLUP expansion, window frames (ROWS/RANGE, numeric and temporal interval offsets),
-COUNT(DISTINCT a,b) tuples, statement-atomic multi-table DML, exact ODKU
-affected-rows semantics (changed=2/no-op=0 under default flags), row-value
-equality/order/null-safe comparisons and literal/subquery `IN`, MySQL's 1241
-error for multi-column scalar/IN/ANY/SOME/ALL subqueries, and the empty-group
-identities for bit aggregates.
+Equi-joins use collation-folded hash keys; other joins use lazy nested loops.
+Direct physical inner tables can build statement-local equality buckets.
+`ORDER BY ... LIMIT` uses a bounded top-N sort.
+
+Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
+materialize once per statement. Compatible scalar and row-value membership
+tests reuse typed sets and can narrow a directly indexed outer table. Correlated
+forms preserve MySQL NULL and multi-column error semantics.
+
+Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
+multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,
+statement-atomic multi-table DML, and exact ODKU affected-row counts. Row
+comparisons retain null-safe behavior and MySQL's 1241 error for invalid
+multi-column subqueries; empty-group bit aggregates retain their identities.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -129,21 +130,20 @@ identities for bit aggregates.
 
 ## 3. Built-in functions
 
-Registered surface (`Functions.builtins`): string (CONCAT family,
-`INSERT`, SUBSTRING aliases, SUBSTRING_INDEX, ELT/FIELD/FIND_IN_SET/EXPORT_SET, QUOTE, STRCMP,
-WEIGHT_STRING with `AS CHAR(N)`/`AS BINARY(N)`, REGEXP_LIKE family with
-match_type, SOUNDEX, MAKE_SET, base64 conversion), math (ROUND with exact/approximate split, CONV,
-CRC32, BIT_COUNT, logarithms, exponentials, and trigonometry), date/time
-(DATE_ADD/SUB, TIMESTAMPADD/DIFF, DATE_FORMAT,
-STR_TO_DATE, EXTRACT, LAST_DAY, MAKEDATE, UNIX_TIMESTAMP, FROM_UNIXTIME,
-WEEK(mode)/YEARWEEK(mode)), JSON (EXTRACT/UNQUOTE/CONTAINS/SET/INSERT/
-REPLACE/REMOVE/ARRAY/OBJECT/LENGTH/DEPTH/VALID/SCHEMA_VALID/
-SCHEMA_VALIDATION_REPORT/TYPE/KEYS/SEARCH,
-ARRAYAGG/OBJECTAGG, JSON_TABLE), AES (`AES_ENCRYPT`/`AES_DECRYPT` with every
-MySQL `block_encryption_mode`, HKDF, and PBKDF2-HMAC), hashing (MD5/SHA1/SHA2), UUID family,
-IPv4/IPv6 conversion and predicates, COALESCE/IFNULL/IF/NULLIF/GREATEST/
-LEAST, plus session functions DATABASE/LAST_INSERT_ID/VERSION/CONNECTION_ID/
-CURRENT_USER/USER/SESSION_USER.
+`Functions.builtins` covers these broad families:
+
+- string search, transformation, weighting, regular expressions, phonetics,
+  quoting, base64 conversion, and MySQL aliases;
+- exact and approximate rounding, base conversion, CRC32, bit counting,
+  logarithms, exponentials, and trigonometry;
+- date and time arithmetic, formatting, parsing, extraction, week modes,
+  day-number conversion, and Unix timestamps;
+- JSON extraction, mutation, search, schema validation, aggregation, and
+  `JSON_TABLE`;
+- AES encryption and decryption across MySQL block modes, HKDF, PBKDF2-HMAC,
+  hashing, and UUIDs;
+- IPv4 and IPv6 conversion and predicates;
+- NULL-selection, comparison, and session identity functions.
 
 | Missing family | Functions | Impact |
 |---|---|---|
@@ -165,20 +165,20 @@ unknown-function error without that component.
 
 ## 4. Data types and values
 
-Working: TINYINT–BIGINT signed/unsigned, DECIMAL(p,s) with fixed-point
-round-trip, FLOAT/DOUBLE with MySQL exponent rendering, CHAR/VARCHAR,
-TINYTEXT–LONGTEXT, BINARY/VARBINARY, TINYBLOB–LONGBLOB, ENUM/SET with
-canonicalization, DATE/DATETIME(fsp)/TIMESTAMP(fsp)/TIME(fsp) with half-up
-rounding by default and truncation under `TIME_TRUNCATE_FRACTIONAL`, all-zero
-and partial-zero dates with sql_mode
-enforcement, YEAR, JSON, per-column charset/collation,
-wire-faithful column metadata (`ColumnWire.metadataOfType`), `BIT(1)`–`BIT(64)`
-fields with binary literals and defaults, deprecated numeric display widths
-and `ZEROFILL` formatting/metadata, per-row functional defaults with
-column references, VIRTUAL generated values recomputed on query reads,
-utf8mb3-normalized table and column comments, and OGC WKB geometry values
-(`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
-accessors).
+Numeric values cover signed and unsigned integers, fixed-point decimals,
+floating-point exponent rendering, numeric display widths, `ZEROFILL`, and
+`BIT(1)` through `BIT(64)`. Wire metadata preserves the declared shapes.
+
+Text and binary values cover the CHAR, VARCHAR, TEXT, BINARY, VARBINARY, BLOB,
+ENUM, and SET families with per-column charset and collation metadata.
+
+Temporal values cover DATE, YEAR, and microsecond-precision DATETIME,
+TIMESTAMP, and signed TIME durations. Fractional values round half-up unless
+`TIME_TRUNCATE_FRACTIONAL` applies, and SQL modes control zero-date acceptance.
+
+JSON, functional defaults, virtual generated columns, normalized comments,
+and OGC WKB geometry values also persist through the regular value and wire
+metadata paths. Virtual generated values are recomputed when queried.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -187,36 +187,35 @@ accessors).
 
 ## 5. Constraints and indexes
 
-Working: composite PK/UNIQUE with collation-aware key encoding and MySQL
-NULL-uniqueness semantics, incremental index maintenance, FK enforcement with
-MATCH SIMPLE parent probes through unique indexes, ON DELETE CASCADE/SET
-NULL/RESTRICT with cycle-safe recursion, ON UPDATE cascade on update/upsert
-paths, qualified cross-database targets with atomic catalog-wide referential
-actions, session foreign_key_checks gate, named CHECK constraints with
-ENFORCED/NOT ENFORCED and ALTER ADD validation, ENUM/SET membership,
-ADD UNIQUE over colliding data fails 1062 rather than corrupting, mixed
-ascending/descending B-tree ordering, and invisible indexes that remain
-maintained for constraints while staying out of ordinary plans.
+Composite primary and unique keys use collation-aware encodings and MySQL NULL
+semantics. Index maintenance is incremental, supports mixed ascending and
+descending keys, and keeps invisible constraint indexes out of ordinary plans.
+
+Foreign keys use unique parent probes, cycle-safe cascade, set-null, and
+restrict actions, qualified cross-database targets, and the session
+`foreign_key_checks` gate. Named CHECK constraints support enforcement state
+and `ALTER` validation, and ENUM or SET values enforce membership. Adding a
+unique key over colliding data returns 1062 without publishing a corrupt index.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, scalar and composite-row literal `IN` lists, prefix-key candidates with full residual checks, matching physical inner/left/right-join keys, direct literal SELECT/UPDATE/DELETE ranges, and matching stored-column or `LOWER(column)`/`UPPER(column)` ordering and grouping prefixes after optional literal-equality keys; broad full-result inner/left join probes yield to a compatible hash build; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; other expression ordering and grouping still sort | high (scale) | divergence |
 | Expression indexes | functional key parts participate in physical access and uniqueness | `LOWER(column)` and `UPPER(column)` key parts maintain physical equality buckets for matching equality and literal-`IN` SELECT/DML predicates, maintain ordered entries for matching `ORDER BY` and `GROUP BY` prefixes and fixed-prefix suffixes, and enforce uniqueness; other non-unique expressions retain DDL, persistence, and metadata but use scan fallback, while other unique expressions are refused | low | divergence/refusal |
+
 ## 6. Charsets and collations
 
-Working: ICU-backed registry covering the utf8mb4 0900 attribute matrix,
-legacy unicode/general and language-tailored collations, ja_0900_as_cs_ks,
-and common Unicode, Windows, DOS, CJK, ISO Latin, KOI8, and Mac codecs; real
-MySQL collation ids and SORTLENs for SHOW COLLATION/I_S; charset-aware DDL,
-write coercion, introducers, LOAD DATA, CONVERT, binary collation keys, and
-byte length/hex/hash/base64/checksum/compression functions; PAD SPACE
-semantics; connection collation for
-literal-vs-literal comparison; symmetric MySQL coercibility precedence for
-scalar, row, `IN`, subquery, quantified, `CASE`, `BETWEEN`, `LIKE`, and join
-comparisons; default utf8mb4_0900_ai_ci.
-Builtin string-result policies are registered beside scalar implementations;
-the executor composes them through aggregate, subquery, window, fixed binary,
-and JSON results without a second builtin-name list.
+The ICU-backed registry covers the utf8mb4 0900 attribute matrix, legacy and
+language-tailored Unicode collations, and common Windows, DOS, CJK, ISO Latin,
+KOI8, and Mac codecs. Catalog metadata uses MySQL collation IDs and sort lengths.
+
+DDL, write coercion, introducers, `LOAD DATA`, `CONVERT`, binary keys, and byte
+functions are charset-aware. Comparisons apply PAD SPACE semantics, connection
+collations, and symmetric MySQL coercibility precedence across scalar, row,
+subquery, quantified, conditional, pattern, and join expressions.
+
+String-result policies live beside their scalar implementations. The executor
+composes them through aggregates, subqueries, windows, fixed-binary values, and
+JSON without maintaining a second builtin-name list.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -226,26 +225,31 @@ and JSON results without a second builtin-name list.
 
 ## 7. Transactions and concurrency
 
-Working: private-snapshot transactions with three-way optimistic merge and a
-point-update fast path for disjoint writes, wait-and-rebase coordination for
-indexed point/range UPDATE and DELETE statements, incremental unique-index
-validation, unique-key claims for literal VALUES inserts/upserts, merged-result FK revalidation,
-savepoints with MySQL establishment-order semantics,
-autocommit implicit transactions, read-only transactions never blocking
-writers, per-database sharding for databases not linked by qualified foreign keys,
-4,096-stripe row ownership, and redo-backed InnoDB-style AUTO_INCREMENT burns
-that survive rollback and restart.
+Transactions use private snapshots and three-way optimistic merge. Disjoint
+point writes have a fast path; indexed point and range updates or deletes wait
+and rebase. Unique-key claims, incremental index validation, and merged-result
+foreign-key validation protect publication.
+
+Savepoints follow MySQL establishment order. Autocommit uses implicit
+transactions, read-only transactions do not block writers, and unrelated
+databases use independent roots. Row-stripe ownership coordinates finer-grained
+writes. Redo-backed AUTO_INCREMENT reservations survive rollback and restart.
+
 `READ UNCOMMITTED` composes the immutable deltas of active transactions into a
 fresh statement view without publishing them; rolled-back deltas disappear on
 the next statement, while stronger isolation levels never consult that view.
+
 `SERIALIZABLE` uses conservative whole-catalog validation for writing
 transactions, preventing write skew while keeping read-only transactions
 lock-free.
+
 Queued table writers close the reader gate until acquisition and release,
 preventing later readers from starving them.
+
 Row- and key-stripe waits participate in a shared wait-for graph; the request
 with the least held ownership aborts with MySQL error 1213/SQLSTATE 40001;
 equal-cost cycles choose the newest participant.
+
 XA branches use the same private snapshots and conflict validation. Prepared
 branches detach from their sessions, survive WAL recovery, remain invisible
 until completion, and defer snapshot truncation until every prepared branch
@@ -256,23 +260,26 @@ has resolved.
 | Failed cross-database commit atomicity | `COMMIT` publishes every database change or none | `Storage.commitCatalogIntoWith` holds the affected roots but merges them sequentially; if a later root raises an optimistic 1205 conflict, earlier roots have already been published even though `COMMIT` reports failure | high (data integrity) | divergence |
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes, literal VALUES inserts/upserts claim supplied unique keys and existing duplicate rows, and AUTO_INCREMENT identities are reserved across transaction snapshots; generated/default non-identity keys, INSERT SELECT, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
-| Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize their catalog-wide referential actions; a 4-database/8-worker campaign completed in 0.49x its serial projection, while the latest 8-database/16-worker CPU-saturated campaign reached 1.46x | medium | partial |
+| Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 | XA recovery details | recovered branches retain InnoDB locks and `XA RECOVER` requires `XA_RECOVER_ADMIN` | live prepared branches retain row/key ownership and `XA_RECOVER_ADMIN` is enforced through `mysql.global_grants`; after restart, overlapping completion returns 1205 through optimistic validation instead of waiting on reconstructed locks; use `CONVERT XID` for byte-exact non-ASCII identifiers because the unconverted result still crosses the string result carrier | low | divergence |
 
 ## 8. Persistence and durability
 
-Working: opt-in `--data-dir` mode with CRC-framed WAL ([len][crc32] records
-over CommitEvent payloads, torn-tail truncation), self-delimiting CRC'd
-snapshots, platform durable-flush-before-ack with FailFast on failure, Unix
-directory fsync after rename, `.new` snapshot verification before preference, replay that
-bypasses checked write paths with ordered change application and incremental
-derived-index maintenance, bounded group commit, ordered checkpoint barriers,
-rotation via a lock-step replica store, signal-driven final rotation,
-decode-depth caps, codecs for every column type including generated-column
-expressions, and durable XA prepare/commit/rollback records. Checkpoint
-rotation waits for prepared XA branches so their recovery base remains in the
-WAL.
+Persistence is opt-in through `--data-dir`. The WAL uses length- and CRC-framed
+commit records with torn-tail truncation; snapshots are self-delimiting and
+CRC-protected. A durable flush precedes acknowledgement, and fatal flush failure
+terminates the process rather than claiming a commit.
+
+Snapshot replacement verifies the `.new` file before preferring it and syncs
+the containing directory after rename on Unix. Replay applies ordered changes
+without re-entering checked write paths and maintains derived indexes
+incrementally.
+
+Group commit, ordered checkpoint barriers, lock-step rotation, shutdown
+rotation, decode-depth limits, generated-expression codecs, and durable XA
+records share the same persistence path. Checkpoint rotation waits for prepared
+XA branches so their recovery base remains in the WAL.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -282,49 +289,55 @@ WAL.
 
 ## 9. Views and triggers
 
-Views working: CREATE [OR REPLACE] VIEW and ALTER VIEW with explicit column lists,
-ALGORITHM, host-qualified DEFINER, and SQL SECURITY declarations; views
-over views, recursive-reference detection (1462), definer-privilege checking
-at read time so revokes take effect, persistence through WAL restarts,
-SHOW CREATE VIEW and I_S.VIEWS with correct shapes. Single-table and nested
-views accept UPDATE and DELETE through direct columns, including predicates
-over computed projections. Insertable views additionally accept INSERT,
-INSERT ... SELECT, REPLACE VALUES/SET/SELECT, and ODKU, with required-column,
-repeated-column, exposed-column, and definer privilege checks. `LOCAL` and
-`CASCADED` CHECK OPTION values are persisted, exposed through metadata, and
-composed through nested views.
+**Views.** Creation and alteration preserve explicit column lists, algorithms,
+host-qualified definers, and SQL security. Definitions may reference other
+views; recursive references return 1462. Definer privileges are checked when a
+view is read, so later revocation takes effect. Definitions persist through the
+WAL and snapshots and appear in `SHOW CREATE VIEW` and `I_S.VIEWS`.
+
+Single-table and nested views accept updates and deletes through direct columns,
+including predicates over computed projections. Insertable views also accept
+the supported INSERT, REPLACE, and ODKU forms with required, repeated, exposed,
+and privilege checks. `LOCAL` and `CASCADED CHECK OPTION` predicates persist and
+compose through nested views.
+
 Uncorrelated scalar projection subqueries preserve updateability but not
 insertability, dependent projection subqueries refuse writes, and subqueries
 inside view predicates lower with the base-table write.
+
 Direct physical inner-join views can update one component table per statement
 and insert through an explicit column list into one insertable component.
 Mergeable component views and simple outer layers preserve the same behavior,
 including inherited CHECK OPTION predicates, when the nested security identity
 is unchanged.
+
 An inner join may also use a nonmergeable aggregate or UNION view as a
 read-only row source while updating another mergeable component; INSERT still
 requires every component to be mergeable.
+
 Multi-component writes, outer-join writes, and join-view DELETE/REPLACE are
 refused with MySQL-compatible errors.
+
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
 STATUS. SHOW CREATE VIEW reports the algorithm, host-qualified definer,
 security mode, explicit column list, and check option. Metadata is derived
 from the saved query without evaluating it.
+
 Direct single-table projections with a static predicate merge into the outer
 SELECT so physical equality, range, and ordered-limit paths remain available;
 other view shapes materialize once per statement.
 
-Triggers working: ordered multiple BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH
-ROW triggers with OLD/NEW row images, BEFORE SET NEW assignments,
-FOLLOWS/PRECEDES, and `BEGIN ... END` sequences of DML, local declarations and
-assignments, nested IF/ELSEIF/ELSE and CASE branches, labeled blocks, WHILE,
-REPEAT, and LOOP statements with LEAVE/ITERATE, SET NEW statements, and nested
-procedure calls with typed local or user-variable output targets;
-single- and multi-table UPDATE/DELETE row firing, statement atomicity, and
-1442 protection for every target and joined table in the invoking statement,
-definer-based privilege checks per fire, lifecycle maintenance, and SHOW
-TRIGGERS/I_S.TRIGGERS metadata. The creation-time SQL mode, client charset,
-and connection collation are stored and restored while each body runs.
+**Triggers.** Multiple `BEFORE` and `AFTER` triggers run in declared
+`FOLLOWS`/`PRECEDES` order for INSERT, UPDATE, and DELETE. Bodies can use OLD and
+NEW row images, `SET NEW`, DML, local declarations, branches, labeled loops,
+condition handling, and nested procedure calls with typed output targets.
+
+Single- and multi-table writes fire row triggers atomically. Error 1442 protects
+every target and joined table in the invoking statement. Each fire uses the
+definer's privileges and restores the creation-time SQL mode, client charset,
+and connection collation. Definitions follow their table lifecycle and appear
+in `SHOW TRIGGERS` and `I_S.TRIGGERS`.
+
 Generated row-image columns and illegal OLD/NEW images are rejected when the
 trigger is created.
 
@@ -336,51 +349,55 @@ trigger is created.
 
 ## 10. Stored routines, events, schedulers
 
-Working: procedures support typed `IN`, `OUT`, and `INOUT` parameters,
+**Procedures.** Typed `IN`, `OUT`, and `INOUT` parameters work with
 `DECLARE`/`SET`, nested `IF`/`ELSEIF`/`ELSE` and `CASE`, labeled blocks,
 `WHILE`, `REPEAT`, and `LOOP` with `LEAVE`/`ITERATE`, scoped condition
 declarations, `CONTINUE`/`EXIT` handlers, `SIGNAL`/`RESIGNAL`, sequential SQL statements,
 routine variables in expressions and `LIMIT`, and multiple resultsets with
-the protocol's final OK result. CREATE/DROP/CALL, SHOW CREATE PROCEDURE, SHOW
-PROCEDURE STATUS, and persisted ROUTINES metadata are covered. DEFINER and
-INVOKER bodies use the corresponding account, routine schema, and captured SQL
-mode, client charset, and connection collation. INFORMATION_SCHEMA.PARAMETERS
-reports procedure arguments and function return/argument rows with declared
-type, ordinal, mode, charset, and collation metadata.
+the protocol's final OK result.
+
+Creation, removal, calls, SHOW output, and routine metadata are persisted.
+Definer and invoker bodies use the corresponding account, routine schema, and
+captured session semantics. `INFORMATION_SCHEMA.PARAMETERS` describes procedure
+arguments and function return or argument rows.
+
 Procedure recursion follows the GLOBAL and SESSION
 `max_sp_recursion_depth` setting, including MySQL's 0–255 bounds and
 per-routine counting for mutual recursion.
-Stored functions support typed parameters and return coercion, `RETURN`,
-compound control flow, handlers, cursors, subqueries, typed local
-`SELECT … INTO`, nested
-function and procedure calls, DEFINER/INVOKER execution, native-function name
-precedence, prepared execution, SHOW metadata, and WAL/snapshot catalog
-persistence. Stored functions retain MySQL's 1424 recursion refusal.
-Their creation-time SQL mode, client charset, and connection collation are
-restored while each body runs. `INSERT`, `REPLACE`, `UPDATE`, `DELETE`, and
-`DO` bodies write through the invoking statement's transaction, so a failed
-statement discards its function effects, error 1442 protects every table the
-invoking statement reads or writes, and metadata-only probes such as
-`LIMIT 0` never invoke the body. Synthetic validation rows cannot invoke the
-body, and function writes during `CREATE TABLE … AS SELECT` are rejected with
-MySQL's 1746. One-time and recurring event declarations
-support CREATE/DROP, schedule/status/body/name alteration, SHOW CREATE EVENT,
-SHOW EVENTS, persisted EVENTS metadata, and definer-context execution of
-one-time and recurring schedules. CREATE ROUTINE,
-ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
+
+**Functions.** Stored functions support typed parameters, return coercion,
+`RETURN`, compound control flow, handlers, cursors, subqueries, typed local
+`SELECT … INTO`, nested function and procedure calls, definer or invoker
+execution, native-function precedence, prepared execution, SHOW metadata, and
+catalog persistence. Stored functions retain MySQL's 1424 recursion refusal
+and restore their creation-time SQL mode, client charset, and connection
+collation.
+
+Data-changing bodies write through the invoking statement's transaction, so a
+failed statement discards their effects. Error 1442 protects every table the
+invoking statement reads or writes. Metadata-only probes and synthetic
+validation rows do not invoke the body, while function writes during
+`CREATE TABLE … AS SELECT` return 1746.
+
+**Events.** One-time and recurring declarations support creation, removal,
+schedule, status, body and name alteration, SHOW output, persistence, and
+definer-context execution. Routine, execute, and event privileges guard their
+corresponding paths.
 
 ## 11. Full-text search
 
-Working: natural-language, boolean, and query-expansion modes; InnoDB's
-exact scoring (TF × IDF² with epsilon floor, oracle-verified against
-8.4.11); InnoDB's 36-word default stopword list; boolean operators
+Natural-language, boolean, and query-expansion modes use MySQL 8.4's
+oracle-verified TF × IDF² scoring with its epsilon floor and built-in stopword
+list. Boolean syntax covers
 `+ - > < ~ word* "phrases" @N proximity ()` with depth cap; blind
-relevance-feedback expansion (top 20 docs); implicit relevance ordering for
-bare WHERE-MATCH queries; FULLTEXT index DDL, introspection, and
-column-set validation; indexed-column collation sensitivity for case,
-accents, and binary text; immutable term-frequency postings and row-local
-token positions maintained with DML and rebuilt once after snapshot/WAL
-recovery; direct WHERE-MATCH candidate streaming by stable row identity.
+relevance-feedback expansion and bare WHERE-MATCH relevance ordering are also
+supported.
+
+FULLTEXT DDL, introspection, column validation, and indexed-column collation
+semantics share immutable term-frequency and position postings. DML maintains
+the postings incrementally, while recovery rebuilds them once. Direct
+WHERE-MATCH candidates stream by stable row identity.
+
 Boolean evaluation unions only touched postings, prefix terms have maintained
 prefix postings, and bounded AND/OR predicate trees intersect or union MATCH
 candidates before residual evaluation. Projection-only MATCH retains ordinary
@@ -396,20 +413,27 @@ evaluating join conditions, predicates, and assignments.
 
 ## 12. Wire protocol and prepared statements
 
-Working: HandshakeV10 with capability negotiation, CLIENT_DEPRECATE_EOF both
-directions, auth-switch to mysql_native_password for caching_sha2 clients,
-constant-time credential verification, COM_QUERY/INIT_DB/PING/FIELD_LIST/
-QUIT/RESET_CONNECTION, full COM_STMT_PREPARE/EXECUTE/FETCH/CLOSE/SEND_LONG_DATA/
-RESET with read-only cursors, type reuse, and 1153-on-overflow long-data accounting, text and
-binary row encodings including µs-precision temporals and 16 MiB multi-packet
-framing, zlib CLIENT_COMPRESS and Zstandard transport, TLS 1.2/1.3 with optional PEM server and client-CA certificates,
-require_secure_transport, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_connections/
-max_prepared_stmt_count enforced with honest advertising, COM_SET_OPTION
-multi-statement toggling, mid-query
-disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
+HandshakeV10 negotiates capabilities, deprecated EOF behavior, authentication,
+compression, TLS, packet limits, and affected-row mode. Authentication can
+switch caching-SHA2 clients to `mysql_native_password` and verifies credentials
+in constant time.
+
+The command surface covers query, database selection, ping, field listing,
+quit, connection reset, and the complete prepared-statement lifecycle. Prepared
+statements support read-only cursors, type reuse, bounded long data, and text or
+binary rows with microsecond temporal precision. Packet framing handles values
+larger than one protocol packet.
+
+Transport supports zlib, Zstandard, TLS 1.2 and 1.3, optional server and client
+CA certificates, and secure-transport enforcement. Packet, connection, and
+prepared-statement limits are enforced and advertised honestly. Mid-query
+disconnects cancel evaluation through `Server.watchForDisconnect`.
+`COM_SET_OPTION` toggles multi-statement handling for negotiated clients.
+
 `CLIENT_SESSION_TRACK` reports default-schema changes and assignments to the
 configured system-variable set, including same-value assignments, plus the
 generic state-change tracker and transaction state/characteristics when enabled.
+
 Physical result columns report
 primary, unique, composite, and non-unique key membership consistently across
 queries, prepared statements, `COM_FIELD_LIST`, and `HANDLER`. Prepared
@@ -429,21 +453,27 @@ the statement.
 
 ## 13. Authentication and privileges
 
-Working: mysql.user with MySQL 8.4's native column order, root bootstrap,
-SHA1-double password hashing with constant-time compare, CREATE/DROP/ALTER
-USER with account lock, TLS requirements, explicit/default password expiry, resource limits, and mergeable JSON attributes/comments,
-SET PASSWORD, GRANT/REVOKE across global/db/table scopes with
-level-shaped denials (1045/1044/1142), GRANT OPTION checked at target level,
-fail-closed unknown privileges, dynamic global privileges with individual grant options,
-role grants with admin option, transitive inheritance, default/session activation,
-mandatory roles, login-wide activation, role-aware metadata visibility, and DROP USER/ROLE cleanup across grant tables,
-target-specific `GRANT/REVOKE PROXY` delegation through `mysql.proxies_priv`,
-privilege collection recursing through subqueries/derived tables/CTEs,
-column-scoped SELECT/INSERT/UPDATE/REFERENCES grants with role inheritance,
-grant-option delegation, metadata visibility, and view security,
-SHOW DATABASES/TABLES visibility filtering, PROCESS-scoped PROCESSLIST/KILL,
-DROP TRIGGER resolved to its subject table for TRIGGER privilege
-(`Auth.requiredPrivileges`), persistence through ordinary row operations.
+The account catalog follows MySQL 8.4's `mysql.user` column order and includes a
+root bootstrap account. Passwords use double-SHA1 hashes with constant-time
+comparison. Account DDL covers locks, TLS requirements, password expiry,
+resource limits, and mergeable JSON attributes or comments.
+
+Static and dynamic grants apply at global, database, table, and column scope.
+Grant option is checked at the target level, unknown privileges fail closed,
+and denials retain MySQL's level-specific error shapes.
+
+Roles support admin option, transitive inheritance, default and session
+activation, mandatory roles, login activation, metadata visibility, and catalog
+cleanup. Proxy grants are target-specific and persist in
+`mysql.proxies_priv`.
+
+Privilege discovery recurses through subqueries, derived tables, and CTEs.
+Metadata visibility, view security, PROCESS-scoped process control, and trigger
+privileges use the same authorization model. Grant data persists through
+ordinary row operations.
+
+`SHOW DATABASES` and `SHOW TABLES` filter by visibility. `DROP TRIGGER` resolves
+its subject table before checking the `TRIGGER` privilege.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -454,23 +484,20 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 
 ## 14. Metadata, server administration, logging, replication
 
-Working: INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
-COLUMNS (including column comments), STATISTICS, TABLE_CONSTRAINTS, KEY_COLUMN_USAGE,
-REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
-ENGINES, COLLATIONS, CHARACTER_SETS, extension metadata, geometry columns,
-optional optimizer/profiling/resource-group/file surfaces, keyword, plugin, user-attribute, and planar spatial-reference catalogs,
-privilege and role-grant views, and direct view table/routine dependencies, …), direct
-SELECT-ability of MySQL-native `mysql.*` schemas plus fsdb's catalogs, SHOW TABLES/COLUMNS/INDEX/CREATE
-TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
-COLLATION/PRIVILEGES/PROCESSLIST/VARIABLES/STATUS/
-GRANTS/TRIGGERS/WARNINGS/ERRORS with statement condition counts, DESCRIBE,
-ALTER TABLE DISABLE/ENABLE KEYS
-no-op for mysqldump, my.cnf parsing ([mysqld]/[server], loose- prefix,
-!include with depth cap), KILL QUERY/CONNECTION with PROCESS/SUPER checks,
-live Limits reporting. `SHOW STATUS` exposes MySQL 8.4's `Com_*` registry and
-updates every command family fsdb implements, including
-text and binary prepared statements, XA, HANDLER, routines, events, and
-administrative probes.
+Viewer-scoped `INFORMATION_SCHEMA` surfaces cover schemas, tables, columns,
+indexes, constraints, views, triggers, processes, engines, charsets, collations,
+extensions, geometry, privileges, roles, dependencies, keywords, plugins, user
+attributes, and the supported optimizer and physical-engine metadata shapes.
+
+MySQL-native `mysql.*` schemas and fsdb catalogs are directly queryable. SHOW
+and DESCRIBE cover object definitions, status, privileges, process state,
+variables, diagnostics, and live byte accounting. Mysqldump's key toggles are
+accepted as no-ops.
+
+Server administration covers MySQL-format option files, scoped KILL checks,
+and live limit reporting. `SHOW STATUS` exposes the `Com_*` registry and updates
+each implemented command family, including prepared statements, XA, HANDLER,
+routines, events, and administrative probes.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -492,16 +519,16 @@ administrative probes.
 
 ## 16. Deliberate divergences (accepted, not targeted for parity)
 
-Documented or ponytail-marked design decisions that differ from MySQL on
-purpose: no option-file auto-discovery; join candidate cap
-of 1M rows;
-VECTOR type and function family (a MySQL 9 forward-port, absent from 8.4 —
-purely additive); live statistics values instead of ANALYZE-stale estimates;
-ICU CLDR collation tailoring; SUPER required for foreign KILL; honest
-advertising of enforced limits (wal_rotate knobs unreported rather than
-fabricated); and an explicitly trusted data directory whose CRCs detect
-corruption rather than authenticate a
-hostile local writer.
+Documented or ponytail-marked decisions that differ from MySQL intentionally:
+
+- a one-million-row join candidate ceiling;
+- the additive `VECTOR` type and function family forward-ported from MySQL 9;
+- live statistics rather than `ANALYZE`-stale estimates;
+- ICU CLDR collation tailoring;
+- `SUPER` for a foreign `KILL`;
+- honest limit advertising, leaving fsdb-only WAL rotation knobs unreported;
+- a trusted data directory whose CRCs detect corruption but do not authenticate
+  a hostile local writer.
 
 ## 17. Relative severity view
 
@@ -511,14 +538,18 @@ implementation effort:
 1. General cost-based planning beyond qualified physical inner joins, plus
    correlated forms that cannot use a direct physical-table equality lookup. Correctness holds,
    but scale still diverges from MySQL past small data.
+
 2. Transaction scheduling. Indexed point/range UPDATE and DELETE statements
    wait and rebase, while the remaining transaction write shapes still rely on
    optimistic catalog merge.
+
 3. Complex join-derived updatable views. Procedures, functions, and triggers
    cover nested calls with local OUT/INOUT targets, typed locals, condition
    handlers, SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential
    data-changing statements.
+
 4. Overlay/buffer operations and geographic SRS behavior. Planar spatial
    indexes, the common topology family, equality, and convex hull are covered.
+
 5. Replication, logging, broad engine counters, and the remaining metadata
    tail. Core command counters are live; replication remains architectural.
