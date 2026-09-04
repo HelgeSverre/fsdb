@@ -505,6 +505,10 @@ let tests =
               | Err(1054, _) -> ()
               | other -> failtestf "expected hidden-column rejection, got %A" other
 
+              match run store "SELECT id, (SELECT visible_rows.hidden) FROM visible_rows" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected correlated hidden-column rejection, got %A" other
+
           testCase "a grouped view rejects UPDATE"
           <| fun _ ->
               let store = setup ()
@@ -520,6 +524,32 @@ let tests =
               expectOk (run store "CREATE TABLE accounts (id INT PRIMARY KEY, name VARCHAR(20), score INT)") "create accounts"
               expectOk (run store "INSERT INTO accounts VALUES (1, 'visible', 10), (2, 'hidden', 1)") "seed accounts"
               expectOk (run store "CREATE VIEW visible_accounts AS SELECT id, name FROM accounts WHERE score >= 5") "create view"
+
+              [ "INSERT INTO visible_accounts VALUES (2, 'upserted') ON DUPLICATE KEY UPDATE name = VALUES(name)"
+                "REPLACE INTO visible_accounts VALUES (2, 'replaced')" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1369, _) -> ()
+                  | other -> failtestf "expected hidden-row conflict rejection for %s, got %A" sql other)
+
+              let mutable predicateCalls = 0
+              let registry =
+                  Fsdb.Functions.builtins
+                  |> Fsdb.Functions.registerScalar "PREDICATE_TOUCH" (fun values ->
+                      match values |> List.tryHead with
+                      | Some(Fsdb.Value.VInt _ as value) ->
+                          predicateCalls <- predicateCalls + 1
+                          value
+                      | _ -> Fsdb.Value.VNull)
+
+              expectOk
+                  (TestSupport.Sql.execute
+                      store
+                      registry
+                      "UPDATE visible_accounts SET name = name WHERE PREDICATE_TOUCH(id) > 0")
+                  "update visible rows with an effectful caller predicate"
+
+              Expect.equal predicateCalls 1 "the caller predicate is not evaluated for the hidden row"
 
               match run store "UPDATE visible_accounts SET name = 'hidden' WHERE visible_accounts.score = 10" with
               | Err(1054, _) -> ()
@@ -612,6 +642,22 @@ let tests =
                   [ [ Some "1"; Some "Replaced"; None ]; [ Some "2"; Some "Set"; None ]; [ Some "3"; Some "Selected"; None ] ]
                   "view upserts and replace forms map only exposed columns"
 
+          testCase "nested writable views do not regain columns hidden by an inner view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE vault (id INT PRIMARY KEY, public_value INT, secret INT)") "create vault"
+              expectOk (run store "INSERT INTO vault VALUES (1, 10, 99)") "seed vault"
+              expectOk (run store "CREATE VIEW public_vault AS SELECT id, public_value FROM vault") "create inner view"
+              expectOk
+                  (run store "CREATE VIEW malformed_vault AS SELECT id, public_value, secret AS leaked FROM public_vault")
+                  "store the invalidated outer definition"
+
+              match run store "UPDATE malformed_vault SET public_value = leaked WHERE id = 1" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected the inner projection boundary to reject secret, got %A" other
+
+              Expect.equal (rows store "SELECT public_value FROM vault") [ [ Some "10" ] ] "the secret was not copied"
+
           testCase "view writes recheck the definer's base-table privileges"
           <| fun _ ->
               let store = setup ()
@@ -671,6 +717,35 @@ let tests =
               | Err(1142, message) -> Expect.stringContains message "secured_rows" "the failing inner boundary names its base table"
               | other -> failtestf "expected the inner definer's revoked privilege to block the write, got %A" other
 
+          testCase "view DELETE subqueries retain the outer definer identity"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = Fsdb.Session.create 1 store
+              let root = apply root "CREATE TABLE delete_target (id INT PRIMARY KEY)"
+              let root = apply root "INSERT INTO delete_target VALUES (1)"
+              let root = apply root "CREATE USER delete_owner"
+              let root = apply root "CREATE USER delete_writer"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO delete_owner"
+              let root = apply root "GRANT SELECT, DELETE ON fsdb.delete_target TO delete_owner"
+              let owner = { Fsdb.Session.create 2 store with User = "delete_owner" }
+              let owner = apply owner "CREATE SQL SECURITY INVOKER VIEW delete_identity AS SELECT CURRENT_USER() AS who"
+              let root = apply root "GRANT SELECT ON fsdb.delete_identity TO delete_owner"
+              let _owner =
+                  apply
+                      owner
+                      "CREATE VIEW delete_gate AS SELECT id FROM delete_target WHERE EXISTS (SELECT 1 FROM delete_identity WHERE who = 'delete_owner@%')"
+
+              let _root = apply root "GRANT DELETE ON fsdb.delete_gate TO delete_writer"
+              let writer = { Fsdb.Session.create 3 store with User = "delete_writer" }
+              expectOk (Fsdb.QueryHandler.handle writer "DELETE FROM delete_gate" |> snd) "delete through definer predicate"
+              Expect.equal (rows store "SELECT id FROM delete_target") [] "the nested invoker saw the outer definer"
+
           testCase "view definitions reject user and system variables"
           <| fun _ ->
               let store = setup ()
@@ -698,7 +773,7 @@ let tests =
               | Err(1146, _) -> ()
               | other -> failtestf "expected missing view after DROP, got %A" other
 
-          testCase "view DDL retains declaration options and ALTER preserves omitted options"
+          testCase "view DDL retains declaration options and ALTER adopts the altering definer"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
 
@@ -775,7 +850,7 @@ let tests =
               match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "controlled" with
               | Ok(_, [ [ _; Some ddl; _; _ ] ]) ->
                   Expect.stringContains ddl "ALGORITHM=MERGE" "ALTER preserves algorithm"
-                  Expect.stringContains ddl "DEFINER=`owner`@`%`" "ALTER preserves definer"
+                  Expect.stringContains ddl "DEFINER=`root`@`%`" "ALTER uses the altering account"
                   Expect.stringContains ddl "SQL SECURITY INVOKER" "ALTER preserves security"
               | other -> failtestf "expected preserved ALTER envelope, got %A" other
 
@@ -1244,6 +1319,39 @@ let tests =
               match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "invoker_view" with
               | Ok(_, [ [ _; Some ddl; _; _ ] ]) -> Expect.stringContains ddl "SQL SECURITY INVOKER" "SHOW statement"
               | other -> failtestf "expected SHOW CREATE VIEW, got %A" other
+
+          testCase "view materialization cache is isolated by effective account"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = Fsdb.Session.create 1 store
+              let root = apply root "CREATE TABLE cache_source (id INT PRIMARY KEY, secret VARCHAR(20))"
+              let root = apply root "INSERT INTO cache_source VALUES (1, 'classified')"
+              let root = apply root "CREATE USER cache_owner"
+              let root = apply root "CREATE USER cache_reader"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO cache_owner"
+              let root = apply root "GRANT SELECT ON fsdb.cache_source TO cache_owner"
+              let owner = { Fsdb.Session.create 2 store with User = "cache_owner" }
+              let owner = apply owner "CREATE SQL SECURITY INVOKER VIEW cache_invoker AS SELECT id, secret FROM cache_source"
+              let root = apply root "GRANT SELECT ON fsdb.cache_invoker TO cache_owner"
+              let _owner = apply owner "CREATE VIEW cache_public AS SELECT id FROM cache_invoker"
+              let root = apply root "GRANT SELECT ON fsdb.cache_invoker TO cache_reader"
+              let _root = apply root "GRANT SELECT ON fsdb.cache_public TO cache_reader"
+              let reader = { Fsdb.Session.create 3 store with User = "cache_reader" }
+
+              match
+                  Fsdb.QueryHandler.handle
+                      reader
+                      "SELECT i.secret FROM cache_public p JOIN cache_invoker i ON i.id = p.id"
+                  |> snd
+              with
+              | Err(1142, message) -> Expect.stringContains message "cache_source" "the reader must authorize the invoker view"
+              | other -> failtestf "expected the cached invoker boundary to reject the reader, got %A" other
 
           testCase "concurrent view creation stamps each account's definer"
           <| fun _ ->

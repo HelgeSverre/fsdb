@@ -79,8 +79,10 @@ type private TriggerRowScope =
 type private ViewCheckScope =
     { Database: string
       Table: string
+      Qualifier: string
       View: string
-      Predicate: Expr option }
+      CheckPredicate: Expr option
+      VisibilityPredicate: Expr option }
 
 type private RangeLookupBounds =
     { Column: string
@@ -316,7 +318,7 @@ type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
-      Views: Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
+      Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
 
@@ -324,7 +326,7 @@ let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
-      Views = Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
+      Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
 
@@ -406,7 +408,8 @@ type private ViewAccess =
     { SecurityType: string
       Definer: string
       Database: string
-      Table: string }
+      Table: string
+      Retarget: bool }
 
 type private ViewColumnTarget =
     { Database: string
@@ -723,11 +726,16 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 | _ -> None)
                         | Some nested ->
                             Expression.rewrite (function
-                                | Col column -> nested.Expressions |> Map.tryFind (column.ToLowerInvariant())
+                                | Col column ->
+                                    nested.Expressions
+                                    |> Map.tryFind (column.ToLowerInvariant())
+                                    |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", column)))
                                 | QualifiedCol(qualifier, column)
                                     when sourceNames
                                          |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)) ->
-                                    nested.Expressions |> Map.tryFind (column.ToLowerInvariant())
+                                    nested.Expressions
+                                    |> Map.tryFind (column.ToLowerInvariant())
+                                    |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", column)))
                                 | _ -> None)
 
                     let physicalQualifier = source.Alias |> Option.defaultValue source.Table
@@ -784,6 +792,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         expandedProjections
                         |> List.exists (fst >> hasDependentSubquery (projectedColumns |> List.map _.ToLowerInvariant() |> Set.ofList))
 
+                    let dependentPredicate =
+                        underlying.IsSome
+                        && (select.Where
+                            |> Option.exists (hasDependentSubquery (projectedColumns |> List.map _.ToLowerInvariant() |> Set.ofList)))
+
                     let projected =
                         expandedProjections
                         |> List.map (fun (expression, alias) ->
@@ -800,6 +813,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     if
                         unresolvedStar
                         || dependentProjection
+                        || dependentPredicate
                         || outputNames.Length <> projected.Length
                         || (outputNames |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList).Count <> outputNames.Length
                         || (projected |> List.forall (fun (_, _, target) -> target.IsNone))
@@ -908,7 +922,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 { SecurityType = view.SecurityType
                                   Definer = view.Definer
                                   Database = sourceDb
-                                  Table = source.Table }
+                                  Table = source.Table
+                                  Retarget = true }
                                 :: (underlying |> Option.map _.AccessPath |> Option.defaultValue [])
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
@@ -1195,7 +1210,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               InsertableTargets = insertableTargets
                               UpdateFrom = (List.head sources).Reference
                               UpdateJoins = rewrittenJoins
-                              AccessPath = []
+                              AccessPath =
+                                [ { SecurityType = view.SecurityType
+                                    Definer = view.Definer
+                                    Database = view.Schema
+                                    Table = view.Name
+                                    Retarget = false } ]
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
             | _ -> None
@@ -4270,6 +4290,24 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), a, (Row _ as b)) ->
         evalRowOperand ctx a
         |> Result.bind (fun left -> evalRowOperand ctx b |> Result.bind (rowComparisonResult ctx op left))
+    | BinOp(And, a, b) ->
+        eval a
+        |> Result.bind (fun left ->
+            match truthy left with
+            | Some false -> Ok(VInt 0L)
+            | Some true -> eval b |> Result.map (fun right -> truthy right |> Option.map boolToValue |> Option.defaultValue VNull)
+            | None ->
+                eval b
+                |> Result.map (fun right -> if truthy right = Some false then VInt 0L else VNull))
+    | BinOp(Or, a, b) ->
+        eval a
+        |> Result.bind (fun left ->
+            match truthy left with
+            | Some true -> Ok(VInt 1L)
+            | Some false -> eval b |> Result.map (fun right -> truthy right |> Option.map boolToValue |> Option.defaultValue VNull)
+            | None ->
+                eval b
+                |> Result.map (fun right -> if truthy right = Some true then VInt 1L else VNull))
     | BinOp(op, a, b) ->
         // Arithmetic can leave the `BIGINT UNSIGNED` domain, which MySQL
         // refuses with 1690 rather than answering in a wider type. That
@@ -4277,12 +4315,6 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // arithmetic has no error channel of its own) and becomes an
         // ordinary `EvalError` here, at the first frame that has one.
         try
-            // And/Or already evaluate both operands (no short-circuit, since
-            // SQL's three-valued logic needs both sides to tell "false" apart
-            // from "unknown"), so every `BinOp` collapses into one total match
-            // on `op` here — every `Ast.Op` case is handled in one place,
-            // rather than two more `failwith`-guarded helpers each only
-            // partially matching the same type.
             eval a
             |> Result.bind (fun va ->
                 eval b
@@ -4315,18 +4347,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | _ -> Ok(f left right)
 
                     match op with
-                    | And ->
-                        match truthy va, truthy vb with
-                        | Some false, _
-                        | _, Some false -> Ok(VInt 0L)
-                        | Some true, Some true -> Ok(VInt 1L)
-                        | _ -> Ok VNull
-                    | Or ->
-                        match truthy va, truthy vb with
-                        | Some true, _
-                        | _, Some true -> Ok(VInt 1L)
-                        | Some false, Some false -> Ok(VInt 0L)
-                        | _ -> Ok VNull
+                    | And
+                    | Or -> Error(1105, "logical operator escaped short-circuit evaluation")
                     // XOR has no short-circuit: either operand being unknown
                     // makes the answer unknown (`NULL XOR 1` is NULL, unlike
                     // `NULL OR 1`).
@@ -5166,20 +5188,22 @@ and private resolveTableRef
     else
         match tryStoredView store tableDb tableRef.Table with
         | Some view ->
-            let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
+            let effectiveAccount = registryAccount registry |> Option.map Auth.formatAccount |> Option.defaultValue ""
+            let stackKey = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
+            let cacheKey = fst stackKey, snd stackKey, effectiveAccount.ToLowerInvariant()
             let stack = currentViewStack ()
             let memo = (currentStatementMemo ()).Views
 
-            match memo.TryGetValue key with
+            match memo.TryGetValue cacheKey with
             | true, cached -> cached
-            | _ when Set.contains key stack ->
+            | _ when Set.contains stackKey stack ->
                 Error(Err(1462, sprintf "View's SELECT contains a recursive reference to view '%s'" view.Name))
             | _ ->
                 let savedCtes = currentCteScope ()
                 let savedCteOrigins = currentCteOriginScope ()
 
                 try
-                    viewStack.Value <- Set.add key stack
+                    viewStack.Value <- Set.add stackKey stack
                     cteScope.Value <- Map.empty
                     cteOriginScope.Value <- Map.empty
 
@@ -5229,7 +5253,7 @@ and private resolveTableRef
                                 | Some(name, _) -> Error(Err(1060, sprintf "Duplicate column name '%s'" name))
                                 | None -> Ok(columns, rows)))
 
-                    if not (isNull (box memo)) then memo.[key] <- resolved
+                    if not (isNull (box memo)) then memo.[cacheKey] <- resolved
                     resolved
                 finally
                     viewStack.Value <- stack
@@ -7794,6 +7818,15 @@ and private tryMergeDirectView
                 | Some direct
                     when direct.Predicate |> Option.forall mergeablePredicate
                          && direct.UpdateJoins.IsEmpty
+                         && ((select.Projections |> List.map fst)
+                             @ (select.Where |> Option.toList)
+                             @ select.GroupBy
+                             @ (select.Having |> Option.toList)
+                             @ (select.OrderBy |> List.map fst)
+                             @ (select.Limit |> Option.toList)
+                             @ (select.Offset |> Option.toList)
+                             |> List.exists (Expression.collectSubqueries >> List.isEmpty >> not)
+                             |> not)
                          && (direct.OrderedColumns
                              |> List.forall (fun column -> Map.containsKey (column.ToLowerInvariant()) direct.Columns)) ->
                     let source =
@@ -13222,7 +13255,13 @@ let private explainTableStats (store: Store) (registry: Registry) (dbName: strin
         let count = uint64 table.RowsArray.Count
         Ok(Some count, if count <= 1UL then "system" else "ALL")
     | Ok _ ->
-        withPlanningProbe (fun () -> resolveTableRef store registry dbName tableRef)
+        let inert =
+            { registry with
+                Scalars = registry.Scalars |> Map.map (fun _ _ _ -> VNull)
+                Aggregates = registry.Aggregates |> Map.map (fun _ _ _ -> VNull) }
+
+        withPlanningProbe (fun () ->
+            withMetadataProbe (fun () -> resolveTableRef store inert dbName tableRef))
         |> Result.map (fun _ -> None, "ALL")
     | Error error -> Error error
 
@@ -15764,7 +15803,7 @@ let rec executeAs
         | Some scope
             when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
                  && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
-            match scope.Predicate with
+            match scope.CheckPredicate with
             | None -> Ok candidate
             | Some predicate ->
                 let context =
@@ -15773,7 +15812,7 @@ let rec executeAs
                         registry
                         db
                         (columnIndexOf columns)
-                        (singleQualifier table columns)
+                        (singleQualifier scope.Qualifier columns)
                         None
                         candidate
 
@@ -15782,6 +15821,30 @@ let rec executeAs
                 | Ok _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
                 | Error error -> Error(ExpressionError error)
         | _ -> Ok candidate
+
+    let validateViewExisting (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (row: Value[]) =
+        match viewCheckScope.Value with
+        | Some scope
+            when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
+                 && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
+            match scope.VisibilityPredicate with
+            | None -> Ok()
+            | Some predicate ->
+                let context =
+                    contextFactory
+                        runStore
+                        registry
+                        db
+                        (columnIndexOf columns)
+                        (singleQualifier scope.Qualifier columns)
+                        None
+                        row
+
+                match evalExpr { context with Clause = WhereClause } predicate with
+                | Ok value when truthy value = Some true -> Ok()
+                | Ok _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
+                | Error error -> Error(ExpressionError error)
+        | _ -> Ok()
 
     let evaluateFunctionalDefaults
         (runStore: Store)
@@ -15983,7 +16046,9 @@ let rec executeAs
                     |> Result.bind (validateViewCandidate s db table tableColumns)
 
                 let applyUpdate ordinal existing candidate =
-                    onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate
+                    validateViewExisting s db table tableColumns existing
+                    |> Result.bind (fun () ->
+                        onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate)
                     |> Result.bind computeGenerated
 
                 upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows)
@@ -16000,7 +16065,9 @@ let rec executeAs
         let afterInsert = afterInsertTriggers store db table
         let beforeDelete = triggersFor store db table "BEFORE" "DELETE"
         let afterDelete = triggersFor store db table "AFTER" "DELETE"
-        let hasTriggers = not (beforeInsert.IsEmpty && afterInsert.IsEmpty && beforeDelete.IsEmpty && afterDelete.IsEmpty)
+        let hasTriggers =
+            not (beforeInsert.IsEmpty && afterInsert.IsEmpty && beforeDelete.IsEmpty && afterDelete.IsEmpty)
+            || viewCheckScope.Value.IsSome
 
         match hasTriggers, scan store db table with
         | _, Error error -> ids, storageErr error
@@ -16028,6 +16095,7 @@ let rec executeAs
 
             let deleteConflict result ((rowId, oldRow) as conflict) =
                 result
+                |> Result.bind (fun () -> validateViewExisting snapshot db table tableColumns oldRow |> Result.mapError storageErr)
                 |> Result.bind (fun () -> fire Before TriggerDelete beforeDelete [ Some oldRow, None ])
                 |> Result.bind (fun () ->
                     deleteRowsCandidates snapshot db table [ conflict ] (fun _ -> Ok true)
@@ -16097,18 +16165,21 @@ let rec executeAs
 
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
         let retarget (access: ViewAccess) =
-            let qualified = access.Database + "." + access.Table
+            if not access.Retarget then
+                statement
+            else
+                let qualified = access.Database + "." + access.Table
 
-            match statement with
-            | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, columns, rows, updates, ignore)
-            | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, columns, select, updates, ignore)
-            | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
-            | ReplaceSelect(_, columns, select) -> ReplaceSelect(qualified, columns, select)
-            | ReplaceSet(_, assignments) -> ReplaceSet(qualified, assignments)
-            | LoadData load -> LoadData { load with Table = qualified }
-            | Update update -> Update { update with From = { update.From with Database = Some access.Database; Table = access.Table } }
-            | Delete delete -> Delete { delete with From = { delete.From with Database = Some access.Database; Table = access.Table } }
-            | other -> other
+                match statement with
+                | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, columns, rows, updates, ignore)
+                | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, columns, select, updates, ignore)
+                | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
+                | ReplaceSelect(_, columns, select) -> ReplaceSelect(qualified, columns, select)
+                | ReplaceSet(_, assignments) -> ReplaceSet(qualified, assignments)
+                | LoadData load -> LoadData { load with Table = qualified }
+                | Update update -> Update { update with From = { update.From with Database = Some access.Database; Table = access.Table } }
+                | Delete delete -> Delete { delete with From = { delete.From with Database = Some access.Database; Table = access.Table } }
+                | other -> other
 
         let authorizedRegistry =
             if view.AccessPath.IsEmpty then
@@ -16128,17 +16199,21 @@ let rec executeAs
             let execute () = executeAs store authorized dbName ids foundRows currentAccount statement
             let targetKey = target.Database, target.Table, target.Qualifier
 
-            match Map.tryFind targetKey view.CheckPredicates with
-            | Some predicate ->
+            let checkPredicate = Map.tryFind targetKey view.CheckPredicates
+
+            match checkPredicate, view.Predicate with
+            | None, None -> execute ()
+            | checkPredicate, visibilityPredicate ->
                 DynamicScope.withValue
                     viewCheckScope
                     (Some
                         { Database = target.Database
                           Table = target.Table
+                          Qualifier = target.Qualifier
                           View = view.ViewDatabase + "." + view.ViewName
-                          Predicate = Some predicate })
+                          CheckPredicate = checkPredicate
+                          VisibilityPredicate = visibilityPredicate })
                     execute
-            | None -> execute ()
 
     match stmt with
     | Update update when not update.Ctes.IsEmpty ->
@@ -16944,10 +17019,7 @@ let rec executeAs
                     "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation"
                 )
             | Some account -> Ok(Auth.formatAccount account)
-            | None ->
-                match existing with
-                | Some view when altering -> Ok view.Definer
-                | _ -> Ok(Auth.formatAccount currentAccount)
+            | None -> Ok(Auth.formatAccount currentAccount)
 
         let missingDefiner =
             requestedDefiner
@@ -18128,9 +18200,8 @@ let rec executeAs
                     OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
-            match registryForViewSecurity store registry view.SecurityType view.Definer view.Database (Delete rewritten) with
-            | Error(code, message) -> ids, Err(code, message)
-            | Ok _ -> executeAs store registry dbName ids foundRows currentAccount (Delete rewritten)
+            let target = view.Targets |> Map.values |> Seq.head
+            executeViewWrite view target (Delete rewritten)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
