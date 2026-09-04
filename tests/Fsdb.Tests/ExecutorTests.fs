@@ -3826,6 +3826,23 @@ let tests =
                     Expect.equal plan.AccessType (Some "index") "the pinned prefix feeds the grouping path"
                     Expect.equal plan.Key (Some "idx_pub_code_city") "the composite grouping index is reported"
 
+                testCase "GROUP BY does not treat a coercive equality as one stored index key"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (p VARCHAR(10), g VARCHAR(10), KEY ix_pg (p, g))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', 'x'), ('a', 'y'), ('b', 'x'), ('b', 'y')" |> ignore
+
+                    match runDefault store "SELECT g, COUNT(*) FROM t WHERE p = 0 GROUP BY g ORDER BY g" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "x"; Some "2" ]; [ Some "y"; Some "2" ] ] "coercion-equivalent prefixes do not split groups"
+                    | other -> failtestf "expected complete groups, got %A" other
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT g, COUNT(*) FROM t WHERE p = 0 GROUP BY g"
+                        |> explainRow
+
+                    Expect.isTrue (plan.Extra |> Option.exists (_.Contains("temporary"))) "the unsafe ordered grouping proof is rejected"
+
                 testCase "prefix indexes do not feed full-value grouping"
                 <| fun _ ->
                     let store = newStore ()
@@ -5758,6 +5775,38 @@ let tests =
                               [ Some "498"; Some "Gamma" ] ]
                             "ORDER BY and LIMIT use complete values after the mutation"
                     | other -> failtestf "expected ordered rows, got %A" other
+
+                testCase "prefix range scans retain primary-equivalent boundary keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, label VARCHAR(30), touched INT, KEY ix_label (label(3)))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, label VARCHAR(30), touched INT)" |> ignore
+                    let values = "(1, 'alpZ', 0), (2, 'álpaca', 0), (3, 'beta', 0)"
+                    runDefault store ("INSERT INTO indexed VALUES " + values) |> ignore
+                    runDefault store ("INSERT INTO scanned VALUES " + values) |> ignore
+
+                    let predicate = "label >= 'álp' AND label < 'alq'"
+
+                    let select table =
+                        runDefault store (sprintf "SELECT id FROM %s WHERE %s ORDER BY id" table predicate)
+
+                    let scannedRows = select "scanned"
+                    Expect.equal scannedRows (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) "the oracle-compatible scan includes both boundary forms"
+                    Expect.equal (select "indexed") scannedRows "the prefix range is a complete candidate superset"
+
+                    let update table =
+                        runDefault store (sprintf "UPDATE %s SET touched = 1 WHERE %s" table predicate)
+
+                    let scannedUpdate = update "scanned"
+                    Expect.equal scannedUpdate (Affected 2UL) "the scan updates both matching rows"
+                    Expect.equal (update "indexed") scannedUpdate "UPDATE sees primary-equivalent prefix boundaries"
+
+                    let delete table =
+                        runDefault store (sprintf "DELETE FROM %s WHERE %s" table predicate)
+
+                    let scannedDelete = delete "scanned"
+                    Expect.equal scannedDelete (Affected 2UL) "the scan deletes both matching rows"
+                    Expect.equal (delete "indexed") scannedDelete "DELETE sees primary-equivalent prefix boundaries"
 
                 testCase "LOWER expression indexes narrow matching predicates only"
                 <| fun _ ->
