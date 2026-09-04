@@ -398,6 +398,20 @@ let tests =
                         | ResultSet(_, [ [ Some v ] ]) -> Expect.equal v expected sql
                         | other -> failtestf "expected a resultset for %s, got %A" sql other
 
+                testCase "binary predicates do not match distinct unrepresentable strings"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE binary_tokens (token VARCHAR(10) CHARACTER SET ascii COLLATE ascii_bin, KEY ix_token(token))" |> ignore
+                    runDefault store "INSERT INTO binary_tokens VALUES ('?')" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) FROM binary_tokens WHERE token = 'é'" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the indexed comparison to remain distinct, got %A" other
+
+                    match runDefault store "SELECT '😀' COLLATE utf8mb4_bin LIKE '💣' COLLATE utf8mb4_bin" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the binary LIKE operands to remain distinct, got %A" other
+
                 testCase "WEIGHT_STRING applies CHAR truncation, BINARY padding, and source collation"
                 <| fun _ ->
                     match

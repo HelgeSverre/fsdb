@@ -107,13 +107,24 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | -1 -> name
         | index -> name[..index - 1]
         |> Charset.canonicalName
-    let binaryBytes (s: string) = Charset.encode charset (trim s)
+
+    let ordinalBytes (s: string) =
+        s
+        |> Seq.collect (fun value -> [ byte (int value >>> 8); byte value ])
+        |> Array.ofSeq
+
+    let binaryBytesWithoutPadding (s: string) =
+        match Charset.tryEncodeStrict charset s with
+        | Some bytes -> Array.append [| 0uy |] bytes
+        | None -> Array.append [| 1uy |] (ordinalBytes s)
+
+    let binaryBytes (s: string) = binaryBytesWithoutPadding (trim s)
     let compareBinary (a: string) (b: string) =
         (binaryBytes a).AsSpan().SequenceCompareTo((binaryBytes b).AsSpan())
     let binaryPrefix (value: string) (prefix: string) =
-        let value = binaryBytes value
-        let prefix = binaryBytes prefix
-        value.AsSpan().StartsWith(prefix.AsSpan())
+        match Charset.tryEncodeStrict charset value, Charset.tryEncodeStrict charset prefix with
+        | Some value, Some prefix -> value.AsSpan().StartsWith(prefix.AsSpan())
+        | _ -> value.StartsWith(prefix, StringComparison.Ordinal)
 
     let foldText (value: string) =
         if name = "utf8mb4_general_ci" then
@@ -131,7 +142,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 [ byte (value >>> 16); byte (value >>> 8); byte value ])
             |> Array.ofSeq
         else
-            Charset.encode charset s
+            Charset.tryEncodeStrict charset s |> Option.defaultWith (fun () -> binaryBytesWithoutPadding s)
 
     let compareFull (a: string) (b: string) : int =
         if String.Equals(a, b, StringComparison.Ordinal) then

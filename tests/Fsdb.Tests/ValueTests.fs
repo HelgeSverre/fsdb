@@ -601,6 +601,21 @@ let tests =
                     Expect.equal (Fsdb.Charset.decodeLoadData "cp1251" [| 0xCFuy; 0xF0uy; 0xE8uy; 0xE2uy; 0xE5uy; 0xF2uy |]) (Ok "Привет") "legacy file bytes decode strictly"
                     Expect.isFalse (Fsdb.Charset.supportsLoadData "utf16") "MySQL forbids UTF-16 LOAD DATA input"
 
+                testCase "binary collations keep unrepresentable text distinct"
+                <| fun _ ->
+                    let ascii = Fsdb.Collation.tryFind "ascii_bin" |> Option.get
+                    Expect.isFalse (ascii.Equals "?" "é") "replacement bytes do not create equality"
+                    Expect.notEqual (ascii.KeyOf "?") (ascii.KeyOf "é") "replacement bytes do not collide as index keys"
+
+                    let utf8mb3 = Fsdb.Collation.tryFind "utf8mb3_bin" |> Option.get
+                    Expect.isFalse (utf8mb3.Equals "😀" "💣") "unsupported supplementary scalars remain distinct"
+                    Expect.notEqual (utf8mb3.KeyOf "😀") (utf8mb3.KeyOf "💣") "supplementary index keys remain distinct"
+
+                    let utf8mb4 = Fsdb.Collation.tryFind "utf8mb4_bin" |> Option.get
+                    Expect.isFalse
+                        (utf8mb4.CharEquals "😀".[1] "💣".[1])
+                        "isolated surrogate comparisons retain their code-unit distinction"
+
                 // Every expectation below was verified against a live MySQL
                 // 8.4 (utf8mb4_0900_ai_ci, the server default) — equality is
                 // primary-weight based (accents and case fold; digraphs
