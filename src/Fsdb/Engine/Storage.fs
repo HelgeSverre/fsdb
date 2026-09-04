@@ -8156,15 +8156,16 @@ let prepareXa
           ValidateWholeSnapshot = validateWholeSnapshot
           TransactionLocks = snapshot.TransactionLocks }
 
-    if store.PreparedXas.TryAdd(xid, prepared) then
-        try
-            persistXaControl store (XaPrepared(xid, validateWholeSnapshot, prepared.Events))
-            true
-        with error ->
-            store.PreparedXas.TryRemove xid |> ignore
-            raise error
-    else
-        false
+    lock store.PreparedXas (fun () ->
+        if store.PreparedXas.TryAdd(xid, prepared) then
+            try
+                persistXaControl store (XaPrepared(xid, validateWholeSnapshot, prepared.Events))
+                true
+            with error ->
+                store.PreparedXas.TryRemove xid |> ignore
+                raise error
+        else
+            false)
 
 let preparedXas (store: Store) : (Xa.Xid * PreparedXa) list =
     lock store.PreparedXas (fun () ->

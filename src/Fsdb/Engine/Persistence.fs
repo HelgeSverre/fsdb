@@ -22,7 +22,8 @@ let private numericDisplaySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x34uy |] /
 let private partitionSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x35uy |] // "FSN5"
 let private dynamicPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x36uy |] // "FSN6"
 let private proxyPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x37uy |] // "FSN7"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x38uy |] // "FSN8"
+let private spatialReferenceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x38uy |] // "FSN8"
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x39uy |] // "FSN9"
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -31,7 +32,8 @@ type private SnapshotFormat =
       Partitions: bool
       DynamicPrivileges: bool
       ProxyPrivileges: bool
-      SpatialReferences: bool }
+      SpatialReferences: bool
+      PreparedXas: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -40,7 +42,8 @@ let private legacySnapshotFormat =
       Partitions = false
       DynamicPrivileges = false
       ProxyPrivileges = false
-      SpatialReferences = false }
+      SpatialReferences = false
+      PreparedXas = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -60,8 +63,11 @@ let private dynamicPrivilegeSnapshotFormat =
 let private proxyPrivilegeSnapshotFormat =
     { dynamicPrivilegeSnapshotFormat with ProxyPrivileges = true }
 
-let private currentSnapshotFormat =
+let private spatialReferenceSnapshotFormat =
     { proxyPrivilegeSnapshotFormat with SpatialReferences = true }
+
+let private currentSnapshotFormat =
+    { spatialReferenceSnapshotFormat with PreparedXas = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -70,6 +76,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = spatialReferenceSnapshotMagic then
+        Some spatialReferenceSnapshotFormat
     elif header = proxyPrivilegeSnapshotMagic then
         Some proxyPrivilegeSnapshotFormat
     elif header = dynamicPrivilegeSnapshotMagic then
@@ -1232,7 +1240,7 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
 /// `decodeCatalog` happens to parse out of partial bytes. The CRC is folded
 /// in per flushed chunk (`crc32Update`), not computed over one assembled
 /// `byte[]`, for the same reason the flush loop exists at all.
-let private writeCatalog (s: FileStream) (catalog: Catalog) : unit =
+let private writeStore (s: FileStream) (store: Store) : unit =
     s.Write(snapshotMagic, 0, snapshotMagic.Length)
     let mutable w = Writer()
     let mutable crc = 0xFFFFFFFFu
@@ -1246,23 +1254,41 @@ let private writeCatalog (s: FileStream) (catalog: Catalog) : unit =
             payloadLen <- payloadLen + int64 bytes.Length
             w.Clear()
 
-    w.WriteInt32LE(Map.count catalog)
+    let writeCatalogPayload (catalog: Catalog) =
+        w.WriteInt32LE(Map.count catalog)
 
-    catalog
-    |> Map.iter (fun dbName db ->
-        writeStr w dbName
-        w.WriteInt32LE(Map.count db)
+        catalog
+        |> Map.iter (fun dbName db ->
+            writeStr w dbName
+            w.WriteInt32LE(Map.count db)
 
-        db
-        |> Map.iter (fun tableKey table ->
-            writeStr w tableKey
-            encodeTableMeta currentSnapshotFormat w table
+            db
+            |> Map.iter (fun tableKey table ->
+                writeStr w tableKey
+                encodeTableMeta currentSnapshotFormat w table
 
-            for row in table.RowsArray do
-                encodeRowBin w row
+                for row in table.RowsArray do
+                    encodeRowBin w row
 
-                if w.Count >= (1 <<< 20) then
-                    flush ()))
+                    if w.Count >= (1 <<< 20) then
+                        flush ()))
+
+    writeCatalogPayload store.Catalog
+
+    let prepared = preparedXas store
+    w.WriteInt32LE prepared.Length
+
+    for xid, branch in prepared do
+        encodeXid w xid
+        writeBool w branch.ValidateWholeSnapshot
+        writeCatalogPayload branch.BaseCatalog
+        w.WriteInt32LE branch.Events.Length
+
+        for event in branch.Events do
+            encodeEvent w event
+
+            if w.Count >= (1 <<< 20) then
+                flush ()
 
     flush ()
 
@@ -1368,18 +1394,45 @@ let private decodeCatalog (format: SnapshotFormat) (r: #IReader) : Catalog =
           dbName, tables ]
     |> Map.ofList
 
+let private decodeSnapshot (format: SnapshotFormat) (r: #IReader) =
+    let catalog = decodeCatalog format r
+
+    let prepared =
+        if format.PreparedXas then
+            [ for _ in 1 .. r.ReadInt32LE() do
+                  let xid = decodeXid r
+                  let validateWholeSnapshot = readBool r
+                  let baseCatalog = decodeCatalog format r
+                  let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEvent r)
+                  let branchStore = Storage.create ()
+                  setCatalog branchStore baseCatalog
+                  branchStore.ForeignKeyChecks <- false
+                  events |> List.iter (applyEvent branchStore)
+
+                  yield
+                      xid,
+                      { BaseCatalog = baseCatalog
+                        Catalog = branchStore.Catalog
+                        Events = events
+                        ValidateWholeSnapshot = validateWholeSnapshot
+                        TransactionLocks = None } ]
+        else
+            []
+
+    catalog, prepared
+
 /// Writes and fsyncs `.new`, truncates the WAL, then atomically renames the
 /// snapshot. Recovery prefers a verified `.new`, preserving either the old
 /// snapshot plus WAL or the complete replacement across every crash point.
 /// Attached stores serialize this through the commit queue; startup tooling
 /// uses the catalog lock before writers exist.
-let private writeSnapshotAndTruncate (dataDir: string) (catalog: Catalog) : unit =
+let private writeSnapshotAndTruncate (dataDir: string) (store: Store) : unit =
     Directory.CreateDirectory dataDir |> ignore
     let finalPath = Path.Combine(dataDir, snapshotFileName)
     let newPath = finalPath + ".new"
 
     (use s = new FileStream(newPath, FileMode.Create, FileAccess.Write)
-     writeCatalog s catalog
+     writeStore s store
      flushToDisk s)
 
     File.WriteAllText(Path.Combine(dataDir, walFileName), "")
@@ -1389,17 +1442,16 @@ let private writeSnapshotAndTruncate (dataDir: string) (catalog: Catalog) : unit
 let snapshotNow (dataDir: string) (store: Store) : unit =
     let dataDir = Path.GetFullPath dataDir
 
-    if store.PreparedXas.IsEmpty then
-        let checkpoint =
-            lock store.CommitLock (fun () ->
-                match store.Durability.Sink with
-                | Some sink when String.Equals(sink.DataDirectory, dataDir, StringComparison.Ordinal) ->
-                    Some(sink.EnqueueCheckpoint())
-                | _ -> None)
+    let checkpoint =
+        lock store.CommitLock (fun () ->
+            match store.Durability.Sink with
+            | Some sink when String.Equals(sink.DataDirectory, dataDir, StringComparison.Ordinal) ->
+                Some(sink.EnqueueCheckpoint())
+            | _ -> None)
 
-        match checkpoint with
-        | Some wait -> wait ()
-        | None -> lock store.Lock (fun () -> writeSnapshotAndTruncate dataDir store.Catalog)
+    match checkpoint with
+    | Some wait -> wait ()
+    | None -> lock store.PreparedXas (fun () -> lock store.Lock (fun () -> writeSnapshotAndTruncate dataDir store))
 
 /// Loads a verified snapshot followed by its valid WAL prefix.
 let load (dataDir: string) : Store =
@@ -1411,7 +1463,7 @@ let load (dataDir: string) : Store =
 
     // Streaming permits snapshots larger than the runtime byte-array limit.
     // Legacy unframed snapshots begin at offset zero; framed versions skip magic.
-    let readSnapshot (path: string) : Catalog * SnapshotFormat =
+    let readSnapshot (path: string) : Catalog * (Xa.Xid * PreparedXa) list * SnapshotFormat =
         use s = new FileStream(path, FileMode.Open, FileAccess.Read)
         let header = Array.zeroCreate<byte> snapshotMagic.Length
         let read = s.Read(header, 0, header.Length)
@@ -1423,7 +1475,8 @@ let load (dataDir: string) : Store =
 
         let start = if read = snapshotMagic.Length && snapshotFormat header |> Option.isSome then int64 snapshotMagic.Length else 0L
         s.Seek(start, SeekOrigin.Begin) |> ignore
-        decodeCatalog format (StreamReader(s)), format
+        let catalog, prepared = decodeSnapshot format (StreamReader(s))
+        catalog, prepared, format
 
     let mutable loadedFormat = None
 
@@ -1434,8 +1487,12 @@ let load (dataDir: string) : Store =
             Storage.ensureRootProxyGrant store
 
     let loadSnapshot path =
-        let catalog, format = readSnapshot path
+        let catalog, prepared, format = readSnapshot path
         setCatalog store catalog
+
+        for xid, branch in prepared do
+            store.PreparedXas.[xid] <- branch
+
         loadedFormat <- Some format
 
     // A torn `.new` cannot supersede the old snapshot and WAL.
@@ -1491,13 +1548,13 @@ let attach (dataDir: string) (store: Store) : unit =
     setCatalog replica store.Catalog
     replica.ForeignKeyChecks <- false
 
+    for xid, branch in preparedXas store do
+        replica.PreparedXas.[xid] <- branch
+
     let tryRotateFromReplica () =
-        if replica.PreparedXas.IsEmpty then
-            reindexAllForReplay replica
-            writeSnapshotAndTruncate dataDir replica.Catalog
-            true
-        else
-            false
+        reindexAllForReplay replica
+        writeSnapshotAndTruncate dataDir replica
+        true
 
     let rotateFromReplica () = tryRotateFromReplica () |> ignore
 

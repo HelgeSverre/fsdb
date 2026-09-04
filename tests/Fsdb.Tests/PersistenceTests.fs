@@ -407,7 +407,7 @@ let tests =
               snapshotNow dir store
               Expect.equal (rowsOf (load dir) defaultDatabase "times") [ [| value |] ] "snapshot replay"
 
-          testCase "prepared XA branches survive restart and defer snapshots"
+          testCase "prepared XA branches survive snapshot rotation and restart"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -428,9 +428,13 @@ let tests =
               let _ = run session "XA PREPARE 'durable', 'commit', 42"
 
               snapshotNow dir store
+              Expect.equal (FileInfo(walPath dir).Length) 0L "a prepared branch no longer prevents WAL truncation"
               let recovered = load dir
               attach dir recovered
-              let recoverySession = Fsdb.Session.create 2 recovered
+              snapshotNow dir recovered
+              let checkpointedAgain = load dir
+              attach dir checkpointedAgain
+              let recoverySession = Fsdb.Session.create 2 checkpointedAgain
 
               match handle recoverySession "XA RECOVER CONVERT XID" |> snd with
               | ResultSet(_, [ [ Some "42"; Some "7"; Some "6"; Some "0x64757261626C65636F6D6D6974" ] ]) -> ()
@@ -476,6 +480,50 @@ let tests =
               match handle (Fsdb.Session.create 7 (load dir)) "XA RECOVER" |> snd with
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected the read-only completed branch to stay gone, got %A" other
+
+          TestSupport.processGlobalCase "automatic WAL rotation checkpoints prepared XA branches"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "wal_rotate_entries", "0" ] (fun () ->
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+
+                  let run session sql =
+                      let next, result = handle session sql
+
+                      match result with
+                      | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                      | _ -> next
+
+                  let preparedSession = Fsdb.Session.create 1 store
+                  let preparedSession = run preparedSession "CREATE TABLE xa_rotating (id INT PRIMARY KEY)"
+                  let preparedSession = run preparedSession "XA START 'rotating'"
+                  let preparedSession = run preparedSession "INSERT INTO xa_rotating VALUES (1)"
+                  let preparedSession = run preparedSession "XA END 'rotating'"
+                  let _ = run preparedSession "XA PREPARE 'rotating'"
+
+                  let committedSession = Fsdb.Session.create 2 store
+                  let _ = run committedSession "INSERT INTO xa_rotating VALUES (2)"
+
+                  Expect.equal (FileInfo(walPath dir).Length) 0L "automatic rotation truncates the WAL"
+
+                  let recovered = load dir
+                  attach dir recovered
+                  let recoverySession = Fsdb.Session.create 3 recovered
+
+                  match handle recoverySession "XA RECOVER CONVERT XID" |> snd with
+                  | ResultSet(_, [ [ Some "1"; Some "8"; Some "0"; Some "0x726F746174696E67" ] ]) -> ()
+                  | other -> failtestf "expected the prepared branch after automatic rotation, got %A" other
+
+                  match rowsOf recovered defaultDatabase "xa_rotating" with
+                  | [ [| VInt 2L |] ] -> ()
+                  | other -> failtestf "expected only the independently committed row before XA completion, got %A" other
+
+                  let _ = run recoverySession "XA COMMIT 'rotating'"
+
+                  match rowsOf (load dir) defaultDatabase "xa_rotating" |> List.sort with
+                  | [ [| VInt 1L |]; [| VInt 2L |] ] -> ()
+                  | other -> failtestf "expected both rows after recovered XA completion, got %A" other)
 
           testCase "attach + reload preserves BIT(64) boundary values"
           <| fun _ ->
