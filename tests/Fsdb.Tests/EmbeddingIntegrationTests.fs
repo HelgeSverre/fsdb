@@ -56,24 +56,22 @@ let tests =
               Expect.equal (commits a) 1 "subscriber A sees exactly one TransactionCommitted wrapping both inserts"
               Expect.equal (commits b) 1 "subscriber B sees the same single TransactionCommitted"
 
-          testCase "Db.serve returns a RunningServer whose Stop stops accepting connections"
+          testCase "Db.serve exposes its bound address and port until stopped"
           <| fun _ ->
               let running = Fsdb.Db.create () |> Fsdb.Db.serve Net.IPAddress.Loopback 0
+              Expect.equal running.Address Net.IPAddress.Loopback "address matches the bound listener"
               Expect.isTrue (running.Port > 0) "port 0 resolves to the OS-assigned port"
 
-              // Accepting before Stop...
               use alive = new Net.Sockets.TcpClient()
-              alive.Connect(Net.IPAddress.Loopback, running.Port)
+              alive.Connect(running.Address, running.Port)
               Expect.isTrue alive.Connected "connects while running"
 
               running.Stop()
 
-              // ...refused after: the listener socket is closed, so a fresh
-              // connect gets ECONNREFUSED rather than hanging.
               Expect.throws
                   (fun () ->
                       use dead = new Net.Sockets.TcpClient()
-                      dead.Connect(Net.IPAddress.Loopback, running.Port))
+                      dead.Connect(running.Address, running.Port))
                   "connections are refused after Stop"
 
           testCase "registered virtual table answers SELECT/WHERE/JOIN from the fsdb schema"

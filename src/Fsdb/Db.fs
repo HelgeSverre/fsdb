@@ -118,12 +118,12 @@ type Connection internal (db: Db) =
 /// to run SQL against its own embedded instance without a socket.
 let connect (db: Db) : Connection = Connection(db)
 
-/// A server started by `serve`: `Port` is the actual bound port (matters
-/// when `serve` was given port 0 for an OS-assigned one), `Stop` stops
-/// accepting new connections. `IDisposable` so `use running = ...` works;
-/// stopping twice is a no-op.
+/// A server started by `serve`. `Address` and `Port` describe the bound
+/// listener; `Stop` stops accepting new connections. `IDisposable` lets a
+/// host bind it with `use`; stopping twice is a no-op.
 type RunningServer =
-    { Port: int
+    { Address: IPAddress
+      Port: int
       Stop: unit -> unit }
 
     interface System.IDisposable with
@@ -140,10 +140,13 @@ let listen (address: IPAddress) (port: int) (db: Db) : Async<unit> =
 
 /// Like `listen`, but starts serving on a background async and hands back
 /// a stoppable `RunningServer` — pass port 0 for an OS-assigned port and
-/// read it back off `Port`.
+/// read the actual listener endpoint from `Address` and `Port`.
 let serve (address: IPAddress) (port: int) (db: Db) : RunningServer =
     let listener = Server.startListening address port
     Async.Start(Server.serveWithOptions db.Transport listener db.Store db.Functions)
 
-    { Port = Server.port listener
+    let endpoint = listener.LocalEndpoint :?> IPEndPoint
+
+    { Address = endpoint.Address
+      Port = endpoint.Port
       Stop = fun () -> listener.Stop() }

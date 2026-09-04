@@ -452,14 +452,12 @@ let slugify =
 
 [<EntryPoint>]
 let main _ =
-    let address = IPAddress.Loopback
-
     use server =
         Db.create ()
         |> Db.registerScalar "SLUGIFY" slugify
-        |> Db.serve address 0
+        |> Db.serve IPAddress.Loopback 0
 
-    printfn "fsdb listening on %O:%d" address server.Port
+    printfn "fsdb listening on %O:%d" server.Address server.Port
     Console.ReadLine() |> ignore
     0
 ```
@@ -675,12 +673,12 @@ match connection.Query "SELECT @request_id" with
 | Executor.MultipleResults results -> printfn "%d results" results.Length
 ```
 
-`Db.serve` starts a background server and returns the actual bound port plus a
-stop function. `Db.listen` returns a foreground `Async<unit>` instead:
+`Db.serve` starts a background server and returns its bound address and port
+plus a stop function. `Db.listen` returns a foreground `Async<unit>` instead:
 
 ```fsharp
 use server = db |> Db.serve System.Net.IPAddress.Loopback 0
-printfn "listening on %d" server.Port
+printfn "listening on %O:%d" server.Address server.Port
 
 Db.create ()
 |> Db.listen System.Net.IPAddress.Loopback 3307
