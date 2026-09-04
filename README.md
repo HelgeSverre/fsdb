@@ -452,12 +452,14 @@ let slugify =
 
 [<EntryPoint>]
 let main _ =
+    let address = IPAddress.Loopback
+
     use server =
         Db.create ()
         |> Db.registerScalar "SLUGIFY" slugify
-        |> Db.serve IPAddress.Loopback 0
+        |> Db.serve address 0
 
-    printfn "fsdb listening on 127.0.0.1:%d" server.Port
+    printfn "fsdb listening on %O:%d" address server.Port
     Console.ReadLine() |> ignore
     0
 ```
