@@ -437,6 +437,14 @@ let tests =
                     Expect.equal (valid "POLYGON((0 0,4 0,4 4,0 4,0 0),(0 1,2 1,2 2,0 2,0 1))") (VInt 0L) "touching hole"
                     Expect.equal (valid "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((4 4,8 4,8 8,4 8,4 4)))") (VInt 1L) "vertex-touching components"
                     Expect.equal (valid "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((2 2,6 2,6 6,2 6,2 2)))") (VInt 0L) "overlapping components"
+                    Expect.equal
+                        (valid "MULTIPOLYGON(((0 0,10 0,10 10,0 10,0 0)),((0 0,1 0.1,0.1 1,0 0)))")
+                        (VInt 0L)
+                        "nested components sharing their first vertex"
+                    Expect.equal
+                        (valid "MULTIPOLYGON(((0 0,10 0,10 10,0 10,0 0),(2 2,8 2,8 8,2 8,2 2)),((3 3,4 3,3 4,3 3)))")
+                        (VInt 1L)
+                        "a separate component may occupy another component's hole"
                     Expect.equal (valid "MULTIPOINT((0 0),(0 0))") (VInt 1L) "duplicate point"
                     Expect.equal (valid "LINESTRING(0 0,-0.00 0,0.0 0)") (VInt 0L) "line without distinct points"
 
