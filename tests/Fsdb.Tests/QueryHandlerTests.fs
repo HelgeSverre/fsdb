@@ -7519,6 +7519,43 @@ let tests =
               | Err(1792, _) -> ()
               | other -> failtestf "expected an update locking read to be rejected, got %A" other
 
+          testCase "denied transactional writes do not retain row or unique-key locks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE TABLE protected_writes (id INT PRIMARY KEY, token VARCHAR(20) UNIQUE, n INT)"
+              let root, _ = handle root "INSERT INTO protected_writes VALUES (1, 'alpha', 10)"
+              let _, _ = handle root "CREATE USER 'lockless_writer'"
+
+              let limited =
+                  { create 2 store with
+                      User = "lockless_writer" }
+
+              let limited, _ = handle limited "BEGIN"
+
+              let expectDeniedWithoutLocks statement current =
+                  let current, result = handle current statement
+
+                  match result with
+                  | Err(1142, _) -> ()
+                  | other -> failtestf "expected write access to be denied, got %A" other
+
+                  let transaction = current.Tx |> Option.get
+                  Expect.equal
+                      (Fsdb.Storage.transactionLockStructCount transaction.Snapshot)
+                      0UL
+                      "authorization failure leaves no transaction lock stripes"
+
+                  current
+
+              let limited = expectDeniedWithoutLocks "UPDATE protected_writes SET n=11 WHERE id=1" limited
+              let limited = expectDeniedWithoutLocks "DELETE FROM protected_writes WHERE id=1" limited
+              let _ = expectDeniedWithoutLocks "INSERT INTO protected_writes VALUES (2, 'beta', 20)" limited
+
+              match handle root "UPDATE protected_writes SET n=12 WHERE id=1" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the authorized writer to remain unblocked, got %A" other
+
           testCase "nested locking clauses remain query-block scoped"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

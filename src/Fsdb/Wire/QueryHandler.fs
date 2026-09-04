@@ -2330,6 +2330,42 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
     let dbName = session.Database |> Option.defaultValue defaultDatabase
 
+    let authorizationStore = session.Store
+    let requiredPrivileges = requiredPrivilegesForStatement session authorizationStore dbName stmt
+
+    // Transaction write preparation acquires locks that outlive the statement,
+    // so authorization must be decided against the live account catalog first.
+    let access =
+        let statementAccess =
+            match stmt with
+            | Grant(privileges, level, _, _)
+            | Revoke(privileges, level, _) ->
+                Auth.checkDynamicGrantOptionsForAccount
+                    authorizationStore
+                    (accountOf session)
+                    session.ActiveRoles
+                    (privileges |> List.map _.Name)
+                    (Auth.targetOfLevel dbName level)
+            | GrantProxy(proxied, _, _)
+            | RevokeProxy(proxied, _) ->
+                Auth.checkProxyGrantAuthority authorizationStore (accountOf session) (Auth.account (fst proxied) (snd proxied))
+            | GrantRoles(roles, _, _)
+            | RevokeRoles(roles, _) ->
+                Auth.checkRoleGrantAuthorityForAccount authorizationStore (accountOf session) session.ActiveRoles roles
+            | _ -> Ok()
+
+        let transactionAccess () =
+            match session.Tx, stmt with
+            | Some tx, (Select _ | Union _) when tx.ReadOnly && statementContainsUpdateLock stmt ->
+                Error(1792, "Cannot execute statement in a READ ONLY transaction")
+            | Some tx, (Select _ | Union _ | Explain _ | ChecksumTables _) when tx.ReadOnly ->
+                Auth.checkForAccountWithRoles authorizationStore (accountOf session) session.ActiveRoles requiredPrivileges
+            | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
+            | _ -> Auth.checkForAccountWithRoles authorizationStore (accountOf session) session.ActiveRoles requiredPrivileges
+
+        statementAccess
+        |> Result.bind transactionAccess
+
     let execute session =
         let store = Session.currentStore session
         let lockingReadView () =
@@ -2337,41 +2373,6 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             | Some transaction when statementContainsLockingRead stmt ->
                 Some(fun () -> rebaseTransactionSnapshot session transaction |> snd)
             | _ -> None
-
-        let requiredPrivileges = requiredPrivilegesForStatement session store dbName stmt
-
-        // Privilege enforcement — the one gate every parsed statement goes
-        // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
-        let access =
-            let statementAccess =
-                match stmt with
-                | Grant(privileges, level, _, _)
-                | Revoke(privileges, level, _) ->
-                    Auth.checkDynamicGrantOptionsForAccount
-                        store
-                        (accountOf session)
-                        session.ActiveRoles
-                        (privileges |> List.map _.Name)
-                        (Auth.targetOfLevel dbName level)
-                | GrantProxy(proxied, _, _)
-                | RevokeProxy(proxied, _) ->
-                    Auth.checkProxyGrantAuthority store (accountOf session) (Auth.account (fst proxied) (snd proxied))
-                | GrantRoles(roles, _, _)
-                | RevokeRoles(roles, _) ->
-                    Auth.checkRoleGrantAuthorityForAccount store (accountOf session) session.ActiveRoles roles
-                | _ -> Ok()
-
-            let transactionAccess () =
-                match session.Tx, stmt with
-                | Some tx, (Select _ | Union _) when tx.ReadOnly && statementContainsUpdateLock stmt ->
-                    Error(1792, "Cannot execute statement in a READ ONLY transaction")
-                | Some tx, (Select _ | Union _ | Explain _ | ChecksumTables _) when tx.ReadOnly ->
-                    Auth.checkForAccountWithRoles store (accountOf session) session.ActiveRoles requiredPrivileges
-                | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
-                | _ -> Auth.checkForAccountWithRoles store (accountOf session) session.ActiveRoles requiredPrivileges
-
-            statementAccess
-            |> Result.bind transactionAccess
 
         match access with
         | Error(code, msg) -> session, Err(code, msg)
@@ -2500,11 +2501,14 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
     match session.Tx with
     | Some _ ->
         let executed, result =
-            session
-            |> startTransactionStatement
-            |> prepareTransactionWrite stmt
-            |> syncTransactionView
-            |> execute
+            match access with
+            | Error _ -> execute session
+            | Ok() ->
+                session
+                |> startTransactionStatement
+                |> prepareTransactionWrite stmt
+                |> syncTransactionView
+                |> execute
 
         let canAllocateAutoIncrement =
             match stmt with
