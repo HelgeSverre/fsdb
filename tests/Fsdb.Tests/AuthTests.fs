@@ -233,6 +233,36 @@ let tests =
                       "subquery in an INSERT VALUES needs SELECT on secret"
               | Error e -> failtestf "parse insert: %s" e
 
+          testCase "DDL privilege requirements cover row creation, foreign keys, and partition truncation"
+          <| fun _ ->
+              let requirements sql =
+                  match Fsdb.Parser.parse sql with
+                  | Ok statement -> requiredPrivileges "app" statement
+                  | Error error -> failtestf "parse %s: %s" sql error
+
+              let createForeignKey =
+                  requirements
+                      "CREATE TABLE child_db.children (parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent_db.parents(id))"
+
+              Expect.contains createForeignKey ("CREATE", OnTable("child_db", "children")) "child creation"
+              Expect.contains createForeignKey ("REFERENCES", OnTable("parent_db", "parents")) "qualified parent"
+
+              let localForeignKey =
+                  requirements
+                      "ALTER TABLE child_db.children ADD FOREIGN KEY (parent_id) REFERENCES parents(id)"
+
+              Expect.contains localForeignKey ("ALTER", OnTable("child_db", "children")) "child alteration"
+              Expect.contains localForeignKey ("REFERENCES", OnTable("child_db", "parents")) "parent follows child schema"
+
+              let createAs = requirements "CREATE TABLE archive AS SELECT id FROM source"
+              Expect.contains createAs ("CREATE", OnTable("app", "archive")) "CTAS creates the target"
+              Expect.contains createAs ("INSERT", OnTable("app", "archive")) "CTAS populates the target"
+              Expect.contains createAs ("SELECT", OnTable("app", "source")) "CTAS reads the source"
+
+              let truncatePartition = requirements "ALTER TABLE logs TRUNCATE PARTITION ALL"
+              Expect.contains truncatePartition ("ALTER", OnTable("app", "logs")) "partition DDL alters the table"
+              Expect.contains truncatePartition ("DROP", OnTable("app", "logs")) "partition truncation removes rows"
+
           testCase "ON DUPLICATE KEY UPDATE requires UPDATE on the target table"
           <| fun _ ->
               for sql in

@@ -2540,6 +2540,9 @@ let requiredPrivilegesForExpression (defaultDb: string) (expression: Expr) : (st
 let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * PrivTarget) list =
     let onTables priv tables = tables |> List.map (fun (db, t) -> priv, OnTable(db, t))
     let split (name: string) = splitQualified defaultDb name
+    let referencedTables ownerDb foreignKeys =
+        foreignKeys
+        |> List.map (fun foreignKey -> foreignKey.RefDatabase |> Option.defaultValue ownerDb, foreignKey.RefTable)
 
     match stmt with
     | Select s -> onTables "SELECT" (selectTables defaultDb s)
@@ -2655,12 +2658,24 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
 
         onTables "DELETE" deletedTables
         @ onTables "SELECT" ((cteTables @ readInExprs) |> List.distinct)
-    | CreateTable table -> onTables "CREATE" [ split table.Name ]
+    | CreateTable table ->
+        let target = split table.Name
+        onTables "CREATE" [ target ]
+        @ onTables "REFERENCES" (referencedTables (fst target) table.ForeignKeys)
     | CreateTableLike(name, source, _) -> onTables "CREATE" [ split name ] @ onTables "SELECT" [ split source ]
-    | CreateTableAs(name, query, _, _) -> onTables "CREATE" [ split name ] @ requiredPrivileges defaultDb query
+    | CreateTableAs(name, query, _, _) ->
+        let target = split name
+        onTables "CREATE" [ target ] @ onTables "INSERT" [ target ] @ requiredPrivileges defaultDb query
     | DropTable(names, _) -> onTables "DROP" (names |> List.map split)
     | Truncate table -> onTables "DROP" [ split table ]
-    | AlterTable(table, _) -> onTables "ALTER" [ split table ]
+    | AlterTable(table, actions) ->
+        let target = split table
+        let foreignKeys = actions |> List.choose (function AddForeignKey foreignKey -> Some foreignKey | _ -> None)
+        let truncatesPartitions = actions |> List.exists (function TruncatePartitions _ -> true | _ -> false)
+
+        onTables "ALTER" [ target ]
+        @ onTables "REFERENCES" (referencedTables (fst target) foreignKeys)
+        @ if truncatesPartitions then onTables "DROP" [ target ] else []
     | RenameTable pairs -> onTables "ALTER" (pairs |> List.map (fst >> split))
     | CreateIndex(_, table, _, _, _, _) -> onTables "INDEX" [ split table ]
     | DropIndexStmt(_, table, _) -> onTables "INDEX" [ split table ]

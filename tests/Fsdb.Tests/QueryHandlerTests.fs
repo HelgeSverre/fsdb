@@ -6768,6 +6768,58 @@ let tests =
               | ResultSet(_, [ _ ]) -> ()
               | other -> failtestf "expected TRIGGER to permit SHOW CREATE TRIGGER, got %A" other
 
+          testCase "DDL enforces REFERENCES, CTAS INSERT, and partition DROP privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 999921 store
+              let root, _ = handle root "CREATE DATABASE ddl_guard"
+              let root, _ = handle root "USE ddl_guard"
+              let root, _ = handle root "CREATE TABLE parent (id INT PRIMARY KEY)"
+              let root, _ = handle root "CREATE TABLE source (id INT)"
+              let root, _ = handle root "INSERT INTO source VALUES (1)"
+              let root, _ = handle root "CREATE TABLE partitioned (id INT) PARTITION BY HASH(id) PARTITIONS 2"
+              let root, _ = handle root "INSERT INTO partitioned VALUES (1)"
+              let root, _ = handle root "CREATE USER 'ddl_guest'"
+              let root, _ = handle root "GRANT CREATE ON ddl_guard.* TO 'ddl_guest'"
+              let root, _ = handle root "GRANT SELECT ON ddl_guard.source TO 'ddl_guest'"
+              let _, _ = handle root "GRANT ALTER ON ddl_guard.partitioned TO 'ddl_guest'"
+
+              let guest =
+                  { create 999922 store with
+                      User = "ddl_guest"
+                      Database = Some "ddl_guard" }
+
+              let expectDenied privilege sql =
+                  match handle guest sql |> snd with
+                  | Err(1142, message) -> Expect.stringContains message privilege "missing privilege is reported"
+                  | other -> failtestf "expected %s to require %s, got %A" sql privilege other
+
+              expectDenied
+                  "REFERENCES"
+                  "CREATE TABLE child (parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent(id))"
+
+              expectDenied "INSERT" "CREATE TABLE archive AS SELECT id FROM source"
+              expectDenied "DROP" "ALTER TABLE partitioned TRUNCATE PARTITION ALL"
+
+              let root, _ = handle root "GRANT REFERENCES ON ddl_guard.parent TO 'ddl_guest'"
+              let root, _ = handle root "GRANT INSERT ON ddl_guard.* TO 'ddl_guest'"
+              let _, _ = handle root "GRANT DROP ON ddl_guard.partitioned TO 'ddl_guest'"
+
+              match
+                  handle guest "CREATE TABLE child (parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent(id))"
+                  |> snd
+              with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected REFERENCES to permit the foreign key, got %A" other
+
+              match handle guest "CREATE TABLE archive AS SELECT id FROM source" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected INSERT to permit CTAS population, got %A" other
+
+              match handle guest "ALTER TABLE partitioned TRUNCATE PARTITION ALL" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected DROP to permit partition truncation, got %A" other
+
           testCase "SHOW CREATE DATABASE, OPEN TABLES, PLUGINS, and ENGINE INNODB STATUS are truthful"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
