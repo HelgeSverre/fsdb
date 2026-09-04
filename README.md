@@ -38,13 +38,14 @@ mysql --protocol=tcp -h127.0.0.1 -P3307 -uroot -e 'SELECT 1'
 
 With `just`, the same two-terminal workflow is `just run` and `just client`.
 
-Port 3307 avoids a real MySQL on 3306 (`--port` overrides). A `root` account
-with all privileges and no password exists out of the box; accounts, `GRANT`s,
-and passwords are managed with the usual `CREATE USER` / `GRANT` / `SET
-PASSWORD` statements (mysql_native_password, verified at the handshake — a
-passwordless account accepts only an empty password, same as MySQL). Account
-locks, TLS requirements, explicit password expiry, per-account resource
-limits, and JSON attributes/comments are enforced as well.
+Port 3307 avoids a real MySQL on 3306 (`--port` overrides). The bootstrap
+account is `root` with all privileges and no password. Authentication uses
+`mysql_native_password`; a passwordless account accepts only an empty password,
+matching MySQL.
+
+Manage accounts and grants with `CREATE USER`, `GRANT`, and `SET PASSWORD`.
+Account locks, TLS requirements, explicit password expiry, per-account resource
+limits, and JSON attributes and comments are enforced.
 
 First queries:
 
@@ -98,13 +99,15 @@ OPTIONS:
 
 fsdb reads `/etc/my.cnf`, `/etc/mysql/my.cnf`, `$MYSQL_HOME/my.cnf`, and
 `~/.my.cnf` when present. `--defaults-file` reads only the named file instead.
-The parser follows MySQL's format rather than a generic ini dialect:
-`[mysqld]`/`[server]` groups, mid-line `#`/`;` comments, quoted values with
-escapes, `-` and `_` interchangeable, size suffixes, `!include`/`!includedir`,
-and `loose-` for options fsdb doesn't have. Other groups are skipped, so a
-shared my.cnf is safe to use; an unrecognised option inside `[mysqld]` is a
-startup error naming the file and line, the same way mysqld refuses to start
-on one.
+
+The parser follows MySQL's option-file format rather than a generic INI
+dialect. It understands `[mysqld]` and `[server]` groups, mid-line `#` and `;`
+comments, quoted values with escapes, interchangeable `-` and `_`, size
+suffixes, `!include`, `!includedir`, and `loose-` options.
+
+Other groups are skipped, so the server can share an option file with MySQL.
+An unrecognised option inside a server group is a startup error that names the
+file and line; `loose-` suppresses that error only for unsupported options.
 
 ```ini
 [mysqld]
@@ -127,14 +130,21 @@ ssl-ca                   = /etc/fsdb/client-ca.pem
 require-secure-transport = ON
 ```
 
-Defaults-file settings apply at startup as process-wide defaults. The standard
+Option-file settings become process-wide defaults at startup. The standard
 files are auto-discovered unless `--defaults-file` selects one explicitly.
-`max_connections`, `max_prepared_stmt_count`, `max_allowed_packet`,
-`local_infile`, `wait_timeout`, `interactive_timeout`, `net_read_timeout`, `net_write_timeout`,
-`innodb_lock_wait_timeout`, and `cte_max_recursion_depth` can also be changed
-with `SET GLOBAL`. `max_load_data_bytes` and the `wal_*` settings are
-configuration-only fsdb limits rather than MySQL system variables. See
-[the compatibility guide](docs/compatibility.md) for the complete behavior and
+
+The following MySQL-shaped settings also accept `SET GLOBAL`:
+
+- connection and protocol limits: `max_connections`,
+  `max_prepared_stmt_count`, `max_allowed_packet`, and `local_infile`;
+- timeouts: `wait_timeout`, `interactive_timeout`, `net_read_timeout`,
+  `net_write_timeout`, and `innodb_lock_wait_timeout`;
+- server behavior: `cte_max_recursion_depth`, `default_password_lifetime`,
+  and `default_week_format`.
+
+`max_load_data_bytes` and the `wal_*` settings are configuration-only fsdb
+limits rather than MySQL system variables. See the
+[compatibility guide](docs/compatibility.md) for detailed behavior and
 deliberate divergences.
 
 ## How it works
@@ -193,81 +203,101 @@ top-(n+offset) set instead of materializing the full sort.
 
 #### Transactions
 
-Databases and tables live in a value-swapped catalog. Repeatable-read
-transactions establish a snapshot on their first database statement;
-read-committed transactions refresh from committed roots per statement;
-read-uncommitted transactions additionally compose active private deltas into
-that statement view. Writes remain private until commit under every isolation
-level. Commit performs a row-level three-way merge: disjoint
-concurrent changes combine, while indexed point/range UPDATE and DELETE
+Databases and tables live in a value-swapped catalog. Transaction visibility
+depends on the selected isolation level:
+
+- repeatable read establishes a snapshot on the first database statement;
+- read committed refreshes from committed roots before each statement;
+- read uncommitted also composes active private deltas into that statement
+  view.
+
+Writes remain private until commit at every isolation level. Within each
+affected database, commit performs a row-level three-way merge so disjoint
+concurrent changes combine. Indexed point and range `UPDATE` or `DELETE`
 statements wait for an existing row owner and rebase before applying their
-change. Remaining overlapping write shapes fail with MySQL's retryable 1205
-error. Immutable row pages let the merge inspect only pages changed from the
-transaction snapshot and maintain indexes incrementally.
+changes; other overlapping write shapes fail with MySQL's retryable 1205
+error.
+
+The row store uses immutable, copy-on-write pages with stable row identities.
+A merge can therefore inspect changed pages and update derived indexes without
+copying the entire table.
 
 #### Locks
 
-`FOR UPDATE`, `FOR SHARE`, and `LOCK IN SHARE MODE` use current committed row
-versions and retain shared or exclusive row-stripe ownership until transaction
-end. `OF`, `NOWAIT`, and `SKIP LOCKED` follow MySQL's transaction behavior;
-direct indexed single-table predicates narrow the locked rows, while joins and
-scan-shaped locking reads conservatively lock each targeted physical source.
-`LOCK TABLES` provides session-scoped shared/exclusive ownership with MySQL's
-alias restrictions, temporary-table exception, atomic replacement lists, and
-implicit locks for view and trigger dependencies. Ordinary statements acquire
-compatible table ownership only for their execution, so explicit locks also
-coordinate with sessions that never issue `LOCK TABLES`. Named `FLUSH TABLES
-... WITH READ LOCK` and `FOR EXPORT` use the same read-lock lifecycle.
+`FOR UPDATE`, `FOR SHARE`, and `LOCK IN SHARE MODE` read current committed row
+versions and retain shared or exclusive row-stripe ownership until the
+transaction ends. `OF`, `NOWAIT`, and `SKIP LOCKED` follow MySQL's transaction
+behavior. Direct indexed predicates narrow a single-table lock set; joins and
+scan-shaped locking reads conservatively lock every targeted physical source.
+
+`LOCK TABLES` provides session-scoped shared or exclusive ownership. It honors
+MySQL's alias restrictions, temporary-table exception, atomic replacement
+lists, and implicit view and trigger dependencies. Ordinary statements acquire
+compatible table ownership only while they execute, so explicit locks also
+coordinate with sessions that never issue `LOCK TABLES`.
+
+Named `FLUSH TABLES ... WITH READ LOCK` and `FOR EXPORT` use the same read-lock
+lifecycle.
 
 #### Indexes and joins
 
-PK/UNIQUE and composite secondary equality lookups go through maps keyed by
-the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
-exactly as MySQL's do. Scalar and composite-row literal `IN` lists, along with
-direct literal ranges in single-table reads and writes, can seek matching
-primary, unique, and secondary B-trees and report `range` in `EXPLAIN`.
-Equality and literal-`IN` probes use immutable bucket cardinalities before
-resolving rows; broad probes fall back to the row-store scan instead of
-materializing an all-row index union.
-`ORDER BY` and compatible `GROUP BY` operations can stream a
-whole-column left prefix of a composite index, or a suffix whose preceding
-keys are fixed by literal equalities, including `LIMIT`, `OFFSET`, and literal
-bounds. Composite keys can include `LOWER(column)` or `UPPER(column)` parts
-for matching ordering and grouping prefixes, including a functional suffix
-after stored keys fixed by literal equalities. Other expression orderings and
-full-value ordering through a prefix key still sort. Equality buckets and
-ordered entries are separate derived structures, deliberately trading memory
-and write work for efficient equality buckets and bounded range seeks.
-Planar `SPATIAL`/`RTREE` indexes maintain immutable minimum-bounding-rectangle
-entries and narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS`
-predicates, including single-table updates and deletes. The residual predicate
-still runs on every candidate, and `EXPLAIN` reports the same `range` access
-shape and key length as MySQL.
-Equi-joins choose between one hash build and repeated index probes. A physical
-inner, left, or right join can probe an index when the rows already in scope
-bind its complete key, including joins expressed with `USING` or `NATURAL
-JOIN`. Full-result inner and left joins use the index's observed distinct-key
-count to avoid repeated broad bucket probes; queries that may stop at `LIMIT`
-retain the streaming index path.
+The engine maintains several immutable index structures, each serving a
+different access pattern:
+
+- **Equality and ranges.** Primary, unique, and secondary equality maps use
+  collation-folded keys. Scalar and composite-row literal `IN` lists, plus
+  direct literal ranges in single-table reads and writes, can seek matching
+  indexes. `EXPLAIN` reports the corresponding `const`, `ref`, or `range`
+  access. Candidate cardinalities are checked before row resolution, so broad
+  probes fall back to a row-store scan instead of building an all-row union.
+
+- **Ordering and grouping.** Compatible `ORDER BY` and `GROUP BY` operations
+  stream a left prefix of a composite index, or a suffix whose preceding keys
+  are fixed by literal equalities. This path supports `LIMIT`, `OFFSET`, and
+  literal bounds. Composite keys may contain `LOWER(column)` or
+  `UPPER(column)` parts. Other expression orderings and full-value ordering
+  through a prefix key still sort.
+
+- **Spatial access.** Planar `SPATIAL` and `RTREE` declarations maintain
+  immutable minimum-bounding-rectangle entries. They narrow direct
+  `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates in single-table
+  reads, updates, and deletes. The full predicate still validates every
+  candidate.
+
+- **Joins.** Equi-joins choose between one hash build and repeated index
+  probes. Physical inner, left, and right joins can probe an index when rows
+  already in scope bind its complete key, including `USING` and `NATURAL JOIN`.
+  Full-result inner and left joins avoid repeated broad probes; queries that
+  may stop at `LIMIT` retain the lazy index path.
+
+Equality buckets and ordered entries remain separate derived structures. That
+trade spends memory and incremental write work to keep point probes direct and
+range seeks bounded.
 
 ### Collations & charsets
 
-MySQL 8.4's utf8mb4 collations are registered alongside common Unicode,
-Windows, DOS, CJK, ISO Latin, KOI8, and Mac character sets (`utf8_*` is
-accepted as MySQL's deprecated alias). Each collation carries a locale,
-fold level, and pad attribute, with ICU sort keys doing the work. Honored
-per-column and per `SET collation_connection` in grouping, dedup, joins,
-and unique keys. DDL, write coercion, `CONVERT(x USING …)`, charset
-introducers, `LOAD DATA`, and the byte length, hex, hashing, base64,
-checksum, and compression functions share the same codec registry.
+The registry covers MySQL 8.4's utf8mb4 names and common Unicode, Windows,
+DOS, CJK, ISO Latin, KOI8, and Mac character sets. `utf8_*` remains available
+as MySQL's deprecated alias.
+
+Each collation carries a locale, fold level, and padding rule. ICU supplies
+the comparison and sort keys, so the exact weight bytes can differ from
+MySQL's UCA tables. Column declarations and `SET collation_connection` feed
+the same coercibility rules used by comparisons, grouping, deduplication,
+joins, and unique indexes.
+
+DDL, write coercion, `CONVERT(x USING ...)`, charset introducers, `LOAD DATA`,
+and byte-oriented functions share the same codec registry.
 
 ### Prepared statements
 
-`COM_STMT_PREPARE`/`COM_STMT_EXECUTE` bind parameter `Value`s into the
-parsed AST (`?` → `Placeholder` → `Lit`), so a bound value keeps its real
-type for every statement the grammar parses; only the text-probed `SET`/
-`SHOW` forms still re-splice literals. Forward-only prepared cursors and
-zlib/Zstandard protocol compression are supported as well.
+`COM_STMT_PREPARE` and `COM_STMT_EXECUTE` bind parameter `Value`s into the
+parsed AST (`?` → `Placeholder` → `Lit`). Bound values therefore keep their
+SQL types for every statement handled by the grammar. The text-probed `SET`
+and `SHOW` forms still splice SQL literals.
+
+Forward-only prepared cursors, long parameter data, and zlib or Zstandard
+protocol compression use the same typed execution path.
 
 ## SQL surface
 
@@ -284,34 +314,35 @@ applications:
 - Stored objects: views and `WITH CHECK OPTION`, procedures, functions,
   scheduled events, and `BEFORE`/`AFTER` triggers with compound bodies and
   nested procedure calls.
-- Accounts: `CREATE USER`, roles, proxy grants, `GRANT`/`REVOKE`, password, resource, and
-  attribute policy, plus database-, table-, and column-level privilege enforcement.
+- Accounts: `CREATE USER`, roles, proxy grants, `GRANT`/`REVOKE`, password,
+  resource, and attribute policy, plus database-, table-, and column-level
+  privilege enforcement.
 - Bulk and batched work: `CLIENT_MULTI_STATEMENTS`/`CLIENT_MULTI_RESULTS` and
   client-side `LOAD DATA LOCAL INFILE`, including target columns, user
   variables, and ordered `SET` transformations. Local infile is disabled by
   default and bounded by `max_load_data_bytes`.
 
-The introspection surface GUI clients lean on has compatible schemas and live
-data wherever fsdb owns the underlying subsystem: `information_schema`
-column sets are diffed against a live
-MySQL 8.4, the `SHOW` family (`STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`,
-`CREATE TABLE`, ...), and a live `PROCESSLIST` with working
-`KILL QUERY|CONNECTION`.
+The introspection surface used by GUI clients exposes compatible schemas and
+live data wherever fsdb owns the underlying subsystem. Its
+`information_schema` column sets are checked against MySQL 8.4. The `SHOW`
+family covers metadata such as `STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`, and
+`CREATE TABLE`; `PROCESSLIST` is live, with working `KILL QUERY` and
+`KILL CONNECTION` commands.
 
-What makes the SQL surface *this* server's rather than generic SQL: every
-comparison, sort, group, dedup, join, and unique key folds by the column's
-own collation. `SET collation_connection` governs literals, so
-`SELECT 'åge' = 'age' COLLATE utf8mb4_bin` is 0 while
-`... COLLATE utf8mb4_0900_ai_ci` is 1. Charsets transcode on write;
-`SHOW CREATE TABLE` reports declared collations and column comments, and
-`information_schema.COLUMNS` carries `CHARACTER_SET_NAME`, `COLLATION_NAME`,
-and `COLUMN_COMMENT`.
+Every comparison, sort, group, deduplication, join, and unique key uses the
+effective collation of its operands. `SET collation_connection` governs
+literals, so `SELECT 'åge' = 'age' COLLATE utf8mb4_bin` is 0 while the same
+comparison under `utf8mb4_0900_ai_ci` is 1.
 
-The deliberate gaps — including complex updatable views, replication, and
-every smaller divergence — are
-documented in
-[docs/compatibility.md](docs/compatibility.md) and marked `ponytail:` at
-their code sites.
+Charsets transcode on write. `SHOW CREATE TABLE` reports declared collations
+and column comments, while `information_schema.COLUMNS` exposes
+`CHARACTER_SET_NAME`, `COLLATION_NAME`, and `COLUMN_COMMENT`.
+
+The open compatibility ledger, including complex updatable views and
+replication, lives in [GAPS.md](GAPS.md). The
+[compatibility guide](docs/compatibility.md) describes the validation method,
+and intentional local compromises carry `ponytail:` markers near the relevant
+code.
 
 ## Persistence format
 
@@ -324,43 +355,52 @@ authenticate them. Anyone who can modify `wal.bin` or `snapshot.fsdb` can
 modify the catalog, including the `mysql.user` rows loaded at startup. Keep
 the directory writable only by the account running fsdb.
 
-**`wal.bin`** — one framed record per committed event:
+### Write-ahead log
+
+`wal.bin` contains one framed record per committed event:
 
 ```
 [int32 LE payload length][uint32 LE CRC-32 of payload][payload bytes]
 ```
 
-The payload is a `CommitEvent` in a tag-byte codec (schema DDL as
-pre-encoded statement trees; row events as physical `Value[]`s, so replay
-writes the exact committed values — `NOW()` replays to the same instant, not
-a fresh one). A crash mid-append leaves a torn final record; replay stops
-before it (length overrun or CRC mismatch), truncates the WAL back to the
-last good offset, and the next append glues onto a clean boundary.
-Replay locates keyed row changes through the table's unique indexes and
-maintains derived indexes incrementally; keyless row-image events use one
-ordered table pass.
+The payload is a `CommitEvent` encoded with tagged binary values. Schema
+events contain pre-encoded statement trees; row events contain physical
+`Value[]` rows. Replay therefore writes the exact committed values: a stored
+`NOW()` value does not advance to a new instant after restart.
+
+A crash during append can leave a torn final record. Replay stops at a length
+overrun or CRC mismatch, truncates the WAL to its last valid boundary, and
+continues future appends from there.
+
+Keyed changes replay through unique indexes while derived indexes are updated
+incrementally. A row-image event without a usable unique key needs one ordered
+pass over the table.
 
 Concurrent commits use a bounded group-commit queue. Commits that arrive
 while a flush is in progress share the next append and `fsync`, while each
 client is acknowledged only after that batch is durable. Snapshot rotation
 passes through the same queue as a checkpoint barrier, so truncation cannot
-overtake a published WAL event. The defaults-file setting
-`wal_group_commit_queue_capacity` controls producer backpressure (default
-1024).
+overtake a published WAL event.
 
-**`snapshot.fsdb`** — the catalog as a self-delimiting binary tree
-(`database count` → tables → rows), same tag-byte codec and row format as the
-WAL. Written to `snapshot.fsdb.new`, durably flushed, then renamed
-into place; a `.new` that parses cleanly supersedes the WAL on startup, a
-torn one falls back to the old snapshot plus full WAL replay. fsdb avoids
-`FileStream.Flush(true)` on Unix because it issues the substantially stronger
-`F_FULLFSYNC` on macOS; plain `fsync` matches MySQL's default macOS flush
-semantics. Windows uses `Flush(true)` as its portable disk-flush path.
+The `wal_group_commit_queue_capacity` option controls producer backpressure.
 
-By default, the catalog is snapshotted and the WAL truncated once the WAL
-crosses 64 MiB or 100,000 events, or during a graceful shutdown. The
-`wal_rotate_bytes` and `wal_rotate_entries` defaults-file settings tune those
-thresholds.
+### Snapshots
+
+`snapshot.fsdb` stores the catalog as a self-delimiting binary tree: databases,
+tables, then rows. It uses the same tagged value format as the WAL.
+
+A checkpoint is written to `snapshot.fsdb.new`, durably flushed, and renamed
+into place. On startup, a valid `.new` file wins; a torn one falls back to the
+previous snapshot followed by full WAL replay.
+
+On Unix, fsdb calls `fsync` directly. This avoids `FileStream.Flush(true)`,
+which issues the substantially stronger `F_FULLFSYNC` on macOS and does not
+match MySQL's default macOS flush behavior. Windows uses `Flush(true)` as its
+portable durable-flush path.
+
+The server snapshots the catalog and truncates the WAL when either configured
+rotation threshold is crossed, and during graceful shutdown. Set those
+thresholds with `wal_rotate_bytes` and `wal_rotate_entries`.
 
 ## Embedding & extensibility
 
@@ -429,9 +469,11 @@ types instead of receiving preformatted strings.
 Arity is expressed by pattern matching, not by registration metadata. Handle
 `VNull` explicitly: fsdb evaluates expressions against an all-NULL probe row
 before scanning real rows, and SQL functions normally propagate NULL where
-appropriate. Raise `SqlError(code, message)` for a deliberate client-visible
-failure; any other exception becomes error 1105. An exception from an
-extension aborts the current transaction.
+appropriate.
+
+Raise `SqlError(code, message)` for a deliberate client-visible failure. Any
+other exception becomes error 1105, and an extension failure aborts the current
+transaction.
 
 The remaining snippets use the same `Fsdb`, `Fsdb.Functions`, and `Fsdb.Value`
 opens as the complete host above.
@@ -486,8 +528,8 @@ The wire-level integration test in
 the current session or perform external work:
 
 - `Database` is the current schema and agrees with `DATABASE()`.
-- `User` is the authenticated account name, without the host part displayed by
-  `CURRENT_USER()`.
+- `User` is the authenticated account name without its host qualifier;
+  `CURRENT_USER()` returns the selected `name@host` account.
 - `Cancellation` is signalled when the client disconnects, cancels, or is
   killed. Pass it into blocking I/O.
 
@@ -561,12 +603,14 @@ let connection = Db.connect db
 connection.Query "SELECT alias, model FROM fsdb.models ORDER BY alias" |> ignore
 ```
 
-The provider must return one `Value` per declared column. Re-registering a
-name replaces it case-insensitively, and a virtual table shadows a physical
-table with the same name. `VirtualTable.text`, `int`, `bigint`, and `double`
-create nullable columns with the server defaults; other types can use an
-`Ast.ColumnDef`. Writes to the virtual table are rejected. Call `registerTable`
-after `withDataDir`, because `withDataDir` replaces the store.
+The provider must return one `Value` per declared column. `VirtualTable.text`,
+`int`, `bigint`, and `double` create nullable columns with server defaults;
+other types can use an `Ast.ColumnDef`.
+
+Names are case-insensitive. Re-registering a name replaces its provider, and a
+virtual table shadows a physical table with the same name. Writes are rejected.
+Call `registerTable` after `withDataDir`, because `withDataDir` replaces the
+store.
 
 ### Consume committed changes
 
@@ -603,9 +647,11 @@ let drain () =
 Handlers run synchronously under the commit-ordering lock. Keep them fast,
 avoid blocking, and never write back to the database from a handler; re-entry
 deadlocks. Queue events and process them after the originating statement
-returns. A thrown handler exception can make that statement report an error,
-but cannot roll back data that has already been published, so handlers should
-capture their own failures.
+returns.
+
+A handler exception can make the statement report an error, but it cannot roll
+back data that has already been published. Handlers should therefore capture
+their own failures.
 
 ### Run SQL in-process or over the wire
 
@@ -685,23 +731,28 @@ whose bytes differ but extracted identity is the same.
 
 ## Benchmarking
 
-`benchmarks/Fsdb.Benchmarks` runs fsdb head-to-head against a native MySQL
-8.4, same schema, same seeded data, same queries, via BenchmarkDotNet.
+`benchmarks/Fsdb.Benchmarks` runs fsdb head-to-head against native MySQL 8.4
+through BenchmarkDotNet. Each pair uses the same schema, seeded data, and SQL.
 
 ```sh
-just bench              # full latency suite, results -> benchmarks/results/<git-sha>.md
-just bench-features     # recent SQL-feature latency subset
-just bench-quick        # ShortRun job for fast local iteration, no results file
-just bench-durable      # durability-matched: fsdb WAL vs MySQL fsync/no-fsync
-just bench-scale        # latency suite at 100k users / 500k orders
-just bench-load         # N-writer throughput under concurrency (ops/sec)
-just bench-load-scale   # throughput at 1/2/4/8/16 workers
+just bench               # full latency suite
+just bench-features      # selected SQL-feature latency subset
+just bench-quick         # ShortRun job for fast local iteration
+just bench-durable       # fsdb WAL vs MySQL fsync/no-fsync
+just bench-scale         # larger seeded data set
+just bench-load          # concurrent writer throughput
+just bench-load-scale    # throughput across worker counts
 just bench-comprehensive # all latency, durability, scale, and load suites
 ```
 
-Both servers start ad hoc (no brew services) and shut down after. fsdb
-optimizes for readable, idiomatic F# over raw speed, so expect MySQL to win
-most of these — the numbers track fsdb's hotspots, not parity.
+Each recipe starts both servers for the run and shuts them down afterward; it
+does not use Homebrew services. Result artifacts are written under
+[`benchmarks/results`](benchmarks/results), including the quick run.
+
+fsdb optimizes for readable, idiomatic F# over raw speed, so MySQL is expected
+to win many workloads. The measurements identify scaling slopes and engine
+hotspots rather than serving as a parity target. See the
+[benchmark guide](benchmarks/README.md) for isolation and interpretation rules.
 
 ## Development
 
@@ -743,6 +794,7 @@ is not part of `just check`; see the
 ## Documentation
 
 - [Compatibility](docs/compatibility.md) — how MySQL 8.4 equivalence is validated
+- [Open gaps](GAPS.md) — current, evidence-backed differences from MySQL 8.4
 - [Comment style](docs/comment-style.md) — the grading every comment survives
 - [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
 - [Benchmarks](benchmarks/README.md) — workloads and methodology
