@@ -7720,7 +7720,7 @@ let private deleteRowsCore
                   let database, table = catalogTableIdentity catalog address
                   RowsUpdated(database, table, changes) ]
 
-    let apply =
+    let apply () =
         withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
             let key = normalizeTableName tableName
             let address = tableAddress dbName key
@@ -7747,11 +7747,11 @@ let private deleteRowsCore
 
     let result =
         match candidates with
-        | None -> apply
+        | None -> apply ()
         | Some candidates ->
             candidates
             |> List.map fst
-            |> fun rowIds -> withRowLocks store dbName tableName rowIds (fun () -> apply)
+            |> fun rowIds -> withRowLocks store dbName tableName rowIds apply
 
     match result with
     | Ok(affected, _, _, _) -> Ok affected
@@ -7906,6 +7906,32 @@ let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Datab
     | [ tableKey, rowIds ] when not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb -> Some(tableKey, rowIds)
     | _ -> None
 
+let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb: Database) =
+    if obj.ReferenceEquals(liveDb, baseDb) then
+        batchDb
+    else
+        match tryPointUpdate baseDb batchDb liveDb with
+        | Some(tableKey, rowIds) -> mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
+        | None ->
+            let tableKeys = Set.union (keysOf baseDb) (keysOf batchDb)
+
+            let merged =
+                tableKeys
+                |> Set.fold
+                    (fun acc tableName ->
+                        match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
+                        | Some baseTable, Some batchTable, _ when obj.ReferenceEquals(baseTable, batchTable) -> acc
+                        | Some baseTable, None, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.remove tableName acc
+                        | None, Some batchTable, None -> Map.add tableName batchTable acc
+                        | Some baseTable, Some batchTable, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.add tableName batchTable acc
+                        | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
+                            Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
+                        | _ -> raise (LockWaitTimeout dbName))
+                    liveDb
+
+            validateMergedForeignKeys dbName merged
+            merged
+
 let private mergeDatabaseSlotPublishing
     (timeout: TimeSpan)
     (dbName: string)
@@ -7919,31 +7945,7 @@ let private mergeDatabaseSlotPublishing
 
     try
         let liveDb = slot.Value
-
-        if obj.ReferenceEquals(liveDb, baseDb) then
-            slot.Value <- batchDb
-        else
-            match tryPointUpdate baseDb batchDb liveDb with
-            | Some(tableKey, rowIds) -> slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
-            | None ->
-                let tableKeys = Set.union (keysOf baseDb) (keysOf batchDb)
-
-                let merged =
-                    tableKeys
-                    |> Set.fold
-                        (fun acc tableName ->
-                            match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
-                            | Some baseTable, Some batchTable, _ when obj.ReferenceEquals(baseTable, batchTable) -> acc
-                            | Some baseTable, None, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.remove tableName acc
-                            | None, Some batchTable, None -> Map.add tableName batchTable acc
-                            | Some baseTable, Some batchTable, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.add tableName batchTable acc
-                            | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
-                                Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
-                            | _ -> raise (LockWaitTimeout dbName))
-                        liveDb
-
-                validateMergedForeignKeys dbName merged
-                slot.Value <- merged
+        slot.Value <- mergeDatabase dbName baseDb batchDb liveDb
 
         prepare ()
     finally
@@ -7994,103 +7996,98 @@ let private commitCatalogIntoWith
     let batchCatalog = snapshot.Catalog
     let validateWholeSnapshot = validateWholeSnapshot || catalogHasQualifiedForeignKeys batchCatalog
 
-    match store.PendingEvents, validateWholeSnapshot with
-    | Some _, false ->
-        mergeCatalogIntoWithTimeoutCore timeout store baseCatalog snapshot.Catalog
-        prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
-    | _ ->
-        let changedKeys =
-            Set.union (keysOf baseCatalog) (keysOf batchCatalog)
-            |> Set.filter (fun dbName ->
-                match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-                | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
-                | None, None -> false
-                | _ -> true)
+    let changedKeys =
+        Set.union (keysOf baseCatalog) (keysOf batchCatalog)
+        |> Set.filter (fun dbName ->
+            match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+            | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
+            | None, None -> false
+            | _ -> true)
 
-        if not changedKeys.IsEmpty then
-            let needsCatalogLock =
-                validateWholeSnapshot
-                || changedKeys
-                   |> Seq.exists (fun dbName ->
-                       Map.containsKey dbName baseCatalog <> Map.containsKey dbName batchCatalog)
+    if not changedKeys.IsEmpty then
+        let needsCatalogLock =
+            validateWholeSnapshot
+            || changedKeys
+               |> Seq.exists (fun dbName ->
+                   Map.containsKey dbName baseCatalog <> Map.containsKey dbName batchCatalog)
 
-            let publish () =
-                let existingKeys = if validateWholeSnapshot then keysOf baseCatalog else changedKeys
+        let publish () =
+            let existingKeys = if validateWholeSnapshot then keysOf baseCatalog else changedKeys
 
-                let newKeys =
-                    changedKeys
-                    |> Set.filter (fun dbName ->
-                        Map.containsKey dbName baseCatalog |> not
-                        && Map.containsKey dbName batchCatalog)
+            let newKeys =
+                changedKeys
+                |> Set.filter (fun dbName ->
+                    Map.containsKey dbName baseCatalog |> not
+                    && Map.containsKey dbName batchCatalog)
 
-                let lockedKeys = Set.union existingKeys newKeys
+            let lockedKeys = Set.union existingKeys newKeys
 
-                let databases =
-                    lockedKeys
-                    |> Seq.map (fun dbName ->
+            let databases =
+                lockedKeys
+                |> Seq.map (fun dbName ->
+                    match store.Databases.TryGetValue dbName with
+                    | true, slot -> dbName, slot
+                    | false, _ when Set.contains dbName newKeys -> dbName, ref Map.empty
+                    | false, _ -> raise (LockWaitTimeout dbName))
+                |> Seq.toList
+
+            let rec withSlots remaining publish =
+                match remaining with
+                | [] -> publish ()
+                | (dbName, slot) :: tail ->
+                    if not (Monitor.TryEnter(slot, timeout)) then
+                        raise (LockWaitTimeout dbName)
+
+                    try
+                        withSlots tail publish
+                    finally
+                        Monitor.Exit slot
+
+            withSlots databases (fun () ->
+                for dbName, slot in databases do
+                    if not (Set.contains dbName newKeys) then
                         match store.Databases.TryGetValue dbName with
-                        | true, slot -> dbName, slot
-                        | false, _ when Set.contains dbName newKeys -> dbName, ref Map.empty
-                        | false, _ -> raise (LockWaitTimeout dbName))
+                        | true, current when obj.ReferenceEquals(current, slot) -> ()
+                        | _ -> raise (LockWaitTimeout dbName)
+
+                if validateWholeSnapshot then
+                    for dbName, slot in databases do
+                        match Map.tryFind dbName baseCatalog with
+                        | Some baseDb when not (obj.ReferenceEquals(slot.Value, baseDb)) -> raise (LockWaitTimeout dbName)
+                        | _ -> ()
+
+                    if store.ForeignKeyChecks then
+                        validateCatalogForeignKeys baseCatalog batchCatalog
+
+                let publicationPlan =
+                    changedKeys
+                    |> Seq.map (fun dbName ->
+                        let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
+
+                        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+                        | Some baseDb, None when obj.ReferenceEquals(slot.Value, baseDb) -> dbName, slot, None
+                        | None, Some batchDb when not (store.Databases.ContainsKey dbName) -> dbName, slot, Some batchDb
+                        | Some _, Some batchDb when validateWholeSnapshot -> dbName, slot, Some batchDb
+                        | Some baseDb, Some batchDb -> dbName, slot, Some(mergeDatabase dbName baseDb batchDb slot.Value)
+                        | _ -> raise (LockWaitTimeout dbName))
                     |> Seq.toList
 
-                let rec withSlots remaining publish =
-                    match remaining with
-                    | [] -> publish ()
-                    | (dbName, slot) :: tail ->
-                        if not (Monitor.TryEnter(slot, timeout)) then
-                            raise (LockWaitTimeout dbName)
+                for dbName, slot, database in publicationPlan do
+                    match database with
+                    | Some database when Set.contains dbName newKeys ->
+                        slot.Value <- database
+                        store.Databases.TryAdd(dbName, slot) |> ignore
+                    | Some database -> slot.Value <- database
+                    | None -> store.Databases.TryRemove dbName |> ignore
 
-                        try
-                            withSlots tail publish
-                        finally
-                            Monitor.Exit slot
+                prepareCommit store snapshot)
 
-                withSlots databases (fun () ->
-                    for dbName, slot in databases do
-                        if not (Set.contains dbName newKeys) then
-                            match store.Databases.TryGetValue dbName with
-                            | true, current when obj.ReferenceEquals(current, slot) -> ()
-                            | _ -> raise (LockWaitTimeout dbName)
+        let acknowledge =
+            if needsCatalogLock then lock store.Lock publish else publish ()
 
-                    if validateWholeSnapshot then
-                        for dbName, slot in databases do
-                            match Map.tryFind dbName baseCatalog with
-                            | Some baseDb when not (obj.ReferenceEquals(slot.Value, baseDb)) -> raise (LockWaitTimeout dbName)
-                            | _ -> ()
-
-                        if store.ForeignKeyChecks then
-                            validateCatalogForeignKeys baseCatalog batchCatalog
-
-                    for dbName in changedKeys do
-                        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-                        | Some baseDb, None ->
-                            match store.Databases.TryGetValue dbName with
-                            | true, slot when obj.ReferenceEquals(slot.Value, baseDb) ->
-                                store.Databases.TryRemove dbName |> ignore
-                            | _ -> raise (LockWaitTimeout dbName)
-                        | None, Some batchDb ->
-                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
-                            slot.Value <- batchDb
-
-                            if not (store.Databases.TryAdd(dbName, slot)) then
-                                raise (LockWaitTimeout dbName)
-                        | Some _, Some batchDb when validateWholeSnapshot ->
-                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
-                            slot.Value <- batchDb
-                        | Some baseDb, Some batchDb ->
-                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
-                            mergeDatabaseSlot timeout dbName slot baseDb batchDb
-                        | None, None -> ()
-
-                    prepareCommit store snapshot)
-
-            let acknowledge =
-                if needsCatalogLock then lock store.Lock publish else publish ()
-
-            acknowledge ()
-        else
-            prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
+        acknowledge ()
+    else
+        prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
 
 let commitCatalogIntoWithTimeout (timeout: TimeSpan) (publishFlat: bool) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->

@@ -351,6 +351,51 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected the concurrent row after commit, got %A" result
 
+          testCase "an unseeded savepoint rollback does not replace the live catalog"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE tx_unseeded_savepoint (id INT PRIMARY KEY)"
+              let transaction, _ = handle setup "BEGIN"
+              let transaction, saved = handle transaction "SAVEPOINT before_view"
+              Expect.equal saved (Affected 0UL) "the savepoint is created before a consistent view"
+
+              match transaction.Tx with
+              | Some tx -> Expect.isFalse tx.Seeded "SAVEPOINT does not establish the deferred consistent view"
+              | None -> failtest "expected an open transaction"
+
+              let other = create 2 store
+              let other, inserted = handle other "INSERT INTO tx_unseeded_savepoint VALUES (1)"
+              Expect.equal inserted (Affected 1UL) "the other session commits after the savepoint"
+
+              let transaction, rolledBack = handle transaction "ROLLBACK TO SAVEPOINT before_view"
+              Expect.equal rolledBack (Affected 0UL) "the unseeded rollback succeeds"
+
+              match handle other "SELECT id FROM tx_unseeded_savepoint" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the concurrent commit to remain live, got %A" result
+
+              match handle transaction "SELECT id FROM tx_unseeded_savepoint" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the first consistent read to include the earlier commit, got %A" result
+
+          testCase "READ UNCOMMITTED rebases an unseeded savepoint before the first write"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session, _ = handle (create 1 store) "CREATE TABLE tx_ru_unseeded_savepoint (id INT PRIMARY KEY)"
+              let session, _ = handle session "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "SAVEPOINT before_write"
+              let session, inserted = handle session "INSERT INTO tx_ru_unseeded_savepoint VALUES (1)"
+              Expect.equal inserted (Affected 1UL) "the first database statement seeds and writes"
+              let session, rolledBack = handle session "ROLLBACK TO SAVEPOINT before_write"
+              Expect.equal rolledBack (Affected 0UL) "the rebased savepoint rolls the write back"
+              let session, committed = handle session "COMMIT"
+              Expect.equal committed (Affected 0UL) "the empty transaction commits"
+
+              match handle session "SELECT id FROM tx_ru_unseeded_savepoint" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected the post-savepoint write to be absent, got %A" result
+
           testCase "SERIALIZABLE rejects write skew after a concurrent commit"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

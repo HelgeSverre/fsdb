@@ -2059,6 +2059,13 @@ let startTransactionStatement (session: Session) : Session =
     | Some tx when not tx.Seeded && tx.Isolation = ReadUncommitted ->
         let baseCatalog, transactionSnapshot = readUncommittedBase session
         let snapshot = transactionSnapshot |> Storage.carryTransactionLocks tx.Snapshot
+        let savepoints =
+            tx.Savepoints
+            |> Map.map (fun _ savepoint ->
+                { savepoint with
+                    Seeded = true
+                    BaseCatalog = baseCatalog
+                    Catalog = baseCatalog })
 
         { session with
             Tx =
@@ -2066,7 +2073,8 @@ let startTransactionStatement (session: Session) : Session =
                     { tx with
                         Snapshot = snapshot
                         BaseCatalog = baseCatalog
-                        Seeded = true } }
+                        Seeded = true
+                        Savepoints = savepoints } }
     | Some tx when not tx.Seeded ->
         let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
         let snapshot =
@@ -2077,6 +2085,7 @@ let startTransactionStatement (session: Session) : Session =
             tx.Savepoints
             |> Map.map (fun _ savepoint ->
                 { savepoint with
+                    Seeded = true
                     BaseCatalog = baseCatalog
                     Catalog = baseCatalog })
 
@@ -2173,8 +2182,9 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
                             Map.add
                                 name
                                 { Sequence = seq
+                                  Seeded = tx.Seeded
                                   BaseCatalog = tx.BaseCatalog
-                                  Catalog = tx.Snapshot.Catalog
+                                  Catalog = if tx.Seeded then tx.Snapshot.Catalog else Map.empty
                                   PendingEventCount = eventCount
                                   RollbackWork = Storage.transactionRollbackWork tx.Snapshot }
                                 tx.Savepoints
@@ -2191,16 +2201,17 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
         // `catalog` is the savepoint's own stale copy of every `NextAutoId`,
         // so bump it back up to whatever this transaction ran ahead to
         // since, before wholesale-replacing the snapshot's catalog with it.
-        let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
-        Storage.setCatalog tx.Snapshot catalog
-        Storage.restoreTransactionRollbackWork tx.Snapshot savepoint.RollbackWork
-        // Drop every event this transaction buffered after the savepoint —
-        // otherwise a WAL replay would apply writes the savepoint rollback
-        // just undid.
-        tx.Snapshot.PendingEvents
-        |> Option.iter (fun buffer ->
-            if buffer.Count > savepoint.PendingEventCount then
-                buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
+        if savepoint.Seeded then
+            let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
+            Storage.setCatalog tx.Snapshot catalog
+            Storage.restoreTransactionRollbackWork tx.Snapshot savepoint.RollbackWork
+            // Drop every event this transaction buffered after the savepoint —
+            // otherwise a WAL replay would apply writes the savepoint rollback
+            // just undid.
+            tx.Snapshot.PendingEvents
+            |> Option.iter (fun buffer ->
+                if buffer.Count > savepoint.PendingEventCount then
+                    buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
 
         // Real MySQL also destroys every savepoint established *after* the
         // one rolled back to — the named savepoint itself survives (a

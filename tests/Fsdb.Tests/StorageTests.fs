@@ -1493,6 +1493,56 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | other -> failtestf "expected Ok 0, got %A" other
 
+                testCase "a candidate delete waits for its row lock before publishing"
+                <| fun _ ->
+                    let store = create ()
+                    let index = { Name = "ix_category"; KeyColumns = indexColumns [ "category" ]; Unique = false; Visible = true; Kind = BTree }
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "locked_items"
+                        [ col "id" (TInt false) false; col "category" (TVarchar 20) false ]
+                        [ index ]
+                        []
+                        None
+                        None
+                    |> ignore
+
+                    insertRows store defaultDatabase "locked_items" None [ [ VInt 1L; VString "books" ] ] |> ignore
+
+                    let candidates =
+                        match trySecondaryLookup store defaultDatabase "locked_items" "category" (VString "books") with
+                        | Some(_, rows) -> rows
+                        | None -> failtest "expected an indexed candidate"
+
+                    let rowIds = candidates |> List.map fst
+                    let holder = beginTransactionContext store
+                    acquireTransactionWriteTargets (System.TimeSpan.FromSeconds 1.) holder defaultDatabase "locked_items" rowIds []
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit.Add events.Add
+                    use started = new System.Threading.ManualResetEventSlim(false)
+
+                    let deletion =
+                        System.Threading.Tasks.Task.Run(fun () ->
+                            started.Set()
+                            deleteRowsCandidates store defaultDatabase "locked_items" candidates (fun _ -> Ok true))
+
+                    Expect.isTrue (started.Wait(System.TimeSpan.FromSeconds 1.)) "the delete starts"
+
+                    try
+                        Expect.isFalse (deletion.Wait(System.TimeSpan.FromMilliseconds 100.)) "the delete remains blocked on the row lock"
+                        Expect.isEmpty events "a waiting delete emits no commit event"
+
+                        match scan store defaultDatabase "locked_items" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 1 "the row remains visible while the delete waits"
+                        | Error error -> failtestf "expected the locked table, got %A" error
+                    finally
+                        releaseTransactionLocks holder
+
+                    Expect.isTrue (deletion.Wait(System.TimeSpan.FromSeconds 5.)) "the delete finishes after the lock is released"
+                    Expect.equal (deletion.GetAwaiter().GetResult()) (Ok 1) "the delete succeeds once it owns the row lock"
+
                 testCase "deleteRows removes matching rows and returns the count"
                 <| fun _ ->
                     let store = withUsersTable ()
@@ -3514,6 +3564,77 @@ let tests =
                               RowsInserted(defaultDatabase, "users", [ [| VInt 2L; VString "bob"; VInt 40L |] ]) ]
                             "both buffered inserts, in order"
                     | other -> failtestf "expected exactly one TransactionCommitted, got %A" other
+
+                testCase "a cross-database conflict publishes none of the transaction"
+                <| fun _ ->
+                    let store = create ()
+                    let columns = [ col "id" (TInt false) false; col "value" (TInt false) false ]
+
+                    for database in [ "atomic_a"; "atomic_b" ] do
+                        createDatabase store database |> ignore
+                        createTable store database "items" columns [] [] None None |> ignore
+                        insertRows store database "items" None [ [ VInt 1L; VInt 0L ] ] |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit.Add events.Add
+                    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+                    let setValue value (row: Value[]) = Ok [| row.[0]; VInt value |]
+
+                    updateRows snapshot "atomic_a" "items" None (fun _ -> Ok true) (setValue 1L) |> ignore
+                    updateRows snapshot "atomic_b" "items" None (fun _ -> Ok true) (setValue 1L) |> ignore
+                    updateRows store "atomic_b" "items" None (fun _ -> Ok true) (setValue 2L) |> ignore
+                    events.Clear()
+
+                    Expect.throwsT<LockWaitTimeout>
+                        (fun () -> commitCatalogInto store baseCatalog snapshot)
+                        "the later database conflicts with its changed live row"
+
+                    let value database =
+                        match scan store database "items" with
+                        | Ok(_, rows) -> rows |> Seq.exactlyOne |> fun row -> row.[1]
+                        | Error error -> failtestf "expected %s.items, got %A" database error
+
+                    Expect.equal (value "atomic_a") (VInt 0L) "the earlier database was not partially published"
+                    Expect.equal (value "atomic_b") (VInt 2L) "the concurrent value remains"
+                    Expect.isEmpty events "the rejected transaction emits no commit events"
+
+                testCase "a later database lock timeout publishes none of the transaction"
+                <| fun _ ->
+                    let store = create ()
+                    let columns = [ col "id" (TInt false) false; col "value" (TInt false) false ]
+
+                    for database in [ "timeout_a"; "timeout_b" ] do
+                        createDatabase store database |> ignore
+                        createTable store database "items" columns [] [] None None |> ignore
+                        insertRows store database "items" None [ [ VInt 1L; VInt 0L ] ] |> ignore
+
+                    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+                    let setValue (row: Value[]) = Ok [| row.[0]; VInt 1L |]
+                    updateRows snapshot "timeout_a" "items" None (fun _ -> Ok true) setValue |> ignore
+                    updateRows snapshot "timeout_b" "items" None (fun _ -> Ok true) setValue |> ignore
+                    let blockedSlot = store.Databases.["timeout_b"]
+                    System.Threading.Monitor.Enter blockedSlot
+
+                    try
+                        let commit =
+                            System.Threading.Tasks.Task.Run(fun () ->
+                                commitCatalogIntoWithTimeout (System.TimeSpan.FromMilliseconds 100.) false store baseCatalog snapshot)
+
+                        Expect.isTrue
+                            (System.Threading.SpinWait.SpinUntil((fun () -> commit.IsCompleted), System.TimeSpan.FromSeconds 5.))
+                            "the commit reaches its lock timeout"
+
+                        try
+                            commit.GetAwaiter().GetResult()
+                            failtest "expected the second database lock to time out"
+                        with :? LockWaitTimeout ->
+                            ()
+                    finally
+                        System.Threading.Monitor.Exit blockedSlot
+
+                    match scan store "timeout_a" "items" with
+                    | Ok(_, rows) -> Expect.equal ((Seq.exactlyOne rows).[1]) (VInt 0L) "the earlier database remains unchanged"
+                    | Error error -> failtestf "expected timeout_a.items, got %A" error
 
                 testCase "a transaction snapshot and its merge base share one catalog capture"
                 <| fun _ ->
