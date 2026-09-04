@@ -5748,6 +5748,11 @@ let rec private invokeStoredFunction
             locals
             statements
 
+    use nesting =
+        match Limits.tryAcquireStoredProgramFrame () with
+        | Some nesting -> nesting
+        | None -> raise (Diagnostics.EvaluationError(1436, "Thread stack overrun while executing stored programs"))
+
     let outcome =
         DynamicScope.withValue storedFunctionCalls (Some(key :: calls)) (fun () ->
             DynamicScope.withValue storedFunctionSession (Some executionSession) (fun () ->
@@ -6225,22 +6230,27 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
                                     executed, result
 
-                            let (executed, result), changed =
-                                Storage.withExecutionSettings executionStore capturedSettings (fun () ->
-                                    let outcome, changed = captureRoutineVariableChanges executeBody
-                                    resultingSettings <- Storage.executionSettings executionStore
-                                    outcome, changed)
+                            match Limits.tryAcquireStoredProgramFrame () with
+                            | None -> session, Err(1436, "Thread stack overrun while executing stored programs")
+                            | Some nesting ->
+                                use _nesting = nesting
 
-                            mergeRoutineExecutionSettings originalSettings changed resultingSettings
-                            |> Storage.setExecutionSettings executionStore
+                                let (executed, result), changed =
+                                    Storage.withExecutionSettings executionStore capturedSettings (fun () ->
+                                        let outcome, changed = captureRoutineVariableChanges executeBody
+                                        resultingSettings <- Storage.executionSettings executionStore
+                                        outcome, changed)
 
-                            { executed with
-                                User = session.User
-                                AccountHost = session.AccountHost
-                                Database = session.Database
-                                RoutineStack = session.RoutineStack
-                                Variables = restoreRoutineVariables session.Variables changed executed.Variables },
-                            result
+                                mergeRoutineExecutionSettings originalSettings changed resultingSettings
+                                |> Storage.setExecutionSettings executionStore
+
+                                { executed with
+                                    User = session.User
+                                    AccountHost = session.AccountHost
+                                    Database = session.Database
+                                    RoutineStack = session.RoutineStack
+                                    Variables = restoreRoutineVariables session.Variables changed executed.Variables },
+                                result
         | DropProcedure(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)

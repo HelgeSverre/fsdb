@@ -94,6 +94,25 @@ let maxAdvisoryLocksPerSession = 64
 let maxPreparedCursors = 64
 let maxPreparedCursorRows = 100_000
 let maxPreparedCursorBytes = 64L * 1024L * 1024L
+let maxStoredProgramNesting = 16
+let maxViewMetadataNesting = 32
+let maxConcurrentEventExecutions = 8
+let eventExecutionTimeout = TimeSpan.FromSeconds 60.0
+
+let private storedProgramNesting = new ThreadLocal<int>(fun () -> 0)
+
+let tryAcquireStoredProgramFrame () : IDisposable option =
+    if storedProgramNesting.Value >= maxStoredProgramNesting then
+        None
+    else
+        storedProgramNesting.Value <- storedProgramNesting.Value + 1
+        let mutable released = 0
+
+        Some
+            { new IDisposable with
+                member _.Dispose() =
+                    if Interlocked.Exchange(&released, 1) = 0 then
+                        storedProgramNesting.Value <- storedProgramNesting.Value - 1 }
 
 /// Password lifetime inherited by accounts whose mysql.user row stores NULL.
 let mutable defaultPasswordLifetimeDays = 0

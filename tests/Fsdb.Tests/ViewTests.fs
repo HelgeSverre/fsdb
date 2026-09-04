@@ -891,6 +891,51 @@ let tests =
               | Err(1462, message) -> Expect.stringContains message "recursive reference" "clear recursion error"
               | other -> failtestf "expected 1462, got %A" other
 
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.prepareStatementForSession session "SELECT * FROM looped" with
+              | Ok(statement, parameterCount) ->
+                  let parameters, _ = Fsdb.QueryHandler.preparedMetadata session statement parameterCount
+                  Expect.isEmpty parameters "cyclic origin discovery completes without parameter metadata"
+              | Error error -> failtestf "expected cyclic view text to prepare safely, got %A" error
+
+              expectOk (run store "CREATE VIEW looped_peer AS SELECT * FROM looped") "create peer view"
+              expectOk (run store "CREATE OR REPLACE VIEW looped AS SELECT * FROM looped_peer") "create mutual cycle"
+
+              match Fsdb.QueryHandler.prepareStatementForSession session "SELECT * FROM looped_peer" with
+              | Ok(statement, parameterCount) ->
+                  Fsdb.QueryHandler.preparedMetadata session statement parameterCount |> ignore
+              | Error error -> failtestf "expected mutual view cycle text to prepare safely, got %A" error
+
+          testCase "acyclic view metadata traversal is depth bounded"
+          <| fun _ ->
+              let store = setup ()
+              let deepest = Fsdb.Limits.maxViewMetadataNesting * 4
+              expectOk (run store "CREATE VIEW depth_view_0 AS SELECT id FROM vendors") "create base view"
+
+              for index in 1 .. deepest do
+                  let result =
+                      run
+                          store
+                          (sprintf "CREATE VIEW depth_view_%d AS SELECT * FROM depth_view_%d" index (index - 1))
+
+                  expectOk result "create depth-bounded view"
+
+              let session = Fsdb.Session.create 1 store
+
+              match
+                  Fsdb.QueryHandler.prepareStatementForSession
+                      session
+                      (sprintf "SELECT * FROM depth_view_%d" deepest)
+              with
+              | Ok(statement, parameterCount) ->
+                  Fsdb.QueryHandler.preparedMetadata session statement parameterCount |> ignore
+              | Error _ -> ()
+
+              match run store (sprintf "SELECT * FROM depth_view_%d" deepest) with
+              | Err(1436, message) -> Expect.stringContains message "view" "execution uses the same expansion ceiling"
+              | other -> failtestf "expected bounded view execution to return 1436, got %A" other
+
           testCase "view definitions persist through the WAL"
           <| fun _ ->
               TestSupport.withDirectory "view" (fun dir ->

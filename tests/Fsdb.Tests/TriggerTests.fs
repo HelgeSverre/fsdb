@@ -962,6 +962,35 @@ let tests =
               expectOk (runDefault store "INSERT INTO c0(n) VALUES (1)") "fire chain"
               Expect.equal (rows store "SELECT n FROM c12") [ [ Some "1" ] ] "the terminal trigger receives the row"
 
+          testCase "acyclic trigger nesting stops before exhausting the process stack"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for index in 0 .. Fsdb.Limits.maxStoredProgramNesting + 1 do
+                  expectOk (runDefault store (sprintf "CREATE TABLE deep%d (n INT)" index)) "create guarded chain table"
+
+              for index in 0 .. Fsdb.Limits.maxStoredProgramNesting do
+                  expectOk
+                      (runDefault
+                          store
+                          (sprintf
+                              "CREATE TRIGGER deep_trigger%d AFTER INSERT ON deep%d FOR EACH ROW INSERT INTO deep%d(n) VALUES (NEW.n)"
+                              index
+                              index
+                              (index + 1)))
+                      "create guarded chain trigger"
+
+              match runDefault store "INSERT INTO deep0(n) VALUES (1)" with
+              | Err(1436, message) -> Expect.stringContains message "stack" "resource error describes the exhausted stack budget"
+              | other -> failtestf "expected guarded trigger nesting to return 1436, got %A" other
+
+              Expect.equal
+                  (rows store (sprintf "SELECT n FROM deep%d" (Fsdb.Limits.maxStoredProgramNesting + 1)))
+                  []
+                  "the rejected statement does not reach the terminal table"
+
+              Expect.equal (rows store "SELECT 1") [ [ Some "1" ] ] "the server remains usable"
+
           testCase "multiple triggers honor creation and explicit action order"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

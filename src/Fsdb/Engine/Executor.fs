@@ -338,6 +338,7 @@ let private cteOriginScope = System.Threading.AsyncLocal<Map<string, ColumnOrigi
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
+let private viewMergeDepth = System.Threading.AsyncLocal<int>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
 let private triggerTextExecutor = System.Threading.AsyncLocal<(TriggerTextExecution -> string -> QueryResult) option>()
@@ -656,7 +657,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
     let rec classify seen (view: StoredView) (select: SelectStmt) =
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-        if Set.contains key seen then
+        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
             None
         else
             match select.From with
@@ -2654,15 +2655,22 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
         | None ->
             match tryStoredView store database table.Table with
             | Some view ->
-                match Parser.parse view.Definition with
-                | Ok(Select viewSelect) ->
-                    let columns = selectProjectionColumns store view.Schema viewSelect
+                let stack = currentViewStack ()
+                let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-                    if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
-                        columns
-                    else
-                        List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
-                | _ -> []
+                if Set.contains key stack || stack.Count >= Limits.maxViewMetadataNesting then
+                    []
+                else
+                    DynamicScope.withValue viewStack (Set.add key stack) (fun () ->
+                        match Parser.parse view.Definition with
+                        | Ok(Select viewSelect) ->
+                            let columns = selectProjectionColumns store view.Schema viewSelect
+
+                            if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
+                                columns
+                            else
+                                List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
+                        | _ -> [])
             | None ->
                 scan store database table.Table
                 |> Result.toOption
@@ -5239,6 +5247,8 @@ and private resolveTableRef
             | true, cached -> cached
             | _ when Set.contains stackKey stack ->
                 Error(Err(1462, sprintf "View's SELECT contains a recursive reference to view '%s'" view.Name))
+            | _ when stack.Count >= Limits.maxViewMetadataNesting ->
+                Error(Err(1436, "Thread stack overrun while expanding stored views"))
             | _ ->
                 let savedCtes = currentCteScope ()
                 let savedCteOrigins = currentCteOriginScope ()
@@ -5556,7 +5566,7 @@ and private describeQueryColumns
                 | Some(view: StoredView) ->
                     let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-                    if Set.contains key seen then
+                    if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
                         None
                     else
                         Parser.parse view.Definition
@@ -8455,7 +8465,13 @@ and private runSelectStmt
     else
     match tryMergeDirectView store registry dbName select with
     | Error error -> error, [], []
-    | Ok(Some merged) -> runSelectStmt store registry dbName merged outer
+    | Ok(Some merged) ->
+        let depth = viewMergeDepth.Value
+
+        if depth >= Limits.maxViewMetadataNesting then
+            Err(1436, "Thread stack overrun while expanding stored views"), [], []
+        else
+            DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmt store registry dbName merged outer)
     | Ok None -> runUnmergedSelectStmt store registry dbName select outer
 
 and private runUnmergedSelectStmt
@@ -15433,10 +15449,11 @@ let rec executeAs
         (triggers: StoredTrigger list)
         (rows: (Value[] option * Value[] option) list)
         : QueryResult option =
+        let chain = triggerChain.Value
+
         match scan runStore db table with
         | Error _ -> None
         | Ok(columns, _) ->
-            let chain = triggerChain.Value
             let self = db, normalizeTableName table
             let protectedTables = Set.add self (Set.union (Set.ofList chain) triggerInvocationTables.Value)
 
@@ -15489,7 +15506,6 @@ let rec executeAs
                 // Eval-time DIRECTONLY backstop, same as generated
                 // columns — see `shadowDirectOnly`'s doc.
                 let shadowed = shadowDirectOnly "trigger" registry
-                triggerChain.Value <- self :: chain
 
                 // An extension's own `SqlError` (including the
                 // DirectOnly shadow's 3102) surfaces as a clean
@@ -15900,17 +15916,23 @@ let rec executeAs
 
                             runStatements scope statements |> fst))
 
-                try
-                    rows
-                    |> List.tryPick (fun (oldRow, newRow) ->
-                        bodies
-                        |> List.tryPick (fun (trigger, statements, account) ->
-                            Storage.withExecutionSettings runStore (triggerExecutionSettings trigger) (fun () ->
-                                match runBody oldRow newRow (statements, account) with
-                                | Err _ as e -> Some e
-                                | _ -> None)))
-                finally
-                    triggerChain.Value <- chain
+                match Limits.tryAcquireStoredProgramFrame () with
+                | None -> Some(Err(1436, "Thread stack overrun while executing stored programs"))
+                | Some nesting ->
+                    use _nesting = nesting
+                    triggerChain.Value <- self :: chain
+
+                    try
+                        rows
+                        |> List.tryPick (fun (oldRow, newRow) ->
+                            bodies
+                            |> List.tryPick (fun (trigger, statements, account) ->
+                                Storage.withExecutionSettings runStore (triggerExecutionSettings trigger) (fun () ->
+                                    match runBody oldRow newRow (statements, account) with
+                                    | Err _ as e -> Some e
+                                    | _ -> None)))
+                    finally
+                        triggerChain.Value <- chain
 
     let triggerStorageResult =
         function

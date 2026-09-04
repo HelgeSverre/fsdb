@@ -4246,6 +4246,80 @@ let tests =
                   Expect.stringContains message "mutual_a" "limited routine"
               | other -> failtestf "expected mutual depth refusal, got %A" other
 
+          testCase "distinct procedure nesting stops before exhausting the process stack"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              TestSupport.Sql.expectOk
+                  (execute (sprintf "CREATE PROCEDURE deep_%d() SELECT 1" Fsdb.Limits.maxStoredProgramNesting))
+                  "create terminal procedure"
+
+              for index in Fsdb.Limits.maxStoredProgramNesting - 1 .. -1 .. 0 do
+                  TestSupport.Sql.expectOk
+                      (execute (sprintf "CREATE PROCEDURE deep_%d() CALL deep_%d()" index (index + 1)))
+                      "create nested procedure"
+
+              match execute "CALL deep_0()" with
+              | Err(1436, message) -> Expect.stringContains message "stack" "aggregate nesting backstop"
+              | other -> failtestf "expected distinct procedure nesting to return 1436, got %A" other
+
+              match execute "SELECT 1" with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the session to remain usable, got %A" other
+
+              TestSupport.Sql.expectOk
+                  (execute (sprintf "CREATE FUNCTION deep_fn_%d() RETURNS INT RETURN 1" Fsdb.Limits.maxStoredProgramNesting))
+                  "create terminal function"
+
+              for index in Fsdb.Limits.maxStoredProgramNesting - 1 .. -1 .. 0 do
+                  TestSupport.Sql.expectOk
+                      (execute
+                          (sprintf
+                              "CREATE FUNCTION deep_fn_%d() RETURNS INT RETURN deep_fn_%d()"
+                              index
+                              (index + 1)))
+                      "create nested function"
+
+              match execute "SELECT deep_fn_0()" with
+              | Err(1436, message) -> Expect.stringContains message "stack" "stored functions share the aggregate backstop"
+              | other -> failtestf "expected distinct function nesting to return 1436, got %A" other
+
+              for index in 0 .. 9 do
+                  TestSupport.Sql.expectOk (execute (sprintf "CREATE TABLE mixed_table_%d (n INT)" index)) "create mixed chain table"
+
+              for index in 0 .. 8 do
+                  TestSupport.Sql.expectOk
+                      (execute
+                          (sprintf
+                              "CREATE TRIGGER mixed_trigger_%d AFTER INSERT ON mixed_table_%d FOR EACH ROW INSERT INTO mixed_table_%d VALUES (NEW.n)"
+                              index
+                              index
+                              (index + 1)))
+                      "create mixed chain trigger"
+
+              TestSupport.Sql.expectOk
+                  (execute
+                      "CREATE FUNCTION mixed_fn_7() RETURNS INT MODIFIES SQL DATA BEGIN INSERT INTO mixed_table_0 VALUES (1); RETURN 1; END")
+                  "create mixed terminal function"
+
+              for index in 6 .. -1 .. 0 do
+                  TestSupport.Sql.expectOk
+                      (execute
+                          (sprintf
+                              "CREATE FUNCTION mixed_fn_%d() RETURNS INT MODIFIES SQL DATA RETURN mixed_fn_%d()"
+                              index
+                              (index + 1)))
+                      "create mixed nested function"
+
+              match execute "SELECT mixed_fn_0()" with
+              | Err(1436, message) -> Expect.stringContains message "stack" "mixed functions and triggers share one backstop"
+              | other -> failtestf "expected mixed nesting to return 1436, got %A" other
+
           testCase "nested procedure errors retain prior results and reach handlers"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -4852,6 +4926,73 @@ let tests =
               match handle session "SHOW CREATE EVENT once_run" |> snd with
               | Err(1539, _) -> ()
               | other -> failtestf "expected one-time event removal, got %A" other
+
+          testCase "event scheduler bounds concurrent executions and retries unclaimed work"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable active = 0
+              let mutable peak = 0
+              let mutable enteredTotal = 0
+              use admitted = new Threading.CountdownEvent(Fsdb.Limits.maxConcurrentEventExecutions)
+              use release = new Threading.ManualResetEventSlim(false)
+
+              let rec recordPeak value =
+                  let observed = Threading.Volatile.Read(&peak)
+
+                  if value > observed && Threading.Interlocked.CompareExchange(&peak, value, observed) <> observed then
+                      recordPeak value
+
+              let hold _ =
+                  let ordinal = Threading.Interlocked.Increment(&enteredTotal)
+                  let current = Threading.Interlocked.Increment(&active)
+                  recordPeak current
+
+                  if ordinal <= Fsdb.Limits.maxConcurrentEventExecutions then
+                      admitted.Signal() |> ignore
+
+                  try
+                      release.Wait()
+                      VInt 1L
+                  finally
+                      Threading.Interlocked.Decrement(&active) |> ignore
+
+              let registry = Fsdb.Functions.empty |> Fsdb.Functions.registerScalar "HOLD_EVENT" hold
+              let mutable session = create 1 store
+
+              for index in 0 .. Fsdb.Limits.maxConcurrentEventExecutions do
+                  let next, result =
+                      handle
+                          session
+                          (sprintf
+                              "CREATE EVENT quota_event_%d ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 SECOND DO DO HOLD_EVENT()"
+                              index)
+
+                  TestSupport.Sql.expectOk result "create scheduled event"
+                  session <- next
+
+              let scheduler = Fsdb.EventScheduler.acquire store registry
+
+              try
+                  Expect.isTrue (admitted.Wait(TimeSpan.FromSeconds 5.0)) "the scheduler fills its bounded worker set"
+                  scheduler.Dispose()
+                  use resumed = Fsdb.EventScheduler.acquire store registry
+                  Threading.Thread.Sleep 250
+                  Expect.equal (Threading.Volatile.Read(&peak)) Fsdb.Limits.maxConcurrentEventExecutions "reacquiring keeps the same worker budget"
+                  Expect.equal (Threading.Volatile.Read(&enteredTotal)) Fsdb.Limits.maxConcurrentEventExecutions "saturated work remains unclaimed"
+
+                  release.Set()
+                  let timer = System.Diagnostics.Stopwatch.StartNew()
+
+                  while timer.Elapsed < TimeSpan.FromSeconds 5.0 && Threading.Volatile.Read(&enteredTotal) < Fsdb.Limits.maxConcurrentEventExecutions + 1 do
+                      Threading.Thread.Sleep 25
+
+                  Expect.equal
+                      (Threading.Volatile.Read(&enteredTotal))
+                      (Fsdb.Limits.maxConcurrentEventExecutions + 1)
+                      "the skipped occurrence runs after a slot is released"
+              finally
+                  release.Set()
+                  scheduler.Dispose()
 
           testCase "ALTER EVENT changes schedule, status, name, schema, and body"
           <| fun _ ->
