@@ -1706,10 +1706,45 @@ let private enabledSessionFlag name (session: Session) =
     |> Option.flatten
     |> Option.forall ((<>) "0")
 
+let private transactionCatalogChanges (baseCatalog: Catalog) (catalog: Catalog) =
+    let mutable databases = Set.empty
+    let mutable tables = Set.empty
+    let mutable tableBudget = Limits.maxReadUncommittedTables + 1
+    let databaseNames = Seq.append (Map.keys baseCatalog) (Map.keys catalog) |> Seq.distinct
+    use databaseEnumerator = databaseNames.GetEnumerator()
+
+    while tableBudget > 0 && databaseEnumerator.MoveNext() do
+        let databaseName = databaseEnumerator.Current
+        let before = Map.tryFind databaseName baseCatalog
+        let after = Map.tryFind databaseName catalog
+
+        if before.IsSome <> after.IsSome then
+            databases <- Set.add databaseName databases
+
+        let beforeTables = before |> Option.defaultValue Map.empty
+        let afterTables = after |> Option.defaultValue Map.empty
+        let tableNames = Seq.append (Map.keys beforeTables) (Map.keys afterTables) |> Seq.distinct
+        use tableEnumerator = tableNames.GetEnumerator()
+
+        while tableBudget > 0 && tableEnumerator.MoveNext() do
+            let tableName = tableEnumerator.Current
+
+            match Map.tryFind tableName beforeTables, Map.tryFind tableName afterTables with
+            | Some left, Some right when obj.ReferenceEquals(left, right) -> ()
+            | None, None -> ()
+            | _ ->
+                databases <- Set.add databaseName databases
+                tables <- Set.add (databaseName, tableName) tables
+                tableBudget <- tableBudget - 1
+
+    databases, tables
+
 let private syncTransactionView (session: Session) =
     match session.Tx with
     | Some transaction when transaction.Seeded ->
         let rowsModified = Storage.transactionRollbackWork transaction.Snapshot |> max 0L |> uint64
+        let catalog = transaction.Snapshot.Catalog
+        let changedDatabases, changedTables = transactionCatalogChanges transaction.BaseCatalog catalog
 
         match Storage.transactionId transaction.Snapshot with
         | Some transactionId ->
@@ -1717,7 +1752,9 @@ let private syncTransactionView (session: Session) =
                 session.Store
                 session.ConnectionId
                 { BaseCatalog = transaction.BaseCatalog
-                  Snapshot = transaction.Snapshot
+                  Catalog = catalog
+                  ChangedDatabases = changedDatabases
+                  ChangedTables = changedTables
                   Metadata =
                     { Id = transactionId
                       Started = DateTime.Now
@@ -1749,16 +1786,61 @@ let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Cat
 let private readUncommittedBase (session: Session) =
     let _, initial = Storage.beginTransactionSnapshotWithBase session.Store
     let mutable snapshot = initial
+    let mutable viewCount = 0
+    let mutable rowCount = 0UL
+    let mutable databaseCount = 0
+    let mutable tableCount = 0
+
+    let projectedCatalog (view: TransactionRegistry.Entry) (catalog: Catalog) =
+        view.ChangedDatabases
+        |> Seq.choose (fun databaseName ->
+            Map.tryFind databaseName catalog
+            |> Option.map (fun database ->
+                let projected =
+                    if Map.containsKey databaseName view.BaseCatalog <> Map.containsKey databaseName view.Catalog then
+                        database
+                    else
+                        view.ChangedTables
+                        |> Seq.choose (fun (owner, tableName) ->
+                            if owner = databaseName then
+                                Map.tryFind tableName database |> Option.map (fun table -> tableName, table)
+                            else
+                                None)
+                        |> Map.ofSeq
+
+                databaseName, projected))
+        |> Map.ofSeq
 
     TransactionRegistry.others session.Store session.ConnectionId
     |> List.iter (fun view ->
-        let candidate = Storage.beginTransactionSnapshotFromCatalog session.Store snapshot.Catalog
+        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+        let changedTables = view.ChangedTables.Count
 
-        try
-            Storage.mergeCatalogInto candidate view.BaseCatalog view.Snapshot.Catalog
-            snapshot <- candidate
-        with :? Storage.LockWaitTimeout ->
-            ())
+        if not view.ChangedDatabases.IsEmpty then
+            viewCount <- viewCount + 1
+            databaseCount <- databaseCount + view.ChangedDatabases.Count
+            tableCount <- tableCount + changedTables
+
+            if
+                viewCount > Limits.maxReadUncommittedViews
+                || databaseCount > Limits.maxReadUncommittedDatabases
+                || tableCount > Limits.maxReadUncommittedTables
+                || view.Metadata.RowsModified > Limits.maxReadUncommittedRows - rowCount
+            then
+                raise (Functions.SqlError(1235, "This version of MySQL doesn't yet support READ UNCOMMITTED views beyond its resource limits"))
+
+            rowCount <- rowCount + view.Metadata.RowsModified
+
+        if not view.ChangedDatabases.IsEmpty then
+            let candidate = Storage.beginTransactionSnapshotFromCatalog session.Store snapshot.Catalog
+            let baseCatalog = projectedCatalog view view.BaseCatalog
+            let batchCatalog = projectedCatalog view view.Catalog
+
+            try
+                Storage.mergeCatalogInto candidate baseCatalog batchCatalog
+                snapshot <- candidate
+            with :? Storage.LockWaitTimeout ->
+                ())
 
     snapshot.Catalog, snapshot
 

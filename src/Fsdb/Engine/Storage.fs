@@ -2663,7 +2663,9 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
         secondaryIndex <- updatedSecondary
         secondaryOrder <- updatedOrder
 
-    for rowId, before, after in batchTable.RowsArray.ChangesFrom baseTable.RowsArray do
+    for iteration, (rowId, before, after) in batchTable.RowsArray.ChangesFrom baseTable.RowsArray |> Seq.indexed do
+        Limits.checkQueryCancellation iteration
+
         match before, after with
         | Some baseRow, replacement ->
             match rows.TryFind rowId with
@@ -2746,6 +2748,41 @@ type private LockWaitDecision =
     | CurrentDeadlockVictim
     | WakeDeadlockVictim of RowLockStripe
 
+let internal tryFindLockWaitPath target (starts: seq<int64>) (successors: int64 -> seq<int64>) =
+    let visited = HashSet<int64>()
+    let predecessors = Dictionary<int64, int64>()
+    let pending = Stack<int64>()
+
+    for start in starts do
+        if visited.Add start then
+            pending.Push start
+
+    let mutable found = false
+
+    while pending.Count > 0 && not found do
+        let current = pending.Pop()
+
+        if current = target then
+            found <- true
+        else
+            for successor in successors current do
+                if visited.Add successor then
+                    predecessors.[successor] <- current
+                    pending.Push successor
+
+    if not found then
+        None
+    else
+        let path = ResizeArray<int64>()
+        let mutable current = target
+        path.Add current
+
+        while predecessors.ContainsKey current do
+            current <- predecessors.[current]
+            path.Add current
+
+        path |> Seq.rev |> List.ofSeq |> Some
+
 let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockContext) stripe blockers =
     lock graph.SyncRoot (fun () ->
         graph.Edges.[context.Owner] <-
@@ -2753,24 +2790,11 @@ let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockCon
               Context = context
               Stripe = stripe }
 
-        let rec tryPath target visited current =
-            if current = target then
-                Some [ current ]
-            elif Set.contains current visited then
-                None
-            else
-                match graph.Edges.TryGetValue current with
-                | false, _ -> None
-                | true, wait ->
-                    let visited = Set.add current visited
-                    wait.Blockers
-                    |> Seq.tryPick (fun blocker ->
-                        tryPath target visited blocker
-                        |> Option.map (fun path -> current :: path))
-
         let cycle =
-            blockers
-            |> Seq.tryPick (tryPath context.Owner Set.empty)
+            tryFindLockWaitPath context.Owner blockers (fun owner ->
+                match graph.Edges.TryGetValue owner with
+                | true, wait -> wait.Blockers
+                | false, _ -> Seq.empty)
             |> Option.map (fun path -> context.Owner :: path |> List.distinct)
 
         match cycle with
@@ -7854,7 +7878,9 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
         let mutable secondaryIndex = liveTable.SecondaryIndex
         let mutable secondaryOrder = liveTable.SecondaryOrder
 
-        for rowId in rowIds do
+        for iteration, rowId in List.indexed rowIds do
+            Limits.checkQueryCancellation iteration
+
             match baseTable.RowsArray.TryFind rowId, batchTable.RowsArray.TryFind rowId, rows.TryFind rowId with
             | Some before, Some after, Some live when live = before ->
                 let collision =
@@ -7893,7 +7919,12 @@ let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Datab
             match Map.tryFind tableKey baseDb, Map.tryFind tableKey batchDb with
             | Some baseTable, Some batchTable when obj.ReferenceEquals(baseTable, batchTable) -> None
             | Some baseTable, Some batchTable when sameTableSchema baseTable batchTable ->
-                let changes = batchTable.RowsArray.ChangesFrom baseTable.RowsArray |> List.ofSeq
+                let changes =
+                    batchTable.RowsArray.ChangesFrom baseTable.RowsArray
+                    |> Seq.mapi (fun iteration change ->
+                        Limits.checkQueryCancellation iteration
+                        change)
+                    |> List.ofSeq
 
                 if changes |> List.forall (function _, Some _, Some _ -> true | _ -> false) then
                     Some(tableKey, changes |> List.map (fun (rowId, _, _) -> rowId))

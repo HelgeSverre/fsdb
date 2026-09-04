@@ -7585,6 +7585,114 @@ let tests =
               | ResultSet(_, [ [ Some "10" ]; [ Some "22" ] ]) -> ()
               | other -> failtestf "expected the committed second delta, got %A" other
 
+          testCase "READ UNCOMMITTED rejects an excessive dirty-view fanout"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE dirty_fanout (id INT PRIMARY KEY, value INT)"
+
+              let rows =
+                  [ for id in 1 .. Fsdb.Limits.maxReadUncommittedViews + 1 -> sprintf "(%d, 0)" id ]
+                  |> String.concat ","
+
+              handle setup $"INSERT INTO dirty_fanout VALUES {rows}" |> ignore
+
+              let writers =
+                  [ for id in 1 .. Fsdb.Limits.maxReadUncommittedViews + 1 do
+                        let writer, _ = handle (create (id + 1) store) "BEGIN"
+                        let writer, updated = handle writer $"UPDATE dirty_fanout SET value = 1 WHERE id = {id}"
+                        Expect.equal updated (Affected 1UL) "each writer contributes one private dirty root"
+                        yield writer ]
+
+              let reader, _ =
+                  handle
+                      (create (Fsdb.Limits.maxReadUncommittedViews + 10) store)
+                      "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+
+              let reader, _ = handle reader "BEGIN"
+
+              try
+                  match handle reader "SELECT 1" |> snd with
+                  | Err(1235, message) -> Expect.stringContains message "resource limits" "the failure explains the bounded dirty view"
+                  | result -> failtestf "expected dirty-view admission to fail, got %A" result
+              finally
+                  writers |> List.iter (fun writer -> handle writer "ROLLBACK" |> ignore)
+                  handle reader "ROLLBACK" |> ignore
+
+          testCase "READ UNCOMMITTED observes a dirty database drop"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE DATABASE dirty_drop_database"
+              handle setup "CREATE TABLE dirty_drop_database.items (id INT)" |> ignore
+              let baseCatalog = store.Catalog
+              let catalog = Map.remove "dirty_drop_database" baseCatalog
+
+              Fsdb.TransactionRegistry.publish
+                  store
+                  99
+                  { BaseCatalog = baseCatalog
+                    Catalog = catalog
+                    ChangedDatabases = Set.singleton "dirty_drop_database"
+                    ChangedTables = Set.singleton ("dirty_drop_database", "items")
+                    Metadata =
+                      { Id = 99UL
+                        Started = DateTime.Now
+                        Isolation = "READ UNCOMMITTED"
+                        ReadOnly = false
+                        UniqueChecks = true
+                        ForeignKeyChecks = true
+                        RowsModified = 0UL
+                        LockStructs = 0UL } }
+
+              let reader, _ = handle (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let reader, _ = handle reader "BEGIN"
+
+              try
+                  match handle reader "SHOW DATABASES" |> snd with
+                  | ResultSet(_, rows) ->
+                      let names = rows |> List.choose List.tryHead |> List.choose id
+                      Expect.isFalse (names |> List.contains "dirty_drop_database") "the dirty drop is visible"
+                  | result -> failtestf "expected SHOW DATABASES, got %A" result
+              finally
+                  handle reader "ROLLBACK" |> ignore
+                  Fsdb.TransactionRegistry.remove store 99
+
+          testCase "READ UNCOMMITTED bounds empty database deltas"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let baseCatalog = store.Catalog
+              let databaseNames =
+                  [ for ordinal in 1 .. Fsdb.Limits.maxReadUncommittedDatabases + 1 -> $"dirty_empty_{ordinal}" ]
+
+              let catalog = databaseNames |> List.fold (fun current name -> Map.add name Map.empty current) baseCatalog
+
+              Fsdb.TransactionRegistry.publish
+                  store
+                  99
+                  { BaseCatalog = baseCatalog
+                    Catalog = catalog
+                    ChangedDatabases = Set.ofList databaseNames
+                    ChangedTables = Set.empty
+                    Metadata =
+                      { Id = 99UL
+                        Started = DateTime.Now
+                        Isolation = "READ UNCOMMITTED"
+                        ReadOnly = false
+                        UniqueChecks = true
+                        ForeignKeyChecks = true
+                        RowsModified = 0UL
+                        LockStructs = 0UL } }
+
+              let reader, _ = handle (create 2 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let reader, _ = handle reader "BEGIN"
+
+              try
+                  match handle reader "SELECT 1" |> snd with
+                  | Err(1235, message) -> Expect.stringContains message "resource limits" "database-only deltas are admitted by count"
+                  | result -> failtestf "expected database-delta admission to fail, got %A" result
+              finally
+                  handle reader "ROLLBACK" |> ignore
+                  Fsdb.TransactionRegistry.remove store 99
+
           testCase "locking reads honor NOWAIT and SKIP LOCKED"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
