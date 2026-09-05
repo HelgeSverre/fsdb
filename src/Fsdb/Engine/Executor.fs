@@ -6657,6 +6657,55 @@ and private tryIndexedJoinProbe
         equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe table rightColumns
     | _ -> None
 
+and private innerJoinChainPreservesLeftOrder
+    (store: Store)
+    (sources: FullTextPhysicalSource list)
+    (baseSource: FromItem)
+    (joins: Join list)
+    =
+    let sourceFor item =
+        let qualifier = fromItemQualifier item
+
+        sources
+        |> List.tryFind (fun source ->
+            source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+
+    let rec preservesOrder resolved =
+        function
+        | [] -> true
+        | join :: remaining ->
+            match join.Kind, join.Using, sourceFor join.Table with
+            | InnerJoin, [], Some right ->
+                let leftColumns = resolved |> List.collect snd
+                let joinedSources = resolved @ [ right.Qualifier, right.Table.Columns ]
+                let ranges = qualifierRanges joinedSources
+
+                let resolveQualified (qualifier: string) (column: string) =
+                    ranges
+                    |> Map.tryFind (qualifier.ToLowerInvariant())
+                    |> Option.bind (fun (columns, offset) ->
+                        columns
+                        |> List.tryFindIndex (fun definition ->
+                            definition.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
+                        |> Option.map (fun index -> offset + index, columns.[index].Type))
+
+                let equiKeys, residual = extractEquiKeys resolveQualified leftColumns.Length join.On
+
+                match tryIndexedJoinProbe store join leftColumns right.Table.Columns (Some right.Table) equiKeys with
+                | Some probe
+                    when residual.IsEmpty
+                         && probe.Index.Unique
+                         && (probe.Index.PrefixLengths |> List.forall Option.isNone)
+                         && (probe.Index.Transforms |> List.forall Option.isNone) ->
+                    preservesOrder joinedSources remaining
+                | _ -> false
+            | _ -> false
+
+    match sourceFor baseSource with
+    | Some source when not joins.IsEmpty ->
+        preservesOrder [ source.Qualifier, source.Table.Columns ] joins
+    | _ -> false
+
 and private tryIndexedPreservedRightProbe
     (store: Store)
     (join: Join)
@@ -12670,6 +12719,56 @@ and private runFullTextSelect
                         |> List.map (fun (node, name) -> node, QualifiedCol(plan.Source.Qualifier, name)))
 
                 let sub expression = substituteExprs replacements expression
+                let whereNodes = select.Where |> Option.map collectMatchAgainst |> Option.defaultValue []
+                let computed = preparedSources |> List.collect _.Scores
+                let synthetic = preparedSources |> List.collect _.Synthetic
+                let baseQualifier = fromItemQualifier fromItem
+                let baseKey = baseQualifier.ToLowerInvariant()
+
+                let streamedScoreColumn =
+                    let projectionsAreScalar =
+                        select.Projections
+                        |> List.forall (fun (expression, _) ->
+                            not (containsAggregate registry expression)
+                            && (collectWindowFuncs expression).IsEmpty)
+
+                    let onlyBasePredicate =
+                        sourcePredicates
+                        |> Map.forall (fun qualifier _ -> qualifier = baseKey)
+
+                    if
+                        select.Limit.IsSome
+                        && select.OrderBy.IsEmpty
+                        && select.GroupBy.IsEmpty
+                        && select.Having.IsNone
+                        && select.Locking.IsEmpty
+                        && not select.Distinct
+                        && projectionsAreScalar
+                        && onlyBasePredicate
+                        && innerJoinChainPreservesLeftOrder store sources fromItem select.Joins
+                    then
+                        match computed with
+                        | [ node, mode, _ ] when mode <> BooleanMode && List.contains node whereNodes ->
+                            preparedSources
+                            |> List.tryFind (fun plan ->
+                                plan.Source.Qualifier.Equals(baseQualifier, System.StringComparison.OrdinalIgnoreCase)
+                                && not plan.Scores.IsEmpty)
+                            |> Option.map (fun plan -> plan.Source.Table.Columns.Length)
+                        | _ -> None
+                    else
+                        None
+
+                let rowsByDescendingScore scoreIndex (rows: Value[] seq) =
+                    rows
+                    |> Seq.indexed
+                    |> Seq.sortWith (fun (leftIndex, left) (rightIndex, right) ->
+                        let scoreOrder = Value.compare right.[scoreIndex] left.[scoreIndex]
+                        if scoreOrder <> 0 then
+                            scoreOrder
+                        else
+                            Microsoft.FSharp.Core.Operators.compare leftIndex rightIndex)
+                    |> Seq.map snd
+
                 let originals =
                     preparedSources
                     |> List.map (fun plan -> plan.Source.Qualifier.ToLowerInvariant(), plan.Source.Table.Columns)
@@ -12685,16 +12784,21 @@ and private runFullTextSelect
                     |> Map.ofList
 
                 let resolveBase =
-                    match Map.tryFind ((fromItemQualifier fromItem).ToLowerInvariant()) overrides with
-                    | Some source -> Ok(source.Columns, source.Rows)
+                    match Map.tryFind baseKey overrides with
+                    | Some source ->
+                        let rows =
+                            streamedScoreColumn
+                            |> Option.map (fun index -> rowsByDescendingScore index source.Rows)
+                            |> Option.defaultValue source.Rows
+
+                        Ok(source.Columns, rows)
                     | None -> resolveFromItem store registry dbName fromItem |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq)
 
                 match resolveBase with
                 | Error error -> error, [], []
                 | Ok(baseColumns, baseRows) ->
-                    let baseQualifier = fromItemQualifier fromItem
                     let filteredBase =
-                        match Map.tryFind (baseQualifier.ToLowerInvariant()) sourcePredicates with
+                        match Map.tryFind baseKey sourcePredicates with
                         | None -> Ok baseRows
                         | Some predicate -> filterSourceRows store registry dbName outer baseQualifier baseColumns predicate baseRows
 
@@ -12747,12 +12851,10 @@ and private runFullTextSelect
 
                                 [ sub expression, label ]
 
-                        let whereNodes = select.Where |> Option.map collectMatchAgainst |> Option.defaultValue []
-                        let computed = preparedSources |> List.collect _.Scores
-                        let synthetic = preparedSources |> List.collect _.Synthetic
-
                         let implicitOrder =
-                            if select.OrderBy.IsEmpty && select.GroupBy.IsEmpty && not select.Distinct then
+                            if streamedScoreColumn.IsSome then
+                                []
+                            elif select.OrderBy.IsEmpty && select.GroupBy.IsEmpty && not select.Distinct then
                                 computed
                                 |> List.tryFind (fun (node, mode, _) -> mode <> BooleanMode && List.contains node whereNodes)
                                 |> Option.bind (fun (node, _, _) -> synthetic |> List.tryFind (fst >> (=) node))

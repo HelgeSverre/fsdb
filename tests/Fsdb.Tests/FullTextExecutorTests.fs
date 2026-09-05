@@ -254,7 +254,7 @@ let tests =
                   let body =
                       match id with
                       | 37 -> "needle alpha"
-                      | 82 -> "needle beta"
+                      | 82 -> "needle needle beta"
                       | _ -> "ordinary"
 
                   sprintf "(%d, '%s')" id body)
@@ -338,6 +338,38 @@ let tests =
 
               Expect.equal (ids joinedPointIntersection) [ "37" ] "the joined point lookup retains the matching row"
               Expect.equal calls 2 "the joined full-text plan scores only the shared physical candidate"
+
+              calls <- 0
+
+              let limitedJoinedSearch =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT d.id, TOUCH(o.id) FROM docs d JOIN owners o ON o.id = d.id WHERE MATCH(d.body) AGAINST('needle') LIMIT 1"
+
+              match limitedJoinedSearch with
+              | ResultSet(_, [ [ Some id; Some touched ] ]) ->
+                  Expect.equal id "82" "the unique join preserves relevance order"
+                  Expect.equal id touched "the unique join retains the full-text row"
+              | other -> failtestf "expected one joined full-text row, got %A" other
+
+              Expect.equal calls 2 "the relevance-ordered unique join stops after the requested row"
+
+              run store "CREATE TABLE owner_duplicates (id INT)" |> ignore
+              run store "INSERT INTO owner_duplicates VALUES (37), (37), (82)" |> ignore
+              calls <- 0
+
+              let limitedOneToMany =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT d.id, TOUCH(o.id) FROM docs d JOIN owner_duplicates o ON o.id = d.id WHERE MATCH(d.body) AGAINST('needle') LIMIT 1"
+
+              match limitedOneToMany with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected one limited one-to-many row, got %A" other
+
+              Expect.equal calls 4 "a one-to-many join evaluates every candidate before the relevance limit"
 
           testCase "captured table roots retain their full-text snapshot"
           <| fun _ ->
