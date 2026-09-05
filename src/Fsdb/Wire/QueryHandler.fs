@@ -127,6 +127,17 @@ let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql
     let positions = ResizeArray<int>()
     let mutable i = 0
 
+    let skipLineComment () =
+        let carriageReturn = sql.IndexOf('\r', i)
+        let lineFeed = sql.IndexOf('\n', i)
+
+        i <-
+            match carriageReturn, lineFeed with
+            | -1, -1 -> n
+            | -1, index
+            | index, -1 -> index + 1
+            | cr, lf -> min cr lf + 1
+
     while i < n do
         match sql.[i] with
         | ('\'' | '"' | '`') as quote ->
@@ -151,11 +162,8 @@ let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql
         | '-' when i + 1 < n && sql.[i + 1] = '-' && (i + 2 >= n || System.Char.IsWhiteSpace sql.[i + 2]) ->
             // MySQL only treats `--` as a comment when whitespace/EOL follows
             // (`5--3` is arithmetic) — same rule as `Parser.stripVersionComments`.
-            let idx = sql.IndexOf('\n', i)
-            i <- if idx = -1 then n else idx + 1
-        | '#' ->
-            let idx = sql.IndexOf('\n', i)
-            i <- if idx = -1 then n else idx + 1
+            skipLineComment ()
+        | '#' -> skipLineComment ()
         | '/' when i + 1 < n && sql.[i + 1] = '*' ->
             let idx = sql.IndexOf("*/", i + 2)
             i <- if idx = -1 then n else idx + 2
@@ -252,6 +260,7 @@ let private isSessionScope (scope: string) : bool =
 let private globalScopeOnlyVariables =
     Set.ofList
         [ "activate_all_roles_on_login"
+          "connect_timeout"
           "ft_query_expansion_limit"
           "innodb_ft_max_token_size"
           "innodb_ft_min_token_size"
@@ -309,6 +318,7 @@ let private numericSystemVariables =
     Set.ofList
         [ "auto_increment_increment"
           "autocommit"
+          "connect_timeout"
           "cte_max_recursion_depth"
           "foreign_key_checks"
           "ft_query_expansion_limit"
@@ -450,14 +460,37 @@ type private AdvisoryLock =
     { Owner: int
       Count: int }
 
+type private AdvisoryLockTable =
+    { Locks: System.Collections.Generic.Dictionary<string, AdvisoryLock>
+      OwnedNames: System.Collections.Generic.Dictionary<int, System.Collections.Generic.HashSet<string>> }
+
 let private advisoryLocksByStore =
-    ConditionalWeakTable<obj, System.Collections.Generic.Dictionary<string, AdvisoryLock>>()
+    ConditionalWeakTable<obj, AdvisoryLockTable>()
 
 let private advisoryLocks (session: Session) =
     advisoryLocksByStore.GetValue(
         session.Store.Lock,
-        fun _ -> System.Collections.Generic.Dictionary(StringComparer.Ordinal)
+        fun _ ->
+            { Locks = System.Collections.Generic.Dictionary(StringComparer.Ordinal)
+              OwnedNames = System.Collections.Generic.Dictionary() }
     )
+
+let private advisoryNamesForOwner (table: AdvisoryLockTable) owner =
+    match table.OwnedNames.TryGetValue owner with
+    | true, names -> names
+    | false, _ ->
+        let names = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+        table.OwnedNames.[owner] <- names
+        names
+
+let private forgetAdvisoryName (table: AdvisoryLockTable) owner name =
+    match table.OwnedNames.TryGetValue owner with
+    | true, names ->
+        names.Remove name |> ignore
+
+        if names.Count = 0 then
+            table.OwnedNames.Remove owner |> ignore
+    | false, _ -> ()
 
 let private advisoryLockName = function
     | VNull -> None
@@ -482,16 +515,22 @@ let private getAdvisoryLock (session: Session) = function
             else
                 let infinite = seconds < 0.0 || Double.IsPositiveInfinity seconds
                 let deadline = Stopwatch.StartNew()
-                let locks = advisoryLocks session
+                let table = advisoryLocks session
 
-                lock locks (fun () ->
+                lock table (fun () ->
                     let rec acquire () =
-                        match locks.TryGetValue name with
+                        match table.Locks.TryGetValue name with
                         | false, _ ->
-                            locks.[name] <- { Owner = session.ConnectionId; Count = 1 }
+                            let owned = advisoryNamesForOwner table session.ConnectionId
+
+                            if owned.Count >= Limits.maxAdvisoryLocksPerSession then
+                                raise (Functions.SqlError(1235, "This version of MySQL doesn't yet support more user-level locks in one session"))
+
+                            table.Locks.[name] <- { Owner = session.ConnectionId; Count = 1 }
+                            owned.Add name |> ignore
                             VInt 1L
                         | true, current when current.Owner = session.ConnectionId ->
-                            locks.[name] <- { current with Count = current.Count + 1 }
+                            table.Locks.[name] <- { current with Count = current.Count + 1 }
                             VInt 1L
                         | _ when not infinite && deadline.Elapsed.TotalSeconds >= seconds -> VInt 0L
                         | _ ->
@@ -500,7 +539,7 @@ let private getAdvisoryLock (session: Session) = function
                             let waitMilliseconds =
                                 if infinite then 50 else max 1 (min 50 (int ((seconds - deadline.Elapsed.TotalSeconds) * 1000.0)))
 
-                            Threading.Monitor.Wait(locks, waitMilliseconds) |> ignore
+                            Threading.Monitor.Wait(table, waitMilliseconds) |> ignore
                             acquire ()
 
                     acquire ())
@@ -511,35 +550,42 @@ let private releaseAdvisoryLock (session: Session) = function
         match advisoryLockName value with
         | None -> VNull
         | Some name ->
-            let locks = advisoryLocks session
+            let table = advisoryLocks session
 
-            lock locks (fun () ->
-                match locks.TryGetValue name with
+            lock table (fun () ->
+                match table.Locks.TryGetValue name with
                 | false, _ -> VNull
                 | true, current when current.Owner <> session.ConnectionId -> VInt 0L
                 | true, current when current.Count > 1 ->
-                    locks.[name] <- { current with Count = current.Count - 1 }
+                    table.Locks.[name] <- { current with Count = current.Count - 1 }
                     VInt 1L
                 | true, _ ->
-                    locks.Remove name |> ignore
-                    Threading.Monitor.PulseAll locks
+                    table.Locks.Remove name |> ignore
+                    forgetAdvisoryName table session.ConnectionId name
+                    Threading.Monitor.PulseAll table
                     VInt 1L)
     | _ -> raise (Functions.SqlError(1582, "Incorrect parameter count in the call to native function 'RELEASE_LOCK'"))
 
 let private releaseAllAdvisoryLocks (session: Session) =
-    let locks = advisoryLocks session
+    let table = advisoryLocks session
 
-    lock locks (fun () ->
+    lock table (fun () ->
         let owned =
-            locks
-            |> Seq.filter (fun pair -> pair.Value.Owner = session.ConnectionId)
-            |> Seq.map (fun pair -> pair.Key, pair.Value.Count)
-            |> List.ofSeq
+            match table.OwnedNames.TryGetValue session.ConnectionId with
+            | true, names ->
+                names
+                |> Seq.choose (fun name ->
+                    match table.Locks.TryGetValue name with
+                    | true, entry -> Some(name, entry.Count)
+                    | false, _ -> None)
+                |> List.ofSeq
+            | false, _ -> []
 
-        owned |> List.iter (fst >> locks.Remove >> ignore)
+        owned |> List.iter (fst >> table.Locks.Remove >> ignore)
+        table.OwnedNames.Remove session.ConnectionId |> ignore
 
         if not owned.IsEmpty then
-            Threading.Monitor.PulseAll locks
+            Threading.Monitor.PulseAll table
 
         owned |> List.sumBy snd)
 
@@ -548,10 +594,10 @@ let private inspectAdvisoryLock (session: Session) inUse = function
         match advisoryLockName value with
         | None -> VNull
         | Some name ->
-            let locks = advisoryLocks session
+            let table = advisoryLocks session
 
-            lock locks (fun () ->
-                match locks.TryGetValue name with
+            lock table (fun () ->
+                match table.Locks.TryGetValue name with
                 | true, current when inUse -> VInt(int64 current.Owner)
                 | true, _ -> VInt 0L
                 | false, _ when inUse -> VNull
@@ -901,13 +947,15 @@ let private catalogWithOverlay (session: Session) (dbName: string) (table: strin
 let private showColumnsRe =
     Regex(@"^SHOW\s+(FULL\s+)?COLUMNS\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
+let private showColumnsFieldFilterRe =
+    Regex(
+        @"\s+WHERE\s+`?Field`?\s*=\s*(?<value>'(?:\\.|''|[^'])*')\s*$",
+        RegexOptions.IgnoreCase ||| RegexOptions.NonBacktracking,
+        Limits.regexpMatchTimeout
+    )
+
 let private showColumnsFieldFilter (sql: string) =
-    let matched =
-        Regex.Match(
-            sql,
-            @"\s+WHERE\s+`?Field`?\s*=\s*(?<value>'(?:\\.|''|[^'])*')\s*$",
-            RegexOptions.IgnoreCase
-        )
+    let matched = showColumnsFieldFilterRe.Match sql
 
     if not matched.Success then
         None
@@ -1013,10 +1061,14 @@ let private resolveUserSetRhs
             let variables = expressionVariablesFor session userVariables
             let store = Session.currentStore session
             let dbName = session.Database |> Option.defaultValue defaultDatabase
+            let privileges = Auth.requiredPrivilegesForExpression dbName expression
 
-            Executor.withVariableContext variables (fun () ->
-                Executor.evaluateExpression store (registryFor session) dbName expression
-                |> Result.map (fun value -> value, variables.UserVariables.Value))
+            match checkSessionAccess session store privileges with
+            | Error(code, message) -> Error(Err(code, message))
+            | Ok() ->
+                Executor.withVariableContext variables (fun () ->
+                    Executor.evaluateExpression store (registryFor session) dbName expression
+                    |> Result.map (fun value -> value, variables.UserVariables.Value))
 
 let private resolveSystemSetRhs
     (session: Session)
@@ -1428,6 +1480,10 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, _, true) when readOnlySystemVariables.Contains name ->
         Error(Err(1238, sprintf "Variable '%s' is a read only variable" name))
+    | SetVarAction("session_track_system_variables", Some value, _)
+        when value.Length > Limits.maxTrackedSystemVariablesLength
+             || (value |> Seq.filter ((=) ',') |> Seq.length) >= Limits.maxTrackedSystemVariableNames ->
+        Error(Err(1231, "Variable 'session_track_system_variables' exceeds its resource limit"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | SetVarAction(name, _, false) when globalOnlyVariables.Contains name ->
@@ -1559,7 +1615,8 @@ let private alterCurrentUserPasswordRe =
 let private showGrantsRe =
     Regex(
         @"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?(?:\s+USING\s+(.+?))?\s*;?$",
-        RegexOptions.IgnoreCase
+        RegexOptions.IgnoreCase ||| RegexOptions.NonBacktracking,
+        Limits.regexpMatchTimeout
     )
 
 /// `FLUSH [LOCAL] PRIVILEGES` — a no-op OK: privilege reads always hit the
@@ -1657,10 +1714,45 @@ let private enabledSessionFlag name (session: Session) =
     |> Option.flatten
     |> Option.forall ((<>) "0")
 
+let private transactionCatalogChanges (baseCatalog: Catalog) (catalog: Catalog) =
+    let mutable databases = Set.empty
+    let mutable tables = Set.empty
+    let mutable tableBudget = Limits.maxReadUncommittedTables + 1
+    let databaseNames = Seq.append (Map.keys baseCatalog) (Map.keys catalog) |> Seq.distinct
+    use databaseEnumerator = databaseNames.GetEnumerator()
+
+    while tableBudget > 0 && databaseEnumerator.MoveNext() do
+        let databaseName = databaseEnumerator.Current
+        let before = Map.tryFind databaseName baseCatalog
+        let after = Map.tryFind databaseName catalog
+
+        if before.IsSome <> after.IsSome then
+            databases <- Set.add databaseName databases
+
+        let beforeTables = before |> Option.defaultValue Map.empty
+        let afterTables = after |> Option.defaultValue Map.empty
+        let tableNames = Seq.append (Map.keys beforeTables) (Map.keys afterTables) |> Seq.distinct
+        use tableEnumerator = tableNames.GetEnumerator()
+
+        while tableBudget > 0 && tableEnumerator.MoveNext() do
+            let tableName = tableEnumerator.Current
+
+            match Map.tryFind tableName beforeTables, Map.tryFind tableName afterTables with
+            | Some left, Some right when obj.ReferenceEquals(left, right) -> ()
+            | None, None -> ()
+            | _ ->
+                databases <- Set.add databaseName databases
+                tables <- Set.add (databaseName, tableName) tables
+                tableBudget <- tableBudget - 1
+
+    databases, tables
+
 let private syncTransactionView (session: Session) =
     match session.Tx with
     | Some transaction when transaction.Seeded ->
         let rowsModified = Storage.transactionRollbackWork transaction.Snapshot |> max 0L |> uint64
+        let catalog = transaction.Snapshot.Catalog
+        let changedDatabases, changedTables = transactionCatalogChanges transaction.BaseCatalog catalog
 
         match Storage.transactionId transaction.Snapshot with
         | Some transactionId ->
@@ -1668,7 +1760,9 @@ let private syncTransactionView (session: Session) =
                 session.Store
                 session.ConnectionId
                 { BaseCatalog = transaction.BaseCatalog
-                  Snapshot = transaction.Snapshot
+                  Catalog = catalog
+                  ChangedDatabases = changedDatabases
+                  ChangedTables = changedTables
                   Metadata =
                     { Id = transactionId
                       Started = DateTime.Now
@@ -1700,16 +1794,61 @@ let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Cat
 let private readUncommittedBase (session: Session) =
     let _, initial = Storage.beginTransactionSnapshotWithBase session.Store
     let mutable snapshot = initial
+    let mutable viewCount = 0
+    let mutable rowCount = 0UL
+    let mutable databaseCount = 0
+    let mutable tableCount = 0
+
+    let projectedCatalog (view: TransactionRegistry.Entry) (catalog: Catalog) =
+        view.ChangedDatabases
+        |> Seq.choose (fun databaseName ->
+            Map.tryFind databaseName catalog
+            |> Option.map (fun database ->
+                let projected =
+                    if Map.containsKey databaseName view.BaseCatalog <> Map.containsKey databaseName view.Catalog then
+                        database
+                    else
+                        view.ChangedTables
+                        |> Seq.choose (fun (owner, tableName) ->
+                            if owner = databaseName then
+                                Map.tryFind tableName database |> Option.map (fun table -> tableName, table)
+                            else
+                                None)
+                        |> Map.ofSeq
+
+                databaseName, projected))
+        |> Map.ofSeq
 
     TransactionRegistry.others session.Store session.ConnectionId
     |> List.iter (fun view ->
-        let candidate = Storage.beginTransactionSnapshotFromCatalog session.Store snapshot.Catalog
+        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+        let changedTables = view.ChangedTables.Count
 
-        try
-            Storage.mergeCatalogInto candidate view.BaseCatalog view.Snapshot.Catalog
-            snapshot <- candidate
-        with :? Storage.LockWaitTimeout ->
-            ())
+        if not view.ChangedDatabases.IsEmpty then
+            viewCount <- viewCount + 1
+            databaseCount <- databaseCount + view.ChangedDatabases.Count
+            tableCount <- tableCount + changedTables
+
+            if
+                viewCount > Limits.maxReadUncommittedViews
+                || databaseCount > Limits.maxReadUncommittedDatabases
+                || tableCount > Limits.maxReadUncommittedTables
+                || view.Metadata.RowsModified > Limits.maxReadUncommittedRows - rowCount
+            then
+                raise (Functions.SqlError(1235, "This version of MySQL doesn't yet support READ UNCOMMITTED views beyond its resource limits"))
+
+            rowCount <- rowCount + view.Metadata.RowsModified
+
+        if not view.ChangedDatabases.IsEmpty then
+            let candidate = Storage.beginTransactionSnapshotFromCatalog session.Store snapshot.Catalog
+            let baseCatalog = projectedCatalog view view.BaseCatalog
+            let batchCatalog = projectedCatalog view view.Catalog
+
+            try
+                Storage.mergeCatalogInto candidate baseCatalog batchCatalog
+                snapshot <- candidate
+            with :? Storage.LockWaitTimeout ->
+                ())
 
     snapshot.Catalog, snapshot
 
@@ -2010,6 +2149,13 @@ let startTransactionStatement (session: Session) : Session =
     | Some tx when not tx.Seeded && tx.Isolation = ReadUncommitted ->
         let baseCatalog, transactionSnapshot = readUncommittedBase session
         let snapshot = transactionSnapshot |> Storage.carryTransactionLocks tx.Snapshot
+        let savepoints =
+            tx.Savepoints
+            |> Map.map (fun _ savepoint ->
+                { savepoint with
+                    Seeded = true
+                    BaseCatalog = baseCatalog
+                    Catalog = baseCatalog })
 
         { session with
             Tx =
@@ -2017,7 +2163,8 @@ let startTransactionStatement (session: Session) : Session =
                     { tx with
                         Snapshot = snapshot
                         BaseCatalog = baseCatalog
-                        Seeded = true } }
+                        Seeded = true
+                        Savepoints = savepoints } }
     | Some tx when not tx.Seeded ->
         let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
         let snapshot =
@@ -2028,6 +2175,7 @@ let startTransactionStatement (session: Session) : Session =
             tx.Savepoints
             |> Map.map (fun _ savepoint ->
                 { savepoint with
+                    Seeded = true
                     BaseCatalog = baseCatalog
                     Catalog = baseCatalog })
 
@@ -2124,8 +2272,9 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
                             Map.add
                                 name
                                 { Sequence = seq
+                                  Seeded = tx.Seeded
                                   BaseCatalog = tx.BaseCatalog
-                                  Catalog = tx.Snapshot.Catalog
+                                  Catalog = if tx.Seeded then tx.Snapshot.Catalog else Map.empty
                                   PendingEventCount = eventCount
                                   RollbackWork = Storage.transactionRollbackWork tx.Snapshot }
                                 tx.Savepoints
@@ -2142,16 +2291,17 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
         // `catalog` is the savepoint's own stale copy of every `NextAutoId`,
         // so bump it back up to whatever this transaction ran ahead to
         // since, before wholesale-replacing the snapshot's catalog with it.
-        let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
-        Storage.setCatalog tx.Snapshot catalog
-        Storage.restoreTransactionRollbackWork tx.Snapshot savepoint.RollbackWork
-        // Drop every event this transaction buffered after the savepoint —
-        // otherwise a WAL replay would apply writes the savepoint rollback
-        // just undid.
-        tx.Snapshot.PendingEvents
-        |> Option.iter (fun buffer ->
-            if buffer.Count > savepoint.PendingEventCount then
-                buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
+        if savepoint.Seeded then
+            let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
+            Storage.setCatalog tx.Snapshot catalog
+            Storage.restoreTransactionRollbackWork tx.Snapshot savepoint.RollbackWork
+            // Drop every event this transaction buffered after the savepoint —
+            // otherwise a WAL replay would apply writes the savepoint rollback
+            // just undid.
+            tx.Snapshot.PendingEvents
+            |> Option.iter (fun buffer ->
+                if buffer.Count > savepoint.PendingEventCount then
+                    buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
 
         // Real MySQL also destroys every savepoint established *after* the
         // one rolled back to — the named savepoint itself survives (a
@@ -2220,7 +2370,10 @@ let private divisionByZeroPolicy (store: Store) (statement: Statement) =
         Diagnostics.DivisionByZeroPolicy.Warn
 
 let private requiredPrivilegesForStatement session store dbName = function
-    | AlterUser(name, host, Some _, _, _) when Auth.sameAccount (Auth.account name host) (accountOf session) -> []
+    | AlterUser(name, host, Some _, _, options) when
+        options = AccountOptions.empty && Auth.sameAccount (Auth.account name host) (accountOf session)
+        ->
+        []
     | statement -> Auth.requiredPrivilegesInStore store dbName statement
 
 let private statementContainsLockingReadWhere predicate statement =
@@ -2733,6 +2886,67 @@ let private temporaryTargets (dbName: string) (action: TemporaryAction option) (
     | Some DropTemporary, DropTable(names, _) -> names |> List.map (splitQualified dbName)
     | _ -> []
 
+let private moveTemporaryKey sourceDb sourceTable targetTable keys =
+    let source = tableKey sourceDb sourceTable
+
+    if Set.contains source keys then
+        keys |> Set.remove source |> Set.add (tableKey sourceDb targetTable)
+    else
+        keys
+
+let private temporaryKeysAfterStatement dbName beforeKeys stmt =
+    match stmt with
+    | RenameTable pairs ->
+        pairs
+        |> List.fold
+            (fun keys (sourceName, targetName) ->
+                let sourceDb, sourceTable = splitQualified dbName sourceName
+                let _, targetTable = splitQualified dbName targetName
+                moveTemporaryKey sourceDb sourceTable targetTable keys)
+            beforeKeys
+    | AlterTable(sourceName, actions) ->
+        let sourceDb, sourceTable = splitQualified dbName sourceName
+
+        actions
+        |> List.choose (function RenameTo target -> Some target | _ -> None)
+        |> List.tryLast
+        |> Option.map (fun target -> moveTemporaryKey sourceDb sourceTable target beforeKeys)
+        |> Option.defaultValue beforeKeys
+    | _ -> beforeKeys
+
+let private temporaryRenameSourceKinds dbName beforeKeys pairs =
+    pairs
+    |> List.fold
+        (fun (hasTemporary, hasPermanent, keys) (sourceName, targetName) ->
+            let sourceDb, sourceTable = splitQualified dbName sourceName
+            let _, targetTable = splitQualified dbName targetName
+            let source = tableKey sourceDb sourceTable
+
+            if Set.contains source keys then
+                true,
+                hasPermanent,
+                keys |> Set.remove source |> Set.add (tableKey sourceDb targetTable)
+            else
+                hasTemporary, true, keys)
+        (false, false, beforeKeys)
+
+let private mixesTemporaryAndPermanentRenames dbName beforeKeys = function
+    | RenameTable pairs ->
+        let hasTemporary, hasPermanent, _ = temporaryRenameSourceKinds dbName beforeKeys pairs
+        hasTemporary && hasPermanent
+    | _ -> false
+
+let private changesOnlyTemporaryCatalog dbName beforeKeys action stmt =
+    match action, stmt with
+    | Some _, _ -> true
+    | None, AlterTable(sourceName, _) ->
+        let sourceDb, sourceTable = splitQualified dbName sourceName
+        Set.contains (tableKey sourceDb sourceTable) beforeKeys
+    | None, RenameTable pairs ->
+        let hasTemporary, hasPermanent, _ = temporaryRenameSourceKinds dbName beforeKeys pairs
+        hasTemporary && not hasPermanent
+    | _ -> false
+
 let private statementUsesTemporary (catalog: Catalog) (dbName: string) (stmt: Statement) =
     Auth.requiredPrivileges dbName stmt
     |> List.exists (function
@@ -2787,7 +3001,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             match action with
             | Some CreateTemporary -> Set.union beforeKeys targets
             | Some DropTemporary -> Set.difference beforeKeys targets
-            | None -> beforeKeys
+            | None -> temporaryKeysAfterStatement dbName beforeKeys stmt
 
         let temporaryCatalog =
             afterKeys
@@ -2801,8 +3015,11 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
         let overlayKeys = Set.unionMany [ beforeKeys; afterKeys; targets ]
 
         let permanentCatalog =
-            overlayKeys
-            |> Set.fold (fun catalog (db, table) -> setCatalogTable catalog db table (catalogTable baseCatalog (db, table))) working.Catalog
+            if changesOnlyTemporaryCatalog dbName beforeKeys action stmt then
+                baseCatalog
+            else
+                overlayKeys
+                |> Set.fold (fun catalog (db, table) -> setCatalogTable catalog db table (catalogTable baseCatalog (db, table))) working.Catalog
 
         working.Catalog <- permanentCatalog
 
@@ -2823,6 +3040,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
 let private executeParsedWithTemporaryAction (action: TemporaryAction option) (session: Session) (stmt: Statement) =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let usesTemporary = action.IsSome || statementUsesTemporary session.TemporaryCatalog dbName stmt
+    let beforeKeys = temporaryKeys session.TemporaryCatalog
 
     let statementAccesses () =
         TableLocks.accessesForStatement
@@ -2832,7 +3050,9 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
             stmt
 
     let executed, result =
-        if usesTemporary && xaAssociation session |> Option.isSome then
+        if mixesTemporaryAndPermanentRenames dbName beforeKeys stmt then
+            session, Err(1105, "RENAME TABLE cannot mix temporary and permanent tables")
+        elif usesTemporary && xaAssociation session |> Option.isSome then
             session, Err(4091, "XA: Temporary tables cannot be accessed inside XA transactions when xa_detach_on_prepare=ON")
         elif usesTemporary then
             executeWithStatementAccess session (statementAccesses ()) (fun () ->
@@ -3063,6 +3283,7 @@ let private probeCausesImplicitCommit = function
 let private probeForbiddenInFunctionOrTrigger probe =
     probeCausesImplicitCommit probe
     || (match probe with
+        | SetAutocommit _
         | Begin _
         | Commit _
         | Rollback _
@@ -4553,6 +4774,20 @@ let private parseFunctionDefinition options parameters returnType body =
         Error(Err(1336, "Dynamic SQL is not allowed in stored function or trigger"))
     | _, _, Error _ -> Error(syntaxError body)
 
+let private firstUnsafeStoredRoutineCall (registry: Functions.Registry) statements =
+    statements
+    |> List.collect StoredProgram.expressions
+    |> List.tryPick (fun expression ->
+        Expression.tryPick
+            (function
+            | FuncCall(name, _) ->
+                registry.Extensions
+                |> Map.tryFind (name.ToUpperInvariant())
+                |> Option.filter (fun extension -> extension.DirectOnly || not extension.Deterministic)
+                |> Option.map (fun _ -> name)
+            | _ -> None)
+            expression)
+
 let private routineColumn name columnType =
     { Name = name
       Type = columnType
@@ -4584,8 +4819,11 @@ let private evaluateRoutineExpression (session: Session) expression =
     let database = session.Database |> Option.defaultValue defaultDatabase
 
     let result =
-        Executor.withVariableContext variables (fun () ->
-            Executor.evaluateExpression store (registryFor session) database expression)
+        match checkSessionAccess session store (Auth.requiredPrivilegesForExpression database expression) with
+        | Error(code, message) -> Error(Err(code, message))
+        | Ok() ->
+            Executor.withVariableContext variables (fun () ->
+                Executor.evaluateExpression store (registryFor session) database expression)
 
     { session with UserVariables = variables.UserVariables.Value }, result
 
@@ -5502,7 +5740,9 @@ let rec private invokeStoredFunction
         | Some account ->
             { caller with
                 User = account.Name
-                AccountHost = account.Host }
+                AccountHost = account.Host
+                ActiveRoles =
+                    if Auth.sameAccount account (accountOf caller) then caller.ActiveRoles else [] }
         | None -> caller
 
     let caller = withStoredFunctions executeText caller
@@ -5530,6 +5770,11 @@ let rec private invokeStoredFunction
         match parseFunctionDefinition options routine.Parameters routine.ReturnType routine.Definition with
         | Ok definition -> definition
         | Error error -> raiseFunctionError error
+
+    match Executor.currentDirectOnlyRestriction (), firstUnsafeStoredRoutineCall caller.CustomFunctions statements with
+    | Some what, Some name ->
+        raise (Diagnostics.EvaluationError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name))
+    | _ -> ()
 
     let expressionPrivileges =
         let expressions =
@@ -5603,6 +5848,11 @@ let rec private invokeStoredFunction
             executionSession
             locals
             statements
+
+    use nesting =
+        match Limits.tryAcquireStoredProgramFrame () with
+        | Some nesting -> nesting
+        | None -> raise (Diagnostics.EvaluationError(1436, "Thread stack overrun while executing stored programs"))
 
     let outcome =
         DynamicScope.withValue storedFunctionCalls (Some(key :: calls)) (fun () ->
@@ -5896,6 +6146,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 with
                 | Error error, _
                 | _, Error error -> session, error
+                | _, Ok(_, _, statements) when firstUnsafeStoredRoutineCall session.CustomFunctions statements |> Option.isSome ->
+                    let functionName = firstUnsafeStoredRoutineCall session.CustomFunctions statements |> Option.get
+                    session, Err(3102, sprintf "Stored function '%s' contains a disallowed function: %s" name functionName)
                 | Ok(securityType, deterministic, dataAccess), Ok(_, parsedReturnType, _) ->
                     if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
                         Diagnostics.note
@@ -6005,6 +6258,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                                 { callerSession with
                                     User = account.Name
                                     AccountHost = account.Host
+                                    ActiveRoles =
+                                        if Auth.sameAccount account (accountOf callerSession) then callerSession.ActiveRoles else []
                                     Database = Some routine.Schema
                                     RoutineStack = ("PROCEDURE", routine.Schema, routine.Name) :: callerSession.RoutineStack
                                     Variables =
@@ -6076,22 +6331,27 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
                                     executed, result
 
-                            let (executed, result), changed =
-                                Storage.withExecutionSettings executionStore capturedSettings (fun () ->
-                                    let outcome, changed = captureRoutineVariableChanges executeBody
-                                    resultingSettings <- Storage.executionSettings executionStore
-                                    outcome, changed)
+                            match Limits.tryAcquireStoredProgramFrame () with
+                            | None -> session, Err(1436, "Thread stack overrun while executing stored programs")
+                            | Some nesting ->
+                                use _nesting = nesting
 
-                            mergeRoutineExecutionSettings originalSettings changed resultingSettings
-                            |> Storage.setExecutionSettings executionStore
+                                let (executed, result), changed =
+                                    Storage.withExecutionSettings executionStore capturedSettings (fun () ->
+                                        let outcome, changed = captureRoutineVariableChanges executeBody
+                                        resultingSettings <- Storage.executionSettings executionStore
+                                        outcome, changed)
 
-                            { executed with
-                                User = session.User
-                                AccountHost = session.AccountHost
-                                Database = session.Database
-                                RoutineStack = session.RoutineStack
-                                Variables = restoreRoutineVariables session.Variables changed executed.Variables },
-                            result
+                                mergeRoutineExecutionSettings originalSettings changed resultingSettings
+                                |> Storage.setExecutionSettings executionStore
+
+                                { executed with
+                                    User = session.User
+                                    AccountHost = session.AccountHost
+                                    Database = session.Database
+                                    RoutineStack = session.RoutineStack
+                                    Variables = restoreRoutineVariables session.Variables changed executed.Variables },
+                                result
         | DropProcedure(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)
@@ -6670,7 +6930,7 @@ let private resetsOwnPassword session = function
         |> Option.map accountRefOf
         |> Option.defaultValue (accountOf session)
         |> Auth.sameAccount (accountOf session)
-    | ParsedAccountStatement(AlterUser(name, host, Some _, _, _)) ->
+    | ParsedAccountStatement(AlterUser(name, host, Some _, _, options)) when options = AccountOptions.empty ->
         Auth.sameAccount (Auth.account name host) (accountOf session)
     | _ -> false
 

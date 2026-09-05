@@ -221,6 +221,9 @@ let lookupScalarMetadata (name: string) (registry: Registry) : ColumnMetadata op
 let internal lookupScalarParameters (name: string) (registry: Registry) : ColumnMetadata list option =
     Map.tryFind (name.ToUpperInvariant()) registry.ScalarParameters
 
+let internal lookupScalarParametersNormalized (name: string) (registry: Registry) : ColumnMetadata list option =
+    Map.tryFind name registry.ScalarParameters
+
 let internal isTextArgument (name: string) index (registry: Registry) =
     registry.TextArguments
     |> Map.tryFind (name.ToUpperInvariant())
@@ -1069,11 +1072,7 @@ let rec private normalizeJsonSchema (node: JsonNode) : unit =
     match node with
     | :? JsonObject as obj ->
         match obj["$ref"] with
-        | :? JsonValue as value ->
-            match value.TryGetValue<string>() with
-            | true, reference when not (reference.StartsWith "#") ->
-                raise (SqlError(1235, "This version of MySQL doesn't yet support 'references in JSON Schema'"))
-            | _ -> ()
+        | :? JsonValue -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'references in JSON Schema'"))
         | _ -> ()
 
         obj |> Seq.iter (fun entry -> normalizeJsonSchema entry.Value)
@@ -1123,32 +1122,6 @@ let private tryResolveJsonPointer (root: JsonObject) (reference: string) =
                     | _ -> None))
             (Some(root :> JsonNode))
     | _ -> None
-
-let private exceedsJsonSchemaReferenceDepth (root: JsonObject) =
-    let visiting = System.Collections.Generic.HashSet<JsonNode>(HashIdentity.Reference)
-
-    let rec visit remainingDepth (node: JsonNode) =
-        if remainingDepth < 0 then
-            true
-        elif isNull node then
-            false
-        elif not (visiting.Add node) then
-            true
-        else
-            let recursive =
-                match node with
-                | :? JsonObject as obj ->
-                    match obj["$ref"] |> tryJsonString with
-                    | Some reference when reference.StartsWith "#" ->
-                        tryResolveJsonPointer root reference |> Option.exists (visit (remainingDepth - 1))
-                    | _ -> obj |> Seq.exists (fun property -> property.Key <> "$ref" && visit (remainingDepth - 1) property.Value)
-                | :? JsonArray as array -> array |> Seq.exists (visit (remainingDepth - 1))
-                | _ -> false
-
-            visiting.Remove node |> ignore
-            recursive
-
-    visit maxJsonSchemaDepth root
 
 type private JsonSchemaRegexBudget =
     { Started: System.Diagnostics.Stopwatch
@@ -1591,9 +1564,6 @@ let private jsonSchemaValidation functionName schemaValue documentValue =
         match schemaNode with
         | :? JsonObject as schema ->
             normalizeJsonSchema schema
-
-            if exceedsJsonSchemaReferenceDepth schema then
-                raise (SqlError(3157, "The JSON document exceeds the maximum depth."))
 
             let cleanSchema = stripJsonSchemaRegularExpressions schema :?> JsonObject
             let patternFailures = ResizeArray<JsonSchemaFailure>()
@@ -2064,6 +2034,13 @@ let private jsonSearchFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
+let private weightStringOverflow () =
+    Diagnostics.warning
+        1301
+        (sprintf "Result of weight_string() was larger than max_allowed_packet (%d) - truncated" Limits.maxAllowedPacket)
+
+    VNull
+
 /// Raw binary operands bypass collation weighting and retain their bytes.
 let weightString (collation: Collation.Collation) (value: Value) : Value =
     match value with
@@ -2071,12 +2048,22 @@ let weightString (collation: Collation.Collation) (value: Value) : Value =
     | value ->
         match tryRawBytes value with
         | Some bytes -> VBytes bytes
-        | None -> collation.WeightOf(req value) |> VBytes
+        | None ->
+            let text = req value
+            let maximumScalars = Limits.maxAllowedPacket / Collation.weightBytesPerCharacter collation.Name
+
+            if text.EnumerateRunes() |> Seq.truncate (maximumScalars + 1) |> Seq.length > maximumScalars then
+                weightStringOverflow ()
+            else
+                let weighted = collation.WeightOf text
+                if weighted.Length > Limits.maxAllowedPacket then weightStringOverflow () else VBytes weighted
 
 let weightStringChar (collation: Collation.Collation) (length: int) (value: Value) : Value =
     match value, tryRawBytes value with
     | VNull, _ -> VNull
     | _, Some bytes -> VBytes(Array.truncate length bytes)
+    | _ when int64 length * int64 (Collation.weightBytesPerCharacter collation.Name) > int64 Limits.maxAllowedPacket ->
+        weightStringOverflow ()
     | _ ->
         let text = req value
         let result = StringBuilder()
@@ -2092,21 +2079,15 @@ let weightStringChar (collation: Collation.Collation) (length: int) (value: Valu
             result.Append ' ' |> ignore
             count <- count + 1
 
-        weightString collation (VString(result.ToString()))
+        let weighted = collation.WeightOf(result.ToString())
+        if weighted.Length > Limits.maxAllowedPacket then weightStringOverflow () else VBytes weighted
 
 let weightStringBinaryWith (encodeText: string -> byte[]) (length: int) (value: Value) : Value =
-    if length > Limits.maxAllowedPacket then
-        raise (SqlError(1153, "Result of WEIGHT_STRING() exceeds max_allowed_packet"))
-
-    let bytes =
-        match value, tryRawBytes value with
-        | VNull, _ -> None
-        | _, Some bytes -> Some bytes
-        | _ -> Some(encodeText (req value))
-
-    match bytes with
-    | None -> VNull
-    | Some bytes ->
+    match value with
+    | VNull -> VNull
+    | _ when length > Limits.maxAllowedPacket -> weightStringOverflow ()
+    | _ ->
+        let bytes = tryRawBytes value |> Option.defaultWith (fun () -> encodeText (req value))
         let result = Array.zeroCreate length
         Array.Copy(bytes, result, min bytes.Length length)
         VBytes result
@@ -3408,24 +3389,49 @@ let private insertStringFn: Scalar =
                     else min (int (min length (int64 System.Int32.MaxValue))) (bytes.Length - start)
 
                 let inserted = tryRawBytes replacement |> Option.defaultValue (Encoding.UTF8.GetBytes(req replacement))
-                Array.concat [ Array.take start bytes; inserted; Array.skip (start + removed) bytes ] |> VBytes
-        | None ->
-            let characters = req source |> _.EnumerateRunes() |> Seq.map _.ToString() |> Seq.toArray
+                let resultLength = int64 bytes.Length - int64 removed + int64 inserted.Length
 
-            if position < 1L || position > int64 characters.Length then
+                if resultLength > int64 Limits.maxAllowedPacket then
+                    VNull
+                else
+                    let result = Array.zeroCreate<byte> (int resultLength)
+                    Array.Copy(bytes, 0, result, 0, start)
+                    Array.Copy(inserted, 0, result, start, inserted.Length)
+                    Array.Copy(bytes, start + removed, result, start + inserted.Length, bytes.Length - start - removed)
+                    VBytes result
+        | None ->
+            let text = req source
+
+            let utf16OffsetAtRune (startOffset: int) (runes: int64) =
+                let mutable offset = startOffset
+                let mutable remaining = runes
+
+                while offset < text.Length && remaining > 0L do
+                    let rune = Rune.GetRuneAt(text, offset)
+                    offset <- offset + rune.Utf16SequenceLength
+                    remaining <- remaining - 1L
+
+                offset, remaining = 0L
+
+            let start, positionExists = utf16OffsetAtRune 0 (position - 1L)
+
+            if position < 1L || not positionExists || start = text.Length then
                 source
             else
-                let start = int position - 1
-                let removed =
-                    if length < 0L then characters.Length - start
-                    else min (int (min length (int64 System.Int32.MaxValue))) (characters.Length - start)
+                let finish =
+                    if length < 0L then text.Length
+                    else utf16OffsetAtRune start length |> fst
 
-                String.concat
-                    ""
-                    [ characters |> Array.take start |> String.concat ""
-                      req replacement
-                      characters |> Array.skip (start + removed) |> String.concat "" ]
-                |> VString
+                let inserted = req replacement
+                let resultLength =
+                    int64 (Encoding.UTF8.GetByteCount(text.AsSpan(0, start)))
+                    + int64 (Encoding.UTF8.GetByteCount(inserted.AsSpan()))
+                    + int64 (Encoding.UTF8.GetByteCount(text.AsSpan(finish)))
+
+                if resultLength > int64 Limits.maxAllowedPacket then
+                    VNull
+                else
+                    String.Concat(text.AsSpan(0, start), inserted.AsSpan(), text.AsSpan(finish)) |> VString
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'insert'"))
 
 let private padFn (left: bool) : Scalar =
@@ -3487,7 +3493,14 @@ let private repeatFn: Scalar =
         | Some bytes ->
             if k <= 0 then VBytes [||]
             elif int64 k * int64 bytes.Length > int64 Limits.maxAllowedPacket then VNull
-            else Array.replicate k bytes |> Array.concat |> VBytes
+            elif bytes.Length = 0 then VBytes [||]
+            else
+                let result = Array.zeroCreate<byte> (k * bytes.Length)
+
+                for index in 0 .. k - 1 do
+                    Array.Copy(bytes, 0, result, index * bytes.Length, bytes.Length)
+
+                VBytes result
         | None ->
             let text = req value
             if k <= 0 then VString ""
@@ -3766,6 +3779,7 @@ let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. 16 .. padded.Length - 16 do
+                Limits.checkQueryCancellation offset
                 Array.Copy(padded, offset, block, 0, 16)
 
                 if configuration.CipherMode = AesCbc then
@@ -3787,6 +3801,7 @@ let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for i in 0 .. input.Length - 1 do
+                Limits.checkQueryCancellation i
                 let mutable outputByte = 0uy
 
                 for bit in 7 .. -1 .. 0 do
@@ -3811,6 +3826,7 @@ let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. segmentLength .. input.Length - 1 do
+                Limits.checkQueryCancellation offset
                 let length = min segmentLength (input.Length - offset)
                 let encrypted = aesEncryptBlock key register
                 let feedback = Array.zeroCreate length
@@ -3833,6 +3849,7 @@ let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. 16 .. input.Length - 1 do
+                Limits.checkQueryCancellation offset
                 let length = min 16 (input.Length - offset)
                 let next = aesEncryptBlock key register
                 Array.Copy(next, register, 16)
@@ -3859,6 +3876,7 @@ let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
             try
                 for offset in 0 .. 16 .. input.Length - 16 do
+                    Limits.checkQueryCancellation offset
                     Array.Copy(input, offset, block, 0, 16)
                     let decrypted = aesDecryptBlock key block
 
@@ -3880,6 +3898,7 @@ let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for i in 0 .. input.Length - 1 do
+                Limits.checkQueryCancellation i
                 let mutable outputByte = 0uy
 
                 for bit in 7 .. -1 .. 0 do
@@ -3903,6 +3922,7 @@ let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. segmentLength .. input.Length - 1 do
+                Limits.checkQueryCancellation offset
                 let length = min segmentLength (input.Length - offset)
                 let encrypted = aesEncryptBlock key register
                 let feedback = input.[offset .. offset + length - 1]
@@ -3922,6 +3942,7 @@ let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. 16 .. input.Length - 1 do
+                Limits.checkQueryCancellation offset
                 let length = min 16 (input.Length - offset)
                 let next = aesEncryptBlock key register
                 Array.Copy(next, register, 16)
@@ -3972,7 +3993,19 @@ let private aesArguments (functionName: string) (configuration: AesConfiguration
                 | _ :: kdfName :: options -> deriveAesKey reportedFunctionName configuration.KeyLength keyMaterial kdfName options
                 | _ -> aesKeyWithoutKdf configuration.KeyLength keyMaterial
 
-            Some(aesBytes data, derivedKey, initializationVector)
+            let input = aesBytes data
+            let maximumInput =
+                match configuration.CipherMode with
+                | AesCfb1 -> Limits.maxAesCfb1Bytes
+                | AesCfb8 -> Limits.maxAesCfb8Bytes
+                | _ -> Limits.maxAllowedPacket
+
+            if input.Length > maximumInput then
+                CryptographicOperations.ZeroMemory derivedKey
+                CryptographicOperations.ZeroMemory initializationVector
+                raise (SqlError(1153, sprintf "Input to %s exceeds the work limit for the selected block_encryption_mode" reportedFunctionName))
+
+            Some(input, derivedKey, initializationVector)
     | _ -> aesParameterCountError functionName
 
 /// Builds an AES function bound to one session's `block_encryption_mode`.
@@ -4129,11 +4162,29 @@ let private uncompressFn: Scalar =
             VNull
         else
             try
-                use source = new MemoryStream(input, 4, input.Length - 4)
-                use decompressor = new ZLibStream(source, CompressionMode.Decompress)
-                use output = new MemoryStream()
-                decompressor.CopyTo output
-                VBytes(output.ToArray())
+                let declaredLength = int64 (BitConverter.ToUInt32(input, 0))
+
+                if declaredLength > int64 Limits.maxAllowedPacket then
+                    VNull
+                else
+                    use source = new MemoryStream(input, 4, input.Length - 4)
+                    use decompressor = new ZLibStream(source, CompressionMode.Decompress)
+                    use output = new MemoryStream()
+                    let buffer = Array.zeroCreate<byte> 81920
+                    let mutable total = 0L
+                    let mutable count = decompressor.Read(buffer, 0, buffer.Length)
+                    let mutable valid = true
+
+                    while valid && count > 0 do
+                        total <- total + int64 count
+
+                        if total > declaredLength || total > int64 Limits.maxAllowedPacket then
+                            valid <- false
+                        else
+                            output.Write(buffer, 0, count)
+                            count <- decompressor.Read(buffer, 0, buffer.Length)
+
+                    if valid && total = declaredLength then VBytes(output.ToArray()) else VNull
             with _ ->
                 VNull
     | _ -> VNull
@@ -4470,10 +4521,7 @@ let private intArgOr (dflt: int) (args: Value list) (idx: int) : int =
     args |> List.tryItem idx |> Option.filter (fun v -> v <> VNull) |> Option.map (toDouble >> int) |> Option.defaultValue dflt
 
 let private normalizedOffset (input: Regexp.PreparedInput) sourceOffset =
-    input.SourceOffsets
-    |> Array.tryFindIndex (fun offset -> offset > sourceOffset)
-    |> Option.map (fun index -> index - 1)
-    |> Option.defaultValue input.Text.Length
+    Regexp.normalizedOffset input sourceOffset
 
 let private regexpPositionError () =
     raise (SqlError(3686, "Index out of bounds in regular expression search."))
@@ -4484,8 +4532,8 @@ let private regexpLikeFn (collation: Collation.Collation) : Scalar =
         if anyNull rest then VNull
         else
             let regex = regexResult "regexp_like" collation (matchTypeArg rest 0) (req p)
-            let input = Regexp.prepareInput (matchTypeArg rest 0) (req p) (req e)
-            withRegexTimeout (fun () -> if regex.IsMatch input.Text then VInt 1L else VInt 0L)
+            let input = Regexp.prepareText (matchTypeArg rest 0) (req p) (req e)
+            withRegexTimeout (fun () -> if regex.IsMatch input then VInt 1L else VInt 0L)
     | _ -> VNull
 
 let private regexpInstrFn (collation: Collation.Collation) : Scalar =
@@ -4602,7 +4650,7 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
     let start = normalizedOffset input sourceStart
     let sourceInput: Regexp.PreparedInput =
         { Text = source
-          SourceOffsets = [| 0 .. source.Length |] }
+          RemovedCrOffsets = None }
 
     let sourceRegex = Regex(regex.ToString(), regex.Options, Limits.regexpMatchTimeout)
     let builder = StringBuilder(min source.Length Limits.maxAllowedPacket)
@@ -4638,10 +4686,10 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
 
         if m.Length = 0
            && matchStart = Regexp.sourceOffset input m.Index
-           && m.Index + 1 < input.SourceOffsets.Length
-           && input.SourceOffsets[m.Index + 1] = matchStart + 2
+           && m.Index + 1 <= input.Text.Length
+           && Regexp.sourceOffset input (m.Index + 1) = matchStart + 2
            && source[matchStart] = '\r' then
-            let next = sourceRegex.Match(source, matchStart + 1)
+            let next = sourceRegex.Match(source, matchStart + 1, 1)
 
             if next.Success && next.Index = matchStart + 1 && next.Length = 0 then
                 emit sourceInput next (matchStart + 1) (matchStart + 1)

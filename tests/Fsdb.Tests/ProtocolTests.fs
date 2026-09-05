@@ -327,8 +327,18 @@ let tests =
 
               Expect.equal
                   (negotiatedCompression ClientZstdCompressionAlgorithm (Some 7))
-                  (Ok(Some(zstd 7)))
-                  "a valid Zstandard level is retained"
+                  (Ok(Some(zstd Fsdb.Limits.maxZstdCompressionLevel)))
+                  "the server caps client-selected compression work"
+
+              Expect.equal
+                  (negotiatedCompression ClientZstdCompressionAlgorithm (Some 1))
+                  (Ok(Some(zstd 1)))
+                  "a conservative client level is retained"
+
+              Expect.equal
+                  (negotiatedCompression ClientZstdCompressionAlgorithm (Some 22))
+                  (Ok(Some(zstd Fsdb.Limits.maxZstdCompressionLevel)))
+                  "the highest valid client level cannot select ultra compression"
 
               for level in [ None; Some 0; Some 23; Some 255 ] do
                   match negotiatedCompression ClientZstdCompressionAlgorithm level with
