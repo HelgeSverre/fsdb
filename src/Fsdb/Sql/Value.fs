@@ -570,6 +570,12 @@ let private ringIsSimple ring =
 let private pointStrictlyInRing point ring =
     ringContains point ring && not (ring |> segments |> List.exists (pointOnSegment point))
 
+let private pointStrictlyInPolygon point = function
+    | shell :: holes ->
+        pointStrictlyInRing point shell
+        && holes |> List.forall (fun hole -> not (ringContains point hole))
+    | [] -> false
+
 let private ringsIntersect first second =
     first
     |> segments
@@ -659,8 +665,8 @@ let rec private shapeIsValid = function
                     match first, second with
                     | firstShell :: _, secondShell :: _ ->
                         not (ringsCrossOrOverlap firstShell secondShell)
-                        && not (pointStrictlyInRing firstShell.Head secondShell)
-                        && not (pointStrictlyInRing secondShell.Head firstShell)
+                        && not (firstShell |> List.exists (fun point -> pointStrictlyInPolygon point second))
+                        && not (secondShell |> List.exists (fun point -> pointStrictlyInPolygon point first))
                     | _ -> false))
 
         not (List.isEmpty polygons) && polygons |> List.forall polygonIsValid && polygonsAreSeparate
