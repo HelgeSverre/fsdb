@@ -11171,58 +11171,63 @@ and private runGroupedSelect
                 let metadata = columnMetadataOf 1 [ projected ] |> applyWireOverrides wireOverrides
                 ResultSet(colNames, [ rendered ]), metadata, [ [| VInt count |] ]
         else
-        match rows |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
+        let collations = groupExprs |> List.map (keyCollation (ctxFor (probeRow columns)))
+        let comparer = SqlValueKeyComparer(collations, false)
+        let equalityComparer = comparer :> IEqualityComparer<Value[]>
+        let groupIndex = Dictionary<Value[], int>(comparer)
+        let groups = ResizeArray<Value[] * ResizeArray<Value[]>>()
+
+        let addGroup key row =
+            let groupRows = ResizeArray()
+            groupRows.Add row
+            groups.Add(key, groupRows)
+
+        let addOrdered key row =
+            if groups.Count > 0 && equalityComparer.Equals(fst groups.[groups.Count - 1], key) then
+                let _, groupRows = groups.[groups.Count - 1]
+                groupRows.Add row
+            else
+                addGroup key row
+
+        let addUnordered key row =
+            match groupIndex.TryGetValue key with
+            | true, index ->
+                let _, groupRows = groups.[index]
+                groupRows.Add row
+            | false, _ ->
+                groupIndex.Add(key, groups.Count)
+                addGroup key row
+
+        let collect row =
+            matches row
+            |> Result.bind (fun keep ->
+                if not keep then
+                    Ok None
+                elif groupExprs.IsEmpty then
+                    Ok(Some row)
+                else
+                    groupExprs
+                    |> traverse (evalExpr (ctxFor row))
+                    |> Result.map (fun values ->
+                        let key = Array.ofList values
+
+                        match groupInputOrder with
+                        | ContiguousGroupRows -> addOrdered key row
+                        | ArbitraryGroupRows -> addUnordered key row
+
+                        None))
+
+        match rows |> traverseSeq collect with
         | Error(code, message) -> Err(code, message), [], []
         | Ok matched ->
             let buildGroups () : Result<(Value list * Value[] list) list, EvalError> =
                 if groupExprs.IsEmpty then
                     Ok [ [], matched ]
                 else
-                    let collations = groupExprs |> List.map (keyCollation (ctxFor (probeRow columns)))
-                    let comparer = SqlValueKeyComparer(collations, false)
-                    let equalityComparer = comparer :> IEqualityComparer<Value[]>
-                    let groupIndex = Dictionary<Value[], int>(comparer)
-                    let groups = ResizeArray<Value[] * ResizeArray<Value[]>>()
-                    let mutable failure = None
-
-                    let addGroup key row =
-                        let groupRows = ResizeArray()
-                        groupRows.Add row
-                        groups.Add(key, groupRows)
-
-                    let addOrdered key row =
-                        if groups.Count > 0 && equalityComparer.Equals(fst groups.[groups.Count - 1], key) then
-                            let _, groupRows = groups.[groups.Count - 1]
-                            groupRows.Add row
-                        else
-                            addGroup key row
-
-                    let addUnordered key row =
-                        match groupIndex.TryGetValue key with
-                        | true, index ->
-                            let _, groupRows = groups.[index]
-                            groupRows.Add row
-                        | false, _ ->
-                            groupIndex.Add(key, groups.Count)
-                            addGroup key row
-
-                    for row in matched do
-                        if failure.IsNone then
-                            match groupExprs |> traverse (evalExpr (ctxFor row)) with
-                            | Error error -> failure <- Some error
-                            | Ok values ->
-                                let key = Array.ofList values
-                                match groupInputOrder with
-                                | ContiguousGroupRows -> addOrdered key row
-                                | ArbitraryGroupRows -> addUnordered key row
-
-                    match failure with
-                    | Some error -> Error error
-                    | None ->
-                        groups
-                        |> Seq.map (fun (key, rows) -> List.ofArray key, List.ofSeq rows)
-                        |> List.ofSeq
-                        |> Ok
+                    groups
+                    |> Seq.map (fun (key, rows) -> List.ofArray key, List.ofSeq rows)
+                    |> List.ofSeq
+                    |> Ok
 
             // `WITH ROLLUP` adds one super-aggregate row per dropped GROUP BY
             // suffix. MySQL emits them in key order with each subtotal right
