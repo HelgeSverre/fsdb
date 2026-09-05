@@ -879,6 +879,10 @@ let tests =
                         (mkSelect([ col "order", None; col "a`b", None ], Some "select", None, [], None, None))
                         "backtick identifiers"
 
+                testCase "NUL is rejected inside a quoted identifier"
+                <| fun _ ->
+                    Expect.isError (parse "CREATE TABLE t (`bad\u0000name` INT)") "MySQL rejects NUL in quoted identifiers"
+
                 testCase "ROW and PARTITION cannot become implicit aliases"
                 <| fun _ ->
                     Expect.isError (parse "SELECT ROW(1, 2) ROW") "ROW alias"
@@ -1045,6 +1049,16 @@ let tests =
                                         Kind = BTree } ] }
                         ))
                         "create table"
+
+                testCase "repeated deprecated charset options accumulate linearly and in source order"
+                <| fun _ ->
+                    let options = String.replicate 2000 " DEFAULT CHARSET=utf8"
+
+                    match parse ("CREATE TABLE t (id INT)" + options) with
+                    | Ok(CreateTable { Deprecations = deprecations }) ->
+                        Expect.equal deprecations.Length 2000 "every occurrence remains reportable"
+                        Expect.isTrue (deprecations |> List.forall ((=) Utf8CharsetAlias)) "warning order is preserved"
+                    | other -> failtestf "expected repeated table options to parse, got %A" other
 
                 testCase "column comments parse on CREATE and ALTER definitions"
                 <| fun _ ->
@@ -2851,6 +2865,22 @@ let tests =
                     Expect.isError (parseTableLocks "LOCK TABLES") "a lock list is required"
                     Expect.isError (parseTableLocks "LOCK TABLES t SHARE") "only READ and WRITE are valid"
 
+                testCase "bounds explicit and FLUSH table lock lists"
+                <| fun _ ->
+                    let names count = [ 1..count ] |> List.map (sprintf "t%d") |> String.concat ","
+                    let locks count = [ 1..count ] |> List.map (fun index -> sprintf "t%d READ" index) |> String.concat ","
+
+                    Expect.isOk (parseTableLocks ("LOCK TABLES " + locks 1024)) "the supported lock boundary parses"
+                    Expect.isError (parseTableLocks ("LOCK TABLES " + locks 1025)) "an oversized lock list is rejected"
+
+                    Expect.isOk
+                        (parseFlushTableLocks ("FLUSH TABLES " + names 1024 + " WITH READ LOCK"))
+                        "the supported FLUSH boundary parses"
+
+                    Expect.isError
+                        (parseFlushTableLocks ("FLUSH TABLES " + names 1025 + " WITH READ LOCK"))
+                        "an oversized FLUSH list is rejected"
+
                 testCase "accepts comments between lock-list tokens"
                 <| fun _ ->
                     match parseTableLocks "LOCK/**/TABLES `app`./* qualifier */`t` AS/* alias */reader READ/**/LOCAL" with
@@ -3014,6 +3044,32 @@ let tests =
                     match parse (sprintf "SELECT %s" deep) with
                     | Error _ -> ()
                     | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt
+
+                testCase "HIGH_NOT_PRECEDENCE applies the same NOT depth limit"
+                <| fun _ ->
+                    let options = { defaultOptions with HighNotPrecedence = true }
+                    let expression count = String.replicate count "NOT " + "TRUE"
+
+                    Expect.isOk (parseWithOptions options ("SELECT " + expression 32)) "the supported boundary parses"
+                    Expect.isError (parseWithOptions options ("SELECT " + expression 33)) "the next NOT is rejected"
+                    Expect.isError
+                        (parseWithOptions options ("SELECT " + String.replicate 33 "NOT/**/" + "TRUE"))
+                        "comments cannot hide a prefix chain"
+                    Expect.isError
+                        (parseWithOptions options ("SELECT " + String.replicate 33 "NOT - " + "TRUE"))
+                        "other unary operators cannot hide a prefix chain"
+
+                    let independent = [ 1..40 ] |> List.map (fun _ -> "NOT TRUE") |> String.concat ","
+                    Expect.isOk (parseWithOptions options ("SELECT " + independent)) "independent prefixes are not a chain"
+
+                testCase "redundant SELECT parentheses have a separate backtracking limit"
+                <| fun _ ->
+                    let query depth = String.replicate depth "(" + "SELECT 1" + String.replicate depth ")"
+                    let commented depth = String.replicate depth "(/**/" + "SELECT 1" + String.replicate depth ")"
+
+                    Expect.isOk (parse (query 8)) "the supported boundary parses"
+                    Expect.isError (parse (query 9)) "ambiguous nesting is rejected before reparsing grows exponentially"
+                    Expect.isError (parse (commented 9)) "comments cannot hide ambiguous nesting"
 
                 testCase "compact scalar-subquery nesting is rejected before parser amplification"
                 <| fun _ ->
@@ -3430,6 +3486,14 @@ let tests =
                       [ "SELECT ';'"; "SELECT `a;b` FROM t"; "SELECT 3" ]
                       "only statement delimiters split the batch"
               | Error error -> failtestf "unexpected split error: %s" error
+
+          testCase "compound detection does not rescan repeated header tokens"
+          <| fun _ ->
+              let sql = "CREATE DEFINER=x " + String.replicate 10000 "TRIGGER " + "BEGIN"
+
+              match splitStatements sql with
+              | Ok [ statement ] -> Expect.equal statement sql "the invalid statement remains one batch member"
+              | other -> failtestf "unexpected split result: %A" other
 
           testCase "statement batches preserve compound trigger bodies"
           <| fun _ ->
@@ -3875,6 +3939,20 @@ let tests =
                   Expect.equal load.FieldTerminator "::" "field terminator"
                   Expect.equal load.LineTerminator "💥" "line terminator"
               | Error error -> failtestf "unexpected parse error: %s" error
+
+          testCase "LOAD DATA LOCAL INFILE bounds field and line terminators"
+          <| fun _ ->
+              let terminator length = String.replicate length "x"
+              let sql field line =
+                  sprintf
+                      "LOAD DATA LOCAL INFILE 'x' INTO TABLE t FIELDS TERMINATED BY '%s' LINES TERMINATED BY '%s'"
+                      field
+                      line
+
+              Expect.isOk (parseLocalLoad (sql (terminator 16) "\n")) "the supported field boundary parses"
+              Expect.isOk (parseLocalLoad (sql "," (terminator 16))) "the supported line boundary parses"
+              Expect.isError (parseLocalLoad (sql (terminator 17) "\n")) "an oversized field terminator is rejected"
+              Expect.isError (parseLocalLoad (sql "," (terminator 17))) "an oversized line terminator is rejected"
 
           testCase "LOAD DATA LOCAL INFILE retains custom and empty escape settings"
           <| fun _ ->

@@ -91,15 +91,15 @@ let private parseTimeNumberTicks (text: string) : TimeParseResult =
         elif trimmed.StartsWith "+" then false, trimmed.Substring 1
         else false, trimmed
 
-    match body.Split '.' with
-    | [| whole |]
-    | [| whole; _ |] when whole.Length > 0 ->
-        let fraction = if body.Contains '.' then body.Substring(body.IndexOf '.' + 1) else ""
+    let decimalPoint = body.IndexOf '.'
 
-        if
-            whole |> Seq.forall Char.IsDigit
-            && fraction |> Seq.forall Char.IsDigit
-        then
+    if decimalPoint <> body.LastIndexOf '.' then
+        NotATime
+    else
+        let whole = if decimalPoint < 0 then body else body.Substring(0, decimalPoint)
+        let fraction = if decimalPoint < 0 then "" else body.Substring(decimalPoint + 1)
+
+        if whole.Length > 0 && Seq.forall Char.IsDigit whole && Seq.forall Char.IsDigit fraction then
             match Int64.TryParse(whole, NumberStyles.None, CultureInfo.InvariantCulture) with
             | true, number ->
                 let seconds = number % 100L
@@ -120,7 +120,6 @@ let private parseTimeNumberTicks (text: string) : TimeParseResult =
             | _ -> TimeComponentsOutOfRange
         else
             NotATime
-    | _ -> NotATime
 
 let parseTimeInput text =
     match parseTimeTicks text with
