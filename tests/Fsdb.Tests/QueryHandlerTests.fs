@@ -567,6 +567,20 @@ let tests =
                       "prepared derived origin"
               | Error error -> failtestf "expected the derived query to prepare, got %A" error
 
+          testCase "prepared metadata normalizes a long function name once"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let functionName = String.replicate 10_000 "f"
+              let arguments = List.replicate 128 "?" |> String.concat ","
+              let sql = sprintf "SELECT %s(%s)" functionName arguments
+
+              match prepareStatementForSession session sql with
+              | Ok(statement, count) ->
+                  let parameters, _ = preparedMetadata session statement count
+                  Expect.equal count 128 "all placeholders are parsed"
+                  Expect.equal parameters.Length 128 "all parameters receive metadata"
+              | Error error -> failtestf "expected the long function call to prepare, got %A" error
+
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -785,13 +799,13 @@ let tests =
                       "mixed textual expressions remain non-null"
               | Error error -> failtestf "expected builtin statement to prepare, got %A" error
 
-          testCase "recursive JSON schemas return the MySQL maximum-depth error"
+          testCase "JSON Schema references return MySQL's unsupported-feature error"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT JSON_SCHEMA_VALID('{\"$ref\":\"#\"}', '{}')" |> snd with
-              | Err(3157, message) -> Expect.equal message "The JSON document exceeds the maximum depth." "error text"
-              | other -> failtestf "expected recursive schema error 3157, got %A" other
+              | Err(1235, message) -> Expect.stringContains message "references in JSON Schema" "error text"
+              | other -> failtestf "expected reference error 1235, got %A" other
 
           testCase "planar geometry functions compose through SQL expressions"
           <| fun _ ->
@@ -1495,6 +1509,10 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected JSON_TABLE USING to compare padded CHAR values, got %A" other
 
+              match handle paddedSession "SELECT c FROM JSON_TABLE('[\"x\"]', '$[*]' COLUMNS(c CHAR(500000000) PATH '$')) jt" |> snd with
+              | Err(1074, _) -> ()
+              | other -> failtestf "expected an oversized JSON_TABLE CHAR column to fail with 1074, got %A" other
+
           testCase "NO_UNSIGNED_SUBTRACTION produces signed integer results"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -2178,6 +2196,35 @@ let tests =
               match prepareStatementForSession session "HANDLER h READ FIRST" with
               | Error(1295, _) -> ()
               | other -> failtestf "expected prepared protocol refusal, got %A" other
+
+          testCase "HANDLER bounds retained aliases and their names"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let mutable session, _ = handle session "CREATE TABLE handler_quota (id INT)"
+
+              for index in 0 .. Fsdb.Limits.maxOpenTableHandlers - 1 do
+                  let next, result = handle session (sprintf "HANDLER handler_quota OPEN AS h%d" index)
+                  Expect.equal result (Affected 0UL) "an alias below the cap opens"
+                  session <- next
+
+              let unchanged, overLimit = handle session "HANDLER handler_quota OPEN AS one_too_many"
+              Expect.equal unchanged.TableHandlers.Count Fsdb.Limits.maxOpenTableHandlers "the rejected alias is not retained"
+
+              match overLimit with
+              | Err(1235, _) -> ()
+              | other -> failtestf "expected the handler quota error, got %A" other
+
+              let session, _ = handle session "HANDLER h0 CLOSE"
+              let session, reopened = handle session "HANDLER handler_quota OPEN AS replacement"
+              Expect.equal reopened (Affected 0UL) "closing an alias frees quota"
+
+              let longAlias = String.replicate (Fsdb.Limits.maxTableHandlerAliasRunes + 1) "a"
+              let unchanged, result = handle session (sprintf "HANDLER handler_quota OPEN AS `%s`" longAlias)
+              Expect.equal unchanged.TableHandlers.Count Fsdb.Limits.maxOpenTableHandlers "an overlong name is not retained"
+
+              match result with
+              | Err(1059, _) -> ()
+              | other -> failtestf "expected the identifier-length error, got %A" other
 
           testCase "HANDLER follows temporary and schema lifetimes"
           <| fun _ ->
@@ -4199,6 +4246,80 @@ let tests =
                   Expect.stringContains message "mutual_a" "limited routine"
               | other -> failtestf "expected mutual depth refusal, got %A" other
 
+          testCase "distinct procedure nesting stops before exhausting the process stack"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+
+              let execute sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              TestSupport.Sql.expectOk
+                  (execute (sprintf "CREATE PROCEDURE deep_%d() SELECT 1" Fsdb.Limits.maxStoredProgramNesting))
+                  "create terminal procedure"
+
+              for index in Fsdb.Limits.maxStoredProgramNesting - 1 .. -1 .. 0 do
+                  TestSupport.Sql.expectOk
+                      (execute (sprintf "CREATE PROCEDURE deep_%d() CALL deep_%d()" index (index + 1)))
+                      "create nested procedure"
+
+              match execute "CALL deep_0()" with
+              | Err(1436, message) -> Expect.stringContains message "stack" "aggregate nesting backstop"
+              | other -> failtestf "expected distinct procedure nesting to return 1436, got %A" other
+
+              match execute "SELECT 1" with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the session to remain usable, got %A" other
+
+              TestSupport.Sql.expectOk
+                  (execute (sprintf "CREATE FUNCTION deep_fn_%d() RETURNS INT RETURN 1" Fsdb.Limits.maxStoredProgramNesting))
+                  "create terminal function"
+
+              for index in Fsdb.Limits.maxStoredProgramNesting - 1 .. -1 .. 0 do
+                  TestSupport.Sql.expectOk
+                      (execute
+                          (sprintf
+                              "CREATE FUNCTION deep_fn_%d() RETURNS INT RETURN deep_fn_%d()"
+                              index
+                              (index + 1)))
+                      "create nested function"
+
+              match execute "SELECT deep_fn_0()" with
+              | Err(1436, message) -> Expect.stringContains message "stack" "stored functions share the aggregate backstop"
+              | other -> failtestf "expected distinct function nesting to return 1436, got %A" other
+
+              for index in 0 .. 9 do
+                  TestSupport.Sql.expectOk (execute (sprintf "CREATE TABLE mixed_table_%d (n INT)" index)) "create mixed chain table"
+
+              for index in 0 .. 8 do
+                  TestSupport.Sql.expectOk
+                      (execute
+                          (sprintf
+                              "CREATE TRIGGER mixed_trigger_%d AFTER INSERT ON mixed_table_%d FOR EACH ROW INSERT INTO mixed_table_%d VALUES (NEW.n)"
+                              index
+                              index
+                              (index + 1)))
+                      "create mixed chain trigger"
+
+              TestSupport.Sql.expectOk
+                  (execute
+                      "CREATE FUNCTION mixed_fn_7() RETURNS INT MODIFIES SQL DATA BEGIN INSERT INTO mixed_table_0 VALUES (1); RETURN 1; END")
+                  "create mixed terminal function"
+
+              for index in 6 .. -1 .. 0 do
+                  TestSupport.Sql.expectOk
+                      (execute
+                          (sprintf
+                              "CREATE FUNCTION mixed_fn_%d() RETURNS INT MODIFIES SQL DATA RETURN mixed_fn_%d()"
+                              index
+                              (index + 1)))
+                      "create mixed nested function"
+
+              match execute "SELECT mixed_fn_0()" with
+              | Err(1436, message) -> Expect.stringContains message "stack" "mixed functions and triggers share one backstop"
+              | other -> failtestf "expected mixed nesting to return 1436, got %A" other
+
           testCase "nested procedure errors retain prior results and reach handlers"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -4806,6 +4927,73 @@ let tests =
               | Err(1539, _) -> ()
               | other -> failtestf "expected one-time event removal, got %A" other
 
+          testCase "event scheduler bounds concurrent executions and retries unclaimed work"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable active = 0
+              let mutable peak = 0
+              let mutable enteredTotal = 0
+              use admitted = new Threading.CountdownEvent(Fsdb.Limits.maxConcurrentEventExecutions)
+              use release = new Threading.ManualResetEventSlim(false)
+
+              let rec recordPeak value =
+                  let observed = Threading.Volatile.Read(&peak)
+
+                  if value > observed && Threading.Interlocked.CompareExchange(&peak, value, observed) <> observed then
+                      recordPeak value
+
+              let hold _ =
+                  let ordinal = Threading.Interlocked.Increment(&enteredTotal)
+                  let current = Threading.Interlocked.Increment(&active)
+                  recordPeak current
+
+                  if ordinal <= Fsdb.Limits.maxConcurrentEventExecutions then
+                      admitted.Signal() |> ignore
+
+                  try
+                      release.Wait()
+                      VInt 1L
+                  finally
+                      Threading.Interlocked.Decrement(&active) |> ignore
+
+              let registry = Fsdb.Functions.empty |> Fsdb.Functions.registerScalar "HOLD_EVENT" hold
+              let mutable session = create 1 store
+
+              for index in 0 .. Fsdb.Limits.maxConcurrentEventExecutions do
+                  let next, result =
+                      handle
+                          session
+                          (sprintf
+                              "CREATE EVENT quota_event_%d ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 SECOND DO DO HOLD_EVENT()"
+                              index)
+
+                  TestSupport.Sql.expectOk result "create scheduled event"
+                  session <- next
+
+              let scheduler = Fsdb.EventScheduler.acquire store registry
+
+              try
+                  Expect.isTrue (admitted.Wait(TimeSpan.FromSeconds 5.0)) "the scheduler fills its bounded worker set"
+                  scheduler.Dispose()
+                  use resumed = Fsdb.EventScheduler.acquire store registry
+                  Threading.Thread.Sleep 250
+                  Expect.equal (Threading.Volatile.Read(&peak)) Fsdb.Limits.maxConcurrentEventExecutions "reacquiring keeps the same worker budget"
+                  Expect.equal (Threading.Volatile.Read(&enteredTotal)) Fsdb.Limits.maxConcurrentEventExecutions "saturated work remains unclaimed"
+
+                  release.Set()
+                  let timer = System.Diagnostics.Stopwatch.StartNew()
+
+                  while timer.Elapsed < TimeSpan.FromSeconds 5.0 && Threading.Volatile.Read(&enteredTotal) < Fsdb.Limits.maxConcurrentEventExecutions + 1 do
+                      Threading.Thread.Sleep 25
+
+                  Expect.equal
+                      (Threading.Volatile.Read(&enteredTotal))
+                      (Fsdb.Limits.maxConcurrentEventExecutions + 1)
+                      "the skipped occurrence runs after a slot is released"
+              finally
+                  release.Set()
+                  scheduler.Dispose()
+
           testCase "ALTER EVENT changes schedule, status, name, schema, and body"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -5085,6 +5273,29 @@ let tests =
 
               let session, _ = handle session "SELECT 1"
               Expect.isEmpty session.SessionStateChanges "the next statement starts with an empty tracker"
+
+          testCase "session tracker configuration is bounded and skipped without negotiation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let oversized = String.replicate (Fsdb.Limits.maxTrackedSystemVariablesLength + 1) "a"
+              let hostile = { session with Variables = Map.add "session_track_system_variables" (Some oversized) session.Variables }
+              let unchanged = Fsdb.Session.trackSystemVariableAssignments true [ "autocommit" ] hostile
+              Expect.isEmpty unchanged.SessionStateChanges "a client without CLIENT_SESSION_TRACK does not parse the tracker list"
+
+              match handle session (sprintf "SET session_track_system_variables = REPEAT('a', %d)" oversized.Length) with
+              | unchanged, Err(1231, _) ->
+                  Expect.equal unchanged.Variables.["session_track_system_variables"] session.Variables.["session_track_system_variables"] "invalid value is not stored"
+              | _, other -> failtestf "expected an oversized tracker configuration error, got %A" other
+
+              let tooMany = String.replicate Fsdb.Limits.maxTrackedSystemVariableNames "a,"
+
+              match handle session (sprintf "SET session_track_system_variables = '%s'" tooMany) |> snd with
+              | Err(1231, _) -> ()
+              | other -> failtestf "expected a tracker-name cardinality error, got %A" other
+
+              let negotiated = { hostile with Capabilities = ClientProtocol41 ||| ClientSessionTrack }
+              let unchanged = Fsdb.Session.trackSystemVariableAssignments true [ "autocommit" ] negotiated
+              Expect.isEmpty unchanged.SessionStateChanges "defensive parsing skips an invalid retained configuration"
 
           testCase "transaction tracking reports replay characteristics and state transitions"
           <| fun _ ->
@@ -6137,6 +6348,28 @@ let tests =
 
               closeSession second
               Expect.equal (scalar first "SELECT GET_LOCK('migration', 0)") (Some "1") "disconnect releases locks"
+
+          testCase "advisory locks enforce a distinct-name quota per session"
+          <| fun _ ->
+              let session = create 10 (Fsdb.Storage.create ())
+
+              let scalar sql =
+                  match handle session sql |> snd with
+                  | ResultSet(_, [ [ value ] ]) -> value
+                  | other -> failtestf "expected one scalar value, got %A" other
+
+              for index in 0 .. Fsdb.Limits.maxAdvisoryLocksPerSession - 1 do
+                  Expect.equal (scalar (sprintf "SELECT GET_LOCK('quota-%d', 0)" index)) (Some "1") "lock below quota"
+
+              Expect.equal (scalar "SELECT GET_LOCK('quota-0', 0)") (Some "1") "reentrant acquisition is quota-neutral"
+
+              match handle session "SELECT GET_LOCK('one-too-many', 0)" |> snd with
+              | Err(1235, _) -> ()
+              | other -> failtestf "expected the advisory-lock quota error, got %A" other
+
+              Expect.equal (scalar "SELECT RELEASE_LOCK('quota-1')") (Some "1") "release frees one name"
+              Expect.equal (scalar "SELECT GET_LOCK('replacement', 0)") (Some "1") "a new name fits after release"
+              closeSession session
 
           testCase "comments ahead of text-probed statements are stripped like real MySQL's lexer"
           <| fun _ ->
@@ -7352,6 +7585,114 @@ let tests =
               | ResultSet(_, [ [ Some "10" ]; [ Some "22" ] ]) -> ()
               | other -> failtestf "expected the committed second delta, got %A" other
 
+          testCase "READ UNCOMMITTED rejects an excessive dirty-view fanout"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE dirty_fanout (id INT PRIMARY KEY, value INT)"
+
+              let rows =
+                  [ for id in 1 .. Fsdb.Limits.maxReadUncommittedViews + 1 -> sprintf "(%d, 0)" id ]
+                  |> String.concat ","
+
+              handle setup $"INSERT INTO dirty_fanout VALUES {rows}" |> ignore
+
+              let writers =
+                  [ for id in 1 .. Fsdb.Limits.maxReadUncommittedViews + 1 do
+                        let writer, _ = handle (create (id + 1) store) "BEGIN"
+                        let writer, updated = handle writer $"UPDATE dirty_fanout SET value = 1 WHERE id = {id}"
+                        Expect.equal updated (Affected 1UL) "each writer contributes one private dirty root"
+                        yield writer ]
+
+              let reader, _ =
+                  handle
+                      (create (Fsdb.Limits.maxReadUncommittedViews + 10) store)
+                      "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+
+              let reader, _ = handle reader "BEGIN"
+
+              try
+                  match handle reader "SELECT 1" |> snd with
+                  | Err(1235, message) -> Expect.stringContains message "resource limits" "the failure explains the bounded dirty view"
+                  | result -> failtestf "expected dirty-view admission to fail, got %A" result
+              finally
+                  writers |> List.iter (fun writer -> handle writer "ROLLBACK" |> ignore)
+                  handle reader "ROLLBACK" |> ignore
+
+          testCase "READ UNCOMMITTED observes a dirty database drop"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE DATABASE dirty_drop_database"
+              handle setup "CREATE TABLE dirty_drop_database.items (id INT)" |> ignore
+              let baseCatalog = store.Catalog
+              let catalog = Map.remove "dirty_drop_database" baseCatalog
+
+              Fsdb.TransactionRegistry.publish
+                  store
+                  99
+                  { BaseCatalog = baseCatalog
+                    Catalog = catalog
+                    ChangedDatabases = Set.singleton "dirty_drop_database"
+                    ChangedTables = Set.singleton ("dirty_drop_database", "items")
+                    Metadata =
+                      { Id = 99UL
+                        Started = DateTime.Now
+                        Isolation = "READ UNCOMMITTED"
+                        ReadOnly = false
+                        UniqueChecks = true
+                        ForeignKeyChecks = true
+                        RowsModified = 0UL
+                        LockStructs = 0UL } }
+
+              let reader, _ = handle (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let reader, _ = handle reader "BEGIN"
+
+              try
+                  match handle reader "SHOW DATABASES" |> snd with
+                  | ResultSet(_, rows) ->
+                      let names = rows |> List.choose List.tryHead |> List.choose id
+                      Expect.isFalse (names |> List.contains "dirty_drop_database") "the dirty drop is visible"
+                  | result -> failtestf "expected SHOW DATABASES, got %A" result
+              finally
+                  handle reader "ROLLBACK" |> ignore
+                  Fsdb.TransactionRegistry.remove store 99
+
+          testCase "READ UNCOMMITTED bounds empty database deltas"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let baseCatalog = store.Catalog
+              let databaseNames =
+                  [ for ordinal in 1 .. Fsdb.Limits.maxReadUncommittedDatabases + 1 -> $"dirty_empty_{ordinal}" ]
+
+              let catalog = databaseNames |> List.fold (fun current name -> Map.add name Map.empty current) baseCatalog
+
+              Fsdb.TransactionRegistry.publish
+                  store
+                  99
+                  { BaseCatalog = baseCatalog
+                    Catalog = catalog
+                    ChangedDatabases = Set.ofList databaseNames
+                    ChangedTables = Set.empty
+                    Metadata =
+                      { Id = 99UL
+                        Started = DateTime.Now
+                        Isolation = "READ UNCOMMITTED"
+                        ReadOnly = false
+                        UniqueChecks = true
+                        ForeignKeyChecks = true
+                        RowsModified = 0UL
+                        LockStructs = 0UL } }
+
+              let reader, _ = handle (create 2 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+              let reader, _ = handle reader "BEGIN"
+
+              try
+                  match handle reader "SELECT 1" |> snd with
+                  | Err(1235, message) -> Expect.stringContains message "resource limits" "database-only deltas are admitted by count"
+                  | result -> failtestf "expected database-delta admission to fail, got %A" result
+              finally
+                  handle reader "ROLLBACK" |> ignore
+                  Fsdb.TransactionRegistry.remove store 99
+
           testCase "locking reads honor NOWAIT and SKIP LOCKED"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -8505,6 +8846,17 @@ let tests =
               match handle session "SHOW TABLES FROM d WHERE Tables_in_d = ?" |> snd with
               | Err(1064, _) -> ()
               | other -> failtestf "expected 1064 for a probe placeholder, got %A" other
+
+              for comment in [ "# hidden"; "-- hidden" ] do
+                  let sql = sprintf "%s\rCREATE TABLE cr_placeholder (a INT, b INT AS (?))" comment
+
+                  match handle session sql |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected 1064 after a lone-CR comment, got %A" other
+
+              Expect.isFalse
+                  (Map.containsKey "cr_placeholder" session.Store.Catalog.[Fsdb.Storage.defaultDatabase])
+                  "lone-CR comments cannot hide a persisted placeholder"
 
           testCase "prepareStatement rejects a placeholder the binder can't reach (DDL generated column)"
           <| fun _ ->

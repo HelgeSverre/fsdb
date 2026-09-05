@@ -13,6 +13,7 @@
 module Fsdb.Limits
 
 open System
+open System.Threading
 
 /// Safety ceiling for a reassembled multi-packet payload, and the value
 /// advertised as `max_allowed_packet`. A malicious or buggy client can't
@@ -39,6 +40,88 @@ let mutable maxConnections = 500
 /// ASTs without coupling otherwise independent sessions.
 let mutable maxPreparedStmtCount = 16382
 
+/// Ambient cancellation for synchronous query work. Long-running SQL and
+/// engine loops share this token so disconnect and KILL do not depend on a
+/// particular row-pipeline helper being on the call path.
+let queryCancellation = new ThreadLocal<CancellationToken>(fun () -> CancellationToken.None)
+let queryWorkDeadline = new ThreadLocal<int64 option>(fun () -> None)
+
+let cancellationCheckInterval = 256
+
+let checkQueryCancellation iteration =
+    if iteration % cancellationCheckInterval = 0 then
+        queryCancellation.Value.ThrowIfCancellationRequested()
+
+let queryWorkDeadlineAfter (duration: TimeSpan) =
+    System.Diagnostics.Stopwatch.GetTimestamp()
+    + int64 (duration.TotalSeconds * float System.Diagnostics.Stopwatch.Frequency)
+
+let queryWorkDeadlineExpired () =
+    queryWorkDeadline.Value
+    |> Option.exists (fun deadline -> System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
+
+let queryWorkDeadlineRemaining () =
+    queryWorkDeadline.Value
+    |> Option.map (fun deadline ->
+        let ticks = max 0L (deadline - System.Diagnostics.Stopwatch.GetTimestamp())
+        TimeSpan.FromSeconds(float ticks / float System.Diagnostics.Stopwatch.Frequency))
+
+/// Explicit ceilings for functions whose successful result is constant-size
+/// regardless of the requested work.
+let maxSleepSeconds = 60.0
+let maxBenchmarkIterations = 10_000_000L
+let maxBenchmarkDuration = TimeSpan.FromSeconds 1.0
+
+/// READ UNCOMMITTED composes private transaction roots in user space rather
+/// than reading storage-engine pages directly. Bound that compatibility layer
+/// so one reader cannot be forced to materialize every active transaction.
+let maxReadUncommittedViews = 64
+let maxReadUncommittedRows = 100_000UL
+let maxReadUncommittedDatabases = 256
+let maxReadUncommittedTables = 1024
+
+/// Feedback modes perform one AES block operation per bit or byte.
+let maxAesCfb1Bytes = 1024
+let maxAesCfb8Bytes = 16 * 1024
+
+let maxGeometryDistanceComparisons = 10_000_000
+
+/// Compression work is chosen by the server even when the client advertises
+/// a more expensive level in its handshake response.
+let maxZstdCompressionLevel = 3
+
+/// A session can stream large values without retaining one backing page for
+/// every parameter in an attacker-sized prepared-statement collection.
+let maxLongDataParameters = 4096
+
+let maxOpenTableHandlers = 256
+let maxTableHandlerAliasRunes = 256
+let maxTrackedSystemVariablesLength = 4096
+let maxTrackedSystemVariableNames = 256
+let maxAdvisoryLocksPerSession = 64
+let maxPreparedCursors = 64
+let maxPreparedCursorRows = 100_000
+let maxPreparedCursorBytes = 64L * 1024L * 1024L
+let maxStoredProgramNesting = 16
+let maxViewMetadataNesting = 32
+let maxConcurrentEventExecutions = 8
+let eventExecutionTimeout = TimeSpan.FromSeconds 60.0
+
+let private storedProgramNesting = new ThreadLocal<int>(fun () -> 0)
+
+let tryAcquireStoredProgramFrame () : IDisposable option =
+    if storedProgramNesting.Value >= maxStoredProgramNesting then
+        None
+    else
+        storedProgramNesting.Value <- storedProgramNesting.Value + 1
+        let mutable released = 0
+
+        Some
+            { new IDisposable with
+                member _.Dispose() =
+                    if Interlocked.Exchange(&released, 1) = 0 then
+                        storedProgramNesting.Value <- storedProgramNesting.Value - 1 }
+
 /// Password lifetime inherited by accounts whose mysql.user row stores NULL.
 let mutable defaultPasswordLifetimeDays = 0
 
@@ -47,6 +130,10 @@ let mutable defaultWeekFormat = 0
 
 /// Idle timeout waiting for the next command packet.
 let mutable waitTimeoutSeconds = 28800
+
+/// Bounds greeting, TLS, and authentication exchanges before a session has
+/// an account whose ordinary idle policy can apply.
+let mutable connectTimeoutSeconds = 10
 
 /// Idle timeout inherited by clients that negotiate CLIENT_INTERACTIVE.
 let mutable interactiveTimeoutSeconds = 28800
@@ -151,6 +238,12 @@ let private knobs =
         Max = 31536000L
         Set = fun v -> waitTimeoutSeconds <- int v
         Get = fun () -> int64 waitTimeoutSeconds
+        Reportable = true }
+      { Name = "connect_timeout"
+        Min = 2L
+        Max = 31536000L
+        Set = fun v -> connectTimeoutSeconds <- int v
+        Get = fun () -> int64 connectTimeoutSeconds
         Reportable = true }
       { Name = "interactive_timeout"
         Min = 1L

@@ -123,43 +123,95 @@ let private hasWildcardDot (pattern: string) =
 
 type PreparedInput =
     { Text: string
-      SourceOffsets: int array }
+      RemovedCrOffsets: int array option }
 
 let private normalizeLineTerminators (text: string) =
-    let builder = StringBuilder(text.Length)
-    let offsets = ResizeArray<int>(text.Length + 1)
-    let mutable index = 0
+    if text.IndexOf '\r' < 0 then
+        { Text = text; RemovedCrOffsets = None }
+    else
+        let builder = StringBuilder(text.Length)
+        let removedCrOffsets = ResizeArray<int>()
+        let mutable index = 0
 
-    while index < text.Length do
-        offsets.Add index
+        while index < text.Length do
+            match text[index] with
+            | '\r' when index + 1 < text.Length && text[index + 1] = '\n' ->
+                builder.Append '\n' |> ignore
+                removedCrOffsets.Add builder.Length
+                index <- index + 2
+            | '\r' ->
+                builder.Append '\n' |> ignore
+                index <- index + 1
+            | character ->
+                builder.Append character |> ignore
+                index <- index + 1
 
-        match text[index] with
-        | '\r' when index + 1 < text.Length && text[index + 1] = '\n' ->
-            builder.Append '\n' |> ignore
-            index <- index + 2
-        | '\r' ->
-            builder.Append '\n' |> ignore
-            index <- index + 1
-        | character ->
-            builder.Append character |> ignore
-            index <- index + 1
+        { Text = builder.ToString()
+          RemovedCrOffsets = Some(removedCrOffsets.ToArray()) }
 
-    offsets.Add text.Length
+let private normalizeLineTerminatorText (text: string) =
+    if text.IndexOf '\r' < 0 then
+        text
+    else
+        let builder = StringBuilder(text.Length)
+        let mutable index = 0
 
-    { Text = builder.ToString()
-      SourceOffsets = offsets.ToArray() }
+        while index < text.Length do
+            match text[index] with
+            | '\r' when index + 1 < text.Length && text[index + 1] = '\n' ->
+                builder.Append '\n' |> ignore
+                index <- index + 2
+            | '\r' ->
+                builder.Append '\n' |> ignore
+                index <- index + 1
+            | character ->
+                builder.Append character |> ignore
+                index <- index + 1
 
-let prepareInput (matchType: string option) (pattern: string) (text: string) =
+        builder.ToString()
+
+let private needsLineTerminatorNormalization matchType pattern =
     let multiline = matchType |> Option.defaultValue "" |> String.exists ((=) 'm')
     let unixLines = matchType |> Option.defaultValue "" |> String.exists ((=) 'u')
+    (hasWildcardDot pattern || multiline) && not unixLines
 
-    if (hasWildcardDot pattern || multiline) && not unixLines then
+let prepareInput (matchType: string option) (pattern: string) (text: string) =
+    if needsLineTerminatorNormalization matchType pattern then
         normalizeLineTerminators text
     else
         { Text = text
-          SourceOffsets = [| 0 .. text.Length |] }
+          RemovedCrOffsets = None }
 
-let sourceOffset (input: PreparedInput) index = input.SourceOffsets[index]
+let prepareText (matchType: string option) (pattern: string) (text: string) =
+    if needsLineTerminatorNormalization matchType pattern then
+        normalizeLineTerminatorText text
+    else
+        text
+
+let sourceOffset (input: PreparedInput) index =
+    match input.RemovedCrOffsets with
+    | None -> index
+    | Some removed ->
+        let found = Array.BinarySearch(removed, index)
+        let preceding = if found >= 0 then found + 1 else ~~~found
+        index + preceding
+
+let normalizedOffset (input: PreparedInput) sourcePosition =
+    match input.RemovedCrOffsets with
+    | None -> min sourcePosition input.Text.Length
+    | Some _ ->
+        let mutable lower = 0
+        let mutable upper = input.Text.Length + 1
+
+        while lower < upper do
+            let middle = lower + (upper - lower) / 2
+
+            if sourceOffset input middle <= sourcePosition then
+                lower <- middle + 1
+            else
+                upper <- middle
+
+        max 0 (lower - 1)
 
 let scalarCount (text: string) =
     let mutable offset = 0
