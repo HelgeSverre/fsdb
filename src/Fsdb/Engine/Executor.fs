@@ -10135,15 +10135,28 @@ and private groupByIndexTerms (tref: TableRef) (groupExprs: Expr list) : IndexOr
         | None -> Error())
     |> Result.toOption
 
-/// Only literal equalities prove that a preceding index key is constant.
-and private whereEqualityPinnedColumns (whereExpr: Expr option) : Set<string> =
+and private equalityPinsOneStoredKey (table: Table) (name: string) (literal: Value) =
+    Storage.resolveColumn table.Columns name
+    |> Result.toOption
+    |> Option.exists (fun index ->
+        match table.Columns.[index].Type, literal with
+        | (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBit _ | TYear),
+          (VInt _ | VUInt _ | VBit _ | VDecimal _)
+        | TDecimal _, (VInt _ | VUInt _ | VBit _ | VDecimal _)
+        | (TDouble _ | TFloat _), (VInt _ | VUInt _ | VBit _ | VDecimal _ | VDouble _) -> true
+        | _ -> false)
+
+/// A pinned prefix must identify one stored index key, not merely values
+/// equal after SQL coercion or collation folding.
+and private whereEqualityPinnedColumns (table: Table) (whereExpr: Expr option) : Set<string> =
     let rec walk expr acc =
         match expr with
         | BinOp(And, l, r) -> walk r (walk l acc)
-        | BinOp(Eq, Col name, Lit _)
-        | BinOp(Eq, Lit _, Col name)
-        | BinOp(Eq, QualifiedCol(_, name), Lit _)
-        | BinOp(Eq, Lit _, QualifiedCol(_, name)) -> Set.add (name.ToLowerInvariant()) acc
+        | BinOp(Eq, Col name, Lit literal)
+        | BinOp(Eq, Lit literal, Col name)
+        | BinOp(Eq, QualifiedCol(_, name), Lit literal)
+        | BinOp(Eq, Lit literal, QualifiedCol(_, name)) when equalityPinsOneStoredKey table name literal ->
+            Set.add (name.ToLowerInvariant()) acc
         | _ -> acc
 
     whereExpr |> Option.map (fun e -> walk e Set.empty) |> Option.defaultValue Set.empty
@@ -10230,7 +10243,7 @@ and private orderedIndexPrefixMatches
     InformationSchema.findTable store.Catalog tableDb tref.Table
     |> Result.toOption
     |> Option.map (fun table ->
-        let pinned = whereEqualityPinnedColumns whereExpr
+        let pinned = whereEqualityPinnedColumns table whereExpr
 
         orderedIndexCandidates table
         |> List.choose (fun candidate ->

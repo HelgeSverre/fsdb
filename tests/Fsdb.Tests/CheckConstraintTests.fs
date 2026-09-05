@@ -126,6 +126,18 @@ let tests =
                   (run store "CREATE TABLE deleting_child (pid INT CHECK (pid > 0), CONSTRAINT deleting_fk FOREIGN KEY (pid) REFERENCES parent (id) ON DELETE CASCADE)")
                   "row-deleting cascade is safe"
 
+          testCase "ST_IsValid checks reject nested multipolygon interiors"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE regions (shape MULTIPOLYGON, CHECK (ST_IsValid(shape)))") "create"
+
+              expectError
+                  3819
+                  (run
+                      store
+                      "INSERT INTO regions VALUES (ST_GeomFromText('MULTIPOLYGON(((0 0,10 0,10 10,0 10,0 0)),((0 0,1 0.1,0.1 1,0 0)))'))")
+                  "overlapping interiors"
+
           testCase "rename retargets metadata and drop removes it"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
