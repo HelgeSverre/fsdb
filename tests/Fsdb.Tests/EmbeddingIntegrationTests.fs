@@ -164,8 +164,11 @@ let tests =
                   Fsdb.Functions.VirtualTable.create "v" [ Fsdb.Functions.VirtualTable.int "n" ] (fun () ->
                       [ [| VInt 42L |] ])
 
-              let conn = Fsdb.Db.connect (Fsdb.Db.create () |> Fsdb.Db.registerTable t)
-              conn.Query "CREATE TABLE fsdb.v (n INT)" |> ignore
+              let db = Fsdb.Db.create ()
+              let seed = Fsdb.Db.connect db
+              seed.Query "CREATE TABLE fsdb.v (n INT, KEY ix_n(n))" |> ignore
+              seed.Query "INSERT INTO fsdb.v VALUES (1), (2)" |> ignore
+              let conn = Fsdb.Db.connect (db |> Fsdb.Db.registerTable t)
 
               // The overlay is read-only: a write addressed to the
               // registered name must error (1036) rather than silently land
@@ -193,6 +196,17 @@ let tests =
               (match conn.Query "SELECT n FROM fsdb.v" with
                | ResultSet(_, [ [ Some "42" ] ]) -> ()
                | other -> failtestf "expected the virtual table to win the name collision, got %A" other)
+
+              (match conn.Query "SELECT n FROM fsdb.v WHERE n >= 0" with
+               | ResultSet(_, [ [ Some "42" ] ]) -> ()
+               | other -> failtestf "expected range predicates to retain the virtual overlay, got %A" other)
+
+              (match conn.Query "EXPLAIN SELECT n FROM fsdb.v WHERE n >= 0" with
+               | ResultSet(_, [ row ]) ->
+                   Expect.equal row.[2] (Some "v") "EXPLAIN names the virtual source"
+                   Expect.equal row.[4] (Some "ALL") "the virtual source uses its ordinary scan"
+                   Expect.equal row.[6] None "the shadowed physical key is not disclosed"
+               | other -> failtestf "expected virtual-table EXPLAIN, got %A" other)
 
               (match conn.Query "SELECT n FROM fsdb.real_t" with
                | ResultSet(_, [ [ Some "7" ] ]) -> ()

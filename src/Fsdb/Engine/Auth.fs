@@ -740,6 +740,8 @@ let renameUser
 
     if (tryUserRowForAccount store oldAccount).IsNone || (tryUserRowForAccount store newAccount).IsSome then
         operationFailed "RENAME USER" oldName oldHost
+    elif isMandatoryRole store oldAccount then
+        mandatoryRoleError oldAccount
     elif isRoleIdentifier then
         Error(3532, "Renaming of a role identifier is forbidden")
     else
@@ -1066,13 +1068,7 @@ let grantProxyAs store grantor proxied grantees withGrantOption =
                         |> Result.map ignore
                         |> Result.mapError toMySqlError
 
-                written
-                |> Result.bind (fun () ->
-                    if withGrantOption then
-                        updateSystemRows store "user" (matchUserRow grantee) [ "Grant_priv", VString "Y" ]
-                        |> Result.map ignore
-                    else
-                        Ok()))
+                written)
             |> Result.map ignore)
 
 let revokeProxyAs store grantor proxied grantees =
@@ -2059,9 +2055,10 @@ and private fromItemReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (i
 and private selectOrUnionReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (body: SelectOrUnion) : (string * string) list =
     match body with
     | PlainSelect s -> selectReadTablesIn boundCtes defaultDb s
-    | UnionSelect(first, rest, _, _, _) ->
+    | UnionSelect(first, rest, orderBy, _, _) ->
         selectReadTablesIn boundCtes defaultDb first
         @ (rest |> List.collect (snd >> selectReadTablesIn boundCtes defaultDb))
+        @ (orderBy |> List.collect (fst >> exprReadTablesIn boundCtes defaultDb))
 
 and private selectReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (s: SelectStmt) : (string * string) list =
     let cteReads, localCtes = cteReadTablesIn boundCtes defaultDb s.Ctes
@@ -2540,11 +2537,18 @@ let requiredPrivilegesForExpression (defaultDb: string) (expression: Expr) : (st
 let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * PrivTarget) list =
     let onTables priv tables = tables |> List.map (fun (db, t) -> priv, OnTable(db, t))
     let split (name: string) = splitQualified defaultDb name
+    let referencedTables ownerDb foreignKeys =
+        foreignKeys
+        |> List.map (fun foreignKey -> foreignKey.RefDatabase |> Option.defaultValue ownerDb, foreignKey.RefTable)
 
     match stmt with
     | Select s -> onTables "SELECT" (selectTables defaultDb s)
-    | Union(first, rest, _, _, _) ->
-        onTables "SELECT" (selectTables defaultDb first @ (rest |> List.collect (snd >> selectTables defaultDb)))
+    | Union(first, rest, orderBy, _, _) ->
+        onTables
+            "SELECT"
+            (selectTables defaultDb first
+             @ (rest |> List.collect (snd >> selectTables defaultDb))
+             @ (orderBy |> List.collect (fst >> exprReadTables defaultDb)))
     | Insert(table, _, rows, onDup, _) ->
         let readInExprs =
             (rows |> List.collect (List.collect (exprReadTables defaultDb)))
@@ -2655,12 +2659,24 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
 
         onTables "DELETE" deletedTables
         @ onTables "SELECT" ((cteTables @ readInExprs) |> List.distinct)
-    | CreateTable table -> onTables "CREATE" [ split table.Name ]
+    | CreateTable table ->
+        let target = split table.Name
+        onTables "CREATE" [ target ]
+        @ onTables "REFERENCES" (referencedTables (fst target) table.ForeignKeys)
     | CreateTableLike(name, source, _) -> onTables "CREATE" [ split name ] @ onTables "SELECT" [ split source ]
-    | CreateTableAs(name, query, _, _) -> onTables "CREATE" [ split name ] @ requiredPrivileges defaultDb query
+    | CreateTableAs(name, query, _, _) ->
+        let target = split name
+        onTables "CREATE" [ target ] @ onTables "INSERT" [ target ] @ requiredPrivileges defaultDb query
     | DropTable(names, _) -> onTables "DROP" (names |> List.map split)
     | Truncate table -> onTables "DROP" [ split table ]
-    | AlterTable(table, _) -> onTables "ALTER" [ split table ]
+    | AlterTable(table, actions) ->
+        let target = split table
+        let foreignKeys = actions |> List.choose (function AddForeignKey foreignKey -> Some foreignKey | _ -> None)
+        let truncatesPartitions = actions |> List.exists (function TruncatePartitions _ -> true | _ -> false)
+
+        onTables "ALTER" [ target ]
+        @ onTables "REFERENCES" (referencedTables (fst target) foreignKeys)
+        @ if truncatesPartitions then onTables "DROP" [ target ] else []
     | RenameTable pairs -> onTables "ALTER" (pairs |> List.map (fst >> split))
     | CreateIndex(_, table, _, _, _, _) -> onTables "INDEX" [ split table ]
     | DropIndexStmt(_, table, _) -> onTables "INDEX" [ split table ]
@@ -2688,15 +2704,18 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         // A dynamic privilege carries its own grant option in
         // mysql.global_grants. Static privileges still share the grant
         // option stored at the target level.
+        let names = privilegeNames privs
+        let explicitGrantOption = names |> List.contains "GRANT OPTION"
+
         let privilegeRequirements, grantOptionRequirements =
-            match expandPrivs (privilegeNames privs |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target with
+            match expandPrivs (names |> List.filter (fun privilege -> privilege <> "GRANT OPTION")) target with
             | Result.Ok resolved ->
                 let privileges =
                     (resolved.Static |> List.map (fun privilege -> privilege.Sql)) @ resolved.Dynamic
                     |> List.map (fun privilege -> privilege, target)
 
                 let grantOption =
-                    if resolved.Static.IsEmpty && not resolved.Dynamic.IsEmpty then
+                    if resolved.Static.IsEmpty && not resolved.Dynamic.IsEmpty && not explicitGrantOption then
                         []
                     else
                         [ "GRANT OPTION", target ]
@@ -2713,7 +2732,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | SetDefaultRole _ -> []
     // DROP's subject table is resolved by `requiredPrivilegesInStore` below.
     | CreateTrigger creation -> onTables "TRIGGER" [ split creation.Table ]
-    | SetTriggerNew _ -> []
+    | SetTriggerNew(_, expression) -> onTables "SELECT" (exprReadTables defaultDb expression)
     | DropTrigger _ -> []
     | CreateView view ->
         let viewDb, _ = split view.Name
