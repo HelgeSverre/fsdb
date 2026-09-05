@@ -107,7 +107,13 @@ let private splitComment options (text: string) =
     | Some(prefix, literal) -> tryComment options literal |> Option.map (fun comment -> prefix, Some comment)
 
 let private stripTrailing (pattern: string) (groupName: string) (text: string) =
-    let matched = Regex.Match(text, pattern, RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+    let matched =
+        Regex.Match(
+            text,
+            pattern,
+            RegexOptions.IgnoreCase ||| RegexOptions.Singleline ||| RegexOptions.NonBacktracking,
+            Fsdb.Limits.regexpMatchTimeout
+        )
 
     if matched.Success then
         text.Substring(0, matched.Index).Trim(), Some(matched.Groups.[groupName].Value.Trim())

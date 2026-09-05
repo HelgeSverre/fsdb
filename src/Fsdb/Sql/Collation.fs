@@ -477,6 +477,26 @@ let tryFind (name: string) : Collation option =
 let tryId (name: string) : int option =
     idAndSortlen |> Map.tryFind (canonicalName name) |> Option.map fst
 
+/// Conservative maximum weight bytes produced per requested CHAR scalar.
+/// MySQL's legacy utf8 binary weights use three bytes despite reporting a
+/// one-byte SORTLEN; 0900 collations report zero for their variable format,
+/// whose server-side transformation budget is sixteen bytes per scalar.
+let weightBytesPerCharacter (name: string) =
+    let name = canonicalName name
+
+    if name = "utf8mb3_bin" || name = "utf8mb4_bin" then
+        3
+    elif name = "binary" then
+        1
+    elif name.EndsWith("_bin", StringComparison.Ordinal) then
+        let separator = name.IndexOf '_'
+        let charset = if separator < 0 then name else name.Substring(0, separator)
+        Charset.maxBytes charset |> Option.defaultValue 4
+    else
+        match idAndSortlen |> Map.tryFind name with
+        | Some(_, sortLength) when sortLength > 16 -> sortLength
+        | _ -> 16
+
 let tryFindById (id: int) : Collation option =
     idAndSortlen
     |> Seq.tryPick (fun (KeyValue(name, (candidate, _))) ->
