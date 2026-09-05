@@ -301,7 +301,8 @@ let negotiatedCompression capabilities zstdCompressionLevel =
         Ok(Some Compression.Algorithm.Zlib)
     elif capabilities &&& ClientZstdCompressionAlgorithm <> 0u then
         match zstdCompressionLevel with
-        | Some level when level >= 1 && level <= 22 -> Ok(Some(Compression.Algorithm.Zstandard level))
+        | Some level when level >= 1 && level <= 22 ->
+            Ok(Some(Compression.Algorithm.Zstandard(min level Limits.maxZstdCompressionLevel)))
         | _ -> Error(3923, "Invalid zstd compression level for algorithm 'zstd'.")
     else
         Ok None

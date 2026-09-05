@@ -79,8 +79,10 @@ type private TriggerRowScope =
 type private ViewCheckScope =
     { Database: string
       Table: string
+      Qualifier: string
       View: string
-      Predicate: Expr option }
+      CheckPredicate: Expr option
+      VisibilityPredicate: Expr option }
 
 type private RangeLookupBounds =
     { Column: string
@@ -316,7 +318,7 @@ type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
-      Views: Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
+      Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
 
@@ -324,7 +326,7 @@ let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
-      Views = Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
+      Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
 
@@ -336,11 +338,14 @@ let private cteOriginScope = System.Threading.AsyncLocal<Map<string, ColumnOrigi
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
+let private viewMergeDepth = System.Threading.AsyncLocal<int>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
 let private triggerTextExecutor = System.Threading.AsyncLocal<(TriggerTextExecution -> string -> QueryResult) option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private metadataProbe = System.Threading.AsyncLocal<bool>()
+let private planningProbe = System.Threading.AsyncLocal<bool>()
+let private directOnlyRestriction = System.Threading.AsyncLocal<string option>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
@@ -378,6 +383,11 @@ let private withMetadataProbe (body: unit -> 'a) : 'a =
 
 let internal isMetadataProbe () = metadataProbe.Value
 
+let private withPlanningProbe (body: unit -> 'a) : 'a =
+    DynamicScope.withValue planningProbe true body
+
+let internal currentDirectOnlyRestriction () = directOnlyRestriction.Value
+
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
     DynamicScope.withValue triggerRowScope (Some scope) body
 
@@ -399,7 +409,8 @@ type private ViewAccess =
     { SecurityType: string
       Definer: string
       Database: string
-      Table: string }
+      Table: string
+      Retarget: bool }
 
 type private ViewColumnTarget =
     { Database: string
@@ -646,7 +657,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
     let rec classify seen (view: StoredView) (select: SelectStmt) =
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-        if Set.contains key seen then
+        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
             None
         else
             match select.From with
@@ -716,11 +727,16 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 | _ -> None)
                         | Some nested ->
                             Expression.rewrite (function
-                                | Col column -> nested.Expressions |> Map.tryFind (column.ToLowerInvariant())
+                                | Col column ->
+                                    nested.Expressions
+                                    |> Map.tryFind (column.ToLowerInvariant())
+                                    |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", column)))
                                 | QualifiedCol(qualifier, column)
                                     when sourceNames
                                          |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)) ->
-                                    nested.Expressions |> Map.tryFind (column.ToLowerInvariant())
+                                    nested.Expressions
+                                    |> Map.tryFind (column.ToLowerInvariant())
+                                    |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", column)))
                                 | _ -> None)
 
                     let physicalQualifier = source.Alias |> Option.defaultValue source.Table
@@ -777,6 +793,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         expandedProjections
                         |> List.exists (fst >> hasDependentSubquery (projectedColumns |> List.map _.ToLowerInvariant() |> Set.ofList))
 
+                    let dependentPredicate =
+                        underlying.IsSome
+                        && (select.Where
+                            |> Option.exists (hasDependentSubquery (projectedColumns |> List.map _.ToLowerInvariant() |> Set.ofList)))
+
                     let projected =
                         expandedProjections
                         |> List.map (fun (expression, alias) ->
@@ -793,6 +814,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     if
                         unresolvedStar
                         || dependentProjection
+                        || dependentPredicate
                         || outputNames.Length <> projected.Length
                         || (outputNames |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList).Count <> outputNames.Length
                         || (projected |> List.forall (fun (_, _, target) -> target.IsNone))
@@ -901,7 +923,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                                 { SecurityType = view.SecurityType
                                   Definer = view.Definer
                                   Database = sourceDb
-                                  Table = source.Table }
+                                  Table = source.Table
+                                  Retarget = true }
                                 :: (underlying |> Option.map _.AccessPath |> Option.defaultValue [])
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
@@ -1188,7 +1211,12 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               InsertableTargets = insertableTargets
                               UpdateFrom = (List.head sources).Reference
                               UpdateJoins = rewrittenJoins
-                              AccessPath = []
+                              AccessPath =
+                                [ { SecurityType = view.SecurityType
+                                    Definer = view.Definer
+                                    Database = view.Schema
+                                    Table = view.Name
+                                    Retarget = false } ]
                               Definer = view.Definer
                               SecurityType = view.SecurityType }
             | _ -> None
@@ -1216,6 +1244,10 @@ let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
 
 let private currentCteOriginScope () : Map<string, ColumnOrigin option list> =
     DynamicScope.valueOrDefault Map.empty cteOriginScope
+
+let private withoutCteScope (body: unit -> 'a) : 'a =
+    DynamicScope.withValue cteScope Map.empty (fun () ->
+        DynamicScope.withValue cteOriginScope Map.empty body)
 
 let private unknownColumn (name: string) : EvalError =
     1054, sprintf "Unknown column '%s' in 'field list'" name
@@ -1748,7 +1780,7 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
         | Error Regexp.InvalidMatchType -> Error(1210, "Incorrect arguments to regexp function")
         | Ok regex ->
             try
-                Ok(boolToValue (regex.IsMatch((Regexp.prepareInput None pat text).Text)))
+                Ok(boolToValue (regex.IsMatch(Regexp.prepareText None pat text)))
             with :? RegexMatchTimeoutException ->
                 Error(3699, "Timeout exceeded in regular expression match.")
 
@@ -1862,10 +1894,14 @@ let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
 
 let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : Value =
     match store.ExecutionSettings.SqlMode.PadCharToFullLength, column.Type, value with
+    | true, TChar length, VString _ when length > 255 ->
+        raise (SqlError(1074, sprintf "Column length too big for column '%s' (max = 255); use BLOB or TEXT instead" column.Name))
     | true, TChar length, VString text ->
         let padding = length - (text.EnumerateRunes() |> Seq.length)
 
-        if padding > 0 then
+        if padding > Limits.maxAllowedPacket then
+            raise (SqlError(1153, "Padded CHAR value exceeds max_allowed_packet"))
+        elif padding > 0 then
             VString(text + System.String(' ', padding))
         else
             value
@@ -2619,15 +2655,22 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
         | None ->
             match tryStoredView store database table.Table with
             | Some view ->
-                match Parser.parse view.Definition with
-                | Ok(Select viewSelect) ->
-                    let columns = selectProjectionColumns store view.Schema viewSelect
+                let stack = currentViewStack ()
+                let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-                    if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
-                        columns
-                    else
-                        List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
-                | _ -> []
+                if Set.contains key stack || stack.Count >= Limits.maxViewMetadataNesting then
+                    []
+                else
+                    DynamicScope.withValue viewStack (Set.add key stack) (fun () ->
+                        match Parser.parse view.Definition with
+                        | Ok(Select viewSelect) ->
+                            let columns = selectProjectionColumns store view.Schema viewSelect
+
+                            if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
+                                columns
+                            else
+                                List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
+                        | _ -> [])
             | None ->
                 scan store database table.Table
                 |> Result.toOption
@@ -4167,17 +4210,24 @@ and private isStatementStableSelect
 /// Prevents indirect evaluation of extension functions registered as
 /// direct-only, including definitions loaded from older persisted catalogs.
 let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
-    registry.Extensions
-    |> Map.fold
-        (fun current name extension ->
-            if extension.DirectOnly then
-                registerScalar
-                    name
-                    (fun _ -> raise (SqlError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name)))
-                    current
-            else
-                current)
-        registry
+    let shadowed =
+        registry.Extensions
+        |> Map.fold
+            (fun current name extension ->
+                if extension.DirectOnly then
+                    registerScalar
+                        name
+                        (fun _ -> raise (SqlError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name)))
+                        current
+                else
+                    current)
+            registry
+
+    { shadowed with
+        Scalars =
+            shadowed.Scalars
+            |> Map.map (fun _ scalar arguments ->
+                DynamicScope.withValue directOnlyRestriction (Some what) (fun () -> scalar arguments)) }
 
 let private informationSchemaRequiresProcess (tableName: string) =
     tableName.StartsWith("INNODB_", System.StringComparison.OrdinalIgnoreCase)
@@ -4252,6 +4302,24 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), a, (Row _ as b)) ->
         evalRowOperand ctx a
         |> Result.bind (fun left -> evalRowOperand ctx b |> Result.bind (rowComparisonResult ctx op left))
+    | BinOp(And, a, b) ->
+        eval a
+        |> Result.bind (fun left ->
+            match truthy left with
+            | Some false -> Ok(VInt 0L)
+            | Some true -> eval b |> Result.map (fun right -> truthy right |> Option.map boolToValue |> Option.defaultValue VNull)
+            | None ->
+                eval b
+                |> Result.map (fun right -> if truthy right = Some false then VInt 0L else VNull))
+    | BinOp(Or, a, b) ->
+        eval a
+        |> Result.bind (fun left ->
+            match truthy left with
+            | Some true -> Ok(VInt 1L)
+            | Some false -> eval b |> Result.map (fun right -> truthy right |> Option.map boolToValue |> Option.defaultValue VNull)
+            | None ->
+                eval b
+                |> Result.map (fun right -> if truthy right = Some true then VInt 1L else VNull))
     | BinOp(op, a, b) ->
         // Arithmetic can leave the `BIGINT UNSIGNED` domain, which MySQL
         // refuses with 1690 rather than answering in a wider type. That
@@ -4259,12 +4327,6 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // arithmetic has no error channel of its own) and becomes an
         // ordinary `EvalError` here, at the first frame that has one.
         try
-            // And/Or already evaluate both operands (no short-circuit, since
-            // SQL's three-valued logic needs both sides to tell "false" apart
-            // from "unknown"), so every `BinOp` collapses into one total match
-            // on `op` here — every `Ast.Op` case is handled in one place,
-            // rather than two more `failwith`-guarded helpers each only
-            // partially matching the same type.
             eval a
             |> Result.bind (fun va ->
                 eval b
@@ -4297,18 +4359,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | _ -> Ok(f left right)
 
                     match op with
-                    | And ->
-                        match truthy va, truthy vb with
-                        | Some false, _
-                        | _, Some false -> Ok(VInt 0L)
-                        | Some true, Some true -> Ok(VInt 1L)
-                        | _ -> Ok VNull
-                    | Or ->
-                        match truthy va, truthy vb with
-                        | Some true, _
-                        | _, Some true -> Ok(VInt 1L)
-                        | Some false, Some false -> Ok(VInt 0L)
-                        | _ -> Ok VNull
+                    | And
+                    | Or -> Error(1105, "logical operator escaped short-circuit evaluation")
                     // XOR has no short-circuit: either operand being unknown
                     // makes the answer unknown (`NULL XOR 1` is NULL, unlike
                     // `NULL OR 1`).
@@ -4614,17 +4666,27 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
             if value = VNull || System.Double.IsNaN seconds || System.Double.IsInfinity seconds || seconds < 0.0 then
                 Error(1210, "Incorrect arguments to sleep.")
+            elif seconds > Limits.maxSleepSeconds then
+                Error(1235, "This version of MySQL doesn't yet support SLEEP durations beyond its resource limit")
             else
                 let cancellation = Storage.queryCancellation.Value
                 let mutable remaining = seconds
                 let mutable interrupted = false
+                let mutable deadlineExpired = false
 
-                while remaining > 0.0 && not interrupted do
-                    let interval = min remaining 0.1
+                while remaining > 0.0 && not interrupted && not deadlineExpired do
+                    deadlineExpired <- Limits.queryWorkDeadlineExpired ()
+                    let deadlineRemaining = Limits.queryWorkDeadlineRemaining () |> Option.map _.TotalSeconds
+                    let interval = min remaining 0.1 |> fun value -> deadlineRemaining |> Option.map (min value) |> Option.defaultValue value
                     interrupted <- cancellation.WaitHandle.WaitOne(System.TimeSpan.FromSeconds interval)
                     remaining <- remaining - interval
 
-                Ok(VInt(if interrupted then 1L else 0L)))
+                if interrupted then
+                    Ok(VInt 1L)
+                elif deadlineExpired || remaining > 0.0 && Limits.queryWorkDeadlineExpired () then
+                    Error(1235, "This version of MySQL doesn't yet support BENCHMARK execution beyond its resource limit")
+                else
+                    Ok(VInt 0L))
     | FuncCall(name, [ countExpr; body ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
         eval countExpr
         |> Result.bind (fun value ->
@@ -4638,21 +4700,40 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         System.Int64.MaxValue
                     else
                         int64 repetitions
-                let cancellation = Storage.queryCancellation.Value
-                let mutable iteration = 0L
-                let mutable failure = None
 
-                while iteration < count && failure.IsNone do
-                    if iteration % int64 Storage.cancellationCheckInterval = 0L then
-                        cancellation.ThrowIfCancellationRequested()
+                if count > Limits.maxBenchmarkIterations then
+                    Error(1235, "This version of MySQL doesn't yet support BENCHMARK counts beyond its resource limit")
+                else
+                    let cancellation = Storage.queryCancellation.Value
+                    let stopwatch = System.Diagnostics.Stopwatch.StartNew()
+                    let previousDeadline = Limits.queryWorkDeadline.Value
+                    let benchmarkDeadline = Limits.queryWorkDeadlineAfter Limits.maxBenchmarkDuration
+                    let effectiveDeadline = previousDeadline |> Option.map (min benchmarkDeadline) |> Option.defaultValue benchmarkDeadline
+                    let mutable iteration = 0L
+                    let mutable failure = None
 
-                    match eval body with
-                    | Ok _ -> iteration <- iteration + 1L
-                    | Error error -> failure <- Some error
+                    try
+                        Limits.queryWorkDeadline.Value <- Some effectiveDeadline
 
-                match failure with
-                | Some error -> Error error
-                | None -> Ok(VInt 0L))
+                        while iteration < count && failure.IsNone do
+                            if iteration % int64 Storage.cancellationCheckInterval = 0L then
+                                cancellation.ThrowIfCancellationRequested()
+
+                            match eval body with
+                            | Ok _ when stopwatch.Elapsed > Limits.maxBenchmarkDuration ->
+                                failure <-
+                                    Some(
+                                        1235,
+                                        "This version of MySQL doesn't yet support BENCHMARK execution beyond its resource limit"
+                                    )
+                            | Ok _ -> iteration <- iteration + 1L
+                            | Error error -> failure <- Some error
+                    finally
+                        Limits.queryWorkDeadline.Value <- previousDeadline
+
+                    match failure with
+                    | Some error -> Error error
+                    | None -> Ok(VInt 0L))
     | FuncCall(name, [ Cast(argument, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
         eval argument |> Result.map (Functions.weightStringChar (keyCollation ctx argument) length)
     | FuncCall(name, [ Cast(argument, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
@@ -4828,6 +4909,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | Ok node -> Ok(VJson(Functions.jsonNodeText node))
                 | Error() ->
                     Error(3141, "Invalid JSON text in argument 1 to function cast_as_json: \"Invalid value.\" at position 0."))
+    | Cast(_, TBit width) when width < 1 -> Error(3013, "Invalid size for CAST.")
+    | Cast(_, TBit width) when width > 64 -> Error(1439, "Display width out of range for CAST (max = 64)")
+    | Cast(_, (TBinary length | TVarBinary length)) when length > Limits.maxAllowedPacket ->
+        Diagnostics.warning
+            1301
+            (sprintf "Result of cast_as_binary() was larger than max_allowed_packet (%d) - truncated" Limits.maxAllowedPacket)
+
+        Ok VNull
     | Cast(e, ty) ->
         eval e
         // Casting an ENUM to a number reads its declaration ordinal, the same
@@ -5114,11 +5203,11 @@ and private resolveTableRef
     // An unqualified name resolves against the statement's `WITH` bindings
     // first — a CTE shadows a real table of the same name, as in MySQL.
     match (if tableRef.Database.IsSome then None else currentCteScope () |> Map.tryFind (tableRef.Table.ToLowerInvariant())) with
-    | Some materialized -> Ok materialized
+    | Some(columns, rows) -> Ok(columns, if planningProbe.Value then [] else rows)
     | None ->
 
     if tableRef.Database.IsNone && System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase) then
-        Ok([], [ [||] ])
+        Ok([], if planningProbe.Value then [] else [ [||] ])
     elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
         let tableName = tableRef.Table.ToUpperInvariant()
 
@@ -5129,7 +5218,7 @@ and private resolveTableRef
             Error(Err(1227, "Access denied; you need (at least one of) the PROCESS privilege(s) for this operation"))
         else
             match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
-            | Some(columns, rows) -> Ok(columns, rows)
+            | Some(columns, rows) -> Ok(columns, if planningProbe.Value then [] else rows)
             | None -> Error(storageErr (NoSuchTable tableRef.Table))
     elif
         System.String.Equals(tableDb, "fsdb", System.StringComparison.OrdinalIgnoreCase)
@@ -5144,24 +5233,28 @@ and private resolveTableRef
         // information_schema-style narrowing analogue until a big virtual
         // table hurts.
         let vt = store.VirtualTables.[tableRef.Table.ToLowerInvariant()]
-        Ok(vt.Columns, vt.Rows())
+        Ok(vt.Columns, if planningProbe.Value then [] else vt.Rows())
     else
         match tryStoredView store tableDb tableRef.Table with
         | Some view ->
-            let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
+            let effectiveAccount = registryAccount registry |> Option.map Auth.formatAccount |> Option.defaultValue ""
+            let stackKey = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
+            let cacheKey = fst stackKey, snd stackKey, effectiveAccount.ToLowerInvariant()
             let stack = currentViewStack ()
             let memo = (currentStatementMemo ()).Views
 
-            match memo.TryGetValue key with
+            match memo.TryGetValue cacheKey with
             | true, cached -> cached
-            | _ when Set.contains key stack ->
+            | _ when Set.contains stackKey stack ->
                 Error(Err(1462, sprintf "View's SELECT contains a recursive reference to view '%s'" view.Name))
+            | _ when stack.Count >= Limits.maxViewMetadataNesting ->
+                Error(Err(1436, "Thread stack overrun while expanding stored views"))
             | _ ->
                 let savedCtes = currentCteScope ()
                 let savedCteOrigins = currentCteOriginScope ()
 
                 try
-                    viewStack.Value <- Set.add key stack
+                    viewStack.Value <- Set.add stackKey stack
                     cteScope.Value <- Map.empty
                     cteOriginScope.Value <- Map.empty
 
@@ -5211,14 +5304,27 @@ and private resolveTableRef
                                 | Some(name, _) -> Error(Err(1060, sprintf "Duplicate column name '%s'" name))
                                 | None -> Ok(columns, rows)))
 
-                    if not (isNull (box memo)) then memo.[key] <- resolved
+                    if not (isNull (box memo)) then memo.[cacheKey] <- resolved
                     resolved
                 finally
                     viewStack.Value <- stack
                     cteScope.Value <- savedCtes
                     cteOriginScope.Value <- savedCteOrigins
         | None ->
-            if tableRef.Partitions.IsEmpty then
+            if planningProbe.Value then
+                tableSnapshot store tableDb tableRef.Table
+                |> Result.mapError storageErr
+                |> Result.bind (fun table ->
+                    match tableRef.Partitions, table.Partitioning with
+                    | [], _ -> Ok(table.Columns, [])
+                    | _ :: _, None -> Error(Err(1747, "PARTITION () clause on non partitioned table"))
+                    | requested, Some partitioning ->
+                        let names = hashPartitionNames partitioning
+
+                        match requested |> List.tryFind (fun name -> not (Map.containsKey (name.ToLowerInvariant()) names)) with
+                        | Some name -> Error(Err(1735, sprintf "Unknown partition '%s' in table '%s'" name table.OriginalName))
+                        | None -> Ok(table.Columns, []))
+            elif tableRef.Partitions.IsEmpty then
                 match tryLockingReadRows tableRef with
                 | None -> scanList store tableDb tableRef.Table |> Result.mapError storageErr
                 | Some _ ->
@@ -5234,6 +5340,8 @@ and private resolveTableRef
 
                     match table.Partitioning with
                     | None -> Error(Err(1747, "PARTITION () clause on non partitioned table"))
+                    | Some partitioning when not (Expression.collectSubqueries partitioning.Expression).IsEmpty ->
+                        Error(Err(1564, "This partition function is not allowed"))
                     | Some partitioning ->
                         let partitionNames = hashPartitionNames partitioning
 
@@ -5458,7 +5566,7 @@ and private describeQueryColumns
                 | Some(view: StoredView) ->
                     let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-                    if Set.contains key seen then
+                    if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
                         None
                     else
                         Parser.parse view.Definition
@@ -5713,6 +5821,8 @@ and private tryInformationSchemaNarrow
 
     if not (System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase)) then
         None
+    elif informationSchemaRequiresProcess tableRef.Table && not (InformationSchema.canViewProcessMetadata ()) then
+        None
     else
         match
             pointLookupEqualities tableRef where
@@ -5951,6 +6061,20 @@ and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list
         | NestedColumns(_, nested) -> jsonTableColumnDefs nested)
     |> List.collect id
 
+and private validateJsonTableAllocationBounds (columns: JsonTableColumn list) : Result<ColumnDef list, QueryResult> =
+    let definitions = jsonTableColumnDefs columns
+
+    definitions
+    |> traverse (fun definition ->
+        match definition.Type with
+        | TChar _
+        | TBinary _
+        | TVarBinary _
+        | TBit _ -> Storage.validateColumnType definition
+        | _ -> Ok())
+    |> Result.map (fun _ -> definitions)
+    |> Result.mapError storageErr
+
 /// Expands one already-evaluated JSON_TABLE source document into rows — the
 /// one expansion both eval sites (`resolveFromItem`'s uncorrelated case and
 /// `applyJsonTableJoin`'s per-left-row lateral branch) share. Oracle-pinned
@@ -6128,15 +6252,17 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
         // FROM list — a forward reference is illegal, and MySQL-compatible
         // clients match on the 1109 code), and a bare one is 1054 with the
         // same context string, not the literal context's 'field list'.
-        match firstColumnRef source with
-        | Some(QualifiedCol(table, _)) -> Error(Err(1109, sprintf "Unknown table '%s' in a table function argument" table))
-        | Some(Col name) -> Error(Err(1054, sprintf "Unknown column '%s' in 'a table function argument'" name))
-        | _ ->
-            let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
+        validateJsonTableAllocationBounds columns
+        |> Result.bind (fun definitions ->
+            match firstColumnRef source with
+            | Some(QualifiedCol(table, _)) -> Error(Err(1109, sprintf "Unknown table '%s' in a table function argument" table))
+            | Some(Col name) -> Error(Err(1054, sprintf "Unknown column '%s' in 'a table function argument'" name))
+            | _ ->
+                let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
 
-            match evalExpr literalCtx source with
-            | Error(code, message) -> Error(Err(code, message))
-            | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> jsonTableColumnDefs columns, rows)
+                match evalExpr literalCtx source with
+                | Error(code, message) -> Error(Err(code, message))
+                | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> definitions, rows))
     | FromSubquery _ ->
         // Serve a derived table from the per-statement memo if already
         // resolved through the statement memo, else compute and record it.
@@ -6404,6 +6530,11 @@ and private tryPhysicalTableRef (store: Store) (dbName: string) (tableRef: Table
         |> Result.map Some
         |> Result.mapError storageErr
 
+and private physicalFastPathTable (store: Store) (dbName: string) (tableRef: TableRef) =
+    tryPhysicalTableRef store dbName tableRef
+    |> Result.toOption
+    |> Option.flatten
+
 and private sameIndexSemantics (left: ColumnDef) (right: ColumnDef) : bool =
     left.Type = right.Type
     &&
@@ -6593,11 +6724,9 @@ and private applyJsonTableJoin
     (columns: JsonTableColumn list)
     (alias: string)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
-    match join.Kind with
-    | InnerJoin
-    | CrossJoin
-    | LeftJoin ->
-        let joinColumns = jsonTableColumnDefs columns
+    match join.Kind, validateJsonTableAllocationBounds columns with
+    | _, Error error -> Error error
+    | (InnerJoin | CrossJoin | LeftJoin), Ok joinColumns ->
         let newSources = sourcesSoFar @ [ alias, joinColumns ]
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
         let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer
@@ -6793,13 +6922,16 @@ and private prepareVirtualRows
 
             generated
             |> traverse (fun (index, column, expression) ->
-                evalExpr ctx expression
-                |> Result.bind (fun value ->
-                    match Storage.coerceValue store.ExecutionSettings.SqlMode.Strict column value with
-                    | Ok value ->
-                        current.[index] <- value
-                        Ok()
-                    | Error error -> Error(Storage.toMySqlError error)))
+                if not (Expression.collectSubqueries expression).IsEmpty then
+                    Error(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column.Name)
+                else
+                    evalExpr ctx expression
+                    |> Result.bind (fun value ->
+                        match Storage.coerceValue store.ExecutionSettings.SqlMode.Strict column value with
+                        | Ok value ->
+                            current.[index] <- value
+                            Ok()
+                        | Error error -> Error(Storage.toMySqlError error)))
             |> Result.map (fun _ -> Some current))
         |> Result.mapError (fun (code, message) -> Err(code, message))
         |> Result.map (fun rows -> rows :> Value[] seq)
@@ -7751,6 +7883,15 @@ and private tryMergeDirectView
                 | Some direct
                     when direct.Predicate |> Option.forall mergeablePredicate
                          && direct.UpdateJoins.IsEmpty
+                         && ((select.Projections |> List.map fst)
+                             @ (select.Where |> Option.toList)
+                             @ select.GroupBy
+                             @ (select.Having |> Option.toList)
+                             @ (select.OrderBy |> List.map fst)
+                             @ (select.Limit |> Option.toList)
+                             @ (select.Offset |> Option.toList)
+                             |> List.exists (Expression.collectSubqueries >> List.isEmpty >> not)
+                             |> not)
                          && (direct.OrderedColumns
                              |> List.forall (fun column -> Map.containsKey (column.ToLowerInvariant()) direct.Columns)) ->
                     let source =
@@ -8178,21 +8319,38 @@ and private tryIndexedSemiJoin
                         match index with
                         | None -> Ok None
                         | Some index ->
-                            let rec probe acc =
-                                function
-                                | [] -> Some acc
-                                | tuple :: rest when tuple |> List.contains VNull -> probe acc rest
-                                | tuple :: rest ->
-                                    orderedEqualityValues table index columnNames tuple
-                                    |> Option.bind (Storage.tryEqualityLookupForIndex store table index)
-                                    |> Option.bind (fun rows -> probe (List.fold (fun found row -> row :: found) acc rows) rest)
+                            let candidates = Dictionary<RowId, Value[]>()
+                            let probedKeys = HashSet<string>(System.StringComparer.Ordinal)
 
-                            match probe [] values with
+                            let rec probe processed =
+                                function
+                                | [] -> Some()
+                                | tuple :: rest when tuple |> List.contains VNull ->
+                                    Limits.checkQueryCancellation processed
+                                    probe (processed + 1) rest
+                                | tuple :: rest ->
+                                    Limits.checkQueryCancellation processed
+
+                                    orderedEqualityValues table index columnNames tuple
+                                    |> Option.bind (fun ordered ->
+                                        Storage.tryEqualityProbeKeyForIndex store table index ordered
+                                        |> Option.bind (fun key ->
+                                            if probedKeys.Add key then
+                                                Storage.tryEqualityLookupForIndex store table index ordered
+                                                |> Option.map (fun rows ->
+                                                    for rowId, row in rows do
+                                                        candidates.[rowId] <- row)
+                                            else
+                                                Some()))
+                                    |> Option.bind (fun () -> probe (processed + 1) rest)
+
+                            match probe 0 values with
                             | None -> Ok None
-                            | Some candidates ->
+                            | Some() ->
                                 let rows =
                                     candidates
-                                    |> Map.ofList
+                                    |> Seq.map (fun entry -> entry.Key, entry.Value)
+                                    |> Map.ofSeq
                                     |> Map.toSeq
                                     |> Seq.map snd
 
@@ -8307,7 +8465,13 @@ and private runSelectStmt
     else
     match tryMergeDirectView store registry dbName select with
     | Error error -> error, [], []
-    | Ok(Some merged) -> runSelectStmt store registry dbName merged outer
+    | Ok(Some merged) ->
+        let depth = viewMergeDepth.Value
+
+        if depth >= Limits.maxViewMetadataNesting then
+            Err(1436, "Thread stack overrun while expanding stored views"), [], []
+        else
+            DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmt store registry dbName merged outer)
     | Ok None -> runUnmergedSelectStmt store registry dbName select outer
 
 and private runUnmergedSelectStmt
@@ -8637,7 +8801,7 @@ and private tryEqualityAccessWith
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedValuesMatchReadValues store) then
+    if not (storedValuesMatchReadValues store) || (physicalFastPathTable store dbName tref).IsNone then
         None
     else
         let tableDb = tref.Database |> Option.defaultValue dbName
@@ -8702,7 +8866,7 @@ and private tryLiteralInAccessWith
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedValuesMatchReadValues store) then
+    if not (storedValuesMatchReadValues store) || (physicalFastPathTable store dbName tref).IsNone then
         None
     else
         let tableDb = tref.Database |> Option.defaultValue dbName
@@ -8833,7 +8997,7 @@ and private tryCorrelatedEqualityLookup
             lookup.FindRows value
             |> Option.map (fun rows -> lookup.TableColumns, rows))
 
-    (if storedValuesMatchReadValues store then outer else None)
+    (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then outer else None)
     |> Option.bind (fun context ->
         whereExpr
         |> Option.toList
@@ -8867,7 +9031,10 @@ and private tryRangeAccess
     : Storage.RangeLookup option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    (if storedValuesMatchReadValues store then rangeLookupBounds scope tref whereExpr else [])
+    (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then
+         rangeLookupBounds scope tref whereExpr
+     else
+         [])
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.filter (fun lookup ->
@@ -8886,7 +9053,10 @@ and private trySpatialAccess
     : Storage.SpatialLookup option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    (if storedValuesMatchReadValues store then spatialLookupPredicates scope tref whereExpr else [])
+    (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then
+         spatialLookupPredicates scope tref whereExpr
+     else
+         [])
     |> List.tryPick (fun predicate ->
         Storage.trySpatialLookup store tableDb tref.Table predicate.Column predicate.Relation predicate.Geometry)
 
@@ -9683,7 +9853,14 @@ and private evalAggregate
         | e -> false, e
 
     match args with
-    | [ Star _ ] when isCount -> Ok(VInt(int64 (List.length rows)))
+    | [ Star _ ] when isCount ->
+        let mutable count = 0L
+
+        for _ in rows do
+            Limits.checkQueryCancellation (int (count % int64 System.Int32.MaxValue))
+            count <- count + 1L
+
+        Ok(VInt count)
     | [ innerExpr ]
         when (upper = "COUNT" || upper = "SUM" || upper = "AVG")
              && (match innerExpr with Distinct _ -> false | _ -> true)
@@ -9692,6 +9869,7 @@ and private evalAggregate
         let mutable exactTotal = 0M
         let mutable total: Value option = None
         let mutable failure: EvalError option = None
+        let mutable processed = 0
 
         let add value =
             count <- count + 1L
@@ -9707,6 +9885,8 @@ and private evalAggregate
 
         for row in rows do
             if failure.IsNone then
+                Limits.checkQueryCancellation processed
+                processed <- processed + 1
                 let ctx = ctxFor row
 
                 match evalExpr ctx innerExpr with
@@ -10227,8 +10407,7 @@ and private orderedIndexPrefixMatches
     : (string * IndexPrefixMatch) list =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    InformationSchema.findTable store.Catalog tableDb tref.Table
-    |> Result.toOption
+    physicalFastPathTable store dbName tref
     |> Option.map (fun table ->
         let pinned = whereEqualityPinnedColumns whereExpr
 
@@ -11012,40 +11191,71 @@ and private runWindowedSelect
         // binds to this SELECT's own `WINDOW w AS (...)` list, an inline
         // one is already a spec. MySQL's own error (3579) for an undefined
         // name.
-        let rec resolveWindow (windowName: string) (visited: Set<string>) (spec: WindowSpec) : Result<WindowSpec, EvalError> =
+        let windowDefinitions = Dictionary<string, string * WindowSpec>(System.StringComparer.OrdinalIgnoreCase)
+
+        for name, spec in select.Windows do
+            windowDefinitions.TryAdd(name, (name, spec)) |> ignore
+
+        let resolvedWindows = Dictionary<string, Result<WindowSpec, EvalError>>(System.StringComparer.OrdinalIgnoreCase)
+
+        let inheritWindow (windowName: string) (name: string) (spec: WindowSpec) (inherited: WindowSpec) =
+            if not spec.PartitionBy.IsEmpty then
+                Error(3581, "A window which depends on another cannot define partitioning.")
+            elif inherited.Frame.IsSome then
+                Error(3582, sprintf "Window '%s' has a frame definition, so cannot be referenced by another window." name)
+            elif not inherited.OrderBy.IsEmpty && not spec.OrderBy.IsEmpty then
+                Error(3583, sprintf "Window '%s' cannot inherit '%s' since both contain an ORDER BY clause." windowName name)
+            else
+                Ok
+                    { Inherit = None
+                      PartitionBy = inherited.PartitionBy
+                      OrderBy = if spec.OrderBy.IsEmpty then inherited.OrderBy else spec.OrderBy
+                      Frame = spec.Frame }
+
+        let resolveNamedWindow (name: string) : Result<WindowSpec, EvalError> =
+            let pending = ResizeArray<string * string * WindowSpec>()
+            let visited = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+            let mutable current = name
+            let mutable resolved: Result<WindowSpec, EvalError> option = None
+
+            // Keep long valid chains off the call stack. Cached suffixes also
+            // make resolving several OVER clauses linear in the definition count.
+            while resolved.IsNone do
+                match resolvedWindows.TryGetValue current with
+                | true, result -> resolved <- Some result
+                | false, _ when not (visited.Add current) ->
+                    resolved <- Some(Error(3580, "There is a circularity in the window dependency graph."))
+                | false, _ ->
+                    match windowDefinitions.TryGetValue current with
+                    | false, _ -> resolved <- Some(Error(3579, sprintf "Window name '%s' is not defined." current))
+                    | true, (candidate, spec) ->
+                        match spec.Inherit with
+                        | None ->
+                            let result = Ok spec
+                            resolvedWindows.[candidate] <- result
+                            resolved <- Some result
+                        | Some parent ->
+                            pending.Add(candidate, parent, spec)
+                            current <- parent
+
+            let mutable result = resolved.Value
+
+            for index = pending.Count - 1 downto 0 do
+                let candidate, parent, spec = pending.[index]
+                result <- result |> Result.bind (inheritWindow candidate parent spec)
+                resolvedWindows.[candidate] <- result
+
+            result
+
+        let resolveWindow (windowName: string) (spec: WindowSpec) : Result<WindowSpec, EvalError> =
             match spec.Inherit with
             | None -> Ok spec
-            | Some name ->
-                resolveNamedWindow visited name
-                |> Result.bind (fun inherited ->
-                    if not spec.PartitionBy.IsEmpty then
-                        Error(3581, "A window which depends on another cannot define partitioning.")
-                    elif inherited.Frame.IsSome then
-                        Error(3582, sprintf "Window '%s' has a frame definition, so cannot be referenced by another window." name)
-                    elif not inherited.OrderBy.IsEmpty && not spec.OrderBy.IsEmpty then
-                        Error(3583, sprintf "Window '%s' cannot inherit '%s' since both contain an ORDER BY clause." windowName name)
-                    else
-                        Ok
-                            { Inherit = None
-                              PartitionBy = inherited.PartitionBy
-                              OrderBy = if spec.OrderBy.IsEmpty then inherited.OrderBy else spec.OrderBy
-                              Frame = spec.Frame })
-
-        and resolveNamedWindow (visited: Set<string>) (name: string) : Result<WindowSpec, EvalError> =
-            let key = name.ToLowerInvariant()
-
-            if visited.Contains key then
-                Error(3580, "There is a circularity in the window dependency graph.")
-            else
-                select.Windows
-                |> List.tryFind (fun (candidate, _) -> System.String.Equals(candidate, name, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.map (fun (candidate, spec) -> resolveWindow candidate (visited.Add key) spec)
-                |> Option.defaultValue (Error(3579, sprintf "Window name '%s' is not defined." name))
+            | Some name -> resolveNamedWindow name |> Result.bind (inheritWindow windowName name spec)
 
         let resolveOver (over: OverClause) : Result<WindowSpec, EvalError> =
             match over with
-            | OverSpec spec -> resolveWindow "<unnamed window>" Set.empty spec
-            | OverName name -> resolveNamedWindow Set.empty name
+            | OverSpec spec -> resolveWindow "<unnamed window>" spec
+            | OverName name -> resolveNamedWindow name
 
         // A frame offset (`ROWS BETWEEN <n> PRECEDING ...`) must be a
         // constant — MySQL rejects a column reference there — so it
@@ -12774,7 +12984,7 @@ let private validateCheckRow
             match Parser.parseExpression check.Clause with
             | Result.Error _ -> Error(ExpressionError(3812, sprintf "Check constraint '%s' is invalid." check.Name))
             | Result.Ok expression ->
-                evalExpr ctx expression
+                withoutCteScope (fun () -> evalExpr ctx expression)
                 |> Result.mapError ExpressionError
                 |> Result.bind (fun value ->
                     if truthy value = Some false then
@@ -12807,13 +13017,16 @@ let private computeGeneratedRow
         // generated columns.
         generated
         |> traverse (fun (col, expr) ->
-            evalExpr ctx expr
-            |> Result.mapError ExpressionError
-            |> Result.bind (fun v -> coerceValue store.ExecutionSettings.SqlMode.Strict col v)
-            |> Result.map (fun v' ->
-                match resolveColumn columns col.Name with
-                | Ok idx -> row'.[idx] <- v'
-                | Error _ -> ()))
+            if not (Expression.collectSubqueries expr).IsEmpty then
+                Error(ExpressionError(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col.Name))
+            else
+                withoutCteScope (fun () -> evalExpr ctx expr)
+                |> Result.mapError ExpressionError
+                |> Result.bind (fun v -> coerceValue store.ExecutionSettings.SqlMode.Strict col v)
+                |> Result.map (fun v' ->
+                    match resolveColumn columns col.Name with
+                    | Ok idx -> row'.[idx] <- v'
+                    | Error _ -> ()))
         |> Result.bind (fun _ -> validateCheckRow store registry dbName table columns row')
 
 /// Backfills generated columns after ALTER adds or changes one. Ordinary
@@ -13166,17 +13379,20 @@ let private selectSubqueryExprs (select: SelectStmt) : Expr list =
 /// too, same as it would be if the statement actually ran — not a fake
 /// plan with `rows = NULL`.
 let private explainTableStats (store: Store) (registry: Registry) (dbName: string) (tableRef: TableRef) : Result<uint64 option * string, QueryResult> =
-    let tableDb = tableRef.Database |> Option.defaultValue dbName
+    match tryPhysicalTableRef store dbName tableRef with
+    | Ok(Some table) when tableRef.Partitions.IsEmpty ->
+        let count = uint64 table.RowsArray.Count
+        Ok(Some count, if count <= 1UL then "system" else "ALL")
+    | Ok _ ->
+        let inert =
+            { registry with
+                Scalars = registry.Scalars |> Map.map (fun _ _ _ -> VNull)
+                Aggregates = registry.Aggregates |> Map.map (fun _ _ _ -> VNull) }
 
-    let rowCountResult =
-        if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-            match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
-            | Some(_, rows) -> Ok(uint64 (List.length rows))
-            | None -> Error(storageErr (NoSuchTable tableRef.Table))
-        else
-            scan store tableDb tableRef.Table |> Result.mapError storageErr |> Result.map (snd >> Seq.length >> uint64)
-
-    rowCountResult |> Result.map (fun n -> Some n, (if n <= 1UL then "system" else "ALL"))
+        withPlanningProbe (fun () ->
+            withMetadataProbe (fun () -> resolveTableRef store inert dbName tableRef))
+        |> Result.map (fun _ -> None, "ALL")
+    | Error error -> Error error
 
 /// One `EXPLAIN` block's table rows (`from` plus every `join`, in order),
 /// recursing into a `FROM (SELECT ...) AS alias`'s own block (`DERIVED`)
@@ -13726,9 +13942,16 @@ let private checksumTables (store: Store) (dbName: string) (tables: string list)
             match scan store database table with
             | Error _ -> [ Some label; None ]
             | Ok(_, rows) ->
-                let writer = Fsdb.Binary.Writer()
-                rows |> Seq.iter (Array.iter (encodeValue writer))
-                [ Some label; Some(string (Fsdb.Binary.crc32 (writer.ToArray()))) ]
+                let checksum = Fsdb.Binary.Crc32()
+
+                rows
+                |> Seq.iteri (fun index row ->
+                    Limits.checkQueryCancellation index
+                    let writer = Fsdb.Binary.Writer()
+                    row |> Array.iter (encodeValue writer)
+                    checksum.Append(writer.ToArray()))
+
+                [ Some label; Some(string checksum.Value) ]
 
     ResultSet([ "Table"; "Checksum" ], tables |> List.map checksum)
 
@@ -13738,9 +13961,9 @@ let private checksumTables (store: Store) (dbName: string) (tables: string list)
 /// gives 1146 for a table `EXPLAIN` describes that doesn't exist and 1054
 /// for a column it doesn't recognize, not a fake plan; `explainJoinBlock`/
 /// `explainTableStats` carry that check for every table an `UPDATE`/
-/// `DELETE`/`SELECT`/subquery touches, `runSelectStmt` (read-only, so safe
-/// to call purely to typecheck and discard) covers a `SELECT`'s columns the
-/// same way `QueryHandler`'s real execution path would.
+/// `DELETE`/`SELECT`/subquery touches. A planning probe checks expressions
+/// against empty sources and inert scalar implementations, so validation
+/// cannot invoke an extension or walk the underlying rows.
 /// Covers every statement shape real MySQL allows `EXPLAIN` on that this
 /// engine has a join/subquery structure to describe (`SELECT`, `UNION`,
 /// `UPDATE`, `DELETE`, `INSERT` — plain or `... SELECT`); anything else
@@ -13756,6 +13979,11 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     let mutable analyzedMilliseconds = 0.0
     let mutable analyzedRows = 0
     let mutable analyzedStatements = 0
+
+    let validationRegistry =
+        { registry with
+            Scalars = registry.Scalars |> Map.map (fun _ _ _ -> VNull)
+            Aggregates = registry.Aggregates |> Map.map (fun _ _ _ -> VNull) }
 
     let finish (result: Result<unit, QueryResult>) =
         match result with
@@ -13774,11 +14002,18 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     /// `INSERT` has no `FROM`), so it needs its own existence check.
     let checkTableExists (table: string) : Result<unit, QueryResult> =
         let db, tname = splitQualified dbName table
-        resolveTableRef store registry dbName { Database = Some db; Table = tname; Alias = None; Partitions = [] } |> Result.map ignore
+        withPlanningProbe (fun () ->
+            resolveTableRef store validationRegistry dbName { Database = Some db; Table = tname; Alias = None; Partitions = [] })
+        |> Result.map ignore
 
     let checkSelect (select: SelectStmt) : Result<unit, QueryResult> =
         let stopwatch = System.Diagnostics.Stopwatch.StartNew()
-        let result, _, rows = runSelectStmt store registry dbName select None
+        let result, _, rows =
+            if format = ExplainAnalyze then
+                runSelectStmt store registry dbName select None
+            else
+                withPlanningProbe (fun () ->
+                    withMetadataProbe (fun () -> runSelectStmt store validationRegistry dbName select None))
         stopwatch.Stop()
 
         if format = ExplainAnalyze then
@@ -13799,21 +14034,23 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         let resolveJoinSource (j: Join) =
             match j.Table with
             | FromSubquery _ ->
-                resolveFromSubquery store registry dbName j.Table None
+                resolveFromSubquery store validationRegistry dbName j.Table None
                 |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
             | FromLateral _ -> Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
             | FromJsonTable _ -> Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
-            | FromTable tref -> resolveTableRef store registry dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
+            | FromTable tref -> resolveTableRef store validationRegistry dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
 
-        resolveTableRef store registry dbName fromRef
-        |> Result.bind (fun (fromCols, _) ->
-            joins
-            |> traverse resolveJoinSource
-            |> Result.map (fun joinSources -> ((fromRef.Alias |> Option.defaultValue fromRef.Table), fromCols) :: joinSources))
-        |> Result.bind (fun sources ->
-            let allCols = sources |> List.collect snd
-            let ctx = contextFactory store registry dbName (columnIndexOf allCols) (qualifierRanges sources) None (probeRow allCols)
-            exprs |> traverse (fun e -> evalExpr ctx e |> Result.map ignore) |> Result.map ignore |> Result.mapError Err)
+        withPlanningProbe (fun () ->
+            withMetadataProbe (fun () ->
+                resolveTableRef store validationRegistry dbName fromRef
+                |> Result.bind (fun (fromCols, _) ->
+                    joins
+                    |> traverse resolveJoinSource
+                    |> Result.map (fun joinSources -> ((fromRef.Alias |> Option.defaultValue fromRef.Table), fromCols) :: joinSources))
+                |> Result.bind (fun sources ->
+                    let allCols = sources |> List.collect snd
+                    let ctx = contextFactory store validationRegistry dbName (columnIndexOf allCols) (qualifierRanges sources) None (probeRow allCols)
+                    exprs |> traverse (fun e -> evalExpr ctx e |> Result.map ignore) |> Result.map ignore |> Result.mapError Err)))
 
     match stmt with
     | Do _ -> Err(1064, "EXPLAIN does not support DO")
@@ -14063,6 +14300,13 @@ let private rejectQuantifiedComparisonsInGenerated (columns: Ast.ColumnDef list)
     |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsQuantifiedComparison expression then Some column.Name else None))
     |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
 
+let private rejectSubqueriesInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
+    columns
+    |> List.tryPick (fun column ->
+        column.Generated
+        |> Option.bind (fun (expression, _) -> if containsSubqueryExpr expression then Some column.Name else None))
+    |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
+
 let rec private containsSessionVariable (expression: Expr) : bool =
     Expression.fold
         (fun found node ->
@@ -14117,6 +14361,43 @@ let private rejectSessionVariablesInGenerated (columns: Ast.ColumnDef list) : Qu
     columns
     |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsSessionVariable expression then Some column.Name else None))
     |> Option.map (fun column -> Err(3772, sprintf "Default value expression of column '%s' cannot refer user or system variables." column))
+
+let private containsEffectfulStorageFunction =
+    Expression.exists (function
+        | FuncCall(name, _) ->
+            let name = name.ToUpperInvariant()
+            name = "SLEEP" || name = "BENCHMARK"
+        | _ -> false)
+
+let private rejectUnsafePartitionExpression (registry: Registry) (partitioning: HashPartitioning option) =
+    partitioning
+    |> Option.bind (fun partitioning ->
+        let expression = partitioning.Expression
+
+        if
+            containsSubqueryExpr expression
+            || containsSessionVariable expression
+            || containsAggregate registry expression
+            || containsEffectfulStorageFunction expression
+            || (firstDirectOnlyCall registry expression).IsSome
+        then
+            Some(Err(1564, "This partition function is not allowed"))
+        else
+            None)
+
+let private rejectUnsafeFunctionalDefaults (registry: Registry) (columns: ColumnDef list) =
+    columns
+    |> List.tryPick (fun column ->
+        column.Default
+        |> Option.bind (function
+            | DExpression expression
+                when containsSubqueryExpr expression
+                     || containsSessionVariable expression
+                     || containsAggregate registry expression
+                     || containsEffectfulStorageFunction expression
+                     || (firstDirectOnlyCall registry expression).IsSome ->
+                Some(Err(3769, sprintf "Default value expression of column '%s' contains a disallowed function." column.Name))
+            | _ -> None))
 
 let private viewContainsSessionVariable =
     function
@@ -15112,6 +15393,8 @@ let private truncateHashPartitions
         | None, _ -> Error(ExpressionError(1505, "Partition management on a not partitioned table is not possible"))
         | Some _, None ->
             deleteRows store dbName tableName (fun _ -> Ok true) |> Result.map ignore
+        | Some partitioning, Some _ when containsSubqueryExpr partitioning.Expression ->
+            Error(ExpressionError(1564, "This partition function is not allowed"))
         | Some partitioning, Some selectedPartitions ->
             let partitionNames = hashPartitionNames partitioning
             let requested =
@@ -15166,10 +15449,11 @@ let rec executeAs
         (triggers: StoredTrigger list)
         (rows: (Value[] option * Value[] option) list)
         : QueryResult option =
+        let chain = triggerChain.Value
+
         match scan runStore db table with
         | Error _ -> None
         | Ok(columns, _) ->
-            let chain = triggerChain.Value
             let self = db, normalizeTableName table
             let protectedTables = Set.add self (Set.union (Set.ofList chain) triggerInvocationTables.Value)
 
@@ -15192,14 +15476,29 @@ let rec executeAs
                                 Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name)
                             )
                         else
-                            let privileges =
-                                dmlStatements |> traverse (checkStoredDefiner runStore trigger.Definer db)
+                            match Auth.tryParseAccount trigger.Definer with
+                            | Some account when Auth.tryUserRowForAccount runStore account |> Option.isSome ->
+                                let expressionPrivileges =
+                                    bodyStatements
+                                    |> List.collect StoredProgram.expressions
+                                    |> List.collect (Auth.requiredPrivilegesForExpression db)
+                                    |> List.distinct
 
-                            match Auth.tryParseAccount trigger.Definer, privileges with
-                            | Some account, Result.Ok _ -> Result.Ok(trigger, bodyStatements, account)
-                            | _, Result.Error(code, msg) -> Result.Error(Err(code, msg))
-                            | None, Result.Ok _ ->
-                                Result.Error(Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name))
+                                let access =
+                                    dmlStatements
+                                    |> traverse (checkStoredDefiner runStore trigger.Definer db)
+                                    |> Result.bind (fun _ -> Auth.checkForAccount runStore account expressionPrivileges)
+
+                                match access with
+                                | Ok() -> Result.Ok(trigger, bodyStatements, account)
+                                | Error(code, msg) -> Result.Error(Err(code, msg))
+                            | _ ->
+                                Result.Error(
+                                    Err(
+                                        1449,
+                                        sprintf "The user specified as a definer ('%s') does not exist for trigger '%s'" trigger.Definer trigger.Name
+                                    )
+                                )
 
             match triggers |> traverse checkBody with
             | Result.Error err -> Some err
@@ -15207,7 +15506,6 @@ let rec executeAs
                 // Eval-time DIRECTONLY backstop, same as generated
                 // columns — see `shadowDirectOnly`'s doc.
                 let shadowed = shadowDirectOnly "trigger" registry
-                triggerChain.Value <- self :: chain
 
                 // An extension's own `SqlError` (including the
                 // DirectOnly shadow's 3102) surfaces as a clean
@@ -15259,6 +15557,7 @@ let rec executeAs
                           Old = oldRow
                           New = newRow }
                         (fun () ->
+                          withoutCteScope (fun () ->
                             let runDml statement =
                                 withRoutineVariableState locals (fun () ->
                                     match statement with
@@ -15615,19 +15914,25 @@ let rec executeAs
                                   ActiveError = None
                                   StackedDiagnostics = None }
 
-                            runStatements scope statements |> fst)
+                            runStatements scope statements |> fst))
 
-                try
-                    rows
-                    |> List.tryPick (fun (oldRow, newRow) ->
-                        bodies
-                        |> List.tryPick (fun (trigger, statements, account) ->
-                            Storage.withExecutionSettings runStore (triggerExecutionSettings trigger) (fun () ->
-                                match runBody oldRow newRow (statements, account) with
-                                | Err _ as e -> Some e
-                                | _ -> None)))
-                finally
-                    triggerChain.Value <- chain
+                match Limits.tryAcquireStoredProgramFrame () with
+                | None -> Some(Err(1436, "Thread stack overrun while executing stored programs"))
+                | Some nesting ->
+                    use _nesting = nesting
+                    triggerChain.Value <- self :: chain
+
+                    try
+                        rows
+                        |> List.tryPick (fun (oldRow, newRow) ->
+                            bodies
+                            |> List.tryPick (fun (trigger, statements, account) ->
+                                Storage.withExecutionSettings runStore (triggerExecutionSettings trigger) (fun () ->
+                                    match runBody oldRow newRow (statements, account) with
+                                    | Err _ as e -> Some e
+                                    | _ -> None)))
+                    finally
+                        triggerChain.Value <- chain
 
     let triggerStorageResult =
         function
@@ -15640,7 +15945,7 @@ let rec executeAs
         | Some scope
             when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
                  && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
-            match scope.Predicate with
+            match scope.CheckPredicate with
             | None -> Ok candidate
             | Some predicate ->
                 let context =
@@ -15649,7 +15954,7 @@ let rec executeAs
                         registry
                         db
                         (columnIndexOf columns)
-                        (singleQualifier table columns)
+                        (singleQualifier scope.Qualifier columns)
                         None
                         candidate
 
@@ -15658,6 +15963,30 @@ let rec executeAs
                 | Ok _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
                 | Error error -> Error(ExpressionError error)
         | _ -> Ok candidate
+
+    let validateViewExisting (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (row: Value[]) =
+        match viewCheckScope.Value with
+        | Some scope
+            when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
+                 && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
+            match scope.VisibilityPredicate with
+            | None -> Ok()
+            | Some predicate ->
+                let context =
+                    contextFactory
+                        runStore
+                        registry
+                        db
+                        (columnIndexOf columns)
+                        (singleQualifier scope.Qualifier columns)
+                        None
+                        row
+
+                match evalExpr { context with Clause = WhereClause } predicate with
+                | Ok value when truthy value = Some true -> Ok()
+                | Ok _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
+                | Error error -> Error(ExpressionError error)
+        | _ -> Ok()
 
     let evaluateFunctionalDefaults
         (runStore: Store)
@@ -15746,19 +16075,19 @@ let rec executeAs
         indices
         |> Result.bind (fun indices -> rows |> traverse (evaluateRow indices))
 
-    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
-        let finish candidate =
-            computeGeneratedRow runStore registry db table columns candidate
-            |> Result.bind (validateViewCandidate runStore db table columns)
+    let finishInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
+        computeGeneratedRow runStore registry db table columns candidate
+        |> Result.bind (validateViewCandidate runStore db table columns)
 
+    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
         evaluateFunctionalDefaults runStore db table columns omitted candidate
         |> Result.bind (fun candidate ->
             match beforeInsertTriggers runStore db table with
-            | [] -> finish candidate
+            | [] -> finishInsertRow runStore db table columns candidate
             | triggers ->
                 match fireTriggers runStore db table Before TriggerInsert triggers [ None, Some candidate ] with
                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
-                | _ -> finish candidate)
+                | _ -> finishInsertRow runStore db table columns candidate)
 
     /// Runs an insert branch's storage write and fires AFTER INSERT triggers with
     /// MySQL's statement atomicity: when triggers exist, the insert and
@@ -15859,7 +16188,9 @@ let rec executeAs
                     |> Result.bind (validateViewCandidate s db table tableColumns)
 
                 let applyUpdate ordinal existing candidate =
-                    onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate
+                    validateViewExisting s db table tableColumns existing
+                    |> Result.bind (fun () ->
+                        onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate)
                     |> Result.bind computeGenerated
 
                 upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows)
@@ -15871,12 +16202,15 @@ let rec executeAs
         (rowsValues: Value list list)
         (deferred: Set<int>)
         (prepareFor: Store -> ColumnDef list -> int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+        (finishFor: Store -> ColumnDef list -> int -> Value[] -> Result<Value[], StorageError>)
         =
         let beforeInsert = beforeInsertTriggers store db table
         let afterInsert = afterInsertTriggers store db table
         let beforeDelete = triggersFor store db table "BEFORE" "DELETE"
         let afterDelete = triggersFor store db table "AFTER" "DELETE"
-        let hasTriggers = not (beforeInsert.IsEmpty && afterInsert.IsEmpty && beforeDelete.IsEmpty && afterDelete.IsEmpty)
+        let hasTriggers =
+            not (beforeInsert.IsEmpty && afterInsert.IsEmpty && beforeDelete.IsEmpty && afterDelete.IsEmpty)
+            || viewCheckScope.Value.IsSome
 
         match hasTriggers, scan store db table with
         | _, Error error -> ids, storageErr error
@@ -15889,10 +16223,12 @@ let rec executeAs
                     cols
                     rowsValues
                     deferred
-                    (prepareFor targetStore tableColumns))
+                    (prepareFor targetStore tableColumns)
+                    (finishFor targetStore tableColumns))
         | true, Ok(tableColumns, _) ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             let prepare = prepareFor snapshot tableColumns
+            let finish = finishFor snapshot tableColumns
 
             let fire timing event (triggers: StoredTrigger list) rows =
                 if List.isEmpty triggers then
@@ -15904,6 +16240,7 @@ let rec executeAs
 
             let deleteConflict result ((rowId, oldRow) as conflict) =
                 result
+                |> Result.bind (fun () -> validateViewExisting snapshot db table tableColumns oldRow |> Result.mapError storageErr)
                 |> Result.bind (fun () -> fire Before TriggerDelete beforeDelete [ Some oldRow, None ])
                 |> Result.bind (fun () ->
                     deleteRowsCandidates snapshot db table [ conflict ] (fun _ -> Ok true)
@@ -15923,6 +16260,7 @@ let rec executeAs
                             values
                             deferred
                             (prepare rowNumber)
+                            (finish rowNumber)
                         |> Result.mapError storageErr
                         |> Result.bind (fun prepared ->
                             replaceConflictRows snapshot db table prepared.Values
@@ -15970,21 +16308,26 @@ let rec executeAs
             Set.empty
             (fun targetStore tableColumns _ omitted candidate ->
                 prepareInsertRow targetStore db table tableColumns omitted candidate)
+            (fun targetStore tableColumns _ candidate ->
+                finishInsertRow targetStore db table tableColumns candidate)
 
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
         let retarget (access: ViewAccess) =
-            let qualified = access.Database + "." + access.Table
+            if not access.Retarget then
+                statement
+            else
+                let qualified = access.Database + "." + access.Table
 
-            match statement with
-            | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, columns, rows, updates, ignore)
-            | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, columns, select, updates, ignore)
-            | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
-            | ReplaceSelect(_, columns, select) -> ReplaceSelect(qualified, columns, select)
-            | ReplaceSet(_, assignments) -> ReplaceSet(qualified, assignments)
-            | LoadData load -> LoadData { load with Table = qualified }
-            | Update update -> Update { update with From = { update.From with Database = Some access.Database; Table = access.Table } }
-            | Delete delete -> Delete { delete with From = { delete.From with Database = Some access.Database; Table = access.Table } }
-            | other -> other
+                match statement with
+                | Insert(_, columns, rows, updates, ignore) -> Insert(qualified, columns, rows, updates, ignore)
+                | InsertSelect(_, columns, select, updates, ignore) -> InsertSelect(qualified, columns, select, updates, ignore)
+                | Replace(_, columns, rows) -> Replace(qualified, columns, rows)
+                | ReplaceSelect(_, columns, select) -> ReplaceSelect(qualified, columns, select)
+                | ReplaceSet(_, assignments) -> ReplaceSet(qualified, assignments)
+                | LoadData load -> LoadData { load with Table = qualified }
+                | Update update -> Update { update with From = { update.From with Database = Some access.Database; Table = access.Table } }
+                | Delete delete -> Delete { delete with From = { delete.From with Database = Some access.Database; Table = access.Table } }
+                | other -> other
 
         let authorizedRegistry =
             if view.AccessPath.IsEmpty then
@@ -16004,17 +16347,21 @@ let rec executeAs
             let execute () = executeAs store authorized dbName ids foundRows currentAccount statement
             let targetKey = target.Database, target.Table, target.Qualifier
 
-            match Map.tryFind targetKey view.CheckPredicates with
-            | Some predicate ->
+            let checkPredicate = Map.tryFind targetKey view.CheckPredicates
+
+            match checkPredicate, view.Predicate with
+            | None, None -> execute ()
+            | checkPredicate, visibilityPredicate ->
                 DynamicScope.withValue
                     viewCheckScope
                     (Some
                         { Database = target.Database
                           Table = target.Table
+                          Qualifier = target.Qualifier
                           View = view.ViewDatabase + "." + view.ViewName
-                          Predicate = Some predicate })
+                          CheckPredicate = checkPredicate
+                          VisibilityPredicate = visibilityPredicate })
                     execute
-            | None -> execute ()
 
     match stmt with
     | Update update when not update.Ctes.IsEmpty ->
@@ -16223,16 +16570,20 @@ let rec executeAs
                 match
                     rejectDirectOnlyGenerated registry table.Columns,
                     rejectQuantifiedComparisonsInGenerated table.Columns,
+                    rejectSubqueriesInGenerated table.Columns,
                     rejectSessionVariablesInGenerated table.Columns,
+                    rejectUnsafePartitionExpression registry table.Partitioning,
                     validateFunctionalDefaults registry table.Columns,
                     validateIndexExpressions registry table.Columns table.Indexes
                 with
-                | Some err, _, _, _, _
-                | _, Some err, _, _, _
-                | _, _, Some err, _, _
-                | _, _, _, Error err, _ -> ids, err
-                | _, _, _, _, Error error -> ids, storageErr error
-                | None, None, None, Ok(), Ok() ->
+                | Some err, _, _, _, _, _, _
+                | _, Some err, _, _, _, _, _
+                | _, _, Some err, _, _, _, _
+                | _, _, _, Some err, _, _, _
+                | _, _, _, _, Some err, _, _
+                | _, _, _, _, _, Error err, _ -> ids, err
+                | _, _, _, _, _, _, Error error -> ids, storageErr error
+                | None, None, None, None, None, Ok(), Ok() ->
                     let alreadyExists = scan store db name |> Result.isOk
 
                     if alreadyExists && table.IfNotExists then
@@ -16335,13 +16686,23 @@ let rec executeAs
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match executionOptionError, engineError, rejectDirectOnlyGenerated registry addedColumns, rejectQuantifiedComparisonsInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
-        | Some err, _, _, _, _ -> ids, err
-        | None, Some error, _, _, _ -> ids, error
-        | None, None, Some err, _, _
-        | None, None, _, Some err, _
-        | None, None, _, _, Some err -> ids, err
-        | None, None, None, None, None ->
+        match
+            executionOptionError,
+            engineError,
+            rejectDirectOnlyGenerated registry addedColumns,
+            rejectQuantifiedComparisonsInGenerated addedColumns,
+            rejectSubqueriesInGenerated addedColumns,
+            rejectSessionVariablesInGenerated addedColumns,
+            rejectUnsafeFunctionalDefaults registry addedColumns
+        with
+        | Some err, _, _, _, _, _, _ -> ids, err
+        | None, Some error, _, _, _, _, _ -> ids, error
+        | None, None, Some err, _, _, _, _
+        | None, None, _, Some err, _, _, _
+        | None, None, _, _, Some err, _, _
+        | None, None, _, _, _, Some err, _
+        | None, None, _, _, _, _, Some err -> ids, err
+        | None, None, None, None, None, None, None ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
@@ -16806,10 +17167,7 @@ let rec executeAs
                     "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation"
                 )
             | Some account -> Ok(Auth.formatAccount account)
-            | None ->
-                match existing with
-                | Some view when altering -> Ok view.Definer
-                | _ -> Ok(Auth.formatAccount currentAccount)
+            | None -> Ok(Auth.formatAccount currentAccount)
 
         let missingDefiner =
             requestedDefiner
@@ -17311,8 +17669,11 @@ let rec executeAs
                                 candidate)
 
                     let cols = if load.Fields.IsEmpty then None else Some inputColumns
+                    let finishFor targetStore currentColumns _ candidate =
+                        finishInsertRow targetStore db table currentColumns candidate
+
                     if load.Replace then
-                        replaceEvaluatedWith db table cols rowsValues assignedIndices prepareFor
+                        replaceEvaluatedWith db table cols rowsValues assignedIndices prepareFor finishFor
                     else
                         finishInsert db table (fun targetStore ->
                             match scan targetStore db table with
@@ -17321,9 +17682,9 @@ let rec executeAs
                                 let prepare = prepareFor targetStore currentColumns
 
                                 if load.Ignore then
-                                    insertRowsIgnorePreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare
+                                    insertRowsIgnorePreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare (finishFor targetStore currentColumns)
                                 else
-                                    insertRowsPreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare)
+                                    insertRowsPreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare (finishFor targetStore currentColumns))
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
         let viewDb, viewName = splitQualified dbName table
@@ -17363,11 +17724,12 @@ let rec executeAs
                         | Error error -> Error error
                         | Ok(tableColumns, _) ->
                             let prepare = prepareInsertRow s db table tableColumns
+                            let finish = finishInsertRow s db table tableColumns
 
                             if ignoreDuplicates then
-                                insertRowsIgnorePrepared s db table cols rowsValues prepare
+                                insertRowsIgnorePrepared s db table cols rowsValues prepare finish
                             else
-                                insertRowsPrepared s db table cols rowsValues prepare)
+                                insertRowsPrepared s db table cols rowsValues prepare finish)
                 else
                     upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
 
@@ -17432,11 +17794,12 @@ let rec executeAs
                             | Error error -> Error error
                             | Ok(currentColumns, _) ->
                                 let prepare = prepareInsertRow s db table currentColumns
+                                let finish = finishInsertRow s db table currentColumns
 
                                 if ignoreDuplicates then
-                                    insertRowsIgnorePrepared s db table cols rowsValues prepare
+                                    insertRowsIgnorePrepared s db table cols rowsValues prepare finish
                                 else
-                                    insertRowsPrepared s db table cols rowsValues prepare)
+                                    insertRowsPrepared s db table cols rowsValues prepare finish)
                     else
                         upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate
 
@@ -17716,7 +18079,14 @@ let rec executeAs
                                 match fireTriggers targetStore db table Before TriggerUpdate beforeTriggers [ Some row, Some candidate ] with
                                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
                                 | _ ->
-                                    match validateViewCandidate targetStore db table columns candidate with
+                                    let validated =
+                                        computeGeneratedRow targetStore registry db table columns candidate
+                                        |> Result.bind (validateViewCandidate targetStore db table columns)
+
+                                    match validated with
+                                    | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                        Diagnostics.warning 3819 message
+                                        Ok row
                                     | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
                                         Diagnostics.warning 1369 message
                                         Ok row
@@ -17938,7 +18308,14 @@ let rec executeAs
                                                         [ Some row, Some candidate ]
                                                 )
                                                 |> Result.bind (fun () ->
-                                                    match validateViewCandidate snapshot tdb tname physicalColumns.[i] candidate with
+                                                    let validated =
+                                                        computeGeneratedRow snapshot registry tdb tname physicalColumns.[i] candidate
+                                                        |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i])
+
+                                                    match validated with
+                                                    | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                                        Diagnostics.warning 3819 message
+                                                        Ok row
                                                     | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
                                                         Diagnostics.warning 1369 message
                                                         Ok row
@@ -17990,9 +18367,8 @@ let rec executeAs
                     OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
-            match registryForViewSecurity store registry view.SecurityType view.Definer view.Database (Delete rewritten) with
-            | Error(code, message) -> ids, Err(code, message)
-            | Ok _ -> executeAs store registry dbName ids foundRows currentAccount (Delete rewritten)
+            let target = view.Targets |> Map.values |> Seq.head
+            executeViewWrite view target (Delete rewritten)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table

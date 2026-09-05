@@ -1197,21 +1197,17 @@ let resolveAssignableColumn (columns: ColumnDef list) (tableName: string) (name:
 /// Ambient per-thread cancellation for the query currently executing on
 /// this thread — armed by the connection loop's disconnect watcher
 /// (`Server.withCancellationWatch`) right before dispatching a statement and
-/// cleared right after. `traverse` below (and `Executor.traverseSeq`, the
-/// non-equi join's lazy nested loop) is the only reader: a client that
-/// vanishes mid-query flips this token, and the next periodic check unwinds
-/// the row fold instead of computing into a closed connection. A plain
-/// per-thread field rather than something threaded through every one of
-/// `traverse`'s ~50 call sites — there is exactly one query running per
-/// thread at a time, so "current thread's token" is all a check needs.
-let queryCancellation = new ThreadLocal<CancellationToken>(fun () -> CancellationToken.None)
+/// cleared right after. Engine folds and bounded SQL functions share the
+/// token, so a client that vanishes mid-query can unwind synchronous work
+/// instead of computing into a closed connection.
+let queryCancellation = Limits.queryCancellation
 
 /// How often a row-pipeline fold checks `queryCancellation` — a modulo and
 /// an occasional `IsCancellationRequested` read, cheap enough against a
 /// row's own `evalExpr` cost to be unmeasurable, frequent enough that a
 /// killed client's query unwinds within a few hundred rows rather than
 /// running to completion.
-let cancellationCheckInterval = 256
+let cancellationCheckInterval = Limits.cancellationCheckInterval
 
 /// Applies `f` to each element, short-circuiting on the first `Error` —
 /// generalized over any error type (not just `StorageError`) and public, so
@@ -1314,10 +1310,23 @@ let private escapedUtf8Suffix (text: string) (converted: string) =
         |> Seq.tryFindIndex (fun (original, replacement) -> original <> replacement)
         |> Option.defaultValue 0
 
-    text.Substring(firstChanged)
-    |> Text.Encoding.UTF8.GetBytes
-    |> Array.map (fun b -> if b < 0x80uy then string (char b) else sprintf "\\x%02X" b)
-    |> String.concat ""
+    let previewCharacters = min 8 (text.Length - firstChanged)
+    let bytes = Text.Encoding.UTF8.GetBytes(text.Substring(firstChanged, previewCharacters))
+    let shown = min 6 bytes.Length
+    let builder = Text.StringBuilder(shown * 4 + 3)
+
+    for index in 0 .. shown - 1 do
+        let value = bytes.[index]
+
+        if value < 0x80uy then
+            builder.Append(char value) |> ignore
+        else
+            builder.AppendFormat("\\x{0:X2}", value) |> ignore
+
+    if bytes.Length > shown || firstChanged + previewCharacters < text.Length then
+        builder.Append "..." |> ignore
+
+    builder.ToString()
 
 let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     let strict = mode.Strict
@@ -1447,6 +1456,9 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | _ -> numericFallback (Some "integer") (fun () -> VInt 0L)
 
     match col.Type, v with
+    | TBit width, _ when width < 1 -> Error(ExpressionError(3013, sprintf "Invalid size for column '%s'." col.Name))
+    | TBit width, _ when width > 64 ->
+        Error(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 64)" col.Name))
     | TDecimal(precision, _, _), _ when precision < 1 || precision > 65 ->
         Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision col.Name))
     | TDecimal(_, scale, _), _ when scale < 0 || scale > 30 ->
@@ -2651,7 +2663,9 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
         secondaryIndex <- updatedSecondary
         secondaryOrder <- updatedOrder
 
-    for rowId, before, after in batchTable.RowsArray.ChangesFrom baseTable.RowsArray do
+    for iteration, (rowId, before, after) in batchTable.RowsArray.ChangesFrom baseTable.RowsArray |> Seq.indexed do
+        Limits.checkQueryCancellation iteration
+
         match before, after with
         | Some baseRow, replacement ->
             match rows.TryFind rowId with
@@ -2734,6 +2748,41 @@ type private LockWaitDecision =
     | CurrentDeadlockVictim
     | WakeDeadlockVictim of RowLockStripe
 
+let internal tryFindLockWaitPath target (starts: seq<int64>) (successors: int64 -> seq<int64>) =
+    let visited = HashSet<int64>()
+    let predecessors = Dictionary<int64, int64>()
+    let pending = Stack<int64>()
+
+    for start in starts do
+        if visited.Add start then
+            pending.Push start
+
+    let mutable found = false
+
+    while pending.Count > 0 && not found do
+        let current = pending.Pop()
+
+        if current = target then
+            found <- true
+        else
+            for successor in successors current do
+                if visited.Add successor then
+                    predecessors.[successor] <- current
+                    pending.Push successor
+
+    if not found then
+        None
+    else
+        let path = ResizeArray<int64>()
+        let mutable current = target
+        path.Add current
+
+        while predecessors.ContainsKey current do
+            current <- predecessors.[current]
+            path.Add current
+
+        path |> Seq.rev |> List.ofSeq |> Some
+
 let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockContext) stripe blockers =
     lock graph.SyncRoot (fun () ->
         graph.Edges.[context.Owner] <-
@@ -2741,24 +2790,11 @@ let private registerLockWait (graph: LockWaitGraph) (context: TransactionLockCon
               Context = context
               Stripe = stripe }
 
-        let rec tryPath target visited current =
-            if current = target then
-                Some [ current ]
-            elif Set.contains current visited then
-                None
-            else
-                match graph.Edges.TryGetValue current with
-                | false, _ -> None
-                | true, wait ->
-                    let visited = Set.add current visited
-                    wait.Blockers
-                    |> Seq.tryPick (fun blocker ->
-                        tryPath target visited blocker
-                        |> Option.map (fun path -> current :: path))
-
         let cycle =
-            blockers
-            |> Seq.tryPick (tryPath context.Owner Set.empty)
+            tryFindLockWaitPath context.Owner blockers (fun owner ->
+                match graph.Edges.TryGetValue owner with
+                | true, wait -> wait.Blockers
+                | false, _ -> Seq.empty)
             |> Option.map (fun path -> context.Owner :: path |> List.distinct)
 
         match cycle with
@@ -4019,6 +4055,26 @@ let private equalityKeyGroup (index: EqualityIndex) =
       Directions = List.replicate index.ColumnIndices.Length Asc
       Visible = true }
 
+let internal tryEqualityProbeKeyForIndex
+    (store: Store)
+    (table: Table)
+    (index: EqualityIndex)
+    (values: Value list)
+    : string option =
+    if index.ColumnIndices.Length <> values.Length then
+        None
+    else
+        List.zip index.ColumnIndices values
+        |> traverse (fun (columnIndex, value) ->
+            match exactProbeValue store table columnIndex value with
+            | Some exact -> Ok(columnIndex, exact)
+            | None -> Error())
+        |> Result.toOption
+        |> Option.map (fun exactValues ->
+            let probeRow = Array.create table.Columns.Length VNull
+            exactValues |> List.iter (fun (columnIndex, value) -> probeRow.[columnIndex] <- value)
+            encodeIndexKey table.Columns (equalityKeyGroup index) probeRow)
+
 let private equalityLookupRowIds
     (store: Store)
     (table: Table)
@@ -4761,7 +4817,7 @@ let private withTable
 /// Validates type parameters at DDL time, where the real column name is in
 /// scope for MySQL-compatible errors. Runtime coercion repeats DECIMAL's
 /// bounds because CAST and JSON_TABLE create synthetic column definitions.
-let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
+let internal validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
     let maxVarcharLength = 65535 / Collation.maxBytesPerCharacter c.Charset
 
     let displayError =
@@ -4795,6 +4851,10 @@ let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
                     sprintf "Column length too big for column '%s' (max = %d); use BLOB or TEXT instead" c.Name maxVarcharLength
                 )
             )
+        | TBinary length when length < 1 || length > 255 ->
+            Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 255); use BLOB or TEXT instead" c.Name))
+        | TVarBinary length when length < 1 || length > 65535 ->
+            Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 65535); use BLOB or TEXT instead" c.Name))
         | TBit width when width < 1 -> Error(ExpressionError(3013, sprintf "Invalid size for column '%s'." c.Name))
         | TBit width when width > 64 ->
             Error(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 64)" c.Name))
@@ -5126,22 +5186,16 @@ let private normalizeUtf8mb3Text (text: string) =
     let normalized = Charset.transcodeText "utf8mb3" text
 
     if normalized <> text then
-        let bytes = Encoding.UTF8.GetBytes text
-
-        let preview =
-            bytes
-            |> Seq.truncate 6
-            |> Seq.map (fun value ->
-                if value >= 0x20uy && value <= 0x7Euy then
-                    string (char value)
-                else
-                    sprintf "\\x%02X" value)
-            |> String.concat ""
-            |> fun text -> if bytes.Length > 6 then text + "..." else text
-
+        let preview = escapedUtf8Suffix text normalized
         Diagnostics.warning 1300 (sprintf "Cannot convert string '%s' from utf8mb4 to utf8mb3" preview)
 
     normalized
+
+let private normalizeBoundedUtf8mb3Text maxRunes (text: string) =
+    if text.EnumerateRunes() |> Seq.truncate (maxRunes + 1) |> Seq.length > maxRunes then
+        text
+    else
+        normalizeUtf8mb3Text text
 
 let private validateTableComment (tableName: string) (comment: string) =
     if comment.EnumerateRunes() |> Seq.length > 2048 then
@@ -5165,11 +5219,11 @@ let createTableSeeded
     ensureDatabase store dbName
     let columns =
         columns
-        |> List.map (fun column -> { column with Comment = normalizeUtf8mb3Text column.Comment })
+        |> List.map (fun column -> { column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment })
         |> normalizePrimaryKeyNullability
     let indexes = normalizeGeometryIndexes columns indexes
 
-    let tableComment = tableComment |> Option.map normalizeUtf8mb3Text
+    let tableComment = tableComment |> Option.map (normalizeBoundedUtf8mb3Text 2048)
 
     let createEvent (createTime, columns) =
         let statement =
@@ -5546,10 +5600,10 @@ let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: IndexKeyGr
 let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
     let action =
         match action with
-        | AddColumn(column, position) -> AddColumn({ column with Comment = normalizeUtf8mb3Text column.Comment }, position)
-        | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeUtf8mb3Text column.Comment }, position)
-        | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeUtf8mb3Text column.Comment }, position)
-        | SetTableComment comment -> SetTableComment(normalizeUtf8mb3Text comment)
+        | AddColumn(column, position) -> AddColumn({ column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment }, position)
+        | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment }, position)
+        | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment }, position)
+        | SetTableComment comment -> SetTableComment(normalizeBoundedUtf8mb3Text 2048 comment)
         | AddIndex index -> AddIndex(normalizeGeometryIndexes table.Columns [ index ] |> List.head)
         | action -> action
 
@@ -5619,8 +5673,17 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                 | _ -> col.Name
 
             validateColumnType col
-            |> Result.bind (fun () -> checkVectorKeyColumns [ { col with Name = oldName } ] table.Indexes)
-            |> Result.bind (fun () -> checkGeometryKeyColumns [ { col with Name = oldName } ] table.Indexes)
+            |> Result.bind (fun () -> resolveColumn table.Columns oldName)
+            |> Result.bind (fun oldIndex ->
+                let oldColumn = table.Columns.[oldIndex]
+                let effectiveColumn =
+                    { col with
+                        Name = oldName
+                        PrimaryKey = oldColumn.PrimaryKey || col.PrimaryKey
+                        Unique = oldColumn.Unique || col.Unique }
+
+                checkVectorKeyColumns [ effectiveColumn ] table.Indexes
+                |> Result.bind (fun () -> checkGeometryKeyColumns [ effectiveColumn ] table.Indexes))
         // The key-introducing actions must refuse a VECTOR column the same
         // way CREATE TABLE does — otherwise ALTER is a back door into the
         // very keys `checkVectorKeyColumns` exists to forbid.
@@ -6250,14 +6313,14 @@ let private finalizePreparedAutoValue
     (assigned: (bool * int64) option)
     =
     match table.Columns |> List.tryFindIndex _.AutoIncrement with
-    | None -> nextAutoId, assigned
-    | Some index when not (Set.contains index deferred) && before.[index] = candidate.[index] -> nextAutoId, assigned
+    | None -> nextAutoId, assigned, false
+    | Some index when not (Set.contains index deferred) && before.[index] = candidate.[index] -> nextAutoId, assigned, false
     | Some index ->
         let column = table.Columns.[index]
 
         if generatesAutoValue mode generateAutoOnZero column candidate.[index] then
             candidate.[index] <- VInt nextAutoId
-            (if nextAutoId = Int64.MaxValue then Int64.MaxValue else nextAutoId + 1L), Some(true, nextAutoId)
+            (if nextAutoId = Int64.MaxValue then Int64.MaxValue else nextAutoId + 1L), Some(true, nextAutoId), true
         else
             let explicitValue =
                 match candidate.[index] with
@@ -6268,8 +6331,8 @@ let private finalizePreparedAutoValue
             match explicitValue with
             | Some value ->
                 let next = if value = Int64.MaxValue then Int64.MaxValue else max nextAutoId (value + 1L)
-                next, Some(false, value)
-            | None -> nextAutoId, assigned
+                next, Some(false, value), false
+            | None -> nextAutoId, assigned, false
 
 /// Resolves `columns` (the explicit column list, or `None` for "all columns
 /// in table order") to indices against `table`.
@@ -6295,6 +6358,7 @@ let private prepareInsertCandidateCore
     (values: Value list)
     (deferred: Set<int>)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: Value[] -> Result<Value[], StorageError>)
     : Result<PreparedInsertCandidate, StorageError> =
     match tableAt store dbName tableName with
     | None -> Error(NoSuchTable tableName)
@@ -6324,8 +6388,8 @@ let private prepareInsertCandidateCore
                     let before = Array.copy processed
 
                     prepare omitted processed
-                    |> Result.map (fun candidate ->
-                        let nextAutoId, assignedAutoId =
+                    |> Result.bind (fun candidate ->
+                        let nextAutoId, assignedAutoId, candidateChanged =
                             finalizePreparedAutoValue
                                 mode
                                 generateAutoOnZero
@@ -6336,18 +6400,20 @@ let private prepareInsertCandidateCore
                                 nextAutoId
                                 assignedAutoId
 
-                        let nextAutoId = max nextAutoId reservedNext
-                        advanceAutoIncrementCounter store dbName tableName nextAutoId
+                        (if candidateChanged then finish candidate else Ok candidate)
+                        |> Result.map (fun candidate ->
+                            let nextAutoId = max nextAutoId reservedNext
+                            advanceAutoIncrementCounter store dbName tableName nextAutoId
 
-                        { Values = candidate
-                          NextAutoId = nextAutoId
-                          AssignedAutoId = assignedAutoId })))
+                            { Values = candidate
+                              NextAutoId = nextAutoId
+                              AssignedAutoId = assignedAutoId }))))
 
 let internal prepareInsertCandidate store dbName tableName columns values prepare =
-    prepareInsertCandidateCore store dbName tableName columns values Set.empty prepare
+    prepareInsertCandidateCore store dbName tableName columns values Set.empty prepare Ok
 
-let internal prepareInsertCandidateWithDeferred store dbName tableName columns values deferred prepare =
-    prepareInsertCandidateCore store dbName tableName columns values deferred prepare
+let internal prepareInsertCandidateWithDeferred store dbName tableName columns values deferred prepare finish =
+    prepareInsertCandidateCore store dbName tableName columns values deferred prepare finish
 
 /// Finds every live row a prepared REPLACE candidate displaces.
 let internal replaceConflictRows
@@ -6422,6 +6488,7 @@ let private insertCore
     (idxs: int list)
     (deferred: Set<int>)
     (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: int -> Value[] -> Result<Value[], StorageError>)
     : Result<Database * (int64 * int64 option * int * Value[] list * StorageError list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
@@ -6499,7 +6566,7 @@ let private insertCore
 
                         prepare rowNumber omitted candidate
                         |> Result.bind (fun candidate ->
-                            let nextAutoId', assigned =
+                            let nextAutoId', assigned, candidateChanged =
                                 finalizePreparedAutoValue
                                     mode
                                     generateAutoOnZero
@@ -6510,57 +6577,59 @@ let private insertCore
                                     nextAutoId'
                                     assigned
 
-                            // O(log n) per unique group via the running index
-                            // (seeded from `table.UniqueIndex`, extended below as
-                            // each candidate is accepted) instead of a full scan
-                            // of `table.RowsArray` per candidate.
-                            let uniqueCollision =
-                                uniqueGroups
-                                |> List.tryPick (fun group ->
-                                    match encodeUniqueKey table.Columns group candidate with
-                                    | Some key when Map.find group.Name index |> Map.containsKey key ->
-                                        let value =
-                                            group.Indices
-                                            |> List.map (fun index -> candidate.[index] |> toText |> Option.defaultValue "NULL")
-                                            |> String.concat "-"
+                            (if candidateChanged then finish rowNumber candidate else Ok candidate)
+                            |> Result.bind (fun candidate ->
+                                // O(log n) per unique group via the running index
+                                // (seeded from `table.UniqueIndex`, extended below as
+                                // each candidate is accepted) instead of a full scan
+                                // of `table.RowsArray` per candidate.
+                                let uniqueCollision =
+                                    uniqueGroups
+                                    |> List.tryPick (fun group ->
+                                        match encodeUniqueKey table.Columns group candidate with
+                                        | Some key when Map.find group.Name index |> Map.containsKey key ->
+                                            let value =
+                                                group.Indices
+                                                |> List.map (fun index -> candidate.[index] |> toText |> Option.defaultValue "NULL")
+                                                |> String.concat "-"
 
-                                        Some(DuplicateKey(group.Name, value))
-                                    | _ -> None)
+                                            Some(DuplicateKey(group.Name, value))
+                                        | _ -> None)
 
-                            match uniqueCollision with
-                            | Some e -> Error e
-                            | None ->
-                                if checkFks then
-                                    // A self-referencing (or otherwise
-                                    // same-table) FK's parent needs to see this
-                                    // same multi-row INSERT's earlier rows too,
-                                    // not just what was already committed before
-                                    // the statement started — same reasoning as
-                                    // the running unique-key `index` just above.
-                                    // Ordinary parent tables need no overlay.
-                                    // Only a self-FK needs rows accepted earlier
-                                    // in this statement made visible, in their
-                                    // original insertion order.
-                                    let dbView =
-                                        if hasUnacceleratedSelfForeignKey && not acceptedRev.IsEmpty then
-                                            Map.add tableKey { table with RowsArray = table.RowsArray.AddRange(List.rev acceptedRev) } db
-                                        else
-                                            db
+                                match uniqueCollision with
+                                | Some e -> Error e
+                                | None ->
+                                    if checkFks then
+                                        // A self-referencing (or otherwise
+                                        // same-table) FK's parent needs to see this
+                                        // same multi-row INSERT's earlier rows too,
+                                        // not just what was already committed before
+                                        // the statement started — same reasoning as
+                                        // the running unique-key `index` just above.
+                                        // Ordinary parent tables need no overlay.
+                                        // Only a self-FK needs rows accepted earlier
+                                        // in this statement made visible, in their
+                                        // original insertion order.
+                                        let dbView =
+                                            if hasUnacceleratedSelfForeignKey && not acceptedRev.IsEmpty then
+                                                Map.add tableKey { table with RowsArray = table.RowsArray.AddRange(List.rev acceptedRev) } db
+                                            else
+                                                db
 
-                                    let checkOneForeignKey (foreignKey: ForeignKeyDef) =
-                                        match Map.tryFind foreignKey.Name foreignKeyLookups with
-                                        | Some(childIndices, _, parentKeys) ->
-                                            match encodeConstraintKey table.Columns childIndices candidate with
-                                            | None -> Ok()
-                                            | Some key when parentKeySourceContains key parentKeys -> Ok()
-                                            | Some _ -> Error(ForeignKeyParentMissing foreignKey.Name)
-                                        | None -> checkFkParent catalog dbName dbView table.Columns candidate foreignKey
+                                        let checkOneForeignKey (foreignKey: ForeignKeyDef) =
+                                            match Map.tryFind foreignKey.Name foreignKeyLookups with
+                                            | Some(childIndices, _, parentKeys) ->
+                                                match encodeConstraintKey table.Columns childIndices candidate with
+                                                | None -> Ok()
+                                                | Some key when parentKeySourceContains key parentKeys -> Ok()
+                                                | Some _ -> Error(ForeignKeyParentMissing foreignKey.Name)
+                                            | None -> checkFkParent catalog dbName dbView table.Columns candidate foreignKey
 
-                                    table.ForeignKeys
-                                    |> traverse checkOneForeignKey
-                                    |> Result.map (fun _ -> candidate, nextAutoId', assigned)
-                                else
-                                    Ok(candidate, nextAutoId', assigned)))
+                                        table.ForeignKeys
+                                        |> traverse checkOneForeignKey
+                                        |> Result.map (fun _ -> candidate, nextAutoId', assigned)
+                                    else
+                                        Ok(candidate, nextAutoId', assigned))))
 
                 match rowResult with
                 | Ok(candidate, nextAutoId', assigned) ->
@@ -6618,6 +6687,7 @@ let private insertRowsPreparedCore
     (ignoreErrors: bool)
     (deferred: Set<int>)
     (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: int -> Value[] -> Result<Value[], StorageError>)
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -6653,6 +6723,7 @@ let private insertRowsPreparedCore
                             indices
                             deferred
                             prepare
+                            finish
                         |> Result.map (fun (database, result) -> setCatalogDatabase dbName database catalog, result))))
 
     let result =
@@ -6678,7 +6749,7 @@ let insertRows
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<InsertOutcome, StorageError> =
-    insertRowsPreparedCore false Set.empty (fun _ _ row -> Ok row) store dbName tableName columns rowsIn
+    insertRowsPreparedCore false Set.empty (fun _ _ row -> Ok row) (fun _ row -> Ok row) store dbName tableName columns rowsIn
 
 let insertRowsPrepared
     (store: Store)
@@ -6687,8 +6758,9 @@ let insertRowsPrepared
     (columns: string list option)
     (rowsIn: Value list list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
-    insertRowsPreparedCore false Set.empty (fun _ omitted row -> prepare omitted row) store dbName tableName columns rowsIn
+    insertRowsPreparedCore false Set.empty (fun _ omitted row -> prepare omitted row) (fun _ row -> finish row) store dbName tableName columns rowsIn
 
 let internal insertRowsPreparedWithOrdinal
     (store: Store)
@@ -6698,8 +6770,9 @@ let internal insertRowsPreparedWithOrdinal
     (rowsIn: Value list list)
     (deferred: Set<int>)
     (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: int -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
-    insertRowsPreparedCore false deferred prepare store dbName tableName columns rowsIn
+    insertRowsPreparedCore false deferred prepare finish store dbName tableName columns rowsIn
 
 /// Publishes a candidate returned by `prepareInsertCandidate` without
 /// repeating defaults, generated expressions, or BEFORE triggers.
@@ -6790,7 +6863,7 @@ let insertRowsIgnore
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<InsertOutcome, StorageError> =
-    insertRowsPreparedCore true Set.empty (fun _ _ row -> Ok row) store dbName tableName columns rowsIn
+    insertRowsPreparedCore true Set.empty (fun _ _ row -> Ok row) (fun _ row -> Ok row) store dbName tableName columns rowsIn
 
 let insertRowsIgnorePrepared
     (store: Store)
@@ -6799,8 +6872,9 @@ let insertRowsIgnorePrepared
     (columns: string list option)
     (rowsIn: Value list list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
-    insertRowsPreparedCore true Set.empty (fun _ omitted row -> prepare omitted row) store dbName tableName columns rowsIn
+    insertRowsPreparedCore true Set.empty (fun _ omitted row -> prepare omitted row) (fun _ row -> finish row) store dbName tableName columns rowsIn
 
 let internal insertRowsIgnorePreparedWithOrdinal
     (store: Store)
@@ -6810,8 +6884,9 @@ let internal insertRowsIgnorePreparedWithOrdinal
     (rowsIn: Value list list)
     (deferred: Set<int>)
     (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: int -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
-    insertRowsPreparedCore true deferred prepare store dbName tableName columns rowsIn
+    insertRowsPreparedCore true deferred prepare finish store dbName tableName columns rowsIn
 
 let private referencingForeignKeysInDatabase (db: Database) (parentKey: string) : (string * ForeignKeyDef) list =
     db
@@ -7438,6 +7513,7 @@ let private replaceRowsCore
     (rowsIn: Value list list)
     (deferred: Set<int>)
     (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: int -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
     let key = normalizeTableName tableName
     let address = tableAddress dbName key
@@ -7502,7 +7578,7 @@ let private replaceRowsCore
 
                                     prepare rowNumber omitted candidate
                                     |> Result.bind (fun candidate ->
-                                        let nextAutoId', assigned =
+                                        let nextAutoId', assigned, candidateChanged =
                                             finalizePreparedAutoValue
                                                 mode
                                                 generateAutoOnZero
@@ -7513,108 +7589,110 @@ let private replaceRowsCore
                                                 nextAutoId'
                                                 assigned
 
-                                        let uniqueGroups = uniqueKeyGroups table
+                                        (if candidateChanged then finish rowNumber candidate else Ok candidate)
+                                        |> Result.bind (fun candidate ->
+                                            let uniqueGroups = uniqueKeyGroups table
 
-                                        let conflicts =
-                                            uniqueGroups
-                                            |> List.choose (fun group ->
-                                                encodeUniqueKey table.Columns group candidate
-                                                |> Option.bind (fun encoded ->
-                                                    Map.tryFind encoded (Map.find group.Name table.UniqueIndex)
-                                                    |> Option.map (fun rowId -> rowId, table.RowsArray.[rowId])))
-                                            |> List.fold
-                                                (fun (seen, matches) ((rowId, _) as matched) ->
-                                                    if Set.contains rowId seen then
-                                                        seen, matches
-                                                    else
-                                                        Set.add rowId seen, matched :: matches)
-                                                (Set.empty, [])
-                                            |> snd
-                                            |> List.rev
+                                            let conflicts =
+                                                uniqueGroups
+                                                |> List.choose (fun group ->
+                                                    encodeUniqueKey table.Columns group candidate
+                                                    |> Option.bind (fun encoded ->
+                                                        Map.tryFind encoded (Map.find group.Name table.UniqueIndex)
+                                                        |> Option.map (fun rowId -> rowId, table.RowsArray.[rowId])))
+                                                |> List.fold
+                                                    (fun (seen, matches) ((rowId, _) as matched) ->
+                                                        if Set.contains rowId seen then
+                                                            seen, matches
+                                                        else
+                                                            Set.add rowId seen, matched :: matches)
+                                                    (Set.empty, [])
+                                                |> snd
+                                                |> List.rev
 
-                                        let optimizedConflict =
-                                            match conflicts with
-                                            | [ rowId, existing ] when (referencingForeignKeys catalog address).IsEmpty -> Some(rowId, existing)
-                                            | _ -> None
+                                            let optimizedConflict =
+                                                match conflicts with
+                                                | [ rowId, existing ] when (referencingForeignKeys catalog address).IsEmpty -> Some(rowId, existing)
+                                                | _ -> None
 
-                                        let deletedMatches =
-                                            match optimizedConflict with
-                                            | Some _ -> []
-                                            | None -> conflicts
-
-                                        let deletedConflicts = deletedMatches |> List.map snd
-
-                                        cascadeDelete store.ForeignKeyChecks catalog address deletedConflicts
-                                        |> Result.bind (fun (deletedCatalog, removed, blanked) ->
-                                            let target = tryCatalogTable address deletedCatalog |> Option.get
-                                            let target', writeEvent, weight =
+                                            let deletedMatches =
                                                 match optimizedConflict with
-                                                | Some(rowId, existing) ->
-                                                    let changed = existing <> candidate
-                                                    let uniqueIndex, secondaryIndex, secondaryOrder =
-                                                        reindexRow
-                                                            target.Columns
-                                                            (uniqueKeyGroups target)
-                                                            (secondaryKeyGroups target)
-                                                            (Some(rowId, existing))
-                                                            (Some(rowId, candidate))
-                                                            target.UniqueIndex
-                                                            target.SecondaryIndex
-                                                            target.SecondaryOrder
+                                                | Some _ -> []
+                                                | None -> conflicts
 
-                                                    publishRows target
-                                                        { target with
-                                                            RowsArray = target.RowsArray.SetItem(rowId, candidate)
-                                                            NextAutoId = nextAutoId'
-                                                            UniqueIndex = uniqueIndex
-                                                            SecondaryIndex = secondaryIndex
-                                                            SecondaryOrder = secondaryOrder },
-                                                    (if changed then Some(RowsUpdated(dbName, tableName, [ existing, candidate ])) else None),
-                                                    deletedConflicts.Length + 1 + (if changed then 1 else 0)
-                                                | None ->
-                                                    let rowId, rows = target.RowsArray.Append candidate
-                                                    let uniqueIndex, secondaryIndex, secondaryOrder =
-                                                        reindexRow
-                                                            target.Columns
-                                                            (uniqueKeyGroups target)
-                                                            (secondaryKeyGroups target)
-                                                            None
-                                                            (Some(rowId, candidate))
-                                                            target.UniqueIndex
-                                                            target.SecondaryIndex
-                                                            target.SecondaryOrder
+                                            let deletedConflicts = deletedMatches |> List.map snd
 
-                                                    publishRows target
-                                                        { target with
-                                                            RowsArray = rows
-                                                            NextAutoId = nextAutoId'
-                                                            UniqueIndex = uniqueIndex
-                                                            SecondaryIndex = secondaryIndex
-                                                            SecondaryOrder = secondaryOrder },
-                                                    Some(RowsInserted(dbName, tableName, [ candidate ])),
-                                                    deletedConflicts.Length + 1
+                                            cascadeDelete store.ForeignKeyChecks catalog address deletedConflicts
+                                            |> Result.bind (fun (deletedCatalog, removed, blanked) ->
+                                                let target = tryCatalogTable address deletedCatalog |> Option.get
+                                                let target', writeEvent, weight =
+                                                    match optimizedConflict with
+                                                    | Some(rowId, existing) ->
+                                                        let changed = existing <> candidate
+                                                        let uniqueIndex, secondaryIndex, secondaryOrder =
+                                                            reindexRow
+                                                                target.Columns
+                                                                (uniqueKeyGroups target)
+                                                                (secondaryKeyGroups target)
+                                                                (Some(rowId, existing))
+                                                                (Some(rowId, candidate))
+                                                                target.UniqueIndex
+                                                                target.SecondaryIndex
+                                                                target.SecondaryOrder
 
-                                            let updatedCatalog = setCatalogTable address target' deletedCatalog
+                                                        publishRows target
+                                                            { target with
+                                                                RowsArray = target.RowsArray.SetItem(rowId, candidate)
+                                                                NextAutoId = nextAutoId'
+                                                                UniqueIndex = uniqueIndex
+                                                                SecondaryIndex = secondaryIndex
+                                                                SecondaryOrder = secondaryOrder },
+                                                        (if changed then Some(RowsUpdated(dbName, tableName, [ existing, candidate ])) else None),
+                                                        deletedConflicts.Length + 1 + (if changed then 1 else 0)
+                                                    | None ->
+                                                        let rowId, rows = target.RowsArray.Append candidate
+                                                        let uniqueIndex, secondaryIndex, secondaryOrder =
+                                                            reindexRow
+                                                                target.Columns
+                                                                (uniqueKeyGroups target)
+                                                                (secondaryKeyGroups target)
+                                                                None
+                                                                (Some(rowId, candidate))
+                                                                target.UniqueIndex
+                                                                target.SecondaryIndex
+                                                                target.SecondaryOrder
 
-                                            (if store.ForeignKeyChecks then
-                                                 let currentDatabase = tryCatalogDatabase address.Database updatedCatalog |> Option.get
-                                                 checkFkParents updatedCatalog dbName currentDatabase target.Columns target.ForeignKeys candidate
-                                             else
-                                                 Ok())
-                                            |> Result.map (fun () ->
-                                                let firstAuto', lastExplicit' =
-                                                    match assigned with
-                                                    | Some(true, value) -> Option.orElse (Some value) firstAuto, lastExplicit
-                                                    | Some(false, value) -> firstAuto, Some value
-                                                    | None -> firstAuto, lastExplicit
+                                                        publishRows target
+                                                            { target with
+                                                                RowsArray = rows
+                                                                NextAutoId = nextAutoId'
+                                                                UniqueIndex = uniqueIndex
+                                                                SecondaryIndex = secondaryIndex
+                                                                SecondaryOrder = secondaryOrder },
+                                                        Some(RowsInserted(dbName, tableName, [ candidate ])),
+                                                        deletedConflicts.Length + 1
 
-                                                updatedCatalog,
-                                                nextAutoId',
-                                                firstAuto',
-                                                lastExplicit',
-                                                affected + weight,
-                                                candidate :: inserted,
-                                                events @ commitEvents removed blanked writeEvent)))))
+                                                let updatedCatalog = setCatalogTable address target' deletedCatalog
+
+                                                (if store.ForeignKeyChecks then
+                                                     let currentDatabase = tryCatalogDatabase address.Database updatedCatalog |> Option.get
+                                                     checkFkParents updatedCatalog dbName currentDatabase target.Columns target.ForeignKeys candidate
+                                                 else
+                                                     Ok())
+                                                |> Result.map (fun () ->
+                                                    let firstAuto', lastExplicit' =
+                                                        match assigned with
+                                                        | Some(true, value) -> Option.orElse (Some value) firstAuto, lastExplicit
+                                                        | Some(false, value) -> firstAuto, Some value
+                                                        | None -> firstAuto, lastExplicit
+
+                                                    updatedCatalog,
+                                                    nextAutoId',
+                                                    firstAuto',
+                                                    lastExplicit',
+                                                    affected + weight,
+                                                    candidate :: inserted,
+                                                    events @ commitEvents removed blanked writeEvent))))))
 
                     rowsIn
                     |> List.indexed
@@ -7644,7 +7722,7 @@ let replaceRows
     (rowsIn: Value list list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
-    replaceRowsCore store dbName tableName columns rowsIn Set.empty (fun _ omitted row -> prepare omitted row)
+    replaceRowsCore store dbName tableName columns rowsIn Set.empty (fun _ omitted row -> prepare omitted row) (fun _ row -> Ok row)
 
 let internal replaceRowsWithOrdinal
     (store: Store)
@@ -7654,8 +7732,9 @@ let internal replaceRowsWithOrdinal
     (rowsIn: Value list list)
     (deferred: Set<int>)
     (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: int -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
-    replaceRowsCore store dbName tableName columns rowsIn deferred prepare
+    replaceRowsCore store dbName tableName columns rowsIn deferred prepare finish
 
 /// Deletes every candidate matching `predicate`. Returns the number of rows
 /// removed. `predicate` returns a `Result` rather than a plain `bool` so a
@@ -7690,7 +7769,7 @@ let private deleteRowsCore
                   let database, table = catalogTableIdentity catalog address
                   RowsUpdated(database, table, changes) ]
 
-    let apply =
+    let apply () =
         withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
             let key = normalizeTableName tableName
             let address = tableAddress dbName key
@@ -7717,11 +7796,11 @@ let private deleteRowsCore
 
     let result =
         match candidates with
-        | None -> apply
+        | None -> apply ()
         | Some candidates ->
             candidates
             |> List.map fst
-            |> fun rowIds -> withRowLocks store dbName tableName rowIds (fun () -> apply)
+            |> fun rowIds -> withRowLocks store dbName tableName rowIds apply
 
     match result with
     | Ok(affected, _, _, _) -> Ok affected
@@ -7824,7 +7903,9 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
         let mutable secondaryIndex = liveTable.SecondaryIndex
         let mutable secondaryOrder = liveTable.SecondaryOrder
 
-        for rowId in rowIds do
+        for iteration, rowId in List.indexed rowIds do
+            Limits.checkQueryCancellation iteration
+
             match baseTable.RowsArray.TryFind rowId, batchTable.RowsArray.TryFind rowId, rows.TryFind rowId with
             | Some before, Some after, Some live when live = before ->
                 let collision =
@@ -7863,7 +7944,12 @@ let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Datab
             match Map.tryFind tableKey baseDb, Map.tryFind tableKey batchDb with
             | Some baseTable, Some batchTable when obj.ReferenceEquals(baseTable, batchTable) -> None
             | Some baseTable, Some batchTable when sameTableSchema baseTable batchTable ->
-                let changes = batchTable.RowsArray.ChangesFrom baseTable.RowsArray |> List.ofSeq
+                let changes =
+                    batchTable.RowsArray.ChangesFrom baseTable.RowsArray
+                    |> Seq.mapi (fun iteration change ->
+                        Limits.checkQueryCancellation iteration
+                        change)
+                    |> List.ofSeq
 
                 if changes |> List.forall (function _, Some _, Some _ -> true | _ -> false) then
                     Some(tableKey, changes |> List.map (fun (rowId, _, _) -> rowId))
@@ -7875,6 +7961,32 @@ let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Datab
     match changedTables with
     | [ tableKey, rowIds ] when not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb -> Some(tableKey, rowIds)
     | _ -> None
+
+let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb: Database) =
+    if obj.ReferenceEquals(liveDb, baseDb) then
+        batchDb
+    else
+        match tryPointUpdate baseDb batchDb liveDb with
+        | Some(tableKey, rowIds) -> mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
+        | None ->
+            let tableKeys = Set.union (keysOf baseDb) (keysOf batchDb)
+
+            let merged =
+                tableKeys
+                |> Set.fold
+                    (fun acc tableName ->
+                        match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
+                        | Some baseTable, Some batchTable, _ when obj.ReferenceEquals(baseTable, batchTable) -> acc
+                        | Some baseTable, None, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.remove tableName acc
+                        | None, Some batchTable, None -> Map.add tableName batchTable acc
+                        | Some baseTable, Some batchTable, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.add tableName batchTable acc
+                        | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
+                            Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
+                        | _ -> raise (LockWaitTimeout dbName))
+                    liveDb
+
+            validateMergedForeignKeys dbName merged
+            merged
 
 let private mergeDatabaseSlotPublishing
     (timeout: TimeSpan)
@@ -7889,31 +8001,7 @@ let private mergeDatabaseSlotPublishing
 
     try
         let liveDb = slot.Value
-
-        if obj.ReferenceEquals(liveDb, baseDb) then
-            slot.Value <- batchDb
-        else
-            match tryPointUpdate baseDb batchDb liveDb with
-            | Some(tableKey, rowIds) -> slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
-            | None ->
-                let tableKeys = Set.union (keysOf baseDb) (keysOf batchDb)
-
-                let merged =
-                    tableKeys
-                    |> Set.fold
-                        (fun acc tableName ->
-                            match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
-                            | Some baseTable, Some batchTable, _ when obj.ReferenceEquals(baseTable, batchTable) -> acc
-                            | Some baseTable, None, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.remove tableName acc
-                            | None, Some batchTable, None -> Map.add tableName batchTable acc
-                            | Some baseTable, Some batchTable, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.add tableName batchTable acc
-                            | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
-                                Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
-                            | _ -> raise (LockWaitTimeout dbName))
-                        liveDb
-
-                validateMergedForeignKeys dbName merged
-                slot.Value <- merged
+        slot.Value <- mergeDatabase dbName baseDb batchDb liveDb
 
         prepare ()
     finally
@@ -7964,103 +8052,98 @@ let private commitCatalogIntoWith
     let batchCatalog = snapshot.Catalog
     let validateWholeSnapshot = validateWholeSnapshot || catalogHasQualifiedForeignKeys batchCatalog
 
-    match store.PendingEvents, validateWholeSnapshot with
-    | Some _, false ->
-        mergeCatalogIntoWithTimeoutCore timeout store baseCatalog snapshot.Catalog
-        prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
-    | _ ->
-        let changedKeys =
-            Set.union (keysOf baseCatalog) (keysOf batchCatalog)
-            |> Set.filter (fun dbName ->
-                match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-                | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
-                | None, None -> false
-                | _ -> true)
+    let changedKeys =
+        Set.union (keysOf baseCatalog) (keysOf batchCatalog)
+        |> Set.filter (fun dbName ->
+            match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+            | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
+            | None, None -> false
+            | _ -> true)
 
-        if not changedKeys.IsEmpty then
-            let needsCatalogLock =
-                validateWholeSnapshot
-                || changedKeys
-                   |> Seq.exists (fun dbName ->
-                       Map.containsKey dbName baseCatalog <> Map.containsKey dbName batchCatalog)
+    if not changedKeys.IsEmpty then
+        let needsCatalogLock =
+            validateWholeSnapshot
+            || changedKeys
+               |> Seq.exists (fun dbName ->
+                   Map.containsKey dbName baseCatalog <> Map.containsKey dbName batchCatalog)
 
-            let publish () =
-                let existingKeys = if validateWholeSnapshot then keysOf baseCatalog else changedKeys
+        let publish () =
+            let existingKeys = if validateWholeSnapshot then keysOf baseCatalog else changedKeys
 
-                let newKeys =
-                    changedKeys
-                    |> Set.filter (fun dbName ->
-                        Map.containsKey dbName baseCatalog |> not
-                        && Map.containsKey dbName batchCatalog)
+            let newKeys =
+                changedKeys
+                |> Set.filter (fun dbName ->
+                    Map.containsKey dbName baseCatalog |> not
+                    && Map.containsKey dbName batchCatalog)
 
-                let lockedKeys = Set.union existingKeys newKeys
+            let lockedKeys = Set.union existingKeys newKeys
 
-                let databases =
-                    lockedKeys
-                    |> Seq.map (fun dbName ->
+            let databases =
+                lockedKeys
+                |> Seq.map (fun dbName ->
+                    match store.Databases.TryGetValue dbName with
+                    | true, slot -> dbName, slot
+                    | false, _ when Set.contains dbName newKeys -> dbName, ref Map.empty
+                    | false, _ -> raise (LockWaitTimeout dbName))
+                |> Seq.toList
+
+            let rec withSlots remaining publish =
+                match remaining with
+                | [] -> publish ()
+                | (dbName, slot) :: tail ->
+                    if not (Monitor.TryEnter(slot, timeout)) then
+                        raise (LockWaitTimeout dbName)
+
+                    try
+                        withSlots tail publish
+                    finally
+                        Monitor.Exit slot
+
+            withSlots databases (fun () ->
+                for dbName, slot in databases do
+                    if not (Set.contains dbName newKeys) then
                         match store.Databases.TryGetValue dbName with
-                        | true, slot -> dbName, slot
-                        | false, _ when Set.contains dbName newKeys -> dbName, ref Map.empty
-                        | false, _ -> raise (LockWaitTimeout dbName))
+                        | true, current when obj.ReferenceEquals(current, slot) -> ()
+                        | _ -> raise (LockWaitTimeout dbName)
+
+                if validateWholeSnapshot then
+                    for dbName, slot in databases do
+                        match Map.tryFind dbName baseCatalog with
+                        | Some baseDb when not (obj.ReferenceEquals(slot.Value, baseDb)) -> raise (LockWaitTimeout dbName)
+                        | _ -> ()
+
+                    if store.ForeignKeyChecks then
+                        validateCatalogForeignKeys baseCatalog batchCatalog
+
+                let publicationPlan =
+                    changedKeys
+                    |> Seq.map (fun dbName ->
+                        let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
+
+                        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+                        | Some baseDb, None when obj.ReferenceEquals(slot.Value, baseDb) -> dbName, slot, None
+                        | None, Some batchDb when not (store.Databases.ContainsKey dbName) -> dbName, slot, Some batchDb
+                        | Some _, Some batchDb when validateWholeSnapshot -> dbName, slot, Some batchDb
+                        | Some baseDb, Some batchDb -> dbName, slot, Some(mergeDatabase dbName baseDb batchDb slot.Value)
+                        | _ -> raise (LockWaitTimeout dbName))
                     |> Seq.toList
 
-                let rec withSlots remaining publish =
-                    match remaining with
-                    | [] -> publish ()
-                    | (dbName, slot) :: tail ->
-                        if not (Monitor.TryEnter(slot, timeout)) then
-                            raise (LockWaitTimeout dbName)
+                for dbName, slot, database in publicationPlan do
+                    match database with
+                    | Some database when Set.contains dbName newKeys ->
+                        slot.Value <- database
+                        store.Databases.TryAdd(dbName, slot) |> ignore
+                    | Some database -> slot.Value <- database
+                    | None -> store.Databases.TryRemove dbName |> ignore
 
-                        try
-                            withSlots tail publish
-                        finally
-                            Monitor.Exit slot
+                prepareCommit store snapshot)
 
-                withSlots databases (fun () ->
-                    for dbName, slot in databases do
-                        if not (Set.contains dbName newKeys) then
-                            match store.Databases.TryGetValue dbName with
-                            | true, current when obj.ReferenceEquals(current, slot) -> ()
-                            | _ -> raise (LockWaitTimeout dbName)
+        let acknowledge =
+            if needsCatalogLock then lock store.Lock publish else publish ()
 
-                    if validateWholeSnapshot then
-                        for dbName, slot in databases do
-                            match Map.tryFind dbName baseCatalog with
-                            | Some baseDb when not (obj.ReferenceEquals(slot.Value, baseDb)) -> raise (LockWaitTimeout dbName)
-                            | _ -> ()
-
-                        if store.ForeignKeyChecks then
-                            validateCatalogForeignKeys baseCatalog batchCatalog
-
-                    for dbName in changedKeys do
-                        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-                        | Some baseDb, None ->
-                            match store.Databases.TryGetValue dbName with
-                            | true, slot when obj.ReferenceEquals(slot.Value, baseDb) ->
-                                store.Databases.TryRemove dbName |> ignore
-                            | _ -> raise (LockWaitTimeout dbName)
-                        | None, Some batchDb ->
-                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
-                            slot.Value <- batchDb
-
-                            if not (store.Databases.TryAdd(dbName, slot)) then
-                                raise (LockWaitTimeout dbName)
-                        | Some _, Some batchDb when validateWholeSnapshot ->
-                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
-                            slot.Value <- batchDb
-                        | Some baseDb, Some batchDb ->
-                            let _, slot = databases |> List.find (fun (name, _) -> name = dbName)
-                            mergeDatabaseSlot timeout dbName slot baseDb batchDb
-                        | None, None -> ()
-
-                    prepareCommit store snapshot)
-
-            let acknowledge =
-                if needsCatalogLock then lock store.Lock publish else publish ()
-
-            acknowledge ()
-        else
-            prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
+        acknowledge ()
+    else
+        prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
 
 let commitCatalogIntoWithTimeout (timeout: TimeSpan) (publishFlat: bool) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
     withReferentialSchemaLock ExclusiveAccess store (fun () ->
@@ -8098,15 +8181,16 @@ let prepareXa
           ValidateWholeSnapshot = validateWholeSnapshot
           TransactionLocks = snapshot.TransactionLocks }
 
-    if store.PreparedXas.TryAdd(xid, prepared) then
-        try
-            persistXaControl store (XaPrepared(xid, validateWholeSnapshot, prepared.Events))
-            true
-        with error ->
-            store.PreparedXas.TryRemove xid |> ignore
-            raise error
-    else
-        false
+    lock store.PreparedXas (fun () ->
+        if store.PreparedXas.TryAdd(xid, prepared) then
+            try
+                persistXaControl store (XaPrepared(xid, validateWholeSnapshot, prepared.Events))
+                true
+            with error ->
+                store.PreparedXas.TryRemove xid |> ignore
+                raise error
+        else
+            false)
 
 let preparedXas (store: Store) : (Xa.Xid * PreparedXa) list =
     lock store.PreparedXas (fun () ->

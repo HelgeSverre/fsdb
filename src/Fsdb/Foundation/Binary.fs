@@ -100,6 +100,7 @@ type Reader(data: byte[]) =
     let mutable pos = 0
 
     member _.Remaining = data.Length - pos
+    member _.Position = pos
 
     member _.ReadByte() =
         let b = data.[pos]
@@ -192,6 +193,8 @@ type StreamReader(stream: Stream) =
 
             if len = 0 then
                 eof <- true
+
+    member _.Position = stream.Position - int64 (len - pos)
 
     member _.ReadByte() : byte =
         ensure ()
@@ -293,10 +296,16 @@ let private crcTable =
 
            c |]
 
+type Crc32() =
+    let mutable state = 0xFFFFFFFFu
+
+    member _.Append(data: byte[]) =
+        for value in data do
+            state <- crcTable.[int (state ^^^ uint32 value) &&& 0xFF] ^^^ (state >>> 8)
+
+    member _.Value = ~~~state
+
 let crc32 (data: byte[]) : uint32 =
-    let mutable c = 0xFFFFFFFFu
-
-    for b in data do
-        c <- crcTable.[int (c ^^^ uint32 b) &&& 0xFF] ^^^ (c >>> 8)
-
-    ~~~c
+    let checksum = Crc32()
+    checksum.Append data
+    checksum.Value

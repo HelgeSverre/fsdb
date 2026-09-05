@@ -114,9 +114,15 @@ let supportsLoadData name =
     tryFind name |> Option.exists _.SupportsLoadData
 
 let private replaceSupplementaryCharacters (text: string) =
-    text.EnumerateRunes()
-    |> Seq.map (fun rune -> if rune.Value <= 0xFFFF then rune.ToString() else "?")
-    |> String.concat ""
+    let builder = StringBuilder(text.Length)
+
+    for rune in text.EnumerateRunes() do
+        if rune.Value <= 0xFFFF then
+            builder.Append(char rune.Value) |> ignore
+        else
+            builder.Append '?' |> ignore
+
+    builder.ToString()
 
 let private textAcceptedBy (codec: Codec) (text: string) =
     if codec.AllowsSupplementaryCharacters then text else replaceSupplementaryCharacters text
@@ -142,6 +148,8 @@ let transcodeText (name: string) (text: string) =
 
         if fullyRepresentable then
             text
+        elif not codec.AllowsSupplementaryCharacters && hasForbiddenSupplementary then
+            replaceSupplementaryCharacters text
         else
             text.EnumerateRunes()
             |> Seq.map (fun rune ->

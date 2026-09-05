@@ -86,6 +86,10 @@ let tests =
                     | Err(1659, _) -> ()
                     | other -> failtestf "expected string HASH keys to be rejected, got %A" other
 
+                    match runDefault store "CREATE TABLE hidden_partition (id INT) PARTITION BY HASH((SELECT 1)) PARTITIONS 2" with
+                    | Err(1564, _) -> ()
+                    | other -> failtestf "expected HASH subqueries to be rejected, got %A" other
+
                 testCase "HASH partition truncation removes only selected rows"
                 <| fun _ ->
                     let store = newStore ()
@@ -992,7 +996,18 @@ let tests =
                     Expect.equal
                         (runDefault store "CHECKSUM TABLE t QUICK")
                         (ResultSet([ "Table"; "Checksum" ], [ [ Some "fsdb.t"; None ] ]))
-                        "InnoDB-style QUICK result" ]
+                        "InnoDB-style QUICK result"
+
+                    use cancellation = new System.Threading.CancellationTokenSource()
+                    cancellation.Cancel()
+                    Fsdb.Limits.queryCancellation.Value <- cancellation.Token
+
+                    try
+                        Expect.throwsT<System.OperationCanceledException>
+                            (fun () -> runDefault store "CHECKSUM TABLE t" |> ignore)
+                            "checksum serialization observes query cancellation"
+                    finally
+                        Fsdb.Limits.queryCancellation.Value <- System.Threading.CancellationToken.None ]
 
           testList
               "EXPLAIN"
@@ -1432,6 +1447,13 @@ let tests =
                         match runDefault store sql with
                         | Err(actual, _) -> Expect.equal actual code sql
                         | other -> failtestf "expected error %d for %s, got %A" code sql other
+
+                    runDefault store "CREATE TABLE alter_default_guard (id INT)" |> ignore
+                    runDefault store "INSERT INTO alter_default_guard VALUES (1)" |> ignore
+
+                    match runDefault store "ALTER TABLE alter_default_guard ADD COLUMN leaked INT DEFAULT ((SELECT SLEEP(0)))" with
+                    | Err(3769, _) -> ()
+                    | other -> failtestf "expected ALTER to reject the unsafe default before backfill, got %A" other
 
                 testCase "DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) parses, and an omitted column stores 6 fractional digits"
                 <| fun _ ->
@@ -2722,6 +2744,25 @@ let tests =
                     | Err(1210, "Incorrect arguments to sleep.") -> ()
                     | other -> failtestf "expected invalid SLEEP arguments to return 1210, got %A" other
 
+                    match run store registry (sprintf "SELECT SLEEP(%g)" (Fsdb.Limits.maxSleepSeconds + 1.0)) with
+                    | Err(1235, _) -> ()
+                    | other -> failtestf "expected an over-limit SLEEP to fail before waiting, got %A" other
+
+                    match run store registry (sprintf "SELECT BENCHMARK(%d, 1)" (Fsdb.Limits.maxBenchmarkIterations + 1L)) with
+                    | Err(1235, _) -> ()
+                    | other -> failtestf "expected an over-limit BENCHMARK to fail before looping, got %A" other
+
+                    let benchmarkTimer = System.Diagnostics.Stopwatch.StartNew()
+
+                    match run store registry "SELECT BENCHMARK(1, SLEEP(5))" with
+                    | Err(1235, _) -> ()
+                    | other -> failtestf "expected BENCHMARK to enforce its elapsed-work limit, got %A" other
+
+                    Expect.isLessThan
+                        benchmarkTimer.Elapsed
+                        (Fsdb.Limits.maxBenchmarkDuration + System.TimeSpan.FromSeconds 1.0)
+                        "a nested SLEEP stops near BENCHMARK's earlier deadline"
+
                 testCase "delete-side foreign-key actions run before the replacement insert"
                 <| fun _ ->
                     let store = newStore ()
@@ -3473,7 +3514,41 @@ let tests =
 
                     match runDefault store "SELECT ROUND(AVG(n), 1) AS a FROM t" with
                     | ResultSet([ "a" ], [ [ Some "15.0" ] ]) -> ()
-                    | other -> failtestf "expected a scalar function wrapping an aggregate to work, got %A" other ]
+                    | other -> failtestf "expected a scalar function wrapping an aggregate to work, got %A" other
+
+                testCase "optimized aggregates observe cancellation during their own folds"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE aggregate_cancel (id INT)" |> ignore
+
+                    [ 1..300 ]
+                    |> List.map (sprintf "(%d)")
+                    |> String.concat ","
+                    |> sprintf "INSERT INTO aggregate_cancel VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    let runCancelled cancelAt statement =
+                        use cancellation = new System.Threading.CancellationTokenSource()
+                        let arm =
+                            function
+                            | [ VInt value ] as values ->
+                                if value = cancelAt then cancellation.Cancel()
+                                List.head values
+                            | values -> List.tryHead values |> Option.defaultValue VNull
+
+                        let registry = builtins |> registerScalar "ARM" arm
+                        Fsdb.Limits.queryCancellation.Value <- cancellation.Token
+
+                        try
+                            Expect.throwsT<System.OperationCanceledException>
+                                (fun () -> run store registry statement |> ignore)
+                                (statement + " observes cancellation")
+                        finally
+                            Fsdb.Limits.queryCancellation.Value <- System.Threading.CancellationToken.None
+
+                    runCancelled 300L "SELECT COUNT(*) FROM aggregate_cancel WHERE ARM(id) = id"
+                    runCancelled 1L "SELECT SUM(ARM(id)), AVG(ARM(id)) FROM aggregate_cancel" ]
 
           testList
               "table-qualified columns are checked against the FROM's alias-or-table, not silently accepted from anywhere"
@@ -4345,6 +4420,16 @@ let tests =
                         match runDefault store sql with
                         | Err(3772, "Default value expression of column 'g' cannot refer user or system variables.") -> ()
                         | other -> failtestf "expected generated-column variable rejection, got %A" other)
+
+                    match runDefault store "CREATE TABLE generated_subquery (n INT, g INT AS ((SELECT 1)))" with
+                    | Err(3102, _) -> ()
+                    | other -> failtestf "expected CREATE generated subquery rejection, got %A" other
+
+                    runDefault store "CREATE TABLE generated_alter (n INT)" |> ignore
+
+                    match runDefault store "ALTER TABLE generated_alter ADD COLUMN g INT AS ((SELECT 1))" with
+                    | Err(3102, _) -> ()
+                    | other -> failtestf "expected ALTER generated subquery rejection, got %A" other
 
                 testCase "a generated column recomputes after UPDATE of a column it depends on"
                 <| fun _ ->
@@ -7926,6 +8011,24 @@ let tests =
                         Expect.equal (uint64 second) (uint64 first + 1UL) "UUID_SHORT is monotonic"
                     | other -> failtestf "unexpected result: %A" other
 
+                testCase "allocation-sensitive casts and decompression reject hostile declared sizes"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT UNCOMPRESS(X'FFFFFFFF789C')" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected an oversized compressed frame to return NULL, got %A" other
+
+                    match runDefault (newStore ()) "SELECT CAST(1 AS BIT(1000000000))" with
+                    | Err(1439, _) -> ()
+                    | other -> failtestf "expected an oversized BIT cast to fail with 1439, got %A" other
+
+                    match runDefault (newStore ()) "SELECT CAST('' AS BINARY(1000000000))" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected an oversized BINARY cast to return NULL, got %A" other
+
+                    match runDefault (newStore ()) "SELECT c FROM JSON_TABLE('[\"\"]', '$[*]' COLUMNS(c BINARY(500000000) PATH '$')) jt" with
+                    | Err(1074, _) -> ()
+                    | other -> failtestf "expected an oversized JSON_TABLE BINARY column to fail with 1074, got %A" other
+
                 testCase "standalone TABLE and VALUES ROW queries use the ordinary query pipeline"
                 <| fun _ ->
                     let store = newStore ()
@@ -8778,6 +8881,17 @@ let tests =
                         3583
                         "Window 'w2' cannot inherit 'w' since both contain an ORDER BY clause."
 
+                testCase "deep named-window inheritance resolves without recursion"
+                <| fun _ ->
+                    let definitions =
+                        [ "w1 AS ()"
+                          yield! [ 2..2000 ] |> List.map (fun index -> sprintf "w%d AS (w%d)" index (index - 1)) ]
+                        |> String.concat ","
+
+                    match runDefault (windowStore ()) (sprintf "SELECT SUM(v) OVER w2000 FROM t WINDOW %s" definitions) with
+                    | ResultSet(_, rows) -> Expect.equal rows.Length 6 "every source row remains"
+                    | other -> failtestf "expected a deep valid window chain to execute, got %A" other
+
                 testCase "frame bound rules match the oracle's 3584/3585/3586/3587"
                 <| fun _ ->
                     expectError
@@ -8856,6 +8970,18 @@ let tests =
                     match runDefault store "CREATE TABLE bad_primary (shape POINT PRIMARY KEY)" with
                     | Err(3728, _) -> ()
                     | other -> failtestf "expected spatial primary key refusal, got %A" other
+
+                    runDefault store "CREATE TABLE inherited_primary (shape INT PRIMARY KEY)" |> ignore
+
+                    match runDefault store "ALTER TABLE inherited_primary MODIFY shape GEOMETRY" with
+                    | Err(3728, _) -> ()
+                    | other -> failtestf "expected inherited spatial primary key refusal, got %A" other
+
+                    runDefault store "CREATE TABLE inherited_unique (shape INT UNIQUE)" |> ignore
+
+                    match runDefault store "ALTER TABLE inherited_unique CHANGE shape renamed GEOMETRY" with
+                    | Err(3728, _) -> ()
+                    | other -> failtestf "expected inherited spatial unique key refusal, got %A" other
 
                     match runDefault store "CREATE TABLE bad_nullable (shape POINT, SPATIAL INDEX sx(shape))" with
                     | Err(1252, "All parts of a SPATIAL index must be NOT NULL") -> ()
@@ -9008,6 +9134,44 @@ let tests =
 
                 testCase "a CTE shadows a real table of the same name"
                 <| fun _ -> expectRows "WITH t AS (SELECT 99 AS id) SELECT * FROM t" [ [ Some "99" ] ]
+
+                testCase "indexed fast paths preserve CTE shadowing"
+                <| fun _ ->
+                    let store = cteStore ()
+                    runDefault store "CREATE TABLE secret (id INT, password VARCHAR(20), KEY ix_id(id))" |> ignore
+                    runDefault store "INSERT INTO secret VALUES (1, 'physical-secret')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "WITH secret AS (SELECT 0 AS id, 'cte' AS password), ids AS (SELECT 1 AS id) SELECT (SELECT password FROM secret WHERE secret.id = ids.id) FROM ids"
+                    with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected the correlated lookup to read the CTE, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "WITH secret AS (SELECT 0 AS id, 'cte' AS password) SELECT secret.id FROM secret JOIN t ON t.id = 1 WHERE secret.id >= 0"
+                    with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the joined range lookup to read the CTE, got %A" other
+
+                testCase "DML CTE bindings do not leak into trigger bodies"
+                <| fun _ ->
+                    let store = cteStore ()
+                    runDefault store "CREATE TABLE policy_log (n INT)" |> ignore
+                    runDefault store "CREATE TABLE audit (n INT)" |> ignore
+                    runDefault store "INSERT INTO policy_log VALUES (7)" |> ignore
+                    runDefault store "CREATE TRIGGER audit_t AFTER UPDATE ON t FOR EACH ROW INSERT INTO audit SELECT n FROM policy_log" |> ignore
+
+                    match runDefault store "WITH policy_log AS (SELECT 99 AS n) UPDATE t SET v = v + 1 WHERE id = 1" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one update, got %A" other
+
+                    match runDefault store "SELECT n FROM audit" with
+                    | ResultSet(_, [ [ Some "7" ] ]) -> ()
+                    | other -> failtestf "expected the trigger to resolve the real policy table, got %A" other
 
                 testCase "a CTE carrying a window function filters on its rank"
                 <| fun _ ->

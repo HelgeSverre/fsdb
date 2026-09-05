@@ -25,6 +25,7 @@ module Algorithm =
 let private compressedHeaderLength = 7
 // Keeps raw fallbacks below the compressed frame's 3-byte length ceiling.
 let private maxInputChunk = 0xff0000
+let private maxReadChunk = 64 * 1024
 let private minimumCompressionLength = 50
 
 let private readExactlyInto
@@ -49,8 +50,21 @@ let private readExactlyInto
 
 let private readExact (stream: Stream) count (cancellationToken: CancellationToken) =
     task {
+        let chunks = ResizeArray<byte[]>()
+        let mutable remaining = count
+
+        while remaining > 0 do
+            let chunk = Array.zeroCreate<byte> (min maxReadChunk remaining)
+            do! readExactlyInto stream chunk 0 chunk.Length cancellationToken
+            chunks.Add chunk
+            remaining <- remaining - chunk.Length
+
         let bytes = Array.zeroCreate<byte> count
-        do! readExactlyInto stream bytes 0 count cancellationToken
+        let mutable offset = 0
+
+        for chunk in chunks do
+            Array.Copy(chunk, 0, bytes, offset, chunk.Length)
+            offset <- offset + chunk.Length
 
         return bytes
     }
