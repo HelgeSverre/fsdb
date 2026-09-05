@@ -65,6 +65,7 @@ module SyntaxFuzz =
            "planned_join",
            "SELECT t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1 ORDER BY t.id"
            "low_cardinality_join", "SELECT COUNT(*) FROM syntax_target AS l JOIN syntax_target AS r ON r.n = l.n"
+           "joined_source_filter", "SELECT COUNT(*) FROM syntax_target AS l JOIN syntax_target AS r ON r.n = l.n WHERE r.id <= 2"
            "straight_join",
            "SELECT STRAIGHT_JOIN t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1"
            "correlated_index", "SELECT t.id, (SELECT COUNT(*) FROM syntax_source AS s WHERE s.n = t.n) FROM syntax_target AS t"

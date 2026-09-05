@@ -356,6 +356,11 @@ type ServerBenchmarks() =
         this.Query "SELECT COUNT(*) FROM users u JOIN users v ON v.scan_age = u.scan_age WHERE u.id <= 100"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.LowCardinalityJoinedFilter() =
+        this.Query "SELECT COUNT(*) FROM users u JOIN users v ON v.scan_age = u.scan_age WHERE v.id <= 100"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.UncorrelatedInSubquery() =
         this.Query "SELECT u.id, u.name FROM users u WHERE u.id IN (SELECT o.user_id FROM orders o WHERE o.id <= 100)"
