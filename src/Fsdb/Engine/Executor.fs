@@ -16075,19 +16075,19 @@ let rec executeAs
         indices
         |> Result.bind (fun indices -> rows |> traverse (evaluateRow indices))
 
-    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
-        let finish candidate =
-            computeGeneratedRow runStore registry db table columns candidate
-            |> Result.bind (validateViewCandidate runStore db table columns)
+    let finishInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
+        computeGeneratedRow runStore registry db table columns candidate
+        |> Result.bind (validateViewCandidate runStore db table columns)
 
+    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
         evaluateFunctionalDefaults runStore db table columns omitted candidate
         |> Result.bind (fun candidate ->
             match beforeInsertTriggers runStore db table with
-            | [] -> finish candidate
+            | [] -> finishInsertRow runStore db table columns candidate
             | triggers ->
                 match fireTriggers runStore db table Before TriggerInsert triggers [ None, Some candidate ] with
                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
-                | _ -> finish candidate)
+                | _ -> finishInsertRow runStore db table columns candidate)
 
     /// Runs an insert branch's storage write and fires AFTER INSERT triggers with
     /// MySQL's statement atomicity: when triggers exist, the insert and
@@ -16202,6 +16202,7 @@ let rec executeAs
         (rowsValues: Value list list)
         (deferred: Set<int>)
         (prepareFor: Store -> ColumnDef list -> int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+        (finishFor: Store -> ColumnDef list -> int -> Value[] -> Result<Value[], StorageError>)
         =
         let beforeInsert = beforeInsertTriggers store db table
         let afterInsert = afterInsertTriggers store db table
@@ -16222,10 +16223,12 @@ let rec executeAs
                     cols
                     rowsValues
                     deferred
-                    (prepareFor targetStore tableColumns))
+                    (prepareFor targetStore tableColumns)
+                    (finishFor targetStore tableColumns))
         | true, Ok(tableColumns, _) ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             let prepare = prepareFor snapshot tableColumns
+            let finish = finishFor snapshot tableColumns
 
             let fire timing event (triggers: StoredTrigger list) rows =
                 if List.isEmpty triggers then
@@ -16257,6 +16260,7 @@ let rec executeAs
                             values
                             deferred
                             (prepare rowNumber)
+                            (finish rowNumber)
                         |> Result.mapError storageErr
                         |> Result.bind (fun prepared ->
                             replaceConflictRows snapshot db table prepared.Values
@@ -16304,6 +16308,8 @@ let rec executeAs
             Set.empty
             (fun targetStore tableColumns _ omitted candidate ->
                 prepareInsertRow targetStore db table tableColumns omitted candidate)
+            (fun targetStore tableColumns _ candidate ->
+                finishInsertRow targetStore db table tableColumns candidate)
 
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
         let retarget (access: ViewAccess) =
@@ -17663,8 +17669,11 @@ let rec executeAs
                                 candidate)
 
                     let cols = if load.Fields.IsEmpty then None else Some inputColumns
+                    let finishFor targetStore currentColumns _ candidate =
+                        finishInsertRow targetStore db table currentColumns candidate
+
                     if load.Replace then
-                        replaceEvaluatedWith db table cols rowsValues assignedIndices prepareFor
+                        replaceEvaluatedWith db table cols rowsValues assignedIndices prepareFor finishFor
                     else
                         finishInsert db table (fun targetStore ->
                             match scan targetStore db table with
@@ -17673,9 +17682,9 @@ let rec executeAs
                                 let prepare = prepareFor targetStore currentColumns
 
                                 if load.Ignore then
-                                    insertRowsIgnorePreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare
+                                    insertRowsIgnorePreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare (finishFor targetStore currentColumns)
                                 else
-                                    insertRowsPreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare)
+                                    insertRowsPreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare (finishFor targetStore currentColumns))
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
         let viewDb, viewName = splitQualified dbName table
@@ -17715,11 +17724,12 @@ let rec executeAs
                         | Error error -> Error error
                         | Ok(tableColumns, _) ->
                             let prepare = prepareInsertRow s db table tableColumns
+                            let finish = finishInsertRow s db table tableColumns
 
                             if ignoreDuplicates then
-                                insertRowsIgnorePrepared s db table cols rowsValues prepare
+                                insertRowsIgnorePrepared s db table cols rowsValues prepare finish
                             else
-                                insertRowsPrepared s db table cols rowsValues prepare)
+                                insertRowsPrepared s db table cols rowsValues prepare finish)
                 else
                     upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
 
@@ -17784,11 +17794,12 @@ let rec executeAs
                             | Error error -> Error error
                             | Ok(currentColumns, _) ->
                                 let prepare = prepareInsertRow s db table currentColumns
+                                let finish = finishInsertRow s db table currentColumns
 
                                 if ignoreDuplicates then
-                                    insertRowsIgnorePrepared s db table cols rowsValues prepare
+                                    insertRowsIgnorePrepared s db table cols rowsValues prepare finish
                                 else
-                                    insertRowsPrepared s db table cols rowsValues prepare)
+                                    insertRowsPrepared s db table cols rowsValues prepare finish)
                     else
                         upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate
 
@@ -18068,7 +18079,14 @@ let rec executeAs
                                 match fireTriggers targetStore db table Before TriggerUpdate beforeTriggers [ Some row, Some candidate ] with
                                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
                                 | _ ->
-                                    match validateViewCandidate targetStore db table columns candidate with
+                                    let validated =
+                                        computeGeneratedRow targetStore registry db table columns candidate
+                                        |> Result.bind (validateViewCandidate targetStore db table columns)
+
+                                    match validated with
+                                    | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                        Diagnostics.warning 3819 message
+                                        Ok row
                                     | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
                                         Diagnostics.warning 1369 message
                                         Ok row
@@ -18290,7 +18308,14 @@ let rec executeAs
                                                         [ Some row, Some candidate ]
                                                 )
                                                 |> Result.bind (fun () ->
-                                                    match validateViewCandidate snapshot tdb tname physicalColumns.[i] candidate with
+                                                    let validated =
+                                                        computeGeneratedRow snapshot registry tdb tname physicalColumns.[i] candidate
+                                                        |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i])
+
+                                                    match validated with
+                                                    | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                                        Diagnostics.warning 3819 message
+                                                        Ok row
                                                     | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
                                                         Diagnostics.warning 1369 message
                                                         Ok row
