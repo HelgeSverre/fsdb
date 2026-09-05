@@ -281,6 +281,17 @@ let tests =
 
               calls <- 0
 
+              let pointIntersection =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT id FROM docs WHERE MATCH(body) AGAINST('needle') AND TOUCH(id) = id AND id = 37"
+
+              Expect.equal (ids pointIntersection) [ "37" ] "the point lookup intersects the postings"
+              Expect.equal calls 2 "only the metadata probe and shared candidate enter the residual pipeline"
+
+              calls <- 0
+
               let intersected =
                   TestSupport.Sql.execute
                       store

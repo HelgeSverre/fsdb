@@ -3979,7 +3979,7 @@ let private equalityIndex unique (group: IndexKeyGroup) =
       Transforms = group.Transforms
       Unique = unique }
 
-let private tryEqualityIndexForTransform
+let internal tryEqualityIndexForTransform
     (table: Table)
     (columnName: string)
     (transform: IndexTransform option)
@@ -4179,6 +4179,37 @@ type SpatialLookup =
       SpatialColumns: ColumnDef list
       SpatialRows: (RowId * Value[]) list }
 
+let internal trySpatialLookupInTable
+    (table: Table)
+    (columnName: string)
+    (relation: SpatialIndex.Relation)
+    (geometry: Geometry)
+    : SpatialLookup option =
+    resolveColumn table.Columns columnName
+    |> Result.toOption
+    |> Option.bind (fun columnIndex ->
+        match table.Columns.[columnIndex].Srid, geometryBounds geometry with
+        | Some srid, Some bounds when int64 srid = int64 geometry.Srid ->
+            spatialKeyGroups table
+            |> List.filter _.Visible
+            |> List.tryFind (fun group -> group.ColumnIndex = columnIndex)
+            |> Option.bind (fun group ->
+                table.SpatialIndexes
+                |> Map.tryFind group.Name
+                |> Option.map (fun index ->
+                    let rows =
+                        SpatialIndex.search relation bounds index
+                        |> Seq.choose (fun rowId ->
+                            table.RowsArray.TryFind rowId
+                            |> Option.map (fun row -> rowId, row))
+                        |> List.ofSeq
+
+                    { SpatialIndexName = group.Name
+                      SpatialColumnIndex = columnIndex
+                      SpatialColumns = table.Columns
+                      SpatialRows = rows }))
+        | _ -> None)
+
 let trySpatialLookup
     (store: Store)
     (dbName: string)
@@ -4188,31 +4219,7 @@ let trySpatialLookup
     (geometry: Geometry)
     : SpatialLookup option =
     tableAt store dbName tableName
-    |> Option.bind (fun table ->
-        resolveColumn table.Columns columnName
-        |> Result.toOption
-        |> Option.bind (fun columnIndex ->
-            match table.Columns.[columnIndex].Srid, geometryBounds geometry with
-            | Some srid, Some bounds when int64 srid = int64 geometry.Srid ->
-                spatialKeyGroups table
-                |> List.filter _.Visible
-                |> List.tryFind (fun group -> group.ColumnIndex = columnIndex)
-                |> Option.bind (fun group ->
-                    table.SpatialIndexes
-                    |> Map.tryFind group.Name
-                    |> Option.map (fun index ->
-                        let rows =
-                            SpatialIndex.search relation bounds index
-                            |> Seq.choose (fun rowId ->
-                                table.RowsArray.TryFind rowId
-                                |> Option.map (fun row -> rowId, row))
-                            |> List.ofSeq
-
-                        { SpatialIndexName = group.Name
-                          SpatialColumnIndex = columnIndex
-                          SpatialColumns = table.Columns
-                          SpatialRows = rows }))
-            | _ -> None))
+    |> Option.bind (fun table -> trySpatialLookupInTable table columnName relation geometry)
 
 /// Uses a fully-bound composite key. Residual predicate evaluation remains
 /// responsible for contradictory or repeated equalities.
@@ -4470,7 +4477,7 @@ type RangeLookup =
       TableRowCount: int
       RangeRows: Lazy<(RowId * Value[]) list> }
 
-let private trySecondaryRangeLookupInTable
+let internal trySecondaryRangeLookupInTable
     (store: Store)
     (table: Table)
     (columnName: string)

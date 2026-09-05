@@ -483,6 +483,11 @@ type ServerBenchmarks() =
         this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('database') LIMIT 20"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Feature", "Scale", "FullText", "Planner")>]
+    member this.FullTextPointIntersection() =
+        this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('application') AND id = 5000"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Feature", "Scale", "FullText")>]
     member this.FullTextBooleanSearch() =
         this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('+database +concurrency' IN BOOLEAN MODE) LIMIT 20"

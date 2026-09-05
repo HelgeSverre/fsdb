@@ -191,12 +191,21 @@ let private idf (index: Index<'id>) (df: int) : float =
     if df = 0 then 0.0
     else max (log10 (float index.Documents.Count / float df)) idfFloor
 
-let private termScores (index: Index<'id>) (term: string) : Map<'id, float> =
+let private termScoresWithin (candidateIds: Set<'id> option) (index: Index<'id>) (term: string) : Map<'id, float> =
     match Map.tryFind term index.Postings with
     | None -> Map.empty
     | Some rows ->
         let weight = idf index rows.Count
-        rows |> Map.map (fun _ frequency -> float frequency * weight * weight)
+        let scale = weight * weight
+
+        match candidateIds with
+        | None -> rows |> Map.map (fun _ frequency -> float frequency * scale)
+        | Some candidates ->
+            candidates
+            |> Seq.choose (fun id -> Map.tryFind id rows |> Option.map (fun frequency -> id, float frequency * scale))
+            |> Map.ofSeq
+
+let private termScores index term = termScoresWithin None index term
 
 // ---------------------------------------------------------------------------
 // Natural language mode.
@@ -220,26 +229,32 @@ let private naturalTerms (index: Index<'id>) (query: string) : string[] =
 /// Accumulates into one result map rather than retaining one map per term,
 /// so peak memory stays O(rows), not
 /// O(terms × rows) for a query with many distinct terms.
-let private sumTermScores (index: Index<'id>) (terms: string[]) : Map<'id, float> =
+let private sumTermScoresWithin (candidateIds: Set<'id> option) (index: Index<'id>) (terms: string[]) : Map<'id, float> =
     match terms with
     | [||] -> Map.empty
-    | [| term |] -> termScores index term
+    | [| term |] -> termScoresWithin candidateIds index term
     | _ ->
         terms
         |> Array.skip 1
         |> Array.fold
             (fun scores term ->
-                termScores index term
+                termScoresWithin candidateIds index term
                 |> Map.fold
                     (fun scores id score ->
                         Map.change id (fun current -> Some(score + Option.defaultValue 0.0 current)) scores)
                     scores)
-            (termScores index terms.[0])
+            (termScoresWithin candidateIds index terms.[0])
+
+let private sumTermScores index terms = sumTermScoresWithin None index terms
 
 let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
     sumTermScores index (naturalTerms index query)
 
-let internal tryNaturalSingleTermScoresDictionary
+let internal naturalScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) : Map<'id, float> =
+    sumTermScoresWithin (Some candidateIds) index (naturalTerms index query)
+
+let internal tryNaturalSingleTermScoresDictionaryWithin
+    (candidateIds: Set<'id> option)
     (index: Index<'id>)
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
@@ -250,13 +265,24 @@ let internal tryNaturalSingleTermScoresDictionary
         | Some rows ->
             let weight = idf index rows.Count
             let scale = weight * weight
-            let scores = Collections.Generic.Dictionary<'id, float>(rows.Count)
+            let capacity = candidateIds |> Option.map _.Count |> Option.defaultValue rows.Count |> min rows.Count
+            let scores = Collections.Generic.Dictionary<'id, float>(capacity)
 
-            for KeyValue(id, frequency) in rows do
-                scores.Add(id, float frequency * scale)
+            match candidateIds with
+            | None ->
+                for KeyValue(id, frequency) in rows do
+                    scores.Add(id, float frequency * scale)
+            | Some candidates ->
+                for id in candidates do
+                    match Map.tryFind id rows with
+                    | Some frequency -> scores.Add(id, float frequency * scale)
+                    | None -> ()
 
             Some scores
     | _ -> None
+
+let internal tryNaturalSingleTermScoresDictionary index query =
+    tryNaturalSingleTermScoresDictionaryWithin None index query
 
 let private scoresInCorpusOrder (corpus: Corpus) (scores: Map<int, float>) =
     corpus.Order |> Array.map (fun id -> scores |> Map.tryFind id |> Option.defaultValue 0.0)
@@ -429,9 +455,24 @@ let private phraseCount (doc: Token[]) (words: Token[]) (proximity: int option) 
 /// `TF×IDF²` per doc from raw per-doc frequencies — for terms
 /// with no single index token to count (prefix wildcards, phrases), whose
 /// df falls out of the frequencies themselves.
-let private scoresFromTfs (index: Index<'id>) (tfs: Map<'id, int>) : Map<'id, float> =
-    let weight = idf index tfs.Count
+let private scoresFromTfsWithDocumentFrequency
+    (index: Index<'id>)
+    (documentFrequency: int)
+    (tfs: Map<'id, int>)
+    : Map<'id, float> =
+    let weight = idf index documentFrequency
     tfs |> Map.map (fun _ tf -> float tf * weight * weight)
+
+let private scoresFromTfs (index: Index<'id>) (tfs: Map<'id, int>) =
+    scoresFromTfsWithDocumentFrequency index tfs.Count tfs
+
+let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'value>) =
+    match candidateIds with
+    | None -> scores
+    | Some candidates ->
+        candidates
+        |> Seq.choose (fun id -> Map.tryFind id scores |> Option.map (fun score -> id, score))
+        |> Map.ofSeq
 
 let private phraseCandidates (index: Index<'id>) (words: Token[]) =
     words
@@ -449,7 +490,11 @@ let private phraseCandidates (index: Index<'id>) (words: Token[]) =
         | sets -> sets |> Array.tail |> Array.fold Set.intersect sets.[0]
 
 /// Per-document contribution for one boolean term.
-let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, float> =
+let rec private evalTerm
+    (candidateIds: Set<'id> option)
+    (index: Index<'id>)
+    (term: BoolTerm)
+    : Map<'id, float> =
     match term with
     | BWord(term, false) when not (isSearchable term) ->
         // Stopwords and sub-minimum tokens are never in InnoDB's index, so
@@ -458,13 +503,17 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, float> 
         // still see them: position data counts every token.
         Map.empty
     | BWord(term, false) ->
-        termScores index term.Key
+        termScoresWithin candidateIds index term.Key
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
-        index.PrefixPostings
-        |> Map.tryFind term.Key
-        |> Option.defaultValue Map.empty
-        |> scoresFromTfs index
+        let rows =
+            index.PrefixPostings
+            |> Map.tryFind term.Key
+            |> Option.defaultValue Map.empty
+
+        rows
+        |> restrictScores candidateIds
+        |> scoresFromTfsWithDocumentFrequency index rows.Count
     | BPhrase(words, proximity) ->
         phraseCandidates index words
         |> Seq.choose (fun id ->
@@ -472,15 +521,20 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, float> 
             if count = 0 then None else Some(id, count))
         |> Map.ofSeq
         |> scoresFromTfs index
+        |> restrictScores candidateIds
     | BGroup nodes ->
-        evalNodes index nodes
+        evalNodes candidateIds index nodes
 
 /// Per-document score over a node list — the boolean combination:
 /// a document is absent when a `+` term misses or a `-` term
 /// hits; otherwise matched when anything matched, scoring the sum of the
 /// modifier-adjusted contributions.
-and private evalNodes (index: Index<'id>) (nodes: (BoolOp * BoolTerm) list) : Map<'id, float> =
-    let results = nodes |> List.map (fun (op, term) -> op, evalTerm index term)
+and private evalNodes
+    (candidateIds: Set<'id> option)
+    (index: Index<'id>)
+    (nodes: (BoolOp * BoolTerm) list)
+    : Map<'id, float> =
+    let results = nodes |> List.map (fun (op, term) -> op, evalTerm candidateIds index term)
 
     let candidates =
         results
@@ -525,9 +579,15 @@ and private evalNodes (index: Index<'id>) (nodes: (BoolOp * BoolTerm) list) : Ma
         if anyMatch && not excluded then Some(id, score) else None)
     |> Map.ofSeq
 
-let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
-    evalNodes index (parseBooleanQuery index.Collation query)
+let private booleanScoresWithinOption candidateIds (index: Index<'id>) (query: string) =
+    evalNodes candidateIds index (parseBooleanQuery index.Collation query)
     |> Map.map (fun _ score -> if score = 0.0 then idfFloor * idfFloor else score)
+
+let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
+    booleanScoresWithinOption None index query
+
+let internal booleanScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) =
+    booleanScoresWithinOption (Some candidateIds) index query
 
 let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
     // A matched row whose contributions all cancelled (only `~` terms hit,
@@ -540,7 +600,7 @@ let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
 // the top-ranked docs, NL pass again (blind relevance feedback).
 // ---------------------------------------------------------------------------
 
-let expansionScores (index: Index<'id>) (query: string) : Map<'id, float> =
+let private expansionScoresWithinOption candidateIds (index: Index<'id>) (query: string) =
     let firstPass = naturalScores index query
 
     let seedTerms =
@@ -554,7 +614,13 @@ let expansionScores (index: Index<'id>) (query: string) : Map<'id, float> =
 
     Array.append (naturalTerms index query) seedTerms
     |> Array.distinct
-    |> sumTermScores index
+    |> sumTermScoresWithin candidateIds index
+
+let expansionScores (index: Index<'id>) (query: string) : Map<'id, float> =
+    expansionScoresWithinOption None index query
+
+let internal expansionScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) =
+    expansionScoresWithinOption (Some candidateIds) index query
 
 let expansionScoresOf (corpus: Corpus) (query: string) : float[] =
     expansionScores corpus.Index query |> scoresInCorpusOrder corpus

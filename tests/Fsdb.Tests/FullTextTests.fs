@@ -192,6 +192,42 @@ let tests =
               Expect.equal actual (naturalScores index "database") "dictionary scores match"
               Expect.isNone (tryNaturalSingleTermScoresDictionary index "database security") "multiple terms use combined scoring"
 
+          testCase "candidate-scoped scoring preserves corpus-wide relevance"
+          <| fun _ ->
+              let index =
+                  buildIndexWith
+                      defaultCollation
+                      [ 10, "database tutorial"
+                        20, "database security"
+                        30, "security handbook"
+                        40, "unrelated material" ]
+
+              let candidates = set [ 20; 30 ]
+              let restricted scores = scores |> Map.filter (fun id _ -> candidates.Contains id)
+
+              Expect.equal
+                  (naturalScoresWithin candidates index "database security")
+                  (naturalScores index "database security" |> restricted)
+                  "natural scoring retains corpus-wide IDF"
+
+              Expect.equal
+                  (booleanScoresWithin candidates index "+data*")
+                  (booleanScores index "+data*" |> restricted)
+                  "boolean prefix scoring retains corpus-wide IDF"
+
+              Expect.equal
+                  (expansionScoresWithin candidates index "database")
+                  (expansionScores index "database" |> restricted)
+                  "query expansion retains its corpus-wide seed pass"
+
+              let dictionary =
+                  tryNaturalSingleTermScoresDictionaryWithin (Some candidates) index "database"
+                  |> Option.get
+                  |> Seq.map (fun (KeyValue(id, score)) -> id, score)
+                  |> Map.ofSeq
+
+              Expect.equal dictionary (naturalScores index "database" |> restricted) "dictionary scoring uses the same restriction"
+
           testCase "a deeply nested boolean query is bounded, not a stack overflow"
           <| fun _ ->
               // Thousands of open parens must not overflow the recursive

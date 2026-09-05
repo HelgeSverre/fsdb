@@ -32,6 +32,8 @@ module SyntaxFuzz =
            "SELECT id, MATCH(title, body) AGAINST ('+database +security' IN BOOLEAN MODE) AS relevance FROM syntax_fulltext WHERE MATCH(body, title) AGAINST ('database') ORDER BY relevance DESC, id"
            "fulltext_conjuncts",
            "SELECT id FROM syntax_fulltext WHERE MATCH(title, body) AGAINST ('database') AND MATCH(body, title) AGAINST ('+security' IN BOOLEAN MODE) AND id > 0 ORDER BY id"
+           "fulltext_point_intersection",
+           "SELECT id, MATCH(title, body) AGAINST ('database') AS relevance FROM syntax_fulltext WHERE MATCH(title, body) AGAINST ('database') AND id = 1"
            "fulltext_alternatives",
            "SELECT id FROM syntax_fulltext WHERE (MATCH(title, body) AGAINST ('database') OR MATCH(body, title) AGAINST ('+security' IN BOOLEAN MODE)) AND id > 0 ORDER BY id"
            "fulltext_join",

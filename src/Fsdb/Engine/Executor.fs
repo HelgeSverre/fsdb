@@ -8794,17 +8794,16 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
             | _ -> None
         | _ -> None)
 
-and private tryEqualityAccessWith
+and private tryEqualityAccessInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
-    (dbName: string)
+    (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedValuesMatchReadValues store) || (physicalFastPathTable store dbName tref).IsNone then
+    if not (storedValuesMatchReadValues store) then
         None
     else
-        let tableDb = tref.Database |> Option.defaultValue dbName
         let equalities = pointLookupEqualities tref whereExpr
         let storedEqualities =
             equalities
@@ -8812,7 +8811,7 @@ and private tryEqualityAccessWith
                 if equality.Transform.IsNone then Some(equality.Column, equality.Value) else None)
 
         let composite =
-            Storage.tryCompositeEqualityLookup store tableDb tref.Table storedEqualities
+            Storage.tryCompositeEqualityLookupInTable store table storedEqualities
             |> Option.map (fun lookup ->
                 { KeyName = lookup.IndexName
                   ColumnIndices = lookup.ColumnIndices
@@ -8828,20 +8827,24 @@ and private tryEqualityAccessWith
         |> Option.orElseWith (fun () ->
             equalities
             |> List.tryPick (fun equality ->
-                Storage.tryEqualityKeyProbeForTransform
-                    store
-                    tableDb
-                    tref.Table
-                    equality.Column
-                    equality.Transform
-                    equality.Value
-                |> Option.bind (fun (table, index) ->
+                Storage.tryEqualityIndexForTransform table equality.Column equality.Transform
+                |> Option.bind (fun index ->
                     (if equality.Transform.IsSome then
                          Storage.tryProjectedEqualityRowIdsForIndex store table index [ equality.Value ]
                      else
                          Storage.tryEqualityRowIdsForIndex store table index [ equality.Value ])
                     |> Option.map (equalityAccessPlan table index)
                     |> Option.filter (acceptsEqualityAccess policy))))
+
+and private tryEqualityAccessWith
+    (policy: IndexAccessPolicy)
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : EqualityAccessPlan option =
+    physicalFastPathTable store dbName tref
+    |> Option.bind (fun table -> tryEqualityAccessInTableWith policy store table tref whereExpr)
 
 and private tryEqualityAccess
     (store: Store)
@@ -8859,18 +8862,16 @@ and private tryEqualityCandidates
     : EqualityAccessPlan option =
     tryEqualityAccessWith CandidateNarrowing store dbName tref whereExpr
 
-and private tryLiteralInAccessWith
+and private tryLiteralInAccessInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
-    (dbName: string)
+    (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedValuesMatchReadValues store) || (physicalFastPathTable store dbName tref).IsNone then
+    if not (storedValuesMatchReadValues store) then
         None
     else
-        let tableDb = tref.Database |> Option.defaultValue dbName
-
         literalInProbes tref whereExpr
         |> List.tryPick (fun probe ->
             let values =
@@ -8884,13 +8885,13 @@ and private tryLiteralInAccessWith
                 let access =
                     match probe.Columns, first with
                     | [ (column, transform) ], [ value ] when transform.IsSome ->
-                        Storage.tryEqualityKeyProbeForTransform store tableDb tref.Table column transform value
+                        Storage.tryEqualityIndexForTransform table column transform
+                        |> Option.bind (fun index ->
+                            Storage.tryProjectedEqualityRowIdsForIndex store table index [ value ]
+                            |> Option.map (fun _ -> table, index))
                     | columns, _ when columns |> List.forall (snd >> Option.isNone) ->
-                        tableSnapshot store tableDb tref.Table
-                        |> Result.toOption
-                        |> Option.bind (fun table ->
-                            Storage.tryEqualityIndexForColumns table (columns |> List.map fst)
-                            |> Option.map (fun index -> table, index))
+                        Storage.tryEqualityIndexForColumns table (columns |> List.map fst)
+                        |> Option.map (fun index -> table, index)
                     | _ -> None
 
                 access
@@ -8933,6 +8934,16 @@ and private tryLiteralInAccessWith
                             |> List.fold Set.union Set.empty
                             |> equalityAccessPlan table index))))
 
+and private tryLiteralInAccessWith
+    (policy: IndexAccessPolicy)
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : EqualityAccessPlan option =
+    physicalFastPathTable store dbName tref
+    |> Option.bind (fun table -> tryLiteralInAccessInTableWith policy store table tref whereExpr)
+
 and private tryLiteralInAccess
     (store: Store)
     (dbName: string)
@@ -8962,6 +8973,26 @@ and private tryIndexedCandidates
     : (ColumnDef list * (RowId * Value[]) list) option =
     tryEqualityCandidates store dbName tref whereExpr
     |> Option.orElseWith (fun () -> tryLiteralInCandidates store dbName tref whereExpr)
+    |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
+
+and private tryIndexedLookupInTable
+    (store: Store)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    =
+    tryEqualityAccessInTableWith CostedRead store table tref whereExpr
+    |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CostedRead store table tref whereExpr)
+    |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
+
+and private tryIndexedCandidatesInTable
+    (store: Store)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    =
+    tryEqualityAccessInTableWith CandidateNarrowing store table tref whereExpr
+    |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CandidateNarrowing store table tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryCorrelatedEqualityLookup
@@ -9022,6 +9053,22 @@ and private tryCorrelatedEqualityLookup
                     Storage.tryEqualityLookup store tableDb tref.Table column value
                     |> Option.orElseWith (fun () -> transientLookup tableDb column value))))
 
+and private tryRangeAccessInTable
+    (scope: ColumnReferenceScope)
+    (store: Store)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : Storage.RangeLookup option =
+    (if storedValuesMatchReadValues store then
+         rangeLookupBounds scope tref whereExpr
+     else
+         [])
+    |> List.tryPick (fun bounds ->
+        Storage.trySecondaryRangeLookupInTable store table bounds.Column bounds.Lower bounds.Upper
+        |> Option.filter (fun lookup ->
+            QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange))
+
 and private tryRangeAccess
     (scope: ColumnReferenceScope)
     (store: Store)
@@ -9029,20 +9076,26 @@ and private tryRangeAccess
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.RangeLookup option =
-    let tableDb = tref.Database |> Option.defaultValue dbName
-
-    (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then
-         rangeLookupBounds scope tref whereExpr
-     else
-         [])
-    |> List.tryPick (fun bounds ->
-        Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
-        |> Option.filter (fun lookup ->
-            QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange))
+    physicalFastPathTable store dbName tref
+    |> Option.bind (fun table -> tryRangeAccessInTable scope store table tref whereExpr)
 
 and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     tryRangeAccess BareOrQualifiedColumn store dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
+
+and private trySpatialAccessInTable
+    (scope: ColumnReferenceScope)
+    (store: Store)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : Storage.SpatialLookup option =
+    (if storedValuesMatchReadValues store then
+         spatialLookupPredicates scope tref whereExpr
+     else
+         [])
+    |> List.tryPick (fun predicate ->
+        Storage.trySpatialLookupInTable table predicate.Column predicate.Relation predicate.Geometry)
 
 and private trySpatialAccess
     (scope: ColumnReferenceScope)
@@ -9051,18 +9104,40 @@ and private trySpatialAccess
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.SpatialLookup option =
-    let tableDb = tref.Database |> Option.defaultValue dbName
-
-    (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then
-         spatialLookupPredicates scope tref whereExpr
-     else
-         [])
-    |> List.tryPick (fun predicate ->
-        Storage.trySpatialLookup store tableDb tref.Table predicate.Column predicate.Relation predicate.Geometry)
+    physicalFastPathTable store dbName tref
+    |> Option.bind (fun table -> trySpatialAccessInTable scope store table tref whereExpr)
 
 and private trySpatialLookup scope store dbName tref whereExpr =
     trySpatialAccess scope store dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows)
+
+and private tryPhysicalCandidates store dbName tref whereExpr =
+    tryIndexedCandidates store dbName tref whereExpr
+    |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tref whereExpr)
+    |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref whereExpr)
+
+and private tryPhysicalReadCandidates store dbName tref whereExpr =
+    tryIndexedLookup store dbName tref whereExpr
+    |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tref whereExpr)
+    |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref whereExpr)
+
+and private tryPhysicalReadCandidatesInTable store table tref whereExpr =
+    tryIndexedLookupInTable store table tref whereExpr
+    |> Option.orElseWith (fun () ->
+        trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
+        |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows))
+    |> Option.orElseWith (fun () ->
+        tryRangeAccessInTable BareOrQualifiedColumn store table tref whereExpr
+        |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value))
+
+and private tryPhysicalCandidatesInTable store table tref whereExpr =
+    tryIndexedCandidatesInTable store table tref whereExpr
+    |> Option.orElseWith (fun () ->
+        trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
+        |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows))
+    |> Option.orElseWith (fun () ->
+        tryRangeAccessInTable BareOrQualifiedColumn store table tref whereExpr
+        |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value))
 
 and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     tryRangeAccess QualifiedColumn store dbName tref whereExpr
@@ -12046,7 +12121,11 @@ and private runWindowedSelect
 
             runSelect store registry dbName extendedColumns extendedQualifiers extendedRows ArbitraryGroupRows select' outer
 
-and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
+and private fullTextScoresForTable
+    (table: Table)
+    (candidateIds: Set<RowId> option)
+    (matchNodes: Expr list)
+    =
     let indexColumns =
         table.Indexes
         |> List.filter (fun index -> index.Kind = FullTextIndex && index.Visible)
@@ -12065,11 +12144,23 @@ and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
                 let scores =
                     match mode with
                     | NaturalLanguage ->
-                        FullText.tryNaturalSingleTermScoresDictionary fullTextIndex queryText
+                        FullText.tryNaturalSingleTermScoresDictionaryWithin candidateIds fullTextIndex queryText
                         |> Option.map HashedScores
-                        |> Option.defaultWith (fun () -> FullText.naturalScores fullTextIndex queryText |> OrderedScores)
-                    | BooleanMode -> FullText.booleanScores fullTextIndex queryText |> OrderedScores
-                    | QueryExpansion -> FullText.expansionScores fullTextIndex queryText |> OrderedScores
+                        |> Option.defaultWith (fun () ->
+                            (match candidateIds with
+                             | Some candidates -> FullText.naturalScoresWithin candidates fullTextIndex queryText
+                             | None -> FullText.naturalScores fullTextIndex queryText)
+                            |> OrderedScores)
+                    | BooleanMode ->
+                        (match candidateIds with
+                         | Some candidates -> FullText.booleanScoresWithin candidates fullTextIndex queryText
+                         | None -> FullText.booleanScores fullTextIndex queryText)
+                        |> OrderedScores
+                    | QueryExpansion ->
+                        (match candidateIds with
+                         | Some candidates -> FullText.expansionScoresWithin candidates fullTextIndex queryText
+                         | None -> FullText.expansionScores fullTextIndex queryText)
+                        |> OrderedScores
 
                 Ok(node, mode, scores)
             | None, _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
@@ -12129,13 +12220,17 @@ and private fullTextCandidateIds (candidates: FullTextCandidates) : RowId seq =
         | CombinedCandidates candidates -> yield! Set.toSeq candidates
     }
 
-and private fullTextPredicatePlan (table: Table) (predicate: Expr) =
+and private fullTextPredicatePlan
+    (table: Table)
+    (candidateIds: Set<RowId> option)
+    (predicate: Expr)
+    =
     let matchNodes = collectMatchAgainst predicate |> List.distinct
 
     if matchNodes.IsEmpty then
         Ok None
     else
-        fullTextScoresForTable table matchNodes
+        fullTextScoresForTable table candidateIds matchNodes
         |> Result.map (fun computed ->
             let rewrite scoreFor =
                 computed
@@ -12262,7 +12357,7 @@ and private fullTextMutationSources
                     if nodes.IsEmpty then
                         Ok None
                     else
-                        fullTextScoresForTable source.Table nodes
+                        fullTextScoresForTable source.Table None nodes
                         |> Result.mapError (fun (code, message) -> Err(code, message))
                         |> Result.map (fun computed ->
                             let synthetic = fullTextSyntheticColumns matchNodes computed
@@ -12344,28 +12439,39 @@ and private runFullTextSelect
                               Columns = source.Table.Columns
                               Rows = source.Table.RowsArray :> Value[] seq }
                     else
-                        fullTextScoresForTable source.Table nodes
+                        let physicalCandidates =
+                            match source.Item with
+                            | FromTable tableRef when select.Joins.IsEmpty && select.Locking.IsEmpty ->
+                                tryPhysicalReadCandidatesInTable store source.Table tableRef select.Where
+                            | _ -> None
+
+                        let candidateIds =
+                            physicalCandidates
+                            |> Option.map (snd >> List.map fst >> Set.ofList)
+
+                        fullTextScoresForTable source.Table candidateIds nodes
                         |> Result.mapError (fun (code, message) -> Err(code, message))
                         |> Result.map (fun computed ->
                             let synthetic = fullTextSyntheticColumns matchNodes computed
 
-                            let candidateIds =
+                            let rowsForExecution =
                                 match select.Where |> Option.bind (fullTextCandidates computed) with
                                 | Some candidates ->
-                                    fullTextCandidateIds candidates
+                                    let rows =
+                                        fullTextCandidateIds candidates
+                                        |> Seq.choose (fun rowId ->
+                                            source.Table.RowsArray.TryFind rowId
+                                            |> Option.map (fun row -> rowId, row))
+                                        |> List.ofSeq
+
+                                    rows :> (RowId * Value[]) seq
                                 | None ->
                                     match source.Item with
                                     | FromTable tableRef when select.Joins.IsEmpty && select.Locking.IsEmpty ->
-                                        tryIndexedLookup store dbName tableRef select.Where
-                                        |> Option.map (snd >> Seq.map fst)
-                                        |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst)
-                                    | _ -> source.Table.RowsArray.Indexed |> Seq.map fst
-
-                            let rowsForExecution =
-                                candidateIds
-                                |> Seq.choose (fun rowId ->
-                                    source.Table.RowsArray.TryFind rowId
-                                    |> Option.map (fun row -> rowId, row))
+                                        physicalCandidates
+                                        |> Option.map (snd >> Seq.ofList)
+                                        |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed)
+                                    | _ -> source.Table.RowsArray.Indexed
 
                             let columns = source.Table.Columns @ (synthetic |> List.map (fun (_, name) -> syntheticColumn name (TDouble false) false))
                             let rows =
@@ -17985,9 +18091,19 @@ let rec executeAs
 
         let tableRootResult = tableSnapshot store db table
         let tableRoot = tableRootResult |> Result.toOption
+
+        let physicalCandidates =
+            tableRoot
+            |> Option.bind (fun table ->
+                tryPhysicalCandidatesInTable store table updateStmt.From updateStmt.Where)
+
+        let physicalCandidateIds =
+            physicalCandidates
+            |> Option.map (snd >> List.map fst >> Set.ofList)
+
         let fullTextPlanResult =
             match tableRoot, updateStmt.Where with
-            | Some table, Some predicate -> fullTextPredicatePlan table predicate
+            | Some table, Some predicate -> fullTextPredicatePlan table physicalCandidateIds predicate
             | _ -> Ok None
 
         let fullTextPlan = fullTextPlanResult |> Result.defaultValue None
@@ -17996,10 +18112,10 @@ let rec executeAs
         // evaluates the complete WHERE. Stable RowIds also bound the rewrite.
         let narrowed =
             fullTextPlan
-            |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
-            |> Option.orElseWith (fun () -> tryIndexedCandidates store dbName updateStmt.From updateStmt.Where)
-            |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName updateStmt.From updateStmt.Where)
-            |> Option.orElseWith (fun () -> tryRangeLookup store dbName updateStmt.From updateStmt.Where)
+            |> Option.bind (fun plan ->
+                tableRoot
+                |> Option.map (fun table -> table.Columns, plan.Rows))
+            |> Option.orElse physicalCandidates
 
         let candidateRowsResult = mutationCandidateRows tableRootResult narrowed
 
@@ -18386,19 +18502,29 @@ let rec executeAs
             if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
         let tableRootResult = tableSnapshot targetStore db table
         let tableRoot = tableRootResult |> Result.toOption
+
+        let physicalCandidates =
+            tableRoot
+            |> Option.bind (fun table ->
+                tryPhysicalCandidatesInTable targetStore table deleteStmt.From deleteStmt.Where)
+
+        let physicalCandidateIds =
+            physicalCandidates
+            |> Option.map (snd >> List.map fst >> Set.ofList)
+
         let fullTextPlanResult =
             match tableRoot, deleteStmt.Where with
-            | Some table, Some predicate -> fullTextPredicatePlan table predicate
+            | Some table, Some predicate -> fullTextPredicatePlan table physicalCandidateIds predicate
             | _ -> Ok None
 
         let fullTextPlan = fullTextPlanResult |> Result.defaultValue None
 
         let narrowed =
             fullTextPlan
-            |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
-            |> Option.orElseWith (fun () -> tryIndexedCandidates targetStore dbName deleteStmt.From deleteStmt.Where)
-            |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn targetStore dbName deleteStmt.From deleteStmt.Where)
-            |> Option.orElseWith (fun () -> tryRangeLookup targetStore dbName deleteStmt.From deleteStmt.Where)
+            |> Option.bind (fun plan ->
+                tableRoot
+                |> Option.map (fun table -> table.Columns, plan.Rows))
+            |> Option.orElse physicalCandidates
 
         let candidateRowsResult = mutationCandidateRows tableRootResult narrowed
 
@@ -18578,9 +18704,7 @@ let transactionWriteTargets (store: Store) (dbName: string) (statement: Statemen
     let targets (tableRef: TableRef) predicate =
         let database = tableRef.Database |> Option.defaultValue dbName
 
-        tryIndexedCandidates store dbName tableRef predicate
-        |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tableRef predicate)
-        |> Option.orElseWith (fun () -> tryRangeLookup store dbName tableRef predicate)
+        tryPhysicalCandidates store dbName tableRef predicate
         |> Option.map (fun (_, rows) ->
             database,
             tableRef.Table,
