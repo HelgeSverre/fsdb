@@ -228,6 +228,16 @@ let private ws: Parser<unit, unit> = skipMany (choice [ spaces1; lineComment; ha
 /// `ServerVersion` ever changes.
 let private serverVersionNumber = 80400
 
+let private lineEnd (sql: string) (start: int) =
+    let carriageReturn = sql.IndexOf('\r', start)
+    let lineFeed = sql.IndexOf('\n', start)
+
+    match carriageReturn, lineFeed with
+    | -1, -1 -> sql.Length
+    | -1, index
+    | index, -1 -> index
+    | cr, lf -> min cr lf
+
 /// mysqldump wraps version-specific SQL in `/*!NNNNN ... */` (or a bare
 /// `/*! ... */` for "any version") so one dump can target several server
 /// versions at once: MySQL's grammar runs the wrapped SQL as ordinary
@@ -284,8 +294,7 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (options: Parse
             i <- i + 1
         | None when sql.[i] = '#' ->
             // `# ...` comment: to end of line.
-            let eol = sql.IndexOf('\n', i)
-            let stop = if eol = -1 then sql.Length else eol
+            let stop = lineEnd sql i
 
             if stripOrdinaryComments then
                 sb.Append ' ' |> ignore
@@ -299,8 +308,7 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (options: Parse
             && sql.[i + 1] = '-'
             && (i + 2 = sql.Length || Char.IsWhiteSpace sql.[i + 2])
             ->
-            let eol = sql.IndexOf('\n', i)
-            let stop = if eol = -1 then sql.Length else eol
+            let stop = lineEnd sql i
 
             if stripOrdinaryComments then
                 sb.Append ' ' |> ignore
@@ -561,7 +569,8 @@ let private bareIdent: Parser<string, unit> =
             preturn w
 
 /// Backtick quoting, with `` `` `` as the escape for a literal backtick.
-let private backtickChar: Parser<char, unit> = (pstring "``" >>% '`') <|> satisfy (fun c -> c <> '`')
+let private backtickChar: Parser<char, unit> =
+    (pstring "``" >>% '`') <|> satisfy (fun c -> c <> '`' && c <> '\u0000')
 
 let private backtickIdent: Parser<string, unit> = pchar '`' >>. manyChars backtickChar .>> pchar '`'
 

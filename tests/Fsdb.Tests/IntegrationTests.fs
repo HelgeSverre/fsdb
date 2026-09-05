@@ -878,6 +878,48 @@ let tests =
                       | Error error -> failtestf "table scan failed: %A" error
 
                       do!
+                          query
+                              "CREATE TABLE checked_auto_load (id INT AUTO_INCREMENT PRIMARY KEY, generated_id INT AS (id * 2) STORED, CHECK (generated_id < 1))"
+                          |> Async.Ignore
+
+                      let! _ = readPacketAsync stream
+
+                      let rejectPostAllocation modifier filename =
+                          async {
+                              do!
+                                  query
+                                      (sprintf
+                                          "LOAD DATA LOCAL INFILE '%s' %sINTO TABLE checked_auto_load (@discard) SET id = NULL"
+                                          filename
+                                          modifier)
+                                  |> Async.Ignore
+
+                              let! request = readPacketAsync stream
+                              Expect.equal request.Value.Payload.[0] 0xfbuy "post-allocation LOCAL request"
+                              do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "ignored\n" } |> Async.Ignore
+                              do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                              let! rejected = readPacketAsync stream
+
+                              if modifier = "" then
+                                  Expect.equal rejected.Value.Payload.[0] 0uy "LOAD reports an ignored invalid row"
+                                  let ok = Reader(rejected.Value.Payload.[1..])
+                                  ok.ReadLenEncInt() |> ignore
+                                  ok.ReadLenEncInt() |> ignore
+                                  ok.ReadInt16LE() |> ignore
+                                  Expect.equal (ok.ReadInt16LE()) 1 "post-allocation CHECK is reported as a warning"
+                              else
+                                  Expect.equal rejected.Value.Payload.[0] 0xffuy "post-allocation CHECK rejects REPLACE LOAD"
+                                  Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 3819 "CHECK error code"
+                          }
+
+                      do! rejectPostAllocation "" "checked-insert.tsv"
+                      do! rejectPostAllocation "REPLACE " "checked-replace.tsv"
+
+                      match Fsdb.Storage.scanList store "fsdb" "checked_auto_load" with
+                      | Ok(_, rows) -> Expect.isEmpty rows "failed LOAD candidates are not stored"
+                      | Error error -> failtestf "table scan failed: %A" error
+
+                      do!
                           query "CREATE TABLE transformed_view_base (id INT PRIMARY KEY, name VARCHAR(20), label VARCHAR(40))"
                           |> Async.Ignore
 

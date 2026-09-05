@@ -879,6 +879,10 @@ let tests =
                         (mkSelect([ col "order", None; col "a`b", None ], Some "select", None, [], None, None))
                         "backtick identifiers"
 
+                testCase "NUL is rejected inside a quoted identifier"
+                <| fun _ ->
+                    Expect.isError (parse "CREATE TABLE t (`bad\u0000name` INT)") "MySQL rejects NUL in quoted identifiers"
+
                 testCase "ROW and PARTITION cannot become implicit aliases"
                 <| fun _ ->
                     Expect.isError (parse "SELECT ROW(1, 2) ROW") "ROW alias"

@@ -72,6 +72,14 @@ let maxSleepSeconds = 60.0
 let maxBenchmarkIterations = 10_000_000L
 let maxBenchmarkDuration = TimeSpan.FromSeconds 1.0
 
+/// READ UNCOMMITTED composes private transaction roots in user space rather
+/// than reading storage-engine pages directly. Bound that compatibility layer
+/// so one reader cannot be forced to materialize every active transaction.
+let maxReadUncommittedViews = 64
+let maxReadUncommittedRows = 100_000UL
+let maxReadUncommittedDatabases = 256
+let maxReadUncommittedTables = 1024
+
 /// Feedback modes perform one AES block operation per bit or byte.
 let maxAesCfb1Bytes = 1024
 let maxAesCfb8Bytes = 16 * 1024
