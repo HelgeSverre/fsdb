@@ -6261,6 +6261,39 @@ let tests =
                     Expect.equal limitedPlan.AccessType (Some "ref") "an early-stopping query retains streaming index probes"
                     Expect.equal limitedPlan.Key (Some "ix_bucket") "the streaming key remains visible"
 
+                testCase "qualified base predicates run before inner-join fan-out"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.head values)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE left_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
+                    runDefault store "CREATE TABLE right_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
+
+                    let values =
+                        [ 1..100 ]
+                        |> List.map (fun id -> sprintf "(%d, %d)" id (id % 2))
+                        |> String.concat ","
+
+                    runDefault store $"INSERT INTO left_rows VALUES {values}" |> ignore
+                    runDefault store $"INSERT INTO right_rows VALUES {values}" |> ignore
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT COUNT(*) FROM left_rows l JOIN right_rows r ON r.bucket = l.bucket AND TOUCH(l.id) > 0 WHERE l.id <= 10"
+                    with
+                    | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count "500" "ten left rows each match half the right table"
+                    | other -> failtestf "expected a join count, got %A" other
+
+                    Expect.isLessThan calls 600 "the residual join predicate runs only after the base range predicate"
+
                 testCase "prefix indexes probe inner joins without weakening equality"
                 <| fun _ ->
                     let store = newStore ()

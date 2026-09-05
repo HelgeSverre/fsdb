@@ -3301,6 +3301,37 @@ let rec private conjuncts (expr: Expr) : Expr list =
 
     List.rev (loop [] expr)
 
+let private combineConjuncts =
+    function
+    | [] -> None
+    | first :: rest -> rest |> List.fold (fun combined expression -> BinOp(And, combined, expression)) first |> Some
+
+let private canPushIntoBase (qualifier: string) =
+    let rec eligible =
+        function
+        | Lit _ -> true
+        | QualifiedCol(source, _) -> source.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+        | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
+            eligible left && eligible right
+        | Not expression
+        | IsNull expression
+        | IsNotNull expression
+        | IsTrue expression
+        | IsFalse expression -> eligible expression
+        | Between(value, lower, upper) -> eligible value && eligible lower && eligible upper
+        | In(value, candidates) -> eligible value && List.forall eligible candidates
+        | Collate(expression, _) -> eligible expression
+        | _ -> false
+
+    eligible
+
+let private splitBaseWhere qualifier whereExpression =
+    whereExpression
+    |> Option.map conjuncts
+    |> Option.defaultValue []
+    |> List.partition (canPushIntoBase qualifier)
+    |> fun (pushed, remaining) -> combineConjuncts pushed, combineConjuncts remaining
+
 /// Splits a `JOIN ... ON` expression's `AND`-conjuncts into equi-join key
 /// pairs — a `QualifiedCol = QualifiedCol` conjunct with one side resolving
 /// into the columns already in scope and the other into the just-joined
@@ -5136,28 +5167,31 @@ and private runExpressionSubquery
         memo.[cacheKey] <- UnmemoizedSubquery
         execute (Some ctx)
 
+and private isPlainCountStarSelect (registry: Registry) (select: SelectStmt) =
+    match select.Projections with
+    | [ FuncCall(name, [ Star None ]), _ ] ->
+        name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
+        && Functions.isUnmodifiedBuiltinAggregate name registry
+        && select.GroupBy.IsEmpty
+        && select.Having.IsNone
+        && select.OrderBy.IsEmpty
+        && select.Limit.IsNone
+        && select.Offset.IsNone
+        && select.Windows.IsEmpty
+        && select.Ctes.IsEmpty
+        && select.IntoVariables.IsEmpty
+        && select.Locking.IsEmpty
+        && not select.Distinct
+        && not select.CalculateFoundRows
+        && not select.Rollup
+    | _ -> false
+
 and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Result<Value, EvalError> option =
-    let countStar =
-        match select.Projections with
-        | [ FuncCall(name, [ Star None ]), _ ] -> name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
-        | _ -> false
+    let countStar = isPlainCountStarSelect outer.Registry select
 
     match select.From with
     | Some(FromTable tableRef)
-        when countStar
-             && select.Joins.IsEmpty
-             && select.GroupBy.IsEmpty
-             && select.Having.IsNone
-             && select.OrderBy.IsEmpty
-             && select.Limit.IsNone
-             && select.Offset.IsNone
-             && select.Windows.IsEmpty
-             && select.Ctes.IsEmpty
-             && select.IntoVariables.IsEmpty
-             && select.Locking.IsEmpty
-             && not select.Distinct
-             && not select.CalculateFoundRows
-             && not select.Rollup ->
+        when countStar && select.Joins.IsEmpty ->
         tryCorrelatedEqualityLookup outer.Store outer.DbName tableRef select.Where (Some outer)
         |> Option.map (fun (columns, rows) ->
             let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
@@ -8528,30 +8562,66 @@ and private runUnlockedSelectStmt
             match prepareVirtualRows store registry dbName baseQualifier baseColumns baseRows with
             | Error error -> error, [], []
             | Ok baseRows ->
-                let initial : Result<((string * ColumnDef list) list * Value[] seq * Table option) * string list list, QueryResult> =
-                    Ok(([ baseQualifier, baseColumns ], baseRows, basePhysicalTable), [])
+                let canPushWhere =
+                    not select.Joins.IsEmpty
+                    && select.Joins
+                       |> List.forall (fun join ->
+                           match join.Kind with
+                           | InnerJoin
+                           | CrossJoin
+                           | NaturalJoin -> true
+                           | _ -> false)
 
-                match
-                    planJoinOrder store dbName select
-                    |> List.fold
-                        (fun acc join ->
-                            acc
-                            |> Result.bind (fun ((sources, rows, leftPhysicalTable), namesPerJoin) ->
-                                applyJoin store registry dbName outer Map.empty leftPhysicalTable joinConsumption (sources, rows) join
-                                |> Result.map (fun (sources', rows', names) -> (sources', rows', None), names :: namesPerJoin)))
-                        initial
-                with
+                let pushedWhere, remainingWhere =
+                    if canPushWhere then splitBaseWhere baseQualifier select.Where else None, select.Where
+
+                let prepared =
+                    match pushedWhere with
+                    | None -> Ok(baseRows, select)
+                    | Some predicate ->
+                        let context =
+                            contextFactory
+                                store
+                                registry
+                                dbName
+                                (columnIndexOf baseColumns)
+                                (singleQualifier baseQualifier baseColumns)
+                                outer
+
+                        baseRows
+                        |> traverseSeq (fun row ->
+                            whereMatches context (Some predicate) row
+                            |> Result.map (fun matches -> if matches then Some row else None))
+                        |> Result.mapError Err
+                        |> Result.map (fun rows -> rows :> Value[] seq, { select with Where = remainingWhere })
+
+                match prepared with
                 | Error error -> error, [], []
-                | Ok((sources, rows, _), namesPerJoinRev) ->
-                    let namesPerJoin = List.rev namesPerJoinRev
+                | Ok(baseRows, select) ->
+                    let initial : Result<((string * ColumnDef list) list * Value[] seq * Table option) * string list list, QueryResult> =
+                        Ok(([ baseQualifier, baseColumns ], baseRows, basePhysicalTable), [])
 
-                    let select =
-                        if namesPerJoin |> List.forall List.isEmpty then
-                            select
-                        else
-                            rewriteNaturalSelect select sources select.Joins namesPerJoin
+                    match
+                        planJoinOrder store dbName select
+                        |> List.fold
+                            (fun acc join ->
+                                acc
+                                |> Result.bind (fun ((sources, rows, leftPhysicalTable), namesPerJoin) ->
+                                    applyJoin store registry dbName outer Map.empty leftPhysicalTable joinConsumption (sources, rows) join
+                                    |> Result.map (fun (sources', rows', names) -> (sources', rows', None), names :: namesPerJoin)))
+                            initial
+                    with
+                    | Error error -> error, [], []
+                    | Ok((sources, rows, _), namesPerJoinRev) ->
+                        let namesPerJoin = List.rev namesPerJoinRev
 
-                    runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select outer
+                        let select =
+                            if namesPerJoin |> List.forall List.isEmpty then
+                                select
+                            else
+                                rewriteNaturalSelect select sources select.Joins namesPerJoin
+
+                        runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select outer
 
         let runArbitrary columns (rows: Value[] seq) physicalTable resolvedSelect =
             runResolved ArbitraryGroupRows columns rows physicalTable resolvedSelect
@@ -10791,7 +10861,7 @@ and private runGroupedSelect
     (dbName: string)
     (columns: ColumnDef list)
     (qualifiers: Map<string, ColumnDef list * int>)
-    (rows: Value[] list)
+    (rows: Value[] seq)
     (groupInputOrder: GroupInputOrder)
     (select: SelectStmt)
     (outer: EvalContext option)
@@ -10962,6 +11032,35 @@ and private runGroupedSelect
     | Ok probeProjected ->
         let colNames = probeProjected |> List.map fst
 
+        if isPlainCountStarSelect registry select then
+            let mutable count = 0L
+            let mutable failure = None
+            let mutable processed = 0
+
+            use enumerator = rows.GetEnumerator()
+
+            while failure.IsNone && enumerator.MoveNext() do
+                Limits.checkQueryCancellation processed
+                processed <- processed + 1
+
+                match matches enumerator.Current with
+                | Error error -> failure <- Some error
+                | Ok true -> count <- count + 1L
+                | Ok false -> ()
+
+            Limits.checkQueryCancellation 0
+
+            match failure with
+            | Some(code, message) -> Err(code, message), [], []
+            | None ->
+                let projected = [ List.head colNames, VInt count ]
+                let groupCtx = ctxFor (probeRow columns)
+                let formats = outputColumnFormats groupCtx columns select.Projections
+                let wireOverrides = outputColumnWireOverrides groupCtx columns select
+                let rendered = renderOutputCols formats projected
+                let metadata = columnMetadataOf 1 [ projected ] |> applyWireOverrides wireOverrides
+                ResultSet(colNames, [ rendered ]), metadata, [ [| VInt count |] ]
+        else
         match rows |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
         | Error(code, message) -> Err(code, message), [], []
         | Ok matched ->
@@ -12676,7 +12775,7 @@ and private runSelect
         || projections |> List.exists (fst >> containsAggregate registry)
         || orderBy |> List.exists (fst >> containsAggregate registry)
     then
-        runGroupedSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrder select outer
+        runGroupedSelect store registry dbName columns qualifiers rows groupInputOrder select outer
     else
 
     let columnIndex = columnIndexOf columns
