@@ -12759,15 +12759,18 @@ and private runFullTextSelect
                         None
 
                 let rowsByDescendingScore scoreIndex (rows: Value[] seq) =
-                    rows
-                    |> Seq.indexed
-                    |> Seq.sortWith (fun (leftIndex, left) (rightIndex, right) ->
-                        let scoreOrder = Value.compare right.[scoreIndex] left.[scoreIndex]
-                        if scoreOrder <> 0 then
-                            scoreOrder
-                        else
-                            Microsoft.FSharp.Core.Operators.compare leftIndex rightIndex)
-                    |> Seq.map snd
+                    let queue =
+                        rows
+                        |> Seq.indexed
+                        |> Seq.map (fun (index, row) ->
+                            struct (row, struct (-Value.toDouble row.[scoreIndex], index)))
+                        |> fun entries ->
+                            System.Collections.Generic.PriorityQueue<Value[], struct (float * int)>(entries)
+
+                    seq {
+                        while queue.Count > 0 do
+                            yield queue.Dequeue()
+                    }
 
                 let originals =
                     preparedSources
