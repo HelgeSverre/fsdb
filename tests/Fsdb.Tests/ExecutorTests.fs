@@ -6840,6 +6840,44 @@ let tests =
                     | ResultSet(_, rows) -> rows
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "unordered UPDATE and DELETE stop scanning after LIMIT targets"
+                <| fun _ ->
+                    let mutable touched = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            touched <- touched + 1
+                            List.head values)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, changed INT DEFAULT 0)" |> ignore
+
+                    [ for id in 1 .. 2000 -> sprintf "(%d)" id ]
+                    |> String.concat ","
+                    |> sprintf "INSERT INTO t (id) VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    Expect.equal
+                        (run store registry "UPDATE t SET changed = 1 WHERE TOUCH(id) > 0 LIMIT 3")
+                        (Affected 3UL)
+                        "three rows update"
+
+                    Expect.isLessThan touched 100 "UPDATE stops evaluating its predicate once it has enough targets"
+                    touched <- 0
+
+                    Expect.equal
+                        (run store registry "DELETE FROM t WHERE TOUCH(id) > 0 LIMIT 2")
+                        (Affected 2UL)
+                        "two rows delete"
+
+                    Expect.isLessThan touched 100 "DELETE stops evaluating its predicate once it has enough targets"
+
+                    match runDefault store "SELECT COUNT(*), SUM(changed) FROM t" with
+                    | ResultSet(_, [ [ Some "1998"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the limited mutations to retain their effects, got %A" other
+
                 testCase
                     "streaming LIMIT/OFFSET (no ORDER BY), plain or DISTINCT, plain scan or JOIN, matches a full-materialize-then-slice reference over randomized data"
                 <| fun _ ->

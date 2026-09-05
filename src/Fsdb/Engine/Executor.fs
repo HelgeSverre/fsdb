@@ -13256,19 +13256,26 @@ let evaluateRowPredicate
 /// legitimate a choice as any.
 let private selectMutationTargets
     (ctxFor: Value[] -> EvalContext)
-    (rows: (RowId * Value[]) list)
+    (rows: (RowId * Value[]) seq)
     (matches: Value[] -> Result<bool, EvalError>)
     (orderBy: OrderKey list)
     (limit: int option)
     : Result<(RowId * Value[]) list, EvalError> =
-    rows
-    |> traverse (fun ((_, row) as positioned) -> matches row |> Result.map (fun matched -> matched, positioned))
-    |> Result.bind (fun flagged ->
-        let matched = flagged |> List.filter fst |> List.map snd
+    let matchedRows () =
+        rows
+        |> traverseSeq (fun ((_, row) as positioned) ->
+            matches row |> Result.map (fun matched -> if matched then Some positioned else None))
 
-        if orderBy.IsEmpty then
-            Ok matched
-        else
+    if orderBy.IsEmpty then
+        rows
+        |> streamLimited false 0 limit (fun ((_, row) as positioned) ->
+            matches row
+            |> Result.map (fun matched ->
+                if matched then Some((), positioned) else None))
+        |> Result.map (List.map snd)
+    else
+        matchedRows ()
+        |> Result.bind (fun matched ->
             let dirs = orderBy |> List.map snd
 
             matched
@@ -13276,21 +13283,20 @@ let private selectMutationTargets
                 orderBy
                 |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
                 |> Result.map (fun keys -> keys, positioned))
-            |> Result.map (fun keyed -> keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) |> List.map snd))
-    |> Result.map (fun ordered ->
-        match limit with
-        | Some l -> ordered |> List.truncate (max 0 l)
-        | None -> ordered)
+            |> Result.map (fun keyed ->
+                let ordered = keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) |> List.map snd
+
+                match limit with
+                | Some count -> ordered |> List.truncate (max 0 count)
+                | None -> ordered))
 
 let private mutationCandidateRows
     (tableResult: Result<Table, StorageError>)
     (narrowed: (ColumnDef list * (RowId * Value[]) list) option)
-    : Result<ColumnDef list * (RowId * Value[]) list, StorageError> =
-    narrowed
-    |> Option.map Ok
-    |> Option.defaultWith (fun () ->
-        tableResult
-        |> Result.map (fun table -> table.Columns, table.RowsArray.Indexed |> List.ofSeq))
+    : Result<ColumnDef list * (RowId * Value[]) seq, StorageError> =
+    match narrowed with
+    | Some(columns, rows) -> Ok(columns, rows)
+    | None -> tableResult |> Result.map (fun table -> table.Columns, table.RowsArray.Indexed)
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, left-to-right — each right-hand side is evaluated against the row
