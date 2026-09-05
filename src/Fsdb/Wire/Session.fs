@@ -231,6 +231,7 @@ type XaAssociationState =
 
 type Savepoint =
     { Sequence: int
+      Seeded: bool
       BaseCatalog: Catalog
       Catalog: Catalog
       PendingEventCount: int

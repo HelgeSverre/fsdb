@@ -20,7 +20,9 @@ type Metadata =
 
 type Entry =
     { BaseCatalog: Catalog
-      Snapshot: Store
+      Catalog: Catalog
+      ChangedDatabases: Set<string>
+      ChangedTables: Set<string * string>
       Metadata: Metadata }
 
 let private registries =

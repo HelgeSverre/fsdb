@@ -127,6 +127,17 @@ let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql
     let positions = ResizeArray<int>()
     let mutable i = 0
 
+    let skipLineComment () =
+        let carriageReturn = sql.IndexOf('\r', i)
+        let lineFeed = sql.IndexOf('\n', i)
+
+        i <-
+            match carriageReturn, lineFeed with
+            | -1, -1 -> n
+            | -1, index
+            | index, -1 -> index + 1
+            | cr, lf -> min cr lf + 1
+
     while i < n do
         match sql.[i] with
         | ('\'' | '"' | '`') as quote ->
@@ -151,11 +162,8 @@ let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql
         | '-' when i + 1 < n && sql.[i + 1] = '-' && (i + 2 >= n || System.Char.IsWhiteSpace sql.[i + 2]) ->
             // MySQL only treats `--` as a comment when whitespace/EOL follows
             // (`5--3` is arithmetic) — same rule as `Parser.stripVersionComments`.
-            let idx = sql.IndexOf('\n', i)
-            i <- if idx = -1 then n else idx + 1
-        | '#' ->
-            let idx = sql.IndexOf('\n', i)
-            i <- if idx = -1 then n else idx + 1
+            skipLineComment ()
+        | '#' -> skipLineComment ()
         | '/' when i + 1 < n && sql.[i + 1] = '*' ->
             let idx = sql.IndexOf("*/", i + 2)
             i <- if idx = -1 then n else idx + 2
@@ -1706,10 +1714,45 @@ let private enabledSessionFlag name (session: Session) =
     |> Option.flatten
     |> Option.forall ((<>) "0")
 
+let private transactionCatalogChanges (baseCatalog: Catalog) (catalog: Catalog) =
+    let mutable databases = Set.empty
+    let mutable tables = Set.empty
+    let mutable tableBudget = Limits.maxReadUncommittedTables + 1
+    let databaseNames = Seq.append (Map.keys baseCatalog) (Map.keys catalog) |> Seq.distinct
+    use databaseEnumerator = databaseNames.GetEnumerator()
+
+    while tableBudget > 0 && databaseEnumerator.MoveNext() do
+        let databaseName = databaseEnumerator.Current
+        let before = Map.tryFind databaseName baseCatalog
+        let after = Map.tryFind databaseName catalog
+
+        if before.IsSome <> after.IsSome then
+            databases <- Set.add databaseName databases
+
+        let beforeTables = before |> Option.defaultValue Map.empty
+        let afterTables = after |> Option.defaultValue Map.empty
+        let tableNames = Seq.append (Map.keys beforeTables) (Map.keys afterTables) |> Seq.distinct
+        use tableEnumerator = tableNames.GetEnumerator()
+
+        while tableBudget > 0 && tableEnumerator.MoveNext() do
+            let tableName = tableEnumerator.Current
+
+            match Map.tryFind tableName beforeTables, Map.tryFind tableName afterTables with
+            | Some left, Some right when obj.ReferenceEquals(left, right) -> ()
+            | None, None -> ()
+            | _ ->
+                databases <- Set.add databaseName databases
+                tables <- Set.add (databaseName, tableName) tables
+                tableBudget <- tableBudget - 1
+
+    databases, tables
+
 let private syncTransactionView (session: Session) =
     match session.Tx with
     | Some transaction when transaction.Seeded ->
         let rowsModified = Storage.transactionRollbackWork transaction.Snapshot |> max 0L |> uint64
+        let catalog = transaction.Snapshot.Catalog
+        let changedDatabases, changedTables = transactionCatalogChanges transaction.BaseCatalog catalog
 
         match Storage.transactionId transaction.Snapshot with
         | Some transactionId ->
@@ -1717,7 +1760,9 @@ let private syncTransactionView (session: Session) =
                 session.Store
                 session.ConnectionId
                 { BaseCatalog = transaction.BaseCatalog
-                  Snapshot = transaction.Snapshot
+                  Catalog = catalog
+                  ChangedDatabases = changedDatabases
+                  ChangedTables = changedTables
                   Metadata =
                     { Id = transactionId
                       Started = DateTime.Now
@@ -1749,16 +1794,61 @@ let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Cat
 let private readUncommittedBase (session: Session) =
     let _, initial = Storage.beginTransactionSnapshotWithBase session.Store
     let mutable snapshot = initial
+    let mutable viewCount = 0
+    let mutable rowCount = 0UL
+    let mutable databaseCount = 0
+    let mutable tableCount = 0
+
+    let projectedCatalog (view: TransactionRegistry.Entry) (catalog: Catalog) =
+        view.ChangedDatabases
+        |> Seq.choose (fun databaseName ->
+            Map.tryFind databaseName catalog
+            |> Option.map (fun database ->
+                let projected =
+                    if Map.containsKey databaseName view.BaseCatalog <> Map.containsKey databaseName view.Catalog then
+                        database
+                    else
+                        view.ChangedTables
+                        |> Seq.choose (fun (owner, tableName) ->
+                            if owner = databaseName then
+                                Map.tryFind tableName database |> Option.map (fun table -> tableName, table)
+                            else
+                                None)
+                        |> Map.ofSeq
+
+                databaseName, projected))
+        |> Map.ofSeq
 
     TransactionRegistry.others session.Store session.ConnectionId
     |> List.iter (fun view ->
-        let candidate = Storage.beginTransactionSnapshotFromCatalog session.Store snapshot.Catalog
+        Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+        let changedTables = view.ChangedTables.Count
 
-        try
-            Storage.mergeCatalogInto candidate view.BaseCatalog view.Snapshot.Catalog
-            snapshot <- candidate
-        with :? Storage.LockWaitTimeout ->
-            ())
+        if not view.ChangedDatabases.IsEmpty then
+            viewCount <- viewCount + 1
+            databaseCount <- databaseCount + view.ChangedDatabases.Count
+            tableCount <- tableCount + changedTables
+
+            if
+                viewCount > Limits.maxReadUncommittedViews
+                || databaseCount > Limits.maxReadUncommittedDatabases
+                || tableCount > Limits.maxReadUncommittedTables
+                || view.Metadata.RowsModified > Limits.maxReadUncommittedRows - rowCount
+            then
+                raise (Functions.SqlError(1235, "This version of MySQL doesn't yet support READ UNCOMMITTED views beyond its resource limits"))
+
+            rowCount <- rowCount + view.Metadata.RowsModified
+
+        if not view.ChangedDatabases.IsEmpty then
+            let candidate = Storage.beginTransactionSnapshotFromCatalog session.Store snapshot.Catalog
+            let baseCatalog = projectedCatalog view view.BaseCatalog
+            let batchCatalog = projectedCatalog view view.Catalog
+
+            try
+                Storage.mergeCatalogInto candidate baseCatalog batchCatalog
+                snapshot <- candidate
+            with :? Storage.LockWaitTimeout ->
+                ())
 
     snapshot.Catalog, snapshot
 
@@ -2059,6 +2149,13 @@ let startTransactionStatement (session: Session) : Session =
     | Some tx when not tx.Seeded && tx.Isolation = ReadUncommitted ->
         let baseCatalog, transactionSnapshot = readUncommittedBase session
         let snapshot = transactionSnapshot |> Storage.carryTransactionLocks tx.Snapshot
+        let savepoints =
+            tx.Savepoints
+            |> Map.map (fun _ savepoint ->
+                { savepoint with
+                    Seeded = true
+                    BaseCatalog = baseCatalog
+                    Catalog = baseCatalog })
 
         { session with
             Tx =
@@ -2066,7 +2163,8 @@ let startTransactionStatement (session: Session) : Session =
                     { tx with
                         Snapshot = snapshot
                         BaseCatalog = baseCatalog
-                        Seeded = true } }
+                        Seeded = true
+                        Savepoints = savepoints } }
     | Some tx when not tx.Seeded ->
         let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
         let snapshot =
@@ -2077,6 +2175,7 @@ let startTransactionStatement (session: Session) : Session =
             tx.Savepoints
             |> Map.map (fun _ savepoint ->
                 { savepoint with
+                    Seeded = true
                     BaseCatalog = baseCatalog
                     Catalog = baseCatalog })
 
@@ -2173,8 +2272,9 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
                             Map.add
                                 name
                                 { Sequence = seq
+                                  Seeded = tx.Seeded
                                   BaseCatalog = tx.BaseCatalog
-                                  Catalog = tx.Snapshot.Catalog
+                                  Catalog = if tx.Seeded then tx.Snapshot.Catalog else Map.empty
                                   PendingEventCount = eventCount
                                   RollbackWork = Storage.transactionRollbackWork tx.Snapshot }
                                 tx.Savepoints
@@ -2191,16 +2291,17 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
         // `catalog` is the savepoint's own stale copy of every `NextAutoId`,
         // so bump it back up to whatever this transaction ran ahead to
         // since, before wholesale-replacing the snapshot's catalog with it.
-        let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
-        Storage.setCatalog tx.Snapshot catalog
-        Storage.restoreTransactionRollbackWork tx.Snapshot savepoint.RollbackWork
-        // Drop every event this transaction buffered after the savepoint —
-        // otherwise a WAL replay would apply writes the savepoint rollback
-        // just undid.
-        tx.Snapshot.PendingEvents
-        |> Option.iter (fun buffer ->
-            if buffer.Count > savepoint.PendingEventCount then
-                buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
+        if savepoint.Seeded then
+            let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
+            Storage.setCatalog tx.Snapshot catalog
+            Storage.restoreTransactionRollbackWork tx.Snapshot savepoint.RollbackWork
+            // Drop every event this transaction buffered after the savepoint —
+            // otherwise a WAL replay would apply writes the savepoint rollback
+            // just undid.
+            tx.Snapshot.PendingEvents
+            |> Option.iter (fun buffer ->
+                if buffer.Count > savepoint.PendingEventCount then
+                    buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
 
         // Real MySQL also destroys every savepoint established *after* the
         // one rolled back to — the named savepoint itself survives (a
@@ -5748,6 +5849,11 @@ let rec private invokeStoredFunction
             locals
             statements
 
+    use nesting =
+        match Limits.tryAcquireStoredProgramFrame () with
+        | Some nesting -> nesting
+        | None -> raise (Diagnostics.EvaluationError(1436, "Thread stack overrun while executing stored programs"))
+
     let outcome =
         DynamicScope.withValue storedFunctionCalls (Some(key :: calls)) (fun () ->
             DynamicScope.withValue storedFunctionSession (Some executionSession) (fun () ->
@@ -6225,22 +6331,27 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
                                     executed, result
 
-                            let (executed, result), changed =
-                                Storage.withExecutionSettings executionStore capturedSettings (fun () ->
-                                    let outcome, changed = captureRoutineVariableChanges executeBody
-                                    resultingSettings <- Storage.executionSettings executionStore
-                                    outcome, changed)
+                            match Limits.tryAcquireStoredProgramFrame () with
+                            | None -> session, Err(1436, "Thread stack overrun while executing stored programs")
+                            | Some nesting ->
+                                use _nesting = nesting
 
-                            mergeRoutineExecutionSettings originalSettings changed resultingSettings
-                            |> Storage.setExecutionSettings executionStore
+                                let (executed, result), changed =
+                                    Storage.withExecutionSettings executionStore capturedSettings (fun () ->
+                                        let outcome, changed = captureRoutineVariableChanges executeBody
+                                        resultingSettings <- Storage.executionSettings executionStore
+                                        outcome, changed)
 
-                            { executed with
-                                User = session.User
-                                AccountHost = session.AccountHost
-                                Database = session.Database
-                                RoutineStack = session.RoutineStack
-                                Variables = restoreRoutineVariables session.Variables changed executed.Variables },
-                            result
+                                mergeRoutineExecutionSettings originalSettings changed resultingSettings
+                                |> Storage.setExecutionSettings executionStore
+
+                                { executed with
+                                    User = session.User
+                                    AccountHost = session.AccountHost
+                                    Database = session.Database
+                                    RoutineStack = session.RoutineStack
+                                    Variables = restoreRoutineVariables session.Variables changed executed.Variables },
+                                result
         | DropProcedure(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
             let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)

@@ -100,6 +100,7 @@ type Reader(data: byte[]) =
     let mutable pos = 0
 
     member _.Remaining = data.Length - pos
+    member _.Position = pos
 
     member _.ReadByte() =
         let b = data.[pos]
@@ -192,6 +193,8 @@ type StreamReader(stream: Stream) =
 
             if len = 0 then
                 eof <- true
+
+    member _.Position = stream.Position - int64 (len - pos)
 
     member _.ReadByte() : byte =
         ensure ()
