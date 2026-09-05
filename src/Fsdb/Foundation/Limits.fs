@@ -72,6 +72,14 @@ let maxSleepSeconds = 60.0
 let maxBenchmarkIterations = 10_000_000L
 let maxBenchmarkDuration = TimeSpan.FromSeconds 1.0
 
+/// READ UNCOMMITTED composes private transaction roots in user space rather
+/// than reading storage-engine pages directly. Bound that compatibility layer
+/// so one reader cannot be forced to materialize every active transaction.
+let maxReadUncommittedViews = 64
+let maxReadUncommittedRows = 100_000UL
+let maxReadUncommittedDatabases = 256
+let maxReadUncommittedTables = 1024
+
 /// Feedback modes perform one AES block operation per bit or byte.
 let maxAesCfb1Bytes = 1024
 let maxAesCfb8Bytes = 16 * 1024
@@ -85,6 +93,34 @@ let maxZstdCompressionLevel = 3
 /// A session can stream large values without retaining one backing page for
 /// every parameter in an attacker-sized prepared-statement collection.
 let maxLongDataParameters = 4096
+
+let maxOpenTableHandlers = 256
+let maxTableHandlerAliasRunes = 256
+let maxTrackedSystemVariablesLength = 4096
+let maxTrackedSystemVariableNames = 256
+let maxAdvisoryLocksPerSession = 64
+let maxPreparedCursors = 64
+let maxPreparedCursorRows = 100_000
+let maxPreparedCursorBytes = 64L * 1024L * 1024L
+let maxStoredProgramNesting = 16
+let maxViewMetadataNesting = 32
+let maxConcurrentEventExecutions = 8
+let eventExecutionTimeout = TimeSpan.FromSeconds 60.0
+
+let private storedProgramNesting = new ThreadLocal<int>(fun () -> 0)
+
+let tryAcquireStoredProgramFrame () : IDisposable option =
+    if storedProgramNesting.Value >= maxStoredProgramNesting then
+        None
+    else
+        storedProgramNesting.Value <- storedProgramNesting.Value + 1
+        let mutable released = 0
+
+        Some
+            { new IDisposable with
+                member _.Dispose() =
+                    if Interlocked.Exchange(&released, 1) = 0 then
+                        storedProgramNesting.Value <- storedProgramNesting.Value - 1 }
 
 /// Password lifetime inherited by accounts whose mysql.user row stores NULL.
 let mutable defaultPasswordLifetimeDays = 0

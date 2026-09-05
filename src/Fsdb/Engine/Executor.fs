@@ -338,6 +338,7 @@ let private cteOriginScope = System.Threading.AsyncLocal<Map<string, ColumnOrigi
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
+let private viewMergeDepth = System.Threading.AsyncLocal<int>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
 let private triggerTextExecutor = System.Threading.AsyncLocal<(TriggerTextExecution -> string -> QueryResult) option>()
@@ -656,7 +657,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
     let rec classify seen (view: StoredView) (select: SelectStmt) =
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-        if Set.contains key seen then
+        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
             None
         else
             match select.From with
@@ -2654,15 +2655,22 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
         | None ->
             match tryStoredView store database table.Table with
             | Some view ->
-                match Parser.parse view.Definition with
-                | Ok(Select viewSelect) ->
-                    let columns = selectProjectionColumns store view.Schema viewSelect
+                let stack = currentViewStack ()
+                let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-                    if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
-                        columns
-                    else
-                        List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
-                | _ -> []
+                if Set.contains key stack || stack.Count >= Limits.maxViewMetadataNesting then
+                    []
+                else
+                    DynamicScope.withValue viewStack (Set.add key stack) (fun () ->
+                        match Parser.parse view.Definition with
+                        | Ok(Select viewSelect) ->
+                            let columns = selectProjectionColumns store view.Schema viewSelect
+
+                            if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
+                                columns
+                            else
+                                List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
+                        | _ -> [])
             | None ->
                 scan store database table.Table
                 |> Result.toOption
@@ -5239,6 +5247,8 @@ and private resolveTableRef
             | true, cached -> cached
             | _ when Set.contains stackKey stack ->
                 Error(Err(1462, sprintf "View's SELECT contains a recursive reference to view '%s'" view.Name))
+            | _ when stack.Count >= Limits.maxViewMetadataNesting ->
+                Error(Err(1436, "Thread stack overrun while expanding stored views"))
             | _ ->
                 let savedCtes = currentCteScope ()
                 let savedCteOrigins = currentCteOriginScope ()
@@ -5556,7 +5566,7 @@ and private describeQueryColumns
                 | Some(view: StoredView) ->
                     let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-                    if Set.contains key seen then
+                    if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
                         None
                     else
                         Parser.parse view.Definition
@@ -8455,7 +8465,13 @@ and private runSelectStmt
     else
     match tryMergeDirectView store registry dbName select with
     | Error error -> error, [], []
-    | Ok(Some merged) -> runSelectStmt store registry dbName merged outer
+    | Ok(Some merged) ->
+        let depth = viewMergeDepth.Value
+
+        if depth >= Limits.maxViewMetadataNesting then
+            Err(1436, "Thread stack overrun while expanding stored views"), [], []
+        else
+            DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmt store registry dbName merged outer)
     | Ok None -> runUnmergedSelectStmt store registry dbName select outer
 
 and private runUnmergedSelectStmt
@@ -15433,10 +15449,11 @@ let rec executeAs
         (triggers: StoredTrigger list)
         (rows: (Value[] option * Value[] option) list)
         : QueryResult option =
+        let chain = triggerChain.Value
+
         match scan runStore db table with
         | Error _ -> None
         | Ok(columns, _) ->
-            let chain = triggerChain.Value
             let self = db, normalizeTableName table
             let protectedTables = Set.add self (Set.union (Set.ofList chain) triggerInvocationTables.Value)
 
@@ -15489,7 +15506,6 @@ let rec executeAs
                 // Eval-time DIRECTONLY backstop, same as generated
                 // columns — see `shadowDirectOnly`'s doc.
                 let shadowed = shadowDirectOnly "trigger" registry
-                triggerChain.Value <- self :: chain
 
                 // An extension's own `SqlError` (including the
                 // DirectOnly shadow's 3102) surfaces as a clean
@@ -15900,17 +15916,23 @@ let rec executeAs
 
                             runStatements scope statements |> fst))
 
-                try
-                    rows
-                    |> List.tryPick (fun (oldRow, newRow) ->
-                        bodies
-                        |> List.tryPick (fun (trigger, statements, account) ->
-                            Storage.withExecutionSettings runStore (triggerExecutionSettings trigger) (fun () ->
-                                match runBody oldRow newRow (statements, account) with
-                                | Err _ as e -> Some e
-                                | _ -> None)))
-                finally
-                    triggerChain.Value <- chain
+                match Limits.tryAcquireStoredProgramFrame () with
+                | None -> Some(Err(1436, "Thread stack overrun while executing stored programs"))
+                | Some nesting ->
+                    use _nesting = nesting
+                    triggerChain.Value <- self :: chain
+
+                    try
+                        rows
+                        |> List.tryPick (fun (oldRow, newRow) ->
+                            bodies
+                            |> List.tryPick (fun (trigger, statements, account) ->
+                                Storage.withExecutionSettings runStore (triggerExecutionSettings trigger) (fun () ->
+                                    match runBody oldRow newRow (statements, account) with
+                                    | Err _ as e -> Some e
+                                    | _ -> None)))
+                    finally
+                        triggerChain.Value <- chain
 
     let triggerStorageResult =
         function
@@ -16053,19 +16075,19 @@ let rec executeAs
         indices
         |> Result.bind (fun indices -> rows |> traverse (evaluateRow indices))
 
-    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
-        let finish candidate =
-            computeGeneratedRow runStore registry db table columns candidate
-            |> Result.bind (validateViewCandidate runStore db table columns)
+    let finishInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
+        computeGeneratedRow runStore registry db table columns candidate
+        |> Result.bind (validateViewCandidate runStore db table columns)
 
+    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (omitted: Set<int>) (candidate: Value[]) =
         evaluateFunctionalDefaults runStore db table columns omitted candidate
         |> Result.bind (fun candidate ->
             match beforeInsertTriggers runStore db table with
-            | [] -> finish candidate
+            | [] -> finishInsertRow runStore db table columns candidate
             | triggers ->
                 match fireTriggers runStore db table Before TriggerInsert triggers [ None, Some candidate ] with
                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
-                | _ -> finish candidate)
+                | _ -> finishInsertRow runStore db table columns candidate)
 
     /// Runs an insert branch's storage write and fires AFTER INSERT triggers with
     /// MySQL's statement atomicity: when triggers exist, the insert and
@@ -16180,6 +16202,7 @@ let rec executeAs
         (rowsValues: Value list list)
         (deferred: Set<int>)
         (prepareFor: Store -> ColumnDef list -> int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+        (finishFor: Store -> ColumnDef list -> int -> Value[] -> Result<Value[], StorageError>)
         =
         let beforeInsert = beforeInsertTriggers store db table
         let afterInsert = afterInsertTriggers store db table
@@ -16200,10 +16223,12 @@ let rec executeAs
                     cols
                     rowsValues
                     deferred
-                    (prepareFor targetStore tableColumns))
+                    (prepareFor targetStore tableColumns)
+                    (finishFor targetStore tableColumns))
         | true, Ok(tableColumns, _) ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             let prepare = prepareFor snapshot tableColumns
+            let finish = finishFor snapshot tableColumns
 
             let fire timing event (triggers: StoredTrigger list) rows =
                 if List.isEmpty triggers then
@@ -16235,6 +16260,7 @@ let rec executeAs
                             values
                             deferred
                             (prepare rowNumber)
+                            (finish rowNumber)
                         |> Result.mapError storageErr
                         |> Result.bind (fun prepared ->
                             replaceConflictRows snapshot db table prepared.Values
@@ -16282,6 +16308,8 @@ let rec executeAs
             Set.empty
             (fun targetStore tableColumns _ omitted candidate ->
                 prepareInsertRow targetStore db table tableColumns omitted candidate)
+            (fun targetStore tableColumns _ candidate ->
+                finishInsertRow targetStore db table tableColumns candidate)
 
     let executeViewWrite (view: UpdatableView) (target: ViewColumnTarget) statement =
         let retarget (access: ViewAccess) =
@@ -17641,8 +17669,11 @@ let rec executeAs
                                 candidate)
 
                     let cols = if load.Fields.IsEmpty then None else Some inputColumns
+                    let finishFor targetStore currentColumns _ candidate =
+                        finishInsertRow targetStore db table currentColumns candidate
+
                     if load.Replace then
-                        replaceEvaluatedWith db table cols rowsValues assignedIndices prepareFor
+                        replaceEvaluatedWith db table cols rowsValues assignedIndices prepareFor finishFor
                     else
                         finishInsert db table (fun targetStore ->
                             match scan targetStore db table with
@@ -17651,9 +17682,9 @@ let rec executeAs
                                 let prepare = prepareFor targetStore currentColumns
 
                                 if load.Ignore then
-                                    insertRowsIgnorePreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare
+                                    insertRowsIgnorePreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare (finishFor targetStore currentColumns)
                                 else
-                                    insertRowsPreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare)
+                                    insertRowsPreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare (finishFor targetStore currentColumns))
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
         let viewDb, viewName = splitQualified dbName table
@@ -17693,11 +17724,12 @@ let rec executeAs
                         | Error error -> Error error
                         | Ok(tableColumns, _) ->
                             let prepare = prepareInsertRow s db table tableColumns
+                            let finish = finishInsertRow s db table tableColumns
 
                             if ignoreDuplicates then
-                                insertRowsIgnorePrepared s db table cols rowsValues prepare
+                                insertRowsIgnorePrepared s db table cols rowsValues prepare finish
                             else
-                                insertRowsPrepared s db table cols rowsValues prepare)
+                                insertRowsPrepared s db table cols rowsValues prepare finish)
                 else
                     upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
 
@@ -17762,11 +17794,12 @@ let rec executeAs
                             | Error error -> Error error
                             | Ok(currentColumns, _) ->
                                 let prepare = prepareInsertRow s db table currentColumns
+                                let finish = finishInsertRow s db table currentColumns
 
                                 if ignoreDuplicates then
-                                    insertRowsIgnorePrepared s db table cols rowsValues prepare
+                                    insertRowsIgnorePrepared s db table cols rowsValues prepare finish
                                 else
-                                    insertRowsPrepared s db table cols rowsValues prepare)
+                                    insertRowsPrepared s db table cols rowsValues prepare finish)
                     else
                         upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate
 
@@ -18046,7 +18079,14 @@ let rec executeAs
                                 match fireTriggers targetStore db table Before TriggerUpdate beforeTriggers [ Some row, Some candidate ] with
                                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
                                 | _ ->
-                                    match validateViewCandidate targetStore db table columns candidate with
+                                    let validated =
+                                        computeGeneratedRow targetStore registry db table columns candidate
+                                        |> Result.bind (validateViewCandidate targetStore db table columns)
+
+                                    match validated with
+                                    | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                        Diagnostics.warning 3819 message
+                                        Ok row
                                     | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
                                         Diagnostics.warning 1369 message
                                         Ok row
@@ -18268,7 +18308,14 @@ let rec executeAs
                                                         [ Some row, Some candidate ]
                                                 )
                                                 |> Result.bind (fun () ->
-                                                    match validateViewCandidate snapshot tdb tname physicalColumns.[i] candidate with
+                                                    let validated =
+                                                        computeGeneratedRow snapshot registry tdb tname physicalColumns.[i] candidate
+                                                        |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i])
+
+                                                    match validated with
+                                                    | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                                        Diagnostics.warning 3819 message
+                                                        Ok row
                                                     | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
                                                         Diagnostics.warning 1369 message
                                                         Ok row

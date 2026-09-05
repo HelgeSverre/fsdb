@@ -56,6 +56,34 @@ let tests =
               Expect.contains session.LongDataOverflow 1 "one more parameter stream defers an overflow to EXECUTE"
               Expect.equal session.LongData.Count Fsdb.Limits.maxLongDataParameters "the rejected stream reserves no page"
 
+          testCase "prepared cursor retention is bounded across rows, cursors, and bytes"
+          <| fun _ ->
+              let fits cursors bytes rows retained = Fsdb.Server.preparedCursorFits cursors bytes rows retained
+              let ascii = String.replicate 1024 "a"
+              let retained = Fsdb.Server.preparedCursorBytes [] [ [ Some ascii; None ] ]
+
+              Expect.isGreaterThan retained 2048L "UTF-16 strings and retained row structure are charged"
+
+              Expect.isTrue
+                  (fits
+                      (Fsdb.Limits.maxPreparedCursors - 1)
+                      (Fsdb.Limits.maxPreparedCursorBytes - 1L)
+                      Fsdb.Limits.maxPreparedCursorRows
+                      1L)
+                  "each limit accepts its boundary"
+
+              Expect.isFalse
+                  (fits Fsdb.Limits.maxPreparedCursors 0L 0 0L)
+                  "one more retained cursor is rejected"
+
+              Expect.isFalse
+                  (fits 0 0L (Fsdb.Limits.maxPreparedCursorRows + 1) 0L)
+                  "one more retained row is rejected"
+
+              Expect.isFalse
+                  (fits 1 (Fsdb.Limits.maxPreparedCursorBytes - 1L) 1 2L)
+                  "aggregate retained bytes cannot exceed the session budget"
+
           // MySqlConnector always negotiates CLIENT_DEPRECATE_EOF; PDO/mysqlnd
           // can still require the legacy terminator sequence.
           for caps, label, terminator in

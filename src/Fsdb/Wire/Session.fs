@@ -201,7 +201,8 @@ type PreparedStmt =
 type PreparedCursor =
     { Metadata: ColumnMetadata list
       Rows: string option list array
-      Offset: int }
+      Offset: int
+      RetainedBytes: int64 }
 
 type HandlerCursorPosition =
     | Unpositioned
@@ -230,6 +231,7 @@ type XaAssociationState =
 
 type Savepoint =
     { Sequence: int
+      Seeded: bool
       BaseCatalog: Catalog
       Catalog: Catalog
       PendingEventCount: int
@@ -467,30 +469,41 @@ let private appendSessionStateChanges stateChanged (changes: Protocol.SessionSta
         { session with SessionStateChanges = session.SessionStateChanges @ changes }
 
 let private trackedSystemVariableNames (session: Session) =
-    session.Variables
-    |> Map.tryFind "session_track_system_variables"
-    |> Option.flatten
-    |> Option.defaultValue ""
-    |> fun value -> value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
-    |> Seq.map _.ToLowerInvariant()
-    |> Set.ofSeq
+    let value =
+        session.Variables
+        |> Map.tryFind "session_track_system_variables"
+        |> Option.flatten
+        |> Option.defaultValue ""
+
+    if
+        value.Length > Limits.maxTrackedSystemVariablesLength
+        || (value |> Seq.filter ((=) ',') |> Seq.length) >= Limits.maxTrackedSystemVariableNames
+    then
+        Set.empty
+    else
+        value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+        |> Seq.map _.ToLowerInvariant()
+        |> Set.ofSeq
 
 let trackSystemVariableAssignments stateChanged (names: string list) (session: Session) =
-    let tracked = trackedSystemVariableNames session
-    let tracksAll = Set.contains "*" tracked
+    if session.Capabilities &&& ClientSessionTrack = 0u then
+        session
+    else
+        let tracked = trackedSystemVariableNames session
+        let tracksAll = Set.contains "*" tracked
 
-    names
-    |> List.distinct
-    |> List.choose (fun name ->
-        let name = name.ToLowerInvariant()
+        names
+        |> List.distinct
+        |> List.choose (fun name ->
+            let name = name.ToLowerInvariant()
 
-        if tracksAll || Set.contains name tracked then
-            session.Variables
-            |> Map.tryFind name
-            |> Option.map (fun value -> Protocol.SystemVariableChanged(name, sessionTrackValue name value))
-        else
-            None)
-    |> fun changes -> appendSessionStateChanges stateChanged changes session
+            if tracksAll || Set.contains name tracked then
+                session.Variables
+                |> Map.tryFind name
+                |> Option.map (fun value -> Protocol.SystemVariableChanged(name, sessionTrackValue name value))
+            else
+                None)
+        |> fun changes -> appendSessionStateChanges stateChanged changes session
 
 let trackSchemaAssignment (schema: string) (session: Session) =
     let changes =
