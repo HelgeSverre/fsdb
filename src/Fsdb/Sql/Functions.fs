@@ -221,6 +221,9 @@ let lookupScalarMetadata (name: string) (registry: Registry) : ColumnMetadata op
 let internal lookupScalarParameters (name: string) (registry: Registry) : ColumnMetadata list option =
     Map.tryFind (name.ToUpperInvariant()) registry.ScalarParameters
 
+let internal lookupScalarParametersNormalized (name: string) (registry: Registry) : ColumnMetadata list option =
+    Map.tryFind name registry.ScalarParameters
+
 let internal isTextArgument (name: string) index (registry: Registry) =
     registry.TextArguments
     |> Map.tryFind (name.ToUpperInvariant())
@@ -1069,11 +1072,7 @@ let rec private normalizeJsonSchema (node: JsonNode) : unit =
     match node with
     | :? JsonObject as obj ->
         match obj["$ref"] with
-        | :? JsonValue as value ->
-            match value.TryGetValue<string>() with
-            | true, reference when not (reference.StartsWith "#") ->
-                raise (SqlError(1235, "This version of MySQL doesn't yet support 'references in JSON Schema'"))
-            | _ -> ()
+        | :? JsonValue -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'references in JSON Schema'"))
         | _ -> ()
 
         obj |> Seq.iter (fun entry -> normalizeJsonSchema entry.Value)
@@ -1123,32 +1122,6 @@ let private tryResolveJsonPointer (root: JsonObject) (reference: string) =
                     | _ -> None))
             (Some(root :> JsonNode))
     | _ -> None
-
-let private exceedsJsonSchemaReferenceDepth (root: JsonObject) =
-    let visiting = System.Collections.Generic.HashSet<JsonNode>(HashIdentity.Reference)
-
-    let rec visit remainingDepth (node: JsonNode) =
-        if remainingDepth < 0 then
-            true
-        elif isNull node then
-            false
-        elif not (visiting.Add node) then
-            true
-        else
-            let recursive =
-                match node with
-                | :? JsonObject as obj ->
-                    match obj["$ref"] |> tryJsonString with
-                    | Some reference when reference.StartsWith "#" ->
-                        tryResolveJsonPointer root reference |> Option.exists (visit (remainingDepth - 1))
-                    | _ -> obj |> Seq.exists (fun property -> property.Key <> "$ref" && visit (remainingDepth - 1) property.Value)
-                | :? JsonArray as array -> array |> Seq.exists (visit (remainingDepth - 1))
-                | _ -> false
-
-            visiting.Remove node |> ignore
-            recursive
-
-    visit maxJsonSchemaDepth root
 
 type private JsonSchemaRegexBudget =
     { Started: System.Diagnostics.Stopwatch
@@ -1591,9 +1564,6 @@ let private jsonSchemaValidation functionName schemaValue documentValue =
         match schemaNode with
         | :? JsonObject as schema ->
             normalizeJsonSchema schema
-
-            if exceedsJsonSchemaReferenceDepth schema then
-                raise (SqlError(3157, "The JSON document exceeds the maximum depth."))
 
             let cleanSchema = stripJsonSchemaRegularExpressions schema :?> JsonObject
             let patternFailures = ResizeArray<JsonSchemaFailure>()
@@ -3809,6 +3779,7 @@ let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. 16 .. padded.Length - 16 do
+                Limits.checkQueryCancellation offset
                 Array.Copy(padded, offset, block, 0, 16)
 
                 if configuration.CipherMode = AesCbc then
@@ -3830,6 +3801,7 @@ let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for i in 0 .. input.Length - 1 do
+                Limits.checkQueryCancellation i
                 let mutable outputByte = 0uy
 
                 for bit in 7 .. -1 .. 0 do
@@ -3854,6 +3826,7 @@ let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. segmentLength .. input.Length - 1 do
+                Limits.checkQueryCancellation offset
                 let length = min segmentLength (input.Length - offset)
                 let encrypted = aesEncryptBlock key register
                 let feedback = Array.zeroCreate length
@@ -3876,6 +3849,7 @@ let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. 16 .. input.Length - 1 do
+                Limits.checkQueryCancellation offset
                 let length = min 16 (input.Length - offset)
                 let next = aesEncryptBlock key register
                 Array.Copy(next, register, 16)
@@ -3902,6 +3876,7 @@ let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
             try
                 for offset in 0 .. 16 .. input.Length - 16 do
+                    Limits.checkQueryCancellation offset
                     Array.Copy(input, offset, block, 0, 16)
                     let decrypted = aesDecryptBlock key block
 
@@ -3923,6 +3898,7 @@ let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for i in 0 .. input.Length - 1 do
+                Limits.checkQueryCancellation i
                 let mutable outputByte = 0uy
 
                 for bit in 7 .. -1 .. 0 do
@@ -3946,6 +3922,7 @@ let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. segmentLength .. input.Length - 1 do
+                Limits.checkQueryCancellation offset
                 let length = min segmentLength (input.Length - offset)
                 let encrypted = aesEncryptBlock key register
                 let feedback = input.[offset .. offset + length - 1]
@@ -3965,6 +3942,7 @@ let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) 
 
         try
             for offset in 0 .. 16 .. input.Length - 1 do
+                Limits.checkQueryCancellation offset
                 let length = min 16 (input.Length - offset)
                 let next = aesEncryptBlock key register
                 Array.Copy(next, register, 16)
@@ -4015,7 +3993,19 @@ let private aesArguments (functionName: string) (configuration: AesConfiguration
                 | _ :: kdfName :: options -> deriveAesKey reportedFunctionName configuration.KeyLength keyMaterial kdfName options
                 | _ -> aesKeyWithoutKdf configuration.KeyLength keyMaterial
 
-            Some(aesBytes data, derivedKey, initializationVector)
+            let input = aesBytes data
+            let maximumInput =
+                match configuration.CipherMode with
+                | AesCfb1 -> Limits.maxAesCfb1Bytes
+                | AesCfb8 -> Limits.maxAesCfb8Bytes
+                | _ -> Limits.maxAllowedPacket
+
+            if input.Length > maximumInput then
+                CryptographicOperations.ZeroMemory derivedKey
+                CryptographicOperations.ZeroMemory initializationVector
+                raise (SqlError(1153, sprintf "Input to %s exceeds the work limit for the selected block_encryption_mode" reportedFunctionName))
+
+            Some(input, derivedKey, initializationVector)
     | _ -> aesParameterCountError functionName
 
 /// Builds an AES function bound to one session's `block_encryption_mode`.

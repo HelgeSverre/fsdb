@@ -60,9 +60,7 @@ let private integerFunctions =
     set [ "FROM_DAYS"; "MAKEDATE"; "PERIOD_ADD"; "PERIOD_DIFF" ]
 
 let private functionParameterMetadata (registry: Registry) (name: string) index =
-    let name = name.ToUpperInvariant()
-
-    match Functions.lookupScalarParameters name registry with
+    match Functions.lookupScalarParametersNormalized name registry with
     | Some parameters -> parameters |> List.tryItem index |> Option.orElse (Some generic)
     | None when Set.contains name floatingPointFunctions ->
         Some floatingPoint
@@ -241,6 +239,8 @@ let parameterDefinitions
             inferExpected (inferred second |> Option.orElse expected |> Option.orElse (Some generic)) first
             inferExpected (inferred first |> Option.orElse expected |> Option.orElse (Some generic)) second
         | FuncCall(name, values) ->
+            let name = name.ToUpperInvariant()
+
             values
             |> List.iteri (fun index value ->
                 inferExpected (functionParameterMetadata registry name index) value)

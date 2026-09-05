@@ -682,34 +682,85 @@ let geometryDistancePlanar (first: Geometry) (second: Geometry) : float option =
     if List.isEmpty firstPoints || List.isEmpty secondPoints then
         None
     else
+        let mutable work = 0
+
+        let consumeWork () =
+            if work >= Fsdb.Limits.maxGeometryDistanceComparisons then
+                raise (
+                    Fsdb.Diagnostics.EvaluationError(
+                        1235,
+                        "This version of MySQL doesn't yet support geometry distance computations beyond its resource limit"
+                    )
+                )
+
+            Fsdb.Limits.checkQueryCancellation work
+            work <- work + 1
+
+        let withCancellation predicate =
+            consumeWork ()
+            predicate ()
+
+        let ringContainsWithBudget point ring =
+            let edges = segments ring
+
+            if edges |> List.exists (fun edge -> withCancellation (fun () -> pointOnSegment point edge)) then
+                true
+            else
+                let x, y = point
+
+                edges
+                |> List.fold
+                    (fun inside ((x1, y1), (x2, y2)) ->
+                        consumeWork ()
+
+                        if (y1 > y) <> (y2 > y) && x < (x2 - x1) * (y - y1) / (y2 - y1) + x1 then
+                            not inside
+                        else
+                            inside)
+                    false
+
+        let polygonContainsWithBudget point =
+            function
+            | shell :: holes ->
+                ringContainsWithBudget point shell
+                && not (holes |> List.exists (ringContainsWithBudget point))
+            | [] -> false
+
         let firstSegments = shapeSegments first.Shape
         let secondSegments = shapeSegments second.Shape
         let firstPolygons = shapePolygons first.Shape
         let secondPolygons = shapePolygons second.Shape
-        let firstInsideSecond = firstPoints |> List.exists (fun point -> secondPolygons |> List.exists (polygonContains point))
-        let secondInsideFirst = secondPoints |> List.exists (fun point -> firstPolygons |> List.exists (polygonContains point))
+        let firstInsideSecond = firstPoints |> List.exists (fun point -> secondPolygons |> List.exists (polygonContainsWithBudget point))
+        let secondInsideFirst = secondPoints |> List.exists (fun point -> firstPolygons |> List.exists (polygonContainsWithBudget point))
         let pointTouchesSegment =
-            (firstPoints |> List.exists (fun point -> secondSegments |> List.exists (pointOnSegment point)))
-            || (secondPoints |> List.exists (fun point -> firstSegments |> List.exists (pointOnSegment point)))
+            (firstPoints |> List.exists (fun point -> secondSegments |> List.exists (fun segment -> withCancellation (fun () -> pointOnSegment point segment))))
+            || (secondPoints |> List.exists (fun point -> firstSegments |> List.exists (fun segment -> withCancellation (fun () -> pointOnSegment point segment))))
         let intersects =
             firstSegments
-            |> List.exists (fun firstSegment -> secondSegments |> List.exists (segmentsIntersect firstSegment))
+            |> List.exists (fun firstSegment -> secondSegments |> List.exists (fun secondSegment -> withCancellation (fun () -> segmentsIntersect firstSegment secondSegment)))
 
         if firstInsideSecond || secondInsideFirst || pointTouchesSegment || intersects then
             Some 0.0
         else
-            let pointDistances =
-                [ for firstPoint in firstPoints do
-                      for secondPoint in secondPoints do
-                          euclidean (fst firstPoint - fst secondPoint) (snd firstPoint - snd secondPoint)
-                  for point in firstPoints do
-                      for segment in secondSegments do
-                          pointSegmentDistance point segment
-                  for point in secondPoints do
-                      for segment in firstSegments do
-                          pointSegmentDistance point segment ]
+            let mutable minimum = Double.PositiveInfinity
 
-            pointDistances |> List.min |> Some
+            let consider distance =
+                consumeWork ()
+                minimum <- min minimum distance
+
+            for firstPoint in firstPoints do
+                for secondPoint in secondPoints do
+                    consider (euclidean (fst firstPoint - fst secondPoint) (snd firstPoint - snd secondPoint))
+
+            for point in firstPoints do
+                for segment in secondSegments do
+                    consider (pointSegmentDistance point segment)
+
+            for point in secondPoints do
+                for segment in firstSegments do
+                    consider (pointSegmentDistance point segment)
+
+            Some minimum
 
 let geometryIntersectsPlanar (first: Geometry) (second: Geometry) =
     geometryDistancePlanar first second |> Option.map ((=) 0.0)
