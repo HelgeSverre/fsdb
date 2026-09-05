@@ -539,6 +539,10 @@ let tests =
               | Err(1820, message) -> Expect.stringContains message "reset your password" "sandbox denial"
               | other -> failtestf "expected password sandbox 1820, got %A" other
 
+              match handle expired "ALTER USER expired IDENTIFIED BY 'new-secret' PASSWORD EXPIRE NEVER" |> snd with
+              | Err(1820, _) -> ()
+              | other -> failtestf "expected account-policy changes to remain sandboxed, got %A" other
+
               let active, reset = handle expired "SET PASSWORD = 'new-secret'"
               Expect.equal reset (Affected 0UL) "password reset"
               Expect.isFalse active.PasswordExpired "sandbox cleared"
@@ -1053,6 +1057,10 @@ let tests =
               | Err(3628, _) -> ()
               | other -> failtestf "expected mandatory-account drop refusal, got %A" other
 
+              match handle root "RENAME USER mandatory_parent TO renamed_mandatory" |> snd with
+              | Err(3628, _) -> ()
+              | other -> failtestf "expected mandatory-account rename refusal, got %A" other
+
               let root, defaulted = handle root "SET DEFAULT ROLE mandatory_parent TO alice"
               Expect.equal defaulted (Affected 0UL) "mandatory roles can be defaults"
 
@@ -1126,6 +1134,39 @@ let tests =
                           "own password change works without privileges"
                   | None -> failtest "mallory vanished"
               | other -> failtestf "expected own-password SET PASSWORD to succeed, got %A" other
+
+          testCase "self-service ALTER USER changes only the password"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+
+              let _, _ =
+                  handle
+                      root
+                      "CREATE USER self_policy REQUIRE SSL WITH MAX_QUERIES_PER_HOUR 7 PASSWORD EXPIRE INTERVAL 30 DAY ACCOUNT LOCK"
+
+              let account = { create 2 store with User = "self_policy" }
+
+              match
+                  handle
+                      account
+                      "ALTER USER self_policy IDENTIFIED BY 'new-secret' REQUIRE NONE WITH MAX_QUERIES_PER_HOUR 0 PASSWORD EXPIRE NEVER ACCOUNT UNLOCK"
+                  |> snd
+              with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected self-service policy changes to require CREATE USER, got %A" other
+
+              match handle account "ALTER USER self_policy IDENTIFIED BY 'new-secret'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected a password-only self-service change, got %A" other
+
+              match handle root "SHOW CREATE USER self_policy" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) ->
+                  Expect.stringContains ddl "REQUIRE SSL" "TLS policy remains"
+                  Expect.stringContains ddl "MAX_QUERIES_PER_HOUR 7" "resource policy remains"
+                  Expect.stringContains ddl "PASSWORD EXPIRE INTERVAL 30 DAY" "expiry policy remains"
+                  Expect.stringContains ddl "ACCOUNT LOCK" "lock policy remains"
+              | other -> failtestf "expected the unchanged account policy, got %A" other
 
           testCase "DROP DATABASE mysql is rejected with 3552 like a real system schema"
           <| fun _ ->
@@ -1341,8 +1382,8 @@ let tests =
                   let grants = rows |> List.map (List.head >> Option.get)
                   Expect.contains
                       grants
-                      "GRANT USAGE ON *.* TO `actor`@`%` WITH GRANT OPTION"
-                      "account authority"
+                      "GRANT USAGE ON *.* TO `actor`@`%`"
+                      "proxy delegation does not become global grant authority"
                   Expect.contains
                       grants
                       "GRANT PROXY ON `target`@`localhost` TO `actor`@`%` WITH GRANT OPTION"
@@ -1366,8 +1407,8 @@ let tests =
                   let grants = rows |> List.map (List.head >> Option.get)
                   Expect.contains
                       grants
-                      "GRANT USAGE ON *.* TO `actor`@`%` WITH GRANT OPTION"
-                      "global grant authority remains"
+                      "GRANT USAGE ON *.* TO `actor`@`%`"
+                      "global grant authority remains absent"
                   Expect.contains
                       grants
                       "GRANT PROXY ON `target`@`localhost` TO `actor`@`%`"
@@ -1386,8 +1427,13 @@ let tests =
               let store = Fsdb.Storage.create ()
               let root = create 1 store
               let root, _ = handle root "CREATE USER 'target'@'localhost', 'other'@'localhost', 'actor'@'%', 'delegate'@'%'"
+              let root, _ = handle root "GRANT SELECT ON secret_data.* TO 'actor'@'%'"
               let root, _ = handle root "GRANT PROXY ON 'target'@'localhost' TO 'actor'@'%' WITH GRANT OPTION"
               let actor = { create 2 store with User = "actor"; AccountHost = "%" }
+
+              match handle actor "GRANT SELECT ON secret_data.* TO 'delegate'@'%'" |> snd with
+              | Err(code, _) when code = 1044 || code = 1227 -> ()
+              | other -> failtestf "expected proxy delegation not to grant static delegation, got %A" other
 
               match handle actor "GRANT PROXY ON 'target'@'localhost' TO 'delegate'@'%'" |> snd with
               | Affected 0UL -> ()
@@ -1478,6 +1524,14 @@ let tests =
               match handle grantor "GRANT BACKUP_ADMIN ON *.* TO target" |> snd with
               | Affected 0UL -> ()
               | other -> failtestf "expected grantable dynamic privilege to delegate, got %A" other
+
+              match handle grantor "REVOKE GRANT OPTION, BACKUP_ADMIN ON *.* FROM root" |> snd with
+              | Err(_, message) -> Expect.stringContains message "Access denied" "static grant option remains protected"
+              | other -> failtestf "expected dynamic authority not to revoke static grant option, got %A" other
+
+              match handle root "SELECT Grant_priv FROM mysql.user WHERE User = 'root' AND Host = '%'" |> snd with
+              | ResultSet(_, [ [ Some "Y" ] ]) -> ()
+              | other -> failtestf "expected root's static grant option to remain, got %A" other
 
               let grantor, _ = handle grantor "REVOKE BACKUP_ADMIN ON *.* FROM target"
 

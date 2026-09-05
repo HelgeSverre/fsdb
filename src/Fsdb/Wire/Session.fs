@@ -11,6 +11,38 @@ open Fsdb.Storage
 open Fsdb.Value
 open Fsdb.Sql
 
+type LongDataBuffer() =
+    let pageSize = 1024
+    let pages = ResizeArray<byte[]>()
+    let mutable length = 0
+
+    member _.Length = length
+    member _.ReservedBytes = int64 pages.Count * int64 pageSize
+
+    member _.Append(bytes: byte[]) =
+        let mutable sourceOffset = 0
+
+        while sourceOffset < bytes.Length do
+            if length = pages.Count * pageSize then
+                pages.Add(Array.zeroCreate pageSize)
+
+            let pageOffset = length % pageSize
+            let copied = min (pageSize - pageOffset) (bytes.Length - sourceOffset)
+            Array.Copy(bytes, sourceOffset, pages.[pages.Count - 1], pageOffset, copied)
+            sourceOffset <- sourceOffset + copied
+            length <- length + copied
+
+    member _.ToArray() =
+        let bytes = Array.zeroCreate<byte> length
+        let mutable destinationOffset = 0
+
+        for page in pages do
+            let copied = min pageSize (length - destinationOffset)
+            Array.Copy(page, 0, bytes, destinationOffset, copied)
+            destinationOffset <- destinationOffset + copied
+
+        bytes
+
 /// Session defaults not backed by a live Limits setting.
 let defaultVariables: Map<string, string option> =
     Map.ofList
@@ -169,7 +201,8 @@ type PreparedStmt =
 type PreparedCursor =
     { Metadata: ColumnMetadata list
       Rows: string option list array
-      Offset: int }
+      Offset: int
+      RetainedBytes: int64 }
 
 type HandlerCursorPosition =
     | Unpositioned
@@ -198,6 +231,7 @@ type XaAssociationState =
 
 type Savepoint =
     { Sequence: int
+      Seeded: bool
       BaseCatalog: Catalog
       Catalog: Catalog
       PendingEventCount: int
@@ -313,14 +347,13 @@ type Session =
       RoutineStack: (string * string * string) list
       /// The next id COM_STMT_PREPARE will assign.
       NextStmtId: int
-      /// Bytes buffered by COM_STMT_SEND_LONG_DATA, keyed by (statement id,
-      /// param index), newest chunk first so each arrival is constant-time.
-      /// EXECUTE reverses and concatenates once, then clears the chunks.
-      LongData: Map<int * int, byte[] list>
-      /// Total bytes held in `LongData` for constant-time limit checks.
+      /// Paged COM_STMT_SEND_LONG_DATA buffers keyed by statement and param.
+      LongData: Map<int * int, LongDataBuffer>
+      /// Logical payload bytes held in `LongData` for limit checks.
       LongDataBytes: int64
-      /// Overflows surface on EXECUTE because SEND_LONG_DATA has no reply.
-      LongDataOverflow: Set<int * int>
+      /// Statements with an overflow surface it on EXECUTE because
+      /// SEND_LONG_DATA has no reply.
+      LongDataOverflow: Set<int>
       /// Embedding functions layered over built-ins by QueryHandler.
       CustomFunctions: Fsdb.Functions.Registry
       /// Effective handshake capabilities.
@@ -436,30 +469,41 @@ let private appendSessionStateChanges stateChanged (changes: Protocol.SessionSta
         { session with SessionStateChanges = session.SessionStateChanges @ changes }
 
 let private trackedSystemVariableNames (session: Session) =
-    session.Variables
-    |> Map.tryFind "session_track_system_variables"
-    |> Option.flatten
-    |> Option.defaultValue ""
-    |> fun value -> value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
-    |> Seq.map _.ToLowerInvariant()
-    |> Set.ofSeq
+    let value =
+        session.Variables
+        |> Map.tryFind "session_track_system_variables"
+        |> Option.flatten
+        |> Option.defaultValue ""
+
+    if
+        value.Length > Limits.maxTrackedSystemVariablesLength
+        || (value |> Seq.filter ((=) ',') |> Seq.length) >= Limits.maxTrackedSystemVariableNames
+    then
+        Set.empty
+    else
+        value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+        |> Seq.map _.ToLowerInvariant()
+        |> Set.ofSeq
 
 let trackSystemVariableAssignments stateChanged (names: string list) (session: Session) =
-    let tracked = trackedSystemVariableNames session
-    let tracksAll = Set.contains "*" tracked
+    if session.Capabilities &&& ClientSessionTrack = 0u then
+        session
+    else
+        let tracked = trackedSystemVariableNames session
+        let tracksAll = Set.contains "*" tracked
 
-    names
-    |> List.distinct
-    |> List.choose (fun name ->
-        let name = name.ToLowerInvariant()
+        names
+        |> List.distinct
+        |> List.choose (fun name ->
+            let name = name.ToLowerInvariant()
 
-        if tracksAll || Set.contains name tracked then
-            session.Variables
-            |> Map.tryFind name
-            |> Option.map (fun value -> Protocol.SystemVariableChanged(name, sessionTrackValue name value))
-        else
-            None)
-    |> fun changes -> appendSessionStateChanges stateChanged changes session
+            if tracksAll || Set.contains name tracked then
+                session.Variables
+                |> Map.tryFind name
+                |> Option.map (fun value -> Protocol.SystemVariableChanged(name, sessionTrackValue name value))
+            else
+                None)
+        |> fun changes -> appendSessionStateChanges stateChanged changes session
 
 let trackSchemaAssignment (schema: string) (session: Session) =
     let changes =
