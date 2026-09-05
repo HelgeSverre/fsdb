@@ -165,6 +165,11 @@ let private columnCommentSnapshot (table: string) (comment: string) =
     snapshot.WriteUInt32LE(crc32 payload)
     snapshot.ToArray()
 
+let private fsn1ColumnCommentSnapshot (table: string) (comment: string) =
+    let bytes = columnCommentSnapshot table comment
+    bytes.[3] <- byte '1'
+    bytes
+
 let private legacyCreateTableWalRecord (table: string) =
     let payload = Writer()
     payload.WriteByte 0x04uy
@@ -179,6 +184,62 @@ let private legacyCreateTableWalRecord (table: string) =
     payload.WriteByte 0uy
     payload.WriteByte 0uy
     payload.WriteByte 0uy
+    let payload = payload.ToArray()
+    let record = Writer()
+    record.WriteInt32LE payload.Length
+    record.WriteUInt32LE(crc32 payload)
+    record.WriteBytes payload
+    record.ToArray()
+
+let private v3CreateTableWalRecord (table: string) (tableComment: string option) =
+    let payload = Writer()
+    payload.WriteByte 0x0Auy
+    payload.WriteLenEncString defaultDatabase
+    payload.WriteByte 0x03uy
+    payload.WriteLenEncString table
+    payload.WriteInt32LE 1
+    writeLegacyColumn payload "id"
+    payload.WriteLenEncString "v3 column"
+    payload.WriteInt32LE 0
+    payload.WriteInt32LE 0
+    payload.WriteByte 0uy
+    payload.WriteByte 0uy
+    payload.WriteByte 0uy
+    payload.WriteByte 0uy
+    tableComment |> Option.iter (fun comment -> payload.WriteByte 1uy; payload.WriteLenEncString comment)
+    payload.WriteInt64LE 0L
+    let payload = payload.ToArray()
+    let record = Writer()
+    record.WriteInt32LE payload.Length
+    record.WriteUInt32LE(crc32 payload)
+    record.WriteBytes payload
+    record.ToArray()
+
+let private legacyAlterIndexesWalRecord (table: string) (column: string) (addColumn: bool) =
+    let payload = Writer()
+    payload.WriteByte 0x14uy
+    payload.WriteLenEncString defaultDatabase
+    payload.WriteByte 0x05uy
+    payload.WriteLenEncString table
+    payload.WriteInt32LE(if addColumn then 3 else 2)
+
+    if addColumn then
+        payload.WriteByte 0x01uy
+        writeLegacyColumn payload column
+        payload.WriteLenEncString ""
+        payload.WriteByte 0uy
+        payload.WriteByte 0x01uy
+
+    payload.WriteByte 0x07uy
+    payload.WriteLenEncString "ix_literal"
+    payload.WriteInt32LE 1
+    payload.WriteLenEncString column
+    payload.WriteByte 0uy
+    payload.WriteByte 0uy
+    payload.WriteByte 0x0Buy
+    payload.WriteInt32LE 1
+    payload.WriteLenEncString column
+    payload.WriteInt64LE 0L
     let payload = payload.ToArray()
     let record = Writer()
     record.WriteInt32LE payload.Length
@@ -407,7 +468,7 @@ let tests =
               snapshotNow dir store
               Expect.equal (rowsOf (load dir) defaultDatabase "times") [ [| value |] ] "snapshot replay"
 
-          testCase "prepared XA branches survive restart and defer snapshots"
+          testCase "prepared XA branches survive snapshot rotation and restart"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -428,9 +489,13 @@ let tests =
               let _ = run session "XA PREPARE 'durable', 'commit', 42"
 
               snapshotNow dir store
+              Expect.equal (FileInfo(walPath dir).Length) 0L "a prepared branch no longer prevents WAL truncation"
               let recovered = load dir
               attach dir recovered
-              let recoverySession = Fsdb.Session.create 2 recovered
+              snapshotNow dir recovered
+              let checkpointedAgain = load dir
+              attach dir checkpointedAgain
+              let recoverySession = Fsdb.Session.create 2 checkpointedAgain
 
               match handle recoverySession "XA RECOVER CONVERT XID" |> snd with
               | ResultSet(_, [ [ Some "42"; Some "7"; Some "6"; Some "0x64757261626C65636F6D6D6974" ] ]) -> ()
@@ -476,6 +541,50 @@ let tests =
               match handle (Fsdb.Session.create 7 (load dir)) "XA RECOVER" |> snd with
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected the read-only completed branch to stay gone, got %A" other
+
+          TestSupport.processGlobalCase "automatic WAL rotation checkpoints prepared XA branches"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "wal_rotate_entries", "0" ] (fun () ->
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+
+                  let run session sql =
+                      let next, result = handle session sql
+
+                      match result with
+                      | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                      | _ -> next
+
+                  let preparedSession = Fsdb.Session.create 1 store
+                  let preparedSession = run preparedSession "CREATE TABLE xa_rotating (id INT PRIMARY KEY)"
+                  let preparedSession = run preparedSession "XA START 'rotating'"
+                  let preparedSession = run preparedSession "INSERT INTO xa_rotating VALUES (1)"
+                  let preparedSession = run preparedSession "XA END 'rotating'"
+                  let _ = run preparedSession "XA PREPARE 'rotating'"
+
+                  let committedSession = Fsdb.Session.create 2 store
+                  let _ = run committedSession "INSERT INTO xa_rotating VALUES (2)"
+
+                  Expect.equal (FileInfo(walPath dir).Length) 0L "automatic rotation truncates the WAL"
+
+                  let recovered = load dir
+                  attach dir recovered
+                  let recoverySession = Fsdb.Session.create 3 recovered
+
+                  match handle recoverySession "XA RECOVER CONVERT XID" |> snd with
+                  | ResultSet(_, [ [ Some "1"; Some "8"; Some "0"; Some "0x726F746174696E67" ] ]) -> ()
+                  | other -> failtestf "expected the prepared branch after automatic rotation, got %A" other
+
+                  match rowsOf recovered defaultDatabase "xa_rotating" with
+                  | [ [| VInt 2L |] ] -> ()
+                  | other -> failtestf "expected only the independently committed row before XA completion, got %A" other
+
+                  let _ = run recoverySession "XA COMMIT 'rotating'"
+
+                  match rowsOf (load dir) defaultDatabase "xa_rotating" |> List.sort with
+                  | [ [| VInt 1L |]; [| VInt 2L |] ] -> ()
+                  | other -> failtestf "expected both rows after recovered XA completion, got %A" other)
 
           testCase "attach + reload preserves BIT(64) boundary values"
           <| fun _ ->
@@ -1076,8 +1185,6 @@ let tests =
           testCase "pre-proxy snapshots restore compatibility system catalogs"
           <| fun _ ->
               let dir = tempDataDir ()
-              let store = load dir
-              let mysql = store.Databases.["mysql"]
               let removedTables =
                   [ "component"
                     "engine_cost"
@@ -1099,15 +1206,7 @@ let tests =
                     "slow_log"
                     "time_zone_name" ]
 
-              mysql.Value <- removedTables |> List.fold (fun tables name -> Map.remove name tables) mysql.Value
-              truncate store "mysql" "proxies_priv" |> ignore
-              snapshotNow dir store
-
-              do
-                  use snapshot = new FileStream(snapshotPath dir, FileMode.Open, FileAccess.Write)
-                  snapshot.Position <- 3L
-                  snapshot.WriteByte(byte '6')
-                  snapshot.Flush()
+              File.WriteAllBytes(snapshotPath dir, legacySnapshot "pre_proxy")
 
               let reloaded = load dir
 
@@ -1323,13 +1422,7 @@ let tests =
           testCase "dynamic privilege bootstrap migrates legacy snapshots without undoing current revokes"
           <| fun _ ->
               let legacyDir = tempDataDir ()
-              let legacy = create ()
-              Fsdb.Auth.revoke legacy [ "XA_RECOVER_ADMIN" ] Fsdb.Auth.Global [ "root", "%" ] |> ignore
-              snapshotNow legacyDir legacy
-
-              let legacyBytes = File.ReadAllBytes(snapshotPath legacyDir)
-              legacyBytes.[3] <- byte '5'
-              File.WriteAllBytes(snapshotPath legacyDir, legacyBytes)
+              File.WriteAllBytes(snapshotPath legacyDir, legacySnapshot "pre_dynamic")
 
               let migrated = load legacyDir
               Expect.isTrue
@@ -1805,6 +1898,66 @@ let tests =
               Expect.equal altered (Affected 0UL) "visibility altered"
               assertOrder (load dir) true "WAL retains altered visibility"
 
+          testCase "index metadata tags cannot reinterpret crafted column names after recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let names = [ "\u0000D:\u0000E:not-base64"; "\u0000E:not-base64"; "\u00011:other"; "other" ]
+              let columns = names |> List.map (fun name -> mkCol name (TInt false))
+              let indexes =
+                  names
+                  |> List.mapi (fun i name ->
+                      { Name = sprintf "ix_%d" i
+                        KeyColumns = [ { Name = name; PrefixLength = None; Transform = None; Direction = Asc } ]
+                        Unique = true
+                        Visible = true
+                        Kind = BTree })
+
+              createTable store defaultDatabase "tagged_names" columns indexes [] None None |> Result.mapError (failtestf "%A") |> ignore
+
+              let assertNames label (recovered: Store) =
+                  let table = recovered.Catalog.[defaultDatabase].[normalizeTableName "tagged_names"]
+                  let recoveredNames = table.Indexes |> List.map (fun index -> index.KeyColumns.Head.Name)
+                  Expect.equal recoveredNames names label
+
+              assertNames "WAL preserves literal key-part names" (load dir)
+              snapshotNow dir store
+              assertNames "snapshot preserves literal key-part names" (load dir)
+
+          testCase "legacy ALTER index records resolve marker-shaped names against table columns"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let markerName = "\u00011:other"
+              createTable store defaultDatabase "legacy_alter" [ mkCol markerName (TInt false); mkCol "other" (TInt false) ] [] [] None None
+              |> Result.mapError (failtestf "%A")
+              |> ignore
+              File.AppendAllBytes(walPath dir, legacyAlterIndexesWalRecord "legacy_alter" markerName false)
+
+              let table = (load dir).Catalog.[defaultDatabase].[normalizeTableName "legacy_alter"]
+              let secondary = table.Indexes |> List.find (fun index -> index.Name = "ix_literal")
+              Expect.equal secondary.KeyColumns [ { Name = markerName; PrefixLength = None; Transform = None; Direction = Asc } ] "legacy ADD INDEX remains literal"
+              Expect.equal (primaryKeyColumns table) [ markerName ] "legacy ADD PRIMARY KEY remains literal"
+
+          testCase "legacy compound ALTER decoding tracks columns added before indexes"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let markerName = "\u00011:other"
+              createTable store defaultDatabase "legacy_compound_alter" [ mkCol "other" (TInt false) ] [] [] None None
+              |> Result.mapError (failtestf "%A")
+              |> ignore
+              File.AppendAllBytes(walPath dir, legacyAlterIndexesWalRecord "legacy_compound_alter" markerName true)
+
+              let table = (load dir).Catalog.[defaultDatabase].[normalizeTableName "legacy_compound_alter"]
+              let secondary = table.Indexes |> List.find (fun index -> index.Name = "ix_literal")
+              Expect.equal secondary.KeyColumns.Head.Name markerName "ADD INDEX resolves the preceding ADD COLUMN"
+              Expect.equal secondary.KeyColumns.Head.PrefixLength None "the marker is not prefix metadata"
+              Expect.equal (primaryKeyColumns table) [ markerName ] "ADD PRIMARY KEY resolves the preceding ADD COLUMN"
+
           testCase "qualified foreign keys survive WAL and snapshot recovery"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -1923,6 +2076,29 @@ let tests =
               let table = reloaded.Catalog.[defaultDatabase].[normalizeTableName "documented"]
               Expect.equal table.Columns.Head.Comment "legacy column" "the FSN2 column comment survives"
               Expect.equal table.TableComment "" "FSN2 predates table comments"
+
+          testCase "FSN1 snapshots from the comment-writing transition remain readable"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              File.WriteAllBytes(snapshotPath dir, fsn1ColumnCommentSnapshot "documented" "FSN1 column")
+
+              let table = (load dir).Catalog.[defaultDatabase].[normalizeTableName "documented"]
+              Expect.equal table.Columns.Head.Comment "FSN1 column" "the transitional FSN1 comment survives"
+
+          testCase "both historical V3 CREATE TABLE layouts replay without truncating later records"
+          <| fun _ ->
+              for suffix, tableComment in [ "before", None; "after", Some "V3 table" ] do
+                  let dir = tempDataDir ()
+                  let table = "v3_" + suffix
+                  let following = encodeWalRecord (SchemaChanged(defaultDatabase, CreateDatabase("after_v3", false, [])))
+                  File.WriteAllBytes(walPath dir, Array.append (v3CreateTableWalRecord table tableComment) following)
+
+                  let recovered = load dir
+                  let recoveredTable = recovered.Catalog.[defaultDatabase].[normalizeTableName table]
+                  Expect.equal recoveredTable.Columns.Head.Comment "v3 column" (suffix + " column comment")
+                  Expect.equal recoveredTable.TableComment (tableComment |> Option.defaultValue "") (suffix + " table comment")
+                  Expect.isTrue (Map.containsKey "after_v3" recovered.Catalog) (suffix + " later WAL record survives")
+                  Expect.equal (FileInfo(walPath dir).Length) (int64 ((v3CreateTableWalRecord table tableComment).Length + following.Length)) (suffix + " WAL stays intact")
 
           testCase "a pre-comment snapshot replays a comment-aware WAL record"
           <| fun _ ->
@@ -2105,6 +2281,23 @@ let tests =
                   encodeValue w original
                   let r = Reader(w.ToArray())
                   Expect.equal (decodeValue r) original (sprintf "%A round-trips" original)
+
+          testCase "WAL replay preserves a zero-date default accepted by the originating session"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              let session, mode = handle session "SET SESSION sql_mode = 'STRICT_TRANS_TABLES'"
+              Expect.equal mode (Affected 0UL) "zero-date restrictions disabled"
+              let _, created = handle session "CREATE TABLE zero_default (d DATE NOT NULL DEFAULT '0000-00-00')"
+              Expect.equal created (Affected 0UL) "the originating session accepts the default"
+
+              let column = (load dir).Catalog.[defaultDatabase].[normalizeTableName "zero_default"].Columns.Head
+
+              match column.Default with
+              | Some(DConst(VZeroDate date)) -> Expect.equal (zeroDateParts date) (0, 0, 0) "the normalized default survives WAL replay"
+              | other -> failtestf "expected a recovered zero-date default, got %A" other
 
           testCase "the streamed binary reader rejects impossible lengths before allocating"
           <| fun _ ->

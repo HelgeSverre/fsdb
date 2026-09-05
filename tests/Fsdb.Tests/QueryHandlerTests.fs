@@ -8847,6 +8847,17 @@ let tests =
               | Err(1064, _) -> ()
               | other -> failtestf "expected 1064 for a probe placeholder, got %A" other
 
+              for comment in [ "# hidden"; "-- hidden" ] do
+                  let sql = sprintf "%s\rCREATE TABLE cr_placeholder (a INT, b INT AS (?))" comment
+
+                  match handle session sql |> snd with
+                  | Err(1064, _) -> ()
+                  | other -> failtestf "expected 1064 after a lone-CR comment, got %A" other
+
+              Expect.isFalse
+                  (Map.containsKey "cr_placeholder" session.Store.Catalog.[Fsdb.Storage.defaultDatabase])
+                  "lone-CR comments cannot hide a persisted placeholder"
+
           testCase "prepareStatement rejects a placeholder the binder can't reach (DDL generated column)"
           <| fun _ ->
               match prepareStatement "CREATE TABLE t (a INT, b INT AS (?))" with

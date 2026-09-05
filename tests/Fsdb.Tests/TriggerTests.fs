@@ -61,6 +61,23 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "insert"
               Expect.equal (rows store "SELECT n FROM t") [ [ Some "11" ] ] "stored row contains the value assigned by the trigger"
 
+          testCase "AUTO_INCREMENT allocation after BEFORE INSERT is regenerated and checked"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk
+                  (runDefault store "CREATE TABLE checked_insert (id INT AUTO_INCREMENT PRIMARY KEY, generated_id INT AS (id * 2) STORED, CHECK (generated_id < 1))")
+                  "create checked table"
+              expectOk
+                  (runDefault store "CREATE TRIGGER clear_id BEFORE INSERT ON checked_insert FOR EACH ROW SET NEW.id = NULL")
+                  "create trigger"
+
+              for sql in [ "INSERT INTO checked_insert (id) VALUES (NULL)"; "REPLACE INTO checked_insert (id) VALUES (NULL)" ] do
+                  match runDefault store sql with
+                  | Err(3819, _) -> ()
+                  | other -> failtestf "expected post-allocation CHECK failure for %s, got %A" sql other
+
+              Expect.equal (rows store "SELECT COUNT(*) FROM checked_insert") [ [ Some "0" ] ] "invalid rows are not stored"
+
           testCase "compound trigger bodies execute statements in order"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -546,6 +563,52 @@ let tests =
                   (rows store "SELECT n FROM log ORDER BY id")
                   [ [ Some "11" ]; [ Some "21" ]; [ Some "22" ] ]
                   "every timing sees its corresponding old or new row image"
+
+          testCase "BEFORE UPDATE changes are regenerated and checked before storage"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk
+                  (runDefault store "CREATE TABLE checked_update (id INT PRIMARY KEY, balance INT, debit INT, doubled INT AS (balance * 2) STORED, CHECK (balance >= 0))")
+                  "create checked table"
+              expectOk (runDefault store "INSERT INTO checked_update (id, balance, debit) VALUES (1, 10, 0)") "seed row"
+              expectOk
+                  (runDefault store "CREATE TRIGGER apply_debit BEFORE UPDATE ON checked_update FOR EACH ROW SET NEW.balance = NEW.balance - NEW.debit")
+                  "create trigger"
+
+              match runDefault store "UPDATE checked_update SET debit = 20 WHERE id = 1" with
+              | Err(3819, _) -> ()
+              | other -> failtestf "expected post-trigger CHECK failure, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT balance, debit, doubled FROM checked_update")
+                  [ [ Some "10"; Some "0"; Some "20" ] ]
+                  "failed trigger update is atomic"
+
+              expectOk (runDefault store "UPDATE checked_update SET balance = 9, debit = 2 WHERE id = 1") "valid trigger update"
+              Expect.equal
+                  (rows store "SELECT balance, debit, doubled FROM checked_update")
+                  [ [ Some "7"; Some "2"; Some "14" ] ]
+                  "stored generated value reflects the final NEW row"
+
+          testCase "multi-table UPDATE checks each final trigger row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (runDefault store "CREATE TABLE checked_multi (id INT PRIMARY KEY, balance INT, debit INT, CHECK (balance >= 0))") "create target"
+              expectOk (runDefault store "CREATE TABLE checked_source (id INT PRIMARY KEY)") "create source"
+              expectOk (runDefault store "INSERT INTO checked_multi VALUES (1, 10, 0)") "seed target"
+              expectOk (runDefault store "INSERT INTO checked_source VALUES (1)") "seed source"
+              expectOk
+                  (runDefault store "CREATE TRIGGER apply_multi_debit BEFORE UPDATE ON checked_multi FOR EACH ROW SET NEW.balance = NEW.balance - NEW.debit")
+                  "create trigger"
+
+              match runDefault store "UPDATE checked_multi AS t JOIN checked_source AS s ON s.id = t.id SET t.debit = 20" with
+              | Err(3819, _) -> ()
+              | other -> failtestf "expected multi-table post-trigger CHECK failure, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT balance, debit FROM checked_multi")
+                  [ [ Some "10"; Some "0" ] ]
+                  "multi-table failure is atomic"
 
           testCase "AFTER INSERT fires once per row with NEW.* bound per row"
           <| fun _ ->
