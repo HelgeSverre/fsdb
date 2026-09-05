@@ -4682,6 +4682,9 @@ let parseViewDefinition (sql: string) : Result<ParsedViewDefinition, string> =
           Sql = definition
           CheckOption = checkOption })
 
+let private maxLoadDataMarkerLength = 1
+let private maxLoadDataTerminatorLength = 16
+
 /// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
 /// client-to-server data stream.
 let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<LocalLoad, string> =
@@ -4689,10 +4692,10 @@ let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<Lo
 
     withParserState options sql (runWithDepthLimit parser)
     |> Result.bind (fun load ->
-        let validMarker (value: string) = value = "" || value.Length = 1
+        let validMarker (value: string) = value.Length <= maxLoadDataMarkerLength
         // Multi-character terminators are useful for imports, but matching
         // an attacker-sized prefix at every upload position is quadratic.
-        let validTerminator (value: string) = value.Length <= 16
+        let validTerminator (value: string) = value.Length <= maxLoadDataTerminatorLength
 
         if
             validTerminator load.FieldTerminator
@@ -4725,6 +4728,8 @@ let private explicitTableLock =
           Alias = alias
           Mode = mode }
 
+let private maxTableLockReferences = 1024
+
 let private boundedLockList (tableLock: Parser<ExplicitTableLock, unit>) =
     let mutable count = 0
 
@@ -4735,7 +4740,7 @@ let private boundedLockList (tableLock: Parser<ExplicitTableLock, unit>) =
 
             // These commands retain one parsed record per name even though
             // their handlers need no multi-million-entry lock request.
-            if count > 1024 then
+            if count > maxTableLockReferences then
                 fail "table lock list contains too many references"
             else
                 preturn parsed

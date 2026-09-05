@@ -699,6 +699,21 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
     |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
 
+let private evaluateSessionExpression
+    (session: Session)
+    (variables: Executor.VariableContext)
+    expression
+    =
+    let store = Session.currentStore session
+    let database = session.Database |> Option.defaultValue defaultDatabase
+
+    Auth.requiredPrivilegesForExpression database expression
+    |> checkSessionAccess session store
+    |> Result.mapError (fun (code, message) -> Err(code, message))
+    |> Result.bind (fun () ->
+        Executor.withVariableContext variables (fun () ->
+            Executor.evaluateExpression store (registryFor session) database expression))
+
 let private likeSuffix (sql: string) : string option =
     let m = Regex.Match(sql, @"LIKE\s+'([^']*)'\s*$", RegexOptions.IgnoreCase)
     if m.Success then Some m.Groups.[1].Value else None
@@ -1059,16 +1074,9 @@ let private resolveUserSetRhs
         | Error _ -> Error(syntaxError sql)
         | Ok expression ->
             let variables = expressionVariablesFor session userVariables
-            let store = Session.currentStore session
-            let dbName = session.Database |> Option.defaultValue defaultDatabase
-            let privileges = Auth.requiredPrivilegesForExpression dbName expression
 
-            match checkSessionAccess session store privileges with
-            | Error(code, message) -> Error(Err(code, message))
-            | Ok() ->
-                Executor.withVariableContext variables (fun () ->
-                    Executor.evaluateExpression store (registryFor session) dbName expression
-                    |> Result.map (fun value -> value, variables.UserVariables.Value))
+            evaluateSessionExpression session variables expression
+            |> Result.map (fun value -> value, variables.UserVariables.Value)
 
 let private resolveSystemSetRhs
     (session: Session)
@@ -4815,15 +4823,7 @@ let private coerceRoutineValue (store: Store) column value =
 
 let private evaluateRoutineExpression (session: Session) expression =
     let variables = expressionVariables session
-    let store = Session.currentStore session
-    let database = session.Database |> Option.defaultValue defaultDatabase
-
-    let result =
-        match checkSessionAccess session store (Auth.requiredPrivilegesForExpression database expression) with
-        | Error(code, message) -> Error(Err(code, message))
-        | Ok() ->
-            Executor.withVariableContext variables (fun () ->
-                Executor.evaluateExpression store (registryFor session) database expression)
+    let result = evaluateSessionExpression session variables expression
 
     { session with UserVariables = variables.UserVariables.Value }, result
 

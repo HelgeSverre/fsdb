@@ -14280,12 +14280,8 @@ let statementColumnOrigins (store: Store) (schema: string) (statement: Statement
         Some(outputColumnOrigins store schema (qualifierRanges sources) select)
     | _ -> None
 
-/// Folds one `insertRows`/`insertRowsIgnore`/`upsertRows` result's
-/// `(okPacketId, generatedId)` pair into `execute`'s own `ids` accumulator —
-/// see `execute`'s doc for what each half means. `0L` from storage means
-/// "this statement assigned no id at all", so the OK-packet half falls back
-/// to its previous value the same way it always has; the `LAST_INSERT_ID()`
-/// half only ever moves forward on an actual generated id.
+// Storage uses zero and None when a statement assigns no id, preserving the
+// connection's previous OK-packet and LAST_INSERT_ID values in that case.
 let private nextIds ((okId, generatedId): int64 * int64) ((newOkId: int64), (newGenerated: int64 option)) : int64 * int64 =
     (if newOkId <> 0L then newOkId else okId), (newGenerated |> Option.defaultValue generatedId)
 
@@ -14298,27 +14294,29 @@ let private firstDirectOnlyCall (registry: Registry) =
             |> Option.map (fun _ -> name)
         | _ -> None)
 
-/// MySQL's own ER_GENERATED_COLUMN_FUNCTION_IS_NOT_ALLOWED (3102) shape,
-/// for the first offending column in a CREATE/ALTER's column definitions.
-let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnDef list) : QueryResult option =
+let private rejectGeneratedExpression predicate errorForColumn (columns: ColumnDef list) =
     columns
-    |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
-    |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
+    |> List.tryPick (fun column ->
+        column.Generated
+        |> Option.bind (fun (expression, _) ->
+            if predicate expression then Some(errorForColumn column.Name) else None))
+
+let private disallowedGeneratedExpression column =
+    Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column)
+
+let private rejectDirectOnlyGenerated (registry: Registry) =
+    rejectGeneratedExpression
+        (firstDirectOnlyCall registry >> Option.isSome)
+        disallowedGeneratedExpression
 
 let private containsQuantifiedComparison =
     Expression.exists (function QuantifiedComparison _ -> true | _ -> false)
 
-let private rejectQuantifiedComparisonsInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
-    columns
-    |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsQuantifiedComparison expression then Some column.Name else None))
-    |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
+let private rejectQuantifiedComparisonsInGenerated =
+    rejectGeneratedExpression containsQuantifiedComparison disallowedGeneratedExpression
 
-let private rejectSubqueriesInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
-    columns
-    |> List.tryPick (fun column ->
-        column.Generated
-        |> Option.bind (fun (expression, _) -> if containsSubqueryExpr expression then Some column.Name else None))
-    |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
+let private rejectSubqueriesInGenerated =
+    rejectGeneratedExpression containsSubqueryExpr disallowedGeneratedExpression
 
 let rec private containsSessionVariable (expression: Expr) : bool =
     Expression.fold
@@ -14370,30 +14368,35 @@ and private selectOrUnionContainsSessionVariable (body: SelectOrUnion) : bool =
         || (limit |> Option.exists containsSessionVariable)
         || (offset |> Option.exists containsSessionVariable)
 
-let private rejectSessionVariablesInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
-    columns
-    |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsSessionVariable expression then Some column.Name else None))
-    |> Option.map (fun column -> Err(3772, sprintf "Default value expression of column '%s' cannot refer user or system variables." column))
+let private rejectSessionVariablesInGenerated =
+    rejectGeneratedExpression
+        containsSessionVariable
+        (fun column ->
+            Err(
+                3772,
+                sprintf "Default value expression of column '%s' cannot refer user or system variables." column
+            ))
 
-let private containsEffectfulStorageFunction =
+let private effectfulDdlFunctions = set [ "BENCHMARK"; "SLEEP" ]
+
+let private containsEffectfulDdlFunction =
     Expression.exists (function
-        | FuncCall(name, _) ->
-            let name = name.ToUpperInvariant()
-            name = "SLEEP" || name = "BENCHMARK"
+        | FuncCall(name, _) -> effectfulDdlFunctions.Contains(name.ToUpperInvariant())
         | _ -> false)
+
+let private unsafeStoredExpression (registry: Registry) expression =
+    containsSubqueryExpr expression
+    || containsSessionVariable expression
+    || containsAggregate registry expression
+    || containsEffectfulDdlFunction expression
+    || (firstDirectOnlyCall registry expression).IsSome
 
 let private rejectUnsafePartitionExpression (registry: Registry) (partitioning: HashPartitioning option) =
     partitioning
     |> Option.bind (fun partitioning ->
         let expression = partitioning.Expression
 
-        if
-            containsSubqueryExpr expression
-            || containsSessionVariable expression
-            || containsAggregate registry expression
-            || containsEffectfulStorageFunction expression
-            || (firstDirectOnlyCall registry expression).IsSome
-        then
+        if unsafeStoredExpression registry expression then
             Some(Err(1564, "This partition function is not allowed"))
         else
             None)
@@ -14403,14 +14406,14 @@ let private rejectUnsafeFunctionalDefaults (registry: Registry) (columns: Column
     |> List.tryPick (fun column ->
         column.Default
         |> Option.bind (function
-            | DExpression expression
-                when containsSubqueryExpr expression
-                     || containsSessionVariable expression
-                     || containsAggregate registry expression
-                     || containsEffectfulStorageFunction expression
-                     || (firstDirectOnlyCall registry expression).IsSome ->
+            | DExpression expression when unsafeStoredExpression registry expression ->
                 Some(Err(3769, sprintf "Default value expression of column '%s' contains a disallowed function." column.Name))
             | _ -> None))
+
+let private validationErrorOption mapError =
+    function
+    | Ok _ -> None
+    | Error error -> Some(mapError error)
 
 let private viewContainsSessionVariable =
     function
@@ -14472,8 +14475,6 @@ let private firstDisallowedCheckShape =
         | _ -> None)
 
 let private validateFunctionalDefaults (registry: Registry) (columns: ColumnDef list) : Result<unit, QueryResult> =
-    let disallowedFunctions = set [ "BENCHMARK"; "SLEEP" ]
-
     columns
     |> List.indexed
     |> List.tryPick (fun (columnIndex, column) ->
@@ -14492,7 +14493,7 @@ let private validateFunctionalDefaults (registry: Registry) (columns: ColumnDef 
                     let disallowed =
                         Expression.collect
                             (function
-                            | FuncCall(name, _) when disallowedFunctions.Contains(name.ToUpperInvariant()) -> Some name
+                            | FuncCall(name, _) when effectfulDdlFunctions.Contains(name.ToUpperInvariant()) -> Some name
                             | FuncCall(name, _) ->
                                 registry.Extensions
                                 |> Map.tryFind (name.ToUpperInvariant())
@@ -16580,23 +16581,19 @@ let rec executeAs
                 ids, Affected 0UL
             | Some _ -> ids, storageErr (TableExists name)
             | None ->
-                match
-                    rejectDirectOnlyGenerated registry table.Columns,
-                    rejectQuantifiedComparisonsInGenerated table.Columns,
-                    rejectSubqueriesInGenerated table.Columns,
-                    rejectSessionVariablesInGenerated table.Columns,
-                    rejectUnsafePartitionExpression registry table.Partitioning,
-                    validateFunctionalDefaults registry table.Columns,
-                    validateIndexExpressions registry table.Columns table.Indexes
-                with
-                | Some err, _, _, _, _, _, _
-                | _, Some err, _, _, _, _, _
-                | _, _, Some err, _, _, _, _
-                | _, _, _, Some err, _, _, _
-                | _, _, _, _, Some err, _, _
-                | _, _, _, _, _, Error err, _ -> ids, err
-                | _, _, _, _, _, _, Error error -> ids, storageErr error
-                | None, None, None, None, None, Ok(), Ok() ->
+                let error =
+                    [ rejectDirectOnlyGenerated registry table.Columns
+                      rejectQuantifiedComparisonsInGenerated table.Columns
+                      rejectSubqueriesInGenerated table.Columns
+                      rejectSessionVariablesInGenerated table.Columns
+                      rejectUnsafePartitionExpression registry table.Partitioning
+                      validateFunctionalDefaults registry table.Columns |> validationErrorOption id
+                      validateIndexExpressions registry table.Columns table.Indexes |> validationErrorOption storageErr ]
+                    |> List.tryPick id
+
+                match error with
+                | Some error -> ids, error
+                | None ->
                     let alreadyExists = scan store db name |> Result.isOk
 
                     if alreadyExists && table.IfNotExists then
@@ -16699,23 +16696,19 @@ let rec executeAs
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match
-            executionOptionError,
-            engineError,
-            rejectDirectOnlyGenerated registry addedColumns,
-            rejectQuantifiedComparisonsInGenerated addedColumns,
-            rejectSubqueriesInGenerated addedColumns,
-            rejectSessionVariablesInGenerated addedColumns,
-            rejectUnsafeFunctionalDefaults registry addedColumns
-        with
-        | Some err, _, _, _, _, _, _ -> ids, err
-        | None, Some error, _, _, _, _, _ -> ids, error
-        | None, None, Some err, _, _, _, _
-        | None, None, _, Some err, _, _, _
-        | None, None, _, _, Some err, _, _
-        | None, None, _, _, _, Some err, _
-        | None, None, _, _, _, _, Some err -> ids, err
-        | None, None, None, None, None, None, None ->
+        let error =
+            [ executionOptionError
+              engineError
+              rejectDirectOnlyGenerated registry addedColumns
+              rejectQuantifiedComparisonsInGenerated addedColumns
+              rejectSubqueriesInGenerated addedColumns
+              rejectSessionVariablesInGenerated addedColumns
+              rejectUnsafeFunctionalDefaults registry addedColumns ]
+            |> List.tryPick id
+
+        match error with
+        | Some error -> ids, error
+        | None ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 

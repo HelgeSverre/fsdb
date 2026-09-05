@@ -6614,10 +6614,8 @@ let private insertCore
 
                             (if candidateChanged then finish rowNumber candidate else Ok candidate)
                             |> Result.bind (fun candidate ->
-                                // O(log n) per unique group via the running index
-                                // (seeded from `table.UniqueIndex`, extended below as
-                                // each candidate is accepted) instead of a full scan
-                                // of `table.RowsArray` per candidate.
+                                // Each accepted candidate extends the running map,
+                                // avoiding a full row scan for every unique key.
                                 let uniqueCollision =
                                     uniqueGroups
                                     |> List.tryPick (fun group ->
@@ -6635,16 +6633,8 @@ let private insertCore
                                 | Some e -> Error e
                                 | None ->
                                     if checkFks then
-                                        // A self-referencing (or otherwise
-                                        // same-table) FK's parent needs to see this
-                                        // same multi-row INSERT's earlier rows too,
-                                        // not just what was already committed before
-                                        // the statement started — same reasoning as
-                                        // the running unique-key `index` just above.
-                                        // Ordinary parent tables need no overlay.
-                                        // Only a self-FK needs rows accepted earlier
-                                        // in this statement made visible, in their
-                                        // original insertion order.
+                                        // An unindexed self-reference needs earlier
+                                        // rows from this INSERT overlaid in source order.
                                         let dbView =
                                             if hasUnacceleratedSelfForeignKey && not acceptedRev.IsEmpty then
                                                 Map.add tableKey { table with RowsArray = table.RowsArray.AddRange(List.rev acceptedRev) } db
