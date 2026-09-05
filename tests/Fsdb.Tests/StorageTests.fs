@@ -3714,7 +3714,20 @@ let tests =
 
           testList
               "concurrent writers"
-              [ testCase "holding one database's writer lock does not block another database"
+              [ testCase "dense acyclic lock graphs are searched once per transaction"
+                <| fun _ ->
+                    let expanded = System.Collections.Generic.Dictionary<int64, int>()
+
+                    let successors owner =
+                        expanded.[owner] <- (match expanded.TryGetValue owner with | true, count -> count + 1 | _ -> 1)
+                        seq { owner + 1L .. 24L }
+
+                    let path = tryFindLockWaitPath 100L [ 0L ] successors
+                    Expect.isNone path "an acyclic wait graph has no path back to the requester"
+                    Expect.equal expanded.Count 25 "converging paths expand each transaction once"
+                    Expect.isTrue (expanded.Values |> Seq.forall ((=) 1)) "no transaction is revisited through another predecessor"
+
+                testCase "holding one database's writer lock does not block another database"
                 <| fun _ ->
                     let store = create ()
 
