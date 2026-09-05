@@ -2055,9 +2055,10 @@ and private fromItemReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (i
 and private selectOrUnionReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (body: SelectOrUnion) : (string * string) list =
     match body with
     | PlainSelect s -> selectReadTablesIn boundCtes defaultDb s
-    | UnionSelect(first, rest, _, _, _) ->
+    | UnionSelect(first, rest, orderBy, _, _) ->
         selectReadTablesIn boundCtes defaultDb first
         @ (rest |> List.collect (snd >> selectReadTablesIn boundCtes defaultDb))
+        @ (orderBy |> List.collect (fst >> exprReadTablesIn boundCtes defaultDb))
 
 and private selectReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (s: SelectStmt) : (string * string) list =
     let cteReads, localCtes = cteReadTablesIn boundCtes defaultDb s.Ctes
@@ -2542,8 +2543,12 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
 
     match stmt with
     | Select s -> onTables "SELECT" (selectTables defaultDb s)
-    | Union(first, rest, _, _, _) ->
-        onTables "SELECT" (selectTables defaultDb first @ (rest |> List.collect (snd >> selectTables defaultDb)))
+    | Union(first, rest, orderBy, _, _) ->
+        onTables
+            "SELECT"
+            (selectTables defaultDb first
+             @ (rest |> List.collect (snd >> selectTables defaultDb))
+             @ (orderBy |> List.collect (fst >> exprReadTables defaultDb)))
     | Insert(table, _, rows, onDup, _) ->
         let readInExprs =
             (rows |> List.collect (List.collect (exprReadTables defaultDb)))
@@ -2727,7 +2732,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | SetDefaultRole _ -> []
     // DROP's subject table is resolved by `requiredPrivilegesInStore` below.
     | CreateTrigger creation -> onTables "TRIGGER" [ split creation.Table ]
-    | SetTriggerNew _ -> []
+    | SetTriggerNew(_, expression) -> onTables "SELECT" (exprReadTables defaultDb expression)
     | DropTrigger _ -> []
     | CreateView view ->
         let viewDb, _ = split view.Name

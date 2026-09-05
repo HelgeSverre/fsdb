@@ -809,4 +809,14 @@ let tests =
               | ResultSet(_, [ [ Some "?" ] ]) -> ()
               | other -> failtestf "expected the replacement character, got %A" other
 
+          testCase "utf8mb3 conversion errors keep a bounded byte preview"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE utf8mb3_large (v LONGTEXT CHARACTER SET utf8mb3)"
+              let value = "😀" + String.replicate 100_000 "a"
+
+              match handle session ("INSERT INTO utf8mb3_large VALUES ('" + value + "')") |> snd with
+              | Err(1366, message) -> Expect.isLessThan message.Length 200 "the diagnostic previews only the offending prefix"
+              | other -> failtestf "expected strict utf8mb3 rejection, got %A" other
+
         ]

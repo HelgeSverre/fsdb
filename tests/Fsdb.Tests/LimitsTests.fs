@@ -46,6 +46,20 @@ let tests =
                           | other -> failtestf "expected 1153, got %A" other)
                   | None -> failtest "REGEXP_REPLACE is registered")
 
+          testCase "REGEXP_REPLACE handles many normalized CRLF boundaries in one pass"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let input = String.replicate 2000 "a\r\n"
+                  let expected = String.replicate 2000 "aX\r\n"
+
+                  match lookup "REGEXP_REPLACE" builtins with
+                  | Some function_ ->
+                      Expect.equal
+                          (function_ [ VString input; VString "(?<=a)(?=\\n)"; VString "X"; VInt 1L; VInt 0L; VString "m" ])
+                          (VString expected)
+                          "each zero-width normalized match is handled without suffix searching"
+                  | None -> failtest "REGEXP_REPLACE is registered")
+
           testCase "a value that isn't a plain number with an optional K/M/G suffix is rejected, not guessed at"
           <| fun _ ->
               withSettings [] (fun () ->
@@ -565,9 +579,10 @@ let tests =
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
-              match handle session "SELECT @@wait_timeout, @@interactive_timeout" |> snd with
-              | ResultSet(_, [ [ Some wait; Some interactive ] ]) ->
+              match handle session "SELECT @@wait_timeout, @@interactive_timeout, @@connect_timeout" |> snd with
+              | ResultSet(_, [ [ Some wait; Some interactive; Some connect ] ]) ->
                   Expect.equal wait "28800" "MySQL's default"
                   Expect.equal wait (string waitTimeoutSeconds) "advertised value matches the command idle timeout"
                   Expect.equal interactive "28800" "MySQL's interactive default"
+                  Expect.equal connect "10" "pre-authentication uses MySQL's connect timeout"
               | other -> failtestf "expected both values, got %A" other ]
