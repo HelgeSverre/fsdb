@@ -355,6 +355,23 @@ let tests =
 
               Expect.equal calls 2 "the relevance-ordered unique join stops after the requested row"
 
+              run store "DELETE FROM owners WHERE id = 82" |> ignore
+              calls <- 0
+
+              let limitedJoinedSurvivor =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT d.id, TOUCH(o.id) FROM docs d JOIN owners o ON o.id = d.id WHERE MATCH(d.body) AGAINST('needle') LIMIT 1"
+
+              match limitedJoinedSurvivor with
+              | ResultSet(_, [ [ Some id; Some touched ] ]) ->
+                  Expect.equal id "37" "the stream continues past an unmatched higher score"
+                  Expect.equal id touched "the surviving unique join retains its row"
+              | other -> failtestf "expected the next joined full-text row, got %A" other
+
+              Expect.equal calls 2 "an unmatched score is skipped before projection"
+
               run store "CREATE TABLE owner_duplicates (id INT)" |> ignore
               run store "INSERT INTO owner_duplicates VALUES (37), (37), (82)" |> ignore
               calls <- 0
