@@ -8,9 +8,10 @@ open Fsdb.Sql
 open Fsdb.Value
 
 type private State =
-    { Cancellation: CancellationTokenSource
+    { mutable Cancellation: CancellationTokenSource
       mutable References: int
-      mutable Functions: Functions.Registry }
+      mutable Functions: Functions.Registry
+      mutable ActiveExecutions: int }
 
 type private Lease(release: unit -> unit) =
     let mutable released = 0
@@ -178,63 +179,114 @@ let private enabled (store: Storage.Store) =
     |> Option.flatten
     |> Option.exists (fun value -> value = "1" || value.Equals("ON", StringComparison.OrdinalIgnoreCase))
 
-let private scan (store: Storage.Store) (state: State) =
+let private tryReserveExecution (state: State) (generation: CancellationTokenSource) =
+    lock stateLock (fun () ->
+        if
+            state.References = 0
+            || not (obj.ReferenceEquals(state.Cancellation, generation))
+            || generation.IsCancellationRequested
+            || state.ActiveExecutions >= Limits.maxConcurrentEventExecutions
+        then
+            None
+        else
+            state.ActiveExecutions <- state.ActiveExecutions + 1
+            Some state.Functions)
+
+let private releaseExecution (store: Storage.Store) (state: State) =
+    lock stateLock (fun () ->
+        state.ActiveExecutions <- state.ActiveExecutions - 1
+
+        if state.References = 0 && state.ActiveExecutions = 0 then
+            match states.TryGetValue store.Lock with
+            | true, current when obj.ReferenceEquals(current, state) -> states.Remove store.Lock |> ignore
+            | _ -> ())
+
+let private startExecution store state (cancellation: CancellationToken) functions entry started final =
+    let workflow =
+        async {
+            try
+                use timeout = CancellationTokenSource.CreateLinkedTokenSource cancellation
+                timeout.CancelAfter Limits.eventExecutionTimeout
+                do! execute store timeout.Token functions entry started final
+            finally
+                releaseExecution store state
+        }
+
+    try
+        Async.Start workflow
+    with error ->
+        releaseExecution store state
+        raise error
+
+let private scan (store: Storage.Store) (state: State) (generation: CancellationTokenSource) =
     if enabled store then
         let now = Functions.truncateToSecond DateTime.Now
-        let functions = lock stateLock (fun () -> state.Functions)
 
         for entry in eventEntries store do
             match entry.Status, SystemCatalog.Event.timing entry with
             | Event.Status.Enabled, Some timing ->
                 match Event.dueOccurrence now entry.LastExecuted timing with
                 | Some due ->
-                    match claim store entry due with
-                    | Some started ->
-                        Async.Start(
-                            execute
+                    match tryReserveExecution state generation with
+                    | Some functions ->
+                        match claim store entry due with
+                        | Some started ->
+                            startExecution
                                 store
-                                state.Cancellation.Token
+                                state
+                                generation.Token
                                 functions
                                 entry
                                 started
                                 (Event.isFinalOccurrence due timing)
-                        )
+                        | None -> releaseExecution store state
                     | None -> ()
                 | _ -> ()
             | _ -> ()
 
-let rec private run (store: Storage.Store) (state: State) =
+let rec private run (store: Storage.Store) (state: State) (generation: CancellationTokenSource) =
     async {
         try
-            scan store state
+            scan store state generation
         with error ->
             Log.diagnostic "fsdb: event scheduler: %s" error.Message
 
         do! Async.Sleep 100
-        return! run store state
+        return! run store state generation
     }
 
 let acquire (store: Storage.Store) (functions: Functions.Registry) : IDisposable =
     lock stateLock (fun () ->
         match states.TryGetValue store.Lock with
-        | true, state ->
+        | true, state when state.References > 0 ->
             state.References <- state.References + 1
             state.Functions <- functions
+        | true, state ->
+            state.Cancellation <- new CancellationTokenSource()
+            state.References <- 1
+            state.Functions <- functions
+            let generation = state.Cancellation
+            Async.Start(run store state generation, generation.Token)
         | false, _ ->
             let state =
                 { Cancellation = new CancellationTokenSource()
                   References = 1
-                  Functions = functions }
+                  Functions = functions
+                  ActiveExecutions = 0 }
 
             states.Add(store.Lock, state)
-            Async.Start(run store state, state.Cancellation.Token)
+            let generation = state.Cancellation
+            Async.Start(run store state generation, generation.Token)
 
         new Lease(fun () ->
             lock stateLock (fun () ->
                 match states.TryGetValue store.Lock with
                 | true, state when state.References = 1 ->
-                    states.Remove store.Lock |> ignore
+                    state.References <- 0
                     state.Cancellation.Cancel()
+
+                    if state.ActiveExecutions = 0 then
+                        states.Remove store.Lock |> ignore
                 | true, state -> state.References <- state.References - 1
                 | false, _ -> ()))
         :> IDisposable)

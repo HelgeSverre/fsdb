@@ -253,32 +253,38 @@ let run registry timeout (session: Session) = function
             let defaultDatabase = session.Database |> Option.defaultValue Storage.defaultDatabase
             let database, tableName = splitQualified defaultDatabase qualifiedTable
             let name = alias |> Option.defaultValue tableName
-            let handlerKey = normalize name
-            let temporary = hasTemporaryTable session.TemporaryCatalog database tableName
 
-            if Map.containsKey handlerKey session.TableHandlers then
-                session, Err(1066, sprintf "Not unique table/alias: '%s'" name)
-            elif not temporary && viewExists session database tableName then
-                session, Err(1347, sprintf "'%s.%s' is not BASE TABLE" database tableName)
+            if name.EnumerateRunes() |> Seq.length > Limits.maxTableHandlerAliasRunes then
+                session, Err(1059, "Identifier name is too long")
             else
-                match tableForOpen session database tableName temporary with
-                | Error error ->
-                    let code, message = toMySqlError error
-                    session, Err(code, message)
-                | Ok table ->
-                    match Auth.checkForAccount (Session.currentStore session) (Auth.account session.User session.AccountHost) [ "SELECT", Auth.OnTable(database, tableName) ] with
-                    | Error(code, message) -> session, Err(code, message)
-                    | Ok() ->
-                        let handler =
-                            { Database = database
-                              Table = tableName
-                              Temporary = temporary
-                              CreateTime = table.CreateTime
-                              Columns = table.Columns
-                              Indexes = table.Indexes
-                              Positions = Map.empty }
+                let handlerKey = normalize name
+                let temporary = hasTemporaryTable session.TemporaryCatalog database tableName
 
-                        { session with TableHandlers = Map.add handlerKey handler session.TableHandlers }, Affected 0UL
+                if Map.containsKey handlerKey session.TableHandlers then
+                    session, Err(1066, sprintf "Not unique table/alias: '%s'" name)
+                elif session.TableHandlers.Count >= Limits.maxOpenTableHandlers then
+                    session, Err(1235, "This version of MySQL doesn't yet support more open HANDLER aliases in one session")
+                elif not temporary && viewExists session database tableName then
+                    session, Err(1347, sprintf "'%s.%s' is not BASE TABLE" database tableName)
+                else
+                    match tableForOpen session database tableName temporary with
+                    | Error error ->
+                        let code, message = toMySqlError error
+                        session, Err(code, message)
+                    | Ok table ->
+                        match Auth.checkForAccount (Session.currentStore session) (Auth.account session.User session.AccountHost) [ "SELECT", Auth.OnTable(database, tableName) ] with
+                        | Error(code, message) -> session, Err(code, message)
+                        | Ok() ->
+                            let handler =
+                                { Database = database
+                                  Table = tableName
+                                  Temporary = temporary
+                                  CreateTime = table.CreateTime
+                                  Columns = table.Columns
+                                  Indexes = table.Indexes
+                                  Positions = Map.empty }
+
+                            { session with TableHandlers = Map.add handlerKey handler session.TableHandlers }, Affected 0UL
     | HandlerRead(name, mode, where, limit, offset) ->
         if session.Tx.IsSome || TableLocks.holdsExplicit session.Store session.ConnectionId then
             session, Err(1192, "Can't execute the given command because you have active locked tables or an active transaction")
