@@ -3599,11 +3599,11 @@ let private streamLimited
     (distinct: bool)
     (offset: int)
     (limit: int option)
-    (f: 'a -> Result<(string option list * 'b) option, 'e>)
+    (f: 'a -> Result<('key * 'b) option, 'e>)
     (xs: 'a seq)
-    : Result<(string option list * 'b) list, 'e> =
+    : Result<('key * 'b) list, 'e> =
     let token = queryCancellation.Value
-    let seen = if distinct then Some(System.Collections.Generic.HashSet<string option list>(HashIdentity.Structural)) else None
+    let seen = if distinct then Some(System.Collections.Generic.HashSet<'key>(HashIdentity.Structural)) else None
     let acc = ResizeArray()
     let mutable skipped = 0
     let mutable error : 'e option = None
