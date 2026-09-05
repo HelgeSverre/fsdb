@@ -407,7 +407,7 @@ predicates, and assignments.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible single-table equality, literal-IN, range, and spatial candidates restrict scoring for predicates and projections; join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
+| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, literal-IN, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; cross-source inference and other join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
 | Tunables | innodb_ft_min_token_size, innodb_ft_max_token_size, ft_query_expansion_limit, stopword tables, enable/disable | the three numeric defaults are exposed with MySQL's GLOBAL/read-only scope and drive `FullText` at 3 / 84 / 20; `INNODB_FT_DEFAULT_STOPWORD` exposes the exact duplicate-preserving built-in list, while custom stopword tables and enable/disable behavior remain absent | low | divergence/refusal |
 | CJK | ngram and mecab parsers, WITH PARSER clause | absent; no CJK tokenization | medium (for CJK) | refusal |
 
