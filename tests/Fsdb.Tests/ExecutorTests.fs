@@ -8971,6 +8971,18 @@ let tests =
                     | Err(3728, _) -> ()
                     | other -> failtestf "expected spatial primary key refusal, got %A" other
 
+                    runDefault store "CREATE TABLE inherited_primary (shape INT PRIMARY KEY)" |> ignore
+
+                    match runDefault store "ALTER TABLE inherited_primary MODIFY shape GEOMETRY" with
+                    | Err(3728, _) -> ()
+                    | other -> failtestf "expected inherited spatial primary key refusal, got %A" other
+
+                    runDefault store "CREATE TABLE inherited_unique (shape INT UNIQUE)" |> ignore
+
+                    match runDefault store "ALTER TABLE inherited_unique CHANGE shape renamed GEOMETRY" with
+                    | Err(3728, _) -> ()
+                    | other -> failtestf "expected inherited spatial unique key refusal, got %A" other
+
                     match runDefault store "CREATE TABLE bad_nullable (shape POINT, SPATIAL INDEX sx(shape))" with
                     | Err(1252, "All parts of a SPATIAL index must be NOT NULL") -> ()
                     | other -> failtestf "expected nullable spatial index refusal, got %A" other

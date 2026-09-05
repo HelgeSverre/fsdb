@@ -23,7 +23,8 @@ let private partitionSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x35uy |] // "FS
 let private dynamicPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x36uy |] // "FSN6"
 let private proxyPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x37uy |] // "FSN7"
 let private spatialReferenceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x38uy |] // "FSN8"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x39uy |] // "FSN9"
+let private preparedXaSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x39uy |] // "FSN9"
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x41uy |] // "FSNA" (format 10)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -33,7 +34,8 @@ type private SnapshotFormat =
       DynamicPrivileges: bool
       ProxyPrivileges: bool
       SpatialReferences: bool
-      PreparedXas: bool }
+      PreparedXas: bool
+      TaggedIndexColumns: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -43,7 +45,8 @@ let private legacySnapshotFormat =
       DynamicPrivileges = false
       ProxyPrivileges = false
       SpatialReferences = false
-      PreparedXas = false }
+      PreparedXas = false
+      TaggedIndexColumns = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -66,8 +69,11 @@ let private proxyPrivilegeSnapshotFormat =
 let private spatialReferenceSnapshotFormat =
     { proxyPrivilegeSnapshotFormat with SpatialReferences = true }
 
-let private currentSnapshotFormat =
+let private preparedXaSnapshotFormat =
     { spatialReferenceSnapshotFormat with PreparedXas = true }
+
+let private currentSnapshotFormat =
+    { preparedXaSnapshotFormat with TaggedIndexColumns = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -76,6 +82,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = preparedXaSnapshotMagic then
+        Some preparedXaSnapshotFormat
     elif header = spatialReferenceSnapshotMagic then
         Some spatialReferenceSnapshotFormat
     elif header = proxyPrivilegeSnapshotMagic then
@@ -586,6 +594,7 @@ let private lowercaseIndexColumnPrefix = "\u0000L:"
 let private uppercaseIndexColumnPrefix = "\u0000U:"
 let private expressionIndexColumnPrefix = "\u0000E:"
 let private descendingIndexColumnPrefix = "\u0000D:"
+let private literalIndexColumnPrefix = "\u0000N:"
 let private invisibleIndexNamePrefix = "\u0000I:"
 let private spatialIndexNamePrefix = "\u0000S:"
 let private lengthIndexColumnPrefix = "\u0001"
@@ -596,9 +605,9 @@ let private (|Prefixed|_|) (prefix: string) (value: string) =
     else
         None
 
-// Key-part attributes stay inside the existing string-list field so the
-// following payload remains aligned. NUL cannot occur in an identifier.
-let private encodeIndexColumn column =
+// Tagged formats encode ordinary names too, so no identifier can be
+// mistaken for an in-band key-part attribute after recovery.
+let private encodeIndexColumn (format: SnapshotFormat) column =
     let encoded =
         match column.Transform, column.PrefixLength with
         | Some Lowercase, _ -> lowercaseIndexColumnPrefix + column.Name
@@ -607,6 +616,7 @@ let private encodeIndexColumn column =
             let expressionBytes = Writer()
             encodeExpr expressionBytes expression
             expressionIndexColumnPrefix + Convert.ToBase64String(expressionBytes.ToArray())
+        | None, None when format.TaggedIndexColumns -> literalIndexColumnPrefix + column.Name
         | None, None -> column.Name
         | None, Some length -> sprintf "%s%d:%s" lengthIndexColumnPrefix length column.Name
 
@@ -614,57 +624,99 @@ let private encodeIndexColumn column =
     | Asc -> encoded
     | Desc -> descendingIndexColumnPrefix + encoded
 
-let private decodeIndexColumn (encoded: string) =
-    let direction, encoded =
-        match encoded with
-        | Prefixed descendingIndexColumnPrefix encoded -> Desc, encoded
-        | _ -> Asc, encoded
+let private decodeIndexColumn (format: SnapshotFormat) (columnNames: Set<string>) (encodedValue: string) =
+    let legacyLiteral = not format.TaggedIndexColumns && Set.contains encodedValue columnNames
 
-    let column name prefixLength transform =
+    let direction, encoded =
+        match encodedValue with
+        | Prefixed descendingIndexColumnPrefix encoded -> Desc, encoded
+        | _ -> Asc, encodedValue
+
+    let column columnDirection name prefixLength transform =
         { Name = name
           PrefixLength = prefixLength
           Transform = transform
-          Direction = direction }
+          Direction = columnDirection }
 
-    match encoded with
-    | Prefixed lowercaseIndexColumnPrefix name -> column name None (Some Lowercase)
-    | Prefixed uppercaseIndexColumnPrefix name -> column name None (Some Uppercase)
-    | Prefixed expressionIndexColumnPrefix expression ->
-        let expression = expression |> Convert.FromBase64String |> Reader |> decodeExpr
-        column "" None (Some(Expression expression))
-    | Prefixed lengthIndexColumnPrefix encoded ->
-        match encoded.IndexOf(':') with
-        | separator when separator > 0 ->
-            match Int32.TryParse(encoded.Substring(0, separator)) with
-            | true, length -> column (encoded.Substring(separator + 1)) (Some length) None
-            | _ -> column (lengthIndexColumnPrefix + encoded) None None
-        | _ -> column (lengthIndexColumnPrefix + encoded) None None
-    | _ -> column encoded None None
+    if legacyLiteral then
+        column Asc encodedValue None None
+    else
+        match encoded with
+        | Prefixed literalIndexColumnPrefix name when format.TaggedIndexColumns -> column direction name None None
+        | Prefixed lowercaseIndexColumnPrefix name -> column direction name None (Some Lowercase)
+        | Prefixed uppercaseIndexColumnPrefix name -> column direction name None (Some Uppercase)
+        | Prefixed expressionIndexColumnPrefix expression ->
+            try
+                let expression = expression |> Convert.FromBase64String |> Reader |> decodeExpr
+                column direction "" None (Some(Expression expression))
+            with _ when not format.TaggedIndexColumns ->
+                column Asc encodedValue None None
+        | Prefixed lengthIndexColumnPrefix encoded ->
+            match encoded.IndexOf(':') with
+            | separator when separator > 0 ->
+                match Int32.TryParse(encoded.Substring(0, separator)) with
+                | true, length -> column direction (encoded.Substring(separator + 1)) (Some length) None
+                | _ -> column direction (lengthIndexColumnPrefix + encoded) None None
+            | _ -> column direction (lengthIndexColumnPrefix + encoded) None None
+        | _ when format.TaggedIndexColumns -> failwith "Persistence: invalid tagged index column"
+        | _ -> column direction encoded None None
 
-let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
-    let encodedName = if ix.Kind = SpatialIndex then spatialIndexNamePrefix + ix.Name else ix.Name
-    writeStr w (if ix.Visible then encodedName else invisibleIndexNamePrefix + encodedName)
-    ix.KeyColumns |> List.map encodeIndexColumn |> writeStrList w
-    writeBool w ix.Unique
-    writeBool w (ix.Kind = FullTextIndex)
+let private encodeIndexDef (format: SnapshotFormat) (w: Writer) (ix: IndexDef) : unit =
+    if format.TaggedIndexColumns then
+        writeStr w ix.Name
+        ix.KeyColumns |> List.map (encodeIndexColumn format) |> writeStrList w
+        writeBool w ix.Unique
+        writeBool w ix.Visible
 
-let private decodeIndexDef (r: #IReader) : IndexDef =
-    let encodedName = readStr r
-    let visible, name =
-        match encodedName with
-        | Prefixed invisibleIndexNamePrefix name -> false, name
-        | _ -> true, encodedName
+        w.WriteByte(
+            match ix.Kind with
+            | BTree -> 0uy
+            | FullTextIndex -> 1uy
+            | SpatialIndex -> 2uy
+        )
+    else
+        let encodedName = if ix.Kind = SpatialIndex then spatialIndexNamePrefix + ix.Name else ix.Name
+        writeStr w (if ix.Visible then encodedName else invisibleIndexNamePrefix + encodedName)
+        ix.KeyColumns |> List.map (encodeIndexColumn format) |> writeStrList w
+        writeBool w ix.Unique
+        writeBool w (ix.Kind = FullTextIndex)
 
-    let kind, name =
-        match name with
-        | Prefixed spatialIndexNamePrefix name -> SpatialIndex, name
-        | _ -> BTree, name
+let private decodeIndexDef (format: SnapshotFormat) (columnNames: Set<string>) (r: #IReader) : IndexDef =
+    if format.TaggedIndexColumns then
+        let name = readStr r
+        let keyColumns = readStrList r |> List.map (decodeIndexColumn format columnNames)
+        let unique = readBool r
+        let visible = readBool r
 
-    { Name = name
-      KeyColumns = readStrList r |> List.map decodeIndexColumn
-      Unique = readBool r
-      Visible = visible
-      Kind = (if readBool r then FullTextIndex else kind) }
+        let kind =
+            match r.ReadByte() with
+            | 0uy -> BTree
+            | 1uy -> FullTextIndex
+            | 2uy -> SpatialIndex
+            | _ -> failwith "Persistence: invalid index kind"
+
+        { Name = name
+          KeyColumns = keyColumns
+          Unique = unique
+          Visible = visible
+          Kind = kind }
+    else
+        let encodedName = readStr r
+        let visible, name =
+            match encodedName with
+            | Prefixed invisibleIndexNamePrefix name -> false, name
+            | _ -> true, encodedName
+
+        let kind, name =
+            match name with
+            | Prefixed spatialIndexNamePrefix name -> SpatialIndex, name
+            | _ -> BTree, name
+
+        { Name = name
+          KeyColumns = readStrList r |> List.map (decodeIndexColumn format columnNames)
+          Unique = readBool r
+          Visible = visible
+          Kind = (if readBool r then FullTextIndex else kind) }
 
 // Qualifiers reuse the legacy table-name field so older snapshots remain readable.
 let private qualifiedForeignKeyPrefix = "\u0000Q:"
@@ -745,11 +797,11 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | ChangeColumn(oldName, c, position) -> w.WriteByte 0x04uy; writeStr w oldName; encodeColumnDef format w c; encodeColumnPosition w position
     | RenameTo name -> w.WriteByte 0x05uy; writeStr w name
     | RenameColumnTo(oldName, newName) -> w.WriteByte 0x06uy; writeStr w oldName; writeStr w newName
-    | AddIndex ix -> w.WriteByte 0x07uy; encodeIndexDef w ix
+    | AddIndex ix -> w.WriteByte 0x07uy; encodeIndexDef format w ix
     | DropIndexAction name -> w.WriteByte 0x08uy; writeStr w name
     | AddForeignKey fk -> w.WriteByte 0x09uy; encodeForeignKeyDef w fk
     | DropForeignKey name -> w.WriteByte 0x0Auy; writeStr w name
-    | AddPrimaryKey columns -> w.WriteByte 0x0Buy; columns |> List.map encodeIndexColumn |> writeStrList w
+    | AddPrimaryKey columns -> w.WriteByte 0x0Buy; columns |> List.map (encodeIndexColumn format) |> writeStrList w
     | SetAutoIncrement value -> w.WriteByte 0x0Cuy; w.WriteInt64LE value
     | SetDefault(column, value) ->
         w.WriteByte 0x0Duy
@@ -780,7 +832,7 @@ let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterActi
     | AddHashPartitions _
     | CoalesceHashPartitions _ -> failwith "Persistence: partition ALTER action requires the current WAL format"
 
-let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterAction =
+let private decodeAlterAction (format: SnapshotFormat) (columnNames: Set<string>) (r: #IReader) : AlterAction =
     match r.ReadByte() with
     | 0x01uy -> AddColumn(decodeColumnDef format r, decodeColumnPosition r)
     | 0x02uy -> DropColumn(readStr r)
@@ -788,7 +840,7 @@ let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterActi
     | 0x04uy -> ChangeColumn(readStr r, decodeColumnDef format r, decodeColumnPosition r)
     | 0x05uy -> RenameTo(readStr r)
     | 0x06uy -> RenameColumnTo(readStr r, readStr r)
-    | 0x07uy -> AddIndex(decodeIndexDef r)
+    | 0x07uy -> AddIndex(decodeIndexDef format columnNames r)
     | 0x08uy -> DropIndexAction(readStr r)
     | 0x09uy -> AddForeignKey(decodeForeignKeyDef r)
     | 0x0Auy -> DropForeignKey(readStr r)
@@ -804,7 +856,7 @@ let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterActi
     | 0x12uy -> SetIndexVisibility(readStr r, readBool r)
     | 0x13uy when format.Partitions -> AddHashPartitions(uint32 (r.ReadInt32LE()))
     | 0x14uy when format.Partitions -> CoalesceHashPartitions(uint32 (r.ReadInt32LE()))
-    | _ -> AddPrimaryKey(readStrList r |> List.map decodeIndexColumn)
+    | _ -> AddPrimaryKey(readStrList r |> List.map (decodeIndexColumn format columnNames))
 
 let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) : unit =
     match s with
@@ -816,7 +868,7 @@ let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) 
         w.WriteInt32LE(List.length table.Columns)
         List.iter (encodeColumnDef format w) table.Columns
         w.WriteInt32LE(List.length table.Indexes)
-        List.iter (encodeIndexDef w) table.Indexes
+        List.iter (encodeIndexDef format w) table.Indexes
         w.WriteInt32LE(List.length table.ForeignKeys)
         List.iter (encodeForeignKeyDef w) table.ForeignKeys
         writeBool w table.IfNotExists
@@ -843,14 +895,15 @@ let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) 
     // rots, and no WAL ever carried these.
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
 
-let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
+let private decodeStatement (format: SnapshotFormat) (columnsForTable: string -> Set<string>) (r: #IReader) : Statement =
     match r.ReadByte() with
     | 0x01uy -> CreateDatabase(readStr r, readBool r, [])
     | 0x02uy -> DropDatabase(readStr r, readBool r)
     | 0x03uy ->
         let name = readStr r
         let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef format r)
-        let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
+        let columnNames = columns |> List.map _.Name |> Set.ofList
+        let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef format columnNames r)
         let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
         let ifNotExists = readBool r
         let tableCharset = readOptStr r
@@ -873,7 +926,29 @@ let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
               Partitioning = partitioning
               Deprecations = [] }
     | 0x04uy -> DropTable(readStrList r, readBool r)
-    | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction format r))
+    | 0x05uy ->
+        let table = readStr r
+        let mutable columnNames = columnsForTable table
+
+        let removeColumn name =
+            columnNames
+            |> Set.filter (fun existing -> not (String.Equals(existing, name, StringComparison.OrdinalIgnoreCase)))
+
+        let actions =
+            [ for _ in 1 .. r.ReadInt32LE() do
+                  let action = decodeAlterAction format columnNames r
+
+                  columnNames <-
+                      match action with
+                      | AddColumn(column, _) -> Set.add column.Name columnNames
+                      | DropColumn name -> removeColumn name
+                      | ChangeColumn(oldName, column, _) -> removeColumn oldName |> Set.add column.Name
+                      | RenameColumnTo(oldName, newName) -> removeColumn oldName |> Set.add newName
+                      | _ -> columnNames
+
+                  yield action ]
+
+        AlterTable(table, actions)
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
     | 0x09uy -> Truncate(readStr r)
     // 0x07/0x08 are retired — see `encodeStatement`.
@@ -899,6 +974,8 @@ let private KindXaRolledBack = 0x11uy
 let private KindAutoIncrementAdvanced = 0x12uy
 let private KindSchemaChangedV6 = 0x13uy
 let private KindSchemaChangedAtV6 = 0x14uy
+let private KindSchemaChangedV7 = 0x15uy
+let private KindSchemaChangedAtV7 = 0x16uy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -966,11 +1043,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteLenEncString table
         w.WriteInt64LE nextId
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV6
+        w.WriteByte KindSchemaChangedV7
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV6
+        w.WriteByte KindSchemaChangedAtV7
         w.WriteLenEncString db
         encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
@@ -999,7 +1076,13 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteByte KindXaRolledBack
         encodeXid w xid
 
-let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
+let rec private decodeEventAt
+    (columnsForTable: string -> string -> Set<string>)
+    (legacyFormat: SnapshotFormat)
+    (v3Format: SnapshotFormat)
+    (depth: int)
+    (r: #IReader)
+    : CommitEvent =
     if depth > maxDecodeDepth then
         failwith "Persistence: transaction nesting exceeds the decode limit"
 
@@ -1025,55 +1108,83 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
         AutoIncrementAdvanced(str (), str (), r.ReadInt64LE())
     | k when k = KindSchemaChanged ->
         let db = str ()
-        SchemaChanged(db, decodeStatement legacySnapshotFormat r)
+        SchemaChanged(db, decodeStatement legacyFormat (columnsForTable db) r)
     | k when k = KindTransactionCommitted ->
-        TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r))
+        TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r))
     | k when k = KindSchemaChangedAt ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement legacySnapshotFormat r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement legacyFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV2 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement columnCommentSnapshotFormat r)
+        SchemaChanged(db, decodeStatement columnCommentSnapshotFormat (columnsForTable db) r)
     | k when k = KindSchemaChangedAtV2 ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement columnCommentSnapshotFormat r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement columnCommentSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV3 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement tableCommentSnapshotFormat r)
+        SchemaChanged(db, decodeStatement v3Format (columnsForTable db) r)
     | k when k = KindSchemaChangedAtV3 ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement tableCommentSnapshotFormat r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement v3Format (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV4 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement numericDisplaySnapshotFormat r)
+        SchemaChanged(db, decodeStatement numericDisplaySnapshotFormat (columnsForTable db) r)
     | k when k = KindSchemaChangedAtV4 ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement numericDisplaySnapshotFormat r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement numericDisplaySnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV5 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement proxyPrivilegeSnapshotFormat r)
+        SchemaChanged(db, decodeStatement proxyPrivilegeSnapshotFormat (columnsForTable db) r)
     | k when k = KindSchemaChangedAtV5 ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement proxyPrivilegeSnapshotFormat r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement proxyPrivilegeSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV6 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement currentSnapshotFormat r)
+        SchemaChanged(db, decodeStatement preparedXaSnapshotFormat (columnsForTable db) r)
     | k when k = KindSchemaChangedAtV6 ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement currentSnapshotFormat r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement preparedXaSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
+    | k when k = KindSchemaChangedV7 ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement currentSnapshotFormat (columnsForTable db) r)
+    | k when k = KindSchemaChangedAtV7 ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement currentSnapshotFormat (columnsForTable db) r, DateTime(r.ReadInt64LE()))
     | k when k = KindXaPrepared ->
         let xid = decodeXid r
         let validateWholeSnapshot = readBool r
-        let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r)
+        let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
         XaPrepared(xid, validateWholeSnapshot, events)
     | k when k = KindXaCommitted ->
         let xid = decodeXid r
-        XaCommitted(xid, List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r))
+        XaCommitted(xid, List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r))
     | k when k = KindXaRolledBack ->
         XaRolledBack(decodeXid r)
     | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
 
-let private decodeEvent (r: #IReader) : CommitEvent = decodeEventAt 0 r
+let private columnsInCatalog (catalog: Catalog) (database: string) (table: string) =
+    catalog
+    |> Map.tryFind database
+    |> Option.bind (Map.tryFind (normalizeTableName table))
+    |> Option.map (fun definition -> definition.Columns |> List.map _.Name |> Set.ofList)
+    |> Option.defaultValue Set.empty
+
+let private decodeEvent (catalog: Catalog) (r: #IReader) : CommitEvent =
+    decodeEventAt (columnsInCatalog catalog) columnCommentSnapshotFormat tableCommentSnapshotFormat 0 r
+
+let private decodeWalPayload (store: Store) (payload: byte[]) : CommitEvent =
+    [ columnCommentSnapshotFormat, tableCommentSnapshotFormat
+      legacySnapshotFormat, tableCommentSnapshotFormat
+      columnCommentSnapshotFormat, columnCommentSnapshotFormat
+      legacySnapshotFormat, columnCommentSnapshotFormat ]
+    |> List.tryPick (fun (legacyFormat, v3Format) ->
+        try
+            let reader = Reader(payload)
+            let event = decodeEventAt (columnsInCatalog store.Catalog) legacyFormat v3Format 0 reader
+            if reader.Remaining = 0 then Some event else None
+        with _ ->
+            None)
+    |> Option.defaultWith (fun () -> failwith "Persistence: WAL payload does not match a supported format")
 
 /// Encodes `[int32 payload length][uint32 crc32][payload]`.
 let encodeWalRecord (event: CommitEvent) : byte[] =
@@ -1099,20 +1210,30 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     | CreateDatabase(name, _, _) -> warn "CreateDatabase" (createDatabase store name)
     | DropDatabase(name, _) -> warn "DropDatabase" (dropDatabase store name)
     | CreateTable table ->
-        warn
-            "CreateTable"
-            (createTableSeeded
-                store
-                db
-                table.Name
-                table.Columns
-                table.Indexes
-                table.ForeignKeys
-                table.Charset
-                table.Collation
-                table.AutoIncrementSeed
-                table.Comment
-                table.Partitioning)
+        let settings = executionSettings store
+        let replaySettings =
+            { settings with
+                SqlMode =
+                    { settings.SqlMode with
+                        Strict = false
+                        NoZeroDate = false
+                        NoZeroInDate = false } }
+
+        withExecutionSettings store replaySettings (fun () ->
+            warn
+                "CreateTable"
+                (createTableSeeded
+                    store
+                    db
+                    table.Name
+                    table.Columns
+                    table.Indexes
+                    table.ForeignKeys
+                    table.Charset
+                    table.Collation
+                    table.AutoIncrementSeed
+                    table.Comment
+                    table.Partitioning))
     | DropTable(names, _) -> names |> List.iter (fun n -> warn "DropTable" (dropTable store db n))
     | AlterTable(table, actions) ->
         // Replay non-strict, whatever the store's current mode: MODIFY/
@@ -1204,7 +1325,7 @@ let private replayWal (store: Store) (walPath: string) : int64 =
                     stopped <- true
                 else
                     try
-                        applyEvent store (decodeEvent (Reader(payload)))
+                        applyEvent store (decodeWalPayload store payload)
                         offset <- offset + int64 (8 + recLen)
                     with ex ->
                         Log.diagnostic "fsdb: WAL replay stopped at an unreadable record (%s): %s" walPath ex.Message
@@ -1219,7 +1340,7 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
     w.WriteInt32LE(List.length t.Columns)
     List.iter (encodeColumnDef format w) t.Columns
     w.WriteInt32LE(List.length t.Indexes)
-    List.iter (encodeIndexDef w) t.Indexes
+    List.iter (encodeIndexDef format w) t.Indexes
     w.WriteInt32LE(List.length t.ForeignKeys)
     List.iter (encodeForeignKeyDef w) t.ForeignKeys
     writeOptStr w t.TableCharset
@@ -1301,7 +1422,8 @@ let private writeStore (s: FileStream) (store: Store) : unit =
 let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let originalName = readStr r
     let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef format r)
-    let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
+    let columnNames = columns |> List.map _.Name |> Set.ofList
+    let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef format columnNames r)
     let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
     let tableCharset = readOptStr r
     let tableCollation = readOptStr r
@@ -1403,7 +1525,7 @@ let private decodeSnapshot (format: SnapshotFormat) (r: #IReader) =
                   let xid = decodeXid r
                   let validateWholeSnapshot = readBool r
                   let baseCatalog = decodeCatalog format r
-                  let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEvent r)
+                  let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEvent baseCatalog r)
                   let branchStore = Storage.create ()
                   setCatalog branchStore baseCatalog
                   branchStore.ForeignKeyChecks <- false
@@ -1473,10 +1595,32 @@ let load (dataDir: string) : Store =
             else
                 legacySnapshotFormat
 
-        let start = if read = snapshotMagic.Length && snapshotFormat header |> Option.isSome then int64 snapshotMagic.Length else 0L
-        s.Seek(start, SeekOrigin.Begin) |> ignore
-        let catalog, prepared = decodeSnapshot format (StreamReader(s))
-        catalog, prepared, format
+        let framed = read = snapshotMagic.Length && snapshotFormat header |> Option.isSome
+        let start = if framed then int64 snapshotMagic.Length else 0L
+        let payloadEnd = if framed then s.Length - int64 snapshotTrailerSize else s.Length
+
+        let tryDecode candidate =
+            try
+                s.Seek(start, SeekOrigin.Begin) |> ignore
+                let reader = StreamReader(s)
+                let catalog, prepared = decodeSnapshot candidate reader
+
+                if reader.Position = payloadEnd then
+                    Some(catalog, prepared, candidate)
+                else
+                    None
+            with _ ->
+                None
+
+        let candidates =
+            if framed && header = legacySnapshotMagic then
+                [ columnCommentSnapshotFormat; legacySnapshotFormat ]
+            else
+                [ format ]
+
+        candidates
+        |> List.tryPick tryDecode
+        |> Option.defaultWith (fun () -> failwith "Persistence: snapshot payload does not match its format")
 
     let mutable loadedFormat = None
 
