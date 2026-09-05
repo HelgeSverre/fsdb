@@ -6400,6 +6400,38 @@ and private fromItemQualifier (item: FromItem) : string =
     | FromLateral(_, alias) -> alias
     | FromJsonTable(_, _, _, alias) -> alias
 
+and private sourcePredicatesForInnerJoins
+    (baseSource: FromItem)
+    (joins: Join list)
+    (consumption: JoinConsumption)
+    (whereExpression: Expr option)
+    =
+    let canPush =
+        not joins.IsEmpty
+        && joins
+           |> List.forall (fun join ->
+               match join.Kind with
+               | InnerJoin
+               | CrossJoin
+               | NaturalJoin -> true
+               | _ -> false)
+
+    if not canPush then
+        Map.empty, whereExpression
+    else
+        let joinedQualifiers =
+            if consumption = ConsumesAllRows then
+                joins
+                |> List.choose (fun join ->
+                    match join.Table with
+                    | FromTable _
+                    | FromSubquery _ -> Some(fromItemQualifier join.Table)
+                    | _ -> None)
+            else
+                []
+
+        splitJoinWhere (fromItemQualifier baseSource :: joinedQualifiers) whereExpression
+
 /// `EvalContext.Qualifiers` for every source (the `FROM` table, and each
 /// `JOIN` after it) already resolved into `sources`, ordered the same
 /// left-to-right way their columns are laid out in a combined row —
@@ -8610,32 +8642,8 @@ and private runUnlockedSelectStmt
             match prepareVirtualRows store registry dbName baseQualifier baseColumns baseRows with
             | Error error -> error, [], []
             | Ok baseRows ->
-                let canPushWhere =
-                    not select.Joins.IsEmpty
-                    && select.Joins
-                       |> List.forall (fun join ->
-                           match join.Kind with
-                           | InnerJoin
-                           | CrossJoin
-                           | NaturalJoin -> true
-                           | _ -> false)
-
-                let joinedQualifiers =
-                    if joinConsumption = ConsumesAllRows then
-                        select.Joins
-                        |> List.choose (fun join ->
-                            match join.Table with
-                            | FromTable _
-                            | FromSubquery _ -> Some(fromItemQualifier join.Table)
-                            | _ -> None)
-                    else
-                        []
-
                 let pushedWhere, remainingWhere =
-                    if canPushWhere then
-                        splitJoinWhere (baseQualifier :: joinedQualifiers) select.Where
-                    else
-                        Map.empty, select.Where
+                    sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
 
                 let prepared =
                     let narrowedSelect = { select with Where = remainingWhere }
@@ -12575,6 +12583,12 @@ and private runFullTextSelect
     | None, _ -> unsupported ()
     | _, Error error -> error, [], []
     | Some fromItem, Ok sources ->
+        let joinConsumption = joinConsumptionFor select.Limit
+        let sourcePredicates, remainingWhere =
+            sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
+
+        let select = { select with Where = remainingWhere }
+
         match matchNodes |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node)) with
         | Error error -> error, [], []
         | Ok ownedNodes ->
@@ -12592,9 +12606,13 @@ and private runFullTextSelect
                               Rows = source.Table.RowsArray :> Value[] seq }
                     else
                         let physicalCandidates =
-                            match source.Item with
-                            | FromTable tableRef when select.Joins.IsEmpty && select.Locking.IsEmpty ->
-                                tryPhysicalReadCandidatesInTable store source.Table tableRef select.Where
+                            let candidatePredicate =
+                                Map.tryFind (source.Qualifier.ToLowerInvariant()) sourcePredicates
+                                |> Option.orElseWith (fun () -> if select.Joins.IsEmpty then select.Where else None)
+
+                            match source.Item, candidatePredicate with
+                            | FromTable tableRef, Some predicate when select.Locking.IsEmpty ->
+                                tryPhysicalReadCandidatesInTable store source.Table tableRef (Some predicate)
                             | _ -> None
 
                         let candidateIds =
@@ -12674,8 +12692,13 @@ and private runFullTextSelect
                 match resolveBase with
                 | Error error -> error, [], []
                 | Ok(baseColumns, baseRows) ->
-                    let initial = Ok(([ fromItemQualifier fromItem, baseColumns ], baseRows), [])
-                    let joinConsumption = joinConsumptionFor select.Limit
+                    let baseQualifier = fromItemQualifier fromItem
+                    let filteredBase =
+                        match Map.tryFind (baseQualifier.ToLowerInvariant()) sourcePredicates with
+                        | None -> Ok baseRows
+                        | Some predicate -> filterSourceRows store registry dbName outer baseQualifier baseColumns predicate baseRows
+
+                    let initial = filteredBase |> Result.map (fun rows -> ([ baseQualifier, baseColumns ], rows), [])
 
                     let joined =
                         select.Joins
@@ -12685,7 +12708,7 @@ and private runFullTextSelect
                                 |> Result.bind (fun ((resolved, rows), namesPerJoin) ->
                                     let rewrittenJoin = { join with On = sub join.On }
 
-                                    applyJoin store registry dbName outer overrides Map.empty None joinConsumption (resolved, rows) rewrittenJoin
+                                    applyJoin store registry dbName outer overrides sourcePredicates None joinConsumption (resolved, rows) rewrittenJoin
                                     |> Result.map (fun (sources, rows, names) -> (sources, rows), names :: namesPerJoin)))
                             initial
 
