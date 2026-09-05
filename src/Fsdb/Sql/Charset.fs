@@ -165,6 +165,22 @@ let encode (name: string) (text: string) =
     | Some codec -> codec.Encoding.Value.GetBytes(textAcceptedBy codec text)
     | None -> Encoding.UTF8.GetBytes text
 
+let tryEncodeStrict (name: string) (text: string) =
+    let encode (encoding: Encoding) =
+        try
+            Some(encoding.GetBytes text)
+        with :? EncoderFallbackException ->
+            None
+
+    match tryCodec name with
+    | Some codec when
+        not codec.AllowsSupplementaryCharacters
+        && text.EnumerateRunes() |> Seq.exists (fun rune -> rune.Value > 0xFFFF)
+        ->
+        None
+    | Some codec -> encode codec.StrictEncoding.Value
+    | None -> encode (strictUtf8 ())
+
 let decodeBytes (name: string) (bytes: byte[]) =
     match tryCodec name with
     | Some codec -> codec.Encoding.Value.GetString bytes

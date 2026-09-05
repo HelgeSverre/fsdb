@@ -4377,10 +4377,45 @@ let private trySecondaryOrderSliceInTable
                         let position = entries.IndexOf entry
                         if position < 0 then ~~~position else position
 
-                    let firstEqual value = insertionIndex (entry value (RowId.create Int32.MinValue))
-                    let afterEqual value = insertionIndex (entry value (RowId.create Int32.MaxValue))
+                    let fullFirstEqual value = insertionIndex (entry value (RowId.create Int32.MinValue))
+                    let fullAfterEqual value = insertionIndex (entry value (RowId.create Int32.MaxValue))
                     let hasBounds = lower.IsSome || upper.IsSome
                     let prefixed = group.PrefixLength.IsSome
+
+                    let comparePrimary left right =
+                        let comparison =
+                            match left, right with
+                            | VString left, VString right ->
+                                table.Columns.[index].Collation
+                                |> Option.bind Collation.tryFind
+                                |> Option.defaultValue Collation.defaultCollation
+                                |> fun collation -> collation.ComparePrimary left right
+                            | _ -> Value.compare left right
+
+                        if group.Direction = Desc then -comparison else comparison
+
+                    let primaryInsertionIndex includeEqual value =
+                        let mutable first = 0
+                        let mutable count = entries.Count
+
+                        while count > 0 do
+                            let step = count / 2
+                            let current = first + step
+                            let comparison = comparePrimary entries.[current].Values.Head value
+
+                            if comparison < 0 || (not includeEqual && comparison = 0) then
+                                first <- current + 1
+                                count <- count - step - 1
+                            else
+                                count <- step
+
+                        first
+
+                    let firstEqual value =
+                        if prefixed then primaryInsertionIndex true value else fullFirstEqual value
+
+                    let afterEqual value =
+                        if prefixed then primaryInsertionIndex false value else fullAfterEqual value
 
                     let first, afterLast =
                         match group.Direction with
