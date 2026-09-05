@@ -326,6 +326,19 @@ let tests =
 
               Expect.equal calls 2 "projection-only MATCH retains ordinary point narrowing"
 
+              run store "CREATE TABLE owners (id INT PRIMARY KEY)" |> ignore
+              run store "INSERT INTO owners VALUES (37), (82)" |> ignore
+              calls <- 0
+
+              let joinedPointIntersection =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT d.id FROM docs d JOIN owners o ON o.id = d.id WHERE MATCH(d.body) AGAINST('needle') AND TOUCH(d.id) = d.id AND d.id = 37"
+
+              Expect.equal (ids joinedPointIntersection) [ "37" ] "the joined point lookup retains the matching row"
+              Expect.equal calls 2 "the joined full-text plan scores only the shared physical candidate"
+
           testCase "captured table roots retain their full-text snapshot"
           <| fun _ ->
               let store = create ()
@@ -452,7 +465,7 @@ let tests =
               let store = create ()
 
               [ "CREATE TABLE articles (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
-                "CREATE TABLE notes (article_id INT, body TEXT, FULLTEXT(body))"
+                "CREATE TABLE notes (article_id INT, body TEXT, KEY ix_article_id (article_id), FULLTEXT(body))"
                 "INSERT INTO articles VALUES (1, 'database security'), (2, 'ordinary article'), (3, 'database tutorial')"
                 "INSERT INTO notes VALUES (1, 'release note'), (2, 'security note'), (3, 'ordinary note')" ]
               |> List.iter (run store >> ignore)
@@ -465,6 +478,22 @@ let tests =
                   ))
                   [ "1"; "3" ]
                   "each MATCH reads the corpus and row identity of its owning source"
+
+              let mutable calls = 0
+              let registry =
+                  builtins
+                  |> registerScalar "TOUCH" (fun values ->
+                      calls <- calls + 1
+                      values |> List.tryHead |> Option.defaultValue VNull)
+
+              let joinedSourceIntersection =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT a.id FROM articles a JOIN notes n ON n.article_id = a.id WHERE MATCH(n.body) AGAINST('note') AND TOUCH(n.article_id) = n.article_id AND n.article_id = 2"
+
+              Expect.equal (ids joinedSourceIntersection) [ "2" ] "the joined source retains its matching point candidate"
+              Expect.equal calls 2 "the joined source scores only the shared physical candidate"
 
               match
                   run
