@@ -6,6 +6,33 @@ open Fsdb.Binary
 open Fsdb.Compression
 open Fsdb.Packet
 
+type private HeaderThenEofStream(header: byte[]) =
+    inherit IO.Stream()
+
+    let mutable headerOffset = 0
+    let mutable maximumRead = 0
+
+    member _.MaximumRead = maximumRead
+    override _.CanRead = true
+    override _.CanSeek = false
+    override _.CanWrite = false
+    override _.Length = int64 header.Length
+    override _.Position with get () = int64 headerOffset and set _ = raise (NotSupportedException())
+    override _.Flush() = ()
+    override _.Seek(_, _) = raise (NotSupportedException())
+    override _.SetLength _ = raise (NotSupportedException())
+    override _.Write(_, _, _) = raise (NotSupportedException())
+
+    override _.Read(buffer, offset, count) =
+        maximumRead <- max maximumRead count
+        let copied = min count (header.Length - headerOffset)
+
+        if copied > 0 then
+            Array.Copy(header, headerOffset, buffer, offset, copied)
+            headerOffset <- headerOffset + copied
+
+        copied
+
 let tests =
     testList
         "Packet"
@@ -131,6 +158,33 @@ let tests =
                   Expect.equal read 0 "a clean compressed disconnect is ordinary EOF"
               }
               |> Async.RunSynchronously
+
+          testCase "compressed bodies are read in bounded chunks before materialization"
+          <| fun _ ->
+              let header = [| 0xffuy; 0xffuy; 0xffuy; 0uy; 0uy; 0uy; 0uy |]
+              use wire = new HeaderThenEofStream(header)
+              use reader = new CompressedStream(wire, true)
+              reader.BeginCommand()
+
+              Expect.throwsT<IO.EndOfStreamException>
+                  (fun () -> reader.Read(Array.zeroCreate 1, 0, 1) |> ignore)
+                  "an incomplete declared body is rejected"
+
+              Expect.isLessThanOrEqual wire.MaximumRead (64 * 1024) "a stalled body cannot reserve its full declared length"
+
+          testCase "prepared long-data buffers coalesce tiny chunks into bounded pages"
+          <| fun _ ->
+              let buffer = Fsdb.Session.LongDataBuffer()
+
+              for value in 0..9999 do
+                  buffer.Append [| byte (value % 251) |]
+
+              let actual = buffer.ToArray()
+              Expect.equal actual.Length 10000 "all logical bytes are retained"
+              Expect.equal buffer.ReservedBytes 10240L "tiny arrivals use bounded fixed pages"
+
+              for index in 0..actual.Length - 1 do
+                  Expect.equal actual.[index] (byte (index % 251)) "arrival order is preserved"
 
           testCase "writePacketAsync splits a payload >= 16 MiB instead of truncating the length header"
           <| fun _ ->
