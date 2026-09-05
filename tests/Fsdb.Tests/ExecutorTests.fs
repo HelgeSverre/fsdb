@@ -996,7 +996,18 @@ let tests =
                     Expect.equal
                         (runDefault store "CHECKSUM TABLE t QUICK")
                         (ResultSet([ "Table"; "Checksum" ], [ [ Some "fsdb.t"; None ] ]))
-                        "InnoDB-style QUICK result" ]
+                        "InnoDB-style QUICK result"
+
+                    use cancellation = new System.Threading.CancellationTokenSource()
+                    cancellation.Cancel()
+                    Fsdb.Limits.queryCancellation.Value <- cancellation.Token
+
+                    try
+                        Expect.throwsT<System.OperationCanceledException>
+                            (fun () -> runDefault store "CHECKSUM TABLE t" |> ignore)
+                            "checksum serialization observes query cancellation"
+                    finally
+                        Fsdb.Limits.queryCancellation.Value <- System.Threading.CancellationToken.None ]
 
           testList
               "EXPLAIN"
@@ -2733,6 +2744,25 @@ let tests =
                     | Err(1210, "Incorrect arguments to sleep.") -> ()
                     | other -> failtestf "expected invalid SLEEP arguments to return 1210, got %A" other
 
+                    match run store registry (sprintf "SELECT SLEEP(%g)" (Fsdb.Limits.maxSleepSeconds + 1.0)) with
+                    | Err(1235, _) -> ()
+                    | other -> failtestf "expected an over-limit SLEEP to fail before waiting, got %A" other
+
+                    match run store registry (sprintf "SELECT BENCHMARK(%d, 1)" (Fsdb.Limits.maxBenchmarkIterations + 1L)) with
+                    | Err(1235, _) -> ()
+                    | other -> failtestf "expected an over-limit BENCHMARK to fail before looping, got %A" other
+
+                    let benchmarkTimer = System.Diagnostics.Stopwatch.StartNew()
+
+                    match run store registry "SELECT BENCHMARK(1, SLEEP(5))" with
+                    | Err(1235, _) -> ()
+                    | other -> failtestf "expected BENCHMARK to enforce its elapsed-work limit, got %A" other
+
+                    Expect.isLessThan
+                        benchmarkTimer.Elapsed
+                        (Fsdb.Limits.maxBenchmarkDuration + System.TimeSpan.FromSeconds 1.0)
+                        "a nested SLEEP stops near BENCHMARK's earlier deadline"
+
                 testCase "delete-side foreign-key actions run before the replacement insert"
                 <| fun _ ->
                     let store = newStore ()
@@ -3484,7 +3514,41 @@ let tests =
 
                     match runDefault store "SELECT ROUND(AVG(n), 1) AS a FROM t" with
                     | ResultSet([ "a" ], [ [ Some "15.0" ] ]) -> ()
-                    | other -> failtestf "expected a scalar function wrapping an aggregate to work, got %A" other ]
+                    | other -> failtestf "expected a scalar function wrapping an aggregate to work, got %A" other
+
+                testCase "optimized aggregates observe cancellation during their own folds"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE aggregate_cancel (id INT)" |> ignore
+
+                    [ 1..300 ]
+                    |> List.map (sprintf "(%d)")
+                    |> String.concat ","
+                    |> sprintf "INSERT INTO aggregate_cancel VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    let runCancelled cancelAt statement =
+                        use cancellation = new System.Threading.CancellationTokenSource()
+                        let arm =
+                            function
+                            | [ VInt value ] as values ->
+                                if value = cancelAt then cancellation.Cancel()
+                                List.head values
+                            | values -> List.tryHead values |> Option.defaultValue VNull
+
+                        let registry = builtins |> registerScalar "ARM" arm
+                        Fsdb.Limits.queryCancellation.Value <- cancellation.Token
+
+                        try
+                            Expect.throwsT<System.OperationCanceledException>
+                                (fun () -> run store registry statement |> ignore)
+                                (statement + " observes cancellation")
+                        finally
+                            Fsdb.Limits.queryCancellation.Value <- System.Threading.CancellationToken.None
+
+                    runCancelled 300L "SELECT COUNT(*) FROM aggregate_cancel WHERE ARM(id) = id"
+                    runCancelled 1L "SELECT SUM(ARM(id)), AVG(ARM(id)) FROM aggregate_cancel" ]
 
           testList
               "table-qualified columns are checked against the FROM's alias-or-table, not silently accepted from anywhere"
@@ -7947,6 +8011,24 @@ let tests =
                         Expect.equal (uint64 second) (uint64 first + 1UL) "UUID_SHORT is monotonic"
                     | other -> failtestf "unexpected result: %A" other
 
+                testCase "allocation-sensitive casts and decompression reject hostile declared sizes"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT UNCOMPRESS(X'FFFFFFFF789C')" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected an oversized compressed frame to return NULL, got %A" other
+
+                    match runDefault (newStore ()) "SELECT CAST(1 AS BIT(1000000000))" with
+                    | Err(1439, _) -> ()
+                    | other -> failtestf "expected an oversized BIT cast to fail with 1439, got %A" other
+
+                    match runDefault (newStore ()) "SELECT CAST('' AS BINARY(1000000000))" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected an oversized BINARY cast to return NULL, got %A" other
+
+                    match runDefault (newStore ()) "SELECT c FROM JSON_TABLE('[\"\"]', '$[*]' COLUMNS(c BINARY(500000000) PATH '$')) jt" with
+                    | Err(1074, _) -> ()
+                    | other -> failtestf "expected an oversized JSON_TABLE BINARY column to fail with 1074, got %A" other
+
                 testCase "standalone TABLE and VALUES ROW queries use the ordinary query pipeline"
                 <| fun _ ->
                     let store = newStore ()
@@ -8888,6 +8970,18 @@ let tests =
                     match runDefault store "CREATE TABLE bad_primary (shape POINT PRIMARY KEY)" with
                     | Err(3728, _) -> ()
                     | other -> failtestf "expected spatial primary key refusal, got %A" other
+
+                    runDefault store "CREATE TABLE inherited_primary (shape INT PRIMARY KEY)" |> ignore
+
+                    match runDefault store "ALTER TABLE inherited_primary MODIFY shape GEOMETRY" with
+                    | Err(3728, _) -> ()
+                    | other -> failtestf "expected inherited spatial primary key refusal, got %A" other
+
+                    runDefault store "CREATE TABLE inherited_unique (shape INT UNIQUE)" |> ignore
+
+                    match runDefault store "ALTER TABLE inherited_unique CHANGE shape renamed GEOMETRY" with
+                    | Err(3728, _) -> ()
+                    | other -> failtestf "expected inherited spatial unique key refusal, got %A" other
 
                     match runDefault store "CREATE TABLE bad_nullable (shape POINT, SPATIAL INDEX sx(shape))" with
                     | Err(1252, "All parts of a SPATIAL index must be NOT NULL") -> ()
