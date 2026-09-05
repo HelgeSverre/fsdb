@@ -3306,7 +3306,7 @@ let private combineConjuncts =
     | [] -> None
     | first :: rest -> rest |> List.fold (fun combined expression -> BinOp(And, combined, expression)) first |> Some
 
-let private canPushIntoBase (qualifier: string) =
+let private canPushIntoSource (qualifier: string) =
     let rec eligible =
         function
         | Lit _ -> true
@@ -3325,12 +3325,27 @@ let private canPushIntoBase (qualifier: string) =
 
     eligible
 
-let private splitBaseWhere qualifier whereExpression =
-    whereExpression
-    |> Option.map conjuncts
-    |> Option.defaultValue []
-    |> List.partition (canPushIntoBase qualifier)
-    |> fun (pushed, remaining) -> combineConjuncts pushed, combineConjuncts remaining
+let private splitJoinWhere (qualifiers: string list) (whereExpression: Expr option) =
+    let add (qualifier: string) predicate predicates =
+        predicates
+        |> Map.change
+            (qualifier.ToLowerInvariant())
+            (function
+            | None -> Some predicate
+            | Some existing -> Some(BinOp(And, existing, predicate)))
+
+    let pushed, remaining =
+        whereExpression
+        |> Option.map conjuncts
+        |> Option.defaultValue []
+        |> List.fold
+            (fun (pushed, remaining) predicate ->
+                match qualifiers |> List.tryFind (fun qualifier -> canPushIntoSource qualifier predicate) with
+                | Some qualifier -> add qualifier predicate pushed, remaining
+                | None -> pushed, predicate :: remaining)
+            (Map.empty, [])
+
+    pushed, remaining |> List.rev |> combineConjuncts
 
 /// Splits a `JOIN ... ON` expression's `AND`-conjuncts into equi-join key
 /// pairs — a `QualifiedCol = QualifiedCol` conjunct with one side resolving
@@ -6635,6 +6650,7 @@ and private applyJoin
     (dbName: string)
     (outer: EvalContext option)
     (sourceOverrides: JoinSourceOverrides)
+    (sourcePredicates: Map<string, Expr>)
     (leftPhysicalTable: Table option)
     (consumption: JoinConsumption)
     (state: (string * ColumnDef list) list * Value[] seq)
@@ -6643,7 +6659,7 @@ and private applyJoin
     match join.Table with
     | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName outer state join source path columns alias
     | FromLateral(body, alias) -> applyLateralJoin store registry dbName outer state join body alias
-    | _ -> applyResolvedJoin store registry dbName outer sourceOverrides leftPhysicalTable consumption state join
+    | _ -> applyResolvedJoin store registry dbName outer sourceOverrides sourcePredicates leftPhysicalTable consumption state join
 
 /// `applyJoin`'s LATERAL branch — the derived table re-runs once per left
 /// row, with that row (over the columns joined so far) as its outer context,
@@ -6970,6 +6986,32 @@ and private prepareVirtualRows
         |> Result.mapError (fun (code, message) -> Err(code, message))
         |> Result.map (fun rows -> rows :> Value[] seq)
 
+and private filterSourceRows
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (outer: EvalContext option)
+    (qualifier: string)
+    (columns: ColumnDef list)
+    (predicate: Expr)
+    (rows: Value[] seq)
+    : Result<Value[] seq, QueryResult> =
+    let context =
+        contextFactory
+            store
+            registry
+            dbName
+            (columnIndexOf columns)
+            (singleQualifier qualifier columns)
+            outer
+
+    rows
+    |> traverseSeq (fun row ->
+        whereMatches context (Some predicate) row
+        |> Result.map (fun matches -> if matches then Some row else None))
+    |> Result.mapError Err
+    |> Result.map (fun filtered -> filtered :> Value[] seq)
+
 /// Indexed join probes return physical row arrays, so their results must
 /// resolve to the corresponding VIRTUAL-prepared row before evaluation.
 and private alignPreparedRows
@@ -7009,6 +7051,7 @@ and private applyResolvedJoin
     (dbName: string)
     (outer: EvalContext option)
     (sourceOverrides: JoinSourceOverrides)
+    (sourcePredicates: Map<string, Expr>)
     (leftPhysicalTable: Table option)
     (consumption: JoinConsumption)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
@@ -7036,7 +7079,12 @@ and private applyResolvedJoin
 
         |> Result.bind (fun (columns, rows, physicalTable) ->
             prepareVirtualRows store registry dbName joinQualifier columns rows
-            |> Result.map (fun rows -> columns, rows, physicalTable))
+            |> Result.bind (fun rows ->
+                match Map.tryFind qualifier sourcePredicates with
+                | None -> Ok(columns, rows, physicalTable)
+                | Some predicate ->
+                    filterSourceRows store registry dbName outer joinQualifier columns predicate rows
+                    |> Result.map (fun rows -> columns, rows, None)))
 
     match joinSource with
     | Error e -> Error e
@@ -8572,32 +8620,37 @@ and private runUnlockedSelectStmt
                            | NaturalJoin -> true
                            | _ -> false)
 
+                let joinedQualifiers =
+                    if joinConsumption = ConsumesAllRows then
+                        select.Joins
+                        |> List.choose (fun join ->
+                            match join.Table with
+                            | FromTable _
+                            | FromSubquery _ -> Some(fromItemQualifier join.Table)
+                            | _ -> None)
+                    else
+                        []
+
                 let pushedWhere, remainingWhere =
-                    if canPushWhere then splitBaseWhere baseQualifier select.Where else None, select.Where
+                    if canPushWhere then
+                        splitJoinWhere (baseQualifier :: joinedQualifiers) select.Where
+                    else
+                        Map.empty, select.Where
 
                 let prepared =
-                    match pushedWhere with
-                    | None -> Ok(baseRows, select)
-                    | Some predicate ->
-                        let context =
-                            contextFactory
-                                store
-                                registry
-                                dbName
-                                (columnIndexOf baseColumns)
-                                (singleQualifier baseQualifier baseColumns)
-                                outer
+                    let narrowedSelect = { select with Where = remainingWhere }
 
-                        baseRows
-                        |> traverseSeq (fun row ->
-                            whereMatches context (Some predicate) row
-                            |> Result.map (fun matches -> if matches then Some row else None))
-                        |> Result.mapError Err
-                        |> Result.map (fun rows -> rows :> Value[] seq, { select with Where = remainingWhere })
+                    match Map.tryFind (baseQualifier.ToLowerInvariant()) pushedWhere with
+                    | None -> Ok(baseRows, narrowedSelect)
+                    | Some predicate ->
+                        filterSourceRows store registry dbName outer baseQualifier baseColumns predicate baseRows
+                        |> Result.map (fun rows -> rows, narrowedSelect)
 
                 match prepared with
                 | Error error -> error, [], []
                 | Ok(baseRows, select) ->
+                    let applyPlannedJoin = applyJoin store registry dbName outer Map.empty pushedWhere
+
                     let initial : Result<((string * ColumnDef list) list * Value[] seq * Table option) * string list list, QueryResult> =
                         Ok(([ baseQualifier, baseColumns ], baseRows, basePhysicalTable), [])
 
@@ -8607,7 +8660,7 @@ and private runUnlockedSelectStmt
                             (fun acc join ->
                                 acc
                                 |> Result.bind (fun ((sources, rows, leftPhysicalTable), namesPerJoin) ->
-                                    applyJoin store registry dbName outer Map.empty leftPhysicalTable joinConsumption (sources, rows) join
+                                    applyPlannedJoin leftPhysicalTable joinConsumption (sources, rows) join
                                     |> Result.map (fun (sources', rows', names) -> (sources', rows', None), names :: namesPerJoin)))
                             initial
                     with
@@ -12632,7 +12685,7 @@ and private runFullTextSelect
                                 |> Result.bind (fun ((resolved, rows), namesPerJoin) ->
                                     let rewrittenJoin = { join with On = sub join.On }
 
-                                    applyJoin store registry dbName outer overrides None joinConsumption (resolved, rows) rewrittenJoin
+                                    applyJoin store registry dbName outer overrides Map.empty None joinConsumption (resolved, rows) rewrittenJoin
                                     |> Result.map (fun (sources, rows, names) -> (sources, rows), names :: namesPerJoin)))
                             initial
 

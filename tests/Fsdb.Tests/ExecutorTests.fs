@@ -6261,7 +6261,7 @@ let tests =
                     Expect.equal limitedPlan.AccessType (Some "ref") "an early-stopping query retains streaming index probes"
                     Expect.equal limitedPlan.Key (Some "ix_bucket") "the streaming key remains visible"
 
-                testCase "qualified base predicates run before inner-join fan-out"
+                testCase "qualified source predicates run before inner-join fan-out"
                 <| fun _ ->
                     let mutable calls = 0
 
@@ -6292,7 +6292,20 @@ let tests =
                     | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count "500" "ten left rows each match half the right table"
                     | other -> failtestf "expected a join count, got %A" other
 
-                    Expect.isLessThan calls 600 "the residual join predicate runs only after the base range predicate"
+                    Expect.isLessThan calls 600 "the residual join predicate runs only after the base predicate"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT COUNT(*) FROM left_rows l JOIN right_rows r ON r.bucket = l.bucket AND TOUCH(r.id) > 0 WHERE r.id <= 10"
+                    with
+                    | ResultSet(_, [ [ Some count ] ]) -> Expect.equal count "500" "ten right rows each match half the left table"
+                    | other -> failtestf "expected a join count, got %A" other
+
+                    Expect.isLessThan calls 600 "the residual join predicate runs only after the joined-source predicate"
 
                 testCase "prefix indexes probe inner joins without weakening equality"
                 <| fun _ ->
