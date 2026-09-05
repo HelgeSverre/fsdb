@@ -407,7 +407,7 @@ predicates, and assignments.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, literal-IN, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; cross-source inference and other join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
+| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates; compatible source-local equality, literal-IN, range, and spatial candidates restrict scoring for predicates and projections in single-table and all-inner-join queries; implicit relevance ordering streams through exact unique inner-join chains for bounded results; cross-source inference and other join-shaped combinations still score each owning corpus before joining | medium (scale) | divergence |
 | Tunables | innodb_ft_min_token_size, innodb_ft_max_token_size, ft_query_expansion_limit, stopword tables, enable/disable | the three numeric defaults are exposed with MySQL's GLOBAL/read-only scope and drive `FullText` at 3 / 84 / 20; `INNODB_FT_DEFAULT_STOPWORD` exposes the exact duplicate-preserving built-in list, while custom stopword tables and enable/disable behavior remain absent | low | divergence/refusal |
 | CJK | ngram and mecab parsers, WITH PARSER clause | absent; no CJK tokenization | medium (for CJK) | refusal |
 
@@ -512,7 +512,7 @@ routines, events, and administrative probes.
 
 | Open campaign | Current gap |
 |---|---|
-| Planner constant factors | Indexed joins, equality/`IN`, and secondary ranges retain a constant-factor gap. Low-cardinality joins push safe source-local predicates below full-consumption fan-out and stream plain `COUNT(*)`, while grouping, scan-shaped updates, decimal membership, and full-text joins remain input-sensitive. Benchmark result artifacts carry the measurements; shared statement setup and scan-shaped plans remain the principal measured seams. |
+| Planner constant factors | Indexed joins, equality/`IN`, and secondary ranges retain a constant-factor gap. Low-cardinality joins push safe source-local predicates below full-consumption fan-out and stream plain `COUNT(*)`; relevance-ordered full-text limits stream through exact unique joins, while grouping, scan-shaped updates, decimal membership, and broader full-text plans remain input-sensitive. Benchmark result artifacts carry the measurements; shared statement setup and scan-shaped plans remain the principal measured seams. |
 | Transaction fault scheduling | The torture harness lacks matched connection churn during transactions, cancellation while queued, savepoints under contention, and concurrent campaigns across every isolation level. |
 | Catalog churn | Concurrent `CREATE/DROP DATABASE` under query and transaction traffic lacks a differential campaign. |
 | Snapshot rotation volume | Crash/restart campaigns cover acknowledged-commit and atomicity invariants; longer high-volume checkpoint-rotation campaigns remain useful stress coverage. |
