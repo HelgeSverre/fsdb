@@ -3300,6 +3300,12 @@ let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : V
     | VString _ -> orderValueFor (tryColumnDefForExpr ctx expr) (keyCollation ctx expr) value
     | _ -> value, None
 
+let private compareAggregateOrder (ctx: EvalContext) (expr: Expr) left right =
+    match orderValueForExpr ctx expr left, orderValueForExpr ctx expr right with
+    | (VString leftText, Some collation), (VString rightText, _) ->
+        collation.ComparePrimary leftText rightText
+    | (leftValue, _), (rightValue, _) -> Value.compareTotal leftValue rightValue
+
 /// `Star(Some qualifier)` (`t.*`) resolution — same shape as
 /// `resolveQualifiedCol`, but hands back every one of that qualifier's own
 /// `(name, value)` pairs instead of a single column, so a `JOIN`'s `t.*`
@@ -10324,24 +10330,16 @@ and private evalAggregate
                 let deduped = if distinct then nonNull |> List.distinctBy snd |> List.map fst else nonNull |> List.map fst
 
                 if isCount || not deduped.IsEmpty then
-                    // MIN/MAX over strings compare by the expression's own
-                    // collation weights, with primary-equal values keeping
-                    // the first-seen one (MySQL-verified: MAX('ÅGE','age')
-                    // and MAX('age','ÅGE') each return whichever came
-                    // first) — `Value.compare`'s folded server-default
-                    // order would pick wrong.
-                    if (isMin || isMax) && deduped |> List.forall (function VString _ -> true | _ -> false) then
-                        let col = keyCollation (ctxFor (List.tryHead rows |> Option.defaultValue [||])) innerExpr
+                    // Reusing ORDER BY keys keeps text under its resolved
+                    // collation and ENUM under its declaration ordinal.
+                    if isMin || isMax then
+                        let aggregateCtx = ctxFor (List.tryHead rows |> Option.defaultValue [||])
 
-                        let text (v: Value) =
-                            match v with
-                            | VString s -> s
-                            | _ -> ""
+                        let choose best candidate =
+                            let compared = compareAggregateOrder aggregateCtx innerExpr best candidate
+                            if (if isMax then compared >= 0 else compared <= 0) then best else candidate
 
-                        if isMax then
-                            List.reduce (fun best v -> if col.ComparePrimary (text best) (text v) >= 0 then best else v) deduped
-                        else
-                            List.reduce (fun best v -> if col.ComparePrimary (text best) (text v) <= 0 then best else v) deduped
+                        List.reduce choose deduped
                     else
                         fold deduped
                 else

@@ -3214,8 +3214,8 @@ let tests =
                     match runDefault store "SELECT SUM(status), MAX(status), MIN(status), GROUP_CONCAT(status) FROM t" with
                     | ResultSet(_, [ [ Some total; Some biggest; Some smallest; Some joined ] ]) ->
                         Expect.equal total "11" "SUM folds ordinals"
-                        Expect.equal biggest "open" "MAX still returns a label"
-                        Expect.equal smallest "active" "MIN still returns a label"
+                        Expect.equal biggest "blocked" "MAX returns the label with the largest declaration ordinal"
+                        Expect.equal smallest "open" "MIN returns the label with the smallest declaration ordinal"
                         Expect.equal joined "open,active,done,blocked,open" "GROUP_CONCAT still joins labels"
                     | other -> failtestf "expected one aggregate row, got %A" other
 
