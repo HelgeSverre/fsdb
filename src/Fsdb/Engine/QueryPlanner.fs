@@ -27,8 +27,8 @@ let private rangePreference estimate =
 let private equalityPreference estimate =
     match estimate.Path, estimate.RowsRead with
     | IndexLookup, 0 -> 0
-    | IndexLookup, _ -> 1
-    | TableScan, _ -> 2
+    | TableScan, _ -> 1
+    | IndexLookup, _ -> 2
     | IndexRange, _ -> 3
 
 let private equalityScanFloor = 64

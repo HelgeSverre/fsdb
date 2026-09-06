@@ -5343,11 +5343,19 @@ let tests =
                     let inList last =
                         [ 1..last ] |> List.map string |> String.concat ","
 
-                    let half = runDefault store (sprintf "EXPLAIN SELECT COUNT(*) FROM scores WHERE score IN (%s)" (inList 50)) |> explainRow
-                    Expect.equal half.AccessType (Some "range") "a half-table IN list retains indexed buckets"
-                    Expect.equal half.EstimatedRows (Some "50") "the IN estimate is the distinct bucket union"
+                    let explainIn count =
+                        runDefault store (sprintf "EXPLAIN SELECT COUNT(*) FROM scores WHERE score IN (%s)" (inList count))
+                        |> explainRow
 
-                    let broad = runDefault store (sprintf "EXPLAIN SELECT COUNT(*) FROM scores WHERE score IN (%s)" (inList 100)) |> explainRow
+                    let selective = explainIn 49
+                    Expect.equal selective.AccessType (Some "range") "a sub-half-table IN list retains indexed buckets"
+                    Expect.equal selective.EstimatedRows (Some "49") "the selective IN estimate is the distinct bucket union"
+
+                    let half = explainIn 50
+                    Expect.equal half.AccessType (Some "ALL") "a tied IN estimate prefers the sequential scan"
+                    Expect.equal half.EstimatedRows (Some "100") "the tied IN estimate is the table cardinality"
+
+                    let broad = explainIn 100
                     Expect.equal broad.AccessType (Some "ALL") "an all-row IN list uses the table scan"
                     Expect.equal broad.EstimatedRows (Some "100") "the broad IN estimate is the table cardinality"
 
