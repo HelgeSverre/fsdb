@@ -82,7 +82,8 @@ starvation at high connection counts.
 The same run applies matched fault schedules to MySQL and fsdb. It cancels a
 statement while it is queued for a row lock, then rolls a contended write back
 to a savepoint. A hot-row connection-churn case mixes commits with disconnects
-that leave transactions open. The cases verify atomicity, retained
+that leave transactions open. A final schedule contends on the same row under
+each transaction isolation level. The cases verify atomicity, retained
 pre-savepoint work, rollback on disconnect, and subsequent lock reuse.
 
 ### Crash recovery

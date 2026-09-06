@@ -60,6 +60,12 @@ module ConcurrencyRunner =
     let private cancellationDeadline = TimeSpan.FromSeconds 1.0
     let private connectionChurnWorkers = 8
 
+    let private isolationLevels =
+        [ "READ UNCOMMITTED"
+          "READ COMMITTED"
+          "REPEATABLE READ"
+          "SERIALIZABLE" ]
+
     type private AsyncPhaseBarrier(participants: int) =
         let syncRoot = obj ()
         let mutable remaining = participants
@@ -301,13 +307,50 @@ module ConcurrencyRunner =
             return "disconnects rolled back open transactions and released queued row locks"
         }
 
+    let private isolationContentionCase connectionString timeoutSeconds () =
+        task {
+            for isolation in isolationLevels do
+                use! setup = Database.openConnection connectionString
+                let! _ = executeFaultSql timeoutSeconds setup None "DROP TABLE IF EXISTS concurrency_isolation"
+                let! _ = executeFaultSql timeoutSeconds setup None "CREATE TABLE concurrency_isolation (id INT PRIMARY KEY, value INT NOT NULL)"
+                let! _ = executeFaultSql timeoutSeconds setup None "INSERT INTO concurrency_isolation VALUES (1, 0)"
+
+                use! owner = Database.openConnection connectionString
+                use! waiter = Database.openConnection connectionString
+                let! _ = executeFaultSql timeoutSeconds owner None (sprintf "SET SESSION TRANSACTION ISOLATION LEVEL %s" isolation)
+                let! _ = executeFaultSql timeoutSeconds waiter None (sprintf "SET SESSION TRANSACTION ISOLATION LEVEL %s" isolation)
+                use! ownerTransaction = owner.BeginTransactionAsync()
+                use! waiterTransaction = waiter.BeginTransactionAsync()
+                let! _ = executeFaultSql timeoutSeconds owner (Some ownerTransaction) "UPDATE concurrency_isolation SET value = value + 1 WHERE id = 1"
+                let contested = executeFaultSql timeoutSeconds waiter (Some waiterTransaction) "UPDATE concurrency_isolation SET value = value + 1 WHERE id = 1"
+                do! Task.Delay contentionDelay
+                let waited = not contested.IsCompleted
+                do! ownerTransaction.CommitAsync()
+                let! affected = contested
+
+                if not waited then
+                    raise (InvalidOperationException(sprintf "%s update did not wait for its owner" isolation))
+
+                if affected <> 1 then
+                    raise (InvalidOperationException(sprintf "%s update affected %d rows" isolation affected))
+
+                do! waiterTransaction.CommitAsync()
+                let! value = readFaultInt64 timeoutSeconds setup "SELECT value FROM concurrency_isolation WHERE id = 1"
+
+                if value <> 2L then
+                    raise (InvalidOperationException(sprintf "%s contention left value %d" isolation value))
+
+            return "hot-row contention preserved both commits at every isolation level"
+        }
+
     let private runFaultSchedule target connectionString timeoutSeconds =
         task {
             let connectionString = connectionStringWithoutPooling connectionString timeoutSeconds
             let! queuedCancellation = runFaultCase "queued_cancellation" (queuedCancellationCase connectionString timeoutSeconds)
             let! savepointContention = runFaultCase "savepoint_contention" (savepointContentionCase connectionString timeoutSeconds)
             let! connectionChurn = runFaultCase "connection_churn" (connectionChurnCase connectionString timeoutSeconds)
-            let cases = [| queuedCancellation; savepointContention; connectionChurn |]
+            let! isolationContention = runFaultCase "isolation_contention" (isolationContentionCase connectionString timeoutSeconds)
+            let cases = [| queuedCancellation; savepointContention; connectionChurn; isolationContention |]
 
             let failed = cases |> Array.filter (fun fault -> not fault.Passed)
 
