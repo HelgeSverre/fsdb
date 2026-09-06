@@ -59,6 +59,9 @@ module ConcurrencyRunner =
     let private contentionDelay = TimeSpan.FromMilliseconds 100.0
     let private cancellationDeadline = TimeSpan.FromSeconds 1.0
     let private connectionChurnWorkers = 8
+    let private catalogChurnDatabases = 8
+    let private catalogChurnTransactions = 32
+    let private catalogChurnReads = 64
 
     let private isolationLevels =
         [ "READ UNCOMMITTED"
@@ -343,6 +346,111 @@ module ConcurrencyRunner =
             return "hot-row contention preserved both commits at every isolation level"
         }
 
+    let private catalogChurnCase connectionString timeoutSeconds () =
+        task {
+            use! setup = Database.openConnection connectionString
+            let! _ = executeFaultSql timeoutSeconds setup None "DROP TABLE IF EXISTS concurrency_catalog_anchor"
+            let! _ = executeFaultSql timeoutSeconds setup None "CREATE TABLE concurrency_catalog_anchor (id INT PRIMARY KEY, value INT NOT NULL)"
+            let! _ = executeFaultSql timeoutSeconds setup None "INSERT INTO concurrency_catalog_anchor VALUES (1, 0)"
+
+            let databaseNames =
+                [| for index in 1 .. catalogChurnDatabases -> sprintf "concurrency_catalog_%d" index |]
+
+            for databaseName in databaseNames do
+                let! _ = executeFaultSql timeoutSeconds setup None (sprintf "DROP DATABASE IF EXISTS %s" (Database.quoteIdentifier databaseName))
+                ()
+
+            use ready = new CountdownEvent(3)
+            let start = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            let capture run =
+                task {
+                    try
+                        do! run ()
+                        return None
+                    with error ->
+                        return Some error
+                }
+
+            let churn () =
+                task {
+                    use! connection = Database.openConnection connectionString
+                    ready.Signal() |> ignore
+                    do! start.Task
+
+                    for databaseName in databaseNames do
+                        let quoted = Database.quoteIdentifier databaseName
+                        let! _ = executeFaultSql timeoutSeconds connection None (sprintf "CREATE DATABASE %s" quoted)
+                        let! _ = executeFaultSql timeoutSeconds connection None (sprintf "CREATE TABLE %s.probe (id INT PRIMARY KEY)" quoted)
+                        let! _ = executeFaultSql timeoutSeconds connection None (sprintf "INSERT INTO %s.probe VALUES (1)" quoted)
+                        let! _ = executeFaultSql timeoutSeconds connection None (sprintf "DROP DATABASE %s" quoted)
+                        ()
+                }
+
+            let query () =
+                task {
+                    use! connection = Database.openConnection connectionString
+                    ready.Signal() |> ignore
+                    do! start.Task
+
+                    for _ in 1 .. catalogChurnReads do
+                        let! value = readFaultInt64 timeoutSeconds connection "SELECT value FROM concurrency_catalog_anchor WHERE id = 1"
+                        let! _ = readFaultInt64 timeoutSeconds connection "SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE 'concurrency_catalog_%'"
+
+                        if value < 0L || value > int64 catalogChurnTransactions then
+                            raise (InvalidOperationException(sprintf "catalog query observed invalid anchor value %d" value))
+                }
+
+            let transact () =
+                task {
+                    use! connection = Database.openConnection connectionString
+                    ready.Signal() |> ignore
+                    do! start.Task
+
+                    for _ in 1 .. catalogChurnTransactions do
+                        use! transaction = connection.BeginTransactionAsync()
+                        let! affected =
+                            executeFaultSql
+                                timeoutSeconds
+                                connection
+                                (Some transaction)
+                                "UPDATE concurrency_catalog_anchor SET value = value + 1 WHERE id = 1"
+
+                        if affected <> 1 then
+                            raise (InvalidOperationException(sprintf "catalog transaction affected %d rows" affected))
+
+                        do! transaction.CommitAsync()
+                }
+
+            let pending = [| capture churn; capture query; capture transact |]
+            let readyBeforeDeadline = ready.Wait(TimeSpan.FromSeconds(float timeoutSeconds))
+            start.SetResult()
+            let! failures = Task.WhenAll pending
+
+            for databaseName in databaseNames do
+                let! _ = executeFaultSql timeoutSeconds setup None (sprintf "DROP DATABASE IF EXISTS %s" (Database.quoteIdentifier databaseName))
+                ()
+
+            if not readyBeforeDeadline then
+                raise (TimeoutException "catalog churn workers did not reach the start gate")
+
+            match failures |> Array.choose id with
+            | [||] -> ()
+            | errors ->
+                errors
+                |> Array.map exceptionSummary
+                |> String.concat "; "
+                |> InvalidOperationException
+                |> raise
+
+            let! finalValue = readFaultInt64 timeoutSeconds setup "SELECT value FROM concurrency_catalog_anchor WHERE id = 1"
+
+            if finalValue <> int64 catalogChurnTransactions then
+                raise (InvalidOperationException(sprintf "catalog churn left anchor value %d" finalValue))
+
+            return "database churn preserved concurrent catalog reads and transaction commits"
+        }
+
     let private runFaultSchedule target connectionString timeoutSeconds =
         task {
             let connectionString = connectionStringWithoutPooling connectionString timeoutSeconds
@@ -350,7 +458,8 @@ module ConcurrencyRunner =
             let! savepointContention = runFaultCase "savepoint_contention" (savepointContentionCase connectionString timeoutSeconds)
             let! connectionChurn = runFaultCase "connection_churn" (connectionChurnCase connectionString timeoutSeconds)
             let! isolationContention = runFaultCase "isolation_contention" (isolationContentionCase connectionString timeoutSeconds)
-            let cases = [| queuedCancellation; savepointContention; connectionChurn; isolationContention |]
+            let! catalogChurn = runFaultCase "catalog_churn" (catalogChurnCase connectionString timeoutSeconds)
+            let cases = [| queuedCancellation; savepointContention; connectionChurn; isolationContention; catalogChurn |]
 
             let failed = cases |> Array.filter (fun fault -> not fault.Passed)
 

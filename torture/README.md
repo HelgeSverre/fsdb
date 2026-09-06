@@ -86,6 +86,10 @@ that leave transactions open. A final schedule contends on the same row under
 each transaction isolation level. The cases verify atomicity, retained
 pre-savepoint work, rollback on disconnect, and subsequent lock reuse.
 
+Database creation and deletion also run alongside live catalog reads and
+transactions on an anchor table. The final committed value and absence of
+worker errors protect catalog publication from corrupting unrelated traffic.
+
 ### Crash recovery
 
 Run the crash/restart durability lane without Docker or a MySQL oracle:
