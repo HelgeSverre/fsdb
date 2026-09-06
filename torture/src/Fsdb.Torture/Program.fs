@@ -403,6 +403,15 @@ module Program =
 
         printTarget report.MySql
         printTarget report.Fsdb
+
+        for target in [ report.MySqlFaults; report.FsdbFaults ] do
+            let cases =
+                target.Cases
+                |> Array.map (fun fault -> sprintf "%s=%s" fault.Name (if fault.Passed then "pass" else "fail"))
+                |> String.concat " "
+
+            printfn "  %s faults: %s" target.Target cases
+
         printfn "  peak=%.1f MiB detail: %s" (float report.PeakWorkingSetBytes / 1048576.0) report.ClassificationDetail
 
         if not report.Passed then

@@ -56,6 +56,9 @@ module ConcurrencyWorkload =
 
 [<RequireQualifiedAccess>]
 module ConcurrencyRunner =
+    let private contentionDelay = TimeSpan.FromMilliseconds 100.0
+    let private cancellationDeadline = TimeSpan.FromSeconds 1.0
+
     type private AsyncPhaseBarrier(participants: int) =
         let syncRoot = obj ()
         let mutable remaining = participants
@@ -86,6 +89,187 @@ module ConcurrencyRunner =
         builder.Pooling <- false
         builder.ConnectionTimeout <- uint timeoutSeconds
         builder.ConnectionString
+
+    let private executeFaultSql timeoutSeconds (connection: MySqlConnection) (transaction: MySqlTransaction option) sql =
+        task {
+            use command = connection.CreateCommand()
+            command.CommandText <- sql
+            command.CommandTimeout <- timeoutSeconds
+            transaction |> Option.iter (fun value -> command.Transaction <- value)
+            return! command.ExecuteNonQueryAsync()
+        }
+
+    let private readFaultInt64 timeoutSeconds (connection: MySqlConnection) sql =
+        task {
+            use command = connection.CreateCommand()
+            command.CommandText <- sql
+            command.CommandTimeout <- timeoutSeconds
+            let! value = command.ExecuteScalarAsync()
+            return Convert.ToInt64(value, CultureInfo.InvariantCulture)
+        }
+
+    let private rollbackQuietly (transaction: MySqlTransaction) =
+        task {
+            try
+                do! transaction.RollbackAsync()
+            with _ ->
+                ()
+        }
+
+    let private exceptionSummary (error: exn) =
+        match error with
+        | :? MySqlException as mysql -> sprintf "%d/%s %s" (int mysql.ErrorCode) mysql.SqlState mysql.Message
+        | _ -> sprintf "%s: %s" (error.GetType().Name) error.Message
+
+    let private runFaultCase name run =
+        task {
+            let stopwatch = Stopwatch.StartNew()
+
+            try
+                let! detail = run ()
+                stopwatch.Stop()
+
+                return
+                    { Name = name
+                      ElapsedMs = stopwatch.ElapsedMilliseconds
+                      Passed = true
+                      Detail = detail }
+            with error ->
+                stopwatch.Stop()
+
+                return
+                    { Name = name
+                      ElapsedMs = stopwatch.ElapsedMilliseconds
+                      Passed = false
+                      Detail = exceptionSummary error }
+        }
+
+    let private queuedCancellationCase connectionString timeoutSeconds () =
+        task {
+            use! setup = Database.openConnection connectionString
+            let! _ = executeFaultSql timeoutSeconds setup None "DROP TABLE IF EXISTS concurrency_cancel"
+            let! _ = executeFaultSql timeoutSeconds setup None "CREATE TABLE concurrency_cancel (id INT PRIMARY KEY, value INT NOT NULL)"
+            let! _ = executeFaultSql timeoutSeconds setup None "INSERT INTO concurrency_cancel VALUES (1, 0)"
+
+            use! owner = Database.openConnection connectionString
+            use! waiter = Database.openConnection connectionString
+            use! ownerTransaction = owner.BeginTransactionAsync()
+            use! waiterTransaction = waiter.BeginTransactionAsync()
+            let! _ = executeFaultSql timeoutSeconds owner (Some ownerTransaction) "UPDATE concurrency_cancel SET value = 1 WHERE id = 1"
+
+            use cancellation = new CancellationTokenSource()
+            use waiting = waiter.CreateCommand()
+            waiting.Transaction <- waiterTransaction
+            waiting.CommandText <- "UPDATE concurrency_cancel SET value = 2 WHERE id = 1"
+            waiting.CommandTimeout <- max 5 timeoutSeconds
+
+            let pending =
+                task {
+                    try
+                        let! affected = waiting.ExecuteNonQueryAsync(cancellation.Token)
+                        return Ok affected
+                    with error ->
+                        return Error error
+                }
+
+            do! Task.Delay contentionDelay
+            cancellation.Cancel()
+            let! completed = Task.WhenAny(pending :> Task, Task.Delay cancellationDeadline)
+            let interruptedWhileQueued = obj.ReferenceEquals(completed, pending)
+            do! ownerTransaction.RollbackAsync()
+            let! outcome = pending
+            do! rollbackQuietly waiterTransaction
+
+            match outcome with
+            | Ok affected ->
+                raise (InvalidOperationException(sprintf "queued update completed successfully with %d affected row(s)" affected))
+            | Error error when not interruptedWhileQueued ->
+                raise (InvalidOperationException(sprintf "queued cancellation did not finish promptly: %s" (exceptionSummary error)))
+            | Error _ -> ()
+
+            use! observer = Database.openConnection connectionString
+            let! unchanged = readFaultInt64 timeoutSeconds observer "SELECT value FROM concurrency_cancel WHERE id = 1"
+
+            if unchanged <> 0L then
+                raise (InvalidOperationException(sprintf "cancelled update left value %d" unchanged))
+
+            let! recovered = executeFaultSql timeoutSeconds observer None "UPDATE concurrency_cancel SET value = value + 1 WHERE id = 1"
+
+            if recovered <> 1 then
+                raise (InvalidOperationException(sprintf "replacement update affected %d rows" recovered))
+
+            let! finalValue = readFaultInt64 timeoutSeconds observer "SELECT value FROM concurrency_cancel WHERE id = 1"
+
+            if finalValue <> 1L then
+                raise (InvalidOperationException(sprintf "replacement update left value %d" finalValue))
+
+            return "queued cancellation was prompt, atomic, and released the row lock"
+        }
+
+    let private savepointContentionCase connectionString timeoutSeconds () =
+        task {
+            use! setup = Database.openConnection connectionString
+            let! _ = executeFaultSql timeoutSeconds setup None "DROP TABLE IF EXISTS concurrency_savepoint"
+            let! _ = executeFaultSql timeoutSeconds setup None "CREATE TABLE concurrency_savepoint (id INT PRIMARY KEY, value INT NOT NULL)"
+            let! _ = executeFaultSql timeoutSeconds setup None "INSERT INTO concurrency_savepoint VALUES (1, 0), (2, 0)"
+
+            use! owner = Database.openConnection connectionString
+            use! waiter = Database.openConnection connectionString
+            use! ownerTransaction = owner.BeginTransactionAsync()
+            use! waiterTransaction = waiter.BeginTransactionAsync()
+            let! _ = executeFaultSql timeoutSeconds owner (Some ownerTransaction) "UPDATE concurrency_savepoint SET value = 20 WHERE id = 2"
+            let! _ = executeFaultSql timeoutSeconds waiter (Some waiterTransaction) "UPDATE concurrency_savepoint SET value = 10 WHERE id = 1"
+            let! _ = executeFaultSql timeoutSeconds waiter (Some waiterTransaction) "SAVEPOINT contested"
+
+            let contested = executeFaultSql timeoutSeconds waiter (Some waiterTransaction) "UPDATE concurrency_savepoint SET value = 30 WHERE id = 2"
+            do! Task.Delay contentionDelay
+            let waited = not contested.IsCompleted
+            do! ownerTransaction.RollbackAsync()
+            let! affected = contested
+
+            if not waited then
+                raise (InvalidOperationException "contested update did not wait for its owner")
+
+            if affected <> 1 then
+                raise (InvalidOperationException(sprintf "contested update affected %d rows" affected))
+
+            let! _ = executeFaultSql timeoutSeconds waiter (Some waiterTransaction) "ROLLBACK TO SAVEPOINT contested"
+            do! waiterTransaction.CommitAsync()
+
+            use! observer = Database.openConnection connectionString
+            let! first = readFaultInt64 timeoutSeconds observer "SELECT value FROM concurrency_savepoint WHERE id = 1"
+            let! second = readFaultInt64 timeoutSeconds observer "SELECT value FROM concurrency_savepoint WHERE id = 2"
+
+            if first <> 10L || second <> 0L then
+                raise (InvalidOperationException(sprintf "savepoint rollback left values %d and %d" first second))
+
+            let! recovered = executeFaultSql timeoutSeconds observer None "UPDATE concurrency_savepoint SET value = value + 1 WHERE id = 2"
+
+            if recovered <> 1 then
+                raise (InvalidOperationException(sprintf "post-savepoint update affected %d rows" recovered))
+
+            return "savepoint rollback retained earlier work and released the contended row"
+        }
+
+    let private runFaultSchedule target connectionString timeoutSeconds =
+        task {
+            let connectionString = connectionStringWithoutPooling connectionString timeoutSeconds
+            let! queuedCancellation = runFaultCase "queued_cancellation" (queuedCancellationCase connectionString timeoutSeconds)
+            let! savepointContention = runFaultCase "savepoint_contention" (savepointContentionCase connectionString timeoutSeconds)
+            let cases = [| queuedCancellation; savepointContention |]
+
+            let failed = cases |> Array.filter (fun fault -> not fault.Passed)
+
+            return
+                { Target = target
+                  Cases = cases
+                  Passed = failed.Length = 0
+                  Detail =
+                    if failed.Length = 0 then
+                        "every transaction fault schedule preserved its invariants"
+                    else
+                        failed |> Array.map (fun fault -> sprintf "%s: %s" fault.Name fault.Detail) |> String.concat "; " }
+        }
 
     let private operationFailure (plan: ConcurrencyOperationPlan) stage (error: exn) elapsedMs : ConcurrencyOperationRecord =
         let errorCode, sqlState =
@@ -485,19 +669,25 @@ module ConcurrencyRunner =
                 let! mysqlVersion = Database.scalarString mysqlVersionConnection options.TimeoutSeconds "SELECT VERSION()"
                 let! mysql = runTarget "mysql" oracleConnectionString options
                 let! fsdb = runTarget "fsdb" (Runner.fsdbConnectionString subject.Port) options
+                let! mysqlFaults = runFaultSchedule "mysql" oracleConnectionString options.TimeoutSeconds
+                let! fsdbFaults = runFaultSchedule "fsdb" (Runner.fsdbConnectionString subject.Port) options.TimeoutSeconds
                 let invariantErrors = Invariants.validate subject.Store
 
                 let classification, detail =
                     if not mysql.Passed then
                         "oracle_concurrency_failure", mysql.Detail
+                    elif not mysqlFaults.Passed then
+                        "oracle_fault_schedule_failure", mysqlFaults.Detail
                     elif fsdb.FailedOperations > 0 then
                         "fsdb_concurrency_execution_gap", fsdb.Detail
                     elif not fsdb.Passed then
                         "fsdb_transaction_atomicity_gap", fsdb.Detail
+                    elif not fsdbFaults.Passed then
+                        "fsdb_transaction_fault_gap", fsdbFaults.Detail
                     elif invariantErrors.Length > 0 then
                         "invariant_failure", String.concat "; " invariantErrors
                     else
-                        "pass", fsdb.Detail
+                        "pass", sprintf "%s; %s" fsdb.Detail fsdbFaults.Detail
 
                 let signature =
                     if classification = "pass" then
@@ -517,7 +707,7 @@ module ConcurrencyRunner =
                 currentProcess.Refresh()
 
                 let manifest =
-                    { SchemaVersion = 1
+                    { SchemaVersion = 2
                       RunId = runId
                       CaseId = caseId
                       StartedUtc = started.ToString("O", CultureInfo.InvariantCulture)
@@ -535,6 +725,8 @@ module ConcurrencyRunner =
                       TimeoutSeconds = options.TimeoutSeconds
                       MySql = mysql
                       Fsdb = fsdb
+                      MySqlFaults = mysqlFaults
+                      FsdbFaults = fsdbFaults
                       FsdbInvariantErrors = invariantErrors
                       PeakWorkingSetBytes = max currentProcess.PeakWorkingSet64 currentProcess.WorkingSet64
                       Classification = classification

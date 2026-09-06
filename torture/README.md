@@ -79,6 +79,11 @@ prepared-command counts, throughput, and p50/p95/p99 latency. Its reusable
 phase barrier is asynchronous so the harness does not manufacture thread-pool
 starvation at high connection counts.
 
+The same run applies matched fault schedules to MySQL and fsdb. It cancels a
+statement while it is queued for a row lock, then rolls a contended write back
+to a savepoint. Each case verifies atomicity, retained pre-savepoint work, and
+subsequent lock reuse.
+
 ### Crash recovery
 
 Run the crash/restart durability lane without Docker or a MySQL oracle:

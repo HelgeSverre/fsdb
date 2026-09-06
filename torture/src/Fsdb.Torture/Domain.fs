@@ -170,6 +170,20 @@ type ConcurrencyTargetReport =
       Detail: string }
 
 [<CLIMutable>]
+type ConcurrencyFaultCaseReport =
+    { Name: string
+      ElapsedMs: int64
+      Passed: bool
+      Detail: string }
+
+[<CLIMutable>]
+type ConcurrencyFaultTargetReport =
+    { Target: string
+      Cases: ConcurrencyFaultCaseReport array
+      Passed: bool
+      Detail: string }
+
+[<CLIMutable>]
 type ConcurrencyManifest =
     { SchemaVersion: int
       RunId: string
@@ -189,6 +203,8 @@ type ConcurrencyManifest =
       TimeoutSeconds: int
       MySql: ConcurrencyTargetReport
       Fsdb: ConcurrencyTargetReport
+      MySqlFaults: ConcurrencyFaultTargetReport
+      FsdbFaults: ConcurrencyFaultTargetReport
       FsdbInvariantErrors: string array
       PeakWorkingSetBytes: int64
       Classification: string
