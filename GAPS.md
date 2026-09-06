@@ -223,7 +223,7 @@ JSON without maintaining a second builtin-name list.
 |---|---|---|---|---|
 | Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | `Collation` uses ICU CLDR tailoring; tie-break order among primary-equal strings and `WEIGHT_STRING()` textual bytes can differ (equality never does) | low | divergence |
 | Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with common POSIX character classes and mapped malformed patterns; remaining ICU-only grammar and error-code distinctions can differ | low | divergence |
-| Remaining charset catalog | every bundled charset and collation | armscii8, dec8, eucjpms, gb2312, geostd8, hp8, keybcs2, sjis, swe7, and tis620 remain refused; expanded families register their default and binary collations rather than every legacy language collation | low | refusal |
+| Remaining charset catalog | every bundled charset and collation | armscii8, dec8, eucjpms, geostd8, hp8, and keybcs2 remain refused; expanded families register their default and binary collations rather than every legacy language collation | low | refusal |
 
 ## 7. Transactions and concurrency
 
