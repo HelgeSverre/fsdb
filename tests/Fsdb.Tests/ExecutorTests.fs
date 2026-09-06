@@ -5140,6 +5140,15 @@ let tests =
                     let predicate = "category IN ('books', 'music', 'books', NULL) AND score >= 30"
                     Expect.equal (rows "indexed" "id" predicate) (rows "scanned" "id" predicate) "indexed candidates match a scan"
                     Expect.equal (rows "indexed" "id" predicate) [ [ Some "2" ]; [ Some "3" ] ] "duplicates and NULL do not add matches"
+                    Expect.equal
+                        (rows "indexed" "id" "score IN (10, 40, NULL)")
+                        [ [ Some "1" ]; [ Some "3" ] ]
+                        "integer membership retains NULL semantics"
+
+                    Expect.equal
+                        (rows "indexed" "id" "score IN ('30', NULL)")
+                        [ [ Some "2" ] ]
+                        "cross-type members retain comparison coercion"
 
                     match runDefault store "EXPLAIN SELECT id FROM indexed WHERE category IN ('books', 'music', NULL)" with
                     | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "ix_category"; Some "ix_category"; Some "83"; None; Some "3"; Some "100.00"; Some "Using where" ] ]) -> ()

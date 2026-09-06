@@ -314,9 +314,36 @@ let private equalityMembershipDomain (store: Store) (column: ColumnDef) =
         |> Option.map TextMembership
     | _ -> None
 
+let private equalityMembershipForValues (store: Store) (column: ColumnDef) (values: Value list) =
+    equalityMembershipDomain store column
+    |> Option.bind (fun domain ->
+        let rec collect (keys: Value list) containsNull =
+            function
+            | [] ->
+                Some
+                    { Values = HashSet(keys)
+                      ContainsNull = containsNull
+                      Domain = domain }
+            | VNull :: rest -> collect keys true rest
+            | value :: rest ->
+                equalityMembershipKey domain value
+                |> Option.bind (fun key -> collect (key :: keys) containsNull rest)
+
+        collect [] false values)
+
+let private tryLiteralValues expressions =
+    let rec collect values =
+        function
+        | [] -> Some(List.rev values)
+        | Lit value :: rest -> collect (value :: values) rest
+        | _ -> None
+
+    collect [] expressions
+
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
+      LiteralMemberships: Dictionary<Expr, EqualityMembership option>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
@@ -325,6 +352,7 @@ let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
 let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
+      LiteralMemberships = Dictionary<Expr, EqualityMembership option>(HashIdentity.Reference)
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
@@ -4490,30 +4518,59 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         VNull
                     else
                         VInt 0L)))
-    | In(e, xs) ->
+    | (In(e, xs) as membershipExpression) ->
         eval e
         |> Result.bind (fun ve ->
             match ve with
             | VNull -> Ok VNull
             | _ ->
-                xs
-                |> traverse eval
-                |> Result.bind (fun values ->
-                    List.zip xs values
-                    |> traverse (fun (candidateExpr, candidate) ->
-                        comparisonResult
-                            ctx
-                            e
-                            (tryColumnDefForExpr ctx e)
-                            ve
-                            candidateExpr
-                            (tryColumnDefForExpr ctx candidateExpr)
-                            Eq
-                            candidate)
-                    |> Result.map (fun comparisons ->
-                        if comparisons |> List.exists ((=) (VInt 1L)) then VInt 1L
-                        elif comparisons |> List.exists ((=) VNull) then VNull
-                        else VInt 0L)))
+                let literalMembership =
+                    let memo = (currentStatementMemo ()).LiteralMemberships
+
+                    match memo.TryGetValue membershipExpression with
+                    | true, membership -> membership
+                    | _ ->
+                        let membership =
+                            match e, tryColumnDefForExpr ctx e with
+                            | (Col _ | QualifiedCol _), Some column ->
+                                xs
+                                |> tryLiteralValues
+                                |> Option.bind (equalityMembershipForValues ctx.Store column)
+                            | _ -> None
+
+                        memo.[membershipExpression] <- membership
+                        membership
+
+                let matchingKey =
+                    literalMembership
+                    |> Option.bind (fun membership ->
+                        equalityMembershipKey membership.Domain ve
+                        |> Option.map (fun key -> membership, key))
+
+                match matchingKey with
+                | Some(membership, key) ->
+                    if membership.Values.Contains key then Ok(VInt 1L)
+                    elif membership.ContainsNull then Ok VNull
+                    else Ok(VInt 0L)
+                | None ->
+                    xs
+                    |> traverse eval
+                    |> Result.bind (fun values ->
+                        List.zip xs values
+                        |> traverse (fun (candidateExpr, candidate) ->
+                            comparisonResult
+                                ctx
+                                e
+                                (tryColumnDefForExpr ctx e)
+                                ve
+                                candidateExpr
+                                (tryColumnDefForExpr ctx candidateExpr)
+                                Eq
+                                candidate)
+                        |> Result.map (fun comparisons ->
+                            if comparisons |> List.exists ((=) (VInt 1L)) then VInt 1L
+                            elif comparisons |> List.exists ((=) VNull) then VNull
+                            else VInt 0L)))
     | InSubquery((Row _ as e), select) ->
         evalRowOperand ctx e
         |> Result.bind (fun value ->
@@ -5100,29 +5157,12 @@ and private runExpressionSubquery
     let memo = (currentStatementMemo ()).ExpressionSubqueries
 
     let equalityMembership columns rows =
-        let containsNull = rows |> List.exists (Array.tryHead >> Option.exists ((=) VNull))
-        let values = rows |> List.map (Array.tryHead >> Option.defaultValue VNull)
-
-        let domain =
-            match columns with
-            | [ Some column ] -> equalityMembershipDomain ctx.Store column
-            | _ -> None
-
-        domain
-        |> Option.bind (fun domain ->
-            let rec keys found =
-                function
-                | [] -> Some found
-                | VNull :: rest -> keys found rest
-                | value :: rest ->
-                    equalityMembershipKey domain value
-                    |> Option.bind (fun key -> keys (key :: found) rest)
-
-            keys [] values
-            |> Option.map (fun values ->
-                { Values = HashSet(values)
-                  ContainsNull = containsNull
-                  Domain = domain }))
+        match columns with
+        | [ Some column ] ->
+            rows
+            |> List.map (Array.tryHead >> Option.defaultValue VNull)
+            |> equalityMembershipForValues ctx.Store column
+        | _ -> None
 
     let rowEqualityMembership columns (rows: Value[] list) =
         let domains =
