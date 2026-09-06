@@ -58,6 +58,7 @@ module ConcurrencyWorkload =
 module ConcurrencyRunner =
     let private contentionDelay = TimeSpan.FromMilliseconds 100.0
     let private cancellationDeadline = TimeSpan.FromSeconds 1.0
+    let private connectionChurnWorkers = 8
 
     type private AsyncPhaseBarrier(participants: int) =
         let syncRoot = obj ()
@@ -251,12 +252,62 @@ module ConcurrencyRunner =
             return "savepoint rollback retained earlier work and released the contended row"
         }
 
+    let private connectionChurnCase connectionString timeoutSeconds () =
+        task {
+            use! setup = Database.openConnection connectionString
+            let! _ = executeFaultSql timeoutSeconds setup None "DROP TABLE IF EXISTS concurrency_churn"
+            let! _ = executeFaultSql timeoutSeconds setup None "CREATE TABLE concurrency_churn (id INT PRIMARY KEY, value INT NOT NULL)"
+            let! _ = executeFaultSql timeoutSeconds setup None "INSERT INTO concurrency_churn VALUES (1, 0)"
+
+            use ready = new CountdownEvent(connectionChurnWorkers)
+            let start = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            let runWorker worker =
+                task {
+                    use! connection = Database.openConnection connectionString
+                    let! transaction = connection.BeginTransactionAsync()
+                    ready.Signal() |> ignore
+                    do! start.Task
+                    let! affected = executeFaultSql timeoutSeconds connection (Some transaction) "UPDATE concurrency_churn SET value = value + 1 WHERE id = 1"
+
+                    if affected <> 1 then
+                        raise (InvalidOperationException(sprintf "churn worker %d affected %d rows" worker affected))
+
+                    if worker % 2 = 0 then
+                        do! transaction.CommitAsync()
+                }
+
+            let pending = [| for worker in 0 .. connectionChurnWorkers - 1 -> runWorker worker |]
+            let readyBeforeDeadline = ready.Wait(TimeSpan.FromSeconds(float timeoutSeconds))
+            start.SetResult()
+
+            if not readyBeforeDeadline then
+                raise (TimeoutException "connection churn workers did not reach the start gate")
+
+            let! _ = Task.WhenAll pending
+
+            use! observer = Database.openConnection connectionString
+            let! committed = readFaultInt64 timeoutSeconds observer "SELECT value FROM concurrency_churn WHERE id = 1"
+            let expected = int64 (connectionChurnWorkers / 2)
+
+            if committed <> expected then
+                raise (InvalidOperationException(sprintf "connection churn committed %d increments instead of %d" committed expected))
+
+            let! recovered = executeFaultSql timeoutSeconds observer None "UPDATE concurrency_churn SET value = value + 1 WHERE id = 1"
+
+            if recovered <> 1 then
+                raise (InvalidOperationException(sprintf "post-churn update affected %d rows" recovered))
+
+            return "disconnects rolled back open transactions and released queued row locks"
+        }
+
     let private runFaultSchedule target connectionString timeoutSeconds =
         task {
             let connectionString = connectionStringWithoutPooling connectionString timeoutSeconds
             let! queuedCancellation = runFaultCase "queued_cancellation" (queuedCancellationCase connectionString timeoutSeconds)
             let! savepointContention = runFaultCase "savepoint_contention" (savepointContentionCase connectionString timeoutSeconds)
-            let cases = [| queuedCancellation; savepointContention |]
+            let! connectionChurn = runFaultCase "connection_churn" (connectionChurnCase connectionString timeoutSeconds)
+            let cases = [| queuedCancellation; savepointContention; connectionChurn |]
 
             let failed = cases |> Array.filter (fun fault -> not fault.Passed)
 

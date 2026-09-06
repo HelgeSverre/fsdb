@@ -513,7 +513,7 @@ routines, events, and administrative probes.
 | Open campaign | Current gap |
 |---|---|
 | Planner constant factors | Indexed joins, equality/`IN`, and secondary ranges retain a constant-factor gap. Low-cardinality joins push safe source-local predicates below full-consumption fan-out and stream plain `COUNT(*)`; relevance-ordered full-text limits stream through exact unique joins, unindexed grouping filters and groups in one pass, and mutation scans retain only matched targets while unordered limits stop early. Scan-shaped updates, decimal membership, and broader full-text plans remain input-sensitive. Benchmark result artifacts carry the measurements; shared statement setup and scan-shaped plans remain the principal measured seams. |
-| Transaction fault scheduling | The differential concurrency lane cancels a queued row-lock statement and rolls a contended write back to a savepoint, checking atomicity and subsequent lock reuse on both servers. It still lacks matched connection churn during transactions and concurrent campaigns across every isolation level. |
+| Transaction fault scheduling | The differential concurrency lane cancels a queued row-lock statement, rolls a contended write back to a savepoint, and mixes hot-row commits with connections that close while their transactions remain open. It checks atomicity and subsequent lock reuse on both servers, but still lacks concurrent campaigns across every isolation level. |
 | Catalog churn | Concurrent `CREATE/DROP DATABASE` under query and transaction traffic lacks a differential campaign. |
 | Snapshot rotation volume | Crash/restart campaigns cover acknowledged-commit and atomicity invariants; longer high-volume checkpoint-rotation campaigns remain useful stress coverage. |
 
