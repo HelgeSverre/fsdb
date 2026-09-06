@@ -250,6 +250,8 @@ different access pattern:
   indexes. `EXPLAIN` reports the corresponding `const`, `ref`, or `range`
   access. Candidate cardinalities are checked before row resolution, so broad
   probes fall back to a row-store scan instead of building an all-row union.
+  Compatible scalar literal lists are normalized once per statement, so that
+  fallback does not repeat the entire list comparison for every row.
 
 - **Ordering and grouping.** Compatible `ORDER BY` and `GROUP BY` operations
   stream a left prefix of a composite index, or a suffix whose preceding keys
