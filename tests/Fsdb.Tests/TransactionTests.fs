@@ -803,6 +803,51 @@ let tests =
               | Affected 1UL -> ()
               | result -> failtestf "expected a later transaction to remain usable, got %A" result
 
+          testCase "cancellation interrupts a queued row-lock wait"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE tx_queued_cancel (id INT PRIMARY KEY, v INT)"
+              let _, _ = handle setup "INSERT INTO tx_queued_cancel VALUES (1, 0)"
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, _ = handle owner "UPDATE tx_queued_cancel SET v = 1 WHERE id = 1"
+              let waiter, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let waiter, _ = handle waiter "BEGIN"
+              use cancellation = new Threading.CancellationTokenSource()
+              use started = new Threading.ManualResetEventSlim(false)
+
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      Fsdb.Storage.queryCancellation.Value <- cancellation.Token
+                      started.Set()
+
+                      try
+                          try
+                              Choice1Of2(handle waiter "UPDATE tx_queued_cancel SET v = 2 WHERE id = 1")
+                          with :? OperationCanceledException ->
+                              Choice2Of2()
+                      finally
+                          Fsdb.Storage.queryCancellation.Value <- Threading.CancellationToken.None)
+
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the competing update starts"
+              Threading.Thread.Sleep 100
+              cancellation.Cancel()
+              let cancelledWhileQueued = waiting.Wait(TimeSpan.FromSeconds 1.0)
+              handle owner "ROLLBACK" |> ignore
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "the queued update terminates"
+
+              match waiting.Result with
+              | Choice2Of2() -> ()
+              | Choice1Of2(waiter, result) ->
+                  handle waiter "ROLLBACK" |> ignore
+                  failtestf "expected cancellation, got %A" result
+
+              Expect.isTrue cancelledWhileQueued "cancellation wakes the row-lock waiter"
+
+              let fresh, _ = handle (create 4 store) "BEGIN"
+              let fresh, result = handle fresh "UPDATE tx_queued_cancel SET v = v + 1 WHERE id = 1"
+              Expect.equal result (Affected 1UL) "the cancelled wait leaves the row lock reusable"
+              Expect.equal (handle fresh "COMMIT" |> snd) (Affected 0UL) "the replacement transaction commits"
+
           testCase "an exception on a transaction's second statement aborts the whole transaction"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

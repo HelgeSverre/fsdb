@@ -2836,58 +2836,82 @@ let private acquireStripe
     (waitPolicy: StripeWaitPolicy)
     (stripe: RowLockStripe)
     =
-    lock stripe.SyncRoot (fun () ->
-        let available () =
-            match mode with
-            | SharedStripe -> stripe.ExclusiveOwner |> Option.forall ((=) context.Owner)
-            | ExclusiveStripe ->
-                stripe.ExclusiveOwner |> Option.forall ((=) context.Owner)
-                && (stripe.SharedOwners.Count = 0
-                    || (stripe.SharedOwners.Count = 1 && stripe.SharedOwners.Contains context.Owner))
+    let available () =
+        match mode with
+        | SharedStripe -> stripe.ExclusiveOwner |> Option.forall ((=) context.Owner)
+        | ExclusiveStripe ->
+            stripe.ExclusiveOwner |> Option.forall ((=) context.Owner)
+            && (stripe.SharedOwners.Count = 0
+                || (stripe.SharedOwners.Count = 1 && stripe.SharedOwners.Contains context.Owner))
 
-        let rec acquire () =
-            if available () then
-                let newlyHeld =
-                    lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe)
+    let claim () =
+        let newlyHeld =
+            lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe)
 
-                match mode with
-                | SharedStripe -> stripe.SharedOwners.Add context.Owner |> ignore
-                | ExclusiveStripe -> stripe.ExclusiveOwner <- Some context.Owner
+        match mode with
+        | SharedStripe -> stripe.SharedOwners.Add context.Owner |> ignore
+        | ExclusiveStripe -> stripe.ExclusiveOwner <- Some context.Owner
 
-                true, newlyHeld
-            else
-                match waitPolicy with
-                | FailIfUnavailable -> raise (LockNowait dbName)
-                | SkipIfUnavailable -> false, false
-                | WaitUntilAvailable ->
-                    let remaining = deadline - DateTime.UtcNow
+        true, newlyHeld
 
-                    if remaining <= TimeSpan.Zero then
-                        raise (LockWaitTimeout dbName)
+    match waitPolicy with
+    | FailIfUnavailable ->
+        lock stripe.SyncRoot (fun () ->
+            if available () then claim () else raise (LockNowait dbName))
+    | SkipIfUnavailable ->
+        lock stripe.SyncRoot (fun () ->
+            if available () then claim () else false, false)
+    | WaitUntilAvailable ->
+        let cancellation = queryCancellation.Value
+        cancellation.ThrowIfCancellationRequested()
 
-                    let blockers = stripeBlockers context.Owner mode stripe
+        match lock stripe.SyncRoot (fun () -> if available () then Some(claim ()) else None) with
+        | Some acquired -> acquired
+        | None ->
+            use cancellationWake =
+                if cancellation.CanBeCanceled then
+                    cancellation.Register(fun () ->
+                        lock stripe.SyncRoot (fun () -> Threading.Monitor.PulseAll stripe.SyncRoot))
+                else
+                    Unchecked.defaultof<Threading.CancellationTokenRegistration>
 
-                    match registerLockWait waits context stripe blockers with
-                    | CurrentDeadlockVictim -> raise (DeadlockVictim dbName)
-                    | WakeDeadlockVictim victimStripe -> wakeLockWaiter victimStripe
-                    | WaitRegistered -> ()
+            lock stripe.SyncRoot (fun () ->
+                let rec acquire () =
+                    cancellation.ThrowIfCancellationRequested()
 
-                    let mutable signaled = false
+                    if available () then
+                        claim ()
+                    else
+                        let remaining = deadline - DateTime.UtcNow
 
-                    try
-                        signaled <- Threading.Monitor.Wait(stripe.SyncRoot, remaining)
-                    finally
-                        clearLockWait waits context.Owner
+                        if remaining <= TimeSpan.Zero then
+                            raise (LockWaitTimeout dbName)
 
-                    if context.DeadlockVictim then
-                        raise (DeadlockVictim dbName)
+                        let blockers = stripeBlockers context.Owner mode stripe
 
-                    if not signaled then
-                        raise (LockWaitTimeout dbName)
+                        match registerLockWait waits context stripe blockers with
+                        | CurrentDeadlockVictim -> raise (DeadlockVictim dbName)
+                        | WakeDeadlockVictim victimStripe -> wakeLockWaiter victimStripe
+                        | WaitRegistered -> ()
 
-                    acquire ()
+                        let mutable signaled = false
 
-        acquire ())
+                        try
+                            signaled <- Threading.Monitor.Wait(stripe.SyncRoot, remaining)
+                        finally
+                            clearLockWait waits context.Owner
+
+                        cancellation.ThrowIfCancellationRequested()
+
+                        if context.DeadlockVictim then
+                            raise (DeadlockVictim dbName)
+
+                        if not signaled then
+                            raise (LockWaitTimeout dbName)
+
+                        acquire ()
+
+                acquire ())
 
 let private withWriteLocksFor
     (timeout: TimeSpan)
