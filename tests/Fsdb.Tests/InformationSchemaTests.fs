@@ -442,6 +442,25 @@ let tests =
                       "the codec catalog drives Information Schema"
               | other -> failtestf "expected expanded character sets, got %A" other
 
+          testCase "CHARACTER_SETS exposes standard legacy codec families"
+          <| fun _ ->
+              let store = setup ()
+
+              match
+                  run
+                      store
+                      "SELECT character_set_name,default_collate_name,maxlen FROM information_schema.character_sets WHERE character_set_name IN ('gb2312','sjis','swe7','tis620') ORDER BY character_set_name"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "gb2312"; Some "gb2312_chinese_ci"; Some "2" ]
+                        [ Some "sjis"; Some "sjis_japanese_ci"; Some "2" ]
+                        [ Some "swe7"; Some "swe7_swedish_ci"; Some "1" ]
+                        [ Some "tis620"; Some "tis620_thai_ci"; Some "1" ] ]
+                      "the legacy codec metadata matches MySQL 8.4"
+              | other -> failtestf "expected legacy character sets, got %A" other
+
               match
                   run
                       store

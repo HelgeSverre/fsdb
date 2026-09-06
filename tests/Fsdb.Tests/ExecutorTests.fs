@@ -887,6 +887,31 @@ let tests =
                     | Err(1366, _) -> ()
                     | other -> failtestf "expected cp1251 to reject an unencodable scalar, got %A" other
 
+                testCase "standard legacy character sets round-trip through columns and byte functions"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE legacy_encoded (g VARCHAR(20) CHARACTER SET gb2312, j VARCHAR(20) CHARACTER SET sjis, s VARCHAR(20) CHARACTER SET swe7, t VARCHAR(20) CHARACTER SET tis620)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO legacy_encoded VALUES ('中文', '日本', 'ÄÖÅäöå', 'ไทย')" |> ignore
+
+                    match runDefault store "SELECT HEX(g),HEX(j),HEX(s),HEX(t) FROM legacy_encoded" with
+                    | ResultSet(_, [ [ Some "D6D0CEC4"; Some "93FA967B"; Some "5B5C5D7B7C7D"; Some "E4B7C2" ] ]) -> ()
+                    | other -> failtestf "expected MySQL legacy bytes, got %A" other
+
+                    for sql in
+                        [ "INSERT INTO legacy_encoded(g,j,s,t) VALUES ('€','x','x','x')"
+                          "INSERT INTO legacy_encoded(g,j,s,t) VALUES ('x','①','x','x')"
+                          "INSERT INTO legacy_encoded(g,j,s,t) VALUES ('x','髙','x','x')"
+                          "INSERT INTO legacy_encoded(g,j,s,t) VALUES ('x','x','☃','x')"
+                          "INSERT INTO legacy_encoded(g,j,s,t) VALUES ('x','x','x','€')" ] do
+                        match runDefault store sql with
+                        | Err(1366, _) -> ()
+                        | other -> failtestf "expected 1366 for %s, got %A" sql other
+
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->
                     let store = newStore ()

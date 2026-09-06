@@ -71,9 +71,152 @@ let private codec name defaultCollation description maxBytes supportsLoadData en
       TryDecode = tryDecode strictEncoding
       AllowsSupplementaryCharacters = allowsSupplementary }
 
+let private restrictedCodePageCodec name defaultCollation description maxBytes codePage accepts =
+    let encoding = lazy replacingCodePage codePage ()
+    let strictEncoding = lazy strictCodePage codePage ()
+
+    let tryEncodeText text =
+        tryEncode strictEncoding text
+        |> Option.filter (accepts text)
+
+    let replaceUnsupported (text: string) =
+        text.EnumerateRunes()
+        |> Seq.map (fun rune ->
+            let value = rune.ToString()
+            if tryEncodeText value |> Option.isSome then value else "?")
+        |> String.concat ""
+
+    let tryDecodeBytes bytes =
+        tryDecode strictEncoding bytes
+        |> Option.filter (fun text -> accepts text bytes)
+
+    { Info =
+        { Name = name
+          DefaultCollation = defaultCollation
+          Description = description
+          MaxBytesPerCharacter = maxBytes
+          SupportsLoadData = true }
+      Encode = fun text -> encoding.Value.GetBytes(replaceUnsupported text)
+      TryEncode = tryEncodeText
+      Decode =
+        fun bytes ->
+            match tryDecode strictEncoding bytes with
+            | Some text -> replaceUnsupported text
+            | None -> encoding.Value.GetString bytes |> replaceUnsupported
+      TryDecode = tryDecodeBytes
+      AllowsSupplementaryCharacters = true }
+
+let private tis620Codec =
+    let encoding = lazy replacingCodePage 874 ()
+    let strictEncoding = lazy strictCodePage 874 ()
+    let isControl value = value >= 0x80 && value <= 0x9F
+
+    let isDefinedByte value =
+        value <= 0x9Fuy
+        || (value >= 0xA1uy && value <= 0xDAuy)
+        || (value >= 0xDFuy && value <= 0xFBuy)
+
+    let isEncodedTextByte value =
+        value <= 0x7Fuy
+        || (value >= 0xA1uy && value <= 0xDAuy)
+        || (value >= 0xDFuy && value <= 0xFBuy)
+
+    let tryEncodeRune (rune: Rune) =
+        if isControl rune.Value then
+            Some [| byte rune.Value |]
+        else
+            tryEncode strictEncoding (rune.ToString())
+            |> Option.filter (Array.forall isEncodedTextByte)
+
+    let tryEncodeText (text: string) =
+        let bytes = ResizeArray<byte>()
+        let mutable valid = true
+
+        for rune in text.EnumerateRunes() do
+            match tryEncodeRune rune with
+            | Some encoded -> bytes.AddRange encoded
+            | None -> valid <- false
+
+        if valid then Some(bytes.ToArray()) else None
+
+    let encodeText (text: string) =
+        text.EnumerateRunes()
+        |> Seq.collect (fun rune -> tryEncodeRune rune |> Option.defaultValue [| byte '?' |])
+        |> Array.ofSeq
+
+    let decodeByte value =
+        if isControl (int value) then
+            string (char value)
+        elif isDefinedByte value then
+            encoding.Value.GetString [| value |]
+        else
+            "?"
+
+    let decodeBytes bytes = bytes |> Array.map decodeByte |> String.concat ""
+
+    { Info =
+        { Name = "tis620"
+          DefaultCollation = "tis620_thai_ci"
+          Description = "TIS620 Thai"
+          MaxBytesPerCharacter = 1
+          SupportsLoadData = true }
+      Encode = encodeText
+      TryEncode = tryEncodeText
+      Decode = decodeBytes
+      TryDecode =
+        fun bytes ->
+            if bytes |> Array.forall isDefinedByte then Some(decodeBytes bytes) else None
+      AllowsSupplementaryCharacters = true }
+
 let private codecs =
     let legacy name collation description maxBytes codePage =
         codec name collation description maxBytes true (replacingCodePage codePage) (strictCodePage codePage) true
+
+    let jis = lazy strictCodePage 20932 ()
+    let standardJis text _ =
+        let rec valid (bytes: byte[]) index =
+            if index = bytes.Length then
+                true
+            elif bytes.[index] <= 0x7Fuy then
+                valid bytes (index + 1)
+            elif
+                bytes.[index] = 0x8Euy
+                && index + 1 < bytes.Length
+                && bytes.[index + 1] >= 0xA1uy
+                && bytes.[index + 1] <= 0xDFuy
+            then
+                valid bytes (index + 2)
+            elif
+                index + 1 < bytes.Length
+                && ((bytes.[index] >= 0xA1uy && bytes.[index] <= 0xA8uy)
+                    || (bytes.[index] >= 0xB0uy && bytes.[index] <= 0xF3uy)
+                    || (bytes.[index] = 0xF4uy && bytes.[index + 1] <= 0xA6uy))
+                && bytes.[index + 1] >= 0xA1uy
+                && bytes.[index + 1] <= 0xFEuy
+            then
+                valid bytes (index + 2)
+            else
+                false
+
+        tryEncode jis text |> Option.exists (fun bytes -> valid bytes 0)
+    let gb2312Bytes _ (bytes: byte[]) =
+        let rec valid index =
+            if index = bytes.Length then
+                true
+            elif bytes.[index] <= 0x7Fuy then
+                valid (index + 1)
+            elif
+                index + 1 < bytes.Length
+                && bytes.[index] >= 0xA1uy
+                && bytes.[index] <= 0xF7uy
+                && bytes.[index + 1] >= 0xA1uy
+                && bytes.[index + 1] <= 0xFEuy
+            then
+                valid (index + 2)
+            else
+                false
+
+        valid 0
 
     [ legacy "ascii" "ascii_general_ci" "US ASCII" 1 20127
       legacy "big5" "big5_chinese_ci" "Big5 Traditional Chinese" 2 950
@@ -88,6 +231,7 @@ let private codecs =
       legacy "cp932" "cp932_japanese_ci" "SJIS for Windows Japanese" 2 932
       legacy "euckr" "euckr_korean_ci" "EUC-KR Korean" 2 51949
       legacy "gb18030" "gb18030_chinese_ci" "China National Standard GB18030" 4 54936
+      restrictedCodePageCodec "gb2312" "gb2312_chinese_ci" "GB2312 Simplified Chinese" 2 20936 gb2312Bytes
       legacy "gbk" "gbk_chinese_ci" "GBK Simplified Chinese" 2 936
       legacy "greek" "greek_general_ci" "ISO 8859-7 Greek" 1 28597
       legacy "hebrew" "hebrew_general_ci" "ISO 8859-8 Hebrew" 1 28598
@@ -99,6 +243,9 @@ let private codecs =
       legacy "latin7" "latin7_general_ci" "ISO 8859-13 Baltic" 1 28603
       legacy "macce" "macce_general_ci" "Mac Central European" 1 10029
       legacy "macroman" "macroman_general_ci" "Mac West European" 1 10000
+      restrictedCodePageCodec "sjis" "sjis_japanese_ci" "Shift-JIS Japanese" 2 932 standardJis
+      legacy "swe7" "swe7_swedish_ci" "7bit Swedish" 1 20107
+      tis620Codec
       codec "ucs2" "ucs2_general_ci" "UCS-2 Unicode" 2 false (utf16 true false) (utf16 true true) false
       legacy "ujis" "ujis_japanese_ci" "EUC-JP Japanese" 3 51932
       codec "utf16" "utf16_general_ci" "UTF-16 Unicode" 4 false (utf16 true false) (utf16 true true) true

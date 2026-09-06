@@ -269,6 +269,7 @@ let private additionalCharsetCollations =
       "cp932_japanese_ci", 95, 1, "cp932_bin", 96, Some "ja-JP"
       "euckr_korean_ci", 19, 1, "euckr_bin", 85, Some "ko-KR"
       "gb18030_chinese_ci", 248, 2, "gb18030_bin", 249, Some "zh-Hans-CN"
+      "gb2312_chinese_ci", 24, 1, "gb2312_bin", 86, Some "zh-Hans-CN"
       "gbk_chinese_ci", 28, 1, "gbk_bin", 87, Some "zh-Hans-CN"
       "greek_general_ci", 25, 1, "greek_bin", 70, Some "el-GR"
       "hebrew_general_ci", 16, 1, "hebrew_bin", 71, Some "he-IL"
@@ -279,6 +280,9 @@ let private additionalCharsetCollations =
       "latin7_general_ci", 41, 1, "latin7_bin", 79, None
       "macce_general_ci", 38, 1, "macce_bin", 43, None
       "macroman_general_ci", 39, 1, "macroman_bin", 53, None
+      "sjis_japanese_ci", 13, 1, "sjis_bin", 88, Some "ja-JP"
+      "swe7_swedish_ci", 10, 1, "swe7_bin", 82, Some "sv-SE"
+      "tis620_thai_ci", 18, 4, "tis620_bin", 89, Some "th-TH"
       "ucs2_general_ci", 35, 1, "ucs2_bin", 90, None
       "ujis_japanese_ci", 12, 1, "ujis_bin", 91, Some "ja-JP"
       "utf16_general_ci", 54, 1, "utf16_bin", 55, None
