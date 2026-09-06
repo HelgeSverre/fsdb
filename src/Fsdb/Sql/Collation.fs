@@ -258,7 +258,8 @@ let private register (name: string) (spec: Spec) (map: Map<string, Collation>) :
     Map.add name (makeCollation name spec) map
 
 let private additionalCharsetCollations =
-    [ "big5_chinese_ci", 1, 1, "big5_bin", 84, Some "zh-Hant-TW"
+    [ "armscii8_general_ci", 32, 1, "armscii8_bin", 64, Some "hy-AM"
+      "big5_chinese_ci", 1, 1, "big5_bin", 84, Some "zh-Hant-TW"
       "cp1250_general_ci", 26, 1, "cp1250_bin", 66, None
       "cp1251_general_ci", 51, 1, "cp1251_bin", 50, Some "ru-RU"
       "cp1256_general_ci", 57, 1, "cp1256_bin", 67, Some "ar-SA"
@@ -267,12 +268,16 @@ let private additionalCharsetCollations =
       "cp852_general_ci", 40, 1, "cp852_bin", 81, None
       "cp866_general_ci", 36, 1, "cp866_bin", 68, Some "ru-RU"
       "cp932_japanese_ci", 95, 1, "cp932_bin", 96, Some "ja-JP"
+      "dec8_swedish_ci", 3, 1, "dec8_bin", 69, Some "sv-SE"
       "euckr_korean_ci", 19, 1, "euckr_bin", 85, Some "ko-KR"
       "gb18030_chinese_ci", 248, 2, "gb18030_bin", 249, Some "zh-Hans-CN"
       "gb2312_chinese_ci", 24, 1, "gb2312_bin", 86, Some "zh-Hans-CN"
       "gbk_chinese_ci", 28, 1, "gbk_bin", 87, Some "zh-Hans-CN"
+      "geostd8_general_ci", 92, 1, "geostd8_bin", 93, Some "ka-GE"
       "greek_general_ci", 25, 1, "greek_bin", 70, Some "el-GR"
       "hebrew_general_ci", 16, 1, "hebrew_bin", 71, Some "he-IL"
+      "hp8_english_ci", 6, 1, "hp8_bin", 72, None
+      "keybcs2_general_ci", 37, 1, "keybcs2_bin", 73, Some "cs-CZ"
       "koi8r_general_ci", 7, 1, "koi8r_bin", 74, Some "ru-RU"
       "koi8u_general_ci", 22, 1, "koi8u_bin", 75, Some "uk-UA"
       "latin2_general_ci", 9, 1, "latin2_bin", 77, None

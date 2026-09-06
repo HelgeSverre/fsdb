@@ -912,6 +912,25 @@ let tests =
                         | Err(1366, _) -> ()
                         | other -> failtestf "expected 1366 for %s, got %A" sql other
 
+                testCase "mapped legacy character sets round-trip through columns"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE mapped_legacy (a VARCHAR(20) CHARACTER SET armscii8, d VARCHAR(20) CHARACTER SET dec8, g VARCHAR(20) CHARACTER SET geostd8, h VARCHAR(20) CHARACTER SET hp8, k VARCHAR(20) CHARACTER SET keybcs2)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO mapped_legacy VALUES ('Հայ', 'Œÿ', 'ქართული', 'Àÿ', 'Příliš žluťoučký')" |> ignore
+
+                    match runDefault store "SELECT HEX(a),HEX(d),HEX(g),HEX(h),HEX(k) FROM mapped_legacy" with
+                    | ResultSet(_, [ [ Some "D0B3DB"; Some "D7FD"; Some "D8C0D2C8D6CBC9"; Some "A1EF"; Some "50A9A16C69A820916C759F6F75876B98" ] ]) -> ()
+                    | other -> failtestf "expected MySQL legacy mapping bytes, got %A" other
+
+                    match runDefault store "INSERT INTO mapped_legacy(a,d,g,h,k) VALUES ('x','☃','x','x','x')" with
+                    | Err(1366, _) -> ()
+                    | other -> failtestf "expected 1366 for an undefined DEC mapping, got %A" other
+
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->
                     let store = newStore ()

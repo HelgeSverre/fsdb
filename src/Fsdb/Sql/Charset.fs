@@ -71,6 +71,62 @@ let private codec name defaultCollation description maxBytes supportsLoadData en
       TryDecode = tryDecode strictEncoding
       AllowsSupplementaryCharacters = allowsSupplementary }
 
+let private singleByteCodec name defaultCollation description (highCodePoints: int[]) =
+    if highCodePoints.Length <> 128 then
+        invalidArg (nameof highCodePoints) "A single-byte charset must define bytes 0x80 through 0xFF"
+
+    let byteByCodePoint =
+        let ascii = [ 0..127 ] |> List.map (fun value -> value, byte value) |> Map.ofList
+
+        highCodePoints
+        |> Array.indexed
+        |> Array.fold (fun bytes (index, codePoint) ->
+            if codePoint = 0 || Map.containsKey codePoint bytes then
+                bytes
+            else
+                Map.add codePoint (byte (index + 128)) bytes) ascii
+
+    let tryEncodeText (text: string) =
+        let bytes = ResizeArray<byte>()
+        let mutable valid = true
+
+        for rune in text.EnumerateRunes() do
+            match Map.tryFind rune.Value byteByCodePoint with
+            | Some value -> bytes.Add value
+            | None -> valid <- false
+
+        if valid then Some(bytes.ToArray()) else None
+
+    let encodeText (text: string) =
+        text.EnumerateRunes()
+        |> Seq.map (fun rune -> Map.tryFind rune.Value byteByCodePoint |> Option.defaultValue (byte '?'))
+        |> Array.ofSeq
+
+    let codePoint value =
+        if value < 0x80uy then int value else highCodePoints.[int value - 128]
+
+    let decodeText bytes =
+        bytes
+        |> Array.map (fun value ->
+            match codePoint value with
+            | 0 -> "?"
+            | value -> Rune(value).ToString())
+        |> String.concat ""
+
+    { Info =
+        { Name = name
+          DefaultCollation = defaultCollation
+          Description = description
+          MaxBytesPerCharacter = 1
+          SupportsLoadData = true }
+      Encode = encodeText
+      TryEncode = tryEncodeText
+      Decode = decodeText
+      TryDecode =
+        fun bytes ->
+            if bytes |> Array.forall (fun value -> codePoint value <> 0) then Some(decodeText bytes) else None
+      AllowsSupplementaryCharacters = true }
+
 let private restrictedCodePageCodec name defaultCollation description maxBytes codePage accepts =
     let encoding = lazy replacingCodePage codePage ()
     let strictEncoding = lazy strictCodePage codePage ()
@@ -172,6 +228,11 @@ let private codecs =
     let legacy name collation description maxBytes codePage =
         codec name collation description maxBytes true (replacingCodePage codePage) (strictCodePage codePage) true
 
+    let mapped name collation description =
+        SingleByteCharset.tryFind name
+        |> Option.map (singleByteCodec name collation description)
+        |> Option.defaultWith (fun () -> invalidOp (sprintf "Missing character map for %s" name))
+
     let jis = lazy strictCodePage 20932 ()
     let standardJis text _ =
         let rec valid (bytes: byte[]) index =
@@ -218,7 +279,8 @@ let private codecs =
 
         valid 0
 
-    [ legacy "ascii" "ascii_general_ci" "US ASCII" 1 20127
+    [ mapped "armscii8" "armscii8_general_ci" "ARMSCII-8 Armenian"
+      legacy "ascii" "ascii_general_ci" "US ASCII" 1 20127
       legacy "big5" "big5_chinese_ci" "Big5 Traditional Chinese" 2 950
       codec "binary" "binary" "Binary pseudo charset" 1 false utf8 strictUtf8 true
       legacy "cp1250" "cp1250_general_ci" "Windows Central European" 1 1250
@@ -229,12 +291,16 @@ let private codecs =
       legacy "cp852" "cp852_general_ci" "DOS Central European" 1 852
       legacy "cp866" "cp866_general_ci" "DOS Russian" 1 866
       legacy "cp932" "cp932_japanese_ci" "SJIS for Windows Japanese" 2 932
+      mapped "dec8" "dec8_swedish_ci" "DEC West European"
       legacy "euckr" "euckr_korean_ci" "EUC-KR Korean" 2 51949
       legacy "gb18030" "gb18030_chinese_ci" "China National Standard GB18030" 4 54936
       restrictedCodePageCodec "gb2312" "gb2312_chinese_ci" "GB2312 Simplified Chinese" 2 20936 gb2312Bytes
       legacy "gbk" "gbk_chinese_ci" "GBK Simplified Chinese" 2 936
+      mapped "geostd8" "geostd8_general_ci" "GEOSTD8 Georgian"
       legacy "greek" "greek_general_ci" "ISO 8859-7 Greek" 1 28597
       legacy "hebrew" "hebrew_general_ci" "ISO 8859-8 Hebrew" 1 28598
+      mapped "hp8" "hp8_english_ci" "HP West European"
+      mapped "keybcs2" "keybcs2_general_ci" "DOS Kamenicky Czech-Slovak"
       legacy "koi8r" "koi8r_general_ci" "KOI8-R Relcom Russian" 1 20866
       legacy "koi8u" "koi8u_general_ci" "KOI8-U Ukrainian" 1 21866
       legacy "latin1" "latin1_swedish_ci" "cp1252 West European" 1 1252

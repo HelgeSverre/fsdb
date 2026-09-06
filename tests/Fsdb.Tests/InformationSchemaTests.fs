@@ -442,19 +442,24 @@ let tests =
                       "the codec catalog drives Information Schema"
               | other -> failtestf "expected expanded character sets, got %A" other
 
-          testCase "CHARACTER_SETS exposes standard legacy codec families"
+          testCase "CHARACTER_SETS exposes legacy codec families"
           <| fun _ ->
               let store = setup ()
 
               match
                   run
                       store
-                      "SELECT character_set_name,default_collate_name,maxlen FROM information_schema.character_sets WHERE character_set_name IN ('gb2312','sjis','swe7','tis620') ORDER BY character_set_name"
+                      "SELECT character_set_name,default_collate_name,maxlen FROM information_schema.character_sets WHERE character_set_name IN ('armscii8','dec8','gb2312','geostd8','hp8','keybcs2','sjis','swe7','tis620') ORDER BY character_set_name"
               with
               | ResultSet(_, rows) ->
                   Expect.equal
                       rows
-                      [ [ Some "gb2312"; Some "gb2312_chinese_ci"; Some "2" ]
+                      [ [ Some "armscii8"; Some "armscii8_general_ci"; Some "1" ]
+                        [ Some "dec8"; Some "dec8_swedish_ci"; Some "1" ]
+                        [ Some "gb2312"; Some "gb2312_chinese_ci"; Some "2" ]
+                        [ Some "geostd8"; Some "geostd8_general_ci"; Some "1" ]
+                        [ Some "hp8"; Some "hp8_english_ci"; Some "1" ]
+                        [ Some "keybcs2"; Some "keybcs2_general_ci"; Some "1" ]
                         [ Some "sjis"; Some "sjis_japanese_ci"; Some "2" ]
                         [ Some "swe7"; Some "swe7_swedish_ci"; Some "1" ]
                         [ Some "tis620"; Some "tis620_thai_ci"; Some "1" ] ]
