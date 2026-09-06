@@ -6324,6 +6324,85 @@ let tests =
 
                     Expect.isLessThan calls 600 "the residual join predicate runs only after the joined-source predicate"
 
+                testCase "joined-source predicates use physical index candidates"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.head values)
+
+                    let store = newStore ()
+                    run store registry "CREATE TABLE left_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
+
+                    run
+                        store
+                        registry
+                        "CREATE TABLE right_rows (id INT PRIMARY KEY, bucket INT, observed INT AS (TOUCH(id)) VIRTUAL)"
+                    |> ignore
+
+                    let values =
+                        [ 1..100 ]
+                        |> List.map (fun id -> sprintf "(%d, %d)" id (id % 2))
+                        |> String.concat ","
+
+                    run store registry $"INSERT INTO left_rows VALUES {values}" |> ignore
+                    run store registry $"INSERT INTO right_rows (id, bucket) VALUES {values}" |> ignore
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT SUM(r.observed) FROM left_rows l JOIN right_rows r ON r.bucket = l.bucket WHERE r.id <= 10"
+                    with
+                    | ResultSet(_, [ [ Some total ] ]) -> Expect.equal total "2750" "ten right rows join matching left buckets"
+                    | other -> failtestf "expected a join sum, got %A" other
+
+                    Expect.equal calls 10 "only primary-key range candidates compute the virtual column"
+
+                testCase "base-source predicates use physical index candidates"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.head values)
+
+                    let store = newStore ()
+
+                    run
+                        store
+                        registry
+                        "CREATE TABLE left_rows (id INT PRIMARY KEY, bucket INT, observed INT AS (TOUCH(id)) VIRTUAL)"
+                    |> ignore
+
+                    run store registry "CREATE TABLE right_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
+
+                    let values =
+                        [ 1..100 ]
+                        |> List.map (fun id -> sprintf "(%d, %d)" id (id % 2))
+                        |> String.concat ","
+
+                    run store registry $"INSERT INTO left_rows (id, bucket) VALUES {values}" |> ignore
+                    run store registry $"INSERT INTO right_rows VALUES {values}" |> ignore
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT SUM(l.observed) FROM left_rows l JOIN right_rows r ON r.bucket = l.bucket WHERE l.id <= 10"
+                    with
+                    | ResultSet(_, [ [ Some total ] ]) -> Expect.equal total "2750" "ten left rows join matching right buckets"
+                    | other -> failtestf "expected a join sum, got %A" other
+
+                    Expect.equal calls 10 "only primary-key range candidates compute the virtual column"
+
                 testCase "prefix indexes probe inner joins without weakening equality"
                 <| fun _ ->
                     let store = newStore ()

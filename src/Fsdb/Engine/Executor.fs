@@ -7138,6 +7138,20 @@ and private filterSourceRows
     |> Result.mapError Err
     |> Result.map (fun filtered -> filtered :> Value[] seq)
 
+and private narrowPhysicalSourceRows
+    (store: Store)
+    (source: FromItem)
+    (table: Table option)
+    (predicate: Expr option)
+    (rows: Value[] seq)
+    : Value[] seq =
+    match source, table, predicate with
+    | FromTable tableRef, Some table, Some predicate ->
+        tryPhysicalReadCandidatesInTable store table tableRef (Some predicate)
+        |> Option.map (snd >> Seq.map snd)
+        |> Option.defaultValue rows
+    | _ -> rows
+
 /// Indexed join probes return physical row arrays, so their results must
 /// resolve to the corresponding VIRTUAL-prepared row before evaluation.
 and private alignPreparedRows
@@ -7204,9 +7218,16 @@ and private applyResolvedJoin
                 |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
 
         |> Result.bind (fun (columns, rows, physicalTable) ->
+            let predicate = Map.tryFind qualifier sourcePredicates
+            let rows =
+                if Map.containsKey qualifier sourceOverrides then
+                    rows
+                else
+                    narrowPhysicalSourceRows store join.Table physicalTable predicate rows
+
             prepareVirtualRows store registry dbName joinQualifier columns rows
             |> Result.bind (fun rows ->
-                match Map.tryFind qualifier sourcePredicates with
+                match predicate with
                 | None -> Ok(columns, rows, physicalTable)
                 | Some predicate ->
                     filterSourceRows store registry dbName outer joinQualifier columns predicate rows
@@ -8732,17 +8753,19 @@ and private runUnlockedSelectStmt
             =
             let baseQualifier = fromItemQualifier fromItem
             let joinConsumption = joinConsumptionFor select.Limit
+            let pushedWhere, remainingWhere =
+                sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
+
+            let basePredicate = Map.tryFind (baseQualifier.ToLowerInvariant()) pushedWhere
+            let baseRows = narrowPhysicalSourceRows store fromItem basePhysicalTable basePredicate baseRows
 
             match prepareVirtualRows store registry dbName baseQualifier baseColumns baseRows with
             | Error error -> error, [], []
             | Ok baseRows ->
-                let pushedWhere, remainingWhere =
-                    sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
-
                 let prepared =
                     let narrowedSelect = { select with Where = remainingWhere }
 
-                    match Map.tryFind (baseQualifier.ToLowerInvariant()) pushedWhere with
+                    match basePredicate with
                     | None -> Ok(baseRows, narrowedSelect)
                     | Some predicate ->
                         filterSourceRows store registry dbName outer baseQualifier baseColumns predicate baseRows
