@@ -3590,11 +3590,10 @@ let private boundedTopN (capacity: int) (cmp: 'b -> 'b -> int) (f: 'a -> Result<
 /// is the actual LIMIT short-circuit — verified against a real MySQL oracle
 /// that a row-level error past a `LIMIT`'s cut, with no `ORDER BY`, never
 /// surfaces, because the row is never evaluated in the first place; this
-/// mirrors that by never calling `f` on it. `distinct` dedupes on the
-/// projected row's text key (`f`'s returned `string list`, the same
-/// encoding `SELECT DISTINCT`'s materialized path already keyed on) before
-/// counting a row toward `offset`/`limit`, so `DISTINCT ... LIMIT n` still
-/// streams instead of falling back to a full materialize.
+/// mirrors that by never calling `f` on it. `distinct` dedupes on `f`'s
+/// returned key before counting a row toward `offset`/`limit`; SELECT uses
+/// the same projected-text key as its materialized path, while mutations
+/// disable deduplication and use the helper only for early LIMIT stopping.
 let private streamLimited
     (distinct: bool)
     (offset: int)
