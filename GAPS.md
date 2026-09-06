@@ -40,7 +40,7 @@ findings recorded under `torture/findings/`.
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner/left/right joins, PK/unique/secondary/spatial range, grouping, and index-order probes | Arbitrary expression ordering and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Remaining coarse write shapes |
-| Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
+| Persistence | WAL + snapshot, crash-tested through automatic rotations and WAL tails, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
 | Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
 | Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap recorded |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
@@ -278,7 +278,10 @@ incrementally.
 Group commit, ordered checkpoint barriers, lock-step rotation, shutdown
 rotation, decode-depth limits, generated-expression codecs, and durable XA
 records share the same persistence path. Checkpoint rotation waits for prepared
-XA branches so their recovery base remains in the WAL.
+XA branches so their recovery base remains in the WAL. The durability campaign
+forces repeated automatic rotations, appends a WAL-only commit, crashes the
+server, and verifies the recovered transaction sets before and after a graceful
+snapshot restart.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -513,7 +516,6 @@ routines, events, and administrative probes.
 | Open campaign | Current gap |
 |---|---|
 | Planner constant factors | Indexed joins, equality/`IN`, and secondary ranges retain a constant-factor gap. Low-cardinality joins push safe source-local predicates below full-consumption fan-out and stream plain `COUNT(*)`; relevance-ordered full-text limits stream through exact unique joins, unindexed grouping filters and groups in one pass, and mutation scans retain only matched targets while unordered limits stop early. Scan-shaped updates, decimal membership, and broader full-text plans remain input-sensitive. Benchmark result artifacts carry the measurements; shared statement setup and scan-shaped plans remain the principal measured seams. |
-| Snapshot rotation volume | Crash/restart campaigns cover acknowledged-commit and atomicity invariants; longer high-volume checkpoint-rotation campaigns remain useful stress coverage. |
 
 ## 16. Deliberate divergences (accepted, not targeted for parity)
 

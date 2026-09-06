@@ -80,7 +80,7 @@ module DurabilityRunner =
         listener.Stop()
         port
 
-    let private startServer dataDirectory port =
+    let private startServer dataDirectory defaultsFile port =
         task {
             let assemblyPath = typeof<Fsdb.Storage.Store>.Assembly.Location
             let executableName = if OperatingSystem.IsWindows() then "Fsdb.exe" else "Fsdb"
@@ -95,7 +95,14 @@ module DurabilityRunner =
             startInfo.UseShellExecute <- false
             startInfo.RedirectStandardOutput <- true
             startInfo.RedirectStandardError <- true
-            [| "--listen"; "127.0.0.1"; "--port"; string port; "--data-dir"; dataDirectory |]
+            [| "--listen"
+               "127.0.0.1"
+               "--port"
+               string port
+               "--data-dir"
+               dataDirectory
+               "--defaults-file"
+               defaultsFile |]
             |> Array.iter startInfo.ArgumentList.Add
 
             let child = new Process(StartInfo = startInfo)
@@ -264,20 +271,81 @@ module DurabilityRunner =
             return DurabilityChecks.classify attempted acknowledged left right, left, right
         }
 
+    let private snapshotPath dataDirectory = Path.Combine(dataDirectory, "snapshot.fsdb")
+
+    let private snapshotStamp path =
+        if File.Exists path then
+            let info = FileInfo path
+            Some(info.Length, info.LastWriteTimeUtc.Ticks)
+        else
+            None
+
+    let private snapshotHash path =
+        if File.Exists path then Some(Hashing.file path) else None
+
+    let private executeAcknowledgedOperation
+        (options: DurabilityOptions)
+        (connection: MySqlConnection)
+        worker
+        operationId
+        (attempted: ConcurrentDictionary<int64, byte>)
+        (acknowledged: ConcurrentDictionary<int64, byte>)
+        =
+        task {
+            attempted.TryAdd(operationId, 0uy) |> ignore
+            do! executeOperation connection options.TimeoutSeconds worker operationId
+            acknowledged.TryAdd(operationId, 0uy) |> ignore
+        }
+
+    let private runUntilCheckpoint
+        (options: DurabilityOptions)
+        dataDirectory
+        port
+        phase
+        (attempted: ConcurrentDictionary<int64, byte>)
+        (acknowledged: ConcurrentDictionary<int64, byte>)
+        =
+        task {
+            use connection = new MySqlConnection(connectionString port "durability" options.TimeoutSeconds)
+            do! connection.OpenAsync()
+            let path = snapshotPath dataDirectory
+            let beforeHash = snapshotHash path
+            let beforeStamp = snapshotStamp path
+            let mutable afterStamp = beforeStamp
+            let mutable offset = 0
+
+            while afterStamp = beforeStamp && offset <= options.CheckpointEntries do
+                let operationId = 9_000_000_000L + int64 phase * 1_000_000L + int64 offset
+                do! executeAcknowledgedOperation options connection -phase operationId attempted acknowledged
+                afterStamp <- snapshotStamp path
+                offset <- offset + 1
+
+            let afterHash =
+                if afterStamp = beforeStamp then beforeHash else snapshotHash path
+
+            return beforeHash, afterHash
+        }
+
     let run (options: DurabilityOptions) =
         task {
             let started = DateTimeOffset.UtcNow
             let runId = Paths.uniqueRunId ()
             let caseId =
                 sprintf
-                    "durability-seed%d-workers%d-ops%d-restarts%d"
+                    "durability-seed%d-workers%d-ops%d-restarts%d-checkpoint%d"
                     options.Seed
                     options.Workers
                     options.OperationsPerWorker
                     options.Restarts
+                    options.CheckpointEntries
             let caseDirectory = Path.Combine(options.ArtifactRoot, runId, caseId)
             let dataDirectory = Path.Combine(caseDirectory, "data")
             Directory.CreateDirectory dataDirectory |> ignore
+            let defaultsFile = Path.Combine(caseDirectory, "fsdb.cnf")
+            File.WriteAllText(
+                defaultsFile,
+                sprintf "[mysqld]\nwal_rotate_bytes=1099511627776\nwal_rotate_entries=%d\n" options.CheckpointEntries
+            )
             let! revision, dirty = Tooling.gitState ()
             let assemblyPath = typeof<Fsdb.Storage.Store>.Assembly.Location
             let attempted = ConcurrentDictionary<int64, byte>()
@@ -299,7 +367,7 @@ module DurabilityRunner =
 
             try
                 let port = reservePort ()
-                let! initial = startServer dataDirectory port
+                let! initial = startServer dataDirectory defaultsFile port
                 liveServer <- Some initial
                 do! setup port options.TimeoutSeconds
 
@@ -313,32 +381,65 @@ module DurabilityRunner =
                     with :? TimeoutException ->
                         failwithf "workers did not stop after crash %d" (cycle + 1)
 
-                    let! restarted = startServer dataDirectory port
+                    let! restarted = startServer dataDirectory defaultsFile port
                     liveServer <- Some restarted
+
+                let! firstBefore, firstAfter =
+                    runUntilCheckpoint options dataDirectory port 1 attempted acknowledged
+
+                let! secondBefore, secondAfter =
+                    runUntilCheckpoint options dataDirectory port 2 attempted acknowledged
+
+                let checkpointsRotated =
+                    firstAfter.IsSome
+                    && firstAfter <> firstBefore
+                    && secondAfter.IsSome
+                    && secondAfter <> secondBefore
+
+                use tailConnection = new MySqlConnection(connectionString port "durability" options.TimeoutSeconds)
+                do! tailConnection.OpenAsync()
+                let tailOperationId = 9_003_000_000L
+                do! executeAcknowledgedOperation options tailConnection -3 tailOperationId attempted acknowledged
+                let walPath = Path.Combine(dataDirectory, "wal.bin")
+                let walTailWritten = File.Exists walPath && FileInfo(walPath).Length > 0L
+                do! tailConnection.CloseAsync()
+                do! stopLive true
+                let! tailRestarted = startServer dataDirectory defaultsFile port
+                liveServer <- Some tailRestarted
 
                 let attemptedSet = attempted.Keys |> Set.ofSeq
                 let acknowledgedSet = acknowledged.Keys |> Set.ofSeq
                 let! recovered, leftBeforeSnapshot, rightBeforeSnapshot = observe options port attemptedSet acknowledgedSet
+                let walTailVerified =
+                    walTailWritten
+                    && Set.contains tailOperationId leftBeforeSnapshot
+                    && Set.contains tailOperationId rightBeforeSnapshot
+
                 do! stopLive false
-                let snapshotWritten = File.Exists(Path.Combine(dataDirectory, "snapshot.fsdb"))
-                let! snapshotServer = startServer dataDirectory port
+                let snapshotWritten = File.Exists(snapshotPath dataDirectory)
+                let! snapshotServer = startServer dataDirectory defaultsFile port
                 liveServer <- Some snapshotServer
                 let! afterSnapshot, leftAfterSnapshot, rightAfterSnapshot = observe options port attemptedSet acknowledgedSet
                 let snapshotVerified = snapshotWritten && leftBeforeSnapshot = leftAfterSnapshot && rightBeforeSnapshot = rightAfterSnapshot
                 do! stopLive false
-                let passed = recovered.Passed && afterSnapshot.Passed && snapshotVerified
+                let passed = checkpointsRotated && walTailVerified && recovered.Passed && afterSnapshot.Passed && snapshotVerified
                 let detail =
-                    if not recovered.Passed then recovered.Detail
+                    if not checkpointsRotated then "two automatic checkpoint rotations were not observed"
+                    elif not walTailWritten then "the post-checkpoint commit did not leave a WAL tail"
+                    elif not walTailVerified then "the WAL-tail commit was absent after crash recovery"
+                    elif not recovered.Passed then recovered.Detail
                     elif not afterSnapshot.Passed then "snapshot restart: " + afterSnapshot.Detail
                     elif not snapshotVerified then "the graceful snapshot restart changed recovered rows"
-                    else recovered.Detail + "; graceful snapshot restart preserved the same state"
+                    else
+                        recovered.Detail
+                        + "; repeated automatic checkpoints, WAL-tail recovery, and graceful snapshot restart preserved the same state"
 
                 let classification = if passed then "pass" else "durability_failure"
                 let currentProcess = Process.GetCurrentProcess()
                 currentProcess.Refresh()
                 let signature = if passed then "" else Hashing.combine [ classification; string options.Seed; detail ]
                 let manifest =
-                    { SchemaVersion = 1
+                    { SchemaVersion = 2
                       RunId = runId
                       CaseId = caseId
                       StartedUtc = started.ToString("O", CultureInfo.InvariantCulture)
@@ -349,7 +450,8 @@ module DurabilityRunner =
                       Seed = options.Seed
                       Workers = options.Workers
                       OperationsPerWorker = options.OperationsPerWorker
-                      CrashRestarts = options.Restarts
+                      CrashRestarts = options.Restarts + 1
+                      CheckpointEntries = options.CheckpointEntries
                       AttemptedOperations = attempted.Count
                       AcknowledgedOperations = acknowledged.Count
                       AmbiguousOperations = ambiguous.Count
@@ -357,6 +459,8 @@ module DurabilityRunner =
                       MissingAcknowledged = afterSnapshot.MissingAcknowledged
                       PartialTransactions = afterSnapshot.PartialTransactions
                       UnattemptedRows = afterSnapshot.UnattemptedRows
+                      AutomaticCheckpointsVerified = checkpointsRotated
+                      WalTailVerified = walTailVerified
                       SnapshotVerified = snapshotVerified
                       PeakWorkingSetBytes = max currentProcess.PeakWorkingSet64 currentProcess.WorkingSet64
                       Classification = classification

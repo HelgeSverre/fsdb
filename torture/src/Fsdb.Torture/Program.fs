@@ -26,6 +26,7 @@ type private Cli =
       Workers: int
       OperationsPerWorker: int
       Restarts: int
+      CheckpointEntries: int
       Accounts: int
       HotAccounts: int
       RollbackEvery: int
@@ -63,6 +64,7 @@ Options:
   --workers <n>              Concurrent prepared-statement sessions per database (default 8)
   --operations <n>           Transactions per worker (default 100)
   --restarts <n>             durability: crash/restart cycles (default 8)
+  --checkpoint-entries <n>   durability: WAL entries between checkpoints (default 16)
   --accounts <n>             Total initialized accounts per database (default 32)
   --hot-accounts <n>         Contended account set, at least 2 (default 4)
   --rollback-every <n>       Roll back every Nth operation; 0 disables (default 5)
@@ -126,6 +128,7 @@ Options:
         let mutable workers = 8
         let mutable operationsPerWorker = 100
         let mutable restarts = 8
+        let mutable checkpointEntries = 16
         let mutable accounts = 32
         let mutable hotAccounts = 4
         let mutable rollbackEvery = 5
@@ -195,6 +198,10 @@ Options:
                 match parseInt flag (nextValue flag) with
                 | Ok value -> restarts <- value
                 | Error error -> failure <- Some error
+            | "--checkpoint-entries" ->
+                match parseInt flag (nextValue flag) with
+                | Ok value -> checkpointEntries <- value
+                | Error error -> failure <- Some error
             | "--accounts" ->
                 match parseInt flag (nextValue flag) with
                 | Ok value -> accounts <- value
@@ -255,6 +262,7 @@ Options:
                   Workers = workers
                   OperationsPerWorker = operationsPerWorker
                   Restarts = restarts
+                  CheckpointEntries = checkpointEntries
                   Accounts = accounts
                   HotAccounts = hotAccounts
                   RollbackEvery = rollbackEvery
@@ -308,6 +316,7 @@ Options:
           Workers = cli.Workers
           OperationsPerWorker = cli.OperationsPerWorker
           Restarts = cli.Restarts
+          CheckpointEntries = cli.CheckpointEntries
           TimeoutSeconds = cli.TimeoutSeconds
           ArtifactRoot = cli.Artifacts }
 
@@ -471,12 +480,14 @@ module Program =
     let private printDurability (report: DurabilityManifest) directory =
         printfn "%s: %s — %s" report.CaseId report.Classification directory
         printfn
-            "  attempted=%d acknowledged=%d ambiguous=%d recovered=%d crash-restarts=%d snapshot=%s"
+            "  attempted=%d acknowledged=%d ambiguous=%d recovered=%d crash-restarts=%d automatic-checkpoints=%s wal-tail=%s snapshot=%s"
             report.AttemptedOperations
             report.AcknowledgedOperations
             report.AmbiguousOperations
             report.RecoveredOperations
             report.CrashRestarts
+            (if report.AutomaticCheckpointsVerified then "pass" else "fail")
+            (if report.WalTailVerified then "pass" else "fail")
             (if report.SnapshotVerified then "pass" else "fail")
         printfn "  detail: %s" report.ClassificationDetail
 

@@ -79,6 +79,7 @@ type DurabilityOptions =
       Workers: int
       OperationsPerWorker: int
       Restarts: int
+      CheckpointEntries: int
       TimeoutSeconds: int
       ArtifactRoot: string }
 
@@ -96,6 +97,7 @@ type DurabilityManifest =
       Workers: int
       OperationsPerWorker: int
       CrashRestarts: int
+      CheckpointEntries: int
       AttemptedOperations: int
       AcknowledgedOperations: int
       AmbiguousOperations: int
@@ -103,6 +105,8 @@ type DurabilityManifest =
       MissingAcknowledged: int64 array
       PartialTransactions: int64 array
       UnattemptedRows: int64 array
+      AutomaticCheckpointsVerified: bool
+      WalTailVerified: bool
       SnapshotVerified: bool
       PeakWorkingSetBytes: int64
       Classification: string
