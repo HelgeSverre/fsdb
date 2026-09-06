@@ -7,10 +7,12 @@ services:
     command: --max-connections=2000
     environment:
       MYSQL_ROOT_PASSWORD: torture-secret
+      MYSQL_ROOT_HOST: "%"
     ports:
       - "127.0.0.1::3306"
     volumes:
       - mysql-data:/var/lib/mysql
+      - ./support/mysql-init.sql:/docker-entrypoint-initdb.d/mysql-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "MYSQL_PWD=torture-secret mysqladmin ping -h 127.0.0.1 --silent"]
       interval: 1s
