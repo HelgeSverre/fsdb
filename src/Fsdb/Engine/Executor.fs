@@ -7220,7 +7220,7 @@ and private applyResolvedJoin
                         matchesByLeft
                         |> Map.tryFind li
                         |> Option.map (List.sortBy (fun (_, ri, _) -> ri) >> List.map (fun (_, _, combined) -> combined))
-                        |> Option.defaultValue [ Array.append left rightNullPadding ])
+                        |> Option.defaultWith (fun () -> [ Array.append left rightNullPadding ]))
                 | RightJoin
                 | NaturalRightJoin ->
                     let matchesByRight = matched |> List.groupBy (fun (_, ri, _) -> ri) |> Map.ofList
@@ -7230,7 +7230,7 @@ and private applyResolvedJoin
                         matchesByRight
                         |> Map.tryFind ri
                         |> Option.map (List.sortBy (fun (li, _, _) -> li) >> List.map (fun (_, _, combined) -> combined))
-                        |> Option.defaultValue [ Array.append leftNullPadding right ])
+                        |> Option.defaultWith (fun () -> [ Array.append leftNullPadding right ]))
 
             newSources, combinedRows
 
@@ -10045,13 +10045,14 @@ and private runUnionStmtWithOuter
                 if orderBy.IsEmpty then
                     Ok coercedPaired
                 else
+                    let directions = List.map snd orderBy
                     coercedPaired
                     |> traverse (fun (text, typed) ->
                         orderBy
                         |> traverse (fun (expr, _) -> orderKeyOf typed expr)
                         |> Result.map (fun keys -> keys, (text, typed)))
                     |> Result.map (
-                        List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (orderBy |> List.map snd) ka kb)
+                        List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys directions ka kb)
                         >> List.map snd
                     )
 
@@ -10186,7 +10187,8 @@ and private evalAggregate
                 if orderKeys.IsEmpty then
                     present
                 else
-                    present |> List.sortWith (fun (_, _, ka) (_, _, kb) -> compareByOrderKeys (List.map snd orderKeys) ka kb)
+                    let directions = List.map snd orderKeys
+                    present |> List.sortWith (fun (_, _, ka) (_, _, kb) -> compareByOrderKeys directions ka kb)
             // Collation-aware dedupe: åge/age fold to one value under an
             // ai_ci column, stay distinct under bin.
             let deduped = if distinct then List.distinctBy (fun (_, key, _) -> key) ordered else ordered
@@ -11293,7 +11295,8 @@ and private runGroupedSelect
                             // comparison a no-op, so skip the sort outright.
                             kept
                         else
-                            kept |> List.sortWith (fun (_, ka, _) (_, kb, _) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
+                            let directions = List.map snd select.OrderBy
+                            kept |> List.sortWith (fun (_, ka, _) (_, kb, _) -> compareByOrderKeys directions ka kb)
 
                     // Declared fsp per output column, same as the plain path
                     // — a bare grouped temporal column (`SELECT dt ... GROUP
@@ -13201,7 +13204,8 @@ and private runSelect
                     if orderBy.IsEmpty then
                         keyed
                     else
-                        keyed |> List.sortWith (fun (ka, _, _) (kb, _, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
+                        let directions = List.map snd orderBy
+                        keyed |> List.sortWith (fun (ka, _, _) (kb, _, _) -> compareByOrderKeys directions ka kb)
 
                 // Dedupes on the projected columns while still honoring
                 // `ORDER BY`'s row order (first occurrence wins) — deduping
