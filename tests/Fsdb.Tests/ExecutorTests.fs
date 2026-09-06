@@ -1045,6 +1045,32 @@ let tests =
                         Expect.stringContains extra "Using where" "WHERE noted on the last table"
                     | other -> failtestf "expected a two-row join plan, got %A" other
 
+                testCase "EXPLAIN reports source-local range access in joins"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE left_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
+                    runDefault store "CREATE TABLE right_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
+                    runDefault store "INSERT INTO left_rows VALUES (1, 1), (2, 0), (3, 1), (4, 0)" |> ignore
+                    runDefault store "INSERT INTO right_rows VALUES (1, 1), (2, 0), (3, 1), (4, 0)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "EXPLAIN SELECT COUNT(*) FROM left_rows l JOIN right_rows r ON r.bucket = l.bucket WHERE r.id < 2"
+                    with
+                    | ResultSet(_, [ _; [ _; _; Some "r"; _; Some "range"; Some "PRIMARY"; Some "PRIMARY"; _; _; Some "1"; _; Some extra ] ]) ->
+                        Expect.stringContains extra "Using where" "the joined-source residual remains visible"
+                    | other -> failtestf "expected a joined-source range plan, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "EXPLAIN SELECT COUNT(*) FROM left_rows l JOIN right_rows r ON r.bucket = l.bucket WHERE l.id < 2"
+                    with
+                    | ResultSet(_, [ [ _; _; Some "l"; _; Some "range"; Some "PRIMARY"; Some "PRIMARY"; _; _; Some "1"; _; Some "Using where" ]; _ ]) ->
+                        ()
+                    | other -> failtestf "expected a base-source range plan, got %A" other
+
                 testCase "EXPLAIN SELECT by unique key is MySQL's const row, key columns filled in"
                 <| fun _ ->
                     let store = newStore ()

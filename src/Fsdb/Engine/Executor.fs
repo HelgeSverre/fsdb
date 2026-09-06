@@ -14077,6 +14077,11 @@ let rec private explainJoinBlock
     : Result<unit, QueryResult> =
     let tableCount = (from |> Option.toList |> List.length) + joins.Length
 
+    let sourcePredicates =
+        from
+        |> Option.map (fun source -> sourcePredicatesForInnerJoins source joins consumption whereOpt |> fst)
+        |> Option.defaultValue Map.empty
+
     let emitTableRow (idx: int) (label: string) (rowCount: uint64 option) (typeLabel: string) =
         acc.Add
             { Id = Some id
@@ -14088,102 +14093,99 @@ let rec private explainJoinBlock
               Rows = rowCount
               Extra = (if idx = tableCount - 1 then extra else []) }
 
-    let tryExplainIndexedAccess (tref: TableRef) : bool =
-        if tableCount <> 1 then
-            false
-        else
-            match tryEqualityAccess store dbName tref whereOpt with
-            | Some plan when plan.Unique && plan.CandidateRowIds.IsEmpty ->
-                acc.Add
-                    { Id = Some id
-                      SelectType = selectType
-                      Table = None
-                      Type = None
-                      Key = None
-                      Ref = None
-                      Rows = None
-                      Extra = [ "no matching row in const table" ] }
+    let tryExplainIndexedAccess accessExtra (whereExpr: Expr option) (tref: TableRef) : bool =
+        match tryEqualityAccess store dbName tref whereExpr with
+        | Some plan when plan.Unique && plan.CandidateRowIds.IsEmpty ->
+            acc.Add
+                { Id = Some id
+                  SelectType = selectType
+                  Table = None
+                  Type = None
+                  Key = None
+                  Ref = None
+                  Rows = None
+                  Extra = [ "no matching row in const table" ] }
 
-                true
+            true
+        | Some plan ->
+            acc.Add
+                { Id = Some id
+                  SelectType = selectType
+                  Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                  Type = Some(if plan.Unique then "const" else "ref")
+                  Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
+                  Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
+                  Rows = Some(uint64 plan.CandidateRowIds.Count)
+                  Extra = if plan.Unique then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
+
+            true
+        | None ->
+            match tryLiteralInAccess store dbName tref whereExpr with
             | Some plan ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                      Type = Some(if plan.Unique then "const" else "ref")
+                      Type = Some "range"
                       Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
-                      Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
+                      Ref = None
                       Rows = Some(uint64 plan.CandidateRowIds.Count)
-                      Extra = if plan.Unique then extra |> List.filter ((<>) "Using where") else extra }
+                      Extra = accessExtra }
 
                 true
             | None ->
-                match tryLiteralInAccess store dbName tref whereOpt with
+                match trySpatialAccess BareOrQualifiedColumn store dbName tref whereExpr with
                 | Some plan ->
                     acc.Add
                         { Id = Some id
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                           Type = Some "range"
-                          Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
+                          Key = Some(plan.SpatialIndexName, Some 34)
                           Ref = None
-                          Rows = Some(uint64 plan.CandidateRowIds.Count)
-                          Extra = extra }
+                          Rows = Some(uint64 plan.SpatialRows.Length)
+                          Extra = accessExtra }
 
                     true
                 | None ->
-                    match trySpatialAccess BareOrQualifiedColumn store dbName tref whereOpt with
+                    match indexOrderPlan with
                     | Some plan ->
+                        let hasBounds =
+                            match plan.ColumnIndices with
+                            | [ index ] ->
+                                rangeLookupBounds BareOrQualifiedColumn tref whereExpr
+                                |> List.exists (fun bounds ->
+                                    System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
+                            | _ -> false
+
                         acc.Add
                             { Id = Some id
                               SelectType = selectType
                               Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                              Type = Some "range"
-                              Key = Some(plan.SpatialIndexName, Some 34)
+                              Type = Some(if hasBounds then "range" else "index")
+                              Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
                               Ref = None
-                              Rows = Some(uint64 plan.SpatialRows.Length)
-                              Extra = extra }
+                              Rows = Some(uint64 plan.EstimatedRows)
+                              Extra = accessExtra }
 
                         true
                     | None ->
-                        match indexOrderPlan with
-                        | Some plan ->
-                            let hasBounds =
-                                match plan.ColumnIndices with
-                                | [ index ] ->
-                                    rangeLookupBounds BareOrQualifiedColumn tref whereOpt
-                                    |> List.exists (fun bounds ->
-                                        System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
-                                | _ -> false
-
+                        tryRangeAccess BareOrQualifiedColumn store dbName tref whereExpr
+                        |> Option.map (fun lookup ->
                             acc.Add
                                 { Id = Some id
                                   SelectType = selectType
                                   Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                                  Type = Some(if hasBounds then "range" else "index")
-                                  Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
+                                  Type = Some "range"
+                                  Key =
+                                    Some(
+                                        lookup.RangeIndexName,
+                                        explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
+                                    )
                                   Ref = None
-                                  Rows = Some(uint64 plan.EstimatedRows)
-                                  Extra = extra }
-
-                            true
-                        | None ->
-                            tryRangeAccess BareOrQualifiedColumn store dbName tref whereOpt
-                            |> Option.map (fun lookup ->
-                                acc.Add
-                                    { Id = Some id
-                                      SelectType = selectType
-                                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                                      Type = Some "range"
-                                      Key =
-                                        Some(
-                                            lookup.RangeIndexName,
-                                            explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
-                                        )
-                                      Ref = None
-                                      Rows = Some(uint64 lookup.RangeRowCount)
-                                      Extra = extra })
-                            |> Option.isSome
+                                  Rows = Some(uint64 lookup.RangeRowCount)
+                                  Extra = accessExtra })
+                        |> Option.isSome
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
@@ -14192,8 +14194,19 @@ let rec private explainJoinBlock
         | FromTable tref ->
             explainTableStats store registry dbName tref
             |> Result.map (fun (n, ty) ->
-                match Map.tryFind idx joinPlans with
-                | Some plan ->
+                let sourcePredicate = Map.tryFind ((fromItemQualifier item).ToLowerInvariant()) sourcePredicates
+                let accessExtra = if idx = tableCount - 1 then extra else [ "Using where" ]
+
+                let usesSourceAccess =
+                    if tableCount = 1 then
+                        tryExplainIndexedAccess accessExtra whereOpt tref
+                    else
+                        sourcePredicate
+                        |> Option.exists (fun predicate -> tryExplainIndexedAccess accessExtra (Some predicate) tref)
+
+                match usesSourceAccess, Map.tryFind idx joinPlans with
+                | true, _ -> ()
+                | false, Some plan ->
                     acc.Add
                         { Id = Some id
                           SelectType = selectType
@@ -14206,9 +14219,8 @@ let rec private explainJoinBlock
                               (if idx = tableCount - 1 then extra else [])
                               @ (if plan.HasResidual then [ "Using where" ] else [])
                               |> List.distinct }
-                | None when not (tryExplainIndexedAccess tref) ->
-                    emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty
-                | None -> ())
+                | false, None ->
+                    emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
         | FromSubquery(PlainSelect sub, _alias)
         // A LATERAL body plans like any other derived table here; only its
         // per-left-row evaluation differs, which EXPLAIN doesn't model.
