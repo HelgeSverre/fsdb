@@ -93,6 +93,33 @@ let tests =
                   [ "5" ]
                   "phrase search"
 
+          testCase "boolean proximity uses strict unordered windows"
+          <| fun _ ->
+              let store = create ()
+
+              [ "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
+                "INSERT INTO docs VALUES
+                 (1, 'database concurrency'),
+                 (2, 'database x concurrency'),
+                 (3, 'database x y concurrency'),
+                 (4, 'concurrency x database')" ]
+              |> List.iter (run store >> ignore)
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM docs WHERE MATCH(body) AGAINST ('\"database concurrency\" @1' IN BOOLEAN MODE) ORDER BY id"))
+                  []
+                  "a distance of one excludes adjacent distinct words"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM docs WHERE MATCH(body) AGAINST ('\"database concurrency\" @2' IN BOOLEAN MODE) ORDER BY id"))
+                  [ "1" ]
+                  "adjacent words span one position"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM docs WHERE MATCH(body) AGAINST ('\"database concurrency\" @3' IN BOOLEAN MODE) ORDER BY id"))
+                  [ "1"; "2"; "4" ]
+                  "proximity ignores word order"
+
           testCase "query expansion reaches documents sharing seed terms"
           <| fun _ ->
               let store = setup ()
