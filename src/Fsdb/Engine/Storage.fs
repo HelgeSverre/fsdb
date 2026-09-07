@@ -7320,6 +7320,20 @@ type private UpsertSummary =
       InsertedRows: Value[] list
       UpdatedRows: (Value[] * Value[]) list }
 
+type private UpsertBatchState =
+    { NextAutoId: int64
+      FirstGeneratedId: int64 option
+      LastExplicitId: int64 option
+      Affected: int
+      InsertedRev: Value[] list
+      UpdatedRev: (Value[] * Value[]) list
+      UniqueIndex: Map<string, Map<string, RowId>>
+      SecondaryIndex: Map<string, Map<string, Set<RowId>>>
+      SecondaryOrder: SecondaryOrder
+      Catalog: Catalog
+      Visited: Map<TableAddress, Value[] list>
+      Cascaded: Map<TableAddress, (Value[] * Value[]) list> }
+
 /// Upserts through the collation-aware unique indexes. MySQL counts a changed
 /// match as two affected rows; an unchanged match counts as one only with
 /// CLIENT_FOUND_ROWS, otherwise zero.
@@ -7426,6 +7440,7 @@ and private upsertRowsInTable
                     let secondaryGroups = secondaryKeyGroups table
 
                     let rows = table.RowsArray.ToBuilder()
+                    let expectedColumnCount = idxs.Length
 
                     // The running index (seeded from `table.UniqueIndex`,
                     // rekeyed after every matched/inserted candidate) finds
@@ -7437,23 +7452,11 @@ and private upsertRowsInTable
                             |> Option.bind (fun key -> Map.tryFind key (Map.find group.Name index))
                             |> Option.map (fun rowId -> rowId, rows.[rowId]))
 
-                    let step acc (ordinal, rowValues: Value list) =
-                        acc
-                        |> Result.bind
-                            (fun (nextAutoId,
-                                  firstAuto,
-                                  lastExplicit,
-                                  affected,
-                                  inserted: Value[] list,
-                                  updated: (Value[] * Value[]) list,
-                                  index: Map<string, Map<string, RowId>>,
-                                  secondaryIndex: Map<string, Map<string, Set<RowId>>>,
-                                  secondaryOrder: SecondaryOrder,
-                                  cascadeCatalog: Catalog,
-                                  visited: Map<TableAddress, Value[] list>,
-                                  cascaded: Map<TableAddress, (Value[] * Value[]) list>) ->
-                                if List.length rowValues <> List.length idxs then
-                                    Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
+                    let step stateResult (ordinal, rowValues: Value list) =
+                        stateResult
+                        |> Result.bind (fun state ->
+                                if rowValues.Length <> expectedColumnCount then
+                                    Error(ColumnCountMismatch(expectedColumnCount, rowValues.Length))
                                 else
                                     let provided = List.zip idxs rowValues |> Map.ofList
                                     let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
@@ -7461,21 +7464,15 @@ and private upsertRowsInTable
                                     processRow
                                         mode
                                         generateAutoOnZero
-                                        nextAutoId
+                                        state.NextAutoId
                                         rawRow
                                         table.Columns
                                         Set.empty
                                     |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
-                                        // A unique index over a *generated* column (e.g.
-                                        // Laravel Pulse's `key_hash BINARY(16) AS
-                                        // (unhex(md5(key)))`) is still NULL in the raw
-                                        // candidate at this point — `computeGenerated`
-                                        // fills it in before `findMatch` runs, so ON
-                                        // DUPLICATE KEY UPDATE actually finds the
-                                        // collision instead of degrading into a plain
-                                        // INSERT that then trips the unique check.
+                                        // Generated unique keys must be computed before
+                                        // duplicate lookup.
                                         prepare omitted (Array.ofList finalValues)
-                                        |> Result.map (fun candidate -> candidate, findMatch index candidate)
+                                        |> Result.map (fun candidate -> candidate, findMatch state.UniqueIndex candidate)
                                         |> Result.bind (function
                                             | candidate, Some(pos, existing) ->
                                                 applyUpdate ordinal existing candidate
@@ -7486,7 +7483,7 @@ and private upsertRowsInTable
                                                         |> List.tryPick (fun group ->
                                                             match encodeUniqueKey table.Columns group applied with
                                                             | Some key ->
-                                                                match Map.tryFind key (Map.find group.Name index) with
+                                                                match Map.tryFind key (Map.find group.Name state.UniqueIndex) with
                                                                 | Some otherPos when otherPos <> pos ->
                                                                     let value =
                                                                         group.Indices
@@ -7501,116 +7498,138 @@ and private upsertRowsInTable
                                                     | Some error -> Error error
                                                     | None -> Ok applied)
                                                 |> Result.bind (fun applied ->
-                                                    // Same FK enforcement `updateRows` applies:
-                                                    // `applied`'s own foreign keys need a live
-                                                    // parent (child-side), and if this rewrite
-                                                    // changed a column some *other* table's FK
-                                                    // references, it can't orphan an existing
-                                                    // child (parent-side) — or, per `ON UPDATE`,
-                                                    // cascades/blanks that child instead.
+                                                    // ODKU validates child references and applies
+                                                    // parent-side cascades before reindexing.
                                                     (if checkFks then
-                                                         let currentDatabase = tryCatalogDatabase dbName cascadeCatalog |> Option.get
+                                                         let currentDatabase = tryCatalogDatabase dbName state.Catalog |> Option.get
 
-                                                         checkFkParents cascadeCatalog dbName currentDatabase table.Columns table.ForeignKeys applied
+                                                         checkFkParents state.Catalog dbName currentDatabase table.Columns table.ForeignKeys applied
                                                          |> Result.bind (fun () ->
                                                              cascadeUpdateVisited
                                                                  true
-                                                                 cascadeCatalog
-                                                                 visited
-                                                                 cascaded
+                                                                 state.Catalog
+                                                                 state.Visited
+                                                                 state.Cascaded
                                                                  (tableAddress dbName key)
                                                                  table.Columns
                                                                  existing
                                                                  applied)
                                                      else
-                                                         Ok(cascadeCatalog, visited, cascaded))
+                                                         Ok(state.Catalog, state.Visited, state.Cascaded))
                                                     |> Result.map (fun (cascadeCatalog', visited', cascaded') ->
                                                         rows.[pos] <- applied
 
-                                                        // MySQL's `ON DUPLICATE KEY UPDATE`
-                                                        // row-count rule: a match that actually
-                                                        // changes the row counts as 2 (one for the
-                                                        // attempted insert, one for the update); a
-                                                        // no-op match (every column still equal to
-                                                        // what it already held) counts as 1 only
-                                                        // when the client negotiated
-                                                        // CLIENT_FOUND_ROWS, else 0.
                                                         let changed = applied <> existing
                                                         let weight =
                                                             if changed then 2
                                                             elif foundRows then 1
                                                             else 0
 
-                                                        // A no-op match stays out of `updated`:
-                                                        // MySQL's row-based binlog logs nothing
-                                                        // for a no-op ODKU, and emitting a
-                                                        // before=after RowsUpdated here would let
-                                                        // an onCommit-driven pipeline whose drain
-                                                        // upsert no-ops re-fire itself forever.
-                                                        let index, secondaryIndex, secondaryOrder = reindexRow table.Columns uniqueGroups secondaryGroups (Some(pos, existing)) (Some(pos, applied)) index secondaryIndex secondaryOrder
+                                                        // MySQL emits no row event for a no-op;
+                                                        // emitting one can make on-commit upsert
+                                                        // pipelines re-fire forever.
+                                                        let uniqueIndex, secondaryIndex, secondaryOrder =
+                                                            reindexRow
+                                                                table.Columns
+                                                                uniqueGroups
+                                                                secondaryGroups
+                                                                (Some(pos, existing))
+                                                                (Some(pos, applied))
+                                                                state.UniqueIndex
+                                                                state.SecondaryIndex
+                                                                state.SecondaryOrder
 
-                                                        nextAutoId',
-                                                        firstAuto,
-                                                        lastExplicit,
-                                                        affected + weight,
-                                                        inserted,
-                                                        (if changed then (existing, applied) :: updated else updated),
-                                                        index,
-                                                        secondaryIndex,
-                                                        secondaryOrder,
-                                                        cascadeCatalog',
-                                                        visited',
-                                                        cascaded'))
+                                                        { state with
+                                                            NextAutoId = nextAutoId'
+                                                            Affected = state.Affected + weight
+                                                            UpdatedRev =
+                                                                if changed then
+                                                                    (existing, applied) :: state.UpdatedRev
+                                                                else
+                                                                    state.UpdatedRev
+                                                            UniqueIndex = uniqueIndex
+                                                            SecondaryIndex = secondaryIndex
+                                                            SecondaryOrder = secondaryOrder
+                                                            Catalog = cascadeCatalog'
+                                                            Visited = visited'
+                                                            Cascaded = cascaded' }))
                                             | candidate, None ->
-                                                // Same FK-parent check `insertCore` applies to
-                                                // a plain `INSERT`'s new rows — this candidate
-                                                // didn't collide with anything, so it's really
-                                                // an insert.
                                                 (if checkFks then
-                                                     let currentDatabase = tryCatalogDatabase dbName cascadeCatalog |> Option.get
-                                                     checkFkParents cascadeCatalog dbName currentDatabase table.Columns table.ForeignKeys candidate
+                                                     let currentDatabase = tryCatalogDatabase dbName state.Catalog |> Option.get
+                                                     checkFkParents state.Catalog dbName currentDatabase table.Columns table.ForeignKeys candidate
                                                  else
                                                      Ok())
                                                 |> Result.map (fun () ->
-                                                    // Same "first generated, else last explicit"
-                                                    // `last_insert_id` rule `insertCore` uses —
-                                                    // see its doc.
-                                                    let firstAuto', lastExplicit' =
-                                                        trackAutoIncrementAssignment assigned firstAuto lastExplicit
+                                                    let firstGeneratedId, lastExplicitId =
+                                                        trackAutoIncrementAssignment
+                                                            assigned
+                                                            state.FirstGeneratedId
+                                                            state.LastExplicitId
 
                                                     let rowId = rows.Add candidate
 
-                                                    let index, secondaryIndex, secondaryOrder = reindexRow table.Columns uniqueGroups secondaryGroups None (Some(rowId, candidate)) index secondaryIndex secondaryOrder
+                                                    let uniqueIndex, secondaryIndex, secondaryOrder =
+                                                        reindexRow
+                                                            table.Columns
+                                                            uniqueGroups
+                                                            secondaryGroups
+                                                            None
+                                                            (Some(rowId, candidate))
+                                                            state.UniqueIndex
+                                                            state.SecondaryIndex
+                                                            state.SecondaryOrder
 
-                                                    nextAutoId',
-                                                    firstAuto',
-                                                    lastExplicit',
-                                                    affected + 1,
-                                                    candidate :: inserted,
-                                                    updated,
-                                                    index,
-                                                    secondaryIndex,
-                                                    secondaryOrder,
-                                                    cascadeCatalog,
-                                                    visited,
-                                                    cascaded))))
+                                                    { state with
+                                                        NextAutoId = nextAutoId'
+                                                        FirstGeneratedId = firstGeneratedId
+                                                        LastExplicitId = lastExplicitId
+                                                        Affected = state.Affected + 1
+                                                        InsertedRev = candidate :: state.InsertedRev
+                                                        UniqueIndex = uniqueIndex
+                                                        SecondaryIndex = secondaryIndex
+                                                        SecondaryOrder = secondaryOrder }))))
 
                     rowsIn
                     |> List.indexed
-                    |> foldWithCancellation step (Ok(firstReserved, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, catalog, Map.empty, Map.empty))
-                    |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, secondaryIndex, secondaryOrder, cascadeCatalog, _visited, cascaded) ->
+                    |> foldWithCancellation
+                        step
+                        (Ok
+                            { NextAutoId = firstReserved
+                              FirstGeneratedId = None
+                              LastExplicitId = None
+                              Affected = 0
+                              InsertedRev = []
+                              UpdatedRev = []
+                              UniqueIndex = table.UniqueIndex
+                              SecondaryIndex = table.SecondaryIndex
+                              SecondaryOrder = table.SecondaryOrder
+                              Catalog = catalog
+                              Visited = Map.empty
+                              Cascaded = Map.empty })
+                    |> Result.map (fun state ->
                         let finalRows = rows.DrainToImmutable()
-                        let nextAutoId' = max nextAutoId' reservedAutoNext
-                        advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId'
+                        let nextAutoId = max state.NextAutoId reservedAutoNext
+                        advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId
 
-                        let updatedTable = publishRows table { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
-                        setCatalogTable (tableAddress dbName key) updatedTable cascadeCatalog,
-                        cascaded,
-                        { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
-                          GeneratedId = firstAuto
-                          Affected = affected
-                          InsertedRows = List.rev inserted
-                          UpdatedRows = List.rev updated }))
+                        let updatedTable =
+                            publishRows table
+                                { table with
+                                    RowsArray = finalRows
+                                    NextAutoId = nextAutoId
+                                    UniqueIndex = state.UniqueIndex
+                                    SecondaryIndex = state.SecondaryIndex
+                                    SecondaryOrder = state.SecondaryOrder }
+
+                        setCatalogTable (tableAddress dbName key) updatedTable state.Catalog,
+                        state.Cascaded,
+                        { LastInsertId =
+                            Option.defaultValue
+                                0L
+                                (Option.orElse state.LastExplicitId state.FirstGeneratedId)
+                          GeneratedId = state.FirstGeneratedId
+                          Affected = state.Affected
+                          InsertedRows = List.rev state.InsertedRev
+                          UpdatedRows = List.rev state.UpdatedRev }))
 
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's
