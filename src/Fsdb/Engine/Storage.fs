@@ -8985,11 +8985,6 @@ let dropForeignServer store name =
         | 0 -> Error(foreignServerMissing requestedName)
         | _ -> Ok())
 
-/// Generated columns retain a write-time value because indexes and
-/// constraints operate on physical rows. `Executor.prepareVirtualRows`
-/// replaces VIRTUAL cells before rows enter query evaluation; STORED cells
-/// retain this value on reads.
-
 /// WAL replay runs before live traffic can observe the store, so replay can
 /// publish directly without the checked write paths or their synchronization.
 let private changeTableForReplay
