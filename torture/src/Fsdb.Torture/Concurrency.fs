@@ -346,6 +346,103 @@ module ConcurrencyRunner =
             return "hot-row contention preserved both commits at every isolation level"
         }
 
+    let private preparedKeyContentionCase connectionString timeoutSeconds () =
+        task {
+            use! setup = Database.openConnection connectionString
+            let! _ = executeFaultSql timeoutSeconds setup None "DROP TABLE IF EXISTS concurrency_prepared_source"
+            let! _ = executeFaultSql timeoutSeconds setup None "DROP TABLE IF EXISTS concurrency_prepared_target"
+            let! _ = executeFaultSql timeoutSeconds setup None "CREATE TABLE concurrency_prepared_source (id INT PRIMARY KEY, base INT NOT NULL)"
+            let! _ = executeFaultSql timeoutSeconds setup None "INSERT INTO concurrency_prepared_source VALUES (1, 10), (2, 10)"
+            let! _ =
+                executeFaultSql
+                    timeoutSeconds
+                    setup
+                    None
+                    "CREATE TABLE concurrency_prepared_target (id INT PRIMARY KEY, base INT NOT NULL, derived INT DEFAULT (base + 1), UNIQUE KEY uq_derived (derived))"
+
+            use! owner = Database.openConnection connectionString
+            use! waiter = Database.openConnection connectionString
+            use! ownerTransaction = owner.BeginTransactionAsync()
+            use! waiterTransaction = waiter.BeginTransactionAsync()
+            let! first =
+                executeFaultSql
+                    timeoutSeconds
+                    owner
+                    (Some ownerTransaction)
+                    "INSERT INTO concurrency_prepared_target (id, base) SELECT id, base FROM concurrency_prepared_source WHERE id = 1"
+
+            if first <> 1 then
+                raise (InvalidOperationException(sprintf "prepared owner insert affected %d rows" first))
+
+            let duplicate =
+                task {
+                    try
+                        let! affected =
+                            executeFaultSql
+                                timeoutSeconds
+                                waiter
+                                (Some waiterTransaction)
+                                "INSERT INTO concurrency_prepared_target (id, base) SELECT id, base FROM concurrency_prepared_source WHERE id = 2"
+
+                        return Ok affected
+                    with error ->
+                        return Error error
+                }
+
+            do! Task.Delay contentionDelay
+            let duplicateWaited = not duplicate.IsCompleted
+            do! ownerTransaction.CommitAsync()
+            let! duplicateResult = duplicate
+
+            if not duplicateWaited then
+                raise (InvalidOperationException "prepared INSERT SELECT did not wait for its generated unique key")
+
+            match duplicateResult with
+            | Error(:? MySqlException as error) when int error.ErrorCode = 1062 -> ()
+            | Error error -> raise (InvalidOperationException(sprintf "prepared INSERT SELECT failed with %s" (exceptionSummary error)))
+            | Ok affected -> raise (InvalidOperationException(sprintf "prepared INSERT SELECT unexpectedly affected %d rows" affected))
+
+            do! rollbackQuietly waiterTransaction
+
+            use! replacementOwner = owner.BeginTransactionAsync()
+            use! replacementWaiter = waiter.BeginTransactionAsync()
+            let! ownerReplaced =
+                executeFaultSql
+                    timeoutSeconds
+                    owner
+                    (Some replacementOwner)
+                    "REPLACE INTO concurrency_prepared_target (id, base) SELECT id, base FROM concurrency_prepared_source WHERE id = 1"
+
+            if ownerReplaced <> 2 then
+                raise (InvalidOperationException(sprintf "prepared replacement owner affected %d rows" ownerReplaced))
+
+            let replacement =
+                executeFaultSql
+                    timeoutSeconds
+                    waiter
+                    (Some replacementWaiter)
+                    "REPLACE INTO concurrency_prepared_target (id, base) SELECT id, base FROM concurrency_prepared_source WHERE id = 2"
+
+            do! Task.Delay contentionDelay
+            let replacementWaited = not replacement.IsCompleted
+            do! replacementOwner.CommitAsync()
+            let! replaced = replacement
+
+            if not replacementWaited then
+                raise (InvalidOperationException "prepared REPLACE SELECT did not wait for its generated unique key")
+
+            if replaced <> 2 then
+                raise (InvalidOperationException(sprintf "prepared replacement affected %d rows" replaced))
+
+            do! replacementWaiter.CommitAsync()
+            let! finalValue = readFaultInt64 timeoutSeconds setup "SELECT id * 100 + derived FROM concurrency_prepared_target"
+
+            if finalValue <> 211L then
+                raise (InvalidOperationException(sprintf "prepared replacement left encoded row %d" finalValue))
+
+            return "prepared SELECT writes waited on generated unique keys and rebased before publication"
+        }
+
     let private catalogChurnCase connectionString timeoutSeconds () =
         task {
             use! setup = Database.openConnection connectionString
@@ -458,8 +555,15 @@ module ConcurrencyRunner =
             let! savepointContention = runFaultCase "savepoint_contention" (savepointContentionCase connectionString timeoutSeconds)
             let! connectionChurn = runFaultCase "connection_churn" (connectionChurnCase connectionString timeoutSeconds)
             let! isolationContention = runFaultCase "isolation_contention" (isolationContentionCase connectionString timeoutSeconds)
+            let! preparedKeyContention = runFaultCase "prepared_key_contention" (preparedKeyContentionCase connectionString timeoutSeconds)
             let! catalogChurn = runFaultCase "catalog_churn" (catalogChurnCase connectionString timeoutSeconds)
-            let cases = [| queuedCancellation; savepointContention; connectionChurn; isolationContention; catalogChurn |]
+            let cases =
+                [| queuedCancellation
+                   savepointContention
+                   connectionChurn
+                   isolationContention
+                   preparedKeyContention
+                   catalogChurn |]
 
             let failed = cases |> Array.filter (fun fault -> not fault.Passed)
 
