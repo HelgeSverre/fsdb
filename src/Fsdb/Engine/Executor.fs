@@ -16727,6 +16727,8 @@ let rec executeAs
                                 values
                                 prepare
                             |> Result.bind (fun candidate ->
+                                Storage.acquirePreparedInsertWriteTargets s db table candidate.Values
+
                                 upsertRowsWithOrdinal
                                     s
                                     db

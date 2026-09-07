@@ -2679,11 +2679,12 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                 (fun baseCatalog privateCatalog ->
                     let liveCatalog, rebasedTransaction = Storage.beginTransactionSnapshotWithBase session.Store
                     Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
-                    transaction.Snapshot.Catalog <- rebasedTransaction.Catalog
 
                     let rebasedStatement = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
                     Storage.mergeCatalogInto rebasedStatement baseCatalog privateCatalog
-                    liveCatalog, rebasedStatement.Catalog))
+                    liveCatalog,
+                    rebasedStatement.Catalog,
+                    (fun () -> transaction.Snapshot.Catalog <- rebasedTransaction.Catalog)))
 
         let mutable dynamicWriteBase = None
 

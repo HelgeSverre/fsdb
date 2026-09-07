@@ -1485,6 +1485,38 @@ let tests =
               | ResultSet(_, [ [ Some "2"; Some "10"; Some "11"; Some "second" ] ]) -> ()
               | actual -> failtestf "expected the rebased duplicate update, got %A" actual
 
+          testCase "a prepared upsert refreshes its duplicate after the row wait"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ =
+                  handle setup "CREATE TABLE tx_prepared_refresh (id INT PRIMARY KEY, base INT, derived INT DEFAULT (base + 1), marker VARCHAR(20), UNIQUE KEY uq_derived (derived))"
+              let setup, _ = handle setup "INSERT INTO tx_prepared_refresh (id, base, marker) VALUES (1, 10, 'old')"
+
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let waiter, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let waiter, _ = handle waiter "BEGIN"
+              let owner, updated = handle owner "UPDATE tx_prepared_refresh SET marker = 'owner' WHERE id = 1"
+              Expect.equal updated (Affected 1UL) "the owner holds the duplicate row"
+
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle
+                          waiter
+                          "INSERT INTO tx_prepared_refresh (id, base, marker) VALUES (2, 10, 'candidate') ON DUPLICATE KEY UPDATE id = VALUES(id)")
+
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the upsert waits for the duplicate row"
+              Expect.equal (handle owner "COMMIT" |> snd) (Affected 0UL) "the owner's row version commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the duplicate-row waiter resumes"
+
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 2UL) "the waiter updates the refreshed duplicate"
+              Expect.equal (handle waiter "COMMIT" |> snd) (Affected 0UL) "the refreshed update commits"
+
+              match handle setup "SELECT id, base, derived, marker FROM tx_prepared_refresh" |> snd with
+              | ResultSet(_, [ [ Some "2"; Some "10"; Some "11"; Some "owner" ] ]) -> ()
+              | actual -> failtestf "expected the committed marker to survive the rebased upsert, got %A" actual
+
           testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

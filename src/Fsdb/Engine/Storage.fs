@@ -332,7 +332,7 @@ type TransactionLockContext =
       mutable RollbackWork: int64
       mutable DeadlockVictim: bool
       mutable DynamicWriteBase: Catalog option
-      mutable DynamicWriteRebase: (Catalog -> Catalog -> Catalog * Catalog) option }
+      mutable DynamicWriteRebase: (Catalog -> Catalog -> Catalog * Catalog * (unit -> unit)) option }
 
 type LockWait =
     { Blockers: HashSet<int64>
@@ -623,7 +623,7 @@ let restoreTransactionRollbackWork (store: Store) work =
 let beginDynamicWriteRebase
     (store: Store)
     (baseCatalog: Catalog)
-    (rebase: Catalog -> Catalog -> Catalog * Catalog)
+    (rebase: Catalog -> Catalog -> Catalog * Catalog * (unit -> unit))
     =
     store.TransactionLocks
     |> Option.iter (fun context ->
@@ -642,16 +642,26 @@ let dynamicWriteRebaseActive (store: Store) =
     store.TransactionLocks
     |> Option.exists (fun context -> context.DynamicWriteRebase.IsSome)
 
-let private rebaseDynamicWrite (store: Store) =
+let private prepareDynamicWriteRebase (store: Store) =
     match store.TransactionLocks with
     | Some context ->
         match context.DynamicWriteBase, context.DynamicWriteRebase with
         | Some baseCatalog, Some rebase ->
-            let nextBase, catalog = rebase baseCatalog store.Catalog
-            store.Catalog <- catalog
-            context.DynamicWriteBase <- Some nextBase
-        | _ -> ()
-    | None -> ()
+            let nextBase, catalog, applyRoot = rebase baseCatalog store.Catalog
+            Some(context, nextBase, catalog, applyRoot)
+        | _ -> None
+    | None -> None
+
+let private applyDynamicWriteRebase
+    (store: Store)
+    (context: TransactionLockContext)
+    (baseCatalog: Catalog)
+    (catalog: Catalog)
+    (applyRoot: unit -> unit)
+    =
+    applyRoot ()
+    store.Catalog <- catalog
+    context.DynamicWriteBase <- Some baseCatalog
 
 let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<RowLockStripe>) =
     for stripe in stripes do
@@ -3079,12 +3089,21 @@ let internal acquirePreparedInsertWriteTargets
     match tryInsertLockTargets store dbName tableName None [ candidate |> Array.toList |> List.map Some ] with
     | Some targets when not targets.Keys.IsEmpty ->
         withInsertLocks store dbName tableName targets.RowIds targets.Keys (fun () ->
-            rebaseDynamicWrite store
+            match prepareDynamicWriteRebase store with
+            | None -> ()
+            | Some(context, baseCatalog, catalog, applyRoot) ->
+                let currentStore = beginTransactionSnapshotFromCatalog store catalog
 
-            if store.TransactionLocks.IsSome then
-                match tryInsertLockTargets store dbName tableName None [ candidate |> Array.toList |> List.map Some ] with
-                | Some current -> withInsertLocks store dbName tableName current.RowIds current.Keys ignore
-                | None -> ())
+                let applyLatest () =
+                    match prepareDynamicWriteRebase store with
+                    | Some(latestContext, latestBase, latestCatalog, latestRoot) ->
+                        applyDynamicWriteRebase store latestContext latestBase latestCatalog latestRoot
+                    | None -> applyDynamicWriteRebase store context baseCatalog catalog applyRoot
+
+                match tryInsertLockTargets currentStore dbName tableName None [ candidate |> Array.toList |> List.map Some ] with
+                | Some current ->
+                    withInsertLocks store dbName tableName current.RowIds current.Keys applyLatest
+                | None -> applyLatest ())
     | _ -> ()
 
 let acquireTransactionReadTargets
@@ -7324,10 +7343,7 @@ and upsertRowsWithOrdinal
 
         let result =
             match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
-            | Some targets when not targets.Keys.IsEmpty ->
-                withInsertLocks store dbName tableName targets.RowIds targets.Keys (fun () ->
-                    rebaseDynamicWrite store
-                    publish ())
+            | Some targets when not targets.Keys.IsEmpty -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
             | _ -> publish ()
 
         match result with
