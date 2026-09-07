@@ -719,6 +719,13 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                 && column.Generated.IsNone)
             |> List.forall (fun column -> Set.contains (column.Name.ToLowerInvariant()) columns)
 
+    let namesMatchProjections (outputNames: string list) (projections: (string * Expr * ViewColumnTarget option) list) =
+        outputNames.Length = projections.Length
+        && (outputNames |> List.map _.ToLowerInvariant() |> Set.ofList).Count = outputNames.Length
+
+    let hasWritableProjection (projections: (string * Expr * ViewColumnTarget option) list) =
+        projections |> List.exists (fun (_, _, target) -> target.IsSome)
+
     let selectExpressions (select: SelectStmt) =
         (select.Projections |> List.map fst)
         @ (select.Where |> Option.toList)
@@ -932,24 +939,29 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
+                    let rejectsNestedCheckOption =
+                        underlying
+                        |> Option.exists (fun nested ->
+                            not nested.UpdateJoins.IsEmpty
+                            && not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)))
+
+                    let changesNestedSecurityContext =
+                        underlying
+                        |> Option.exists (fun nested ->
+                            not nested.UpdateJoins.IsEmpty
+                            && (underlyingStored
+                                |> Option.exists (fun stored ->
+                                    not (stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase))
+                                    || not (stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase)))))
+
                     if
                         unresolvedStar
                         || dependentProjection
                         || dependentPredicate
-                        || outputNames.Length <> projected.Length
-                        || (outputNames |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList).Count <> outputNames.Length
-                        || (projected |> List.forall (fun (_, _, target) -> target.IsNone))
-                        || (underlying
-                            |> Option.exists (fun nested ->
-                                not nested.UpdateJoins.IsEmpty
-                                && not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase))))
-                        || (underlying
-                            |> Option.exists (fun nested ->
-                                not nested.UpdateJoins.IsEmpty
-                                && (underlyingStored
-                                    |> Option.exists (fun stored ->
-                                        not (stored.Definer.Equals(view.Definer, System.StringComparison.OrdinalIgnoreCase))
-                                        || not (stored.SecurityType.Equals(view.SecurityType, System.StringComparison.OrdinalIgnoreCase))))))
+                        || not (namesMatchProjections outputNames projected)
+                        || not (hasWritableProjection projected)
+                        || rejectsNestedCheckOption
+                        || changesNestedSecurityContext
                     then
                         None
                     else
@@ -1252,9 +1264,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
                     if
-                        outputNames.Length <> projected.Length
-                        || (outputNames |> List.map _.ToLowerInvariant() |> Set.ofList).Count <> outputNames.Length
-                        || (projected |> List.forall (fun (_, _, target) -> target.IsNone))
+                        not (namesMatchProjections outputNames projected)
+                        || not (hasWritableProjection projected)
                     then
                         None
                     else
@@ -4362,11 +4373,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | MatchAgainst _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
     | Placeholder _ -> Error(1064, "unbound prepared-statement placeholder")
     | Star _ -> Error(1054, "Invalid use of '*'")
-    // Only reachable if a `RowNumberOver`/`LagOver` ever escapes
-    // `runWindowedSelect`'s rewrite (which substitutes every occurrence,
-    // wherever it's nested, for a plain `Col` reference before any of this
-    // runs) — real MySQL itself rejects a window function outside a
-    // `SELECT`'s own projection/`ORDER BY` list the same way.
+    // `runWindowedSelect` substitutes valid window expressions before scalar
+    // evaluation; remaining occurrences are outside MySQL's allowed clauses.
     | WindowOver _ -> Error(1054, "Invalid use of a group function")
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
@@ -6198,12 +6206,6 @@ and private validateJsonTableAllocationBounds (columns: JsonTableColumn list) : 
 /// ORDINALITY counts 1-based per invocation, so the lateral form restarts it
 /// per left row.
 and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn list) : Result<Value[] list, QueryResult> =
-    // One column value: extract → unquote → coerce through a throwaway
-    // ColumnDef (the `Cast` case's `Storage.coerceValue` trick), but
-    // *strict*, so an uncoercible value ('abc' into INT) becomes the pinned
-    // NULL rather than non-strict's 0. Numeric fractions truncate
-    // toward zero like this engine's CAST (MySQL's column store rounds,
-    // 3.7 → 4); align `coerceValue` if a workload ever notices.
     // Strict coercion into the declared column type, shared by an extracted
     // node and by a `DEFAULT` literal. `Error` is JSON_TABLE's "ON ERROR"
     // condition (oracle-pinned: an array or the unconvertible string '5x'
@@ -10555,7 +10557,7 @@ and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
         evalExpr ctx expr
         |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ])
 
-/// An all-NULL row used to surface schema errors even when no data row matches.
+/// An all-NULL row that surfaces schema errors even when no data row matches.
 and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
 
 /// Evaluates one aggregate over rows already filtered by WHERE.
@@ -13850,9 +13852,8 @@ let private applyOnUpdateTimestamps
 /// generated column reference an earlier one in the same row.
 /// MySQL's DDL-time restriction errors (3102 nondeterministic fn,
 /// 3106 VIRTUAL as PK, 3107 forward reference, 3109 auto_increment ref)
-/// aren't validated — misuse degrades to a stale/NULL value, not
-/// corruption; add a CREATE/ALTER validation pass if a real workload hits
-/// one.
+/// ponytail: CREATE/ALTER does not yet reject generated-column restrictions
+/// 3102/3106/3107/3109; validate them before persisting the definition.
 let private validateCheckRow
     (store: Store)
     (registry: Registry)
