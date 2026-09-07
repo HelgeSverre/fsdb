@@ -8936,17 +8936,10 @@ and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralI
                       Values = values |> List.map (List.choose id) }
         | _ -> None)
 
-and private rangeLookupBounds (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
+and private collectRangeBounds columnName boundValue (whereExpr: Expr option) : RangeLookupBounds list =
     match whereExpr with
     | None -> []
     | Some whereExpr ->
-        let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
-
-        let columnName = function
-            | Col name when scope = BareOrQualifiedColumn -> Some name
-            | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
-            | _ -> None
-
         let addBound bounds name lower upper =
             match Map.tryFind name bounds with
             | None -> Map.add name (lower, upper) bounds
@@ -8957,16 +8950,25 @@ and private rangeLookupBounds (scope: ColumnReferenceScope) (tref: TableRef) (wh
         |> List.fold
             (fun bounds expression ->
                 match expression with
-                | BinOp((Gt | Gte as op), column, Lit value)
-                | BinOp((Lt | Lte as op), Lit value, column) ->
-                    columnName column
-                    |> Option.map (fun name -> addBound bounds name (Some(value, op = Gte || op = Lte)) None)
-                    |> Option.defaultValue bounds
-                | BinOp((Lt | Lte as op), column, Lit value)
-                | BinOp((Gt | Gte as op), Lit value, column) ->
-                    columnName column
-                    |> Option.map (fun name -> addBound bounds name None (Some(value, op = Lte || op = Gte)))
-                    |> Option.defaultValue bounds
+                | BinOp((Gt | Gte | Lt | Lte as op), left, right) ->
+                    match columnName left, boundValue right with
+                    | Some name, Some value ->
+                        match op with
+                        | Gt
+                        | Gte -> addBound bounds name (Some(value, (op = Gte))) None
+                        | Lt
+                        | Lte -> addBound bounds name None (Some(value, (op = Lte)))
+                        | _ -> bounds
+                    | _ ->
+                        match columnName right, boundValue left with
+                        | Some name, Some value ->
+                            match op with
+                            | Lt
+                            | Lte -> addBound bounds name (Some(value, (op = Lte))) None
+                            | Gt
+                            | Gte -> addBound bounds name None (Some(value, (op = Gte)))
+                            | _ -> bounds
+                        | _ -> bounds
                 | _ -> bounds)
             Map.empty
         |> Map.toList
@@ -8974,6 +8976,20 @@ and private rangeLookupBounds (scope: ColumnReferenceScope) (tref: TableRef) (wh
             { Column = name
               Lower = lower
               Upper = upper })
+
+and private rangeLookupBounds (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
+    let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
+
+    let columnName = function
+        | Col name when scope = BareOrQualifiedColumn -> Some name
+        | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
+        | _ -> None
+
+    let literalValue = function
+        | Lit value -> Some value
+        | _ -> None
+
+    collectRangeBounds columnName literalValue whereExpr
 
 and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : SpatialLookupPredicate list =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -9256,6 +9272,21 @@ and private correlatedEqualityPredicates selfQualifier (whereExpr: Expr option) 
                     | _ -> None
             | _ -> None))
 
+and private correlatedRangeBounds selfQualifier (whereExpr: Expr option) (outer: EvalContext option) =
+    let innerColumn = function
+        | Col name -> Some name
+        | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
+        | _ -> None
+
+    let outerValue context = function
+        | QualifiedCol(qualifier, _) as expression when not (qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase)) ->
+            evalExpr context expression |> Result.toOption
+        | _ -> None
+
+    outer
+    |> Option.map (fun context -> collectRangeBounds innerColumn (outerValue context) whereExpr)
+    |> Option.defaultValue []
+
 and private tryCorrelatedEqualityLookup
     (store: Store)
     (dbName: string)
@@ -9474,6 +9505,40 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
                         |> Result.toOption
                         |> Option.map (fun projectedRows -> projection.OutputColumns, projectedRows))))))
 
+and private tryProjectedPhysicalCorrelatedRangeLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (source: FromItem)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * Value[] list) option =
+    tryPhysicalProjection store registry dbName source
+    |> Option.bind (fun projection ->
+        correlatedRangeBounds (fromItemQualifier source) whereExpr outer
+        |> List.tryPick (fun bounds ->
+            projection.OutputColumns
+            |> List.tryFindIndex (fun candidate -> candidate.Name.Equals(bounds.Column, System.StringComparison.OrdinalIgnoreCase))
+            |> Option.bind (fun outputIndex ->
+                let sourceIndex = projection.PhysicalColumnIndices.[outputIndex]
+                let sourceColumn = projection.PhysicalTable.Columns.[sourceIndex]
+                let isNullBound = function
+                    | Some(VNull, _) -> true
+                    | _ -> false
+
+                if isNullBound bounds.Lower || isNullBound bounds.Upper then
+                    Some(projection.OutputColumns, [])
+                else
+                    Storage.trySecondaryRangeLookupInTable store projection.PhysicalTable sourceColumn.Name bounds.Lower bounds.Upper
+                    |> Option.filter (fun lookup ->
+                        QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
+                    |> Option.bind (fun lookup ->
+                        lookup.RangeRows.Value
+                        |> List.map snd
+                        |> projectPhysicalRows store registry dbName projection
+                        |> Result.toOption
+                        |> Option.map (fun projectedRows -> projection.OutputColumns, projectedRows)))))
+
 and private tryMaterializedCorrelatedEqualityLookup
     (store: Store)
     (registry: Registry)
@@ -9543,9 +9608,11 @@ and private tryCorrelatedSourceLookup
         tryCorrelatedEqualityLookup store dbName table whereExpr outer
         |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer)
+        |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | FromSubquery _ ->
         tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
+        |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
 

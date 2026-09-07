@@ -7121,6 +7121,97 @@ let tests =
                         "WITH candidates AS (SELECT id, user_id, observed FROM orders WHERE id <= 500)"
                         "candidates c"
 
+                    let assertIndexedRange expectedCounts maxCalls prefix source condition outerWhere =
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                (prefix
+                                 + (if prefix = "" then "" else " ")
+                                 + "SELECT users.id, (SELECT COUNT(*) FROM "
+                                 + source
+                                 + " WHERE "
+                                 + condition
+                                 + ") FROM users WHERE "
+                                 + outerWhere
+                                 + " ORDER BY users.id")
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal
+                                (rows |> List.map (fun row -> row.[1]))
+                                (expectedCounts |> List.map (string >> Some))
+                                "each outer key retains the expected range"
+                        | other -> failtestf "expected correlated range counts, got %A" other
+
+                        Expect.isLessThan calls maxCalls "the range reads generated values only for indexed candidates"
+
+                    assertIndexedRange [ 0; 20; 40; 60; 80 ] 300 "" "orders c" "c.user_id < users.id" "users.id <= 5"
+
+                    assertIndexedRange
+                        [ 0; 20; 40; 60; 80 ]
+                        300
+                        ""
+                        "(SELECT id, user_id, observed FROM orders) c"
+                        "c.user_id < users.id"
+                        "users.id <= 5"
+
+                    assertIndexedRange
+                        [ 0; 20; 40; 60; 80 ]
+                        300
+                        "WITH candidates AS (SELECT id, user_id, observed FROM orders)"
+                        "candidates c"
+                        "users.id > c.user_id"
+                        "users.id <= 5"
+
+                    assertIndexedRange
+                        [ 10; 20; 30; 40; 50 ]
+                        350
+                        ""
+                        "(SELECT id, user_id, observed FROM orders WHERE id <= 500) c"
+                        "users.id >= c.user_id"
+                        "users.id <= 5"
+
+                    assertIndexedRange
+                        [ 80; 60; 40; 20; 0 ]
+                        300
+                        ""
+                        "(SELECT id, user_id, observed FROM orders) c"
+                        "c.user_id > users.id"
+                        "users.id >= 46"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT users.id, (SELECT COUNT(*) FROM "
+                             + "(SELECT id, user_id, observed FROM orders) c "
+                             + "WHERE c.user_id < users.id) FROM users WHERE users.id = 26")
+                    with
+                    | ResultSet(_, [ [ Some "26"; Some "500" ] ]) -> ()
+                    | other -> failtestf "expected the broad correlated range count, got %A" other
+
+                    Expect.isGreaterThan calls 900 "a broad range prefers one materialized source scan"
+                    Expect.isLessThan calls 1100 "the broad source still materializes only once"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT (SELECT COUNT(*) FROM (SELECT id, user_id, observed FROM orders) c "
+                             + "WHERE c.user_id < thresholds.maximum) FROM "
+                             + "(SELECT CAST(NULL AS SIGNED) AS maximum) thresholds")
+                    with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected a NULL range bound to match no rows, got %A" other
+
+                    Expect.equal calls 0 "a NULL range bound resolves without reading the source"
+
                     let mutable effects = 0
 
                     let effect _ =
