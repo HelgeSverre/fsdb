@@ -2137,6 +2137,36 @@ let tests =
                         [ [ VInt 30L; VString "alice" ], 1; [ VInt 30L; VString "carol" ], 1 ]
                         "group keys retain the fixed prefix and ordered suffix"
 
+                    let bounded lower upper =
+                        [ { OrderedColumnName = "age"
+                            OrderedTransform = None
+                            OrderedDirection = Asc }
+                          { OrderedColumnName = "name"
+                            OrderedTransform = None
+                            OrderedDirection = Asc } ]
+                        |> fun terms ->
+                            tryOrderedIndexPrefixRangeLookup
+                                store
+                                defaultDatabase
+                                "users"
+                                terms
+                                [ VInt 30L ]
+                                lower
+                                upper
+                        |> Option.defaultWith (fun () -> failtest "expected a bounded prefix lookup")
+
+                    let between = bounded (Some(VString "alice", false)) (Some(VString "dave", false))
+                    Expect.equal between.OrderedRowCount 1 "exclusive suffix bounds narrow the prefix slice"
+
+                    Expect.equal
+                        (between.OrderedRows |> Seq.map (fun row -> row.[1]) |> List.ofSeq)
+                        [ VString "carol" ]
+                        "the bounded slice retains only matching suffix values"
+
+                    let empty = bounded (Some(VString "dave", true)) (Some(VString "alice", true))
+                    Expect.equal empty.OrderedRowCount 0 "contradictory suffix bounds produce an empty slice"
+                    Expect.isEmpty (empty.OrderedRows |> List.ofSeq) "an empty slice does not resolve rows"
+
                 testCase "a composite secondary index follows row mutations incrementally"
                 <| fun _ ->
                     let store = withUsersTable ()

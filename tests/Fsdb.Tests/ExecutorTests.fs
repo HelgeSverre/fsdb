@@ -4064,6 +4064,47 @@ let tests =
                     Expect.equal plan.EstimatedRows (Some "4") "the estimate is the exact tenant slice rather than the whole table"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "index-owned groups avoid a temporary table"
 
+                    let bounded table =
+                        runDefault
+                            store
+                            (sprintf
+                                "SELECT bucket, COUNT(*) FROM %s WHERE tenant_id = 1 AND bucket >= 2 AND bucket < 4 GROUP BY bucket"
+                                table)
+
+                    Expect.equal
+                        (bounded "indexed")
+                        (bounded "scanned")
+                        "suffix bounds preserve fixed-prefix grouped results"
+
+                    let boundedGroupPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT bucket, COUNT(*) FROM indexed WHERE tenant_id = 1 AND bucket >= 2 AND bucket < 4 GROUP BY bucket"
+                        |> explainRow
+
+                    Expect.equal boundedGroupPlan.AccessType (Some "range") "suffix bounds retain contiguous grouping"
+                    Expect.equal boundedGroupPlan.Key (Some "ix_tenant_bucket") "suffix bounds use the composite index"
+                    Expect.equal boundedGroupPlan.EstimatedRows (Some "3") "the estimate intersects prefix and suffix bounds"
+
+                    let ordered table =
+                        runDefault
+                            store
+                            (sprintf
+                                "SELECT id, bucket FROM %s WHERE tenant_id = 1 AND bucket >= 2 AND bucket < 4 ORDER BY bucket LIMIT 2"
+                                table)
+
+                    Expect.equal (ordered "indexed") (ordered "scanned") "suffix bounds preserve fixed-prefix ordering"
+
+                    let boundedOrderPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id, bucket FROM indexed WHERE tenant_id = 1 AND bucket >= 2 AND bucket < 4 ORDER BY bucket LIMIT 2"
+                        |> explainRow
+
+                    Expect.equal boundedOrderPlan.AccessType (Some "range") "bounded ordering reports range access"
+                    Expect.equal boundedOrderPlan.Key (Some "ix_tenant_bucket") "bounded ordering uses the composite index"
+                    Expect.equal boundedOrderPlan.EstimatedRows (Some "3") "bounded ordering estimates the intersected slice"
+
                 testCase "string fixed prefixes require order and equality to share an equivalence class"
                 <| fun _ ->
                     let store = newStore ()

@@ -4780,6 +4780,8 @@ let private tryOrderedIndexLookupWithPrefix
     (tableName: string)
     (terms: OrderedKeyTerm list)
     (prefixValues: Value list)
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
     : OrderedLookup option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
@@ -4820,45 +4822,120 @@ let private tryOrderedIndexLookupWithPrefix
                 let normalizedPrefix =
                     normalizePrefix prefixValues indices group.PrefixLengths group.Transforms
 
-                Option.map2
-                    (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (prefix: Value list) ->
-                        let first, afterLast =
-                            if prefix.IsEmpty then
-                                0, entries.Count
-                            else
-                                let length = prefix.Length
+                let normalizeBound = function
+                    | None -> Some None
+                    | Some(VNull, _) -> None
+                    | Some(value, inclusive) ->
+                        let position = prefixValues.Length
 
-                                let comparePrefix (entry: SecondaryOrderEntry) =
-                                    compareIndexedKeys
-                                        (List.take length entry.CollationNames)
-                                        (List.take length entry.Directions)
-                                        (List.take length entry.Values)
-                                        prefix
+                        if position >= indices.Length then
+                            None
+                        else
+                            exactProbeValue store table indices.[position] value
+                            |> Option.map (projectIndexValue group.PrefixLengths.[position] group.Transforms.[position])
+                            |> Option.map (fun value -> Some(value, inclusive))
 
-                                let insertionIndex boundary =
-                                    sortedInsertionPoint boundary entries.Count (fun current -> comparePrefix entries.[current])
+                match Map.tryFind group.Name table.SecondaryOrder, normalizedPrefix, normalizeBound lower, normalizeBound upper with
+                | Some(entries: ImmutableSortedSet<SecondaryOrderEntry>), Some prefix, Some lower, Some upper ->
+                    let prefixFirst, prefixAfterLast =
+                        if prefix.IsEmpty then
+                            0, entries.Count
+                        else
+                            let length = prefix.Length
 
-                                insertionIndex FirstEqual, insertionIndex AfterEqual
+                            let comparePrefix (entry: SecondaryOrderEntry) =
+                                compareIndexedKeys
+                                    (List.take length entry.CollationNames)
+                                    (List.take length entry.Directions)
+                                    (List.take length entry.Values)
+                                    prefix
 
-                        let slice =
-                            { IndexName = group.Name
-                              ColumnIndices = indices
-                              PrefixLengths = group.PrefixLengths
-                              Directions = group.Directions
-                              Entries = entries
-                              First = first
-                              AfterLast = afterLast }
+                            let insertionIndex boundary =
+                                sortedInsertionPoint boundary entries.Count (fun current -> comparePrefix entries.[current])
 
+                            insertionIndex FirstEqual, insertionIndex AfterEqual
+
+                    let first, afterLast =
+                        if lower.IsNone && upper.IsNone then
+                            prefixFirst, prefixAfterLast
+                        else
+                            let position = prefix.Length
+                            let columnIndex = indices.[position]
+                            let direction = group.Directions.[position]
+
+                            let compareAt current value =
+                                let comparison =
+                                    match entries.[current].Values.[position], value with
+                                    | VString left, VString right ->
+                                        table.Columns.[columnIndex].Collation
+                                        |> Collation.findOrDefault
+                                        |> fun collation -> collation.ComparePrimary left right
+                                    | left, right -> Value.compare left right
+
+                                if direction = Desc then -comparison else comparison
+
+                            let insertionIndex boundary value =
+                                prefixFirst
+                                + sortedInsertionPoint
+                                    boundary
+                                    (prefixAfterLast - prefixFirst)
+                                    (fun offset -> compareAt (prefixFirst + offset) value)
+
+                            let firstEqual = insertionIndex FirstEqual
+                            let afterEqual = insertionIndex AfterEqual
+
+                            match direction with
+                            | Asc ->
+                                let first =
+                                    match lower with
+                                    | None -> afterEqual VNull
+                                    | Some(value, true) -> firstEqual value
+                                    | Some(value, false) -> afterEqual value
+
+                                let afterLast =
+                                    match upper with
+                                    | None -> prefixAfterLast
+                                    | Some(value, true) -> afterEqual value
+                                    | Some(value, false) -> firstEqual value
+
+                                first, afterLast
+                            | Desc ->
+                                let first =
+                                    match upper with
+                                    | None -> prefixFirst
+                                    | Some(value, true) -> firstEqual value
+                                    | Some(value, false) -> afterEqual value
+
+                                let afterLast =
+                                    match lower with
+                                    | None -> firstEqual VNull
+                                    | Some(value, true) -> afterEqual value
+                                    | Some(value, false) -> firstEqual value
+
+                                first, afterLast
+
+                    let first = max prefixFirst first
+                    let afterLast = max first (min prefixAfterLast afterLast)
+
+                    let slice =
+                        { IndexName = group.Name
+                          ColumnIndices = indices
+                          PrefixLengths = group.PrefixLengths
+                          Directions = group.Directions
+                          Entries = entries
+                          First = first
+                          AfterLast = afterLast }
+
+                    Some
                         { OrderedIndexName = group.Name
                           OrderedColumnIndices = indices
                           OrderedColumns = table.Columns
-                          OrderedRowCount = max 0 (afterLast - first)
+                          OrderedRowCount = afterLast - first
                           OrderedRows =
                             orderedEntries traversal slice
                             |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
-                          OrderedGroups = orderedEntries traversal slice |> orderedGroupCounts indices.Length })
-                    (Map.tryFind group.Name table.SecondaryOrder)
-                    normalizedPrefix)))
+                          OrderedGroups = orderedEntries traversal slice |> orderedGroupCounts indices.Length }
+                | _ -> None)))
 
 let tryOrderedIndexLookup
     (store: Store)
@@ -4866,7 +4943,7 @@ let tryOrderedIndexLookup
     (tableName: string)
     (terms: OrderedKeyTerm list)
     : OrderedLookup option =
-    tryOrderedIndexLookupWithPrefix store dbName tableName terms []
+    tryOrderedIndexLookupWithPrefix store dbName tableName terms [] None None
 
 let internal tryOrderedIndexPrefixLookup
     (store: Store)
@@ -4878,7 +4955,21 @@ let internal tryOrderedIndexPrefixLookup
     if prefixValues.IsEmpty || prefixValues.Length > terms.Length then
         None
     else
-        tryOrderedIndexLookupWithPrefix store dbName tableName terms prefixValues
+        tryOrderedIndexLookupWithPrefix store dbName tableName terms prefixValues None None
+
+let internal tryOrderedIndexPrefixRangeLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (terms: OrderedKeyTerm list)
+    (prefixValues: Value list)
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
+    : OrderedLookup option =
+    if prefixValues.IsEmpty || prefixValues.Length >= terms.Length || (lower.IsNone && upper.IsNone) then
+        None
+    else
+        tryOrderedIndexLookupWithPrefix store dbName tableName terms prefixValues lower upper
 
 let tryCompositeOrderedLookup
     (store: Store)

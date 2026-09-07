@@ -11079,6 +11079,20 @@ and private storageOrderTerms (terms: IndexOrderTerm list) : Storage.OrderedKeyT
           OrderedTransform = term.Transform
           OrderedDirection = term.Direction })
 
+and private fixedPrefixSuffixBounds
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    (matched: IndexPrefixMatch)
+    : (Value * bool) option * (Value * bool) option =
+    matched.Terms
+    |> List.tryItem matched.PinnedCount
+    |> Option.filter (fun term -> term.Transform.IsNone)
+    |> Option.bind (fun term ->
+        rangeLookupBounds BareOrQualifiedColumn tref whereExpr
+        |> List.tryFind (fun bounds -> equalsIgnoreCase bounds.Column term.Column))
+    |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
+    |> Option.defaultValue (None, None)
+
 and private orderedIndexPrefixMatches
     (store: Store)
     (registry: Registry)
@@ -11145,15 +11159,22 @@ and private tryFixedPrefixIndexOrder
 
             traversal
             |> Option.bind (fun directions ->
-                List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
-                |> storageOrderTerms
-                |> fun terms ->
-                    Storage.tryOrderedIndexPrefixLookup
-                        store
-                        resolved.Database
-                        tref.Table
-                        terms
-                        resolved.PinnedValues))
+                let terms =
+                    List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
+                    |> storageOrderTerms
+
+                let lower, upper = fixedPrefixSuffixBounds tref whereExpr matched
+
+                Storage.tryOrderedIndexPrefixRangeLookup
+                    store
+                    resolved.Database
+                    tref.Table
+                    terms
+                    resolved.PinnedValues
+                    lower
+                    upper
+                |> Option.orElseWith (fun () ->
+                    Storage.tryOrderedIndexPrefixLookup store resolved.Database tref.Table terms resolved.PinnedValues)))
 
 and private tryGroupingIndexOrder
     (store: Store)
@@ -11166,11 +11187,22 @@ and private tryGroupingIndexOrder
     orderedIndexPrefixMatches store registry dbName tref whereExpr groupTerms
     |> List.tryPick (fun resolved ->
         let terms = resolved.Match.Terms |> storageOrderTerms
+        let lower, upper = fixedPrefixSuffixBounds tref whereExpr resolved.Match
 
         let lookup =
             match resolved.PinnedValues with
             | [] -> Storage.tryOrderedIndexLookup store resolved.Database tref.Table terms
-            | pinnedValues -> Storage.tryOrderedIndexPrefixLookup store resolved.Database tref.Table terms pinnedValues
+            | pinnedValues ->
+                Storage.tryOrderedIndexPrefixRangeLookup
+                    store
+                    resolved.Database
+                    tref.Table
+                    terms
+                    pinnedValues
+                    lower
+                    upper
+                |> Option.orElseWith (fun () ->
+                    Storage.tryOrderedIndexPrefixLookup store resolved.Database tref.Table terms pinnedValues)
 
         lookup
         |> Option.map (fun lookup ->
@@ -14568,12 +14600,13 @@ let rec private explainJoinBlock
                     match indexOrderPlan with
                     | Some plan ->
                         let hasBounds =
-                            match plan.ColumnIndices with
-                            | [ index ] ->
+                            let boundedColumns =
                                 rangeLookupBounds BareOrQualifiedColumn tref whereExpr
-                                |> List.exists (fun bounds ->
-                                    System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
-                            | _ -> false
+                                |> List.map (_.Column >> _.ToLowerInvariant())
+                                |> Set.ofList
+
+                            plan.ColumnIndices
+                            |> List.exists (fun index -> Set.contains (plan.Columns.[index].Name.ToLowerInvariant()) boundedColumns)
 
                         acc.Add
                             { Id = Some id
