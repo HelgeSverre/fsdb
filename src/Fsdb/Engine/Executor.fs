@@ -16716,9 +16716,10 @@ let rec executeAs
                 if not (Storage.dynamicWriteRebaseActive s) then
                     upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows
                 else
-                    let step state (ordinal, values) =
-                        state
-                        |> Result.bind (fun (firstGenerated, lastInsertId, affected, inserted) ->
+                    rowsValues
+                    |> List.indexed
+                    |> traverse (fun (ordinal, values) ->
+                        Diagnostics.withRowNumber (ordinal + 1) (fun () ->
                             Storage.prepareInsertCandidate
                                 s
                                 db
@@ -16726,47 +16727,33 @@ let rec executeAs
                                 cols
                                 values
                                 prepare
-                            |> Result.bind (fun candidate ->
-                                Storage.acquirePreparedInsertWriteTargets s db table candidate.Values
+                            |> Result.map (fun candidate -> ordinal, candidate)))
+                    |> Result.bind (fun prepared ->
+                        let candidates = prepared |> List.map (fun (_, candidate) -> candidate.Values)
+                        Storage.acquirePreparedInsertWriteTargets s db table candidates
 
-                                upsertRowsWithOrdinal
-                                    s
-                                    db
-                                    table
-                                    None
-                                    [ Array.toList candidate.Values ]
-                                    (fun _ row -> Ok row)
-                                    (fun _ existing row -> applyUpdate ordinal existing row)
-                                    foundRows
-                                |> Result.map (fun outcome ->
-                                    let insertedCandidate = not outcome.InsertedRows.IsEmpty
-                                    let firstGenerated =
-                                        if insertedCandidate then
-                                            let generated =
-                                                candidate.AssignedAutoId
-                                                |> Option.bind (fun (wasGenerated, value) -> if wasGenerated then Some value else None)
+                        upsertRowsWithOrdinal
+                            s
+                            db
+                            table
+                            None
+                            (candidates |> List.map Array.toList)
+                            (fun _ row -> Ok row)
+                            (fun ordinal existing row -> applyUpdate (prepared.[ordinal] |> fst) existing row)
+                            foundRows
+                        |> Result.map (fun outcome ->
+                            let generatedId =
+                                prepared
+                                |> List.tryPick (fun (_, candidate) ->
+                                    if outcome.InsertedRows |> List.exists ((=) candidate.Values) then
+                                        candidate.AssignedAutoId
+                                        |> Option.bind (fun (generated, value) -> if generated then Some value else None)
+                                    else
+                                        None)
 
-                                            Option.orElse firstGenerated generated
-                                        else
-                                            firstGenerated
-
-                                    let lastInsertId =
-                                        if insertedCandidate then outcome.LastInsertId else lastInsertId
-
-                                    firstGenerated,
-                                    lastInsertId,
-                                    affected + outcome.Affected,
-                                    outcome.InsertedRows |> List.fold (fun acc row -> row :: acc) inserted)))
-
-                    rowsValues
-                    |> List.indexed
-                    |> List.fold step (Ok(None, 0L, 0, []))
-                    |> Result.map (fun (generatedId, lastInsertId, affected, inserted) ->
-                        { LastInsertId = Option.defaultValue lastInsertId generatedId
-                          GeneratedId = generatedId
-                          Affected = affected
-                          InsertedRows = List.rev inserted
-                          IgnoredErrors = [] }))
+                            { outcome with
+                                LastInsertId = Option.defaultValue outcome.LastInsertId generatedId
+                                GeneratedId = generatedId })))
 
     let replaceEvaluatedWith
         (db: string)
@@ -16837,7 +16824,7 @@ let rec executeAs
                             (finish rowNumber)
                         |> Result.mapError storageErr
                         |> Result.bind (fun prepared ->
-                            Storage.acquirePreparedInsertWriteTargets snapshot db table prepared.Values
+                            Storage.acquirePreparedInsertWriteTargets snapshot db table [ prepared.Values ]
 
                             replaceConflictRows snapshot db table prepared.Values
                             |> Result.mapError storageErr

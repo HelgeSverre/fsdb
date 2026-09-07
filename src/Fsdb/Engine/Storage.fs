@@ -3084,9 +3084,11 @@ let internal acquirePreparedInsertWriteTargets
     (store: Store)
     (dbName: string)
     (tableName: string)
-    (candidate: Value[])
+    (candidates: Value[] list)
     : unit =
-    match tryInsertLockTargets store dbName tableName None [ candidate |> Array.toList |> List.map Some ] with
+    let rows = candidates |> List.map (Array.toList >> List.map Some)
+
+    match tryInsertLockTargets store dbName tableName None rows with
     | Some targets when not targets.Keys.IsEmpty ->
         withInsertLocks store dbName tableName targets.RowIds targets.Keys (fun () ->
             match prepareDynamicWriteRebase store with
@@ -3100,7 +3102,7 @@ let internal acquirePreparedInsertWriteTargets
                         applyDynamicWriteRebase store latestContext latestBase latestCatalog latestRoot
                     | None -> applyDynamicWriteRebase store context baseCatalog catalog applyRoot
 
-                match tryInsertLockTargets currentStore dbName tableName None [ candidate |> Array.toList |> List.map Some ] with
+                match tryInsertLockTargets currentStore dbName tableName None rows with
                 | Some current ->
                     withInsertLocks store dbName tableName current.RowIds current.Keys applyLatest
                 | None -> applyLatest ())
@@ -7024,26 +7026,26 @@ let internal insertPreparedRowsWithOrdinal
     (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
     (finish: int -> Value[] -> Result<Value[], StorageError>)
     : Result<InsertOutcome, StorageError> =
-    let step state (ordinal, values) =
+    let prepareOne (ordinal, values) =
+        prepareInsertCandidateWithDeferred
+            store
+            dbName
+            tableName
+            columns
+            values
+            deferred
+            (prepare ordinal)
+            (finish ordinal)
+
+    let serialStep state (ordinal, values) =
         state
         |> Result.bind (fun (firstGenerated, lastExplicit, affected, inserted, ignored) ->
-            let prepared =
-                prepareInsertCandidateWithDeferred
-                    store
-                    dbName
-                    tableName
-                    columns
-                    values
-                    deferred
-                    (prepare ordinal)
-                    (finish ordinal)
-
-            match prepared with
+            match prepareOne (ordinal, values) with
             | Error(ColumnCountMismatch _ as error) -> Error error
             | Error error when ignoreErrors -> Ok(firstGenerated, lastExplicit, affected, inserted, error :: ignored)
             | Error error -> Error error
             | Ok candidate ->
-                acquirePreparedInsertWriteTargets store dbName tableName candidate.Values
+                acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
 
                 match insertPreparedCandidate store dbName tableName candidate with
                 | Error error when ignoreErrors -> Ok(firstGenerated, lastExplicit, affected, inserted, error :: ignored)
@@ -7063,18 +7065,48 @@ let internal insertPreparedRowsWithOrdinal
                         ignored
                     ))
 
-    rowsIn
-    |> List.indexed
-    |> List.fold
-        (fun state indexed ->
-            Diagnostics.withRowNumber (fst indexed + 1) (fun () -> step state indexed))
-        (Ok(None, None, 0, [], []))
-    |> Result.map (fun (firstGenerated, lastExplicit, affected, inserted, ignored) ->
-        { LastInsertId = Option.defaultValue 0L (Option.orElse firstGenerated lastExplicit)
-          GeneratedId = firstGenerated
-          Affected = affected
-          InsertedRows = List.rev inserted
-          IgnoredErrors = List.rev ignored })
+    if ignoreErrors then
+        rowsIn
+        |> List.indexed
+        |> List.fold
+            (fun state indexed ->
+                Diagnostics.withRowNumber (fst indexed + 1) (fun () -> serialStep state indexed))
+            (Ok(None, None, 0, [], []))
+        |> Result.map (fun (firstGenerated, lastExplicit, affected, inserted, ignored) ->
+            { LastInsertId = Option.defaultValue 0L (Option.orElse firstGenerated lastExplicit)
+              GeneratedId = firstGenerated
+              Affected = affected
+              InsertedRows = List.rev inserted
+              IgnoredErrors = List.rev ignored })
+    else
+        rowsIn
+        |> List.indexed
+        |> traverse (fun indexed ->
+            Diagnostics.withRowNumber (fst indexed + 1) (fun () -> prepareOne indexed))
+        |> Result.bind (fun prepared ->
+            let candidates = prepared |> List.map _.Values
+            acquirePreparedInsertWriteTargets store dbName tableName candidates
+
+            insertRowsPreparedCore
+                false
+                Set.empty
+                (fun _ _ row -> Ok row)
+                (fun _ row -> Ok row)
+                store
+                dbName
+                tableName
+                None
+                (candidates |> List.map Array.toList)
+            |> Result.map (fun outcome ->
+                let generatedId =
+                    prepared
+                    |> List.tryPick (fun candidate ->
+                        candidate.AssignedAutoId
+                        |> Option.bind (fun (generated, value) -> if generated then Some value else None))
+
+                { outcome with
+                    LastInsertId = Option.defaultValue outcome.LastInsertId generatedId
+                    GeneratedId = generatedId }))
 
 /// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
 /// NULL/unique/foreign-key constraints is skipped instead of failing the
