@@ -16728,8 +16728,13 @@ let rec executeAs
                                 values
                                 prepare
                             |> Result.map (fun candidate -> ordinal, candidate)))
-                    |> Result.bind (fun prepared ->
-                        let candidates = prepared |> List.map (fun (_, candidate) -> candidate.Values)
+                    |> Result.bind (fun preparedRows ->
+                        let prepared = Array.ofList preparedRows
+                        let candidates =
+                            prepared
+                            |> Array.map (fun (_, candidate) -> candidate.Values)
+                            |> Array.toList
+
                         Storage.acquirePreparedInsertWriteTargets s db table candidates
 
                         upsertRowsWithOrdinal
@@ -16739,15 +16744,14 @@ let rec executeAs
                             None
                             (candidates |> List.map Array.toList)
                             (fun _ row -> Ok row)
-                            (fun ordinal existing row -> applyUpdate (prepared.[ordinal] |> fst) existing row)
+                            (fun ordinal existing row -> applyUpdate (fst prepared.[ordinal]) existing row)
                             foundRows
                         |> Result.map (fun outcome ->
                             let generatedId =
                                 prepared
-                                |> List.tryPick (fun (_, candidate) ->
+                                |> Array.tryPick (fun (_, candidate) ->
                                     if outcome.InsertedRows |> List.exists ((=) candidate.Values) then
-                                        candidate.AssignedAutoId
-                                        |> Option.bind (fun (generated, value) -> if generated then Some value else None)
+                                        candidate.GeneratedId
                                     else
                                         None)
 
@@ -16838,10 +16842,10 @@ let rec executeAs
                                     fire After TriggerInsert afterInsert [ None, Some prepared.Values ])
                                 |> Result.map (fun () ->
                                     let firstAuto, lastExplicit =
-                                        match prepared.AssignedAutoId with
-                                        | Some(true, value) -> Option.orElse (Some value) firstAuto, lastExplicit
-                                        | Some(false, value) -> firstAuto, Some value
-                                        | None -> firstAuto, lastExplicit
+                                        Storage.trackAutoIncrementAssignment
+                                            prepared.AssignedAutoId
+                                            firstAuto
+                                            lastExplicit
 
                                     firstAuto,
                                     lastExplicit,

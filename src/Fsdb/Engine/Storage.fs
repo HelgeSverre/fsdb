@@ -326,13 +326,23 @@ type RowLockStripe =
       mutable ExclusiveOwner: int64 option
       SharedOwners: HashSet<int64> }
 
+/// A catalog rebase staged until every generated-key and duplicate-row claim
+/// succeeds, so a failed lock wait cannot mutate the transaction root.
+type PreparedWriteRebase =
+    { BaseCatalog: Catalog
+      StatementCatalog: Catalog
+      ApplyTransactionRoot: unit -> unit }
+
+type DynamicWriteRebase =
+    { mutable BaseCatalog: Catalog
+      Prepare: Catalog -> Catalog -> PreparedWriteRebase }
+
 type TransactionLockContext =
     { Owner: int64
       HeldStripes: Collections.Generic.HashSet<RowLockStripe>
       mutable RollbackWork: int64
       mutable DeadlockVictim: bool
-      mutable DynamicWriteBase: Catalog option
-      mutable DynamicWriteRebase: (Catalog -> Catalog -> Catalog * Catalog * (unit -> unit)) option }
+      mutable DynamicWriteRebase: DynamicWriteRebase option }
 
 type LockWait =
     { Blockers: HashSet<int64>
@@ -562,21 +572,19 @@ let beginTransactionSnapshotWithBase (store: Store) : Catalog * Store =
     let catalog = store.Catalog
     catalog, transactionSnapshotFromCatalog store catalog
 
-let beginTransactionContext (store: Store) : Store =
-    let owner = store.NextLockOwnerId()
+let private createTransactionLockContext owner =
+    { Owner = owner
+      HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
+      RollbackWork = 0L
+      DeadlockVictim = false
+      DynamicWriteRebase = None }
 
+let beginTransactionContext (store: Store) : Store =
     { store with
         OnCommit = ResizeArray()
         PendingEvents = if collectsCommitEvents store then Some(ResizeArray()) else None
         Lock = obj ()
-        TransactionLocks =
-            Some
-                { Owner = owner
-                  HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
-                  RollbackWork = 0L
-                  DeadlockVictim = false
-                  DynamicWriteBase = None
-                  DynamicWriteRebase = None } }
+        TransactionLocks = Some(createTransactionLockContext (store.NextLockOwnerId())) }
 
 let beginTransactionWithBase (store: Store) : Catalog * Store =
     let catalog, snapshot = beginTransactionSnapshotWithBase store
@@ -584,14 +592,7 @@ let beginTransactionWithBase (store: Store) : Catalog * Store =
 
     catalog,
     { snapshot with
-        TransactionLocks =
-            Some
-                { Owner = owner
-                  HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
-                  RollbackWork = 0L
-                  DeadlockVictim = false
-                  DynamicWriteBase = None
-                  DynamicWriteRebase = None } }
+        TransactionLocks = Some(createTransactionLockContext owner) }
 
 let carryTransactionLocks (source: Store) (snapshot: Store) : Store =
     { snapshot with TransactionLocks = source.TransactionLocks }
@@ -623,19 +624,20 @@ let restoreTransactionRollbackWork (store: Store) work =
 let beginDynamicWriteRebase
     (store: Store)
     (baseCatalog: Catalog)
-    (rebase: Catalog -> Catalog -> Catalog * Catalog * (unit -> unit))
+    (prepare: Catalog -> Catalog -> PreparedWriteRebase)
     =
     store.TransactionLocks
     |> Option.iter (fun context ->
-        context.DynamicWriteBase <- Some baseCatalog
-        context.DynamicWriteRebase <- Some rebase)
+        context.DynamicWriteRebase <-
+            Some
+                { BaseCatalog = baseCatalog
+                  Prepare = prepare })
 
 let finishDynamicWriteRebase (store: Store) =
     store.TransactionLocks
     |> Option.bind (fun context ->
+        let baseCatalog = context.DynamicWriteRebase |> Option.map _.BaseCatalog
         context.DynamicWriteRebase <- None
-        let baseCatalog = context.DynamicWriteBase
-        context.DynamicWriteBase <- None
         baseCatalog)
 
 let dynamicWriteRebaseActive (store: Store) =
@@ -643,25 +645,18 @@ let dynamicWriteRebaseActive (store: Store) =
     |> Option.exists (fun context -> context.DynamicWriteRebase.IsSome)
 
 let private prepareDynamicWriteRebase (store: Store) =
-    match store.TransactionLocks with
-    | Some context ->
-        match context.DynamicWriteBase, context.DynamicWriteRebase with
-        | Some baseCatalog, Some rebase ->
-            let nextBase, catalog, applyRoot = rebase baseCatalog store.Catalog
-            Some(context, nextBase, catalog, applyRoot)
-        | _ -> None
-    | None -> None
+    store.TransactionLocks
+    |> Option.bind _.DynamicWriteRebase
+    |> Option.map (fun rebase -> rebase, rebase.Prepare rebase.BaseCatalog store.Catalog)
 
 let private applyDynamicWriteRebase
     (store: Store)
-    (context: TransactionLockContext)
-    (baseCatalog: Catalog)
-    (catalog: Catalog)
-    (applyRoot: unit -> unit)
+    (rebase: DynamicWriteRebase)
+    (prepared: PreparedWriteRebase)
     =
-    applyRoot ()
-    store.Catalog <- catalog
-    context.DynamicWriteBase <- Some baseCatalog
+    prepared.ApplyTransactionRoot ()
+    store.Catalog <- prepared.StatementCatalog
+    rebase.BaseCatalog <- prepared.BaseCatalog
 
 let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<RowLockStripe>) =
     for stripe in stripes do
@@ -3030,12 +3025,7 @@ let private withWriteLocksFor
         match store.TransactionLocks with
         | Some context -> context, false
         | None ->
-            { Owner = store.NextLockOwnerId()
-              HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
-              RollbackWork = 0L
-              DeadlockVictim = false
-              DynamicWriteBase = None
-              DynamicWriteRebase = None },
+            createTransactionLockContext (store.NextLockOwnerId()),
             true
 
     let deadline = DateTime.UtcNow + timeout
@@ -3080,31 +3070,32 @@ let acquireTransactionWriteTargets
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
 
+/// Claims prepared unique keys, then refreshes and claims duplicate rows from
+/// the rebased catalog before applying it.
 let internal acquirePreparedInsertWriteTargets
     (store: Store)
     (dbName: string)
     (tableName: string)
     (candidates: Value[] list)
     : unit =
-    let rows = candidates |> List.map (Array.toList >> List.map Some)
+    let candidateRows = candidates |> List.map (Array.toList >> List.map Some)
 
-    match tryInsertLockTargets store dbName tableName None rows with
+    match tryInsertLockTargets store dbName tableName None candidateRows with
     | Some targets when not targets.Keys.IsEmpty ->
         withInsertLocks store dbName tableName targets.RowIds targets.Keys (fun () ->
             match prepareDynamicWriteRebase store with
             | None -> ()
-            | Some(context, baseCatalog, catalog, applyRoot) ->
-                let currentStore = beginTransactionSnapshotFromCatalog store catalog
+            | Some(rebase, prepared) ->
+                let currentStore = beginTransactionSnapshotFromCatalog store prepared.StatementCatalog
 
                 let applyLatest () =
                     match prepareDynamicWriteRebase store with
-                    | Some(latestContext, latestBase, latestCatalog, latestRoot) ->
-                        applyDynamicWriteRebase store latestContext latestBase latestCatalog latestRoot
-                    | None -> applyDynamicWriteRebase store context baseCatalog catalog applyRoot
+                    | Some(latestRebase, latest) -> applyDynamicWriteRebase store latestRebase latest
+                    | None -> applyDynamicWriteRebase store rebase prepared
 
-                match tryInsertLockTargets currentStore dbName tableName None rows with
-                | Some current ->
-                    withInsertLocks store dbName tableName current.RowIds current.Keys applyLatest
+                match tryInsertLockTargets currentStore dbName tableName None candidateRows with
+                | Some currentTargets ->
+                    withInsertLocks store dbName tableName currentTargets.RowIds currentTargets.Keys applyLatest
                 | None -> applyLatest ())
     | _ -> ()
 
@@ -6524,6 +6515,17 @@ type internal PreparedInsertCandidate =
       NextAutoId: int64
       AssignedAutoId: (bool * int64) option }
 
+    member this.GeneratedId =
+        match this.AssignedAutoId with
+        | Some(true, value) -> Some value
+        | _ -> None
+
+let internal trackAutoIncrementAssignment assigned firstGenerated lastExplicit =
+    match assigned with
+    | Some(true, value) -> Option.orElse (Some value) firstGenerated, lastExplicit
+    | Some(false, value) -> firstGenerated, Some value
+    | None -> firstGenerated, lastExplicit
+
 /// Builds one insert candidate without publishing it.
 let private prepareInsertCandidateCore
     (store: Store)
@@ -6610,38 +6612,10 @@ let internal replaceConflictRows
         |> List.distinctBy fst
         |> Ok
 
-/// Shared core of `insertRows` and `insertRowsIgnore`: builds each row via
-/// `processRow`, then checks it against the table's unique keys (including
-/// rows already accepted earlier in this same statement, since two rows in
-/// one multi-row `INSERT` can collide with each other) and, when `checkFks`
-/// is set, its foreign keys' parents. A row's own shape (wrong column count)
-/// is always a hard error — `INSERT IGNORE` downgrades constraint
-/// violations per MySQL, not malformed statements — everything else is
-/// skipped rather than failing the batch when `ignoreErrors` is set.
-///
-/// The statement's reported `last_insert_id` (what `PDO::lastInsertId()`/
-/// `mysql_insert_id()` read off the OK packet, and what `Eloquent::create()`
-/// relies on to know a just-inserted row's id) follows real MySQL's rule,
-/// verified against a real MySQL 8.4 instance rather than assumed: the
-/// *first* row whose AUTO_INCREMENT column was actually generated (not
-/// supplied), or — only when no row in the statement generated one — the
-/// *last* row's explicitly-supplied value. A single-row `INSERT` that
-/// supplies its own id (e.g. a factory pre-assigning `id` before `create()`)
-/// is the common case this exists for: with only "the first generated
-/// value" tracked, that row's `last_insert_id` would come back
-/// 0 instead of the id it was actually given, and every caller reading it
-/// back (`Eloquent`'s own model, here) would silently get a wrong id.
-///
-/// That OK-packet value is also returned separately as `generatedId` — the
-/// first *actually generated* id, or `None` if every row supplied its own —
-/// because the SQL function `LAST_INSERT_ID()` has a narrower rule than the
-/// OK packet: it only ever reflects a generated id, never an explicitly
-/// supplied one, and holds its previous value across a statement that
-/// generated none at all (see `QueryHandler`'s `LAST_INSERT_ID` doc).
-/// What one INSERT/UPSERT actually did — the OK-packet numbers plus the
-/// concrete rows written (AFTER INSERT triggers bind NEW.* from these).
-/// `insertRows`/`insertRowsIgnore`/`upsertRows` always built these rows
-/// internally for the WAL emit; the record just stops discarding them.
+/// The result of an insert-family statement, including rows needed by WAL
+/// events and AFTER INSERT triggers. MySQL's OK packet reports the first
+/// generated AUTO_INCREMENT value, or the last explicitly supplied value
+/// when none was generated; `LAST_INSERT_ID()` changes only for the former.
 type InsertOutcome =
     { LastInsertId: int64
       GeneratedId: int64 option
@@ -6649,6 +6623,9 @@ type InsertOutcome =
       InsertedRows: Value[] list
       IgnoredErrors: StorageError list }
 
+/// Validates rows against indexes updated by earlier candidates in the same
+/// batch. `INSERT IGNORE` skips constraint failures, but malformed row shapes
+/// remain statement errors.
 let private insertCore
     (store: Store)
     (catalog: Catalog)
@@ -6664,7 +6641,7 @@ let private insertCore
     (deferred: Set<int>)
     (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
     (finish: int -> Value[] -> Result<Value[], StorageError>)
-    : Result<Database * (int64 * int64 option * int * Value[] list * StorageError list), StorageError> =
+    : Result<Database * InsertOutcome, StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
     let secondaryGroups = secondaryKeyGroups table
@@ -6798,11 +6775,7 @@ let private insertCore
 
                 match rowResult with
                 | Ok(candidate, nextAutoId', assigned) ->
-                    let firstAuto', lastExplicit' =
-                        match assigned with
-                        | Some(true, v) -> Option.orElse (Some v) firstAuto, lastExplicit
-                        | Some(false, v) -> firstAuto, Some v
-                        | None -> firstAuto, lastExplicit
+                    let firstAuto', lastExplicit' = trackAutoIncrementAssignment assigned firstAuto lastExplicit
 
                     for KeyValue(_, (_, selfParentIndices, lookup)) in foreignKeyLookups do
                         selfParentIndices
@@ -6837,17 +6810,15 @@ let private insertCore
                     UniqueIndex = index
                     SecondaryIndex = secondaryIndex
                     SecondaryOrder = secondaryOrder }
-        Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted, List.rev ignoredErrorsRev))
+        Map.add tableKey table' db,
+        { LastInsertId = Option.defaultValue 0L firstAssigned
+          GeneratedId = firstAuto
+          Affected = List.length accepted
+          InsertedRows = accepted
+          IgnoredErrors = List.rev ignoredErrorsRev })
 
-/// Inserts rows built from `columns` and matching value lists, applying
-/// defaults, AUTO_INCREMENT assignment, NOT NULL/type-coercion checks, and
-/// — new here — unique-key (error 1062) and, when `store.ForeignKeyChecks`
-/// is set, foreign-key parent-existence (error 1452) checks. Returns
-/// `(lastInsertId, generatedId, affected row count)`; `lastInsertId` is the
-/// OK-packet value (see `insertCore`'s doc), `generatedId` is `None` unless
-/// this statement actually generated an AUTO_INCREMENT id. Fails the whole
-/// statement on the first bad row — see `insertRowsIgnore` for `INSERT
-/// IGNORE`'s per-row skip semantics.
+/// Publishes rows after applying defaults, generated values, constraints, and
+/// optional statement callbacks.
 let private insertRowsPreparedCore
     (ignoreErrors: bool)
     (deferred: Set<int>)
@@ -6866,8 +6837,11 @@ let private insertRowsPreparedCore
             store
             dbName
             SharedAccess
-            (fun (_, _, _, (rows: Value[] list), _) ->
-                if rows.IsEmpty then [] else [ RowsInserted(dbName, tableName, rows) ])
+            (fun outcome ->
+                if outcome.InsertedRows.IsEmpty then
+                    []
+                else
+                    [ RowsInserted(dbName, tableName, outcome.InsertedRows) ])
             (fun catalog db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable db tableName)
@@ -6891,21 +6865,10 @@ let private insertRowsPreparedCore
                             finish
                         |> Result.map (fun (database, result) -> setCatalogDatabase dbName database catalog, result))))
 
-    let result =
-        match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
-        | Some targets when not targets.Keys.IsEmpty -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
-        | _ -> publish ()
-
-    match result with
-    | Ok(lastId, generatedId, affected, rows, ignoredErrors) ->
-        Ok {
-            LastInsertId = lastId
-            GeneratedId = generatedId
-            Affected = affected
-            InsertedRows = rows
-            IgnoredErrors = ignoredErrors
-        }
-    | Error e -> Error e
+    match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
+    | Some targets when not targets.Keys.IsEmpty ->
+        withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
+    | _ -> publish ()
 
 let insertRows
     (store: Store)
@@ -7003,14 +6966,13 @@ let internal insertPreparedCandidate
                         let updated = publishRows table candidateTable
                         setCatalogDatabase dbName (Map.add tableKey updated db) catalog, prepared.Values)))
     |> Result.map (fun candidate ->
-        let generatedId, lastInsertId =
+        let lastInsertId =
             match prepared.AssignedAutoId with
-            | Some(true, value) -> Some value, value
-            | Some(false, value) -> None, value
-            | None -> None, 0L
+            | Some(_, value) -> value
+            | None -> 0L
 
         { LastInsertId = lastInsertId
-          GeneratedId = generatedId
+          GeneratedId = prepared.GeneratedId
           Affected = 1
           InsertedRows = [ candidate ]
           IgnoredErrors = [] })
@@ -7100,9 +7062,7 @@ let internal insertPreparedRowsWithOrdinal
             |> Result.map (fun outcome ->
                 let generatedId =
                     prepared
-                    |> List.tryPick (fun candidate ->
-                        candidate.AssignedAutoId
-                        |> Option.bind (fun (generated, value) -> if generated then Some value else None))
+                    |> List.tryPick _.GeneratedId
 
                 { outcome with
                     LastInsertId = Option.defaultValue outcome.LastInsertId generatedId
@@ -7305,19 +7265,16 @@ and private cascadeUpdateVisitedFrom
 
         referencingForeignKeys catalog parent |> List.fold checkOne (Ok(catalog, visited, changes))
 
-/// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
-/// row that collides with an existing row on any unique key or the primary
-/// key is applied to `applyUpdate existingRow candidateRow` instead of being
-/// appended. Collision detection goes through the same `UniqueIndex`
-/// (collation-aware via `encodeConstraintKey`) as plain `INSERT`'s unique
-/// check.
-/// A matched row `applyUpdate` actually changes counts 2 toward the
-/// returned total (MySQL counts the attempted insert plus the update);
-/// `foundRows` is the session's negotiated CLIENT_FOUND_ROWS capability —
-/// a matched row `applyUpdate` leaves unchanged (every column still equal
-/// to what it already held) counts 1 when set, same as MySQL's
-/// `affected_rows` for a no-op `ON DUPLICATE KEY UPDATE` match, and 0
-/// when not.
+type private UpsertSummary =
+    { LastInsertId: int64
+      GeneratedId: int64 option
+      Affected: int
+      InsertedRows: Value[] list
+      UpdatedRows: (Value[] * Value[]) list }
+
+/// Upserts through the collation-aware unique indexes. MySQL counts a changed
+/// match as two affected rows; an unchanged match counts as one only with
+/// CLIENT_FOUND_ROWS, otherwise zero.
 let rec upsertRows
     (store: Store)
     (dbName: string)
@@ -7351,15 +7308,15 @@ and upsertRowsWithOrdinal
         let key = normalizeTableName tableName
 
         let eventsOf
-            ((_, _, _, (inserted: Value[] list), (updated: (Value[] * Value[]) list)),
-             (cascaded: Map<TableAddress, (Value[] * Value[]) list>),
-             (catalog: Catalog))
+            (summary: UpsertSummary,
+             cascaded: Map<TableAddress, (Value[] * Value[]) list>,
+             catalog: Catalog)
             =
-            [ if not inserted.IsEmpty then
-                  RowsInserted(dbName, tableName, inserted)
+            [ if not summary.InsertedRows.IsEmpty then
+                  RowsInserted(dbName, tableName, summary.InsertedRows)
 
-              if not updated.IsEmpty then
-                  RowsUpdated(dbName, tableName, updated)
+              if not summary.UpdatedRows.IsEmpty then
+                  RowsUpdated(dbName, tableName, summary.UpdatedRows)
 
               for KeyValue(address, changes) in cascaded do
                   if not changes.IsEmpty then
@@ -7379,23 +7336,18 @@ and upsertRowsWithOrdinal
             | _ -> publish ()
 
         match result with
-        | Ok((lastId, generatedId, affected, inserted, updated), _, _) ->
+        | Ok(summary, _, _) ->
             Ok {
-                LastInsertId = lastId
-                GeneratedId = generatedId
-                Affected = affected
-                InsertedRows = inserted
+                LastInsertId = summary.LastInsertId
+                GeneratedId = summary.GeneratedId
+                Affected = summary.Affected
+                InsertedRows = summary.InsertedRows
                 IgnoredErrors = []
             }
         | Error e -> Error e
 
-/// `upsertRows`'s per-table body, pulled out only so it can take `db` (needed
-/// for `checkFkParents`/`cascadeUpdateVisited`, the same FK enforcement
-/// `insertRows`/`updateRows` apply) alongside `table`, which `withTable`
-/// alone doesn't expose. Besides its usual summary tuple, returns the
-/// database with every `ON UPDATE CASCADE`/`SET NULL` child rewrite already
-/// applied, and those rewrites' before/after values by table key for
-/// `upsertRows` to report as their own `RowsUpdated` events.
+/// Applies an upsert batch and returns direct changes alongside any foreign-key
+/// cascades so publication can emit matching row events.
 and private upsertRowsInTable
     (store: Store)
     (dbName: string)
@@ -7407,7 +7359,7 @@ and private upsertRowsInTable
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
-    : Result<Catalog * Map<TableAddress, (Value[] * Value[]) list> * (int64 * int64 option * int * Value[] list * (Value[] * Value[]) list), StorageError> =
+    : Result<Catalog * Map<TableAddress, (Value[] * Value[]) list> * UpsertSummary, StorageError> =
                 let checkFks = store.ForeignKeyChecks
 
                 let indices =
@@ -7576,10 +7528,7 @@ and private upsertRowsInTable
                                                     // `last_insert_id` rule `insertCore` uses —
                                                     // see its doc.
                                                     let firstAuto', lastExplicit' =
-                                                        match assigned with
-                                                        | Some(true, v) -> Option.orElse (Some v) firstAuto, lastExplicit
-                                                        | Some(false, v) -> firstAuto, Some v
-                                                        | None -> firstAuto, lastExplicit
+                                                        trackAutoIncrementAssignment assigned firstAuto lastExplicit
 
                                                     let rowId = rows.Add candidate
 
@@ -7609,7 +7558,11 @@ and private upsertRowsInTable
                         let updatedTable = publishRows table { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
                         setCatalogTable (tableAddress dbName key) updatedTable cascadeCatalog,
                         cascaded,
-                        (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated)))
+                        { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
+                          GeneratedId = firstAuto
+                          Affected = affected
+                          InsertedRows = List.rev inserted
+                          UpdatedRows = List.rev updated }))
 
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's
@@ -7939,10 +7892,7 @@ let private replaceRowsCore
                                                      Ok())
                                                 |> Result.map (fun () ->
                                                     let firstAuto', lastExplicit' =
-                                                        match assigned with
-                                                        | Some(true, value) -> Option.orElse (Some value) firstAuto, lastExplicit
-                                                        | Some(false, value) -> firstAuto, Some value
-                                                        | None -> firstAuto, lastExplicit
+                                                        trackAutoIncrementAssignment assigned firstAuto lastExplicit
 
                                                     updatedCatalog,
                                                     nextAutoId',

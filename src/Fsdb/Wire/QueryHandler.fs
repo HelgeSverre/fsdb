@@ -2504,6 +2504,28 @@ let rec private statementStatusCommand = function
     | Explain(_, statement) -> statementStatusCommand statement
     | SetTriggerNew _ -> None
 
+let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) =
+    let retainsTransaction =
+        session.TransactionTracking.State.Kind = ExplicitTrackedTransaction
+        || lookupVar session "autocommit" |> Option.flatten = Some "0"
+
+    match session.Tx with
+    | Some transaction when retainsTransaction && not (Storage.dynamicWriteRebaseActive store) ->
+        let prepare baseCatalog privateCatalog =
+            let liveCatalog, rebasedTransaction = Storage.beginTransactionSnapshotWithBase session.Store
+            Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
+
+            let rebasedStatement = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
+            Storage.mergeCatalogInto rebasedStatement baseCatalog privateCatalog
+
+            { BaseCatalog = liveCatalog
+              StatementCatalog = rebasedStatement.Catalog
+              ApplyTransactionRoot = (fun () -> transaction.Snapshot.Catalog <- rebasedTransaction.Catalog) }
+
+        Storage.beginDynamicWriteRebase transaction.Snapshot transaction.BaseCatalog prepare
+        true
+    | _ -> false
+
 let private executeParsedStatement (session: Session) (stmt: Statement) : Session * QueryResult =
     stmt
     |> statementStatusCommand
@@ -2663,28 +2685,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             | Some current -> Executor.withLockingReadStore current (lockWaitTimeout session) evaluate
             | None -> evaluate ()
 
-        let retainsTransaction =
-            session.TransactionTracking.State.Kind = ExplicitTrackedTransaction
-            || lookupVar session "autocommit" |> Option.flatten = Some "0"
-
-        let startsDynamicWriteRebase =
-            retainsTransaction && not (Storage.dynamicWriteRebaseActive store)
-
-        session.Tx
-        |> Option.filter (fun _ -> startsDynamicWriteRebase)
-        |> Option.iter (fun transaction ->
-            Storage.beginDynamicWriteRebase
-                transaction.Snapshot
-                transaction.BaseCatalog
-                (fun baseCatalog privateCatalog ->
-                    let liveCatalog, rebasedTransaction = Storage.beginTransactionSnapshotWithBase session.Store
-                    Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
-
-                    let rebasedStatement = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
-                    Storage.mergeCatalogInto rebasedStatement baseCatalog privateCatalog
-                    liveCatalog,
-                    rebasedStatement.Catalog,
-                    (fun () -> transaction.Snapshot.Catalog <- rebasedTransaction.Catalog)))
+        let startedDynamicWriteRebase = beginDynamicWriteRebaseForStatement session store
 
         let mutable dynamicWriteBase = None
 
@@ -2693,7 +2694,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                 DynamicScope.withValue storedFunctionSession (Some session) (fun () ->
                     Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView)
             finally
-                if startsDynamicWriteRebase then
+                if startedDynamicWriteRebase then
                     dynamicWriteBase <- Storage.finishDynamicWriteRebase store
 
         let columnMetadata = completeResultMetadata session result columnMetadata
