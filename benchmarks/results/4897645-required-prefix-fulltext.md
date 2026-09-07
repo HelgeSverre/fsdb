@@ -27,5 +27,5 @@ mean was about 1.5× the matched MySQL mean. ShortRun uses three measured
 iterations, so these values establish the direction and approximate size of
 the improvement rather than a production throughput guarantee.
 
-Optional, excluded, raised/lowered, soft, phrase, proximity, and grouped
-boolean expressions remain on the general evaluator.
+At this build, optional, excluded, raised/lowered, soft, phrase, proximity, and
+grouped boolean expressions remained on the general evaluator.
