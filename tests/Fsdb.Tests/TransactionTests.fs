@@ -1325,6 +1325,166 @@ let tests =
                   | ResultSet(_, [ [ Some "1"; Some "7"; Some "shared" ] ]) -> ()
                   | result -> failtestf "expected only the first defaulted row, got %A" result)
 
+          testCase "functional defaults participate in transaction key claims"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ =
+                  handle setup "CREATE TABLE tx_expression_key (id INT PRIMARY KEY, base INT, derived INT DEFAULT (base + 1), UNIQUE KEY uq_derived (derived))"
+
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let second, _ = handle second "BEGIN"
+              let first, firstInsert = handle first "INSERT INTO tx_expression_key (id, base) VALUES (1, 10)"
+              Expect.equal firstInsert (Affected 1UL) "the first evaluated default owns its unique key"
+
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle second "INSERT INTO tx_expression_key (id, base) VALUES (2, 10)")
+
+              Expect.isFalse
+                  (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                  "the equivalent evaluated default waits for its key owner"
+
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first evaluated default commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the evaluated-default waiter resumes"
+
+              match waiting.GetAwaiter().GetResult() |> snd with
+              | Err(1062, _) -> ()
+              | result -> failtestf "expected the rebased insert to find the evaluated duplicate, got %A" result
+
+              handle second "ROLLBACK" |> ignore
+
+              match handle setup "SELECT id, base, derived FROM tx_expression_key" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "10"; Some "11" ] ]) -> ()
+              | result -> failtestf "expected only the first evaluated default row, got %A" result
+
+          testCase "a failed prepared insert discards its trigger effects after rebasing"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_prepared_audit (id INT)"
+              let setup, _ =
+                  handle setup "CREATE TABLE tx_prepared_atomic (id INT PRIMARY KEY, base INT, derived INT DEFAULT (base + 1), UNIQUE KEY uq_derived (derived))"
+              let setup, _ =
+                  handle setup "CREATE TRIGGER tx_prepared_before BEFORE INSERT ON tx_prepared_atomic FOR EACH ROW INSERT INTO tx_prepared_audit VALUES (NEW.id)"
+
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+              let second, _ = handle second "BEGIN"
+              let first, firstInsert = handle first "INSERT INTO tx_prepared_atomic (id, base) VALUES (1, 10)"
+              Expect.equal firstInsert (Affected 1UL) "the first prepared statement includes its trigger effect"
+
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle second "INSERT INTO tx_prepared_atomic (id, base) VALUES (2, 10)")
+
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the second prepared statement waits"
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first prepared statement commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the failed prepared statement resumes"
+
+              let second, result = waiting.GetAwaiter().GetResult()
+
+              match result with
+              | Err(1062, _) -> ()
+              | actual -> failtestf "expected the rebased duplicate error, got %A" actual
+
+              match handle second "SELECT id FROM tx_prepared_audit ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | actual -> failtestf "expected only the committed trigger effect, got %A" actual
+
+              handle second "ROLLBACK" |> ignore
+
+          testCase "insert-select and replace-select claim prepared unique keys"
+          <| fun _ ->
+              let run replace =
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  let setup, _ = handle setup "CREATE TABLE tx_select_source (id INT PRIMARY KEY, base INT)"
+                  let setup, _ = handle setup "INSERT INTO tx_select_source VALUES (1, 10), (2, 10)"
+                  let setup, _ =
+                      handle setup "CREATE TABLE tx_select_key (id INT PRIMARY KEY, base INT, derived INT DEFAULT (base + 1), UNIQUE KEY uq_derived (derived))"
+
+                  let verb = if replace then "REPLACE" else "INSERT"
+                  let statement id =
+                      sprintf "%s INTO tx_select_key (id, base) SELECT id, base FROM tx_select_source WHERE id = %d" verb id
+
+                  let first, _ = handle (create 2 store) "BEGIN"
+                  let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+                  let second, _ = handle second "BEGIN"
+                  let first, firstWrite = handle first (statement 1)
+                  Expect.equal firstWrite (Affected 1UL) "the first prepared SELECT row owns its key"
+
+                  let waiting = Threading.Tasks.Task.Run(fun () -> handle second (statement 2))
+                  Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the second prepared SELECT row waits"
+
+                  Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first SELECT write commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the SELECT writer resumes"
+
+                  let second, result = waiting.GetAwaiter().GetResult()
+
+                  if replace then
+                      Expect.equal result (Affected 2UL) "REPLACE deletes the committed conflict before inserting"
+                      Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the rebased replacement commits"
+
+                      match handle setup "SELECT id, base, derived FROM tx_select_key" |> snd with
+                      | ResultSet(_, [ [ Some "2"; Some "10"; Some "11" ] ]) -> ()
+                      | actual -> failtestf "expected the replacement selected by the waiter, got %A" actual
+                  else
+                      match result with
+                      | Err(1062, _) -> ()
+                      | actual -> failtestf "expected the rebased INSERT SELECT duplicate, got %A" actual
+
+                      handle second "ROLLBACK" |> ignore
+
+              run false
+              run true
+
+          testCase "a prepared upsert rebases onto its committed conflict"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ =
+                  handle setup "CREATE TABLE tx_prepared_upsert (id INT PRIMARY KEY, base INT, derived INT DEFAULT (base + 1), marker VARCHAR(20), UNIQUE KEY uq_derived (derived))"
+
+              let upsert id marker =
+                  sprintf "INSERT INTO tx_prepared_upsert (id, base, marker) VALUES (%d, 10, '%s') ON DUPLICATE KEY UPDATE id = VALUES(id), marker = VALUES(marker)" id marker
+
+              let mutable evaluations = 0
+              let registry =
+                  Fsdb.Functions.empty
+                  |> Fsdb.Functions.registerScalar "PREPARE_ONCE" (function
+                      | [ value ] ->
+                          Threading.Interlocked.Increment(&evaluations) |> ignore
+                          value
+                      | _ -> VNull)
+
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second = { create 3 store with CustomFunctions = registry }
+              let second, _ = handle second "SET innodb_lock_wait_timeout = 5"
+              let second, _ = handle second "BEGIN"
+              let first, firstWrite = handle first (upsert 1 "first")
+              Expect.equal firstWrite (Affected 1UL) "the first upsert inserts its prepared key"
+
+              let waiting =
+                  Threading.Tasks.Task.Run(fun () ->
+                      handle
+                          second
+                          "INSERT INTO tx_prepared_upsert (id, base, marker) VALUES (2, 10, PREPARE_ONCE('second')) ON DUPLICATE KEY UPDATE id = VALUES(id), marker = VALUES(marker)")
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the prepared upsert waits for its generated conflict"
+
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first prepared upsert commits"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the prepared upsert resumes"
+
+              let second, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 2UL) "the waiter updates the newly committed conflict"
+              Expect.equal evaluations 1 "the prepared expression is not replayed after the wait"
+              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the rebased upsert commits"
+
+              match handle setup "SELECT id, base, derived, marker FROM tx_prepared_upsert" |> snd with
+              | ResultSet(_, [ [ Some "2"; Some "10"; Some "11"; Some "second" ] ]) -> ()
+              | actual -> failtestf "expected the rebased duplicate update, got %A" actual
+
           testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

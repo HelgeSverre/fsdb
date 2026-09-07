@@ -2663,9 +2663,37 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             | Some current -> Executor.withLockingReadStore current (lockWaitTimeout session) evaluate
             | None -> evaluate ()
 
+        let retainsTransaction =
+            session.TransactionTracking.State.Kind = ExplicitTrackedTransaction
+            || lookupVar session "autocommit" |> Option.flatten = Some "0"
+
+        let startsDynamicWriteRebase =
+            retainsTransaction && not (Storage.dynamicWriteRebaseActive store)
+
+        session.Tx
+        |> Option.filter (fun _ -> startsDynamicWriteRebase)
+        |> Option.iter (fun transaction ->
+            Storage.beginDynamicWriteRebase
+                transaction.Snapshot
+                transaction.BaseCatalog
+                (fun baseCatalog privateCatalog ->
+                    let liveCatalog, rebasedTransaction = Storage.beginTransactionSnapshotWithBase session.Store
+                    Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
+                    transaction.Snapshot.Catalog <- rebasedTransaction.Catalog
+
+                    let rebasedStatement = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
+                    Storage.mergeCatalogInto rebasedStatement baseCatalog privateCatalog
+                    liveCatalog, rebasedStatement.Catalog))
+
+        let mutable dynamicWriteBase = None
+
         let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
-            DynamicScope.withValue storedFunctionSession (Some session) (fun () ->
-                Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView)
+            try
+                DynamicScope.withValue storedFunctionSession (Some session) (fun () ->
+                    Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView)
+            finally
+                if startsDynamicWriteRebase then
+                    dynamicWriteBase <- Storage.finishDynamicWriteRebase store
 
         let columnMetadata = completeResultMetadata session result columnMetadata
 
@@ -2676,6 +2704,12 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
                 LastResultColumnMetadata = columnMetadata
                 PendingFoundRows = calculatedFoundRows
                 UserVariables = variables.UserVariables.Value }
+
+        let session =
+            match session.Tx, dynamicWriteBase with
+            | Some transaction, Some baseCatalog ->
+                { session with Tx = Some { transaction with BaseCatalog = baseCatalog } }
+            | _ -> session
 
         session, result
 

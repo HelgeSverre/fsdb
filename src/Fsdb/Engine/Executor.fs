@@ -16576,6 +16576,39 @@ let rec executeAs
                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
                 | _ -> finishInsertRow runStore db table columns candidate)
 
+    let publishInsertStatement baseCatalog snapshot =
+        if Storage.dynamicWriteRebaseActive store then
+            Storage.adoptTransactionSnapshot store snapshot
+        else
+            Storage.commitCatalogInto store baseCatalog snapshot
+
+    let insertPreparedRows
+        targetStore
+        db
+        table
+        columns
+        rows
+        deferred
+        prepare
+        finish
+        ignoreErrors
+        =
+        if Storage.dynamicWriteRebaseActive targetStore then
+            Storage.insertPreparedRowsWithOrdinal
+                ignoreErrors
+                targetStore
+                db
+                table
+                columns
+                rows
+                deferred
+                prepare
+                finish
+        elif ignoreErrors then
+            insertRowsIgnorePreparedWithOrdinal targetStore db table columns rows deferred prepare finish
+        else
+            insertRowsPreparedWithOrdinal targetStore db table columns rows deferred prepare finish
+
     /// Runs an insert branch's storage write and fires AFTER INSERT triggers with
     /// MySQL's statement atomicity: when triggers exist, the insert and
     /// every body's effects land in a private `beginTransactionSnapshot`
@@ -16596,12 +16629,12 @@ let rec executeAs
         let before = beforeInsertTriggers store db table
         let after = afterInsertTriggers store db table
 
-        match before, after with
-        | [], [] ->
+        match before, after, Storage.dynamicWriteRebaseActive store with
+        | [], [], false ->
             match doInsert store with
             | Ok outcome -> ok outcome
             | Error e -> ids, storageErr e
-        | _, triggers ->
+        | _, triggers, _ ->
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
             match doInsert snapshot with
@@ -16609,7 +16642,7 @@ let rec executeAs
             | Ok outcome when outcome.InsertedRows.IsEmpty ->
                 // Nothing actually inserted (all-duplicate upsert/IGNORE) —
                 // nothing to fire, but the update-path writes still count.
-                Storage.commitCatalogInto store baseCatalog snapshot
+                publishInsertStatement baseCatalog snapshot
                 ok outcome
             | Ok outcome ->
                 let rows = outcome.InsertedRows |> List.map (fun row -> None, Some row)
@@ -16617,7 +16650,7 @@ let rec executeAs
                 match fireTriggers snapshot db table After TriggerInsert triggers rows with
                 | Some err -> ids, err
                 | None ->
-                    Storage.commitCatalogInto store baseCatalog snapshot
+                    publishInsertStatement baseCatalog snapshot
                     ok outcome
 
     let onDuplicateUpdater
@@ -16680,7 +16713,58 @@ let rec executeAs
                         onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate)
                     |> Result.bind computeGenerated
 
-                upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows)
+                if not (Storage.dynamicWriteRebaseActive s) then
+                    upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate foundRows
+                else
+                    let step state (ordinal, values) =
+                        state
+                        |> Result.bind (fun (firstGenerated, lastInsertId, affected, inserted) ->
+                            Storage.prepareInsertCandidate
+                                s
+                                db
+                                table
+                                cols
+                                values
+                                prepare
+                            |> Result.bind (fun candidate ->
+                                upsertRowsWithOrdinal
+                                    s
+                                    db
+                                    table
+                                    None
+                                    [ Array.toList candidate.Values ]
+                                    (fun _ row -> Ok row)
+                                    (fun _ existing row -> applyUpdate ordinal existing row)
+                                    foundRows
+                                |> Result.map (fun outcome ->
+                                    let insertedCandidate = not outcome.InsertedRows.IsEmpty
+                                    let firstGenerated =
+                                        if insertedCandidate then
+                                            let generated =
+                                                candidate.AssignedAutoId
+                                                |> Option.bind (fun (wasGenerated, value) -> if wasGenerated then Some value else None)
+
+                                            Option.orElse firstGenerated generated
+                                        else
+                                            firstGenerated
+
+                                    let lastInsertId =
+                                        if insertedCandidate then outcome.LastInsertId else lastInsertId
+
+                                    firstGenerated,
+                                    lastInsertId,
+                                    affected + outcome.Affected,
+                                    outcome.InsertedRows |> List.fold (fun acc row -> row :: acc) inserted)))
+
+                    rowsValues
+                    |> List.indexed
+                    |> List.fold step (Ok(None, 0L, 0, []))
+                    |> Result.map (fun (generatedId, lastInsertId, affected, inserted) ->
+                        { LastInsertId = Option.defaultValue lastInsertId generatedId
+                          GeneratedId = generatedId
+                          Affected = affected
+                          InsertedRows = List.rev inserted
+                          IgnoredErrors = [] }))
 
     let replaceEvaluatedWith
         (db: string)
@@ -16698,6 +16782,7 @@ let rec executeAs
         let hasTriggers =
             not (beforeInsert.IsEmpty && afterInsert.IsEmpty && beforeDelete.IsEmpty && afterDelete.IsEmpty)
             || viewCheckScope.Value.IsSome
+            || Storage.dynamicWriteRebaseActive store
 
         match hasTriggers, scan store db table with
         | _, Error error -> ids, storageErr error
@@ -16750,6 +16835,8 @@ let rec executeAs
                             (finish rowNumber)
                         |> Result.mapError storageErr
                         |> Result.bind (fun prepared ->
+                            Storage.acquirePreparedInsertWriteTargets snapshot db table prepared.Values
+
                             replaceConflictRows snapshot db table prepared.Values
                             |> Result.mapError storageErr
                             |> Result.bind (fun conflicts ->
@@ -16775,7 +16862,7 @@ let rec executeAs
             match rowsValues |> List.indexed |> List.fold step (Ok(None, None, 0, [])) with
             | Error error -> ids, error
             | Ok(firstAuto, lastExplicit, affected, inserted) ->
-                Storage.commitCatalogInto store baseCatalog snapshot
+                publishInsertStatement baseCatalog snapshot
 
                 let outcome =
                     { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
@@ -18160,10 +18247,16 @@ let rec executeAs
                             | Ok(currentColumns, _) ->
                                 let prepare = prepareFor targetStore currentColumns
 
-                                if load.Ignore then
-                                    insertRowsIgnorePreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare (finishFor targetStore currentColumns)
-                                else
-                                    insertRowsPreparedWithOrdinal targetStore db table cols rowsValues assignedIndices prepare (finishFor targetStore currentColumns))
+                                insertPreparedRows
+                                    targetStore
+                                    db
+                                    table
+                                    cols
+                                    rowsValues
+                                    assignedIndices
+                                    prepare
+                                    (finishFor targetStore currentColumns)
+                                    load.Ignore)
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
         let viewDb, viewName = splitQualified dbName table
@@ -18205,10 +18298,16 @@ let rec executeAs
                             let prepare = prepareInsertRow s db table tableColumns
                             let finish = finishInsertRow s db table tableColumns
 
-                            if ignoreDuplicates then
-                                insertRowsIgnorePrepared s db table cols rowsValues prepare finish
-                            else
-                                insertRowsPrepared s db table cols rowsValues prepare finish)
+                            insertPreparedRows
+                                s
+                                db
+                                table
+                                cols
+                                rowsValues
+                                Set.empty
+                                (fun _ omitted candidate -> prepare omitted candidate)
+                                (fun _ candidate -> finish candidate)
+                                ignoreDuplicates)
                 else
                     upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
 
@@ -18275,10 +18374,16 @@ let rec executeAs
                                 let prepare = prepareInsertRow s db table currentColumns
                                 let finish = finishInsertRow s db table currentColumns
 
-                                if ignoreDuplicates then
-                                    insertRowsIgnorePrepared s db table cols rowsValues prepare finish
-                                else
-                                    insertRowsPrepared s db table cols rowsValues prepare finish)
+                                insertPreparedRows
+                                    s
+                                    db
+                                    table
+                                    cols
+                                    rowsValues
+                                    Set.empty
+                                    (fun _ omitted candidate -> prepare omitted candidate)
+                                    (fun _ candidate -> finish candidate)
+                                    ignoreDuplicates)
                     else
                         upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate
 

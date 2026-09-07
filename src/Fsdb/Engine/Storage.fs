@@ -330,7 +330,9 @@ type TransactionLockContext =
     { Owner: int64
       HeldStripes: Collections.Generic.HashSet<RowLockStripe>
       mutable RollbackWork: int64
-      mutable DeadlockVictim: bool }
+      mutable DeadlockVictim: bool
+      mutable DynamicWriteBase: Catalog option
+      mutable DynamicWriteRebase: (Catalog -> Catalog -> Catalog * Catalog) option }
 
 type LockWait =
     { Blockers: HashSet<int64>
@@ -572,7 +574,9 @@ let beginTransactionContext (store: Store) : Store =
                 { Owner = owner
                   HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
                   RollbackWork = 0L
-                  DeadlockVictim = false } }
+                  DeadlockVictim = false
+                  DynamicWriteBase = None
+                  DynamicWriteRebase = None } }
 
 let beginTransactionWithBase (store: Store) : Catalog * Store =
     let catalog, snapshot = beginTransactionSnapshotWithBase store
@@ -585,10 +589,19 @@ let beginTransactionWithBase (store: Store) : Catalog * Store =
                 { Owner = owner
                   HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
                   RollbackWork = 0L
-                  DeadlockVictim = false } }
+                  DeadlockVictim = false
+                  DynamicWriteBase = None
+                  DynamicWriteRebase = None } }
 
 let carryTransactionLocks (source: Store) (snapshot: Store) : Store =
     { snapshot with TransactionLocks = source.TransactionLocks }
+
+let adoptTransactionSnapshot (target: Store) (source: Store) =
+    target.Catalog <- source.Catalog
+
+    match target.PendingEvents, source.PendingEvents with
+    | Some targetEvents, Some sourceEvents -> targetEvents.AddRange sourceEvents
+    | _ -> ()
 
 let transactionRollbackWork (store: Store) =
     store.TransactionLocks
@@ -606,6 +619,39 @@ let transactionLockStructCount (store: Store) =
 let restoreTransactionRollbackWork (store: Store) work =
     store.TransactionLocks
     |> Option.iter (fun context -> Threading.Interlocked.Exchange(&context.RollbackWork, work) |> ignore)
+
+let beginDynamicWriteRebase
+    (store: Store)
+    (baseCatalog: Catalog)
+    (rebase: Catalog -> Catalog -> Catalog * Catalog)
+    =
+    store.TransactionLocks
+    |> Option.iter (fun context ->
+        context.DynamicWriteBase <- Some baseCatalog
+        context.DynamicWriteRebase <- Some rebase)
+
+let finishDynamicWriteRebase (store: Store) =
+    store.TransactionLocks
+    |> Option.bind (fun context ->
+        context.DynamicWriteRebase <- None
+        let baseCatalog = context.DynamicWriteBase
+        context.DynamicWriteBase <- None
+        baseCatalog)
+
+let dynamicWriteRebaseActive (store: Store) =
+    store.TransactionLocks
+    |> Option.exists (fun context -> context.DynamicWriteRebase.IsSome)
+
+let private rebaseDynamicWrite (store: Store) =
+    match store.TransactionLocks with
+    | Some context ->
+        match context.DynamicWriteBase, context.DynamicWriteRebase with
+        | Some baseCatalog, Some rebase ->
+            let nextBase, catalog = rebase baseCatalog store.Catalog
+            store.Catalog <- catalog
+            context.DynamicWriteBase <- Some nextBase
+        | _ -> ()
+    | None -> ()
 
 let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<RowLockStripe>) =
     for stripe in stripes do
@@ -2977,7 +3023,9 @@ let private withWriteLocksFor
             { Owner = store.NextLockOwnerId()
               HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
               RollbackWork = 0L
-              DeadlockVictim = false },
+              DeadlockVictim = false
+              DynamicWriteBase = None
+              DynamicWriteRebase = None },
             true
 
     let deadline = DateTime.UtcNow + timeout
@@ -3021,6 +3069,23 @@ let acquireTransactionWriteTargets
     match store.TransactionLocks with
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
+
+let internal acquirePreparedInsertWriteTargets
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (candidate: Value[])
+    : unit =
+    match tryInsertLockTargets store dbName tableName None [ candidate |> Array.toList |> List.map Some ] with
+    | Some targets when not targets.Keys.IsEmpty ->
+        withInsertLocks store dbName tableName targets.RowIds targets.Keys (fun () ->
+            rebaseDynamicWrite store
+
+            if store.TransactionLocks.IsSome then
+                match tryInsertLockTargets store dbName tableName None [ candidate |> Array.toList |> List.map Some ] with
+                | Some current -> withInsertLocks store dbName tableName current.RowIds current.Keys ignore
+                | None -> ())
+    | _ -> ()
 
 let acquireTransactionReadTargets
     (timeout: TimeSpan)
@@ -6929,6 +6994,69 @@ let internal insertPreparedCandidate
           InsertedRows = [ candidate ]
           IgnoredErrors = [] })
 
+let internal insertPreparedRowsWithOrdinal
+    (ignoreErrors: bool)
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (deferred: Set<int>)
+    (prepare: int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (finish: int -> Value[] -> Result<Value[], StorageError>)
+    : Result<InsertOutcome, StorageError> =
+    let step state (ordinal, values) =
+        state
+        |> Result.bind (fun (firstGenerated, lastExplicit, affected, inserted, ignored) ->
+            let prepared =
+                prepareInsertCandidateWithDeferred
+                    store
+                    dbName
+                    tableName
+                    columns
+                    values
+                    deferred
+                    (prepare ordinal)
+                    (finish ordinal)
+
+            match prepared with
+            | Error(ColumnCountMismatch _ as error) -> Error error
+            | Error error when ignoreErrors -> Ok(firstGenerated, lastExplicit, affected, inserted, error :: ignored)
+            | Error error -> Error error
+            | Ok candidate ->
+                acquirePreparedInsertWriteTargets store dbName tableName candidate.Values
+
+                match insertPreparedCandidate store dbName tableName candidate with
+                | Error error when ignoreErrors -> Ok(firstGenerated, lastExplicit, affected, inserted, error :: ignored)
+                | Error error -> Error error
+                | Ok outcome ->
+                    let firstGenerated = Option.orElse firstGenerated outcome.GeneratedId
+                    let lastExplicit =
+                        match candidate.AssignedAutoId with
+                        | Some(false, value) -> Some value
+                        | _ -> lastExplicit
+
+                    Ok(
+                        firstGenerated,
+                        lastExplicit,
+                        affected + outcome.Affected,
+                        outcome.InsertedRows |> List.fold (fun acc row -> row :: acc) inserted,
+                        ignored
+                    ))
+
+    rowsIn
+    |> List.indexed
+    |> List.fold
+        (fun state indexed ->
+            Diagnostics.withRowNumber (fst indexed + 1) (fun () -> step state indexed))
+        (Ok(None, None, 0, [], []))
+    |> Result.map (fun (firstGenerated, lastExplicit, affected, inserted, ignored) ->
+        { LastInsertId = Option.defaultValue 0L (Option.orElse firstGenerated lastExplicit)
+          GeneratedId = firstGenerated
+          Affected = affected
+          InsertedRows = List.rev inserted
+          IgnoredErrors = List.rev ignored })
+
 /// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
 /// NULL/unique/foreign-key constraints is skipped instead of failing the
 /// statement — MySQL downgrades the error to a warning per row. The
@@ -7196,7 +7324,10 @@ and upsertRowsWithOrdinal
 
         let result =
             match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
-            | Some targets when not targets.Keys.IsEmpty -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
+            | Some targets when not targets.Keys.IsEmpty ->
+                withInsertLocks store dbName tableName targets.RowIds targets.Keys (fun () ->
+                    rebaseDynamicWrite store
+                    publish ())
             | _ -> publish ()
 
         match result with
