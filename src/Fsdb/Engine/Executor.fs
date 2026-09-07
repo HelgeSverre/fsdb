@@ -9768,6 +9768,22 @@ and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: Table
 and private indexOrderTerms (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
+    let projectionAlias name =
+        select.Projections
+        |> List.choose (function
+            | expression, Some alias when System.String.Equals(alias, name, System.StringComparison.OrdinalIgnoreCase) ->
+                Some expression
+            | _ -> None)
+        |> List.tryExactlyOne
+
+    let resolveProjectionReference expression =
+        match resolveOrderPosition select.Projections expression with
+        | Col name as column ->
+            match projectionAlias name with
+            | Some projected -> projected, true
+            | None -> column, false
+        | projected -> projected, true
+
     let directBareColumn name =
         let directProjections =
             select.Projections
@@ -9779,8 +9795,9 @@ and private indexOrderTerms (tref: TableRef) (select: SelectStmt) : IndexOrderTe
 
         if directProjections |> List.forall ((<>) 2) && List.sum directProjections <= 1 then Some name else None
 
-    let directColumn expression =
+    let directColumn projectionReference expression =
         match expression with
+        | Col name when projectionReference -> Some(name, None)
         | Col name -> directBareColumn name |> Option.map (fun column -> column, None)
         | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
             Some(name, None)
@@ -9788,7 +9805,9 @@ and private indexOrderTerms (tref: TableRef) (select: SelectStmt) : IndexOrderTe
 
     select.OrderBy
     |> traverse (fun (expression, direction) ->
-        match directColumn expression with
+        let expression, projectionReference = resolveProjectionReference expression
+
+        match directColumn projectionReference expression with
         | Some(column, transform) ->
             Ok
                 { Column = column
@@ -10994,17 +11013,24 @@ and private resolveOrderKey
         | [] -> evalOrderKey ctx (Col name)
     | e -> evalOrderKey ctx e
 
-and private groupByIndexTerms (tref: TableRef) (groupExprs: Expr list) : IndexOrderTerm list option =
-    groupExprs
-    |> traverse (fun expression ->
-        match indexedColumnFor tref expression with
-        | Some(column, transform) ->
-            Ok
-                { Column = column
-                  Transform = transform
-                  Direction = Asc }
-        | None -> Error())
+and private groupByIndexTerms (table: Table) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
+    let resolved =
+        select.GroupBy
+        |> traverse (resolveGroupByRef (columnIndexOf table.Columns) select.Projections)
+
+    resolved
     |> Result.toOption
+    |> Option.bind (fun groupExprs ->
+        groupExprs
+        |> traverse (fun expression ->
+            match indexedColumnFor tref expression with
+            | Some(column, transform) ->
+                Ok
+                    { Column = column
+                      Transform = transform
+                      Direction = Asc }
+            | None -> Error())
+        |> Result.toOption)
 
 and private equalityPinsOneStoredKey (table: Table) (name: string) (literal: Value) =
     Storage.resolveColumn table.Columns name
@@ -11167,15 +11193,15 @@ and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) 
     if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
         None
     else
-        groupByIndexTerms tref select.GroupBy
-        |> Option.bind (fun groupTerms ->
-            tryGroupingIndexOrder store dbName tref select.Where groupTerms
-            |> Option.map (fun lookup ->
-                { KeyName = lookup.OrderedIndexName
-                  ColumnIndices = lookup.OrderedColumnIndices
-                  Columns = lookup.OrderedColumns
-                  EstimatedRows = lookup.OrderedRowCount
-                  Rows = lookup.OrderedRows }))
+        physicalFastPathTable store dbName tref
+        |> Option.bind (fun table -> groupByIndexTerms table tref select)
+        |> Option.bind (tryGroupingIndexOrder store dbName tref select.Where)
+        |> Option.map (fun lookup ->
+            { KeyName = lookup.OrderedIndexName
+              ColumnIndices = lookup.OrderedColumnIndices
+              Columns = lookup.OrderedColumns
+              EstimatedRows = lookup.OrderedRowCount
+              Rows = lookup.OrderedRows })
 
 and private validateOnlyFullGroupBy
     (store: Store)

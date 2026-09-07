@@ -3900,6 +3900,12 @@ let tests =
                             (referencedPlan.Extra |> Option.exists (_.Contains("temporary")))
                             "projection references keep groups contiguous"
 
+                    let sourceFirstPlan =
+                        runDefault store "EXPLAIN SELECT UPPER(name) AS id, COUNT(*) FROM t GROUP BY id"
+                        |> explainRow
+
+                    Expect.equal sourceFirstPlan.Key (Some "PRIMARY") "GROUP BY prefers a source column over a colliding alias"
+
                 testCase "GROUP BY streams composite functional keys and fixed-prefix suffixes"
                 <| fun _ ->
                     let store = newStore ()
@@ -6173,6 +6179,12 @@ let tests =
                         Expect.isFalse
                             (referencedPlan.Extra |> Option.exists (_.Contains("filesort")))
                             "projection references avoid a filesort"
+
+                    let aliasFirstPlan =
+                        runDefault store "EXPLAIN SELECT UPPER(name) AS id FROM indexed ORDER BY id LIMIT 2"
+                        |> explainRow
+
+                    Expect.equal aliasFirstPlan.Key (Some "ix_upper") "ORDER BY prefers a projection alias over a source column"
 
                     let rawPlan =
                         runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY name"
