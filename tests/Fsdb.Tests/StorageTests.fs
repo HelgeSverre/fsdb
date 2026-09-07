@@ -2062,6 +2062,38 @@ let tests =
                     Expect.equal primaryRange ("PRIMARY", [ VInt 2L; VInt 3L ]) "primary keys share the ordered access path"
                     Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
 
+                testCase "an ordered lookup counts adjacent SQL-equal keys without resolving rows"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let index = { Name = "idx_age"; KeyColumns = indexColumns [ "age" ]; Unique = false; Visible = true; Kind = BTree }
+                    alterTable store defaultDatabase "users" [ AddIndex index ] |> Result.defaultWith (failtestf "add index failed: %A")
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VInt 1L; VString "alice"; VInt 30L ]
+                          [ VInt 2L; VString "bob"; VInt 25L ]
+                          [ VInt 3L; VString "carol"; VInt 30L ]
+                          [ VInt 4L; VString "dave"; VNull ] ]
+                    |> Result.defaultWith (failtestf "insert failed: %A")
+                    |> ignore
+
+                    let lookup =
+                        [ { OrderedColumnName = "age"
+                            OrderedTransform = None
+                            OrderedDirection = Asc } ]
+                        |> tryOrderedIndexLookup store defaultDatabase "users"
+                        |> Option.defaultWith (fun () -> failtest "expected an ordered lookup")
+
+                    let groups = lookup.OrderedGroups |> List.ofSeq
+
+                    Expect.equal
+                        groups
+                        [ [ VNull ], 1; [ VInt 25L ], 1; [ VInt 30L ], 2 ]
+                        "the index groups NULL and duplicate keys in its traversal order"
+
                 testCase "a composite secondary index follows row mutations incrementally"
                 <| fun _ ->
                     let store = withUsersTable ()

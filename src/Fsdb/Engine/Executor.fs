@@ -147,7 +147,8 @@ type private IndexOrderPlan =
       ColumnIndices: int list
       Columns: ColumnDef list
       EstimatedRows: int
-      Rows: Value[] seq }
+      Rows: Value[] seq
+      Groups: (Value list * int) seq option }
 
 type private IndexOrderTerm =
     { Column: string
@@ -156,7 +157,11 @@ type private IndexOrderTerm =
 
 type private GroupInputOrder =
     | ArbitraryGroupRows
-    | ContiguousGroupRows
+    | ContiguousGroupRows of (Value list * int) seq option
+
+type private IndexedGroupProjection =
+    | GroupKey of int
+    | GroupCount
 
 type private OrderedIndexCandidate =
     { Terms: IndexOrderTerm list }
@@ -8831,7 +8836,7 @@ and private runUnlockedSelectStmt
             | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, [] ->
             match tryGroupIndexOrder store dbName tref select with
-            | Some plan -> runResolved ContiguousGroupRows plan.Columns plan.Rows None select
+            | Some plan -> runResolved (ContiguousGroupRows plan.Groups) plan.Columns plan.Rows None select
             | None ->
                 match tryIndexedSemiJoin store registry dbName select tref with
                 | Error error -> error, [], []
@@ -9796,7 +9801,14 @@ and private tryIndexOrder
     else
         indexOrderTerms tref select
         |> Option.bind (fun orderedColumns ->
-            let plan (keyName: string) (indices: int list) (columns: ColumnDef list) (count: int) (rows: Value[] seq) =
+            let plan
+                (keyName: string)
+                (indices: int list)
+                (columns: ColumnDef list)
+                (count: int)
+                (rows: Value[] seq)
+                groups
+                =
                 let unsupported =
                     indices
                     |> List.exists (fun index ->
@@ -9813,10 +9825,17 @@ and private tryIndexOrder
                           ColumnIndices = indices
                           Columns = columns
                           EstimatedRows = count
-                          Rows = rows }
+                          Rows = rows
+                          Groups = groups }
 
             let planLookup (lookup: Storage.OrderedLookup) =
-                plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows
+                plan
+                    lookup.OrderedIndexName
+                    lookup.OrderedColumnIndices
+                    lookup.OrderedColumns
+                    lookup.OrderedRowCount
+                    lookup.OrderedRows
+                    (Some lookup.OrderedGroups)
 
             let completeIndexOrder () =
                 orderedColumns
@@ -9834,7 +9853,7 @@ and private tryIndexOrder
                         |> Option.defaultValue (None, None)
 
                     Storage.trySecondaryOrderedLookup store tableDb tref.Table term.Column lower upper term.Direction
-                    |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
+                    |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows None)
                     |> Option.orElseWith completeIndexOrder
                 | _ -> completeIndexOrder ()
 
@@ -11155,7 +11174,8 @@ and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) 
               ColumnIndices = lookup.OrderedColumnIndices
               Columns = lookup.OrderedColumns
               EstimatedRows = lookup.OrderedRowCount
-              Rows = lookup.OrderedRows })
+              Rows = lookup.OrderedRows
+              Groups = Some lookup.OrderedGroups })
 
 and private validateOnlyFullGroupBy
     (store: Store)
@@ -11558,7 +11578,68 @@ and private runGroupedSelect
     | Ok probeProjected ->
         let colNames = probeProjected |> List.map fst
 
-        if isPlainCountStarSelect registry select then
+        let tryIndexOnlyCountGroups () =
+            let simpleShape =
+                select.Where.IsNone
+                && select.Having.IsNone
+                && select.OrderBy.IsEmpty
+                && select.Limit.IsNone
+                && select.Offset.IsNone
+                && select.Windows.IsEmpty
+                && select.Ctes.IsEmpty
+                && select.IntoVariables.IsEmpty
+                && select.Locking.IsEmpty
+                && not select.Distinct
+                && not select.CalculateFoundRows
+                && not select.Rollup
+
+            let classifyProjection (expression, _) =
+                match expression with
+                | FuncCall(name, [ Star None ])
+                    when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
+                         && Functions.isUnmodifiedBuiltinAggregate name registry ->
+                    Some GroupCount
+                | _ -> groupExprs |> List.tryFindIndex ((=) expression) |> Option.map GroupKey
+
+            match groupInputOrder with
+            | ContiguousGroupRows(Some groups) when simpleShape ->
+                let projections = select.Projections |> List.map classifyProjection
+
+                if projections |> List.exists Option.isNone then
+                    None
+                else
+                    let projections = List.choose id projections
+
+                    let projected =
+                        groups
+                        |> Seq.mapi (fun position (key, count) ->
+                            Limits.checkQueryCancellation position
+
+                            List.map2
+                                (fun name projection ->
+                                    let value =
+                                        match projection with
+                                        | GroupKey index -> key.[index]
+                                        | GroupCount -> VInt(int64 count)
+
+                                    name, value)
+                                colNames
+                                projections)
+                        |> List.ofSeq
+
+                    Limits.checkQueryCancellation 0
+                    let groupCtx = ctxFor (probeRow columns)
+                    let formats = outputColumnFormats groupCtx columns select.Projections
+                    let wireOverrides = outputColumnWireOverridesFor false groupCtx columns select
+                    let rendered = projected |> List.map (renderOutputCols formats)
+                    let typed = projected |> List.map (List.map snd >> Array.ofList)
+                    let metadata = columnMetadataOf colNames.Length projected |> applyWireOverrides wireOverrides
+                    Some(ResultSet(colNames, rendered), metadata, typed)
+            | _ -> None
+
+        match tryIndexOnlyCountGroups () with
+        | Some result -> result
+        | None when isPlainCountStarSelect registry select ->
             let mutable count = 0L
             let mutable failure = None
             let mutable processed = 0
@@ -11586,7 +11667,7 @@ and private runGroupedSelect
                 let rendered = renderOutputCols formats projected
                 let metadata = columnMetadataOf 1 [ projected ] |> applyWireOverrides wireOverrides
                 ResultSet(colNames, [ rendered ]), metadata, [ [| VInt count |] ]
-        else
+        | None ->
         let collations = groupExprs |> List.map (keyCollation (ctxFor (probeRow columns)))
         let comparer = SqlValueKeyComparer(collations, false)
         let equalityComparer = comparer :> IEqualityComparer<Value[]>
@@ -11628,7 +11709,7 @@ and private runGroupedSelect
                         let key = Array.ofList values
 
                         match groupInputOrder with
-                        | ContiguousGroupRows -> addOrdered key row
+                        | ContiguousGroupRows _ -> addOrdered key row
                         | ArbitraryGroupRows -> addUnordered key row
 
                         None))

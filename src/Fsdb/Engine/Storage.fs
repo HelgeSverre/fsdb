@@ -4670,6 +4670,47 @@ let private orderedEntries (traversal: IndexTraversal) (slice: SecondaryOrderSli
                 after <- first
         }
 
+let private indexedValuesEqual collationName left right =
+    match left, right with
+    | VString left, VString right ->
+        collationName
+        |> Option.bind Collation.tryFind
+        |> Option.defaultValue Collation.defaultCollation
+        |> fun collation -> collation.Equals left right
+    | _ -> left = right
+
+let private indexedPrefixesEqual length (left: SecondaryOrderEntry) (right: SecondaryOrderEntry) =
+    let rec loop remaining collations leftValues rightValues =
+        match remaining, collations, leftValues, rightValues with
+        | 0, _, _, _ -> true
+        | _, collation :: restCollations, leftValue :: restLeft, rightValue :: restRight ->
+            indexedValuesEqual collation leftValue rightValue
+            && loop (remaining - 1) restCollations restLeft restRight
+        | _ -> false
+
+    loop length left.CollationNames left.Values right.Values
+
+let private orderedGroupCounts keyLength (entries: SecondaryOrderEntry seq) : (Value list * int) seq =
+    seq {
+        use enumerator = entries.GetEnumerator()
+
+        if enumerator.MoveNext() then
+            let mutable representative = enumerator.Current
+            let mutable count = 1
+
+            while enumerator.MoveNext() do
+                let entry = enumerator.Current
+
+                if indexedPrefixesEqual keyLength representative entry then
+                    count <- count + 1
+                else
+                    yield List.truncate keyLength representative.Values, count
+                    representative <- entry
+                    count <- 1
+
+            yield List.truncate keyLength representative.Values, count
+    }
+
 let private tryOrderedLookup
     (store: Store)
     (dbName: string)
@@ -4712,7 +4753,8 @@ type OrderedLookup =
       OrderedColumnIndices: int list
       OrderedColumns: ColumnDef list
       OrderedRowCount: int
-      OrderedRows: Value[] seq }
+      OrderedRows: Value[] seq
+      OrderedGroups: (Value list * int) seq }
 
 type OrderedKeyTerm =
     { OrderedColumnName: string
@@ -4768,7 +4810,8 @@ let tryOrderedIndexLookup
                       OrderedRowCount = entries.Count
                       OrderedRows =
                         orderedEntries traversal slice
-                        |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId) }))))
+                        |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
+                      OrderedGroups = orderedEntries traversal slice |> orderedGroupCounts indices.Length }))))
 
 let tryCompositeOrderedLookup
     (store: Store)
