@@ -3062,6 +3062,33 @@ let tests =
                     let independent = [ 1..40 ] |> List.map (fun _ -> "NOT TRUE") |> String.concat ","
                     Expect.isOk (parseWithOptions options ("SELECT " + independent)) "independent prefixes are not a chain"
 
+                testCase "parallel parses isolate options, placeholders, and stored-program syntax"
+                <| fun _ ->
+                    let ansi = { defaultOptions with AnsiQuotes = true }
+
+                    let cases =
+                        [ (fun () -> parseWithOptions defaultOptions "SELECT \"label\", ?, ((? + ?))")
+                          (fun () -> parseWithOptions ansi "SELECT \"label\", ?, ((? + ?))")
+                          (fun () -> parseStoredStatementWithOptions defaultOptions "SELECT ?, ? LIMIT local_count") ]
+
+                    let expected = cases |> List.map (fun parseCase -> parseCase ())
+                    expected |> List.iter (fun result -> Expect.isOk result "the isolated baseline parses")
+
+                    use start = new System.Threading.ManualResetEventSlim(false)
+
+                    let tasks =
+                        [| for worker in 0..11 ->
+                               System.Threading.Tasks.Task.Run(fun () ->
+                                   start.Wait()
+                                   let parseCase = cases.[worker % cases.Length]
+                                   let expectedCase = expected.[worker % expected.Length]
+
+                                   for _ in 1..100 do
+                                       Expect.equal (parseCase ()) expectedCase "parser state stays local to one parse") |]
+
+                    start.Set()
+                    System.Threading.Tasks.Task.WhenAll(tasks).GetAwaiter().GetResult()
+
                 testCase "redundant SELECT parentheses have a separate backtracking limit"
                 <| fun _ ->
                     let query depth = String.replicate depth "(" + "SELECT 1" + String.replicate depth ")"

@@ -168,8 +168,23 @@ let trySplitTopLevelKeywordWithOptions
     |> Option.map (fun index ->
         text.Substring(0, index).Trim(), text.Substring(index + keyword.Length).Trim())
 
-let private currentOptions = System.Threading.AsyncLocal<ParserOptions>()
-let private storedProgramSyntax = System.Threading.AsyncLocal<bool>()
+type private ParserState =
+    { Options: ParserOptions
+      StoredProgramSyntax: bool
+      mutable ExpressionDepth: int
+      mutable PlaceholderCount: int }
+
+let private currentState = System.Threading.AsyncLocal<ParserState option>()
+
+let private parserState () =
+    currentState.Value
+    |> Option.defaultWith (fun () -> invalidOp "parser state is unavailable outside a parse")
+
+let private activeOptions () =
+    currentState.Value |> Option.map _.Options |> Option.defaultValue defaultOptions
+
+let private storedProgramSyntaxEnabled () =
+    currentState.Value |> Option.exists _.StoredProgramSyntax
 
 let private whenOption
     (enabled: ParserOptions -> bool)
@@ -177,7 +192,7 @@ let private whenOption
     (parser: Parser<'a, unit>)
     : Parser<'a, unit> =
     fun stream ->
-        if enabled currentOptions.Value then
+        if enabled (activeOptions ()) then
             parser stream
         else
             (fail message) stream
@@ -409,7 +424,7 @@ let private keyword (s: string) : Parser<unit, unit> =
 let private functionOpenParen whitespaceSensitive : Parser<unit, unit> =
     if whitespaceSensitive then
         fun stream ->
-            if currentOptions.Value.IgnoreSpace then
+            if (activeOptions ()).IgnoreSpace then
                 (spaces >>. pchar '(' >>. ws) stream
             else
                 (pchar '(' >>. ws) stream
@@ -562,7 +577,7 @@ let private bareIdent: Parser<string, unit> =
         if
             reservedWords.Contains w
             || charsetIntroducerNames.Contains w
-            || currentOptions.Value.IgnoreSpace && whitespaceSensitiveFunctionNames.Contains w
+            || (activeOptions ()).IgnoreSpace && whitespaceSensitiveFunctionNames.Contains w
         then
             fail (sprintf "'%s' is a reserved keyword" w)
         else
@@ -894,7 +909,7 @@ let private columnTypeWithDisplay: Parser<ColumnType * NumericDisplay option, un
                       let width, decimals = size |> Option.map fst, size |> Option.bind snd
                       preturn (makeType tail.Unsigned, numericDisplay width decimals tail.ZeroFill size.IsSome)
 
-          floatingType (keyword "REAL") (fun unsigned -> if currentOptions.Value.RealAsFloat then TFloat unsigned else TDouble unsigned)
+          floatingType (keyword "REAL") (fun unsigned -> if (activeOptions ()).RealAsFloat then TFloat unsigned else TDouble unsigned)
           floatingType (keyword "DOUBLE" >>. optional (keyword "PRECISION")) TDouble
           keyword "FLOAT"
           >>. opt numericWidth
@@ -939,13 +954,9 @@ let private columnType: Parser<ColumnType, unit> = columnTypeWithDisplay |>> fst
 /// FParsec recurses on the real call stack with no depth check of its own —
 /// `((((...1000s deep...))))`, `NOT NOT NOT ...`, or nested subqueries/CASE
 /// would otherwise blow the stack with an uncatchable `StackOverflowException`
-/// that kills the whole process instead of a clean syntax error. `AsyncLocal`
-/// so concurrent connections parsing at the same time don't share a counter —
-/// same pattern as `placeholderCounterLocal` below. `expr` and `notExpr` are
-/// wrapped with this (see their definitions) since every parenthesized
-/// expression, subquery, `CASE`, and `NOT` chain recurses back through one of
-/// the two.
-let private exprDepth = System.Threading.AsyncLocal<int>()
+/// that kills the whole process instead of a clean syntax error. `expr` and
+/// `notExpr` are wrapped with this since every parenthesized expression,
+/// subquery, `CASE`, and `NOT` chain recurses back through one of the two.
 let private maxExprDepth = 32
 // Nested plain SELECT groups take both speculative set-operation branches.
 // Eight levels keep ordinary redundant grouping while bounding that retry
@@ -963,7 +974,7 @@ let private exceedsAmbiguousSelectParenthesisDepth (sql: string) =
     while index < sql.Length && not exceeded do
         match quote with
         | Some q when
-            not currentOptions.Value.NoBackslashEscapes
+            not (activeOptions ()).NoBackslashEscapes
             && sql.[index] = '\\'
             && q <> '`'
             && index + 1 < sql.Length
@@ -1037,7 +1048,7 @@ let private exceedsHighNotDepth (sql: string) =
 
     while index < sql.Length && not exceeded do
         match quote with
-        | Some q when not currentOptions.Value.NoBackslashEscapes && q <> '`' && sql.[index] = '\\' ->
+        | Some q when not (activeOptions ()).NoBackslashEscapes && q <> '`' && sql.[index] = '\\' ->
             index <- min sql.Length (index + 2)
         | Some q when sql.[index] = q && index + 1 < sql.Length && sql.[index + 1] = q -> index <- index + 2
         | Some q when sql.[index] = q ->
@@ -1151,15 +1162,17 @@ let private exceedsParenthesisDepthLimit (sql: string) =
 
 let private depthGuard (p: Parser<'a, unit>) : Parser<'a, unit> =
     fun stream ->
-        if exprDepth.Value >= maxExprDepth then
+        let state = parserState ()
+
+        if state.ExpressionDepth >= maxExprDepth then
             (fail "expression nested too deeply") stream
         else
-            exprDepth.Value <- exprDepth.Value + 1
+            state.ExpressionDepth <- state.ExpressionDepth + 1
 
             try
                 p stream
             finally
-                exprDepth.Value <- exprDepth.Value - 1
+                state.ExpressionDepth <- state.ExpressionDepth - 1
 
 // Parenthesized expressions, function-call arguments and `IN (...)` lists all recurse back
 // into the full expression grammar, which is itself built on top of them —
@@ -1825,18 +1838,16 @@ let private identAtom: Parser<Expr, unit> =
                         <|> (qualifiedIdentifier |>> fun col -> QualifiedCol(name, col)))
                    preturn (Col name) ])
 
-/// `?` parameter placeholder, numbered by SQL-text position via an
-/// `AsyncLocal` counter (reset per `parse` call, so concurrent connections'
-/// parses never share one). The counter stays out of FParsec user state, so
-/// every parser keeps its `unit` state and the placeholder index rides in the
-/// AST node instead.
-let private placeholderCounterLocal = System.Threading.AsyncLocal<int>()
+/// `?` parameter placeholder, numbered by SQL-text position. The counter
+/// stays out of FParsec user state, so every parser keeps its `unit` state and
+/// the placeholder index rides in the AST node instead.
 
 let private placeholderAtom: Parser<Expr, unit> =
     pchar '?' .>> ws
     |>> (fun _ ->
-        let n = placeholderCounterLocal.Value
-        placeholderCounterLocal.Value <- n + 1
+        let state = parserState ()
+        let n = state.PlaceholderCount
+        state.PlaceholderCount <- n + 1
         Placeholder n)
 
 /// User-variable names are case-insensitive but otherwise opaque to the
@@ -2006,7 +2017,7 @@ opp.AddOperator(
         ws,
         5,
         Associativity.Left,
-        (fun a b -> BinOp((if currentOptions.Value.NoUnsignedSubtraction then SignedSub else Sub), a, b))
+        (fun a b -> BinOp((if (activeOptions ()).NoUnsignedSubtraction then SignedSub else Sub), a, b))
     )
 )
 opp.AddOperator(InfixOperator("*", ws, 6, Associativity.Left, (fun a b -> BinOp(Mul, a, b))))
@@ -2166,7 +2177,7 @@ let private notExpr, notExprRef = createParserForwardedToRef<Expr, unit> ()
 
 notExprRef.Value <-
     depthGuard (fun stream ->
-        if currentOptions.Value.HighNotPrecedence then
+        if (activeOptions ()).HighNotPrecedence then
             comparisonExpr stream
         else
             ((keyword "NOT" >>. notExpr |>> Not) <|> comparisonExpr) stream)
@@ -3277,7 +3288,7 @@ let private orderKey: Parser<OrderKey, unit> =
 let private limitTok: Parser<Expr, unit> =
     let localVariable =
         fun stream ->
-            if storedProgramSyntax.Value then
+            if storedProgramSyntaxEnabled () then
                 (identifier |>> Col) stream
             else
                 (fail "stored program variable") stream
@@ -4601,7 +4612,7 @@ let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Res
             Result.Error "expression nested too deeply"
         elif exceedsAmbiguousSelectParenthesisDepth sql then
             Result.Error "SELECT nested too deeply"
-        elif currentOptions.Value.HighNotPrecedence && exceedsHighNotDepth sql then
+        elif (activeOptions ()).HighNotPrecedence && exceedsHighNotDepth sql then
             Result.Error "expression nested too deeply"
         else
             match run parser sql with
@@ -4610,18 +4621,26 @@ let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Res
     with ex ->
         Result.Error ex.Message
 
-let private withParserState (options: ParserOptions) (sql: string) parse =
-    DynamicScope.withValue currentOptions options (fun () ->
-        DynamicScope.withValue placeholderCounterLocal 0 (fun () ->
-            DynamicScope.withValue exprDepth 0 (fun () ->
-                sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse)))
+let private withParserState storedProgramSyntax (options: ParserOptions) (sql: string) parse =
+    let state =
+        { Options = options
+          StoredProgramSyntax = storedProgramSyntax
+          ExpressionDepth = 0
+          PlaceholderCount = 0 }
+
+    DynamicScope.withValue currentState (Some state) (fun () ->
+        sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse)
+
+let private withStatementParserState options sql parse =
+    withParserState false options sql parse
 
 let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
     let full = ws >>. statement .>> opt (sym ";") .>> eof
-    withParserState options sql (runWithDepthLimit full)
+    withStatementParserState options sql (runWithDepthLimit full)
 
 let parseStoredStatementWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
-    DynamicScope.withValue storedProgramSyntax true (fun () -> parseWithOptions options sql)
+    let full = ws >>. statement .>> opt (sym ";") .>> eof
+    withParserState true options sql (runWithDepthLimit full)
 
 let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
     parseWithOptions { defaultOptions with AnsiQuotes = enabled } sql
@@ -4681,7 +4700,7 @@ let private maxLoadDataTerminatorLength = 16
 let parseLocalLoadWithOptions (options: ParserOptions) (sql: string) : Result<LocalLoad, string> =
     let parser = ws >>. localLoadData .>> opt (sym ";") .>> eof
 
-    withParserState options sql (runWithDepthLimit parser)
+    withStatementParserState options sql (runWithDepthLimit parser)
     |> Result.bind (fun load ->
         let validMarker (value: string) = value.Length <= maxLoadDataMarkerLength
         // Multi-character terminators are useful for imports, but matching
@@ -4740,7 +4759,7 @@ let private boundedLockList (tableLock: Parser<ExplicitTableLock, unit>) =
 
 let parseTableLocksWithOptions (options: ParserOptions) (sql: string) : Result<ExplicitTableLock list, string> =
     let parser = ws >>. keyword "LOCK" >>. keyword "TABLES" >>. boundedLockList explicitTableLock .>> opt (sym ";") .>> eof
-    withParserState options sql (runWithDepthLimit parser)
+    withStatementParserState options sql (runWithDepthLimit parser)
 
 let parseTableLocks (sql: string) : Result<ExplicitTableLock list, string> =
     parseTableLocksWithOptions defaultOptions sql
@@ -4768,7 +4787,7 @@ let parseFlushTableLocksWithOptions (options: ParserOptions) (sql: string) : Res
         .>> opt (sym ";")
         .>> eof
 
-    withParserState options sql (runWithDepthLimit parser)
+    withStatementParserState options sql (runWithDepthLimit parser)
 
 let parseFlushTableLocks (sql: string) : Result<ExplicitTableLock list, string> =
     parseFlushTableLocksWithOptions defaultOptions sql
@@ -4797,7 +4816,7 @@ let parsePartitionMaintenanceWithOptions
         .>> opt (sym ";")
         .>> eof
 
-    withParserState options sql (runWithDepthLimit parser)
+    withStatementParserState options sql (runWithDepthLimit parser)
 
 let parsePartitionMaintenance (sql: string) : Result<string * string * string list option, string> =
     parsePartitionMaintenanceWithOptions defaultOptions sql
@@ -4850,7 +4869,7 @@ let private handlerCommand =
 let parseHandlerWithOptions (options: ParserOptions) (sql: string) : Result<HandlerCommand, string> =
     let parser = ws >>. handlerCommand .>> opt (sym ";") .>> eof
 
-    withParserState options sql (runWithDepthLimit parser)
+    withStatementParserState options sql (runWithDepthLimit parser)
     |> Result.bind (fun command ->
         let expressions =
             match command with
@@ -5001,13 +5020,13 @@ let splitStatements (sql: string) : Result<string list, string> =
 /// guards so damaged catalog text fails as a normal schema error rather
 /// than escaping through the query worker.
 let parseExpressionWithOptions (options: ParserOptions) (sql: string) : Result<Expr, string> =
-    withParserState options sql (runWithDepthLimit (ws >>. expr .>> eof))
+    withStatementParserState options sql (runWithDepthLimit (ws >>. expr .>> eof))
 
 let parseExpression (sql: string) : Result<Expr, string> =
     parseExpressionWithOptions defaultOptions sql
 
 let parseColumnTypeWithOptions (options: ParserOptions) (sql: string) : Result<ColumnType, string> =
-    withParserState options sql (runWithDepthLimit (ws >>. columnType .>> eof))
+    withStatementParserState options sql (runWithDepthLimit (ws >>. columnType .>> eof))
 
 let parseColumnType (sql: string) : Result<ColumnType, string> =
     parseColumnTypeWithOptions defaultOptions sql
@@ -5059,7 +5078,7 @@ let parseRoutineParameterTypeWithOptions
                     | _ -> preturn (columnType, charset, collation)
                 | _ -> preturn (columnType, charset, collation)
 
-    withParserState options sql (runWithDepthLimit (ws >>. parameterType .>> eof))
+    withStatementParserState options sql (runWithDepthLimit (ws >>. parameterType .>> eof))
 
 /// Parses the user-defined-variable target at the front of a `SET`
 /// assignment. The right-hand side remains source text because `SET` has
