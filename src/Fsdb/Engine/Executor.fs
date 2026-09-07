@@ -12725,7 +12725,7 @@ and private fullTextScoresForTable
                              | None -> FullText.naturalScores fullTextIndex queryText)
                             |> OrderedScores)
                     | BooleanMode ->
-                        FullText.tryRequiredTermBooleanScoresDictionaryWithin candidateIds fullTextIndex queryText
+                        FullText.tryFlatBooleanScoresDictionaryWithin candidateIds fullTextIndex queryText
                         |> Option.map HashedScores
                         |> Option.defaultWith (fun () ->
                             (match candidateIds with

@@ -317,6 +317,11 @@ type private BoolTerm =
     | BPhrase of words: Token[] * proximity: int option
     | BGroup of (BoolOp * BoolTerm) list
 
+type private FlatPosting<'id when 'id: comparison> =
+    { Operator: BoolOp
+      Rows: Map<'id, int>
+      Scale: float }
+
 let private parseBooleanQuery (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
     let mutable i = 0
     let len = query.Length
@@ -589,19 +594,19 @@ let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
 let internal booleanScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) =
     booleanScoresWithinOption (Some candidateIds) index query
 
-let internal tryRequiredTermBooleanScoresDictionaryWithin
+let internal tryFlatBooleanScoresDictionaryWithin
     (candidateIds: Set<'id> option)
     (index: Index<'id>)
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
-    let rec requiredTerms (found: (Token * bool) list) =
+    let rec flatTerms (found: (BoolOp * Token * bool) list) =
         function
         | [] when not found.IsEmpty -> Some(List.rev found)
-        | (Must, BWord(term, prefix)) :: rest -> requiredTerms ((term, prefix) :: found) rest
+        | (op, BWord(term, prefix)) :: rest -> flatTerms ((op, term, prefix) :: found) rest
         | _ -> None
 
     parseBooleanQuery index.Collation query
-    |> requiredTerms []
+    |> flatTerms []
     |> Option.map (fun terms ->
         let postingFor (term: Token, prefix) =
             if prefix then Map.tryFind term.Key index.PrefixPostings
@@ -610,48 +615,142 @@ let internal tryRequiredTermBooleanScoresDictionaryWithin
 
         let postings =
             terms
-            |> List.map (fun term ->
-                postingFor term
-                |> Option.map (fun rows ->
-                    let weight = idf index rows.Count
-                    rows, weight * weight))
+            |> List.map (fun (op, term, prefix) ->
+                let rows = postingFor (term, prefix) |> Option.defaultValue Map.empty
+                let weight = idf index rows.Count
+                { Operator = op
+                  Rows = rows
+                  Scale = weight * weight })
 
-        if postings |> List.exists Option.isNone then
-            Collections.Generic.Dictionary()
-        else
-            let postings = postings |> List.choose id
-            let smallestPosting = postings |> List.minBy (fst >> _.Count) |> fst
+        let positiveTerms =
+            postings
+            |> List.filter (fun posting -> posting.Operator <> MustNot)
 
-            let candidates: seq<'id> =
-                match candidateIds with
-                | Some candidates when candidates.Count < smallestPosting.Count -> Set.toSeq candidates
-                | _ -> smallestPosting |> Map.toSeq |> Seq.map fst
+        let requiredTerms =
+            postings
+            |> List.filter (fun posting -> posting.Operator = Must)
 
-            let capacity =
-                candidateIds
-                |> Option.map _.Count
-                |> Option.defaultValue smallestPosting.Count
-                |> min smallestPosting.Count
+        let smallestRequiredPosting =
+            match requiredTerms with
+            | [] -> None
+            | terms ->
+                terms
+                |> List.minBy (fun posting -> posting.Rows.Count)
+                |> fun posting -> Some posting.Rows
 
+        let scoreCandidates (candidates: seq<'id>) (capacity: int) =
             let scores = Collections.Generic.Dictionary<'id, float>(capacity)
 
             for id in candidates do
+                let mutable excluded = false
+                let mutable anyMatch = false
                 let mutable score = 0.0
-                let mutable matchesEveryTerm =
-                    candidateIds |> Option.forall (fun candidates -> candidates.Contains id)
 
-                for rows, scale in postings do
-                    match Map.tryFind id rows with
-                    | Some frequency -> score <- score + float frequency * scale
-                    | None -> matchesEveryTerm <- false
+                for posting in postings do
+                    let frequency = Map.tryFind id posting.Rows
+                    let matched = frequency.IsSome
+                    let contribution =
+                        frequency
+                        |> Option.map (fun value -> float value * posting.Scale)
+                        |> Option.defaultValue 0.0
 
-                if matchesEveryTerm then
-                    scores.Add(id, score)
+                    match posting.Operator with
+                    | Must ->
+                        if matched then
+                            anyMatch <- true
+                            score <- score + contribution
+                        else
+                            excluded <- true
+                    | MustNot -> if matched then excluded <- true
+                    | Optional ->
+                        if matched then
+                            anyMatch <- true
+                            score <- score + contribution
+                    | Raise ->
+                        if matched then
+                            anyMatch <- true
+                            score <- score + contribution + 1.0
+                    | Lower ->
+                        if matched then
+                            anyMatch <- true
+                            score <- score + contribution - 1.0
+                    | Soft -> if matched then anyMatch <- true
 
-            scores)
+                if anyMatch && not excluded then
+                    scores.Add(id, if score = 0.0 then idfFloor * idfFloor else score)
 
-let internal tryRequiredTermBooleanScoresDictionary index query =
-    tryRequiredTermBooleanScoresDictionaryWithin None index query
+            scores
+
+        let accumulatePositivePostings () =
+            let capacity =
+                positiveTerms
+                |> List.sumBy (fun posting -> int64 posting.Rows.Count)
+                |> min (int64 index.Documents.Count)
+                |> int
+
+            let totals = Collections.Generic.Dictionary<'id, float>(capacity)
+            let inScope id = candidateIds |> Option.forall (fun candidates -> candidates.Contains id)
+
+            for posting in positiveTerms do
+                for KeyValue(id, frequency) in posting.Rows do
+                    if inScope id then
+                        let contribution = float frequency * posting.Scale
+
+                        let updatedScore current =
+                            match posting.Operator with
+                            | Raise -> current + contribution + 1.0
+                            | Lower -> current + contribution - 1.0
+                            | Soft -> current
+                            | _ -> current + contribution
+
+                        match totals.TryGetValue id with
+                        | true, current -> totals.[id] <- updatedScore current
+                        | false, _ -> totals.Add(id, updatedScore 0.0)
+
+            for posting in postings do
+                if posting.Operator = MustNot then
+                    for KeyValue(id, _) in posting.Rows do
+                        totals.Remove id |> ignore
+
+            let scores = Collections.Generic.Dictionary<'id, float>(totals.Count)
+
+            totals.Keys
+            |> Seq.sort
+            |> Seq.iter (fun id ->
+                let score = totals.[id]
+                scores.Add(id, if score = 0.0 then idfFloor * idfFloor else score))
+
+            scores
+
+        match smallestRequiredPosting with
+        | Some rows ->
+            let candidates: seq<'id> =
+                match candidateIds with
+                | Some candidates when candidates.Count < rows.Count -> Set.toSeq candidates
+                | Some candidates ->
+                    rows
+                    |> Map.toSeq
+                    |> Seq.map fst
+                    |> Seq.filter candidates.Contains
+                | None -> rows |> Map.toSeq |> Seq.map fst
+
+            let capacity = candidateIds |> Option.map _.Count |> Option.defaultValue rows.Count |> min rows.Count
+            scoreCandidates candidates capacity
+        | None ->
+            let candidateProbeWork =
+                candidateIds
+                |> Option.map (fun candidates -> int64 candidates.Count * int64 postings.Length)
+
+            let postingWork =
+                positiveTerms
+                |> List.sumBy (fun posting -> int64 posting.Rows.Count)
+
+            match candidateIds, candidateProbeWork with
+            | Some candidates, Some work when work < postingWork -> scoreCandidates candidates candidates.Count
+            | _ -> accumulatePositivePostings ())
+
+let internal tryFlatBooleanScoresDictionary index query =
+    tryFlatBooleanScoresDictionaryWithin None index query
 
 let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
     // A matched row whose contributions all cancelled (only `~` terms hit,
