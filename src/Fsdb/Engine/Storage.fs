@@ -4645,6 +4645,8 @@ let trySecondaryRangeLookup
 
 let private orderedEntries (traversal: IndexTraversal) (slice: SecondaryOrderSlice) : SecondaryOrderEntry seq =
     match traversal with
+    | Forward when slice.First = 0 && slice.AfterLast = slice.Entries.Count ->
+        slice.Entries
     | Forward ->
         let count = max 0 (slice.AfterLast - slice.First)
         Seq.init count (fun offset -> slice.Entries.[slice.First + offset])
