@@ -286,6 +286,10 @@ type private MemoizedSubquery =
     | MemoizedSubquery of ExpressionSubqueryResult
     | UnmemoizedSubquery
 
+type private MaterializedEqualityLookup =
+    { Columns: ColumnDef list
+      FindRows: Value -> Value[] list option }
+
 let private equalityMembershipKey domain value =
     match domain, value with
     | SignedIntegerMembership, VInt _
@@ -331,6 +335,46 @@ let private equalityMembershipForValues (store: Store) (column: ColumnDef) (valu
 
         collect [] false values)
 
+let private materializedEqualityLookup
+    (store: Store)
+    (columns: ColumnDef list)
+    (rows: Value[] list)
+    (columnName: string)
+    : MaterializedEqualityLookup option =
+    resolveColumn columns columnName
+    |> Result.toOption
+    |> Option.bind (fun columnIndex ->
+        equalityMembershipDomain store columns.[columnIndex]
+        |> Option.bind (fun domain ->
+            let rowsByKey = Dictionary<Value, ResizeArray<Value[]>>()
+            let mutable compatible = true
+
+            for row in rows do
+                match row.[columnIndex] with
+                | VNull -> ()
+                | value ->
+                    match equalityMembershipKey domain value with
+                    | None -> compatible <- false
+                    | Some key ->
+                        match rowsByKey.TryGetValue key with
+                        | true, matches -> matches.Add row
+                        | _ -> rowsByKey.[key] <- ResizeArray [ row ]
+
+            if not compatible then
+                None
+            else
+                let findRows value =
+                    match value with
+                    | VNull -> Some []
+                    | _ ->
+                        equalityMembershipKey domain value
+                        |> Option.map (fun key ->
+                            match rowsByKey.TryGetValue key with
+                            | true, matches -> List.ofSeq matches
+                            | _ -> [])
+
+                Some { Columns = columns; FindRows = findRows }))
+
 let private tryLiteralValues expressions =
     let rec collect values =
         function
@@ -345,6 +389,7 @@ type private StatementMemo =
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
       LiteralMemberships: Dictionary<Expr, EqualityMembership option>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
+      MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string, MaterializedEqualityLookup option>>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
@@ -354,6 +399,8 @@ let private freshStatementMemo () =
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
       LiteralMemberships = Dictionary<Expr, EqualityMembership option>(HashIdentity.Reference)
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
+      MaterializedCorrelatedEqualities =
+        Dictionary<FromItem, Dictionary<string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
@@ -363,6 +410,7 @@ let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMem
 /// Statement-local materialized CTE bindings, keyed by normalized name.
 let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * Value[] list>>()
 let private cteOriginScope = System.Threading.AsyncLocal<Map<string, ColumnOrigin option list>>()
+let private cteStabilityScope = System.Threading.AsyncLocal<Map<string, bool>>()
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
@@ -1273,9 +1321,13 @@ let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
 let private currentCteOriginScope () : Map<string, ColumnOrigin option list> =
     DynamicScope.valueOrDefault Map.empty cteOriginScope
 
+let private currentCteStabilityScope () : Map<string, bool> =
+    DynamicScope.valueOrDefault Map.empty cteStabilityScope
+
 let private withoutCteScope (body: unit -> 'a) : 'a =
     DynamicScope.withValue cteScope Map.empty (fun () ->
-        DynamicScope.withValue cteOriginScope Map.empty body)
+        DynamicScope.withValue cteOriginScope Map.empty (fun () ->
+            DynamicScope.withValue cteStabilityScope Map.empty body))
 
 let private unknownColumn (name: string) : EvalError =
     1054, sprintf "Unknown column '%s' in 'field list'" name
@@ -5250,11 +5302,10 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
     let countStar = isPlainCountStarSelect outer.Registry select
 
     match select.From with
-    | Some(FromTable tableRef)
-        when countStar && select.Joins.IsEmpty ->
-        tryCorrelatedEqualityLookup outer.Store outer.DbName tableRef select.Where (Some outer)
+    | Some source when countStar && select.Joins.IsEmpty ->
+        tryCorrelatedSourceLookup outer.Store outer.Registry outer.DbName source select.Where (Some outer)
         |> Option.map (fun (columns, rows) ->
-            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            let qualifier = fromItemQualifier source
 
             let context =
                 contextFactory
@@ -5269,7 +5320,7 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
             |> Result.bind (fun _ ->
                 rows
                 |> List.fold
-                    (fun countResult (_, row) ->
+                    (fun countResult row ->
                         countResult
                         |> Result.bind (fun count ->
                             whereMatches context select.Where row
@@ -5346,11 +5397,13 @@ and private resolveTableRef
             | _ ->
                 let savedCtes = currentCteScope ()
                 let savedCteOrigins = currentCteOriginScope ()
+                let savedCteStability = currentCteStabilityScope ()
 
                 try
                     viewStack.Value <- Set.add stackKey stack
                     cteScope.Value <- Map.empty
                     cteOriginScope.Value <- Map.empty
+                    cteStabilityScope.Value <- Map.empty
 
                     let resolved =
                         match Parser.parse view.Definition with
@@ -5404,6 +5457,7 @@ and private resolveTableRef
                     viewStack.Value <- stack
                     cteScope.Value <- savedCtes
                     cteOriginScope.Value <- savedCteOrigins
+                    cteStabilityScope.Value <- savedCteStability
         | None ->
             if planningProbe.Value then
                 tableSnapshot store tableDb tableRef.Table
@@ -8239,6 +8293,7 @@ and private withCteScope
 
         let saved = currentCteScope ()
         let savedOrigins = currentCteOriginScope ()
+        let savedStability = currentCteStabilityScope ()
 
         let originsFor (cte: CommonTableExpr) columns =
             let origins =
@@ -8272,6 +8327,9 @@ and private withCteScope
                         cteOriginScope.Value <-
                             currentCteOriginScope ()
                             |> Map.add (cte.CteName.ToLowerInvariant()) (originsFor cte (fst materialized))
+                        cteStabilityScope.Value <-
+                            currentCteStabilityScope ()
+                            |> Map.add (cte.CteName.ToLowerInvariant()) outer.IsNone
                         bind rest)
 
             match bind ctes with
@@ -8280,6 +8338,7 @@ and private withCteScope
         finally
             cteScope.Value <- saved
             cteOriginScope.Value <- savedOrigins
+            cteStabilityScope.Value <- savedStability
 
 and private withCteQueryResult
     (store: Store)
@@ -8833,8 +8892,8 @@ and private runUnlockedSelectStmt
                   match tryIndexedLookup store dbName tref select.Where with
                   | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                   | None ->
-                    match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
-                    | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
+                    match tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer with
+                    | Some(columns, rows) -> runArbitrary columns rows None select
                     | None ->
                         match trySpatialLookup BareOrQualifiedColumn store dbName tref select.Where with
                         | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
@@ -8870,9 +8929,12 @@ and private runUnlockedSelectStmt
             | Error e -> e, [], []
             | Ok(columns, rows) -> runArbitrary columns rows None select
         | _ ->
-            match resolveFromItem store registry dbName fromItem with
-            | Error e -> e, [], []
-            | Ok(columns, rows) -> runArbitrary columns rows None select
+            match tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer with
+            | Some(columns, rows) -> runArbitrary columns rows None select
+            | None ->
+                match resolveFromItem store registry dbName fromItem with
+                | Error e -> e, [], []
+                | Ok(columns, rows) -> runArbitrary columns rows None select
 
 /// Flattens a top-level `AND` chain into conjuncts.
 and private flattenAnd (expr: Expr) : Expr list =
@@ -9243,15 +9305,7 @@ and private tryIndexedCandidatesInTable
     |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CandidateNarrowing store table tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
-and private tryCorrelatedEqualityLookup
-    (store: Store)
-    (dbName: string)
-    (tref: TableRef)
-    (whereExpr: Expr option)
-    (outer: EvalContext option)
-    : (ColumnDef list * (RowId * Value[]) list) option =
-    let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
-
+and private correlatedEqualityPredicates selfQualifier (whereExpr: Expr option) (outer: EvalContext option) =
     let innerColumn = function
         | Col name -> Some name
         | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
@@ -9261,6 +9315,30 @@ and private tryCorrelatedEqualityLookup
         | QualifiedCol(qualifier, _) as expression when not (qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase)) ->
             evalExpr context expression |> Result.toOption
         | _ -> None
+
+    outer
+    |> Option.map (fun context ->
+        whereExpr
+        |> Option.toList
+        |> List.collect flattenAnd
+        |> List.choose (function
+            | BinOp(Eq, left, right) ->
+                match innerColumn left, outerValue context right with
+                | Some column, Some value -> Some(column, value)
+                | _ ->
+                    match innerColumn right, outerValue context left with
+                    | Some column, Some value -> Some(column, value)
+                    | _ -> None
+            | _ -> None))
+
+and private tryCorrelatedEqualityLookup
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
     let transientLookup (tableDb: string) (column: string) (value: Value) =
         let key = tableDb.ToLowerInvariant(), tref.Table.ToLowerInvariant(), column.ToLowerInvariant()
@@ -9277,29 +9355,88 @@ and private tryCorrelatedEqualityLookup
             |> Option.map (fun rows -> lookup.TableColumns, rows))
 
     (if storedValuesMatchReadValues store && (physicalFastPathTable store dbName tref).IsSome then outer else None)
-    |> Option.bind (fun context ->
-        whereExpr
-        |> Option.toList
-        |> List.collect flattenAnd
-        |> List.choose (function
-            | BinOp(Eq, left, right) ->
-                match innerColumn left, outerValue context right with
-                | Some column, Some value -> Some(column, value)
-                | _ ->
-                    match innerColumn right, outerValue context left with
-                    | Some column, Some value -> Some(column, value)
-                    | _ -> None
-            | _ -> None)
-        |> fun equalities ->
-            let tableDb = tref.Database |> Option.defaultValue dbName
+    |> correlatedEqualityPredicates selfQualifier whereExpr
+    |> Option.bind (fun equalities ->
+        let tableDb = tref.Database |> Option.defaultValue dbName
 
-            Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
-            |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows.Value)
-            |> Option.orElseWith (fun () ->
-                equalities
-                |> List.tryPick (fun (column, value) ->
-                    Storage.tryEqualityLookup store tableDb tref.Table column value
-                    |> Option.orElseWith (fun () -> transientLookup tableDb column value))))
+        Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
+        |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows.Value)
+        |> Option.orElseWith (fun () ->
+            equalities
+            |> List.tryPick (fun (column, value) ->
+                Storage.tryEqualityLookup store tableDb tref.Table column value
+                |> Option.orElseWith (fun () -> transientLookup tableDb column value))))
+
+and private tryMaterializedCorrelatedEqualityLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (source: FromItem)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * Value[] list) option =
+    let eligible =
+        match source with
+        | FromSubquery _ -> true
+        | FromTable table ->
+            table.Database.IsNone
+            && currentCteStabilityScope ()
+               |> Map.tryFind (table.Table.ToLowerInvariant())
+               |> Option.defaultValue false
+        | _ -> false
+
+    if not eligible then
+        None
+    else
+        let qualifier = fromItemQualifier source
+
+        correlatedEqualityPredicates qualifier whereExpr outer
+        |> Option.bind (fun equalities ->
+            let byColumn = (currentStatementMemo ()).MaterializedCorrelatedEqualities
+
+            let sourceLookups =
+                match byColumn.TryGetValue source with
+                | true, lookups -> lookups
+                | _ ->
+                    let lookups =
+                        Dictionary<string, MaterializedEqualityLookup option>(System.StringComparer.OrdinalIgnoreCase)
+
+                    byColumn.[source] <- lookups
+                    lookups
+
+            equalities
+            |> List.tryPick (fun (column, value) ->
+                let lookup =
+                    match sourceLookups.TryGetValue column with
+                    | true, lookup -> lookup
+                    | _ ->
+                        let lookup =
+                            resolveFromItem store registry dbName source
+                            |> Result.toOption
+                            |> Option.bind (fun (columns, rows) -> materializedEqualityLookup store columns rows column)
+
+                        sourceLookups.[column] <- lookup
+                        lookup
+
+                lookup
+                |> Option.bind (fun lookup ->
+                    lookup.FindRows value
+                    |> Option.map (fun rows -> lookup.Columns, rows))))
+
+and private tryCorrelatedSourceLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (source: FromItem)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * Value[] list) option =
+    match source with
+    | FromTable table ->
+        tryCorrelatedEqualityLookup store dbName table whereExpr outer
+        |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
+        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
+    | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
 
 and private tryRangeAccessInTable
     (scope: ColumnReferenceScope)

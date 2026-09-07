@@ -271,6 +271,39 @@ let tests =
               | Err(1054, _) -> ()
               | other -> failtestf "expected an unknown-column error for an empty correlated input, got %A" other
 
+          testCase "correlated materialized lookups preserve binary collation and NULL equality"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE outer_labels (id INT, label VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "CREATE TABLE inner_labels (label VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "INSERT INTO outer_labels VALUES (1, 'A'), (2, 'a'), (3, NULL)" |> ignore
+              runDefault store "INSERT INTO inner_labels VALUES ('a'), (NULL)" |> ignore
+
+              let expected = [ [ Some "1"; Some "0" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+
+              let assertRows sql =
+                  match runDefault store sql with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "expected correlated materialized results, got %A" other
+
+              assertRows
+                  "SELECT o.id, EXISTS (SELECT 1 FROM (SELECT label FROM inner_labels) d WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id"
+
+              assertRows
+                  "WITH labels AS (SELECT label FROM inner_labels) SELECT o.id, EXISTS (SELECT 1 FROM labels d WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id"
+
+              match
+                  runDefault
+                      store
+                      "SELECT o.id, (WITH labels AS (SELECT o.label AS label) SELECT COUNT(*) FROM labels d WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+                      "an outer-dependent CTE is rebuilt for each outer row"
+              | other -> failtestf "expected correlated CTE results, got %A" other
+
           testCase "scalar subquery returning more than one row is MySQL error 1242"
           <| fun _ ->
               let store = newStore ()

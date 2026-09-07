@@ -6997,7 +6997,50 @@ let tests =
                     | ResultSet(_, rows) -> Expect.isEmpty rows "the residual rejects every candidate"
                     | other -> failtestf "expected an empty resultset, got %A" other
 
-                    Expect.isLessThan calls 1100 "residual work stays proportional to the inner rows plus projection inference" ]
+                    Expect.isLessThan calls 1100 "residual work stays proportional to the inner rows plus projection inference"
+
+                testCase "correlated equalities seek stable derived and CTE rows"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values.Head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT)" |> ignore
+                    runDefault store ("INSERT INTO users VALUES " + ([ 1..50 ] |> List.map (sprintf "(%d)") |> String.concat ",")) |> ignore
+
+                    [ 1..1000 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 50) + 1))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO orders VALUES " + rows)
+                    |> ignore
+
+                    let assertCounts prefix source =
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "%s SELECT users.id, (SELECT COUNT(*) FROM %s WHERE c.user_id = users.id AND TOUCH(c.id) = c.id) AS c FROM users ORDER BY users.id"
+                                    prefix
+                                    source)
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal rows.Length 50 "every outer row is retained"
+                            Expect.isTrue (rows |> List.forall (fun row -> row.[1] = Some "20")) "each key has twenty candidates"
+                        | other -> failtestf "expected correlated counts, got %A" other
+
+                        Expect.isLessThan calls 1100 "the materialized source is keyed once instead of scanned per outer row"
+
+                    assertCounts "WITH candidates AS (SELECT id, user_id FROM orders)" "candidates c"
+                    assertCounts "" "(SELECT id, user_id FROM orders) c" ]
 
           testList
               "streaming SELECT pipeline"

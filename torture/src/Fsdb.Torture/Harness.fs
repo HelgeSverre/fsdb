@@ -1238,6 +1238,10 @@ module ScenarioProbes =
                "SELECT te.id AS tenant_id, te.slug FROM tenants AS te WHERE EXISTS (SELECT 1 FROM projects AS p WHERE p.tenant_id = te.id AND p.budget < 0) ORDER BY te.id LIMIT 10"
                "scalar_subquery_in_select_list",
                "SELECT p.id AS project_id, (SELECT COUNT(*) FROM tasks AS t WHERE t.project_id = p.id) AS task_count, (SELECT MAX(t.id) FROM tasks AS t WHERE t.project_id = p.id AND t.status = 'done') AS max_done_task FROM projects AS p ORDER BY p.id LIMIT 12"
+               "correlated_derived_count",
+               "SELECT p.id AS project_id, (SELECT COUNT(*) FROM (SELECT project_id, status FROM tasks) AS candidate_tasks WHERE candidate_tasks.project_id = p.id AND candidate_tasks.status = 'done') AS done_tasks FROM projects AS p ORDER BY p.id LIMIT 12"
+               "correlated_cte_count",
+               "WITH candidate_tasks AS (SELECT project_id, status FROM tasks) SELECT p.id AS project_id, (SELECT COUNT(*) FROM candidate_tasks AS t WHERE t.project_id = p.id AND t.status = 'done') AS done_tasks FROM projects AS p ORDER BY p.id LIMIT 12"
 
                // Set operations, OFFSET past the tail, and partitioned ROW_NUMBER.
                "union_all_ordered_over_branches",
