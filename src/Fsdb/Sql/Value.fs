@@ -1081,8 +1081,7 @@ type Value =
     | VTime of TimeValue
     | VZeroDate of ZeroDate
     | VZeroDateTime of ZeroDateTime
-    /// Raw JSON text. A parsed representation belongs here if JSON values
-    /// eventually need to survive across several operations without reparsing.
+    /// Raw JSON text.
     | VJson of string
     | VGeometry of Geometry
 
@@ -1590,9 +1589,8 @@ let private asDateTime (v: Value) : DateTime =
 /// decides the order before the content does, and comparing a JSON value
 /// against a non-JSON one converts the non-JSON side to JSON first — which
 /// is why `JSON_EXTRACT('{"n":1}','$.n') = '1'` is FALSE (JSON number vs
-/// JSON string) while `= 1` is TRUE, and why the rendered-text comparison
-/// this replaced got `'{"s":"abc"}'->'$.s' = 'abc'` wrong (it compared the
-/// quoted `"abc"` against the bare `abc`).
+/// JSON string) while `= 1` is TRUE. Comparing rendered JSON text would
+/// instead compare the quoted `"abc"` against the bare `abc`.
 /// https://dev.mysql.com/doc/refman/8.4/en/json.html#json-comparison
 ///
 let private jsonRankOfNode (node: JsonNode) : int =

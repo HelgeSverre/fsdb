@@ -2018,10 +2018,8 @@ opp.AddOperator(InfixOperator("%", ws, 6, Associativity.Left, (fun a b -> FuncCa
 // without it, a column named `div_price` would parse as the operator `DIV`
 // followed by a stray `_price` term. `OperatorPrecedenceParser.InfixOperator`
 // matches its operator string case-sensitively with no case-insensitive
-// option, so both the all-caps and all-lowercase spellings (by far the two
-// real-world casings) are registered explicitly. A query mixing
-// case mid-keyword (`Div`) won't match; fold in real case-insensitive
-// matching if that ever shows up outside a lint test.
+// option, so the common all-caps and all-lowercase spellings are registered.
+// ponytail: replace the OPP keyword bridge to accept mixed-case `Div`/`Mod`.
 let private divKeywordBoundary: Parser<unit, unit> = nextCharSatisfiesNot isIdentChar >>. ws
 opp.AddOperator(InfixOperator("DIV", divKeywordBoundary, 6, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
 opp.AddOperator(InfixOperator("div", divKeywordBoundary, 6, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))

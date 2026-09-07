@@ -389,8 +389,7 @@ let private charOctetLength charset (ty: ColumnType) : int64 option =
 /// style: backticked column refs, paren-wrapped binops, lowercased function
 /// names. Total over every `Expr` case — the subquery/window shapes can't
 /// appear in a generated expression, but must render rather than throw.
-/// String literals have no charset introducer (MySQL prints
-/// `_latin1'x'`, this prints `'x'`) — add it if a tool ever diffs the text.
+/// Charset introducers on string literals are not retained in the AST.
 let rec exprToSql (e: Expr) : string =
     let opText =
         function
@@ -533,12 +532,7 @@ let private columnRowWith (privileges: string) (dbName: string) (tableName: stri
        vs c.Name
        vi (i + 1)
        vopt (defaultText c)
-       // A primary key column is implicitly NOT NULL in MySQL even
-       // without an explicit `NOT NULL` — `Ast.ColumnDef.Nullable`
-       // only tracks the explicit modifier (`Storage`
-       // itself still doesn't reject a NULL insert into an implicit
-       // PK column; add that enforcement too if a migration's
-       // assertions ever depend on it, not just this metadata view).
+       // Legacy catalog rows may predate primary-key nullability normalization.
        vs (if c.PrimaryKey || not c.Nullable then "NO" else "YES")
        vs (dataTypeName c.Type)
        (charMaxLength c.Type |> Option.map VInt |> Option.defaultValue VNull)

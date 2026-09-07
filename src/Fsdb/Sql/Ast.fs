@@ -66,9 +66,8 @@ type ColumnType =
     /// The allowed value set, stored so `Storage.coerceValue` can validate an
     /// inserted string against it.
     | TEnum of values: string list
-    /// Accepted like a string column; comma-set validation is not performed
-    /// against `values`, add it if a migration actually needs SET semantics
-    /// enforced rather than just accepted.
+    /// Declared member order used to validate and canonicalize string or
+    /// numeric-bitmask inputs.
     | TSet of values: string list
     | TDecimal of precision: int * scale: int * unsigned: bool
     | TDouble of unsigned: bool

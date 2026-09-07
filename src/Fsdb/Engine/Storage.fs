@@ -450,8 +450,8 @@ type Store =
 
     /// Materializes one catalog root in O(database count), with row structures
     /// shared immutably. Hot single-database paths read `Databases` directly.
-    /// Slots are sampled independently, so cross-database snapshots
-    /// are not linearizable; add a store epoch if a consumer requires that.
+    /// ponytail: slots are sampled independently; add a store-wide epoch
+    /// before exposing linearizable cross-database snapshots.
     member this.Catalog
         with get () : Catalog = this.Databases |> Seq.map (fun kv -> kv.Key, kv.Value.Value) |> Map.ofSeq
         /// Whole-catalog replacement is safe only during startup, private

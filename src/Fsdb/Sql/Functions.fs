@@ -114,12 +114,8 @@ type Registry =
       ByteArguments: Map<string, int -> bool>
       ResultCollations: Map<string, ResultCollation>
       Aggregates: Map<string, Aggregate>
-      /// Rich (`QueryContext`-aware) registrations, kept separate from
-      /// `Scalars` so builtins and plain `registerScalar` users never pay
-      /// for the context plumbing — `QueryHandler.registryFor` collapses
-      /// each entry to a plain `Scalar` by applying the per-statement
-      /// context, and `Executor`'s DDL path reads the `DirectOnly` flag
-      /// here to reject generated-column definitions.
+      /// Context-aware registrations are bound once per statement;
+      /// `DirectOnly` also excludes them from stored expressions.
       Extensions: Map<string, ScalarFunction> }
 
 let empty: Registry =
