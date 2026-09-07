@@ -4144,6 +4144,12 @@ let private exactProbeValue (store: Store) (table: Table) (index: int) (value: V
     | Ok coerced when coerced = value -> Some value
     | _ -> None
 
+let private acceptsExactSingleColumnProbe (store: Store) (table: Table) (literal: Value) (index: EqualityIndex) =
+    index.ColumnIndices
+    |> List.tryExactlyOne
+    |> Option.bind (fun columnIndex -> exactProbeValue store table columnIndex literal)
+    |> Option.isSome
+
 type private EqualityProbeValues =
     | StoredValues
     | ProjectedValues
@@ -4260,7 +4266,7 @@ let private equalityLookupRows store table index probeValues values =
 let private tryUniqueKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : EqualityIndex option =
     tryEqualityIndex table columnName
     |> Option.filter _.Unique
-    |> Option.filter (fun index -> exactProbeValue store table index.ColumnIndices.Head literal |> Option.isSome)
+    |> Option.filter (acceptsExactSingleColumnProbe store table literal)
 
 let tryUniqueLookup
     (store: Store)
@@ -4281,7 +4287,7 @@ let tryUniqueLookup
 let private trySecondaryKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : EqualityIndex option =
     tryEqualityIndex table columnName
     |> Option.filter (not << _.Unique)
-    |> Option.filter (fun index -> exactProbeValue store table index.ColumnIndices.Head literal |> Option.isSome)
+    |> Option.filter (acceptsExactSingleColumnProbe store table literal)
 
 /// Candidate rows for a one-column ordinary B-tree equality probe, in stable
 /// row-store scan order.
@@ -4486,6 +4492,32 @@ let private sortedInsertionPoint boundary count compareAt =
 
     first
 
+let private orderedSliceBounds
+    direction
+    count
+    includeNulls
+    prefixTruncated
+    firstEqual
+    afterEqual
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
+    =
+    let lowerIndex (value, inclusive) =
+        if prefixTruncated || inclusive then firstEqual value else afterEqual value
+
+    let upperIndex (value, inclusive) =
+        if prefixTruncated || inclusive then afterEqual value else firstEqual value
+
+    match direction with
+    | Asc ->
+        let first = lower |> Option.map lowerIndex |> Option.defaultWith (fun () -> if includeNulls then 0 else afterEqual VNull)
+        let afterLast = upper |> Option.map upperIndex |> Option.defaultValue count
+        first, afterLast
+    | Desc ->
+        let first = upper |> Option.map upperIndex |> Option.defaultValue 0
+        let afterLast = lower |> Option.map lowerIndex |> Option.defaultWith (fun () -> if includeNulls then count else firstEqual VNull)
+        first, afterLast
+
 let private trySecondaryOrderSliceInTable
     (store: Store)
     (table: Table)
@@ -4565,39 +4597,15 @@ let private trySecondaryOrderSliceInTable
                         if prefixed then primaryInsertionIndex AfterEqual value else fullAfterEqual value
 
                     let first, afterLast =
-                        match group.Direction with
-                        | Asc ->
-                            let first =
-                                match lower with
-                                | None -> if hasBounds then afterEqual VNull else 0
-                                | Some(value, _) when prefixed -> firstEqual value
-                                | Some(value, true) -> firstEqual value
-                                | Some(value, false) -> afterEqual value
-
-                            let afterLast =
-                                match upper with
-                                | None -> entries.Count
-                                | Some(value, _) when prefixed -> afterEqual value
-                                | Some(value, true) -> afterEqual value
-                                | Some(value, false) -> firstEqual value
-
-                            first, afterLast
-                        | Desc ->
-                            let first =
-                                match upper with
-                                | None -> 0
-                                | Some(value, _) when prefixed -> firstEqual value
-                                | Some(value, true) -> firstEqual value
-                                | Some(value, false) -> afterEqual value
-
-                            let afterLast =
-                                match lower with
-                                | None -> if hasBounds then firstEqual VNull else entries.Count
-                                | Some(value, _) when prefixed -> afterEqual value
-                                | Some(value, true) -> afterEqual value
-                                | Some(value, false) -> firstEqual value
-
-                            first, afterLast
+                        orderedSliceBounds
+                            group.Direction
+                            entries.Count
+                            (not hasBounds)
+                            prefixed
+                            firstEqual
+                            afterEqual
+                            lower
+                            upper
 
                     { IndexName = group.Group.Name
                       ColumnIndices = [ index ]
@@ -4626,9 +4634,8 @@ let internal trySecondaryRangeLookupInTable
     : RangeLookup option =
     trySecondaryOrderSliceInTable store table columnName None lower upper true
     |> Option.bind (fun slice ->
-        slice.ColumnIndices
-        |> List.tryExactlyOne
-        |> Option.map (fun columnIndex ->
+        match slice.ColumnIndices, slice.PrefixLengths with
+        | [ columnIndex ], [ prefixLength ] ->
             let count = max 0 (slice.AfterLast - slice.First)
 
             let rows =
@@ -4638,13 +4645,15 @@ let internal trySecondaryRangeLookupInTable
                      |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
                      |> List.ofSeq)
 
-            { RangeIndexName = slice.IndexName
-              RangeColumnIndex = columnIndex
-              RangePrefixLength = slice.PrefixLengths.Head
-              RangeColumns = table.Columns
-              RangeRowCount = count
-              TableRowCount = table.RowsArray.Count
-              RangeRows = rows }))
+            Some
+                { RangeIndexName = slice.IndexName
+                  RangeColumnIndex = columnIndex
+                  RangePrefixLength = prefixLength
+                  RangeColumns = table.Columns
+                  RangeRowCount = count
+                  TableRowCount = table.RowsArray.Count
+                  RangeRows = rows }
+        | _ -> None)
 
 let trySecondaryRangeLookup
     (store: Store)
@@ -4884,35 +4893,21 @@ let private tryOrderedIndexLookupWithPrefix
                             let firstEqual = insertionIndex FirstEqual
                             let afterEqual = insertionIndex AfterEqual
 
-                            match direction with
-                            | Asc ->
-                                let first =
-                                    match lower with
-                                    | None -> afterEqual VNull
-                                    | Some(value, true) -> firstEqual value
-                                    | Some(value, false) -> afterEqual value
+                            let relativeFirstEqual value = firstEqual value - prefixFirst
+                            let relativeAfterEqual value = afterEqual value - prefixFirst
 
-                                let afterLast =
-                                    match upper with
-                                    | None -> prefixAfterLast
-                                    | Some(value, true) -> afterEqual value
-                                    | Some(value, false) -> firstEqual value
+                            let first, afterLast =
+                                orderedSliceBounds
+                                    direction
+                                    (prefixAfterLast - prefixFirst)
+                                    false
+                                    false
+                                    relativeFirstEqual
+                                    relativeAfterEqual
+                                    lower
+                                    upper
 
-                                first, afterLast
-                            | Desc ->
-                                let first =
-                                    match upper with
-                                    | None -> prefixFirst
-                                    | Some(value, true) -> firstEqual value
-                                    | Some(value, false) -> afterEqual value
-
-                                let afterLast =
-                                    match lower with
-                                    | None -> firstEqual VNull
-                                    | Some(value, true) -> afterEqual value
-                                    | Some(value, false) -> firstEqual value
-
-                                first, afterLast
+                            prefixFirst + first, prefixFirst + afterLast
 
                     let first = max prefixFirst first
                     let afterLast = max first (min prefixAfterLast afterLast)
@@ -4995,7 +4990,7 @@ let tryEqualityKeyProbeForTransform
     tableAt store dbName tableName
     |> Option.bind (fun table ->
         tryEqualityIndexForTransform table columnName transform
-        |> Option.filter (fun index -> exactProbeValue store table index.ColumnIndices.Head literal |> Option.isSome)
+        |> Option.filter (acceptsExactSingleColumnProbe store table literal)
         |> Option.map (fun index -> table, index))
 
 /// Finds a stored-column equality index for an exactly coercible literal.
