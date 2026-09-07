@@ -1008,17 +1008,17 @@ let private withCancellationWatch (client: TcpClient) (entry: InformationSchema.
     let queryCts = new CancellationTokenSource()
     let watchCts = new CancellationTokenSource()
     Async.Start(watchForDisconnect client queryCts, watchCts.Token)
-    Storage.queryCancellation.Value <- queryCts.Token
-    // `KILL QUERY <id>` from another connection cancels through the same
-    // token the disconnect watcher uses.
-    entry |> Option.iter (fun e -> e.CancelQuery <- Some(fun () -> queryCts.Cancel()))
 
-    try
-        body ()
-    finally
-        entry |> Option.iter (fun e -> e.CancelQuery <- None)
-        watchCts.Cancel()
-        Storage.queryCancellation.Value <- CancellationToken.None
+    DynamicScope.withThreadValue Storage.queryCancellation queryCts.Token (fun () ->
+        // `KILL QUERY <id>` from another connection cancels through the same
+        // token the disconnect watcher uses.
+        entry |> Option.iter (fun e -> e.CancelQuery <- Some(fun () -> queryCts.Cancel()))
+
+        try
+            body ()
+        finally
+            entry |> Option.iter (fun e -> e.CancelQuery <- None)
+            watchCts.Cancel())
 
 let private connectionCounter = ref 0L
 let private activeConnectionCounter = ref 0

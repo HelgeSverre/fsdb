@@ -4842,15 +4842,16 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 else
                     let cancellation = Storage.queryCancellation.Value
                     let stopwatch = System.Diagnostics.Stopwatch.StartNew()
-                    let previousDeadline = Limits.queryWorkDeadline.Value
                     let benchmarkDeadline = Limits.queryWorkDeadlineAfter Limits.maxBenchmarkDuration
-                    let effectiveDeadline = previousDeadline |> Option.map (min benchmarkDeadline) |> Option.defaultValue benchmarkDeadline
+                    let effectiveDeadline =
+                        Limits.queryWorkDeadline.Value
+                        |> Option.map (min benchmarkDeadline)
+                        |> Option.defaultValue benchmarkDeadline
+
                     let mutable iteration = 0L
                     let mutable failure = None
 
-                    try
-                        Limits.queryWorkDeadline.Value <- Some effectiveDeadline
-
+                    DynamicScope.withThreadValue Limits.queryWorkDeadline (Some effectiveDeadline) (fun () ->
                         while iteration < count && failure.IsNone do
                             if iteration % int64 Storage.cancellationCheckInterval = 0L then
                                 cancellation.ThrowIfCancellationRequested()
@@ -4863,9 +4864,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                                         "This version of MySQL doesn't yet support BENCHMARK execution beyond its resource limit"
                                     )
                             | Ok _ -> iteration <- iteration + 1L
-                            | Error error -> failure <- Some error
-                    finally
-                        Limits.queryWorkDeadline.Value <- previousDeadline
+                            | Error error -> failure <- Some error)
 
                     match failure with
                     | Some error -> Error error

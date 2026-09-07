@@ -158,16 +158,13 @@ let private execute
                 | Some account ->
                     let session = executionSession store functions entry account
 
-                    try
-                        Storage.queryCancellation.Value <- cancellation
+                    DynamicScope.withThreadValue Storage.queryCancellation cancellation (fun () ->
                         let _, result = QueryHandler.executeEventBody session entry.Definition
 
                         match resultError result with
                         | Some(code, message) ->
                             Log.diagnostic "fsdb: event scheduler %s.%s: ERR %d %s" entry.Schema entry.Name code message
-                        | None -> ()
-                    finally
-                        Storage.queryCancellation.Value <- CancellationToken.None
+                        | None -> ())
             with error ->
                 Log.diagnostic "fsdb: event scheduler %s.%s: %s" entry.Schema entry.Name error.Message
         finally
