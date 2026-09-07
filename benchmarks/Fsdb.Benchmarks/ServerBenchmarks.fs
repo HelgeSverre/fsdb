@@ -578,6 +578,12 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Feature", "Scale", "FullText")>]
+    member this.FullTextBooleanProximitySearch() =
+        this.Query
+            "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('\"benchmark benchmark benchmark benchmark benchmark benchmark benchmark benchmark benchmark benchmark benchmark benchmark database concurrency\" @1' IN BOOLEAN MODE) LIMIT 20"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature", "Scale", "FullText")>]
     member this.FullTextAccentSearch() =
         this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('resume') LIMIT 20"
 
