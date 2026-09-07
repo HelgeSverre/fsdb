@@ -7075,25 +7075,34 @@ let tests =
                         (Affected 1000UL)
                         "seeded generated-column source"
 
-                    calls <- 0
+                    let assertIndexedWork prefix source =
+                        calls <- 0
 
-                    match
-                        run
-                            store
-                            registry
-                            ("SELECT users.id, (SELECT COUNT(*) FROM (SELECT id, user_id, observed FROM orders) c "
-                             + "WHERE c.user_id = users.id AND c.observed = c.id) AS c "
-                             + "FROM users WHERE users.id <= 10 ORDER BY users.id")
-                    with
-                    | ResultSet(_, rows) ->
-                        Expect.equal rows.Length 10 "the selected outer rows are retained"
-                        Expect.equal
-                            (rows |> List.map (fun row -> row.[1]))
-                            (List.replicate 10 (Some "20"))
-                            "each key has twenty candidates"
-                    | other -> failtestf "expected correlated counts, got %A" other
+                        match
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "%s SELECT users.id, (SELECT COUNT(*) FROM %s WHERE c.user_id = users.id AND c.observed = c.id) AS c FROM users WHERE users.id <= 10 ORDER BY users.id"
+                                    prefix
+                                    source)
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal rows.Length 10 "the selected outer rows are retained"
+                            Expect.equal
+                                (rows |> List.map (fun row -> row.[1]))
+                                (List.replicate 10 (Some "20"))
+                                "each key has twenty candidates"
+                        | other -> failtestf "expected correlated counts, got %A" other
 
-                    Expect.isLessThan calls 300 "the derived source reads generated values only for indexed candidates" ]
+                        Expect.isLessThan calls 300 "the source reads generated values only for indexed candidates"
+
+                    assertIndexedWork "" "(SELECT id, user_id, observed FROM orders) c"
+
+                    assertIndexedWork
+                        ("WITH candidates(id, user_id, observed) AS "
+                         + "(SELECT id AS order_key, user_id AS owner_key, observed AS seen FROM orders)")
+                        "candidates c" ]
 
           testList
               "streaming SELECT pipeline"
@@ -9543,6 +9552,12 @@ let tests =
 
                 testCase "a CTE shadows a real table of the same name"
                 <| fun _ -> expectRows "WITH t AS (SELECT 99 AS id) SELECT * FROM t" [ [ Some "99" ] ]
+
+                testCase "a recursive CTE does not bind a shadowed physical table"
+                <| fun _ ->
+                    match runDefault (cteStore ()) "WITH RECURSIVE t AS (SELECT id FROM t) SELECT id FROM t" with
+                    | Err(3573, _) -> ()
+                    | other -> failtestf "expected recursive CTE shape error 3573, got %A" other
 
                 testCase "indexed fast paths preserve CTE shadowing"
                 <| fun _ ->

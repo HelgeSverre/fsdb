@@ -415,11 +415,12 @@ let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMem
 
 type private CteBinding =
     { Columns: ColumnDef list
-      Rows: Value[] list
+      Rows: Lazy<Result<Value[] list, QueryResult>>
       Origins: ColumnOrigin option list
-      StatementStable: bool }
+      StatementStable: bool
+      PhysicalProjection: PhysicalProjection option }
 
-/// Statement-local materialized CTE bindings, keyed by normalized name.
+/// Statement-local CTE bindings, keyed by normalized name.
 let private cteScope = System.Threading.AsyncLocal<Map<string, CteBinding>>()
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
@@ -5353,7 +5354,8 @@ and private resolveTableRef
     // An unqualified name resolves against the statement's `WITH` bindings
     // first — a CTE shadows a real table of the same name, as in MySQL.
     match (if tableRef.Database.IsSome then None else currentCteScope () |> Map.tryFind (tableRef.Table.ToLowerInvariant())) with
-    | Some binding -> Ok(binding.Columns, if planningProbe.Value then [] else binding.Rows)
+    | Some binding when planningProbe.Value -> Ok(binding.Columns, [])
+    | Some binding -> binding.Rows.Value |> Result.map (fun rows -> binding.Columns, rows)
     | None ->
 
     if tableRef.Database.IsNone && System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase) then
@@ -8272,6 +8274,40 @@ and private tryMergeDirectView
             | _ -> Ok None
     | _ -> Ok None
 
+and private cteSelfReferenced (cte: CommonTableExpr) =
+    let rec inSelect (select: SelectStmt) =
+        (select.From |> Option.map inFrom |> Option.defaultValue false)
+        || select.Joins |> List.exists (fun join -> inFrom join.Table)
+
+    and inFrom (item: FromItem) =
+        match item with
+        | FromTable table ->
+            table.Database.IsNone
+            && System.String.Equals(table.Table, cte.CteName, System.StringComparison.OrdinalIgnoreCase)
+        | FromSubquery(body, _)
+        | FromLateral(body, _) -> inBody body
+        | FromJsonTable _ -> false
+
+    and inBody (body: SelectOrUnion) =
+        match body with
+        | PlainSelect select -> inSelect select
+        | UnionSelect(first, rest, _, _, _) -> inSelect first || rest |> List.exists (snd >> inSelect)
+
+    cte.Recursive && inBody cte.Body
+
+and private renameCteColumns (cte: CommonTableExpr) (columns: ColumnDef list) : Result<ColumnDef list, QueryResult> =
+    if cte.CteColumns.IsEmpty then
+        Ok columns
+    elif List.length cte.CteColumns <> List.length columns then
+        Error(
+            Err(
+                1353,
+                "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"
+            )
+        )
+    else
+        Ok(List.map2 (fun (column: ColumnDef) name -> { column with Name = name }) columns cte.CteColumns)
+
 and private withCteScope
     (store: Store)
     (registry: Registry)
@@ -8318,19 +8354,36 @@ and private withCteScope
                 match remaining with
                 | [] -> Ok()
                 | cte :: rest ->
-                    materializeCte store registry dbName cte outer
-                    |> Result.bind (fun (columns, rows) ->
+                    let bindCte columns rows physicalProjection =
                         let binding =
                             { Columns = columns
                               Rows = rows
                               Origins = originsFor cte columns
-                              StatementStable = outer.IsNone }
+                              StatementStable = outer.IsNone
+                              PhysicalProjection = physicalProjection }
 
                         cteScope.Value <-
                             currentCteScope ()
                             |> Map.add (cte.CteName.ToLowerInvariant()) binding
 
-                        bind rest)
+                        bind rest
+
+                    let physicalProjection =
+                        if outer.IsNone && not (cteSelfReferenced cte) then
+                            tryPhysicalProjection store dbName (FromSubquery(cte.Body, cte.CteName))
+                        else
+                            None
+
+                    match physicalProjection with
+                    | Some projection ->
+                        renameCteColumns cte projection.OutputColumns
+                        |> Result.bind (fun columns ->
+                            let projection = { projection with OutputColumns = columns }
+                            let rows = lazy (projectPhysicalRows store registry dbName projection projection.SourceTable.RowsArray)
+                            bindCte columns rows (Some projection))
+                    | None ->
+                        materializeCte store registry dbName cte outer
+                        |> Result.bind (fun (columns, rows) -> bindCte columns (lazy (Ok rows)) None)
 
             match bind ctes with
             | Error err -> err, [], []
@@ -8363,45 +8416,9 @@ and private materializeCte
     (cte: CommonTableExpr)
     (outer: EvalContext option)
     : Result<ColumnDef list * Value[] list, QueryResult> =
-    let selfReferenced =
-        let rec inSelect (select: SelectStmt) =
-            (select.From |> Option.map inFrom |> Option.defaultValue false)
-            || select.Joins |> List.exists (fun j -> inFrom j.Table)
-
-        and inFrom (item: FromItem) =
-            match item with
-            | FromTable tref ->
-                tref.Database.IsNone
-                && System.String.Equals(tref.Table, cte.CteName, System.StringComparison.OrdinalIgnoreCase)
-            | FromSubquery(body, _)
-            | FromLateral(body, _) -> inBody body
-            | FromJsonTable _ -> false
-
-        and inBody (body: SelectOrUnion) =
-            match body with
-            | PlainSelect select -> inSelect select
-            | UnionSelect(first, rest, _, _, _) -> inSelect first || rest |> List.exists (snd >> inSelect)
-
-        cte.Recursive && inBody cte.Body
-
-    // `WITH x (a, b) AS (...)` renames the body's output columns; a count
-    // mismatch is MySQL's 1353.
-    let renamed (columns: ColumnDef list) : Result<ColumnDef list, QueryResult> =
-        if cte.CteColumns.IsEmpty then
-            Ok columns
-        elif List.length cte.CteColumns <> List.length columns then
-            Error(
-                Err(
-                    1353,
-                    "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"
-                )
-            )
-        else
-            Ok(List.map2 (fun (c: ColumnDef) name -> { c with Name = name }) columns cte.CteColumns)
-
-    if not selfReferenced then
+    if not (cteSelfReferenced cte) then
         resolveFromSubquery store registry dbName (FromSubquery(cte.Body, cte.CteName)) outer
-        |> Result.bind (fun (columns, rows) -> renamed columns |> Result.map (fun columns -> columns, rows))
+        |> Result.bind (fun (columns, rows) -> renameCteColumns cte columns |> Result.map (fun columns -> columns, rows))
     else
 
     match cte.Body with
@@ -8448,7 +8465,7 @@ and private materializeCte
         |> Result.bind (fun (anchorColumns, anchorRows) ->
             anchorColumns
             |> normalizeLiteralColumns
-            |> renamed
+            |> renameCteColumns cte
             |> Result.map (fun columns -> columns, anchorRows))
         |> Result.bind (fun (columns, anchorRows) ->
             let key (row: Value[]) = row |> Array.map (fun v -> Value.toText v |> Option.defaultValue "\u0000NULL") |> List.ofArray
@@ -8480,9 +8497,10 @@ and private materializeCte
                             |> Map.add
                                 (cte.CteName.ToLowerInvariant())
                                 { Columns = columns
-                                  Rows = working
+                                  Rows = lazy (Ok working)
                                   Origins = List.replicate columns.Length None
-                                  StatementStable = false }
+                                  StatementStable = false
+                                  PhysicalProjection = None }
 
                         match
                             recursiveBranches
@@ -9394,6 +9412,11 @@ and private tryPhysicalProjection
         && not select.CalculateFoundRows
 
     match source with
+    | FromTable tableRef when tableRef.Database.IsNone && tableRef.Partitions.IsEmpty ->
+        currentCteScope ()
+        |> Map.tryFind (tableRef.Table.ToLowerInvariant())
+        |> Option.bind (fun binding ->
+            if binding.StatementStable then binding.PhysicalProjection else None)
     | FromSubquery(PlainSelect select, _)
         when storedValuesMatchReadValues store && simpleSelect select ->
         match select.From with
@@ -9451,6 +9474,25 @@ and private tryPhysicalProjection
         | _ -> None
     | _ -> None
 
+and private projectPhysicalRows
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (projection: PhysicalProjection)
+    (rows: Value[] seq)
+    : Result<Value[] list, QueryResult> =
+    rows
+    |> prepareVirtualRows
+        store
+        registry
+        dbName
+        (projection.Source.Alias |> Option.defaultValue projection.Source.Table)
+        projection.SourceTable.Columns
+    |> Result.map (fun prepared ->
+        prepared
+        |> Seq.map (fun row -> projection.SourceIndices |> List.map (fun index -> row.[index]) |> Array.ofList)
+        |> List.ofSeq)
+
 and private tryProjectedPhysicalCorrelatedEqualityLookup
     (store: Store)
     (registry: Registry)
@@ -9475,20 +9517,9 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
                     |> Option.bind (fun (_, rows) ->
                         rows
                         |> List.map snd
-                        |> prepareVirtualRows
-                            store
-                            registry
-                            dbName
-                            (projection.Source.Alias |> Option.defaultValue projection.Source.Table)
-                            projection.SourceTable.Columns
+                        |> projectPhysicalRows store registry dbName projection
                         |> Result.toOption
-                        |> Option.map (fun prepared ->
-                            let projectedRows =
-                                prepared
-                                |> Seq.map (fun row -> projection.SourceIndices |> List.map (fun index -> row.[index]) |> Array.ofList)
-                                |> List.ofSeq
-
-                            projection.OutputColumns, projectedRows))))))
+                        |> Option.map (fun projectedRows -> projection.OutputColumns, projectedRows))))))
 
 and private tryMaterializedCorrelatedEqualityLookup
     (store: Store)
@@ -9558,6 +9589,7 @@ and private tryCorrelatedSourceLookup
     | FromTable table ->
         tryCorrelatedEqualityLookup store dbName table whereExpr outer
         |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
+        |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | FromSubquery _ ->
         tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
