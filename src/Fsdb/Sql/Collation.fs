@@ -54,7 +54,12 @@ type Collation =
       IsPrefix: string -> string -> bool
       /// PAD SPACE: trailing spaces are insignificant — `Equals` trims,
       /// and LIKE trims both subject and pattern ends before matching.
-      PadSpace: bool }
+      PadSpace: bool
+      /// Whether the full-order equivalence classes are exactly the SQL
+      /// equality classes. A composite index may order by a suffix after an
+      /// equality-fixed key only when this holds; otherwise case, accent, or
+      /// padding variants can interleave separate suffix runs.
+      EqualityIsOrderEquivalence: bool }
 
 // ---------------------------------------------------------------------------
 // Construction from a small spec — every registered collation is one line
@@ -207,7 +212,10 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             binaryPrefix
         else
             fun value prefix -> ci.IsPrefix(foldText value, foldText prefix, spec.Fold)
-      PadSpace = spec.PadSpace }
+      PadSpace = spec.PadSpace
+      EqualityIsOrderEquivalence =
+        not spec.PadSpace
+        && (spec.ByteOrder || spec.Fold = CompareOptions.None) }
 
 // ---------------------------------------------------------------------------
 // The registry — every utf8mb4 collation MySQL 8.4 ships.

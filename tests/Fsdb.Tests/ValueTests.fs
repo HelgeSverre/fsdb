@@ -731,6 +731,19 @@ let tests =
                         let col = Fsdb.Collation.tryFind name |> Option.get
                         Expect.equal (col.Equals "a" "a ") expectedEqual (sprintf "%s: 'a' = 'a '" name)
 
+                testTheory
+                    "collations identify when equality fixes one full-order position"
+                    [ "utf8mb4_0900_bin", true
+                      "utf8mb4_0900_as_cs", true
+                      "binary", true
+                      "utf8mb4_0900_ai_ci", false
+                      "utf8mb4_0900_as_ci", false
+                      "utf8mb4_unicode_ci", false
+                      "utf8mb4_bin", false ]
+                    <| fun (name, expected) ->
+                        let collation = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.equal collation.EqualityIsOrderEquivalence expected name
+
                 testCase "utf8mb4_general_ci gives sharp s one s weight"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get

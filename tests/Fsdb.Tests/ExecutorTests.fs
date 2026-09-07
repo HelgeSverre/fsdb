@@ -4064,6 +4064,133 @@ let tests =
                     Expect.equal plan.EstimatedRows (Some "4") "the estimate is the exact tenant slice rather than the whole table"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "index-owned groups avoid a temporary table"
 
+                testCase "string fixed prefixes require order and equality to share an equivalence class"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE binary_indexed (id INT PRIMARY KEY, tenant VARCHAR(20) COLLATE utf8mb4_0900_bin, bucket INT, KEY ix_tenant_bucket (tenant, bucket))"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE folded_indexed (id INT PRIMARY KEY, tenant VARCHAR(20) COLLATE utf8mb4_0900_ai_ci, bucket INT, KEY ix_tenant_bucket (tenant, bucket))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE folded_scanned (id INT PRIMARY KEY, tenant VARCHAR(20) COLLATE utf8mb4_0900_ai_ci, bucket INT)"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE padded_indexed (id INT PRIMARY KEY, tenant VARCHAR(20) COLLATE utf8mb4_bin, bucket INT, KEY ix_tenant_bucket (tenant, bucket))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE padded_scanned (id INT PRIMARY KEY, tenant VARCHAR(20) COLLATE utf8mb4_bin, bucket INT)"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE bytes_indexed (id INT PRIMARY KEY, tenant VARBINARY(20), bucket INT, KEY ix_tenant_bucket (tenant, bucket))"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO binary_indexed VALUES (1, 'alpha', 2), (2, 'beta', 1), (3, 'alpha', 1), (4, 'Alpha', 3), (5, 'alpha', 2)"
+                    |> ignore
+
+                    let foldedValues = "(1, 'alpha', 2), (2, 'beta', 1), (3, 'Alpha', 1), (4, 'álpha', 3), (5, 'alpha', 2)"
+
+                    for table in [ "folded_indexed"; "folded_scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES %s" table foldedValues) |> ignore
+
+                    let paddedValues = "(1, 'alpha', 2), (2, 'alpha ', 1), (3, 'beta', 3)"
+
+                    for table in [ "padded_indexed"; "padded_scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES %s" table paddedValues) |> ignore
+
+                    runDefault store "INSERT INTO bytes_indexed VALUES (1, X'61', 2), (2, X'62', 1), (3, X'61', 1)" |> ignore
+
+                    match runDefault store "SELECT bucket, COUNT(*) FROM binary_indexed WHERE tenant = 'alpha' GROUP BY bucket" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            (List.sort rows)
+                            [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ]
+                            "binary equality leaves one contiguous prefix"
+                    | other -> failtestf "expected binary-prefix groups, got %A" other
+
+                    let binaryPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT bucket, COUNT(*) FROM binary_indexed WHERE tenant = 'alpha' GROUP BY bucket"
+                        |> explainRow
+
+                    Expect.equal binaryPlan.Key (Some "ix_tenant_bucket") "the binary prefix selects its composite index"
+                    Expect.equal binaryPlan.EstimatedRows (Some "3") "the binary prefix estimates only exact matching rows"
+                    Expect.isFalse (binaryPlan.Extra |> Option.exists (_.Contains("temporary"))) "the binary suffix stays contiguous"
+
+                    match runDefault store "SELECT bucket FROM binary_indexed WHERE tenant = 'alpha' ORDER BY bucket" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "2" ] ] "the fixed binary prefix streams suffix order"
+                    | other -> failtestf "expected binary-prefix ordering, got %A" other
+
+                    let binaryOrderPlan =
+                        runDefault store "EXPLAIN SELECT bucket FROM binary_indexed WHERE tenant = 'alpha' ORDER BY bucket"
+                        |> explainRow
+
+                    Expect.equal binaryOrderPlan.Key (Some "ix_tenant_bucket") "the ordered binary suffix uses the composite index"
+                    Expect.equal binaryOrderPlan.EstimatedRows (Some "3") "the ordered binary suffix stays inside its prefix"
+                    Expect.isFalse (binaryOrderPlan.Extra |> Option.exists (_.Contains("filesort"))) "the suffix streams without a filesort"
+
+                    let sortedRows table =
+                        match runDefault store (sprintf "SELECT bucket, COUNT(*) FROM %s WHERE tenant = 'alpha' GROUP BY bucket" table) with
+                        | ResultSet(_, rows) -> List.sort rows
+                        | other -> failtestf "expected folded-prefix groups, got %A" other
+
+                    Expect.equal
+                        (sortedRows "folded_indexed")
+                        (sortedRows "folded_scanned")
+                        "case- and accent-equivalent prefixes keep every SQL-equal row"
+
+                    let foldedPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT bucket, COUNT(*) FROM folded_indexed WHERE tenant = 'alpha' GROUP BY bucket"
+                        |> explainRow
+
+                    Expect.isTrue
+                        (foldedPlan.Extra |> Option.exists (_.Contains("temporary")))
+                        "a folded prefix does not claim globally contiguous suffix groups"
+
+                    Expect.equal
+                        (sortedRows "padded_indexed")
+                        (sortedRows "padded_scanned")
+                        "PAD SPACE equality keeps trailing-space variants"
+
+                    let paddedPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT bucket, COUNT(*) FROM padded_indexed WHERE tenant = 'alpha' GROUP BY bucket"
+                        |> explainRow
+
+                    Expect.isTrue
+                        (paddedPlan.Extra |> Option.exists (_.Contains("temporary")))
+                        "a PAD SPACE prefix does not claim globally contiguous suffix groups"
+
+                    let bytesPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT bucket, COUNT(*) FROM bytes_indexed WHERE tenant = X'61' GROUP BY bucket"
+                        |> explainRow
+
+                    Expect.equal bytesPlan.Key (Some "ix_tenant_bucket") "raw byte equality safely fixes an ordered prefix"
+                    Expect.equal bytesPlan.EstimatedRows (Some "2") "the byte prefix estimates its exact slice"
+
+                    match runDefault store "SELECT bucket, COUNT(*) FROM bytes_indexed WHERE tenant = X'61' GROUP BY bucket" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ] "byte prefixes retain suffix order"
+                    | other -> failtestf "expected byte-prefix groups, got %A" other
+
                 testCase "GROUP BY sorts through a composite index once WHERE pins every column ahead of the group key"
                 <| fun _ ->
                     let store = newStore ()

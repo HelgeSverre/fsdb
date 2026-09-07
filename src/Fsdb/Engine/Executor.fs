@@ -10987,11 +10987,21 @@ and private equalityPinsOneStoredKey (table: Table) (name: string) (literal: Val
     Storage.resolveColumn table.Columns name
     |> Result.toOption
     |> Option.exists (fun index ->
-        match table.Columns.[index].Type, literal with
+        let column = table.Columns.[index]
+
+        let equalityIsOrderEquivalence () =
+            column.Collation
+            |> Option.bind Collation.tryFind
+            |> Option.defaultValue Collation.defaultCollation
+            |> _.EqualityIsOrderEquivalence
+
+        match column.Type, literal with
         | (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TBit _ | TYear),
           (VInt _ | VUInt _ | VBit _ | VDecimal _)
         | TDecimal _, (VInt _ | VUInt _ | VBit _ | VDecimal _)
         | (TDouble _ | TFloat _), (VInt _ | VUInt _ | VBit _ | VDecimal _ | VDouble _) -> true
+        | (TVarchar _ | TTinyText | TText | TMediumText | TLongText), VString _ -> equalityIsOrderEquivalence ()
+        | (TBinary _ | TVarBinary _ | TTinyBlob | TBlob | TMediumBlob | TLongBlob), VBytes _ -> true
         | _ -> false)
 
 /// A pinned prefix must identify one stored index key, not merely values
