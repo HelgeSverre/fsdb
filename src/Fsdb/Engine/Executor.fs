@@ -9731,7 +9731,13 @@ and private projectionExpressionsNamed (projections: Projection list) name =
         | expression, Some alias when alias.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> Some expression
         | _ -> None)
 
-and private indexOrderTerms (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
+and private transformUsesStoredSemantics (registry: Registry) = function
+    | None -> true
+    | Some Lowercase -> Functions.isUnmodifiedBuiltinScalar "LOWER" registry
+    | Some Uppercase -> Functions.isUnmodifiedBuiltinScalar "UPPER" registry
+    | Some(Expression _) -> false
+
+and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
     let resolveProjectionReference expression =
@@ -9772,12 +9778,12 @@ and private indexOrderTerms (tref: TableRef) (select: SelectStmt) : IndexOrderTe
         let expression, projectionReference = resolveProjectionReference expression
 
         match directColumn projectionReference expression with
-        | Some(column, transform) ->
+        | Some(column, transform) when transformUsesStoredSemantics registry transform ->
             Ok
                 { Column = column
                   Transform = transform
                   Direction = direction }
-        | None -> Error())
+        | _ -> Error())
     |> Result.toOption
 
 and private tryIndexOrder
@@ -9799,7 +9805,7 @@ and private tryIndexOrder
     if not (storedValuesMatchReadValues store) || not canUseIndexOrder then
         None
     else
-        indexOrderTerms tref select
+        indexOrderTerms registry tref select
         |> Option.bind (fun orderedColumns ->
             let plan
                 (keyName: string)
@@ -10987,12 +10993,6 @@ and private resolveOrderKey
     | e -> evalOrderKey ctx e
 
 and private groupByIndexTerms (registry: Registry) (table: Table) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
-    let usesStoredSemantics = function
-        | None -> true
-        | Some Lowercase -> Functions.isUnmodifiedBuiltinScalar "LOWER" registry
-        | Some Uppercase -> Functions.isUnmodifiedBuiltinScalar "UPPER" registry
-        | Some(Expression _) -> false
-
     let resolved =
         select.GroupBy
         |> traverse (resolveGroupByRef (columnIndexOf table.Columns) select.Projections)
@@ -11003,7 +11003,7 @@ and private groupByIndexTerms (registry: Registry) (table: Table) (tref: TableRe
         groupExprs
         |> traverse (fun expression ->
             match indexedColumnFor tref expression with
-            | Some(column, transform) when usesStoredSemantics transform ->
+            | Some(column, transform) when transformUsesStoredSemantics registry transform ->
                 Ok
                     { Column = column
                       Transform = transform

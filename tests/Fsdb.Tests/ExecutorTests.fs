@@ -6203,6 +6203,24 @@ let tests =
                     Expect.equal rawPlan.AccessType (Some "ALL") "the transformed index does not order the stored value"
                     Expect.isTrue (rawPlan.Extra |> Option.exists (_.Contains("filesort"))) "raw values still use a filesort"
 
+                    let overridden =
+                        builtins
+                        |> registerScalar "UPPER" (fun _ -> VString "same")
+
+                    let overriddenRows table =
+                        match run store overridden $"SELECT id FROM {table} ORDER BY UPPER(name)" with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected override-ordered rows, got %A" other
+
+                    Expect.equal (overriddenRows "indexed") (overriddenRows "scanned") "extension overrides bypass stored function order"
+
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM indexed ORDER BY UPPER(name)"
+                        |> explainRow
+
+                    Expect.equal overriddenPlan.AccessType (Some "ALL") "an overridden function does not claim its built-in index"
+                    Expect.isTrue (overriddenPlan.Extra |> Option.exists (_.Contains("filesort"))) "the override uses its runtime ordering"
+
                     for table in [ "indexed"; "scanned" ] do
                         runDefault store $"UPDATE {table} SET name = 'aardvark' WHERE id = 5" |> ignore
                         runDefault store $"DELETE FROM {table} WHERE id = 2" |> ignore
