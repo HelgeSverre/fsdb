@@ -124,21 +124,28 @@ let private tokenizeWkt (text: string) : WktToken list option =
 
     if valid then Some(List.ofSeq tokens) else None
 
-let tryGeometryFromText (srid: int) (text: string) : Geometry option =
-    let samePoint (x1, y1) (x2, y2) = x1 = x2 && y1 = y2
+let private hasLineExtent =
+    function
+    | _ :: _ :: _ -> true
+    | _ -> false
 
-    let validLine points = List.length points >= 2
+let private isClosedRing =
+    function
+    | first :: _ :: _ :: _ :: _ as ring -> first = List.last ring
+    | _ -> false
+
+let tryGeometryFromText (srid: int) (text: string) : Geometry option =
     let validPolygon rings =
         not (List.isEmpty rings)
-        && rings |> List.forall (fun ring -> List.length ring >= 4 && samePoint (List.head ring) (List.last ring))
+        && rings |> List.forall isClosedRing
 
     let rec isValidWktShape = function
         | GEmpty -> true
         | GPoint _ -> true
-        | GLineString points -> validLine points
+        | GLineString points -> hasLineExtent points
         | GPolygon rings -> validPolygon rings
         | GMultiPoint points -> not (List.isEmpty points)
-        | GMultiLineString lines -> not (List.isEmpty lines) && lines |> List.forall validLine
+        | GMultiLineString lines -> not (List.isEmpty lines) && lines |> List.forall hasLineExtent
         | GMultiPolygon polygons -> not (List.isEmpty polygons) && polygons |> List.forall validPolygon
         | GGeometryCollection geometries -> geometries |> List.forall (fun geometry -> isValidWktShape geometry.Shape)
 
@@ -326,14 +333,12 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                     | 2 ->
                         readMany 16 readPair
                         |> Option.bind (fun points ->
-                            if List.length points >= 2 && points |> List.forall finitePair then Some(GLineString points)
+                            if hasLineExtent points && points |> List.forall finitePair then Some(GLineString points)
                             else None)
                     | 3 ->
                         readMany 4 (fun () -> readMany 16 readPair)
                         |> Option.bind (fun rings ->
-                            let closed ring = List.length ring >= 4 && List.head ring = List.last ring
-
-                            if not (List.isEmpty rings) && rings |> List.forall (fun ring -> closed ring && ring |> List.forall finitePair) then
+                            if not (List.isEmpty rings) && rings |> List.forall (fun ring -> isClosedRing ring && ring |> List.forall finitePair) then
                                 Some(GPolygon rings)
                             else
                                 None)
@@ -354,7 +359,11 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                                 match lines, shape with
                                 | Some values, GLineString line -> Some(line :: values)
                                 | _ -> None) (Some [])
-                            |> Option.bind (fun lines -> if List.isEmpty lines || lines |> List.exists (fun line -> List.length line < 2) then None else Some(GMultiLineString(List.rev lines))))
+                            |> Option.bind (fun lines ->
+                                if List.isEmpty lines || lines |> List.exists (hasLineExtent >> not) then
+                                    None
+                                else
+                                    Some(GMultiLineString(List.rev lines))))
                     | 6 ->
                         readMany 5 (fun () -> readGeometry (depth + 1))
                         |> Option.bind (fun shapes ->
@@ -364,9 +373,12 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                                 | Some values, GPolygon polygon -> Some(polygon :: values)
                                 | _ -> None) (Some [])
                             |> Option.bind (fun polygons ->
-                                let closed ring = List.length ring >= 4 && List.head ring = List.last ring
-
-                                if List.isEmpty polygons || polygons |> List.exists (fun polygon -> List.isEmpty polygon || polygon |> List.exists (closed >> not)) then
+                                if
+                                    List.isEmpty polygons
+                                    || polygons
+                                       |> List.exists (fun polygon ->
+                                           List.isEmpty polygon || polygon |> List.exists (isClosedRing >> not))
+                                then
                                     None
                                 else
                                     Some(GMultiPolygon(List.rev polygons))))
