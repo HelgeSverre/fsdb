@@ -4801,15 +4801,19 @@ let private tryOrderedIndexLookupWithPrefix
                 else
                     None)
             |> Option.bind (fun (group, traversal) ->
+                let rec normalizePrefix values columnIndices prefixLengths transforms =
+                    match values, columnIndices, prefixLengths, transforms with
+                    | [], _, _, _ -> Some []
+                    | value :: rest, index :: indices, prefixLength :: lengths, transform :: remainingTransforms ->
+                        exactProbeValue store table index value
+                        |> Option.map (projectIndexValue prefixLength transform)
+                        |> Option.bind (fun normalized ->
+                            normalizePrefix rest indices lengths remainingTransforms
+                            |> Option.map (fun normalizedRest -> normalized :: normalizedRest))
+                    | _ -> None
+
                 let normalizedPrefix =
-                    List.zip3 indices group.PrefixLengths group.Transforms
-                    |> List.take prefixValues.Length
-                    |> List.zip prefixValues
-                    |> traverse (fun (value, (index, prefixLength, transform)) ->
-                        match exactProbeValue store table index value with
-                        | Some normalized -> Ok(projectIndexValue prefixLength transform normalized)
-                        | None -> Error())
-                    |> Result.toOption
+                    normalizePrefix prefixValues indices group.PrefixLengths group.Transforms
 
                 Option.map2
                     (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (prefix: Value list) ->
