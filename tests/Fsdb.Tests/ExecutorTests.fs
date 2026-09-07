@@ -4076,6 +4076,30 @@ let tests =
                         (bounded "scanned")
                         "suffix bounds preserve fixed-prefix grouped results"
 
+                    let competingBounds table =
+                        runDefault
+                            store
+                            (sprintf
+                                "SELECT bucket, COUNT(*) FROM %s WHERE tenant_id = 1 AND bucket >= 2 AND bucket >= 3 AND bucket < 4 GROUP BY bucket"
+                                table)
+
+                    Expect.equal
+                        (competingBounds "indexed")
+                        (competingBounds "scanned")
+                        "competing suffix bounds remain residual predicates"
+
+                    let reversedBounds table =
+                        runDefault
+                            store
+                            (sprintf
+                                "SELECT bucket, COUNT(*) FROM %s WHERE 1 = tenant_id AND 2 <= bucket AND 4 > bucket GROUP BY bucket"
+                                table)
+
+                    Expect.equal
+                        (reversedBounds "indexed")
+                        (reversedBounds "scanned")
+                        "reversed literal bounds cover the same index slice"
+
                     let boundedGroupPlan =
                         runDefault
                             store

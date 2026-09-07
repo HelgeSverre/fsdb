@@ -8987,60 +8987,84 @@ and private literalInProbes (registry: Registry) (tref: TableRef) (whereExpr: Ex
                       Values = values |> List.map (List.choose id) }
         | _ -> None)
 
-and private collectRangeBounds columnName boundValue (whereExpr: Expr option) : RangeLookupBounds list =
-    match whereExpr with
-    | None -> []
-    | Some whereExpr ->
-        let addBound bounds name lower upper =
-            match Map.tryFind name bounds with
-            | None -> Map.add name (lower, upper) bounds
-            | Some(existingLower, existingUpper) ->
-                Map.add name (Option.orElse existingLower lower, Option.orElse existingUpper upper) bounds
-
-        conjuncts whereExpr
-        |> List.fold
-            (fun bounds expression ->
-                match expression with
-                | BinOp((Gt | Gte | Lt | Lte as op), left, right) ->
-                    match columnName left, boundValue right with
-                    | Some name, Some value ->
-                        match op with
-                        | Gt
-                        | Gte -> addBound bounds name (Some(value, (op = Gte))) None
-                        | Lt
-                        | Lte -> addBound bounds name None (Some(value, (op = Lte)))
-                        | _ -> bounds
-                    | _ ->
-                        match columnName right, boundValue left with
-                        | Some name, Some value ->
-                            match op with
-                            | Lt
-                            | Lte -> addBound bounds name (Some(value, (op = Lte))) None
-                            | Gt
-                            | Gte -> addBound bounds name None (Some(value, (op = Gte)))
-                            | _ -> bounds
-                        | _ -> bounds
-                | _ -> bounds)
-            Map.empty
-        |> Map.toList
-        |> List.map (fun (name, (lower, upper)) ->
+and private tryLiteralRangePredicate columnName boundValue expression : RangeLookupBounds option =
+    let lower name value inclusive =
+        Some
             { Column = name
-              Lower = lower
-              Upper = upper })
+              Lower = Some(value, inclusive)
+              Upper = None }
 
-and private rangeLookupBounds (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
+    let upper name value inclusive =
+        Some
+            { Column = name
+              Lower = None
+              Upper = Some(value, inclusive) }
+
+    match expression with
+    | BinOp((Gt | Gte | Lt | Lte as op), left, right) ->
+        match columnName left, boundValue right with
+        | Some name, Some value ->
+            match op with
+            | Gt -> lower name value false
+            | Gte -> lower name value true
+            | Lt -> upper name value false
+            | Lte -> upper name value true
+            | _ -> None
+        | _ ->
+            match columnName right, boundValue left with
+            | Some name, Some value ->
+                match op with
+                | Lt -> lower name value false
+                | Lte -> lower name value true
+                | Gt -> upper name value false
+                | Gte -> upper name value true
+                | _ -> None
+            | _ -> None
+    | _ -> None
+
+and private literalRangePredicateFor (scope: ColumnReferenceScope) (tref: TableRef) =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
     let columnName = function
         | Col name when scope = BareOrQualifiedColumn -> Some name
-        | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
+        | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+            Some name
         | _ -> None
 
     let literalValue = function
         | Lit value -> Some value
         | _ -> None
 
-    collectRangeBounds columnName literalValue whereExpr
+    tryLiteralRangePredicate columnName literalValue
+
+and private collectClassifiedRangeBounds classify (whereExpr: Expr option) : RangeLookupBounds list =
+    let addBound (bounds: Map<string, RangeLookupBounds>) (predicate: RangeLookupBounds) =
+        let existing =
+            Map.tryFind predicate.Column bounds
+            |> Option.defaultValue
+                { Column = predicate.Column
+                  Lower = None
+                  Upper = None }
+
+        Map.add
+            predicate.Column
+            { existing with
+                Lower = Option.orElse existing.Lower predicate.Lower
+                Upper = Option.orElse existing.Upper predicate.Upper }
+            bounds
+
+    whereExpr
+    |> optionalConjuncts
+    |> List.choose classify
+    |> List.fold addBound Map.empty
+    |> Map.values
+    |> List.ofSeq
+
+and private collectRangeBounds columnName boundValue whereExpr =
+    collectClassifiedRangeBounds (tryLiteralRangePredicate columnName boundValue) whereExpr
+
+and private rangeLookupBounds (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
+    collectClassifiedRangeBounds (literalRangePredicateFor scope tref) whereExpr
 
 and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRef) (whereExpr: Expr option) : SpatialLookupPredicate list =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -11079,19 +11103,41 @@ and private storageOrderTerms (terms: IndexOrderTerm list) : Storage.OrderedKeyT
           OrderedTransform = term.Transform
           OrderedDirection = term.Direction })
 
+and private tryDirectSuffixTerm (matched: IndexPrefixMatch) =
+    matched.Terms
+    |> List.tryItem matched.PinnedCount
+    |> Option.filter (fun term -> term.Transform.IsNone)
+
 and private fixedPrefixSuffixBounds
     (tref: TableRef)
     (whereExpr: Expr option)
     (matched: IndexPrefixMatch)
     : (Value * bool) option * (Value * bool) option =
-    matched.Terms
-    |> List.tryItem matched.PinnedCount
-    |> Option.filter (fun term -> term.Transform.IsNone)
+    matched
+    |> tryDirectSuffixTerm
     |> Option.bind (fun term ->
         rangeLookupBounds BareOrQualifiedColumn tref whereExpr
         |> List.tryFind (fun bounds -> equalsIgnoreCase bounds.Column term.Column))
     |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
     |> Option.defaultValue (None, None)
+
+and private trySuffixRangeCoverageCount (tref: TableRef) (whereExpr: Expr option) (matched: IndexPrefixMatch) : int option =
+    if matched.PinnedCount = 0 then
+        Some 0
+    else
+        matched
+        |> tryDirectSuffixTerm
+        |> Option.map (fun suffix ->
+            whereExpr
+            |> optionalConjuncts
+            |> List.choose (literalRangePredicateFor BareOrQualifiedColumn tref)
+            |> List.filter (fun predicate -> equalsIgnoreCase predicate.Column suffix.Column))
+        |> Option.defaultValue []
+        |> fun predicates ->
+            let lowerCount = predicates |> List.sumBy (fun predicate -> if predicate.Lower.IsSome then 1 else 0)
+            let upperCount = predicates.Length - lowerCount
+
+            if lowerCount <= 1 && upperCount <= 1 then Some predicates.Length else None
 
 and private orderedIndexPrefixMatches
     (store: Store)
@@ -11123,12 +11169,15 @@ and private orderedIndexPrefixMatches
                 |> List.map valueFor
                 |> tryAllSome
                 |> Option.map (fun pinnedValues ->
+                    let coveredRangeCount = trySuffixRangeCoverageCount tref whereExpr matched
+
                     { Database = tableDb
                       Match = matched
                       PinnedValues = pinnedValues
                       PredicateCovered =
-                        conjunctCount = pins.Length
-                        && pins.Length = matched.PinnedCount }))))
+                        pins.Length = matched.PinnedCount
+                        && (coveredRangeCount
+                            |> Option.exists (fun rangeCount -> conjunctCount = pins.Length + rangeCount)) }))))
     |> Option.defaultValue []
 
 and private tryFixedPrefixIndexOrder
@@ -11189,9 +11238,9 @@ and private tryGroupingIndexOrder
         let terms = resolved.Match.Terms |> storageOrderTerms
         let lower, upper = fixedPrefixSuffixBounds tref whereExpr resolved.Match
 
-        let lookup =
+        let rangeLookup =
             match resolved.PinnedValues with
-            | [] -> Storage.tryOrderedIndexLookup store resolved.Database tref.Table terms
+            | [] -> None
             | pinnedValues ->
                 Storage.tryOrderedIndexPrefixRangeLookup
                     store
@@ -11201,6 +11250,12 @@ and private tryGroupingIndexOrder
                     pinnedValues
                     lower
                     upper
+
+        let lookup =
+            match resolved.PinnedValues with
+            | [] -> Storage.tryOrderedIndexLookup store resolved.Database tref.Table terms
+            | pinnedValues ->
+                rangeLookup
                 |> Option.orElseWith (fun () ->
                     Storage.tryOrderedIndexPrefixLookup store resolved.Database tref.Table terms pinnedValues)
 
@@ -11208,7 +11263,9 @@ and private tryGroupingIndexOrder
         |> Option.map (fun lookup ->
             { Lookup = lookup
               KeyOffset = resolved.Match.PinnedCount
-              PredicateCovered = resolved.PredicateCovered }))
+              PredicateCovered =
+                resolved.PredicateCovered
+                && ((lower.IsNone && upper.IsNone) || rangeLookup.IsSome) }))
 
 and private tryGroupIndexOrder (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
     if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
