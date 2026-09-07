@@ -555,3 +555,7 @@ let maxBytesPerCharacter (charset: string option) =
 /// collation takes precedence.
 let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry
 let metadataIdentifierCollation = Map.find "utf8mb3_tolower_ci" registry
+
+/// Resolves an optional collation name through the store-level fallback.
+let findOrDefault name =
+    name |> Option.bind tryFind |> Option.defaultValue defaultCollation

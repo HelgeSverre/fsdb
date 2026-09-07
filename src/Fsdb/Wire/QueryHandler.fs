@@ -5603,15 +5603,6 @@ let private runRoutineStatements
 
     outcome
 
-let private storedExecutionSettings sqlMode characterSetClient collationConnection : ExecutionSettings =
-    { SqlModeText = sqlMode
-      SqlMode = SqlMode.settingsFor sqlMode
-      ConnectionCharset = characterSetClient
-      ConnectionCollation =
-        collationConnection
-        |> Collation.tryFind
-        |> Option.defaultValue Collation.defaultCollation }
-
 let private storedExecutionVariables sqlMode characterSetClient collationConnection variables =
     variables
     |> Map.add "sql_mode" (Some sqlMode)
@@ -5852,7 +5843,7 @@ let rec private invokeStoredFunction
 
     let executionStore = Session.currentStore caller
     let capturedSettings =
-        storedExecutionSettings routine.SqlMode routine.CharacterSetClient routine.CollationConnection
+        ExecutionSettings.forStoredObject routine.SqlMode routine.CharacterSetClient routine.CollationConnection
 
     let executionSession =
         { caller with
@@ -6295,7 +6286,7 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             let executionStore = Session.currentStore callerSession
                             let originalSettings = Storage.executionSettings executionStore
                             let capturedSettings =
-                                storedExecutionSettings routine.SqlMode routine.CharacterSetClient routine.CollationConnection
+                                ExecutionSettings.forStoredObject routine.SqlMode routine.CharacterSetClient routine.CollationConnection
                             let executionSession =
                                 { callerSession with
                                     User = account.Name

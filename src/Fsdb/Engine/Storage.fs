@@ -119,8 +119,7 @@ let private compareIndexedValues (collationName: string option) (left: Value) (r
     match left, right with
     | VString left, VString right ->
         collationName
-        |> Option.bind Collation.tryFind
-        |> Option.defaultValue Collation.defaultCollation
+        |> Collation.findOrDefault
         |> fun collation -> collation.Compare left right
     | _ -> compareTotal left right
 
@@ -384,6 +383,20 @@ type ExecutionSettings =
       SqlMode: SqlMode.Settings
       ConnectionCharset: string
       ConnectionCollation: Collation.Collation }
+
+[<RequireQualifiedAccess>]
+module ExecutionSettings =
+    let defaults =
+        { SqlModeText = SqlMode.defaultText
+          SqlMode = SqlMode.defaultSettings
+          ConnectionCharset = "utf8mb4"
+          ConnectionCollation = Collation.defaultCollation }
+
+    let forStoredObject sqlModeText connectionCharset collationName =
+        { SqlModeText = sqlModeText
+          SqlMode = SqlMode.settingsFor sqlModeText
+          ConnectionCharset = connectionCharset
+          ConnectionCollation = Collation.findOrDefault (Some collationName) }
 
 /// Shared catalog state plus session-local coercion and transaction settings.
 /// Session clones share reference-typed synchronization fields but copy the
@@ -2260,8 +2273,7 @@ let private fullTextKeyGroups (table: Table) : FullTextKeyGroup list =
                           Indices = indices
                           CollationSpec =
                             table.Columns.[first].Collation
-                            |> Option.bind Collation.tryFind
-                            |> Option.defaultValue Collation.defaultCollation }))
+                            |> Collation.findOrDefault }))
 
 type private SpatialKeyGroup =
     { Name: string
@@ -2299,8 +2311,7 @@ let private fullTextDocument (indices: int list) (row: Value[]) =
 let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string =
     let collationOf index =
         columns.[index].Collation
-        |> Option.bind Collation.tryFind
-        |> Option.defaultValue Collation.defaultCollation
+        |> Collation.findOrDefault
 
     let encode (index: int) =
         match row.[index] with
@@ -3972,11 +3983,7 @@ let create () : Store =
 
     { Databases = databases
       ForeignKeyChecks = true
-      ExecutionSettings =
-        { SqlMode = SqlMode.defaultSettings
-          SqlModeText = SqlMode.defaultText
-          ConnectionCharset = "utf8mb4"
-          ConnectionCollation = Collation.defaultCollation }
+      ExecutionSettings = ExecutionSettings.defaults
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
       Durability = { Sink = None }
@@ -4541,8 +4548,7 @@ let private trySecondaryOrderSliceInTable
                             match left, right with
                             | VString left, VString right ->
                                 table.Columns.[index].Collation
-                                |> Option.bind Collation.tryFind
-                                |> Option.defaultValue Collation.defaultCollation
+                                |> Collation.findOrDefault
                                 |> fun collation -> collation.ComparePrimary left right
                             | _ -> Value.compare left right
 
@@ -4682,8 +4688,7 @@ let private indexedValuesEqual collationName left right =
     match left, right with
     | VString left, VString right ->
         collationName
-        |> Option.bind Collation.tryFind
-        |> Option.defaultValue Collation.defaultCollation
+        |> Collation.findOrDefault
         |> fun collation -> collation.Equals left right
     | _ -> left = right
 

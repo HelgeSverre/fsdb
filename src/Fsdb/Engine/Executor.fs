@@ -597,15 +597,6 @@ type private StoredTrigger =
       CharacterSetClient: string
       CollationConnection: string }
 
-let private triggerExecutionSettings (trigger: StoredTrigger) : ExecutionSettings =
-    { SqlModeText = trigger.SqlMode
-      SqlMode = SqlMode.settingsFor trigger.SqlMode
-      ConnectionCharset = trigger.CharacterSetClient
-      ConnectionCollation =
-        trigger.CollationConnection
-        |> Collation.tryFind
-        |> Option.defaultValue Collation.defaultCollation }
-
 type private StoredCheck = SystemCatalog.Check.Entry
 
 type private ViewColumnDescriptor =
@@ -10991,8 +10982,7 @@ and private equalityPinsOneStoredKey (table: Table) (name: string) (literal: Val
 
         let equalityIsOrderEquivalence () =
             column.Collation
-            |> Option.bind Collation.tryFind
-            |> Option.defaultValue Collation.defaultCollation
+            |> Collation.findOrDefault
             |> _.EqualityIsOrderEquivalence
 
         match column.Type, literal with
@@ -16846,7 +16836,13 @@ let rec executeAs
                         |> List.tryPick (fun (oldRow, newRow) ->
                             bodies
                             |> List.tryPick (fun (trigger, statements, account) ->
-                                Storage.withExecutionSettings runStore (triggerExecutionSettings trigger) (fun () ->
+                                let settings =
+                                    ExecutionSettings.forStoredObject
+                                        trigger.SqlMode
+                                        trigger.CharacterSetClient
+                                        trigger.CollationConnection
+
+                                Storage.withExecutionSettings runStore settings (fun () ->
                                     match runBody oldRow newRow (statements, account) with
                                     | Err _ as e -> Some e
                                     | _ -> None)))
