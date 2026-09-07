@@ -7075,7 +7075,7 @@ let tests =
                         (Affected 1000UL)
                         "seeded generated-column source"
 
-                    let assertIndexedWork prefix source =
+                    let assertIndexedWork expectedCount prefix source =
                         calls <- 0
 
                         match
@@ -7091,29 +7091,65 @@ let tests =
                             Expect.equal rows.Length 10 "the selected outer rows are retained"
                             Expect.equal
                                 (rows |> List.map (fun row -> row.[1]))
-                                (List.replicate 10 (Some "20"))
-                                "each key has twenty candidates"
+                                (List.replicate 10 (Some(string expectedCount)))
+                                "each key retains the expected candidates"
                         | other -> failtestf "expected correlated counts, got %A" other
 
                         Expect.isLessThan calls 300 "the source reads generated values only for indexed candidates"
 
-                    assertIndexedWork "" "(SELECT id, user_id, observed FROM orders) c"
+                    assertIndexedWork 20 "" "(SELECT id, user_id, observed FROM orders) c"
 
-                    assertIndexedWork
+                    assertIndexedWork 20
                         ("WITH candidates(id, user_id, observed) AS "
                          + "(SELECT id AS order_key, user_id AS owner_key, observed AS seen FROM orders)")
                         "candidates c"
 
-                    assertIndexedWork
+                    assertIndexedWork 20
                         ""
                         ("(SELECT order_key AS id, owner_key AS user_id, seen AS observed FROM "
                          + "(SELECT id AS order_key, user_id AS owner_key, observed AS seen FROM orders) nested) c")
 
-                    assertIndexedWork
+                    assertIndexedWork 20
                         ("WITH first(order_key, owner_key, seen) AS "
                          + "(SELECT id, user_id, observed FROM orders), "
                          + "candidates(id, user_id, observed) AS (SELECT order_key, owner_key, seen FROM first)")
-                        "candidates c" ]
+                        "candidates c"
+
+                    assertIndexedWork 10 "" "(SELECT id, user_id, observed FROM orders WHERE id <= 500) c"
+
+                    assertIndexedWork 10
+                        "WITH candidates AS (SELECT id, user_id, observed FROM orders WHERE id <= 500)"
+                        "candidates c"
+
+                    let mutable effects = 0
+
+                    let effect _ =
+                        effects <- effects + 1
+                        VInt 1L
+
+                    let effectful =
+                        ScalarFunction.create "EFFECT" (fun _ values -> effect values)
+                        |> ScalarFunction.effectful
+
+                    let effectfulRegistry =
+                        registry
+                        |> registerScalar "EFFECT" effect
+                        |> registerExtension effectful
+
+                    match
+                        run
+                            store
+                            effectfulRegistry
+                            ("SELECT users.id, (SELECT COUNT(*) FROM "
+                             + "(SELECT id, user_id FROM orders WHERE EFFECT(id) = 1) c "
+                             + "WHERE c.user_id = users.id) FROM users WHERE users.id <= 10")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows.Length 10 "the volatile source returns every selected outer row"
+                    | other -> failtestf "expected volatile correlated counts, got %A" other
+
+                    Expect.isGreaterThan effects 900 "an effectful source predicate retains full-source evaluation"
+                    Expect.isLessThan effects 1100 "the effectful source still materializes only once" ]
 
           testList
               "streaming SELECT pipeline"

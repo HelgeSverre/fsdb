@@ -294,11 +294,12 @@ let tests =
 
               assertRows
                   ("SELECT o.id, EXISTS (SELECT 1 FROM "
-                   + "(SELECT candidate AS nested_candidate FROM (SELECT label AS candidate FROM inner_labels) first) d "
+                   + "(SELECT candidate AS nested_candidate FROM "
+                   + "(SELECT label AS candidate FROM inner_labels WHERE label IS NOT NULL) first) d "
                    + "WHERE d.nested_candidate = o.label) FROM outer_labels o ORDER BY o.id")
 
               assertRows
-                  ("WITH first(candidate) AS (SELECT label FROM inner_labels), "
+                  ("WITH first(candidate) AS (SELECT label FROM inner_labels WHERE label IS NOT NULL), "
                    + "labels(label) AS (SELECT candidate FROM first) "
                    + "SELECT o.id, EXISTS (SELECT 1 FROM labels d WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id")
 

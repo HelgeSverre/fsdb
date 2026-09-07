@@ -290,11 +290,18 @@ type private MaterializedEqualityLookup =
     { Columns: ColumnDef list
       FindRows: Value -> Value[] list option }
 
+type private PhysicalProjectionStep =
+    { InputColumns: ColumnDef list
+      InputQualifier: string
+      Predicate: Expr option
+      OutputIndices: int list }
+
 type private PhysicalProjection =
     { OutputColumns: ColumnDef list
       Source: TableRef
       SourceTable: Table
-      SourceIndices: int list }
+      SourceIndices: int list
+      Steps: PhysicalProjectionStep list }
 
 let private equalityMembershipKey domain value =
     match domain, value with
@@ -8370,7 +8377,7 @@ and private withCteScope
 
                     let physicalProjection =
                         if outer.IsNone && not (cteSelfReferenced cte) then
-                            tryPhysicalProjection store dbName (FromSubquery(cte.Body, cte.CteName))
+                            tryPhysicalProjection store registry dbName (FromSubquery(cte.Body, cte.CteName))
                         else
                             None
 
@@ -9394,6 +9401,7 @@ and private tryCorrelatedEqualityLookup
 
 and private tryPhysicalProjection
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (source: FromItem)
     : PhysicalProjection option =
@@ -9401,7 +9409,6 @@ and private tryPhysicalProjection
         select.Ctes.IsEmpty
         && select.IntoVariables.IsEmpty
         && select.Joins.IsEmpty
-        && select.Where.IsNone
         && select.GroupBy.IsEmpty
         && not select.Rollup
         && select.Windows.IsEmpty
@@ -9421,7 +9428,8 @@ and private tryPhysicalProjection
             { OutputColumns = table.Columns
               Source = tableRef
               SourceTable = table
-              SourceIndices = [ 0 .. table.Columns.Length - 1 ] })
+              SourceIndices = [ 0 .. table.Columns.Length - 1 ]
+              Steps = [] })
 
     let tableProjection (tableRef: TableRef) =
         if not tableRef.Partitions.IsEmpty then
@@ -9452,9 +9460,18 @@ and private tryPhysicalProjection
         when storedValuesMatchReadValues store && simpleSelect select ->
         match select.From with
         | Some innerSource ->
-            tryPhysicalProjection store dbName innerSource
+            tryPhysicalProjection store registry dbName innerSource
             |> Option.bind (fun input ->
                 let sourceQualifier = fromItemQualifier innerSource
+                let predicateScope =
+                    { Qualifiers = Set.singleton (sourceQualifier.ToLowerInvariant())
+                      Columns = input.OutputColumns |> List.map (_.Name >> fun name -> name.ToLowerInvariant()) |> Set.ofList }
+
+                let predicateIsStable =
+                    select.Where
+                    |> Option.forall (fun predicate ->
+                        Expression.collectSubqueries predicate |> List.isEmpty
+                        && isStatementStableExpr store registry dbName predicateScope predicate)
 
                 let directColumn =
                     function
@@ -9464,31 +9481,42 @@ and private tryPhysicalProjection
                         Some name
                     | _ -> None
 
-                select.Projections
-                |> traverse (fun (expression, alias) ->
-                    match
-                        directColumn expression
-                        |> Option.bind (fun name ->
-                            resolveColumn input.OutputColumns name
-                            |> Result.toOption
-                            |> Option.map (fun index -> index, alias |> Option.defaultValue (exprLabel expression)))
-                    with
-                    | Some projected -> Ok projected
-                    | None -> Error())
-                |> Result.toOption
-                |> Option.bind (fun projected ->
-                    let names = projected |> List.map snd
-                    let uniqueNames = HashSet<string>(names, System.StringComparer.OrdinalIgnoreCase)
+                if not predicateIsStable then
+                    None
+                else
+                    select.Projections
+                    |> traverse (fun (expression, alias) ->
+                        match
+                            directColumn expression
+                            |> Option.bind (fun name ->
+                                resolveColumn input.OutputColumns name
+                                |> Result.toOption
+                                |> Option.map (fun index -> index, alias |> Option.defaultValue (exprLabel expression)))
+                        with
+                        | Some projected -> Ok projected
+                        | None -> Error())
+                    |> Result.toOption
+                    |> Option.bind (fun projected ->
+                        let names = projected |> List.map snd
+                        let uniqueNames = HashSet<string>(names, System.StringComparer.OrdinalIgnoreCase)
 
-                    if uniqueNames.Count <> names.Length then
-                        None
-                    else
-                        Some
-                            { input with
-                                OutputColumns =
-                                    projected
-                                    |> List.map (fun (index, name) -> derivedColumn input.OutputColumns.[index] name)
-                                SourceIndices = projected |> List.map (fst >> fun index -> input.SourceIndices.[index]) }))
+                        if uniqueNames.Count <> names.Length then
+                            None
+                        else
+                            let outputIndices = projected |> List.map fst
+
+                            Some
+                                { input with
+                                    OutputColumns =
+                                        projected
+                                        |> List.map (fun (index, name) -> derivedColumn input.OutputColumns.[index] name)
+                                    SourceIndices = outputIndices |> List.map (fun index -> input.SourceIndices.[index])
+                                    Steps =
+                                        input.Steps
+                                        @ [ { InputColumns = input.OutputColumns
+                                              InputQualifier = sourceQualifier
+                                              Predicate = select.Where
+                                              OutputIndices = outputIndices } ] }))
         | _ -> None
     | _ -> None
 
@@ -9499,6 +9527,23 @@ and private projectPhysicalRows
     (projection: PhysicalProjection)
     (rows: Value[] seq)
     : Result<Value[] list, QueryResult> =
+    let applyStep (rows: Result<Value[] seq, QueryResult>) (step: PhysicalProjectionStep) =
+        rows
+        |> Result.bind (fun rows ->
+            match step.Predicate with
+            | Some predicate ->
+                filterSourceRows
+                    store
+                    registry
+                    dbName
+                    None
+                    step.InputQualifier
+                    step.InputColumns
+                    predicate
+                    rows
+            | None -> Ok rows)
+        |> Result.map (Seq.map (fun row -> step.OutputIndices |> List.map (fun index -> row.[index]) |> Array.ofList))
+
     rows
     |> prepareVirtualRows
         store
@@ -9506,10 +9551,8 @@ and private projectPhysicalRows
         dbName
         (projection.Source.Alias |> Option.defaultValue projection.Source.Table)
         projection.SourceTable.Columns
-    |> Result.map (fun prepared ->
-        prepared
-        |> Seq.map (fun row -> projection.SourceIndices |> List.map (fun index -> row.[index]) |> Array.ofList)
-        |> List.ofSeq)
+    |> fun prepared -> projection.Steps |> List.fold applyStep prepared
+    |> Result.map List.ofSeq
 
 and private tryProjectedPhysicalCorrelatedEqualityLookup
     (store: Store)
@@ -9519,7 +9562,7 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
     (whereExpr: Expr option)
     (outer: EvalContext option)
     : (ColumnDef list * Value[] list) option =
-    tryPhysicalProjection store dbName source
+    tryPhysicalProjection store registry dbName source
     |> Option.bind (fun projection ->
         correlatedEqualityPredicates (fromItemQualifier source) whereExpr outer
         |> Option.bind (fun equalities ->
