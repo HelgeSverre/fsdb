@@ -405,8 +405,10 @@ WHERE-MATCH candidates stream by stable row identity.
 Flat boolean word expressions score directly from exact or prefix postings.
 Required terms begin with the smallest posting; optional, excluded, raised,
 lowered, and soft terms probe a smaller upstream candidate set or accumulate
-only touched rows. Phrase, proximity, and grouped expressions retain the
-general evaluator. Bounded AND/OR predicate trees intersect or union MATCH
+only touched rows. Phrase and proximity conditions intersect their word
+postings, retain ordinary per-word relevance, and check candidate documents
+with ordered matching or a linear sliding window. Grouped expressions retain
+the general evaluator. Bounded AND/OR predicate trees intersect or union MATCH
 candidates before residual evaluation.
 Single-table reads and writes intersect compatible equality, literal-IN, range,
 and spatial candidates before scoring; physical joins score each owning corpus
@@ -520,7 +522,7 @@ routines, events, and administrative probes.
 
 | Open campaign | Current gap |
 |---|---|
-| Planner constant factors | Indexed joins, equality/`IN`, and secondary ranges retain a constant-factor gap. Low-cardinality joins push safe source-local predicates below full-consumption fan-out and stream plain `COUNT(*)`; relevance-ordered full-text limits stream through exact unique joins, flat boolean word searches score from postings directly, unindexed grouping filters and groups in one pass, and mutation scans retain only matched targets while unordered limits stop early. Scan-shaped updates and phrase, proximity, grouped, or join-shaped full-text plans remain input-sensitive. Benchmark result artifacts carry the measurements; shared statement setup and scan-shaped plans remain the principal measured seams. |
+| Planner constant factors | Indexed joins, equality/`IN`, and secondary ranges retain a constant-factor gap. Low-cardinality joins push safe source-local predicates below full-consumption fan-out and stream plain `COUNT(*)`; relevance-ordered full-text limits stream through exact unique joins, flat boolean word searches score from postings directly, phrase and proximity checks are linear in candidate-document length, unindexed grouping filters and groups in one pass, and mutation scans retain only matched targets while unordered limits stop early. Scan-shaped updates and grouped or join-shaped full-text plans remain input-sensitive. Benchmark result artifacts carry the measurements; shared statement setup and scan-shaped plans remain the principal measured seams. |
 
 ## 16. Deliberate divergences (accepted, not targeted for parity)
 

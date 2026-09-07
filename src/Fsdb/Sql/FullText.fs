@@ -467,9 +467,8 @@ let private proximityMatches (doc: Token[]) (words: Token[]) distance =
 
         matched
 
-/// `TF×IDF²` per doc from raw per-doc frequencies — for terms
-/// with no single index token to count (prefix wildcards, phrases), whose
-/// df falls out of the frequencies themselves.
+/// `TF×IDF²` for a prefix wildcard, whose document frequency belongs to the
+/// prefix posting rather than any one complete-token posting.
 let private scoresFromTfsWithDocumentFrequency
     (index: Index<'id>)
     (documentFrequency: int)
