@@ -11428,6 +11428,62 @@ and private validateOnlyFullGroupBy
                 |> traverse id
                 |> Result.map ignore))
 
+and private isIndexOwnedGroupingShape (select: SelectStmt) =
+    select.Where.IsNone
+    && select.Having.IsNone
+    && select.OrderBy.IsEmpty
+    && select.Limit.IsNone
+    && select.Offset.IsNone
+    && select.Windows.IsEmpty
+    && select.Ctes.IsEmpty
+    && select.IntoVariables.IsEmpty
+    && select.Locking.IsEmpty
+    && not select.Distinct
+    && not select.CalculateFoundRows
+    && not select.Rollup
+
+and private tryIndexedGroupProjection
+    (registry: Registry)
+    (context: EvalContext)
+    (groupExpressions: Expr list)
+    ((expression, _): Projection)
+    : IndexedGroupProjection option =
+    let groupValue expression =
+        groupExpressions
+        |> List.tryFindIndex ((=) expression)
+        |> Option.map GroupValue
+
+    let isBuiltin name = Functions.isUnmodifiedBuiltinAggregate name registry
+
+    match expression with
+    | FuncCall(name, [ Star None ])
+        when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) && isBuiltin name ->
+        Some GroupCardinality
+    | FuncCall(name, [ argument ])
+        when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) && isBuiltin name ->
+        match groupValue argument, argument with
+        | Some(GroupValue index), _ -> Some(GroupNonNullCardinality index)
+        | _, Lit VNull -> Some(GroupConstant(VInt 0L))
+        | _, Lit _ -> Some GroupCardinality
+        | _ ->
+            tryDirectColumnForExpr context argument
+            |> Option.filter (snd >> _.Nullable >> not)
+            |> Option.map (fun _ -> GroupCardinality)
+    | FuncCall(name, [ argument ])
+        when (name.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
+              || name.Equals("MAX", System.StringComparison.OrdinalIgnoreCase))
+             && isBuiltin name ->
+        groupValue argument
+    | _ -> groupValue expression
+
+and private indexedGroupProjectionValue (key: Value list) (count: int) =
+    function
+    | GroupValue index -> key.[index]
+    | GroupCardinality -> VInt(int64 count)
+    | GroupNonNullCardinality index ->
+        if key.[index] = VNull then VInt 0L else VInt(int64 count)
+    | GroupConstant value -> value
+
 and private runGroupedSelect
     (store: Store)
     (registry: Registry)
@@ -11507,15 +11563,9 @@ and private runGroupedSelect
                 match outputCols |> List.filter (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase)) with
                 | [ (_, v) ] ->
                     let sourceExpr =
-                        select.Projections
-                        |> List.choose (fun (projectionExpr, alias) ->
-                            alias
-                            |> Option.filter (fun aliasName ->
-                                System.String.Equals(aliasName, name, System.StringComparison.OrdinalIgnoreCase))
-                            |> Option.map (fun _ -> projectionExpr))
-                        |> function
-                            | [ projectionExpr ] -> projectionExpr
-                            | _ -> Col name
+                        projectionExpressionsNamed select.Projections name
+                        |> List.tryExactlyOne
+                        |> Option.defaultValue (Col name)
 
                     Ok(orderKeyOf { ctx with Clause = OrderClause } sourceExpr v)
                 | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
@@ -11609,57 +11659,11 @@ and private runGroupedSelect
         let colNames = probeProjected |> List.map fst
 
         let tryIndexOnlySimpleGroups () =
-            let simpleShape =
-                select.Where.IsNone
-                && select.Having.IsNone
-                && select.OrderBy.IsEmpty
-                && select.Limit.IsNone
-                && select.Offset.IsNone
-                && select.Windows.IsEmpty
-                && select.Ctes.IsEmpty
-                && select.IntoVariables.IsEmpty
-                && select.Locking.IsEmpty
-                && not select.Distinct
-                && not select.CalculateFoundRows
-                && not select.Rollup
-
-            let groupValue expression =
-                groupExprs
-                |> List.tryFindIndex ((=) expression)
-                |> Option.map GroupValue
-
-            let isBuiltinAggregate name =
-                Functions.isUnmodifiedBuiltinAggregate name registry
-
-            let classifyProjection (expression, _) =
-                match expression with
-                | FuncCall(name, [ Star None ])
-                    when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
-                         && isBuiltinAggregate name ->
-                    Some GroupCardinality
-                | FuncCall(name, [ argument ])
-                    when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
-                         && isBuiltinAggregate name ->
-                    match groupValue argument with
-                    | Some(GroupValue index) -> Some(GroupNonNullCardinality index)
-                    | _ ->
-                        match argument with
-                        | Lit VNull -> Some(GroupConstant(VInt 0L))
-                        | Lit _ -> Some GroupCardinality
-                        | _ ->
-                            tryDirectColumnForExpr probeContext argument
-                            |> Option.filter (snd >> _.Nullable >> not)
-                            |> Option.map (fun _ -> GroupCardinality)
-                | FuncCall(name, [ argument ])
-                    when (name.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
-                          || name.Equals("MAX", System.StringComparison.OrdinalIgnoreCase))
-                         && isBuiltinAggregate name ->
-                    groupValue argument
-                | _ -> groupValue expression
-
             match groupInputOrder with
-            | ContiguousGroupRows(Some groups) when simpleShape ->
-                let projections = select.Projections |> List.map classifyProjection
+            | ContiguousGroupRows(Some groups) when isIndexOwnedGroupingShape select ->
+                let projections =
+                    select.Projections
+                    |> List.map (tryIndexedGroupProjection registry probeContext groupExprs)
 
                 if projections |> List.exists Option.isNone then
                     None
@@ -11673,15 +11677,7 @@ and private runGroupedSelect
 
                             List.map2
                                 (fun name projection ->
-                                    let value =
-                                        match projection with
-                                        | GroupValue index -> key.[index]
-                                        | GroupCardinality -> VInt(int64 count)
-                                        | GroupNonNullCardinality index ->
-                                            if key.[index] = VNull then VInt 0L else VInt(int64 count)
-                                        | GroupConstant value -> value
-
-                                    name, value)
+                                    name, indexedGroupProjectionValue key count projection)
                                 colNames
                                 projections)
                         |> List.ofSeq
@@ -11718,7 +11714,7 @@ and private runGroupedSelect
             match failure with
             | Some(code, message) -> Err(code, message), [], []
             | None ->
-                let projected = [ List.head colNames, VInt count ]
+                let projected = [ List.exactlyOne colNames, VInt count ]
                 let formats = outputColumnFormats probeContext columns select.Projections
                 let wireOverrides = outputColumnWireOverrides probeContext columns select
                 let rendered = renderOutputCols formats projected
