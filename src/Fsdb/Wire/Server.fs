@@ -735,6 +735,15 @@ let private isSocketDead (client: TcpClient) : bool =
 
 let private disconnectPollIntervalMs = 50
 
+/// Preserves the original exception type when Async wraps a synchronous fault.
+let private awaitSingleException (operation: Threading.Tasks.Task<'T>) : Async<'T> =
+    async {
+        try
+            return! Async.AwaitTask operation
+        with :? AggregateException as aggregate when aggregate.InnerExceptions.Count = 1 ->
+            return raise (Seq.exactlyOne aggregate.InnerExceptions)
+    }
+
 /// ReadAsync ignores Socket.ReceiveTimeout and cooperative cancellation.
 /// Closing the client forces a timed-out read to unblock.
 let private readWithTimeoutMs
@@ -757,12 +766,7 @@ let private readWithTimeoutMs
                 |> Async.AwaitTask
 
             if obj.ReferenceEquals(winner, readTask) then
-                // Synchronous task faults arrive wrapped; command dispatch
-                // matches the original protocol exception type.
-                try
-                    return! Async.AwaitTask readTask
-                with :? AggregateException as agg when agg.InnerExceptions.Count = 1 ->
-                    return raise (agg.InnerExceptions.[0])
+                return! awaitSingleException readTask
             else
                 client.Close()
                 return None
@@ -798,10 +802,7 @@ let private readWithProgressTimeoutMs
                 roundCts.Cancel()
 
                 if obj.ReferenceEquals(winner, readTask) then
-                    try
-                        return! Async.AwaitTask readTask
-                    with :? AggregateException as agg when agg.InnerExceptions.Count = 1 ->
-                        return raise (agg.InnerExceptions.[0])
+                    return! awaitSingleException readTask
                 elif obj.ReferenceEquals(winner, progressTask) then
                     return! wait transferTimeoutMs
                 else
