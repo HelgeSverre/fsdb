@@ -1833,7 +1833,23 @@ let private routineAccess schema definer =
 let private routineVisible schema definer = routineAccess schema definer |> fst
 let private routineDefinitionVisible schema definer = routineAccess schema definer |> snd
 
-let private routinesRows (catalog: Catalog) =
+type private RoutineSummary =
+    { Schema: string
+      Name: string
+      Kind: string
+      Definer: string
+      Created: DateTime option
+      Modified: DateTime option }
+
+let private routineSummary schema name kind definer created =
+    { Schema = schema
+      Name = name
+      Kind = kind
+      Definer = definer
+      Created = created
+      Modified = created }
+
+let private routineEntries (catalog: Catalog) =
     let procedures =
         mysqlTable catalog "routines"
         |> Option.map (fun table ->
@@ -1843,6 +1859,7 @@ let private routinesRows (catalog: Catalog) =
             |> Seq.map (fun routine ->
                 let created = routine.Created |> Option.map VDateTime |> Option.defaultValue VNull
 
+                routineSummary routine.Schema routine.Name "PROCEDURE" routine.Definer routine.Created,
                 [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "PROCEDURE"; vs ""; VNull; VNull
                    VNull; VNull; VNull; VNull; VNull; VNull; vs "SQL"
                    (if routineDefinitionVisible routine.Schema routine.Definer then vs routine.Definition else VNull)
@@ -1868,6 +1885,7 @@ let private routinesRows (catalog: Catalog) =
                 let temporal = columnType |> Option.bind datetimePrecision
                 let isCharacter = columnType |> Option.exists isStringy
 
+                routineSummary routine.Schema routine.Name "FUNCTION" routine.Definer routine.Created,
                 [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "FUNCTION"; vs dataType
                    characterLength |> Option.map VInt |> Option.defaultValue VNull
                    columnType |> Option.bind (charOctetLength None) |> Option.map VInt |> Option.defaultValue VNull
@@ -1886,6 +1904,8 @@ let private routinesRows (catalog: Catalog) =
         |> Option.defaultValue []
 
     procedures @ functions
+
+let private routinesRows catalog = routineEntries catalog |> List.map snd
 
 let private parametersColumns =
     [ strCol "SPECIFIC_CATALOG"
@@ -4327,13 +4347,15 @@ let showEvents (catalog: Catalog) (dbName: string option) : ShowResult =
 
 /// `SHOW PROCEDURE STATUS` / `SHOW FUNCTION STATUS [LIKE|WHERE ...]`.
 let showRoutineStatus (catalog: Catalog) kind : ShowResult =
+    let dateText = Option.bind (VDateTime >> toText)
+
     let rows =
-        routinesRows catalog
-        |> List.filter (fun row ->
-            String.Equals(toText row.[4] |> Option.defaultValue "", kind, StringComparison.OrdinalIgnoreCase))
-        |> List.map (fun row ->
-            [ toText row.[2]; toText row.[3]; toText row.[4]; Some "SQL"; toText row.[27]; toText row.[24]
-              toText row.[23]; Some "DEFINER"; Some ""; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
+        routineEntries catalog
+        |> List.map fst
+        |> List.filter (fun routine -> String.Equals(routine.Kind, kind, StringComparison.OrdinalIgnoreCase))
+        |> List.map (fun routine ->
+            [ Some routine.Schema; Some routine.Name; Some routine.Kind; Some "SQL"; Some routine.Definer
+              dateText routine.Modified; dateText routine.Created; Some "DEFINER"; Some ""; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
               Some "utf8mb4_0900_ai_ci" ])
 
     Ok(
