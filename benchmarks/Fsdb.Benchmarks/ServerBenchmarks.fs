@@ -21,6 +21,7 @@ open Fsdb.Benchmarks.Schema
 [<MemoryDiagnoser>]
 type ServerBenchmarks() =
 
+    let concurrentConnectionCount = 16
     let mutable conn : MySqlConnection = Unchecked.defaultof<_>
     let mutable compressedConn : MySqlConnection = Unchecked.defaultof<_>
     // A second connection authenticated as the SELECT-only `bench_reader`
@@ -37,6 +38,10 @@ type ServerBenchmarks() =
 
     // Draw from the seeded id range so every read hits a real row.
     let randomUserId () = rng.Next(1, Schema.userCount + 1)
+
+    let insertSql prefix id =
+        "INSERT INTO users (name, email, age, meta, created_at) VALUES "
+        + $"('{prefix}_{id}','{prefix}_{id}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')"
 
     // The durability-matched run (`just bench-durable`) adds `fsdb-wal` and
     // `mysql-nofsync` so each engine is measured with and without the fsync
@@ -83,7 +88,7 @@ type ServerBenchmarks() =
         limitedConn <- new MySqlConnection(Schema.userConnectionString this.Target "bench_reader" "benchpw")
         limitedConn.Open()
         concurrentConnections <-
-            Array.init 16 (fun _ ->
+            Array.init concurrentConnectionCount (fun _ ->
                 let connection = new MySqlConnection(Schema.connectionString this.Target)
                 connection.Open()
                 connection)
@@ -258,11 +263,7 @@ type ServerBenchmarks() =
     [<BenchmarkCategory("Scale")>]
     member this.InsertSingle() =
         let i = Interlocked.Increment(&insertCounter)
-
-        this.Exec(
-            "INSERT INTO users (name, email, age, meta, created_at) VALUES "
-            + $"('bench_ins_{i}','bench_ins_{i}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')"
-        )
+        this.Exec(insertSql "bench_ins" i)
 
     [<Benchmark>]
     [<BenchmarkCategory("Durability")>]
@@ -274,9 +275,14 @@ type ServerBenchmarks() =
     member this.ConcurrentInsertBurst() =
         this.ConcurrentExec(fun _ ->
             let id = Interlocked.Increment(&insertCounter)
+            insertSql "burst" id)
 
-            "INSERT INTO users (name, email, age, meta, created_at) VALUES "
-            + $"('burst_{id}','burst_{id}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')")
+    [<Benchmark>]
+    [<BenchmarkCategory("Durability")>]
+    member this.SequentialInsertBurst() =
+        for _ in 1..concurrentConnectionCount do
+            let id = Interlocked.Increment(&insertCounter)
+            this.Exec(insertSql "sequential_burst" id)
 
     [<Benchmark>]
     member this.InsertBatch100() =

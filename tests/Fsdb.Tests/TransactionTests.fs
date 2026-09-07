@@ -320,6 +320,43 @@ let tests =
                   Expect.equal rows expected "each transaction retains its reserved identity"
               | result -> failtestf "expected committed auto-increment rows, got %A" result
 
+          testCase "concurrent autocommit inserts publish every distinct row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_concurrent_insert (id INT AUTO_INCREMENT PRIMARY KEY, note VARCHAR(40) UNIQUE)"
+              let writerCount = 16
+              use ready = new Threading.CountdownEvent(writerCount)
+              use start = new Threading.ManualResetEventSlim()
+
+              let inserts =
+                  Array.init writerCount (fun index ->
+                      Threading.Tasks.Task.Factory.StartNew(
+                          (fun () ->
+                              ready.Signal() |> ignore
+                              start.Wait()
+                              handle (create (index + 2) store) $"INSERT INTO tx_concurrent_insert(note) VALUES ('row-{index}')" |> snd),
+                          Threading.CancellationToken.None,
+                          Threading.Tasks.TaskCreationOptions.LongRunning,
+                          Threading.Tasks.TaskScheduler.Default
+                      ))
+
+              Expect.isTrue (ready.Wait(TimeSpan.FromSeconds 5.)) "every writer reached the start barrier"
+              start.Set()
+              let completed = Threading.Tasks.Task.WhenAll inserts
+              Expect.isTrue (completed.Wait(TimeSpan.FromSeconds 10.)) "every writer completes"
+
+              inserts
+              |> Array.iter (fun insert -> Expect.equal insert.Result (Affected 1UL) "each insert publishes one row")
+
+              match handle setup "SELECT COUNT(*), COUNT(DISTINCT id), COUNT(DISTINCT note) FROM tx_concurrent_insert" |> snd with
+              | ResultSet(_, [ [ count; distinctIds; distinctNotes ] ]) ->
+                  let expected = Some(string writerCount)
+                  Expect.equal count expected "all inserts are visible"
+                  Expect.equal distinctIds expected "every insert receives a distinct identity"
+                  Expect.equal distinctNotes expected "every insert retains its distinct value"
+              | result -> failtestf "expected every concurrent insert exactly once, got %A" result
+
           testCase "READ COMMITTED savepoint rollback retains concurrent committed rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
