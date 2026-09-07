@@ -270,10 +270,13 @@ let private hasInvalidPosixClass (pattern: string) =
     invalid
 
 let private invalidPattern (pattern: string) =
-    let interval = Regex.Match(pattern, @"(?<!\\)\{(\d+),(\d+)\}")
+    let interval = Regex.Match(pattern, @"(?<!\\)\{(?<minimum>\d+),(?<maximum>\d+)\}")
 
     if interval.Success then
-        match Int32.TryParse interval.Groups.[1].Value, Int32.TryParse interval.Groups.[2].Value with
+        match
+            Int32.TryParse interval.Groups.["minimum"].Value,
+            Int32.TryParse interval.Groups.["maximum"].Value
+        with
         | (true, minimum), (true, maximum) when maximum < minimum ->
             Some(3693, "The maximum is less than the minumum in a {min,max} interval.")
         | _ -> None

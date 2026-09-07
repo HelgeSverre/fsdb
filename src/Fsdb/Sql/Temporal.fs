@@ -48,7 +48,10 @@ let truncateTicksToFsp (fsp: int) (ticks: int64) : int64 =
     ticks - ticks % unit
 
 let private timePattern =
-    Regex(@"^([+-])?(?:(\d+)\s+)?(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d+))?$", RegexOptions.CultureInvariant)
+    Regex(
+        @"^(?<sign>[+-])?(?:(?<days>\d+)\s+)?(?<hours>\d+):(?<minutes>\d{1,2}):(?<seconds>\d{1,2})(?:\.(?<fraction>\d+))?$",
+        RegexOptions.CultureInvariant
+    )
 
 let private parseFractionTicks (fraction: string) =
     if fraction = "" then
@@ -71,9 +74,14 @@ let private parseTimeTicks (text: string) : TimeParseResult =
             else
                 Some 0L
 
-        match number matched.Groups.[2], number matched.Groups.[3], number matched.Groups.[4], number matched.Groups.[5] with
+        match
+            number matched.Groups.["days"],
+            number matched.Groups.["hours"],
+            number matched.Groups.["minutes"],
+            number matched.Groups.["seconds"]
+        with
         | Some days, Some hours, Some minutes, Some seconds when minutes <= 59L && seconds <= 59L ->
-            let fraction = matched.Groups.[6].Value
+            let fraction = matched.Groups.["fraction"].Value
             let fractionTicks = parseFractionTicks fraction
             let totalHours =
                 if days > 34L || hours > 838L then
@@ -81,7 +89,7 @@ let private parseTimeTicks (text: string) : TimeParseResult =
                 else
                     min 839L (days * 24L + hours)
             let ticks = if totalHours > 838L then maxTimeTicks + 10L else (totalHours * 3600L + minutes * 60L + seconds) * TimeSpan.TicksPerSecond + fractionTicks
-            ParsedTime(if matched.Groups.[1].Value = "-" then -ticks else ticks)
+            ParsedTime(if matched.Groups.["sign"].Value = "-" then -ticks else ticks)
         | _ -> TimeComponentsOutOfRange
 
 let private parseTimeNumberTicks (text: string) : TimeParseResult =
