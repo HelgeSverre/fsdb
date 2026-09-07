@@ -2336,7 +2336,7 @@ let tryInsertLockTargets
     (dbName: string)
     (tableName: string)
     (columns: string list option)
-    (rows: Value list list)
+    (rows: Value option list list)
     : WriteLockTargets option =
     let findInTable table =
         let indices =
@@ -2349,8 +2349,6 @@ let tryInsertLockTargets
             if rows |> List.exists (fun row -> row.Length <> indices.Length) then
                 None
             else
-                let supplied = Set.ofList indices
-
                 let omittedKeyValues =
                     table.Columns
                     |> List.map (fun column ->
@@ -2363,28 +2361,35 @@ let tryInsertLockTargets
                             | _ -> None)
                     |> Array.ofList
 
-                let groups =
-                    uniqueKeyGroups table
-                    |> List.filter (fun group ->
-                        group.Indices
-                        |> List.forall (fun index -> Set.contains index supplied || omittedKeyValues.[index].IsSome))
-
-                let keyIndices = groups |> Seq.collect _.Indices |> Set.ofSeq
-
                 rows
                 |> traverse (fun values ->
-                    let candidate = omittedKeyValues |> Array.map (Option.defaultValue VNull)
+                    let provided = List.zip indices values |> Map.ofList
 
-                    List.zip indices values
-                    |> List.filter (fun (index, _) -> Set.contains index keyIndices)
-                    |> traverse (fun (index, value) ->
-                        Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value)
-                        |> Result.map (fun coerced -> candidate.[index] <- coerced))
-                    |> Result.map (fun _ ->
-                        groups
-                        |> List.choose (fun group ->
-                            encodeUniqueKey table.Columns group candidate
-                            |> Option.map (fun key -> group.Name, key, group.Name + "\u0000" + key))))
+                    let keyValue index =
+                        match Map.tryFind index provided with
+                        | Some(Some value) ->
+                            Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value)
+                            |> Result.map Some
+                        | _ -> Ok omittedKeyValues.[index]
+
+                    uniqueKeyGroups table
+                    |> traverse (fun group ->
+                        group.Indices
+                        |> traverse keyValue
+                        |> Result.map (fun values ->
+                            let resolved = values |> List.choose id
+
+                            if resolved.Length <> values.Length then
+                                None
+                            else
+                                let candidate = Array.create table.Columns.Length VNull
+
+                                List.zip group.Indices resolved
+                                |> List.iter (fun (index, value) -> candidate.[index] <- value)
+
+                                encodeUniqueKey table.Columns group candidate
+                                |> Option.map (fun key -> group.Name, key, group.Name + "\u0000" + key)))
+                    |> Result.map (List.choose id))
                 |> Result.toOption
                 |> Option.map (fun encodedKeys ->
                     let encodedKeys = encodedKeys |> List.concat |> List.distinct
@@ -6801,7 +6806,7 @@ let private insertRowsPreparedCore
                         |> Result.map (fun (database, result) -> setCatalogDatabase dbName database catalog, result))))
 
     let result =
-        match tryInsertLockTargets store dbName tableName columns rowsIn with
+        match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
         | Some targets when not targets.Keys.IsEmpty -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
         | _ -> publish ()
 
@@ -7190,7 +7195,7 @@ and upsertRowsWithOrdinal
                 |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
 
         let result =
-            match tryInsertLockTargets store dbName tableName columns rowsIn with
+            match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
             | Some targets when not targets.Keys.IsEmpty -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
             | _ -> publish ()
 

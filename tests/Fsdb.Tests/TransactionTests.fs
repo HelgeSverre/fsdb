@@ -1291,36 +1291,39 @@ let tests =
 
           testCase "literal defaults participate in transaction key claims"
           <| fun _ ->
-              let store = Fsdb.Storage.create ()
-              let setup = create 1 store
-              let setup, _ =
-                  handle setup "CREATE TABLE tx_default_key (id INT PRIMARY KEY, tenant INT, token VARCHAR(20) DEFAULT 'shared', UNIQUE KEY uq_token (tenant, token))"
+              [ "INSERT INTO tx_default_key (id, tenant) VALUES (%d, 7)"
+                "INSERT INTO tx_default_key (id, tenant, token) VALUES (%d, 7, DEFAULT)" ]
+              |> List.iter (fun insertTemplate ->
+                  let insert id = insertTemplate.Replace("%d", string id)
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  let setup, _ =
+                      handle setup "CREATE TABLE tx_default_key (id INT PRIMARY KEY, tenant INT, token VARCHAR(20) DEFAULT 'shared', UNIQUE KEY uq_token (tenant, token))"
 
-              let first, _ = handle (create 2 store) "BEGIN"
-              let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
-              let second, _ = handle second "BEGIN"
-              let first, firstInsert = handle first "INSERT INTO tx_default_key (id, tenant) VALUES (1, 7)"
-              Expect.equal firstInsert (Affected 1UL) "the first omitted default claims its unique key"
+                  let first, _ = handle (create 2 store) "BEGIN"
+                  let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+                  let second, _ = handle second "BEGIN"
+                  let first, firstInsert = handle first (insert 1)
+                  Expect.equal firstInsert (Affected 1UL) "the first defaulted value claims its unique key"
 
-              let waiting =
-                  Threading.Tasks.Task.Run(fun () -> handle second "INSERT INTO tx_default_key (id, tenant) VALUES (2, 7)")
+                  let waiting = Threading.Tasks.Task.Run(fun () -> handle second (insert 2))
 
-              Expect.isFalse
-                  (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
-                  "the same literal default waits for its key owner"
+                  Expect.isFalse
+                      (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      "the same literal default waits for its key owner"
 
-              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first defaulted row commits"
-              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the default-key waiter resumes"
+                  Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first defaulted row commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the default-key waiter resumes"
 
-              match waiting.GetAwaiter().GetResult() |> snd with
-              | Err(1062, _) -> ()
-              | result -> failtestf "expected the rebased insert to find the duplicate default, got %A" result
+                  match waiting.GetAwaiter().GetResult() |> snd with
+                  | Err(1062, _) -> ()
+                  | result -> failtestf "expected the rebased insert to find the duplicate default, got %A" result
 
-              handle second "ROLLBACK" |> ignore
+                  handle second "ROLLBACK" |> ignore
 
-              match handle setup "SELECT id, tenant, token FROM tx_default_key" |> snd with
-              | ResultSet(_, [ [ Some "1"; Some "7"; Some "shared" ] ]) -> ()
-              | result -> failtestf "expected only the first defaulted row, got %A" result
+                  match handle setup "SELECT id, tenant, token FROM tx_default_key" |> snd with
+                  | ResultSet(_, [ [ Some "1"; Some "7"; Some "shared" ] ]) -> ()
+                  | result -> failtestf "expected only the first defaulted row, got %A" result)
 
           testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
           <| fun _ ->

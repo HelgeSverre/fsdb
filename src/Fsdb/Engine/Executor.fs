@@ -19088,7 +19088,8 @@ let transactionWriteTargets (store: Store) (dbName: string) (statement: Statemen
     let literalInsertTargets tableName columns rows =
         rows
         |> traverse (traverse (function
-            | Lit value -> Ok value
+            | Lit value -> Ok(Some value)
+            | FuncCall(name, []) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) -> Ok None
             | _ -> Error()))
         |> Result.toOption
         |> Option.bind (insertTargets tableName columns)
@@ -19102,7 +19103,7 @@ let transactionWriteTargets (store: Store) (dbName: string) (statement: Statemen
         assignments
         |> traverse (fun (column, expression) ->
             match expression with
-            | Lit value -> Ok(column, value)
+            | Lit value -> Ok(column, Some value)
             | _ -> Error())
         |> Result.toOption
         |> Option.bind (fun values ->
