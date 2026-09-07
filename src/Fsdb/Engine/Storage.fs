@@ -2350,12 +2350,30 @@ let tryInsertLockTargets
                 None
             else
                 let supplied = Set.ofList indices
-                let groups = uniqueKeyGroups table |> List.filter (fun group -> Set.isSubset (Set.ofList group.Indices) supplied)
+
+                let omittedKeyValues =
+                    table.Columns
+                    |> List.map (fun column ->
+                        if column.Generated.IsSome || column.AutoIncrement then
+                            None
+                        else
+                            match column.Default with
+                            | Some(DConst value) -> Some value
+                            | None when column.Nullable -> Some VNull
+                            | _ -> None)
+                    |> Array.ofList
+
+                let groups =
+                    uniqueKeyGroups table
+                    |> List.filter (fun group ->
+                        group.Indices
+                        |> List.forall (fun index -> Set.contains index supplied || omittedKeyValues.[index].IsSome))
+
                 let keyIndices = groups |> Seq.collect _.Indices |> Set.ofSeq
 
                 rows
                 |> traverse (fun values ->
-                    let candidate = Array.create table.Columns.Length VNull
+                    let candidate = omittedKeyValues |> Array.map (Option.defaultValue VNull)
 
                     List.zip indices values
                     |> List.filter (fun (index, _) -> Set.contains index keyIndices)
