@@ -5744,30 +5744,8 @@ let private firstArgument index = index = 0
 let private arguments positions index = Set.contains index positions
 let private argumentsAfter position index = index > position
 
-let builtins: Registry =
-    empty
-    |> registerScalar "NOW" nowFn
-    |> registerScalar "CURRENT_TIMESTAMP" nowFn
-    |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) concatFn
-    |> registerStringScalar "UPPER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
-    |> registerStringScalar "UCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
-    |> registerStringScalar "LOWER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
-    |> registerStringScalar "LCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
-    |> registerByteTextScalar "LENGTH" firstArgument lengthFn
-    |> registerByteTextScalar "OCTET_LENGTH" firstArgument lengthFn
-    |> registerByteTextScalar "BIT_LENGTH" firstArgument bitLengthFn
-    |> registerTextScalar "CHAR_LENGTH" firstArgument charLengthFn
-    |> registerTextScalar "CHARACTER_LENGTH" firstArgument charLengthFn
-    |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
-    |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn
-    |> registerScalarResult "IF" (CombineArguments (arguments (set [ 1; 2 ]))) ifFn
-    |> registerScalar "ABS" absFn
-    |> registerScalar "ROUND" roundFn
-    |> registerScalar "MOD" modFn
-    |> registerJsonBuiltins
-    |> registerScalarResult "WEIGHT_STRING" binaryResult weightStringFn
-    |> registerSpatialBuiltins
-    // Dates
+let private registerTemporalBuiltins registry =
+    registry
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
     |> registerScalar "TIMESTAMPADD" timestampAddFn
     |> registerScalar "ADDDATE" (addSubDateCore 1.0)
@@ -5826,7 +5804,10 @@ let builtins: Registry =
     |> registerScalar "MAKEDATE" makeDateFn
     |> registerScalar "CONVERT_TZ" convertTzFn
     |> registerScalar "STR_TO_DATE" strToDateFn
-    // Strings
+
+let private registerStringBuiltins registry =
+    registry
+    |> registerScalarResult "WEIGHT_STRING" binaryResult weightStringFn
     |> registerStringScalar "SUBSTRING" firstArgument (InheritArgument 0) substringFn
     |> registerStringScalar "SUBSTR" firstArgument (InheritArgument 0) substringFn
     |> registerStringScalar "MID" firstArgument (InheritArgument 0) substringFn
@@ -5882,7 +5863,9 @@ let builtins: Registry =
     |> registerScalarResult "REGEXP_REPLACE" (InheritArgument 0) (requiredRegexpFunction "REGEXP_REPLACE")
     |> registerScalarResult "REGEXP_SUBSTR" (InheritArgument 0) (requiredRegexpFunction "REGEXP_SUBSTR")
     |> registerScalar "REGEXP_INSTR" (requiredRegexpFunction "REGEXP_INSTR")
-    // Math/misc
+
+let private registerNumericBuiltins registry =
+    registry
     |> registerScalar "CEIL" ceilFn
     |> registerScalar "CEILING" ceilFn
     |> registerScalar "FLOOR" floorFn
@@ -5936,7 +5919,9 @@ let builtins: Registry =
     |> registerScalar "IS_IPV6" isIpv6Fn
     |> registerScalar "IS_IPV4_COMPAT" isIpv4CompatFn
     |> registerScalar "IS_IPV4_MAPPED" isIpv4MappedFn
-    // MySQL 9 VECTOR
+
+let private registerVectorBuiltins registry =
+    registry
     |> registerScalar "STRING_TO_VECTOR" stringToVectorFn
     |> registerScalar "TO_VECTOR" stringToVectorFn
     |> registerScalar "VECTOR_TO_STRING" vectorToStringFn
@@ -5944,6 +5929,9 @@ let builtins: Registry =
     |> registerScalar "VECTOR_DIM" vectorDimFn
     |> registerScalar "DISTANCE" distanceFn
     |> registerScalar "VECTOR_DISTANCE" distanceFn
+
+let private registerAggregateBuiltins registry =
+    registry
     |> registerAggregate "COUNT" countAgg
     |> registerAggregate "SUM" sumAgg
     |> registerAggregate "AVG" avgAgg
@@ -5959,6 +5947,34 @@ let builtins: Registry =
     |> registerAggregate "BIT_AND" bitAndAgg
     |> registerAggregate "BIT_OR" bitOrAgg
     |> registerAggregate "BIT_XOR" bitXorAgg
+
+let builtins: Registry =
+    empty
+    |> registerScalar "NOW" nowFn
+    |> registerScalar "CURRENT_TIMESTAMP" nowFn
+    |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) concatFn
+    |> registerStringScalar "UPPER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
+    |> registerStringScalar "UCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
+    |> registerStringScalar "LOWER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
+    |> registerStringScalar "LCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
+    |> registerByteTextScalar "LENGTH" firstArgument lengthFn
+    |> registerByteTextScalar "OCTET_LENGTH" firstArgument lengthFn
+    |> registerByteTextScalar "BIT_LENGTH" firstArgument bitLengthFn
+    |> registerTextScalar "CHAR_LENGTH" firstArgument charLengthFn
+    |> registerTextScalar "CHARACTER_LENGTH" firstArgument charLengthFn
+    |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
+    |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn
+    |> registerScalarResult "IF" (CombineArguments (arguments (set [ 1; 2 ]))) ifFn
+    |> registerScalar "ABS" absFn
+    |> registerScalar "ROUND" roundFn
+    |> registerScalar "MOD" modFn
+    |> registerJsonBuiltins
+    |> registerSpatialBuiltins
+    |> registerTemporalBuiltins
+    |> registerStringBuiltins
+    |> registerNumericBuiltins
+    |> registerVectorBuiltins
+    |> registerAggregateBuiltins
 
 let internal isUnmodifiedBuiltinAggregate (name: string) (registry: Registry) =
     match lookupAggregate name builtins, lookupAggregate name registry with
