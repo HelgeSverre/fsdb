@@ -6178,16 +6178,20 @@ and private dispatchNormalized session rawSql parserOptions sql =
             | true, Ok() ->
                 let options = SqlMode.parserOptionsFor session.Store.ExecutionSettings.SqlModeText
 
-                match
-                    parseFunctionCharacteristics creation.Characteristics,
-                    parseFunctionDefinition options creation.Parameters creation.ReturnType creation.Body
-                with
-                | Error error, _
-                | _, Error error -> session, error
-                | _, Ok(_, _, statements) when firstUnsafeStoredRoutineCall session.CustomFunctions statements |> Option.isSome ->
-                    let functionName = firstUnsafeStoredRoutineCall session.CustomFunctions statements |> Option.get
+                let characteristics = parseFunctionCharacteristics creation.Characteristics
+                let definition = parseFunctionDefinition options creation.Parameters creation.ReturnType creation.Body
+
+                let unsafeFunction =
+                    definition
+                    |> Result.toOption
+                    |> Option.bind (fun (_, _, statements) -> firstUnsafeStoredRoutineCall session.CustomFunctions statements)
+
+                match characteristics, definition, unsafeFunction with
+                | Error error, _, _
+                | _, Error error, _ -> session, error
+                | _, _, Some functionName ->
                     session, Err(3102, sprintf "Stored function '%s' contains a disallowed function: %s" name functionName)
-                | Ok(securityType, deterministic, dataAccess), Ok(_, parsedReturnType, _) ->
+                | Ok(securityType, deterministic, dataAccess), Ok(_, parsedReturnType, _), None ->
                     if Auth.tryUserRowForAccount session.Store definer |> Option.isNone then
                         Diagnostics.note
                             1449
