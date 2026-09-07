@@ -3217,22 +3217,67 @@ let private selfColumnsRowsCached : Lazy<Value[] list> =
 let private allColumnRows catalog viewColumns =
     columnsRows catalog viewColumns @ selfColumnsRowsCached.Value
 
+[<RequireQualifiedAccess>]
+module private ColumnsRow =
+    let tableCatalog = 0
+    let tableSchema = 1
+    let tableName = 2
+    let columnName = 3
+    let dataType = 7
+    let srsId = 21
+
+[<RequireQualifiedAccess>]
+module private SchemataRow =
+    let catalogName = 0
+    let schemaName = 1
+
+[<RequireQualifiedAccess>]
+module private TablesRow =
+    let tableCatalog = 0
+    let tableSchema = 1
+    let tableName = 2
+
+[<RequireQualifiedAccess>]
+module private TableConstraintsRow =
+    let constraintCatalog = 0
+    let constraintSchema = 1
+    let constraintName = 2
+    let tableName = 4
+    let constraintType = 5
+
 let private columnsExtensionsRows catalog viewColumns =
     allColumnRows catalog viewColumns
-    |> List.map (fun row -> [| row.[0]; row.[1]; row.[2]; row.[3]; VNull; VNull |])
+    |> List.map (fun row ->
+        [| row.[ColumnsRow.tableCatalog]
+           row.[ColumnsRow.tableSchema]
+           row.[ColumnsRow.tableName]
+           row.[ColumnsRow.columnName]
+           VNull
+           VNull |])
 
 let private schemataExtensionsRows catalog =
     schemataRows catalog
-    |> List.map (fun row -> [| row.[0]; row.[1]; vs "" |])
+    |> List.map (fun row -> [| row.[SchemataRow.catalogName]; row.[SchemataRow.schemaName]; vs "" |])
 
 let private tablesExtensionsRows catalog =
     tablesRows catalog @ selfTablesRows ()
-    |> List.map (fun row -> [| row.[0]; row.[1]; row.[2]; VNull; VNull |])
+    |> List.map (fun row ->
+        [| row.[TablesRow.tableCatalog]
+           row.[TablesRow.tableSchema]
+           row.[TablesRow.tableName]
+           VNull
+           VNull |])
 
 let private tableConstraintsExtensionsRows catalog =
     tableConstraintsRows catalog
-    |> List.filter (fun row -> not (eqI (rowText row 5) "CHECK"))
-    |> List.map (fun row -> [| row.[0]; row.[1]; row.[2]; row.[4]; VNull; VNull |])
+    |> List.filter (fun row -> not (eqI (rowText row TableConstraintsRow.constraintType) "CHECK"))
+    |> List.map (fun row ->
+        [| row.[TableConstraintsRow.constraintCatalog]
+           row.[TableConstraintsRow.constraintSchema]
+           row.[TableConstraintsRow.constraintName]
+           row.[TableConstraintsRow.tableName]
+           VNull
+           VNull |])
 
 let private geometryDataTypes =
     set
@@ -3248,10 +3293,17 @@ let private geometryDataTypes =
 let private stGeometryColumnsRows catalog viewColumns =
     allColumnRows catalog viewColumns
     |> List.choose (fun row ->
-        let dataType = rowText row 7
+        let dataType = rowText row ColumnsRow.dataType
 
         if geometryDataTypes.Contains(dataType) then
-            Some [| row.[0]; row.[1]; row.[2]; row.[3]; VNull; row.[21]; vs dataType |]
+            Some
+                [| row.[ColumnsRow.tableCatalog]
+                   row.[ColumnsRow.tableSchema]
+                   row.[ColumnsRow.tableName]
+                   row.[ColumnsRow.columnName]
+                   VNull
+                   row.[ColumnsRow.srsId]
+                   vs dataType |]
         else
             None)
 
