@@ -4761,11 +4761,12 @@ type OrderedKeyTerm =
       OrderedTransform: IndexTransform option
       OrderedDirection: Direction }
 
-let tryOrderedIndexLookup
+let private tryOrderedIndexLookupWithPrefix
     (store: Store)
     (dbName: string)
     (tableName: string)
     (terms: OrderedKeyTerm list)
+    (prefixValues: Value list)
     : OrderedLookup option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
@@ -4792,26 +4793,89 @@ let tryOrderedIndexLookup
                 else
                     None)
             |> Option.bind (fun (group, traversal) ->
-                table.SecondaryOrder
-                |> Map.tryFind group.Name
-                |> Option.map (fun entries ->
-                    let slice =
-                        { IndexName = group.Name
-                          ColumnIndices = indices
-                          PrefixLengths = group.PrefixLengths
-                          Directions = group.Directions
-                          Entries = entries
-                          First = 0
-                          AfterLast = entries.Count }
+                let normalizedPrefix =
+                    List.zip3 indices group.PrefixLengths group.Transforms
+                    |> List.take prefixValues.Length
+                    |> List.zip prefixValues
+                    |> traverse (fun (value, (index, prefixLength, transform)) ->
+                        match exactProbeValue store table index value with
+                        | Some normalized -> Ok(projectIndexValue prefixLength transform normalized)
+                        | None -> Error())
+                    |> Result.toOption
 
-                    { OrderedIndexName = group.Name
-                      OrderedColumnIndices = indices
-                      OrderedColumns = table.Columns
-                      OrderedRowCount = entries.Count
-                      OrderedRows =
-                        orderedEntries traversal slice
-                        |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
-                      OrderedGroups = orderedEntries traversal slice |> orderedGroupCounts indices.Length }))))
+                Option.map2
+                    (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (prefix: Value list) ->
+                        let first, afterLast =
+                            if prefix.IsEmpty then
+                                0, entries.Count
+                            else
+                                let length = prefix.Length
+
+                                let comparePrefix (entry: SecondaryOrderEntry) =
+                                    compareIndexedKeys
+                                        (List.take length entry.CollationNames)
+                                        (List.take length entry.Directions)
+                                        (List.take length entry.Values)
+                                        prefix
+
+                                let insertionIndex includeEqual =
+                                    let mutable first = 0
+                                    let mutable count = entries.Count
+
+                                    while count > 0 do
+                                        let step = count / 2
+                                        let current = first + step
+                                        let comparison = comparePrefix entries.[current]
+
+                                        if comparison < 0 || (not includeEqual && comparison = 0) then
+                                            first <- current + 1
+                                            count <- count - step - 1
+                                        else
+                                            count <- step
+
+                                    first
+
+                                insertionIndex true, insertionIndex false
+
+                        let slice =
+                            { IndexName = group.Name
+                              ColumnIndices = indices
+                              PrefixLengths = group.PrefixLengths
+                              Directions = group.Directions
+                              Entries = entries
+                              First = first
+                              AfterLast = afterLast }
+
+                        { OrderedIndexName = group.Name
+                          OrderedColumnIndices = indices
+                          OrderedColumns = table.Columns
+                          OrderedRowCount = max 0 (afterLast - first)
+                          OrderedRows =
+                            orderedEntries traversal slice
+                            |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
+                          OrderedGroups = orderedEntries traversal slice |> orderedGroupCounts indices.Length })
+                    (Map.tryFind group.Name table.SecondaryOrder)
+                    normalizedPrefix)))
+
+let tryOrderedIndexLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (terms: OrderedKeyTerm list)
+    : OrderedLookup option =
+    tryOrderedIndexLookupWithPrefix store dbName tableName terms []
+
+let internal tryOrderedIndexPrefixLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (terms: OrderedKeyTerm list)
+    (prefixValues: Value list)
+    : OrderedLookup option =
+    if prefixValues.IsEmpty || prefixValues.Length > terms.Length then
+        None
+    else
+        tryOrderedIndexLookupWithPrefix store dbName tableName terms prefixValues
 
 let tryCompositeOrderedLookup
     (store: Store)

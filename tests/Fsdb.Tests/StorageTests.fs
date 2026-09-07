@@ -2094,6 +2094,49 @@ let tests =
                         [ [ VNull ], 1; [ VInt 25L ], 1; [ VInt 30L ], 2 ]
                         "the index groups NULL and duplicate keys in its traversal order"
 
+                testCase "an ordered lookup seeks an exact composite prefix"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    let index =
+                        { Name = "ix_age_name"
+                          KeyColumns = indexColumns [ "age"; "name" ]
+                          Unique = false
+                          Visible = true
+                          Kind = BTree }
+
+                    alterTable store defaultDatabase "users" [ AddIndex index ]
+                    |> Result.defaultWith (failtestf "add index failed: %A")
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VInt 1L; VString "alice"; VInt 30L ]
+                          [ VInt 2L; VString "bob"; VInt 25L ]
+                          [ VInt 3L; VString "carol"; VInt 30L ]
+                          [ VInt 4L; VString "dave"; VInt 40L ] ]
+                    |> Result.defaultWith (failtestf "insert failed: %A")
+                    |> ignore
+
+                    let lookup =
+                        [ { OrderedColumnName = "age"
+                            OrderedTransform = None
+                            OrderedDirection = Asc }
+                          { OrderedColumnName = "name"
+                            OrderedTransform = None
+                            OrderedDirection = Asc } ]
+                        |> fun terms -> tryOrderedIndexPrefixLookup store defaultDatabase "users" terms [ VInt 30L ]
+                        |> Option.defaultWith (fun () -> failtest "expected a prefix lookup")
+
+                    Expect.equal lookup.OrderedRowCount 2 "only rows under the exact prefix remain"
+
+                    Expect.equal
+                        (lookup.OrderedGroups |> List.ofSeq)
+                        [ [ VInt 30L; VString "alice" ], 1; [ VInt 30L; VString "carol" ], 1 ]
+                        "group keys retain the fixed prefix and ordered suffix"
+
                 testCase "a composite secondary index follows row mutations incrementally"
                 <| fun _ ->
                     let store = withUsersTable ()
