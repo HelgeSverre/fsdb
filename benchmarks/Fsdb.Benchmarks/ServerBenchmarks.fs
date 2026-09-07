@@ -604,6 +604,11 @@ type ServerBenchmarks() =
         this.Query "SELECT a.id, a.title, u.email FROM articles a JOIN users u ON u.id = a.id WHERE MATCH(a.title, a.body) AGAINST ('database') LIMIT 20"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Feature", "Scale", "FullText", "Planner")>]
+    member this.FullTextRightJoinUsers() =
+        this.Query "SELECT a.id, a.title, u.email FROM users u JOIN articles a ON a.id = u.id WHERE MATCH(a.title, a.body) AGAINST ('database') LIMIT 20"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Feature")>]
     member this.InsertCheckedGenerated() =
         let i = Interlocked.Increment(&insertCounter)
