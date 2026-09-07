@@ -255,12 +255,16 @@ different access pattern:
 
 - **Ordering and grouping.** Compatible `ORDER BY` and `GROUP BY` operations
   stream a left prefix of a composite index, or a suffix whose preceding keys
-  are fixed by literal equalities. Exact fixed prefixes seek only their
-  matching index slice; simple covered groups derive counts and grouping-key
-  `MIN` or `MAX` values from adjacent keys without resolving rows. This path
-  also supports `LIMIT`, `OFFSET`, and literal bounds. Composite keys may
-  contain `LOWER(column)` or `UPPER(column)` parts. Other expression orderings
-  and full-value ordering through a prefix key still sort.
+  are fixed by literal equalities. Numeric and binary prefixes can seek their
+  matching slice, as can text collations whose SQL equality classes match
+  their full ordering, such as `utf8mb4_0900_bin` and
+  `utf8mb4_0900_as_cs`. Case- or accent-folded and PAD SPACE text prefixes
+  retain the scan/sort path because equal values can occupy separate suffix
+  runs. Simple covered groups derive counts and grouping-key `MIN` or `MAX`
+  values from adjacent keys without resolving rows. This path also supports
+  `LIMIT`, `OFFSET`, and literal bounds. Composite keys may contain
+  `LOWER(column)` or `UPPER(column)` parts. Other expression orderings and
+  full-value ordering through a prefix key still sort.
 
 - **Spatial access.** Planar `SPATIAL` and `RTREE` declarations maintain
   immutable minimum-bounding-rectangle entries. They narrow direct
