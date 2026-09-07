@@ -407,10 +407,14 @@ let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
 
 let private currentStatementMemo () = DynamicScope.getOrCreate freshStatementMemo statementMemo
 
+type private CteBinding =
+    { Columns: ColumnDef list
+      Rows: Value[] list
+      Origins: ColumnOrigin option list
+      StatementStable: bool }
+
 /// Statement-local materialized CTE bindings, keyed by normalized name.
-let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * Value[] list>>()
-let private cteOriginScope = System.Threading.AsyncLocal<Map<string, ColumnOrigin option list>>()
-let private cteStabilityScope = System.Threading.AsyncLocal<Map<string, bool>>()
+let private cteScope = System.Threading.AsyncLocal<Map<string, CteBinding>>()
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
@@ -1315,19 +1319,11 @@ let withCteRecursionDepth (limit: int64) (body: unit -> 'a) : 'a =
 let withGroupConcatMaxLen (limit: int) (body: unit -> 'a) : 'a =
     DynamicScope.withValue groupConcatMaxLen (Some limit) body
 
-let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
+let private currentCteScope () : Map<string, CteBinding> =
     DynamicScope.valueOrDefault Map.empty cteScope
 
-let private currentCteOriginScope () : Map<string, ColumnOrigin option list> =
-    DynamicScope.valueOrDefault Map.empty cteOriginScope
-
-let private currentCteStabilityScope () : Map<string, bool> =
-    DynamicScope.valueOrDefault Map.empty cteStabilityScope
-
 let private withoutCteScope (body: unit -> 'a) : 'a =
-    DynamicScope.withValue cteScope Map.empty (fun () ->
-        DynamicScope.withValue cteOriginScope Map.empty (fun () ->
-            DynamicScope.withValue cteStabilityScope Map.empty body))
+    DynamicScope.withValue cteScope Map.empty body
 
 let private unknownColumn (name: string) : EvalError =
     1054, sprintf "Unknown column '%s' in 'field list'" name
@@ -2727,7 +2723,9 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
 
         match
             if table.Database.IsNone then
-                currentCteScope () |> Map.tryFind (table.Table.ToLowerInvariant()) |> Option.map fst
+                currentCteScope ()
+                |> Map.tryFind (table.Table.ToLowerInvariant())
+                |> Option.map _.Columns
             else
                 None
         with
@@ -2883,8 +2881,9 @@ let rec private outputColumnOrigins
             | FromTable table when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) localCtes ->
                 originsForBody qualifier columns localCtes.[table.Table.ToLowerInvariant()]
             | FromTable table when table.Database.IsNone && Map.containsKey (table.Table.ToLowerInvariant()) (currentCteScope ()) ->
-                currentCteOriginScope ()
+                currentCteScope ()
                 |> Map.tryFind (table.Table.ToLowerInvariant())
+                |> Option.map _.Origins
                 |> Option.defaultValue []
                 |> List.map (withQualifier qualifier)
             | FromTable table ->
@@ -5348,7 +5347,7 @@ and private resolveTableRef
     // An unqualified name resolves against the statement's `WITH` bindings
     // first — a CTE shadows a real table of the same name, as in MySQL.
     match (if tableRef.Database.IsSome then None else currentCteScope () |> Map.tryFind (tableRef.Table.ToLowerInvariant())) with
-    | Some(columns, rows) -> Ok(columns, if planningProbe.Value then [] else rows)
+    | Some binding -> Ok(binding.Columns, if planningProbe.Value then [] else binding.Rows)
     | None ->
 
     if tableRef.Database.IsNone && System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase) then
@@ -5396,14 +5395,10 @@ and private resolveTableRef
                 Error(Err(1436, "Thread stack overrun while expanding stored views"))
             | _ ->
                 let savedCtes = currentCteScope ()
-                let savedCteOrigins = currentCteOriginScope ()
-                let savedCteStability = currentCteStabilityScope ()
 
                 try
                     viewStack.Value <- Set.add stackKey stack
                     cteScope.Value <- Map.empty
-                    cteOriginScope.Value <- Map.empty
-                    cteStabilityScope.Value <- Map.empty
 
                     let resolved =
                         match Parser.parse view.Definition with
@@ -5456,8 +5451,6 @@ and private resolveTableRef
                 finally
                     viewStack.Value <- stack
                     cteScope.Value <- savedCtes
-                    cteOriginScope.Value <- savedCteOrigins
-                    cteStabilityScope.Value <- savedCteStability
         | None ->
             if planningProbe.Value then
                 tableSnapshot store tableDb tableRef.Table
@@ -8292,8 +8285,6 @@ and private withCteScope
     | None ->
 
         let saved = currentCteScope ()
-        let savedOrigins = currentCteOriginScope ()
-        let savedStability = currentCteStabilityScope ()
 
         let originsFor (cte: CommonTableExpr) columns =
             let origins =
@@ -8322,14 +8313,17 @@ and private withCteScope
                 | [] -> Ok()
                 | cte :: rest ->
                     materializeCte store registry dbName cte outer
-                    |> Result.bind (fun materialized ->
-                        cteScope.Value <- currentCteScope () |> Map.add (cte.CteName.ToLowerInvariant()) materialized
-                        cteOriginScope.Value <-
-                            currentCteOriginScope ()
-                            |> Map.add (cte.CteName.ToLowerInvariant()) (originsFor cte (fst materialized))
-                        cteStabilityScope.Value <-
-                            currentCteStabilityScope ()
-                            |> Map.add (cte.CteName.ToLowerInvariant()) outer.IsNone
+                    |> Result.bind (fun (columns, rows) ->
+                        let binding =
+                            { Columns = columns
+                              Rows = rows
+                              Origins = originsFor cte columns
+                              StatementStable = outer.IsNone }
+
+                        cteScope.Value <-
+                            currentCteScope ()
+                            |> Map.add (cte.CteName.ToLowerInvariant()) binding
+
                         bind rest)
 
             match bind ctes with
@@ -8337,8 +8331,6 @@ and private withCteScope
             | Ok() -> body ()
         finally
             cteScope.Value <- saved
-            cteOriginScope.Value <- savedOrigins
-            cteStabilityScope.Value <- savedStability
 
 and private withCteQueryResult
     (store: Store)
@@ -8477,7 +8469,14 @@ and private materializeCte
                                 )
                             )
                     else
-                        cteScope.Value <- saved |> Map.add (cte.CteName.ToLowerInvariant()) (columns, working)
+                        cteScope.Value <-
+                            saved
+                            |> Map.add
+                                (cte.CteName.ToLowerInvariant())
+                                { Columns = columns
+                                  Rows = working
+                                  Origins = List.replicate columns.Length None
+                                  StatementStable = false }
 
                         match
                             recursiveBranches
@@ -9380,9 +9379,9 @@ and private tryMaterializedCorrelatedEqualityLookup
         | FromSubquery _ -> true
         | FromTable table ->
             table.Database.IsNone
-            && currentCteStabilityScope ()
+            && currentCteScope ()
                |> Map.tryFind (table.Table.ToLowerInvariant())
-               |> Option.defaultValue false
+               |> Option.exists _.StatementStable
         | _ -> false
 
     if not eligible then
