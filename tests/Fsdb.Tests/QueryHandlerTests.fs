@@ -1128,6 +1128,53 @@ let tests =
               | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES, got %A" other
 
+          testCase "sql_mode validates names and canonicalizes composite modes atomically"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, result = handle session "SET SESSION sql_mode = 'ansi,no_dir_in_create,ANSI'"
+              Expect.equal result (Affected 0UL) "known modes are accepted"
+
+              let expected =
+                  "REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ONLY_FULL_GROUP_BY,NO_DIR_IN_CREATE,ANSI"
+
+              match handle session "SELECT @@session.sql_mode" |> snd with
+              | ResultSet(_, [ [ Some modes ] ]) -> Expect.equal modes expected "ANSI expands in MySQL order"
+              | other -> failtestf "expected the canonical mode list, got %A" other
+
+              let unchanged, invalid = handle session "SET @changed = 1, SESSION sql_mode = 'ANSI,BOGUS'"
+
+              match invalid with
+              | Err(1231, message) -> Expect.stringContains message "BOGUS" "the invalid member is named"
+              | other -> failtestf "expected an invalid sql_mode error, got %A" other
+
+              match handle unchanged "SELECT @@session.sql_mode, @changed" |> snd with
+              | ResultSet(_, [ [ Some modes; None ] ]) -> Expect.equal modes expected "the failed SET changes nothing"
+              | other -> failtestf "expected the prior mode and untouched user variable, got %A" other
+
+              let session, _ = handle session "CREATE TABLE ansi_grouping (label VARCHAR(10))"
+              let session, _ = handle session "INSERT INTO ansi_grouping VALUES ('a'), ('b')"
+
+              match handle session "SELECT label, COUNT(*) FROM ansi_grouping" |> snd with
+              | Err(1140, _) -> ()
+              | other -> failtestf "expected ANSI to imply ONLY_FULL_GROUP_BY, got %A" other
+
+              let session, globalResult = handle session "SET GLOBAL sql_mode = 'NO_DIR_IN_CREATE'"
+              Expect.equal globalResult (Affected 0UL) "the global mode changes"
+              let session, restored = handle session "SET SESSION sql_mode = DEFAULT"
+              Expect.equal restored (Affected 0UL) "the session adopts the global mode"
+
+              match handle session "SELECT @@session.sql_mode" |> snd with
+              | ResultSet(_, [ [ Some "NO_DIR_IN_CREATE" ] ]) -> ()
+              | other -> failtestf "expected DEFAULT to resolve through the global mode, got %A" other
+
+              let _, reset = handle session "SET GLOBAL sql_mode = DEFAULT"
+              Expect.equal reset (Affected 0UL) "the global mode returns to its compiled default"
+
+              match handle (create 2 store) "SELECT @@global.sql_mode" |> snd with
+              | ResultSet(_, [ [ Some modes ] ]) -> Expect.equal modes Fsdb.Sql.SqlMode.defaultText "compiled default"
+              | other -> failtestf "expected the reset global mode, got %A" other
+
           testCase "ONLY_FULL_GROUP_BY is enabled by default and scoped to the session"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -1673,7 +1720,7 @@ let tests =
               | other -> failtestf "expected quoted variable assignments to succeed, got %A" other
 
               match handle session "SELECT @@group_concat_max_len, @@sql_mode" |> snd with
-              | ResultSet(_, [ [ Some "2048"; Some "ANSI" ] ]) -> ()
+              | ResultSet(_, [ [ Some "2048"; Some "REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ONLY_FULL_GROUP_BY,ANSI" ] ]) -> ()
               | other -> failtestf "expected both settings, got %A" other
 
           testCase "SET NAMES 'x' COLLATE 'y', SESSION sql_mode='...' applies both assignments"

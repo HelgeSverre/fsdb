@@ -1319,6 +1319,11 @@ let private parseSetFragment
                     let rhs = varMatch.Groups.[3].Value
                     let usesDefault = rhs.Trim().Equals("DEFAULT", StringComparison.OrdinalIgnoreCase)
 
+                    let sqlModeAction value sideEffects =
+                        match SqlMode.tryNormalize value with
+                        | Ok canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
+                        | Error invalid -> Error(Err(1231, sprintf "Variable 'sql_mode' can't be set to the value of '%s'" invalid))
+
                     let resolved =
                         if name = "max_sp_recursion_depth" && not usesDefault then
                             resolveUserSetRhs session userVariables sql rhs
@@ -1357,10 +1362,25 @@ let private parseSetFragment
                                 Session.tryGlobalVariable session.Store name |> Option.defaultValue Session.defaultVariables.[name]
 
                         Ok(SetVarAction(name, value, isGlobal), sideEffects)
+                    | Ok(_, sideEffects) when usesDefault && name = "sql_mode" ->
+                        let value =
+                            if isGlobal then
+                                Session.defaultVariables.[name]
+                            else
+                                Session.tryGlobalVariable session.Store name
+                                |> Option.defaultValue Session.defaultVariables.[name]
+
+                        match value with
+                        | Some value -> sqlModeAction value sideEffects
+                        | None -> Error(Err(1231, "Variable 'sql_mode' can't be set to the value of 'NULL'"))
                     | Ok(value, sideEffects) when name = "max_sp_recursion_depth" ->
                         normalizeRoutineRecursionDepth value
                         |> Result.map (fun (depth, warning) ->
                             SetRoutineRecursionDepthAction(depth, isGlobal, warning), sideEffects)
+                    | Ok(value, sideEffects) when name = "sql_mode" ->
+                        match toText value with
+                        | Some value -> sqlModeAction value sideEffects
+                        | None -> Error(Err(1231, "Variable 'sql_mode' can't be set to the value of 'NULL'"))
                     | Ok(VString value, sideEffects) when name = "block_encryption_mode" ->
                         match Functions.tryBlockEncryptionMode value with
                         | Some canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
