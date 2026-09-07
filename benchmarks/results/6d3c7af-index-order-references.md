@@ -1,0 +1,31 @@
+# Projection-referenced index ordering
+
+Environment: Apple M2 Max, macOS 15.6, .NET 10.0.11,
+BenchmarkDotNet 0.14.0, MySQL 8.4.11. The previous fsdb server is
+`db16735`; the current server is `6d3c7af`. Both used the same host, schema,
+SQL, three warmups, and three measured iterations.
+
+`OrderByIndexedAlias` orders a bounded result through a projected primary-key
+alias. `GroupByIndexedAlias` groups through a projected secondary-index key.
+
+| User rows | Workload | Previous fsdb | Current fsdb | MySQL |
+|---:|---|---:|---:|---:|
+| 10,000 | ORDER BY alias | 1.527 ms | 163.7 us | 41.3 us |
+| 10,000 | GROUP BY alias | 1.568 ms | 2.362 ms | 1.032 ms |
+| 100,000 | ORDER BY alias | 18.184 ms | 164.1 us | 37.0 us |
+| 100,000 | GROUP BY alias | 19.652 ms | 44.212 ms | 9.641 ms |
+
+Alias and ordinal references now reach the same ordered-index paths as their
+source expressions. The bounded ORDER BY no longer scales with table size.
+GROUP BY gains the index-compatible plan and MySQL-compatible ordering, but
+the ordered row walk remains slower than the previous unordered hash grouping
+at these cardinalities. Linear full-index enumeration and direct lookup of
+natural row identities reduce that path's fixed cost without hiding the
+remaining gap.
+
+Commands:
+
+```sh
+FSDB_BENCH_USERS=10000 FSDB_BENCH_ORDERS=1 FSDB_BENCH_ARTICLES=1 FSDB_BENCH_METHODS=OrderByIndexedAlias,GroupByIndexedAlias just _bench-run --quick
+FSDB_BENCH_USERS=100000 FSDB_BENCH_ORDERS=1 FSDB_BENCH_ARTICLES=1 FSDB_BENCH_METHODS=OrderByIndexedAlias,GroupByIndexedAlias just _bench-run --quick
+```
