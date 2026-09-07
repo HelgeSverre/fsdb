@@ -4458,6 +4458,27 @@ let internal equalityIndexDistinctKeyCount (table: Table) (index: EqualityIndex)
         |> Option.map Map.count
         |> Option.defaultValue 0
 
+type private OrderedBoundary =
+    | FirstEqual
+    | AfterEqual
+
+let private sortedInsertionPoint boundary count compareAt =
+    let mutable first = 0
+    let mutable remaining = count
+
+    while remaining > 0 do
+        let step = remaining / 2
+        let current = first + step
+        let comparison = compareAt current
+
+        if comparison < 0 || (boundary = AfterEqual && comparison = 0) then
+            first <- current + 1
+            remaining <- remaining - step - 1
+        else
+            remaining <- step
+
+    first
+
 let private trySecondaryOrderSliceInTable
     (store: Store)
     (table: Table)
@@ -4527,28 +4548,15 @@ let private trySecondaryOrderSliceInTable
 
                         if group.Direction = Desc then -comparison else comparison
 
-                    let primaryInsertionIndex includeEqual value =
-                        let mutable first = 0
-                        let mutable count = entries.Count
-
-                        while count > 0 do
-                            let step = count / 2
-                            let current = first + step
-                            let comparison = comparePrimary entries.[current].Values.Head value
-
-                            if comparison < 0 || (not includeEqual && comparison = 0) then
-                                first <- current + 1
-                                count <- count - step - 1
-                            else
-                                count <- step
-
-                        first
+                    let primaryInsertionIndex boundary value =
+                        sortedInsertionPoint boundary entries.Count (fun current ->
+                            comparePrimary entries.[current].Values.Head value)
 
                     let firstEqual value =
-                        if prefixed then primaryInsertionIndex true value else fullFirstEqual value
+                        if prefixed then primaryInsertionIndex FirstEqual value else fullFirstEqual value
 
                     let afterEqual value =
-                        if prefixed then primaryInsertionIndex false value else fullAfterEqual value
+                        if prefixed then primaryInsertionIndex AfterEqual value else fullAfterEqual value
 
                     let first, afterLast =
                         match group.Direction with
@@ -4818,24 +4826,10 @@ let private tryOrderedIndexLookupWithPrefix
                                         (List.take length entry.Values)
                                         prefix
 
-                                let insertionIndex includeEqual =
-                                    let mutable first = 0
-                                    let mutable count = entries.Count
+                                let insertionIndex boundary =
+                                    sortedInsertionPoint boundary entries.Count (fun current -> comparePrefix entries.[current])
 
-                                    while count > 0 do
-                                        let step = count / 2
-                                        let current = first + step
-                                        let comparison = comparePrefix entries.[current]
-
-                                        if comparison < 0 || (not includeEqual && comparison = 0) then
-                                            first <- current + 1
-                                            count <- count - step - 1
-                                        else
-                                            count <- step
-
-                                    first
-
-                                insertionIndex true, insertionIndex false
+                                insertionIndex FirstEqual, insertionIndex AfterEqual
 
                         let slice =
                             { IndexName = group.Name
