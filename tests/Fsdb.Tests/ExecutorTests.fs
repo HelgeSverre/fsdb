@@ -3859,6 +3859,26 @@ let tests =
                     Expect.equal plan.Key (Some "idx_code") "the grouping index is reported"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "ordered groups do not use a temporary table"
 
+                testCase "indexed group keys retain simple aggregate semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, bucket INT NULL, KEY ix_bucket (bucket))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, NULL), (2, NULL), (3, 1), (4, 1), (5, 2)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT bucket, COUNT(*), COUNT(bucket), COUNT(id), MIN(bucket), MAX(bucket) FROM t GROUP BY bucket"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ None; Some "2"; Some "0"; Some "2"; None; None ]
+                              [ Some "1"; Some "2"; Some "2"; Some "2"; Some "1"; Some "1" ]
+                              [ Some "2"; Some "1"; Some "1"; Some "1"; Some "2"; Some "2" ] ]
+                            "NULL keys and non-null columns retain their aggregate values"
+                    | other -> failtestf "expected indexed simple aggregates, got %A" other
+
                 testCase "GROUP BY streams a matching case-folding expression index"
                 <| fun _ ->
                     let store = newStore ()
