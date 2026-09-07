@@ -543,7 +543,7 @@ let belongsToCharset (charset: string) (collation: string) =
 let maxBytesPerCharacter (charset: string option) =
     charset |> Option.bind Charset.maxBytes |> Option.defaultValue 4
 
-/// The engine's one active default — a `Store`-level default today, the
-/// seam a per-session/per-column `COLLATE` resolves against.
+/// The store-level fallback used when no session, column, or explicit
+/// collation takes precedence.
 let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry
 let metadataIdentifierCollation = Map.find "utf8mb3_tolower_ci" registry

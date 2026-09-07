@@ -299,9 +299,9 @@ let naturalScoresOf (corpus: Corpus) (query: string) : float[] =
 // behavior for the modifiers: `>` adds +1.0 to a matched term's
 // contribution and `<` subtracts 1.0 (a weak match can go negative);
 // `~` zeroes a matched term's contribution (observed on 8.4.11 — the
-// manual's "lowers" is MyISAM's older behavior). `@N` proximity
-// is "all quoted words within an N-token window", the common reading; the
-// manual doesn't pin the exact distance definition.
+// manual's "lowers" is MyISAM's older behavior). `@N` proximity requires
+// every distinct quoted word to span fewer than N positions; word order and
+// repeated query words do not add requirements.
 // ---------------------------------------------------------------------------
 
 type private BoolOp =
@@ -321,6 +321,44 @@ type private FlatPosting<'id when 'id: comparison> =
     { Operator: BoolOp
       Rows: Map<'id, int>
       Scale: float }
+
+[<Struct>]
+type private BooleanScoreState =
+    { Matched: bool
+      Excluded: bool
+      Score: float }
+
+let private emptyBooleanScore =
+    { Matched = false
+      Excluded = false
+      Score = 0.0 }
+
+let private addBooleanContribution operator contribution state =
+    match operator, contribution with
+    | Must, Some score ->
+        { state with
+            Matched = true
+            Score = state.Score + score }
+    | Must, None -> { state with Excluded = true }
+    | MustNot, Some _ -> { state with Excluded = true }
+    | MustNot, None -> state
+    | Optional, Some score ->
+        { state with
+            Matched = true
+            Score = state.Score + score }
+    | Raise, Some score ->
+        { state with
+            Matched = true
+            Score = state.Score + score + 1.0 }
+    | Lower, Some score ->
+        { state with
+            Matched = true
+            Score = state.Score + score - 1.0 }
+    | Soft, Some _ -> { state with Matched = true }
+    | (Optional | Raise | Lower | Soft), None -> state
+
+let private tryBooleanScore state =
+    if state.Matched && not state.Excluded then Some state.Score else None
 
 let private parseBooleanQuery (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
     let mutable i = 0
@@ -499,7 +537,7 @@ let private phraseCandidates (index: Index<'id>) (words: Token[]) =
     |> Array.sortBy _.Count
     |> function
         | [||] -> Set.empty
-        | sets -> sets |> Array.tail |> Array.fold Set.intersect sets.[0]
+        | sets -> sets |> Array.reduce Set.intersect
 
 let private booleanCandidates (results: (BoolOp * Map<'id, float>) list) : seq<'id> =
     let required =
@@ -598,38 +636,13 @@ and private evalNodes
 
     booleanCandidates results
     |> Seq.choose (fun id ->
-        let mutable excluded = false
-        let mutable anyMatch = false
-        let mutable score = 0.0
-
-        for op, r in results do
-            let contribution = Map.tryFind id r
-            let matched = contribution.IsSome
-            let contribution = Option.defaultValue 0.0 contribution
-
-            match op with
-            | Must ->
-                if matched then
-                    anyMatch <- true
-                    score <- score + contribution
-                else
-                    excluded <- true
-            | MustNot -> if matched then excluded <- true
-            | Optional ->
-                if matched then
-                    anyMatch <- true
-                    score <- score + contribution
-            | Raise ->
-                if matched then
-                    anyMatch <- true
-                    score <- score + contribution + 1.0
-            | Lower ->
-                if matched then
-                    anyMatch <- true
-                    score <- score + contribution - 1.0
-            | Soft -> if matched then anyMatch <- true
-
-        if anyMatch && not excluded then Some(id, score) else None)
+        results
+        |> List.fold
+            (fun state (operator, scores) ->
+                addBooleanContribution operator (Map.tryFind id scores) state)
+            emptyBooleanScore
+        |> tryBooleanScore
+        |> Option.map (fun score -> id, score))
     |> Map.ofSeq
 
 let private visibleBooleanScore score =
@@ -693,42 +706,17 @@ let internal tryFlatBooleanScoresDictionaryWithin
             let scores = Collections.Generic.Dictionary<'id, float>(capacity)
 
             for id in candidates do
-                let mutable excluded = false
-                let mutable anyMatch = false
-                let mutable score = 0.0
+                let score =
+                    postings
+                    |> List.fold
+                        (fun state posting ->
+                            Map.tryFind id posting.Rows
+                            |> Option.map (fun frequency -> float frequency * posting.Scale)
+                            |> fun contribution -> addBooleanContribution posting.Operator contribution state)
+                        emptyBooleanScore
+                    |> tryBooleanScore
 
-                for posting in postings do
-                    let frequency = Map.tryFind id posting.Rows
-                    let matched = frequency.IsSome
-                    let contribution =
-                        frequency
-                        |> Option.map (fun value -> float value * posting.Scale)
-                        |> Option.defaultValue 0.0
-
-                    match posting.Operator with
-                    | Must ->
-                        if matched then
-                            anyMatch <- true
-                            score <- score + contribution
-                        else
-                            excluded <- true
-                    | MustNot -> if matched then excluded <- true
-                    | Optional ->
-                        if matched then
-                            anyMatch <- true
-                            score <- score + contribution
-                    | Raise ->
-                        if matched then
-                            anyMatch <- true
-                            score <- score + contribution + 1.0
-                    | Lower ->
-                        if matched then
-                            anyMatch <- true
-                            score <- score + contribution - 1.0
-                    | Soft -> if matched then anyMatch <- true
-
-                if anyMatch && not excluded then
-                    scores.Add(id, visibleBooleanScore score)
+                score |> Option.iter (fun score -> scores.Add(id, visibleBooleanScore score))
 
             scores
 

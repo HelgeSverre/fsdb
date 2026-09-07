@@ -9,6 +9,12 @@ let private textOr fallback index (row: Value[]) =
 
 let private textAt index row = textOr "" index row
 
+let private optionalTextAt index (row: Value[]) =
+    row |> Array.tryItem index |> Option.bind toText
+
+let private yesAt index row =
+    String.Equals(textAt index row, "YES", StringComparison.OrdinalIgnoreCase)
+
 let private dateTimeAt index (row: Value[]) =
     row
     |> Array.tryItem index
@@ -280,7 +286,7 @@ module StoredFunction =
                   Definer = textAt 5 row
                   Parameters = textAt 6 row
                   SecurityType = textOr "DEFINER" 7 row
-                  Deterministic = String.Equals(textAt 8 row, "YES", StringComparison.OrdinalIgnoreCase)
+                  Deterministic = yesAt 8 row
                   SqlDataAccess = textOr "CONTAINS SQL" 9 row
                   SqlMode = textOr StoredExecutionContext.legacySqlMode 10 row
                   CharacterSetClient = textOr StoredExecutionContext.legacyCharacterSetClient 11 row
@@ -366,8 +372,8 @@ module Event =
                   DatabaseCollation = textOr StoredExecutionContext.legacyDatabaseCollation 15 row
                   Originator = int64At 1L 16 row
                   ExecuteAt = dateTimeAt 17 row
-                  IntervalValue = Array.tryItem 18 row |> Option.bind toText
-                  IntervalField = Array.tryItem 19 row |> Option.bind toText
+                  IntervalValue = optionalTextAt 18 row
+                  IntervalField = optionalTextAt 19 row
                   Starts = dateTimeAt 20 row
                   Ends = dateTimeAt 21 row })
             row
@@ -407,9 +413,9 @@ module Check =
                   Schema = textAt 1 row
                   Table = textAt 2 row
                   Clause = textAt 3 row
-                  Enforced = String.Equals(textAt 4 row, "YES", StringComparison.OrdinalIgnoreCase)
-                  Column = row |> Array.tryItem 5 |> Option.bind toText
-                  GeneratedName = String.Equals(textAt 6 row, "YES", StringComparison.OrdinalIgnoreCase)
+                  Enforced = yesAt 4 row
+                  Column = optionalTextAt 5 row
+                  GeneratedName = yesAt 6 row
                   Ordinal = int (int64At 1L 7 row) })
             row
 

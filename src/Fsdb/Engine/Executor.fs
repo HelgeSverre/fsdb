@@ -12714,28 +12714,33 @@ and private fullTextScoresForTable
             match indexColumns |> List.tryFind (snd >> (=) columns), Value.toText queryValue with
             | Some(index, _), Some queryText ->
                 let fullTextIndex = Map.find index.Name table.FullTextIndexes
+                let scoresWithinOrAll restricted unrestricted =
+                    match candidateIds with
+                    | Some candidates -> restricted candidates
+                    | None -> unrestricted ()
+
                 let scores =
                     match mode with
                     | NaturalLanguage ->
                         FullText.tryNaturalSingleTermScoresDictionaryWithin candidateIds fullTextIndex queryText
                         |> Option.map HashedScores
                         |> Option.defaultWith (fun () ->
-                            (match candidateIds with
-                             | Some candidates -> FullText.naturalScoresWithin candidates fullTextIndex queryText
-                             | None -> FullText.naturalScores fullTextIndex queryText)
+                            scoresWithinOrAll
+                                (fun candidates -> FullText.naturalScoresWithin candidates fullTextIndex queryText)
+                                (fun () -> FullText.naturalScores fullTextIndex queryText)
                             |> OrderedScores)
                     | BooleanMode ->
                         FullText.tryFlatBooleanScoresDictionaryWithin candidateIds fullTextIndex queryText
                         |> Option.map HashedScores
                         |> Option.defaultWith (fun () ->
-                            (match candidateIds with
-                             | Some candidates -> FullText.booleanScoresWithin candidates fullTextIndex queryText
-                             | None -> FullText.booleanScores fullTextIndex queryText)
+                            scoresWithinOrAll
+                                (fun candidates -> FullText.booleanScoresWithin candidates fullTextIndex queryText)
+                                (fun () -> FullText.booleanScores fullTextIndex queryText)
                             |> OrderedScores)
                     | QueryExpansion ->
-                        (match candidateIds with
-                         | Some candidates -> FullText.expansionScoresWithin candidates fullTextIndex queryText
-                         | None -> FullText.expansionScores fullTextIndex queryText)
+                        scoresWithinOrAll
+                            (fun candidates -> FullText.expansionScoresWithin candidates fullTextIndex queryText)
+                            (fun () -> FullText.expansionScores fullTextIndex queryText)
                         |> OrderedScores
 
                 Ok(node, mode, scores)
@@ -12748,8 +12753,8 @@ and private fullTextScoresForTable
 
 and private fullTextScoreIds (scores: FullTextScores) : RowId seq =
     match scores with
-    | OrderedScores scores -> seq { yield! Map.keys scores }
-    | HashedScores scores -> seq { yield! scores.Keys }
+    | OrderedScores scores -> Map.keys scores
+    | HashedScores scores -> scores.Keys
 
 and private tryFullTextScore rowId =
     function
@@ -12790,11 +12795,9 @@ and private fullTextCandidates (computed: (Expr * MatchMode * FullTextScores) li
     candidates expression
 
 and private fullTextCandidateIds (candidates: FullTextCandidates) : RowId seq =
-    seq {
-        match candidates with
-        | ScoredCandidates scores -> yield! fullTextScoreIds scores
-        | CombinedCandidates candidates -> yield! Set.toSeq candidates
-    }
+    match candidates with
+    | ScoredCandidates scores -> fullTextScoreIds scores
+    | CombinedCandidates candidates -> Set.toSeq candidates
 
 and private fullTextPredicatePlan
     (table: Table)

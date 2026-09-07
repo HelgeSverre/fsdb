@@ -8011,16 +8011,10 @@ let internal replaceRowsWithOrdinal
     : Result<InsertOutcome, StorageError> =
     replaceRowsCore store dbName tableName columns rowsIn deferred prepare finish
 
-/// Deletes every candidate matching `predicate`. Returns the number of rows
-/// removed. `predicate` returns a `Result` rather than a plain `bool` so a
-/// per-row WHERE-evaluation failure (not reachable today — every `Value`
-/// operation is total — but a real possibility once functions that can
-/// fail per row land) surfaces as an `Error` instead of silently being
-/// treated as "didn't match". When `store.ForeignKeyChecks` is set (the
-/// default), applies every referencing foreign key's `ON DELETE` action —
-/// see `cascadeDelete`. `None` candidates scan the table; supplied row
-/// identities are resolved from the current table root and rechecked by
-/// `predicate` before removal.
+/// Deletes every candidate matching `predicate`. Predicate errors abort the
+/// operation; enabled foreign-key checks apply each referencing ON DELETE
+/// action. `None` scans the table, while supplied identities are resolved
+/// from the current table root and rechecked before removal.
 let private deleteRowsCore
     (store: Store)
     (dbName: string)

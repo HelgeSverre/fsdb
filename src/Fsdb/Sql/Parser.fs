@@ -3669,16 +3669,9 @@ let private crossJoinClause: Parser<Join, unit> =
     attempt (keyword "CROSS" >>. keyword "JOIN" >>. fromItem)
     |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }
 
-/// `FROM t1, t2` — MySQL's legacy comma (implicit-join) syntax, still the
-/// form plenty of handwritten SQL uses for what an explicit `CROSS JOIN`
-/// says today. Desugars into the exact same `CrossJoin` shape
-/// `crossJoinClause` already produces, so every consumer that already walks
-/// an N-source join list (`Executor.applyJoin`/`runMutationJoin`) lights up
-/// for `SELECT`/`UPDATE`/`DELETE` alike with no executor change; a real
-/// table or a `JSON_TABLE(...)` (MySQL's correlated comma-join form, `FROM
-/// t, JSON_TABLE(t.doc, ...) jt`) or a `LATERAL (SELECT ...)` (its
-/// correlated derived-table form, which is what the comma is *for* here)
-/// can follow the comma, but not a plain derived `(SELECT ...)`.
+/// MySQL's comma join shares the `CrossJoin` AST shape with explicit CROSS
+/// JOIN. The right side may be a table, correlated JSON_TABLE, or LATERAL
+/// derived table; an unqualified derived table is not legal in this form.
 let private commaJoinClause: Parser<Join, unit> =
     attempt (sym "," >>. (lateralTable <|> jsonTable <|> (tableRef |>> FromTable)))
     |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }

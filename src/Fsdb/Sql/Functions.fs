@@ -510,13 +510,10 @@ let private nowFn: Scalar =
     | _ -> VDateTime(truncateToSecond DateTime.Now)
 
 // ---------------------------------------------------------------------------
-// JSON. `VJson`/`VString` both hold raw JSON text (a JSON column coerces to
-// `VString` today — `Storage.coerceValue`'s call, not this module's — so
-// every function here reads through `tryParseJsonValue`, which treats the
-// two the same rather than special-casing `VJson`). Parsed on demand with
-// `System.Text.Json.Nodes.JsonNode`, whose object/array nodes are mutable in
-// place, which is what makes JSON_SET/INSERT/REPLACE/REMOVE tractable
-// without hand-rolling a second JSON tree type.
+// JSON columns reach scalar functions as `VString`, while JSON constructors
+// return `VJson`; both carry raw JSON text and therefore share one parser.
+// Mutable `JsonNode` containers provide the update semantics needed by
+// JSON_SET/INSERT/REPLACE/REMOVE.
 // ---------------------------------------------------------------------------
 
 /// One step of a `$.a[2].b`-style path. The wildcards are the minimal

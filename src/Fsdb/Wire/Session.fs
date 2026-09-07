@@ -475,10 +475,7 @@ let private trackedSystemVariableNames (session: Session) =
         |> Option.flatten
         |> Option.defaultValue ""
 
-    if
-        value.Length > Limits.maxTrackedSystemVariablesLength
-        || (value |> Seq.filter ((=) ',') |> Seq.length) >= Limits.maxTrackedSystemVariableNames
-    then
+    if Limits.trackedSystemVariablesExceedLimit value then
         Set.empty
     else
         value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)

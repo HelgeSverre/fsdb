@@ -98,6 +98,11 @@ let maxOpenTableHandlers = 256
 let maxTableHandlerAliasRunes = 256
 let maxTrackedSystemVariablesLength = 4096
 let maxTrackedSystemVariableNames = 256
+
+let trackedSystemVariablesExceedLimit (value: string) =
+    value.Length > maxTrackedSystemVariablesLength
+    || (value |> Seq.filter ((=) ',') |> Seq.length) >= maxTrackedSystemVariableNames
+
 let maxAdvisoryLocksPerSession = 64
 let maxPreparedCursors = 64
 let maxPreparedCursorRows = 100_000

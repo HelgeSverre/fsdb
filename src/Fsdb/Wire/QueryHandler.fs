@@ -272,15 +272,22 @@ let private globalOnlyVariables =
               "max_prepared_stmt_count"
               "net_write_timeout" ])
 
+let private conditionCount errorsOnly (session: Session) =
+    if errorsOnly then
+        session.Diagnostics
+        |> List.sumBy (fun condition -> if condition.Level = Diagnostics.Error then 1 else 0)
+    else
+        session.Diagnostics.Length
+
 /// The outer option preserves error 1193 for unknown system variables while
 /// the inner option represents SQL NULL.
 let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name: string) : string option option =
     let name = name.ToLowerInvariant()
 
     if sigil = "@@" && not (isGlobalScope scope) && name = "warning_count" then
-        Some(Some(string session.Diagnostics.Length))
+        Some(Some(string (conditionCount false session)))
     elif sigil = "@@" && not (isGlobalScope scope) && name = "error_count" then
-        Some(Some(string (session.Diagnostics |> List.filter (fun condition -> condition.Level = Diagnostics.Error) |> List.length)))
+        Some(Some(string (conditionCount true session)))
     elif sigil = "@@" then
         if isGlobalScope scope || globalScopeOnlyVariables.Contains name then
             Session.tryGlobalVariable session.Store name
@@ -1495,8 +1502,7 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
     | SetVarAction(name, _, true) when readOnlySystemVariables.Contains name ->
         Error(Err(1238, sprintf "Variable '%s' is a read only variable" name))
     | SetVarAction("session_track_system_variables", Some value, _)
-        when value.Length > Limits.maxTrackedSystemVariablesLength
-             || (value |> Seq.filter ((=) ',') |> Seq.length) >= Limits.maxTrackedSystemVariableNames ->
+        when Limits.trackedSystemVariablesExceedLimit value ->
         Error(Err(1231, "Variable 'session_track_system_variables' exceeds its resource limit"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
@@ -4094,11 +4100,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         session, ResultSet([ "Level"; "Code"; "Message" ], rows)
     | ShowMessageCount isError ->
         let col = if isError then "@@session.error_count" else "@@session.warning_count"
-        let count =
-            if isError then
-                session.Diagnostics |> List.filter (fun condition -> condition.Level = Diagnostics.Error) |> List.length
-            else
-                session.Diagnostics.Length
+        let count = conditionCount isError session
 
         session, ResultSet([ col ], [ [ Some(string count) ] ])
     | ShowDatabases -> session, handleShowDatabases session sql
