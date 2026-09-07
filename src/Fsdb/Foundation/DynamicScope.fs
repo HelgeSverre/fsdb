@@ -22,3 +22,12 @@ let withValue (slot: AsyncLocal<'value>) (value: 'value) (body: unit -> 'result)
         body ()
     finally
         slot.Value <- previous
+
+let withThreadValue (slot: ThreadLocal<'value>) (value: 'value) (body: unit -> 'result) : 'result =
+    let previous = slot.Value
+    slot.Value <- value
+
+    try
+        body ()
+    finally
+        slot.Value <- previous

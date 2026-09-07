@@ -15648,13 +15648,8 @@ let private triggerInvocationTables =
     new System.Threading.ThreadLocal<Set<string * string>>(fun () -> Set.empty)
 
 let private withTriggerInvocationTables tables body =
-    let previous = triggerInvocationTables.Value
-    triggerInvocationTables.Value <- Set.union previous tables
-
-    try
-        body ()
-    finally
-        triggerInvocationTables.Value <- previous
+    let combined = Set.union triggerInvocationTables.Value tables
+    DynamicScope.withThreadValue triggerInvocationTables combined body
 
 let private err1442 (table: string) : QueryResult =
     Err(
@@ -16829,9 +16824,7 @@ let rec executeAs
                 | None -> Some(Err(1436, "Thread stack overrun while executing stored programs"))
                 | Some nesting ->
                     use _nesting = nesting
-                    triggerChain.Value <- self :: chain
-
-                    try
+                    DynamicScope.withThreadValue triggerChain (self :: chain) (fun () ->
                         rows
                         |> List.tryPick (fun (oldRow, newRow) ->
                             bodies
@@ -16845,9 +16838,7 @@ let rec executeAs
                                 Storage.withExecutionSettings runStore settings (fun () ->
                                     match runBody oldRow newRow (statements, account) with
                                     | Err _ as e -> Some e
-                                    | _ -> None)))
-                    finally
-                        triggerChain.Value <- chain
+                                    | _ -> None))))
 
     let triggerStorageResult =
         function
