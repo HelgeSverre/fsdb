@@ -12725,10 +12725,13 @@ and private fullTextScoresForTable
                              | None -> FullText.naturalScores fullTextIndex queryText)
                             |> OrderedScores)
                     | BooleanMode ->
-                        (match candidateIds with
-                         | Some candidates -> FullText.booleanScoresWithin candidates fullTextIndex queryText
-                         | None -> FullText.booleanScores fullTextIndex queryText)
-                        |> OrderedScores
+                        FullText.tryRequiredWordBooleanScoresDictionaryWithin candidateIds fullTextIndex queryText
+                        |> Option.map HashedScores
+                        |> Option.defaultWith (fun () ->
+                            (match candidateIds with
+                             | Some candidates -> FullText.booleanScoresWithin candidates fullTextIndex queryText
+                             | None -> FullText.booleanScores fullTextIndex queryText)
+                            |> OrderedScores)
                     | QueryExpansion ->
                         (match candidateIds with
                          | Some candidates -> FullText.expansionScoresWithin candidates fullTextIndex queryText

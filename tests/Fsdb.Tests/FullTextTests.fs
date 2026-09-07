@@ -228,6 +228,41 @@ let tests =
 
               Expect.equal dictionary (naturalScores index "database" |> restricted) "dictionary scoring uses the same restriction"
 
+          testCase "required-word boolean dictionaries preserve scores and candidate scope"
+          <| fun _ ->
+              let index =
+                  buildIndexWith
+                      defaultCollation
+                      [ 10, "database concurrency database"
+                        20, "database security"
+                        30, "concurrency handbook"
+                        40, "database concurrency tutorial" ]
+
+              let asMap scores =
+                  scores
+                  |> Seq.map (fun (KeyValue(id, score)) -> id, score)
+                  |> Map.ofSeq
+
+              let expected = booleanScores index "+database +concurrency +database"
+              let actual = tryRequiredWordBooleanScoresDictionary index "+database +concurrency +database" |> Option.get |> asMap
+
+              Expect.equal actual expected "required terms retain duplicate-term scoring"
+
+              let candidates = set [ 10; 20; 30 ]
+              let restricted = expected |> Map.filter (fun id _ -> candidates.Contains id)
+
+              let scoped =
+                  tryRequiredWordBooleanScoresDictionaryWithin (Some candidates) index "+database +concurrency +database"
+                  |> Option.get
+                  |> asMap
+
+              Expect.equal scoped restricted "candidate scope changes rows, not corpus-wide IDF"
+              Expect.isEmpty
+                  (tryRequiredWordBooleanScoresDictionary index "+database +missing" |> Option.get)
+                  "a missing required posting makes the result empty"
+              Expect.isNone (tryRequiredWordBooleanScoresDictionary index "database +concurrency") "optional terms use general scoring"
+              Expect.isNone (tryRequiredWordBooleanScoresDictionary index "+data*") "prefix terms use general scoring"
+
           testCase "a deeply nested boolean query is bounded, not a stack overflow"
           <| fun _ ->
               // Thousands of open parens must not overflow the recursive

@@ -589,6 +589,65 @@ let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
 let internal booleanScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) =
     booleanScoresWithinOption (Some candidateIds) index query
 
+let internal tryRequiredWordBooleanScoresDictionaryWithin
+    (candidateIds: Set<'id> option)
+    (index: Index<'id>)
+    (query: string)
+    : Collections.Generic.Dictionary<'id, float> option =
+    let rec requiredWords (found: Token list) =
+        function
+        | [] when not found.IsEmpty -> Some(List.rev found)
+        | (Must, BWord(term, false)) :: rest when isSearchable term -> requiredWords (term :: found) rest
+        | _ -> None
+
+    parseBooleanQuery index.Collation query
+    |> requiredWords []
+    |> Option.map (fun terms ->
+        let postings =
+            terms
+            |> List.map (fun term ->
+                Map.tryFind term.Key index.Postings
+                |> Option.map (fun rows ->
+                    let weight = idf index rows.Count
+                    rows, weight * weight))
+
+        if postings |> List.exists Option.isNone then
+            Collections.Generic.Dictionary()
+        else
+            let postings = postings |> List.choose id
+            let smallestPosting = postings |> List.minBy (fst >> _.Count) |> fst
+
+            let candidates: seq<'id> =
+                match candidateIds with
+                | Some candidates when candidates.Count < smallestPosting.Count -> Set.toSeq candidates
+                | _ -> smallestPosting |> Map.toSeq |> Seq.map fst
+
+            let capacity =
+                candidateIds
+                |> Option.map _.Count
+                |> Option.defaultValue smallestPosting.Count
+                |> min smallestPosting.Count
+
+            let scores = Collections.Generic.Dictionary<'id, float>(capacity)
+
+            for id in candidates do
+                let mutable score = 0.0
+                let mutable matchesEveryTerm =
+                    candidateIds |> Option.forall (fun candidates -> candidates.Contains id)
+
+                for rows, scale in postings do
+                    match Map.tryFind id rows with
+                    | Some frequency -> score <- score + float frequency * scale
+                    | None -> matchesEveryTerm <- false
+
+                if matchesEveryTerm then
+                    scores.Add(id, score)
+
+            scores)
+
+let internal tryRequiredWordBooleanScoresDictionary index query =
+    tryRequiredWordBooleanScoresDictionaryWithin None index query
+
 let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
     // A matched row whose contributions all cancelled (only `~` terms hit,
     // or everywhere-present words at the floor) still has to read as a
