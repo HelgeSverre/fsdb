@@ -3906,6 +3906,16 @@ let tests =
 
                     Expect.equal sourceFirstPlan.Key (Some "PRIMARY") "GROUP BY prefers a source column over a colliding alias"
 
+                    let overridden =
+                        builtins
+                        |> registerScalar "UPPER" (function
+                            | [ VString _ ] -> VString "same"
+                            | _ -> VNull)
+
+                    match run store overridden "SELECT UPPER(name), COUNT(*) FROM t GROUP BY UPPER(name)" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "same"; Some "4" ] ] "extension overrides bypass stored function values"
+                    | other -> failtestf "expected an override-defined group, got %A" other
+
                 testCase "GROUP BY streams composite functional keys and fixed-prefix suffixes"
                 <| fun _ ->
                     let store = newStore ()

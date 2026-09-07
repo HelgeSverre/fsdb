@@ -8835,7 +8835,7 @@ and private runUnlockedSelectStmt
             | Error e -> e, [], []
             | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, [] ->
-            match tryGroupIndexOrder store dbName tref select with
+            match tryGroupIndexOrder store registry dbName tref select with
             | Some plan -> runResolved (ContiguousGroupRows plan.Groups) plan.Columns plan.Rows None select
             | None ->
                 match tryIndexedSemiJoin store registry dbName select tref with
@@ -10986,7 +10986,13 @@ and private resolveOrderKey
         | [] -> evalOrderKey ctx (Col name)
     | e -> evalOrderKey ctx e
 
-and private groupByIndexTerms (table: Table) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
+and private groupByIndexTerms (registry: Registry) (table: Table) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
+    let usesStoredSemantics = function
+        | None -> true
+        | Some Lowercase -> Functions.isUnmodifiedBuiltinScalar "LOWER" registry
+        | Some Uppercase -> Functions.isUnmodifiedBuiltinScalar "UPPER" registry
+        | Some(Expression _) -> false
+
     let resolved =
         select.GroupBy
         |> traverse (resolveGroupByRef (columnIndexOf table.Columns) select.Projections)
@@ -10997,12 +11003,12 @@ and private groupByIndexTerms (table: Table) (tref: TableRef) (select: SelectStm
         groupExprs
         |> traverse (fun expression ->
             match indexedColumnFor tref expression with
-            | Some(column, transform) ->
+            | Some(column, transform) when usesStoredSemantics transform ->
                 Ok
                     { Column = column
                       Transform = transform
                       Direction = Asc }
-            | None -> Error())
+            | _ -> Error())
         |> Result.toOption)
 
 and private equalityPinsOneStoredKey (table: Table) (name: string) (literal: Value) =
@@ -11162,12 +11168,12 @@ and private tryGroupingIndexOrder
         |> storageOrderTerms
         |> Storage.tryOrderedIndexLookup store tableDb tref.Table)
 
-and private tryGroupIndexOrder (store: Store) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
+and private tryGroupIndexOrder (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
     if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
         None
     else
         physicalFastPathTable store dbName tref
-        |> Option.bind (fun table -> groupByIndexTerms table tref select)
+        |> Option.bind (fun table -> groupByIndexTerms registry table tref select)
         |> Option.bind (tryGroupingIndexOrder store dbName tref select.Where)
         |> Option.map (fun lookup ->
             { KeyName = lookup.OrderedIndexName
@@ -14712,7 +14718,7 @@ and private explainSelectBlock
     let indexOrderPlan =
         match select.From, joins with
         | Some(FromTable tref), [] ->
-            match tryGroupIndexOrder store dbName tref select with
+            match tryGroupIndexOrder store registry dbName tref select with
             | Some plan -> Some plan
             | None when tryIndexedLookup store dbName tref select.Where |> Option.isNone -> tryIndexOrder store registry dbName tref select
             | None -> None
