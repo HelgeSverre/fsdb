@@ -176,6 +176,20 @@ let tests =
               let optional = booleanScoresOf corpus "tutorial the"
               Expect.isTrue (optional.[0] > 0.0) "an optional stopword just contributes nothing"
 
+          testCase "boolean groups compose required and excluded terms"
+          <| fun _ ->
+              let grouped = buildCorpus [ "alpha common"; "beta common"; "alpha beta common"; "common" ]
+              let matches query =
+                  booleanScoresOf grouped query
+                  |> Array.mapi (fun index score -> index + 1, score <> 0.0)
+                  |> Array.filter snd
+                  |> Array.map fst
+
+              Expect.equal (matches "+(alpha beta) +common") [| 1; 2; 3 |] "a required group accepts either positive member"
+              Expect.equal (matches "+(alpha beta) +common -beta") [| 1 |] "an exclusion narrows the required intersection"
+              Expect.equal (matches "+(alpha +beta) +common") [| 2; 3 |] "a nested required term constrains its group"
+              Expect.equal (matches "-(alpha beta) common") [| 4 |] "an excluded group removes every group match"
+
           testCase "query expansion ranks the seed docs first and pulls in term-sharing docs"
           <| fun _ ->
               // Oracle: AGAINST ('database' WITH QUERY EXPANSION) returns all

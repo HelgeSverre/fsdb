@@ -501,6 +501,31 @@ let private phraseCandidates (index: Index<'id>) (words: Token[]) =
         | [||] -> Set.empty
         | sets -> sets |> Array.tail |> Array.fold Set.intersect sets.[0]
 
+let private booleanCandidates (results: (BoolOp * Map<'id, float>) list) : seq<'id> =
+    let required =
+        results
+        |> List.choose (function
+            | Must, scores -> Some scores
+            | _ -> None)
+
+    match required with
+    | [] ->
+        results
+        |> List.fold
+            (fun candidates (operator, scores) ->
+                if operator = MustNot then
+                    candidates
+                else
+                    scores |> Map.fold (fun candidates id _ -> Set.add id candidates) candidates)
+            Set.empty
+        |> Set.toSeq
+    | required ->
+        let smallest = required |> List.minBy _.Count
+
+        smallest
+        |> Map.keys
+        |> Seq.filter (fun id -> required |> List.forall (Map.containsKey id))
+
 /// Per-document contribution for one boolean term.
 let rec private evalTerm
     (candidateIds: Set<'id> option)
@@ -571,14 +596,7 @@ and private evalNodes
     : Map<'id, float> =
     let results = nodes |> List.map (fun (op, term) -> op, evalTerm candidateIds index term)
 
-    let candidates =
-        results
-        |> List.fold
-            (fun candidates (_, scores) ->
-                scores |> Map.fold (fun candidates id _ -> Set.add id candidates) candidates)
-            Set.empty
-
-    candidates
+    booleanCandidates results
     |> Seq.choose (fun id ->
         let mutable excluded = false
         let mutable anyMatch = false
