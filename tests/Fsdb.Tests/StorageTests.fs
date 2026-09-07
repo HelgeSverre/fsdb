@@ -3917,6 +3917,60 @@ let tests =
                         release.Set()
                         Expect.isTrue (holder.Wait(System.TimeSpan.FromSeconds 5.)) "the held database lock is released"
 
+                testCase "a blocked transaction publication does not block another database"
+                <| fun _ ->
+                    let store = create ()
+
+                    for dbName in [ "held"; "free" ] do
+                        createDatabase store dbName |> ignore
+                        createTable store dbName "items" [ col "id" (TInt false) false ] [] [] None None |> ignore
+
+                    let prepareInsert dbName id =
+                        let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+                        insertRows snapshot dbName "items" None [ [ VInt id ] ] |> ignore
+                        baseCatalog, snapshot
+
+                    let heldBase, heldSnapshot = prepareInsert "held" 1L
+                    let freeBase, freeSnapshot = prepareInsert "free" 2L
+                    use heldStarted = new System.Threading.ManualResetEventSlim()
+                    let heldSlot = store.Databases.["held"]
+
+                    let blocked =
+                        lock heldSlot (fun () ->
+                            let blocked =
+                                System.Threading.Tasks.Task.Factory.StartNew(
+                                    (fun () ->
+                                        heldStarted.Set()
+                                        commitCatalogInto store heldBase heldSnapshot),
+                                    System.Threading.CancellationToken.None,
+                                    System.Threading.Tasks.TaskCreationOptions.LongRunning,
+                                    System.Threading.Tasks.TaskScheduler.Default
+                                )
+
+                            Expect.isTrue (heldStarted.Wait(System.TimeSpan.FromSeconds 5.)) "the blocked commit started"
+
+                            Expect.isTrue
+                                (System.Threading.SpinWait.SpinUntil(
+                                    (fun () -> store.ReferentialSchemaLock.CurrentReadCount > 0),
+                                    System.TimeSpan.FromSeconds 5.
+                                ))
+                                "the blocked commit reached its database slot under shared schema access"
+
+                            let independent =
+                                System.Threading.Tasks.Task.Run(fun () -> commitCatalogInto store freeBase freeSnapshot)
+
+                            Expect.isTrue
+                                (independent.Wait(System.TimeSpan.FromSeconds 5.))
+                                "the independent database commits while the first publication waits"
+
+                            blocked)
+
+                    Expect.isTrue (blocked.Wait(System.TimeSpan.FromSeconds 5.)) "the blocked publication resumes"
+
+                    match scan store "free" "items" with
+                    | Ok(_, rows) -> Expect.equal (rows |> Seq.exactlyOne).[0] (VInt 2L) "the independent row is published"
+                    | Error error -> failtestf "expected the independent database row, got %A" error
+
                 testCase "two threads incrementing the same row in the same database serialize correctly (no lost updates)"
                 <| fun _ ->
                     let store = create ()

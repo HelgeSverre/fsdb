@@ -8637,11 +8637,11 @@ let private commitCatalogIntoWith
         prepareCommit store snapshot |> fun acknowledge -> acknowledge ()
 
 let commitCatalogIntoWithTimeout (timeout: TimeSpan) (publishFlat: bool) (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    withReferentialSchemaLock ExclusiveAccess store (fun () ->
+    withReferentialSchemaLock SharedAccess store (fun () ->
         commitCatalogIntoWith timeout false (prepareTransactionEventsWith publishFlat) store baseCatalog snapshot)
 
 let commitCatalogInto (store: Store) (baseCatalog: Catalog) (snapshot: Store) : unit =
-    withReferentialSchemaLock ExclusiveAccess store (fun () ->
+    withReferentialSchemaLock SharedAccess store (fun () ->
         commitCatalogIntoWith (Fsdb.Limits.lockWaitTimeout ()) false prepareTransactionEvents store baseCatalog snapshot)
 
 let commitSerializableCatalogIntoWithTimeout
