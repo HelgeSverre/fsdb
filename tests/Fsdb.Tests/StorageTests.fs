@@ -2062,6 +2062,54 @@ let tests =
                     Expect.equal primaryRange ("PRIMARY", [ VInt 2L; VInt 3L ]) "primary keys share the ordered access path"
                     Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
 
+                testCase "updating a non-indexed column preserves immutable index groups"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    let index =
+                        { Name = "idx_age"
+                          KeyColumns = indexColumns [ "age" ]
+                          Unique = false
+                          Visible = true
+                          Kind = BTree }
+
+                    alterTable store defaultDatabase "users" [ AddIndex index ]
+                    |> Result.defaultWith (failtestf "add index failed: %A")
+
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ]
+                    |> Result.defaultWith (failtestf "insert failed: %A")
+                    |> ignore
+
+                    let table () = store.Catalog.[defaultDatabase].["users"]
+                    let before = table ()
+
+                    updateRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        (fun row -> Ok(row.[0] = VInt 1L))
+                        (fun row -> Ok [| row.[0]; VString "ALICE"; row.[2] |])
+                    |> Result.defaultWith (failtestf "update failed: %A")
+                    |> ignore
+
+                    let after = table ()
+                    let updatedRow = after.RowsArray |> Seq.exactlyOne
+
+                    Expect.equal updatedRow.[1] (VString "ALICE") "the row update is published"
+                    Expect.isTrue
+                        (obj.ReferenceEquals(before.UniqueIndex.["PRIMARY"], after.UniqueIndex.["PRIMARY"]))
+                        "the unchanged primary-key bucket is shared"
+                    Expect.isTrue
+                        (obj.ReferenceEquals(before.SecondaryIndex.["idx_age"], after.SecondaryIndex.["idx_age"]))
+                        "the unchanged equality buckets are shared"
+                    Expect.isTrue
+                        (obj.ReferenceEquals(before.SecondaryOrder.["idx_age"], after.SecondaryOrder.["idx_age"]))
+                        "the unchanged ordered entries are shared"
+                    Expect.isTrue
+                        (obj.ReferenceEquals(before.SecondaryOrder.["PRIMARY"], after.SecondaryOrder.["PRIMARY"]))
+                        "the unchanged primary-key ordering is shared"
+
                 testCase "an ordered lookup counts adjacent SQL-equal keys without resolving rows"
                 <| fun _ ->
                     let store = withUsersTable ()

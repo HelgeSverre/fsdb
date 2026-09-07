@@ -2605,21 +2605,30 @@ let private reindexRow
     (secondaryIndex: Map<string, Map<string, Set<RowId>>>)
     (secondaryOrder: SecondaryOrder)
     : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> * SecondaryOrder =
-    let updateUniqueGroup (keyGroup: IndexKeyGroup) group =
-        let group =
-            removed
-            |> Option.fold
-                (fun entries (_, row) ->
-                    encodeUniqueKey columns keyGroup row
-                    |> Option.fold (fun current key -> Map.remove key current) entries)
-                group
+    let rowKeyUnchanged keyOf =
+        match removed, added with
+        | Some(removedId, before), Some(addedId, after) ->
+            removedId = addedId && keyOf before = keyOf after
+        | _ -> false
 
-        added
-        |> Option.fold
-            (fun entries (rowId, row) ->
-                encodeUniqueKey columns keyGroup row
-                |> Option.fold (fun current key -> Map.add key rowId current) entries)
+    let updateUniqueGroup (keyGroup: IndexKeyGroup) group =
+        if rowKeyUnchanged (encodeUniqueKey columns keyGroup) then
             group
+        else
+            let group =
+                removed
+                |> Option.fold
+                    (fun entries (_, row) ->
+                        encodeUniqueKey columns keyGroup row
+                        |> Option.fold (fun current key -> Map.remove key current) entries)
+                    group
+
+            added
+            |> Option.fold
+                (fun entries (rowId, row) ->
+                    encodeUniqueKey columns keyGroup row
+                    |> Option.fold (fun current key -> Map.add key rowId current) entries)
+                group
 
     let uniqueIndex =
         uniqueGroups
@@ -2641,8 +2650,11 @@ let private reindexRow
         Map.add key (Set.add rowId rows) buckets
 
     let updateSecondaryGroup (keyGroup: IndexKeyGroup) buckets =
-        let buckets = removed |> Option.fold (removeSecondaryRow keyGroup) buckets
-        added |> Option.fold (addSecondaryRow keyGroup) buckets
+        if rowKeyUnchanged (encodeIndexKey columns keyGroup) then
+            buckets
+        else
+            let buckets = removed |> Option.fold (removeSecondaryRow keyGroup) buckets
+            added |> Option.fold (addSecondaryRow keyGroup) buckets
 
     let secondaryIndex =
         secondaryGroups
@@ -2655,18 +2667,21 @@ let private reindexRow
           RowId = rowId }
 
     let updateOrderedGroup (keyGroup: IndexKeyGroup) entries =
-        let entries =
-            removed
+        if rowKeyUnchanged (indexValues keyGroup) then
+            entries
+        else
+            let entries =
+                removed
+                |> Option.fold
+                    (fun (current: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) ->
+                        current.Remove(orderedEntry keyGroup rowId row))
+                    entries
+
+            added
             |> Option.fold
                 (fun (current: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) ->
-                    current.Remove(orderedEntry keyGroup rowId row))
+                    current.Add(orderedEntry keyGroup rowId row))
                 entries
-
-        added
-        |> Option.fold
-            (fun (current: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) ->
-                current.Add(orderedEntry keyGroup rowId row))
-            entries
 
     let secondaryOrder =
         uniqueGroups @ secondaryGroups
