@@ -49,6 +49,15 @@ let private nestedSubqueryResultsError = 1105, "Multiple resultsets are not vali
 let private equalsIgnoreCase (left: string) (right: string) =
     System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
+let private tryAllSome values =
+    let rec collect resolved =
+        function
+        | [] -> Some(List.rev resolved)
+        | Some value :: rest -> collect (value :: resolved) rest
+        | None :: _ -> None
+
+    collect [] values
+
 /// An expression-evaluation failure: a MySQL error code and message, the
 /// same shape `Storage.toMySqlError` produces, so both error sources funnel
 /// into `Err` the same way.
@@ -5576,15 +5585,12 @@ and private describeQueryColumns
             | first :: rest -> rest |> List.fold strictestUnionCollation first |> fun value -> Some value.Name
 
         let numericParts = columns |> List.map _.NumericParts
-        let allNumeric = numericParts |> List.forall Option.isSome
+        let resolvedNumericParts = tryAllSome numericParts
 
-        let decimalType () =
-            numericParts
-            |> List.choose id
-            |> fun parts ->
-                let scale = parts |> List.map snd |> List.max
-                let integralDigits = parts |> List.map (fun (precision, partScale) -> precision - partScale) |> List.max
-                TDecimal(min 65 (integralDigits + scale), scale, false)
+        let decimalType parts =
+            let scale = parts |> List.map snd |> List.max
+            let integralDigits = parts |> List.map (fun (precision, partScale) -> precision - partScale) |> List.max
+            TDecimal(min 65 (integralDigits + scale), scale, false)
 
         let displayLength =
             function
@@ -5599,13 +5605,14 @@ and private describeQueryColumns
             lengths |> List.max |> TVarchar
 
         let mergedType =
-            match types with
-            | _ when types |> List.exists (stringLength >> Option.isSome) && types |> List.exists (fun ty -> decimalParts ty |> Option.isSome) -> stringType
-            | _ when allNumeric && types |> List.exists (function TDecimal _ -> true | _ -> false) -> decimalType ()
-            | _ when allNumeric && types |> List.forall ((=) first.Column.Type) -> first.Column.Type
-            | _ when allNumeric -> TBigInt false
-            | _ when types |> List.forall (stringLength >> Option.isSome) -> stringType
-            | _ when types |> List.forall ((=) first.Column.Type) -> first.Column.Type
+            match types, resolvedNumericParts with
+            | types, _ when types |> List.exists (stringLength >> Option.isSome) && types |> List.exists (fun ty -> decimalParts ty |> Option.isSome) ->
+                stringType
+            | types, Some parts when types |> List.exists (function TDecimal _ -> true | _ -> false) -> decimalType parts
+            | types, Some _ when types |> List.forall ((=) first.Column.Type) -> first.Column.Type
+            | _, Some _ -> TBigInt false
+            | types, _ when types |> List.forall (stringLength >> Option.isSome) -> stringType
+            | types, _ when types |> List.forall ((=) first.Column.Type) -> first.Column.Type
             | _ -> TText
 
         let nullable = definitions |> List.exists isNullable
@@ -5648,12 +5655,11 @@ and private describeQueryColumns
         | PlainSelect select -> describeSelect seen dbName ctes select
         | UnionSelect(first, rest, _, _, _) ->
             let branches = first :: (rest |> List.map snd)
-            let described = branches |> List.map (describeSelect seen dbName ctes)
 
-            if described |> List.forall Option.isSome then
-                described |> List.choose id |> unionColumns
-            else
-                None
+            branches
+            |> List.map (describeSelect seen dbName ctes)
+            |> tryAllSome
+            |> Option.bind unionColumns
 
     and sourceColumns seen dbName ctes =
         function
@@ -5701,14 +5707,12 @@ and private describeQueryColumns
 
                     recursiveBranches
                     |> List.map (snd >> describeSelect seen dbName scope)
-                    |> fun branches ->
-                        if branches |> List.forall Option.isSome then
-                            anchorColumns :: (branches |> List.choose id)
-                            |> unionColumns
-                            |> Option.map (List.map (fun descriptor ->
-                                { descriptor with Column = { descriptor.Column with Nullable = true; Default = None } }))
-                        else
-                            None)
+                    |> tryAllSome
+                    |> Option.bind (fun branches ->
+                        anchorColumns :: branches
+                        |> unionColumns
+                        |> Option.map (List.map (fun descriptor ->
+                            { descriptor with Column = { descriptor.Column with Nullable = true; Default = None } }))))
             | _ ->
                 describeBody seen dbName ctes cte.Body
                 |> Option.bind (renameColumns cte.CteColumns)
@@ -7384,7 +7388,9 @@ and private applyResolvedJoin
                     namedJoinOn combinedColumnsSoFar qualifierOfLeft joinQualifier joinColumns equiKeys
 
             let keyClasses =
-                equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+                equiKeys
+                |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+                |> tryAllSome
 
             let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
 
@@ -7420,12 +7426,14 @@ and private applyResolvedJoin
 
             let hashCompatible =
                 lazy
-                    (storedValuesMatchReadValues store
-                     && not equiKeys.IsEmpty
-                     && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
-                     && keyClasses |> List.forall Option.isSome
-                     && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
-                     && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows)
+                    (match keyClasses with
+                     | Some classes ->
+                         storedValuesMatchReadValues store
+                         && not equiKeys.IsEmpty
+                         && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
+                         && rowsMatchKeyClasses classes (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
+                         && rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
+                     | None -> false)
 
             let indexedJoinProbe =
                 candidateIndexedJoinProbe
@@ -7779,17 +7787,21 @@ and private applyMutationJoin
                         namedJoinOn combinedColumnsSoFar qualifierOfLeft joinQualifier joinColumns equiKeys
 
                 let keyClasses =
-                    equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+                    equiKeys
+                    |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+                    |> tryAllSome
 
                 let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
 
                 let hashEligible =
-                    storedValuesMatchReadValues store
-                    && not equiKeys.IsEmpty
-                    && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
-                    && keyClasses |> List.forall Option.isSome
-                    && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) leftFlatRows
-                    && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
+                    match keyClasses with
+                    | Some classes ->
+                        storedValuesMatchReadValues store
+                        && not equiKeys.IsEmpty
+                        && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
+                        && rowsMatchKeyClasses classes (equiKeys |> List.map fst) leftFlatRows
+                        && rowsMatchKeyClasses classes (equiKeys |> List.map snd) joinRows
+                    | None -> false
 
                 let residualHolds (combinedFlat: Value[]) : Result<bool, EvalError> =
                     residualConjuncts
@@ -11037,9 +11049,15 @@ and private tryIndexPrefix (pinned: Set<string>) (suffix: IndexOrderTerm list) (
 
     let leadingPinned = pinnedCount 0 indexTerms
     let remaining = List.skip leadingPinned indexTerms
-    let matchedSuffix = List.length remaining >= List.length suffix && List.forall2 sameKey suffix (List.take suffix.Length remaining)
 
-    if matchedSuffix then
+    let rec startsWith expected actual =
+        match expected, actual with
+        | [], _ -> true
+        | expectedTerm :: expectedRest, actualTerm :: actualRest when sameKey expectedTerm actualTerm ->
+            startsWith expectedRest actualRest
+        | _ -> false
+
+    if startsWith suffix remaining then
         Some
             { Terms = List.take (leadingPinned + suffix.Length) indexTerms
               PinnedCount = leadingPinned }
