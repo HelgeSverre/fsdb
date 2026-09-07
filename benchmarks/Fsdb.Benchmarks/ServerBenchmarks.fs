@@ -383,6 +383,25 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedNestedDerivedEquality() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM "
+            + "(SELECT order_id AS id, owner_id AS user_id FROM "
+            + "(SELECT id AS order_id, user_id AS owner_id FROM orders) first) candidates "
+            + "WHERE candidates.user_id = u.id) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedChainedCteEquality() =
+        this.Query(
+            "WITH first(order_id, owner_id) AS (SELECT id, user_id FROM orders), "
+            + "candidates(id, user_id) AS (SELECT order_id, owner_id FROM first) "
+            + "SELECT u.id, (SELECT COUNT(*) FROM candidates c WHERE c.user_id = u.id) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.IndexedStringInSubquery() =
         this.Query "SELECT u.id, u.name FROM users u WHERE u.email IN (SELECT email FROM users WHERE id <= 100)"
 
