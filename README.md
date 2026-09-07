@@ -260,9 +260,10 @@ different access pattern:
   their full ordering, such as `utf8mb4_0900_bin` and
   `utf8mb4_0900_as_cs`. Case- or accent-folded and PAD SPACE text prefixes
   retain the scan/sort path because equal values can occupy separate suffix
-  runs. Simple covered groups derive counts and grouping-key `MIN` or `MAX`
-  values from adjacent keys without resolving rows. This path also supports
-  `LIMIT`, `OFFSET`, and literal bounds. Composite keys may contain
+  runs. Compatible literal bounds on the next suffix key further narrow the
+  fixed-prefix slice. Simple covered groups derive counts and grouping-key
+  `MIN` or `MAX` values from adjacent keys without resolving rows. This path
+  also supports `LIMIT` and `OFFSET`. Composite keys may contain
   `LOWER(column)` or `UPPER(column)` parts. Other expression orderings and
   full-value ordering through a prefix key still sort.
 

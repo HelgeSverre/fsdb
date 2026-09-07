@@ -491,6 +491,12 @@ type ServerBenchmarks() =
         this.Query "SELECT status_bucket, COUNT(*) FROM orders WHERE status = 'paid' GROUP BY status_bucket"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryOrder", "Planner")>]
+    member this.GroupByStringFixedPrefixRange() =
+        this.Query
+            "SELECT status_bucket, COUNT(*) FROM orders WHERE status = 'paid' AND status_bucket >= 16 AND status_bucket < 32 GROUP BY status_bucket"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.JsonExtract() =
         this.Query "SELECT id, name FROM users WHERE meta->>'$.plan' = 'pro' LIMIT 20"
