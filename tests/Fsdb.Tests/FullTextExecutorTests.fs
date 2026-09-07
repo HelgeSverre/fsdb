@@ -397,6 +397,18 @@ let tests =
               | other -> failtestf "expected one reordered full-text row, got %A" other
 
               Expect.equal calls 4 "the reordered unique join evaluates only the surviving row"
+              let reorderedCalls = calls
+
+              calls <- 0
+
+              let pinnedJoinedSearch =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT STRAIGHT_JOIN d.id, TOUCH(o.id) FROM owners o JOIN docs d ON d.id = o.id WHERE MATCH(d.body) AGAINST('needle') AND TOUCH(o.id) = d.id LIMIT 1"
+
+              Expect.equal (ids pinnedJoinedSearch) [ "82" ] "STRAIGHT_JOIN preserves the result"
+              Expect.isGreaterThan calls reorderedCalls "STRAIGHT_JOIN retains the written source order"
 
               run store "DELETE FROM owners WHERE id = 82" |> ignore
               calls <- 0
