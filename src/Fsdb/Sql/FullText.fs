@@ -415,47 +415,57 @@ let private parseBooleanQuery (collation: Collation) (query: string) : (BoolOp *
 
     nodes 0 false
 
-/// Whether `doc` contains the quoted words as adjacent tokens in order
-/// (`proximity = None`) or all within an (N+1)-token window (`Some N`).
-/// Returns the occurrence count (phrase TF).
-let private phraseCount (doc: Token[]) (words: Token[]) (proximity: int option) : int =
+let private exactPhraseMatches (doc: Token[]) (words: Token[]) =
     if words.Length = 0 then
-        0
+        false
     else
-        match proximity with
-        | None ->
-            let mutable count = 0
-            for start in 0 .. doc.Length - words.Length do
-                let mutable ok = true
-                for j in 0 .. words.Length - 1 do
-                    if doc.[start + j].Key <> words.[j].Key then ok <- false
-                if ok then count <- count + 1
-            count
-        | Some dist ->
-            // All words present with positions spanning at most `dist`.
-            // The window search is exponential in the phrase's
-            // word count over each word's occurrence list — fine for the
-            // short quoted phrases proximity is used with; make it a sliding
-            // window if anyone feeds it a paragraph.
-            let positions =
-                words
-                |> Array.map (fun word ->
-                    doc
-                    |> Array.mapi (fun i token -> i, token.Key)
-                    |> Array.filter (snd >> (=) word.Key)
-                    |> Array.map fst)
-            if positions |> Array.exists Array.isEmpty then
-                0
-            else
-                // Smallest window containing one position of each word.
-                let found =
-                    positions.[0]
-                    |> Array.exists (fun p0 ->
-                        let rec fits (k: int) (lo: int) (hi: int) =
-                            if k = positions.Length then hi - lo <= dist
-                            else positions.[k] |> Array.exists (fun p -> fits (k + 1) (min lo p) (max hi p))
-                        fits 1 p0 p0)
-                if found then 1 else 0
+        seq { 0 .. doc.Length - words.Length }
+        |> Seq.exists (fun start ->
+            words
+            |> Array.indexed
+            |> Array.forall (fun (offset, word) -> doc.[start + offset].Key = word.Key))
+
+let private proximityMatches (doc: Token[]) (words: Token[]) distance =
+    let required = words |> Array.map _.Key |> Set.ofArray
+
+    if required.IsEmpty then
+        false
+    elif required.Count = 1 then
+        doc |> Array.exists (fun token -> required.Contains token.Key)
+    else
+        let frequencies = Collections.Generic.Dictionary<string, int>()
+        let mutable covered = 0
+        let mutable left = 0
+        let mutable matched = false
+
+        for right in 0 .. doc.Length - 1 do
+            let rightKey = doc.[right].Key
+
+            if required.Contains rightKey then
+                match frequencies.TryGetValue rightKey with
+                | true, count -> frequencies.[rightKey] <- count + 1
+                | false, _ ->
+                    frequencies.Add(rightKey, 1)
+                    covered <- covered + 1
+
+            while not matched && covered = required.Count do
+                if right - left < distance then
+                    matched <- true
+                else
+                    let leftKey = doc.[left].Key
+
+                    if required.Contains leftKey then
+                        let count = frequencies.[leftKey] - 1
+
+                        if count = 0 then
+                            frequencies.Remove leftKey |> ignore
+                            covered <- covered - 1
+                        else
+                            frequencies.[leftKey] <- count
+
+                    left <- left + 1
+
+        matched
 
 /// `TF×IDF²` per doc from raw per-doc frequencies — for terms
 /// with no single index token to count (prefix wildcards, phrases), whose
@@ -467,9 +477,6 @@ let private scoresFromTfsWithDocumentFrequency
     : Map<'id, float> =
     let weight = idf index documentFrequency
     tfs |> Map.map (fun _ tf -> float tf * weight * weight)
-
-let private scoresFromTfs (index: Index<'id>) (tfs: Map<'id, int>) =
-    scoresFromTfsWithDocumentFrequency index tfs.Count tfs
 
 let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'value>) =
     match candidateIds with
@@ -484,6 +491,7 @@ let private phraseCandidates (index: Index<'id>) (words: Token[]) =
     // InnoDB omits short terms and stopwords from postings but retains their
     // positions after the first searchable word in a phrase.
     |> Array.filter isSearchable
+    |> Array.distinctBy _.Key
     |> Array.map (fun word ->
         index.Postings
         |> Map.tryFind word.Key
@@ -520,13 +528,36 @@ let rec private evalTerm
         |> restrictScores candidateIds
         |> scoresFromTfsWithDocumentFrequency index rows.Count
     | BPhrase(words, proximity) ->
-        phraseCandidates index words
+        let candidates =
+            phraseCandidates index words
+            |> fun candidates -> candidateIds |> Option.map (Set.intersect candidates) |> Option.defaultValue candidates
+
+        let terms =
+            words
+            |> Array.filter isSearchable
+            |> Array.distinctBy _.Key
+            |> Array.choose (fun word ->
+                index.Postings
+                |> Map.tryFind word.Key
+                |> Option.map (fun rows ->
+                    let weight = idf index rows.Count
+                    rows, weight * weight))
+
+        candidates
         |> Seq.choose (fun id ->
-            let count = phraseCount index.Documents.[id] words proximity
-            if count = 0 then None else Some(id, count))
+            let document = index.Documents.[id]
+            let matches =
+                match proximity with
+                | None -> exactPhraseMatches document words
+                | Some distance -> proximityMatches document words distance
+
+            if matches then
+                terms
+                |> Array.sumBy (fun (rows, scale) -> float rows.[id] * scale)
+                |> fun score -> Some(id, score)
+            else
+                None)
         |> Map.ofSeq
-        |> scoresFromTfs index
-        |> restrictScores candidateIds
     | BGroup nodes ->
         evalNodes candidateIds index nodes
 

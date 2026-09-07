@@ -106,6 +106,33 @@ let tests =
               let far = booleanScoresOf corpus "\"stands database\" @1"
               Expect.equal (far |> Array.mapi (fun i v -> i + 1, v > 0.0) |> Array.filter snd |> Array.map fst) [||] "window too narrow"
 
+          testCase "boolean phrase and proximity ranking follows its indexed words"
+          <| fun _ ->
+              let phrases = buildCorpus [ "database concurrency"; "database concurrency database"; "concurrency x database" ]
+              let wordScores = booleanScoresOf phrases "database concurrency"
+              let exact = booleanScoresOf phrases "\"database concurrency\""
+              let near = booleanScoresOf phrases "\"database concurrency\" @3"
+
+              Expect.equal exact.[0] wordScores.[0] "an exact match retains ordinary word relevance"
+              Expect.equal exact.[1] wordScores.[1] "term frequency still affects phrase relevance"
+              Expect.equal exact.[2] 0.0 "an exact phrase remains ordered and adjacent"
+              Expect.equal near wordScores "proximity is unordered and scores every matching word"
+
+              let boundaries = buildCorpus [ "database concurrency"; "database x concurrency"; "database x y concurrency"; "concurrency x database" ]
+              let matches query =
+                  booleanScoresOf boundaries query
+                  |> Array.map (fun score -> score > 0.0)
+
+              Expect.equal (matches "\"database concurrency\" @1") [| false; false; false; false |] "the distance bound is strict"
+              Expect.equal (matches "\"database concurrency\" @2") [| true; false; false; false |] "adjacent words span one position"
+              Expect.equal (matches "\"database concurrency\" @3") [| true; true; false; true |] "word order does not affect proximity"
+
+              let duplicates = buildCorpus [ "database"; "database database" ]
+              Expect.equal
+                  (booleanScoresOf duplicates "\"database database\" @0" |> Array.map (fun score -> score > 0.0))
+                  [| true; true |]
+                  "duplicate query words share one proximity requirement"
+
           testCase "boolean phrases retain internal stopword and short-token positions"
           <| fun _ ->
               let phrases =
