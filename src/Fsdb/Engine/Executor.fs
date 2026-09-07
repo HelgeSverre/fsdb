@@ -433,6 +433,14 @@ let private tryLiteralValues expressions =
 
     collect [] expressions
 
+let private getMemoized (memo: Dictionary<'key, 'value>) key compute =
+    match memo.TryGetValue key with
+    | true, value -> value
+    | false, _ ->
+        let value = compute ()
+        memo.[key] <- value
+        value
+
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
@@ -4571,19 +4579,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let literalMembership =
                     let memo = (currentStatementMemo ()).LiteralMemberships
 
-                    match memo.TryGetValue membershipExpression with
-                    | true, membership -> membership
-                    | _ ->
-                        let membership =
-                            match e, tryColumnDefForExpr ctx e with
-                            | (Col _ | QualifiedCol _), Some column ->
-                                xs
-                                |> tryLiteralValues
-                                |> Option.bind (equalityMembershipForValues ctx.Store column)
-                            | _ -> None
-
-                        memo.[membershipExpression] <- membership
-                        membership
+                    getMemoized memo membershipExpression (fun () ->
+                        match e, tryColumnDefForExpr ctx e with
+                        | (Col _ | QualifiedCol _), Some column ->
+                            xs
+                            |> tryLiteralValues
+                            |> Option.bind (equalityMembershipForValues ctx.Store column)
+                        | _ -> None)
 
                 let matchingKey =
                     literalMembership
@@ -6384,16 +6386,8 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
                 | Error(code, message) -> Error(Err(code, message))
                 | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> definitions, rows))
     | FromSubquery _ ->
-        // Serve a derived table from the per-statement memo if already
-        // resolved through the statement memo, else compute and record it.
         let memo = (currentStatementMemo ()).FromSubqueries
-
-        match memo.TryGetValue item with
-        | true, cached -> cached
-        | _ ->
-            let computed = resolveFromSubquery store registry dbName item None
-            memo.[item] <- computed
-            computed
+        getMemoized memo item (fun () -> resolveFromSubquery store registry dbName item None)
 
 and private resolveFromSubquery
     (store: Store)
@@ -9336,44 +9330,43 @@ and private tryIndexedCandidatesInTable
     |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CandidateNarrowing store registry table tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
+and private tryCorrelatedInnerColumn selfQualifier = function
+    | Col name -> Some name
+    | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
+    | _ -> None
+
+and private tryCorrelatedOuterValue selfQualifier context = function
+    | QualifiedCol(qualifier, _) as expression when not (qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase)) ->
+        evalExpr context expression |> Result.toOption
+    | _ -> None
+
+and private tryCorrelatedEqualityPredicate selfQualifier context = function
+    | BinOp(Eq, left, right) ->
+        Option.map2
+            (fun column value -> column, value)
+            (tryCorrelatedInnerColumn selfQualifier left)
+            (tryCorrelatedOuterValue selfQualifier context right)
+        |> Option.orElseWith (fun () ->
+            Option.map2
+                (fun column value -> column, value)
+                (tryCorrelatedInnerColumn selfQualifier right)
+                (tryCorrelatedOuterValue selfQualifier context left))
+    | _ -> None
+
 and private correlatedEqualityPredicates selfQualifier (whereExpr: Expr option) (outer: EvalContext option) =
-    let innerColumn = function
-        | Col name -> Some name
-        | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
-        | _ -> None
-
-    let outerValue context = function
-        | QualifiedCol(qualifier, _) as expression when not (qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase)) ->
-            evalExpr context expression |> Result.toOption
-        | _ -> None
-
     outer
     |> Option.map (fun context ->
         whereExpr
         |> optionalConjuncts
-        |> List.choose (function
-            | BinOp(Eq, left, right) ->
-                match innerColumn left, outerValue context right with
-                | Some column, Some value -> Some(column, value)
-                | _ ->
-                    match innerColumn right, outerValue context left with
-                    | Some column, Some value -> Some(column, value)
-                    | _ -> None
-            | _ -> None))
+        |> List.choose (tryCorrelatedEqualityPredicate selfQualifier context))
 
 and private correlatedRangeBounds selfQualifier (whereExpr: Expr option) (outer: EvalContext option) =
-    let innerColumn = function
-        | Col name -> Some name
-        | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
-        | _ -> None
-
-    let outerValue context = function
-        | QualifiedCol(qualifier, _) as expression when not (qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase)) ->
-            evalExpr context expression |> Result.toOption
-        | _ -> None
-
     outer
-    |> Option.map (fun context -> collectRangeBounds innerColumn (outerValue context) whereExpr)
+    |> Option.map (fun context ->
+        collectRangeBounds
+            (tryCorrelatedInnerColumn selfQualifier)
+            (tryCorrelatedOuterValue selfQualifier context)
+            whereExpr)
     |> Option.defaultValue []
 
 and private tryCorrelatedEqualityLookup
@@ -9389,12 +9382,7 @@ and private tryCorrelatedEqualityLookup
         let key = tableDb.ToLowerInvariant(), tref.Table.ToLowerInvariant(), column.ToLowerInvariant()
         let lookups = (currentStatementMemo ()).CorrelatedEqualities
 
-        match lookups.TryGetValue key with
-        | true, lookup -> lookup
-        | _ ->
-            let lookup = Storage.tryBuildTransientEqualityLookup store tableDb tref.Table column
-            lookups.[key] <- lookup
-            lookup
+        getMemoized lookups key (fun () -> Storage.tryBuildTransientEqualityLookup store tableDb tref.Table column)
         |> Option.bind (fun lookup ->
             lookup.FindRows value
             |> Option.map (fun rows -> lookup.TableColumns, rows))
@@ -9422,7 +9410,7 @@ and private tryPhysicalProjection
 
     match projections.TryGetValue source with
     | true, projection -> Some projection
-    | _ ->
+    | false, _ ->
         tryPhysicalProjectionUncached store registry dbName source
         |> Option.map (fun projection ->
             projections.[source] <- projection
@@ -9548,6 +9536,13 @@ and private tryPhysicalProjectionUncached
         | _ -> None
     | _ -> None
 
+and private tryPhysicalProjectionColumn (projection: PhysicalProjection) columnName =
+    resolveColumn projection.OutputColumns columnName
+    |> Result.toOption
+    |> Option.map (fun outputIndex ->
+        let physicalIndex = projection.PhysicalColumnIndices.[outputIndex]
+        projection.PhysicalTable.Columns.[physicalIndex])
+
 and private projectPhysicalRows
     (store: Store)
     (registry: Registry)
@@ -9596,12 +9591,8 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
         |> Option.bind (fun equalities ->
             equalities
             |> List.tryPick (fun (column, value) ->
-                projection.OutputColumns
-                |> List.tryFindIndex (fun candidate -> candidate.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.bind (fun outputIndex ->
-                    let sourceIndex = projection.PhysicalColumnIndices.[outputIndex]
-                    let sourceColumn = projection.PhysicalTable.Columns.[sourceIndex]
-
+                tryPhysicalProjectionColumn projection column
+                |> Option.bind (fun sourceColumn ->
                     Storage.tryEqualityLookupInTable store projection.PhysicalTable sourceColumn.Name value
                     |> Option.bind (fun (_, rows) ->
                         rows
@@ -9622,11 +9613,8 @@ and private tryProjectedPhysicalCorrelatedRangeLookup
     |> Option.bind (fun projection ->
         correlatedRangeBounds (fromItemQualifier source) whereExpr outer
         |> List.tryPick (fun bounds ->
-            projection.OutputColumns
-            |> List.tryFindIndex (fun candidate -> candidate.Name.Equals(bounds.Column, System.StringComparison.OrdinalIgnoreCase))
-            |> Option.bind (fun outputIndex ->
-                let sourceIndex = projection.PhysicalColumnIndices.[outputIndex]
-                let sourceColumn = projection.PhysicalTable.Columns.[sourceIndex]
+            tryPhysicalProjectionColumn projection bounds.Column
+            |> Option.bind (fun sourceColumn ->
                 let isNullBound = function
                     | Some(VNull, _) -> true
                     | _ -> false
@@ -9672,28 +9660,16 @@ and private tryMaterializedCorrelatedEqualityLookup
             let byColumn = (currentStatementMemo ()).MaterializedCorrelatedEqualities
 
             let sourceLookups =
-                match byColumn.TryGetValue source with
-                | true, lookups -> lookups
-                | _ ->
-                    let lookups =
-                        Dictionary<string, MaterializedEqualityLookup option>(System.StringComparer.OrdinalIgnoreCase)
-
-                    byColumn.[source] <- lookups
-                    lookups
+                getMemoized byColumn source (fun () ->
+                    Dictionary<string, MaterializedEqualityLookup option>(System.StringComparer.OrdinalIgnoreCase))
 
             equalities
             |> List.tryPick (fun (column, value) ->
                 let lookup =
-                    match sourceLookups.TryGetValue column with
-                    | true, lookup -> lookup
-                    | _ ->
-                        let lookup =
-                            resolveFromItem store registry dbName source
-                            |> Result.toOption
-                            |> Option.bind (fun (columns, rows) -> materializedEqualityLookup store columns rows column)
-
-                        sourceLookups.[column] <- lookup
-                        lookup
+                    getMemoized sourceLookups column (fun () ->
+                        resolveFromItem store registry dbName source
+                        |> Result.toOption
+                        |> Option.bind (fun (columns, rows) -> materializedEqualityLookup store columns rows column))
 
                 lookup
                 |> Option.bind (fun lookup ->
@@ -9721,14 +9697,17 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
 
-and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (whereExpr: Expr option) : int option =
-    let predicates = whereExpr |> optionalConjuncts
+and private tryAllCorrelatedEqualityPredicates selfQualifier whereExpr outer =
+    outer
+    |> Option.bind (fun context ->
+        match optionalConjuncts whereExpr with
+        | [] -> None
+        | predicates -> predicates |> List.map (tryCorrelatedEqualityPredicate selfQualifier context) |> tryAllSome)
 
+and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (whereExpr: Expr option) : int option =
     let physicalEquality (projection: PhysicalProjection) (column, value) =
-        resolveColumn projection.OutputColumns column
-        |> Result.map (fun outputIndex ->
-            let physicalIndex = projection.PhysicalColumnIndices.[outputIndex]
-            projection.PhysicalTable.Columns.[physicalIndex], value)
+        tryPhysicalProjectionColumn projection column
+        |> Option.map (fun physicalColumn -> physicalColumn, value)
 
     let countRows (projection: PhysicalProjection) equalities =
         if equalities |> List.exists (fst >> _.Type >> InformationSchema.isStringy) then
@@ -9749,20 +9728,18 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                 |> Option.map (fun lookup -> lookup.LookupRowIds.Count)
             | [] -> None
 
-    if predicates.IsEmpty || not (storedValuesMatchReadValues outer.Store) then
+    if not (storedValuesMatchReadValues outer.Store) then
         None
     else
         tryPhysicalProjection outer.Store outer.Registry outer.DbName source
         |> Option.filter (fun projection -> projection.Steps |> List.forall (_.Predicate >> Option.isNone))
         |> Option.bind (fun projection ->
-            correlatedEqualityPredicates (fromItemQualifier source) whereExpr (Some outer)
-            |> Option.filter (fun equalities ->
-                equalities.Length = predicates.Length
-                && (equalities |> tryDuplicateIgnoreCase fst |> Option.isNone))
+            tryAllCorrelatedEqualityPredicates (fromItemQualifier source) whereExpr (Some outer)
+            |> Option.filter (tryDuplicateIgnoreCase fst >> Option.isNone)
             |> Option.bind (fun equalities ->
                 equalities
-                |> traverse (physicalEquality projection)
-                |> Result.toOption
+                |> List.map (physicalEquality projection)
+                |> tryAllSome
                 |> Option.bind (countRows projection)))
 
 and private tryRangeAccessInTable

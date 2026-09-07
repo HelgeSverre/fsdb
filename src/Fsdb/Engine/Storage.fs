@@ -2591,6 +2591,10 @@ let private sameTableSchema (left: Table) (right: Table) =
     && left.Partitioning = right.Partitioning
     && left.CreateTime = right.CreateTime
 
+let private updateNamedGroup name update groups =
+    let group = groups |> Map.find name |> update
+    Map.add name group groups
+
 let private reindexRow
     (columns: ColumnDef list)
     (uniqueGroups: IndexKeyGroup list)
@@ -2601,68 +2605,73 @@ let private reindexRow
     (secondaryIndex: Map<string, Map<string, Set<RowId>>>)
     (secondaryOrder: SecondaryOrder)
     : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> * SecondaryOrder =
+    let updateUniqueGroup (keyGroup: IndexKeyGroup) group =
+        let group =
+            removed
+            |> Option.fold
+                (fun entries (_, row) ->
+                    encodeUniqueKey columns keyGroup row
+                    |> Option.fold (fun current key -> Map.remove key current) entries)
+                group
+
+        added
+        |> Option.fold
+            (fun entries (rowId, row) ->
+                encodeUniqueKey columns keyGroup row
+                |> Option.fold (fun current key -> Map.add key rowId current) entries)
+            group
+
     let uniqueIndex =
         uniqueGroups
-        |> List.fold
-            (fun accIndex keyGroup ->
-                let group = Map.find keyGroup.Name accIndex
-                let group = removed |> Option.fold (fun g (_, row) -> encodeUniqueKey columns keyGroup row |> Option.fold (fun g' k -> Map.remove k g') g) group
-                let group = added |> Option.fold (fun g (rowId, row) -> encodeUniqueKey columns keyGroup row |> Option.fold (fun g' k -> Map.add k rowId g') g) group
-                Map.add keyGroup.Name group accIndex)
-            uniqueIndex
+        |> List.fold (fun indexes keyGroup -> updateNamedGroup keyGroup.Name (updateUniqueGroup keyGroup) indexes) uniqueIndex
+
+    let removeSecondaryRow (keyGroup: IndexKeyGroup) buckets (rowId, row) =
+        let key = encodeIndexKey columns keyGroup row
+
+        match Map.tryFind key buckets with
+        | None -> buckets
+        | Some rows ->
+            match Set.remove rowId rows with
+            | remaining when remaining.IsEmpty -> Map.remove key buckets
+            | remaining -> Map.add key remaining buckets
+
+    let addSecondaryRow (keyGroup: IndexKeyGroup) buckets (rowId, row) =
+        let key = encodeIndexKey columns keyGroup row
+        let rows = buckets |> Map.tryFind key |> Option.defaultValue Set.empty
+        Map.add key (Set.add rowId rows) buckets
+
+    let updateSecondaryGroup (keyGroup: IndexKeyGroup) buckets =
+        let buckets = removed |> Option.fold (removeSecondaryRow keyGroup) buckets
+        added |> Option.fold (addSecondaryRow keyGroup) buckets
 
     let secondaryIndex =
         secondaryGroups
-        |> List.fold
-            (fun accIndex keyGroup ->
-                let group = Map.find keyGroup.Name accIndex
-                let group =
-                    removed
-                    |> Option.fold (fun g (rowId, row) ->
-                        let key = encodeIndexKey columns keyGroup row
-                        match Map.tryFind key g with
-                        | None -> g
-                        | Some rows ->
-                            let remaining = Set.remove rowId rows
-                            if remaining.IsEmpty then Map.remove key g else Map.add key remaining g) group
-                let group =
-                    added
-                    |> Option.fold (fun g (rowId, row) ->
-                        let key = encodeIndexKey columns keyGroup row
-                        let rows = g |> Map.tryFind key |> Option.defaultValue Set.empty
-                        Map.add key (Set.add rowId rows) g) group
-                Map.add keyGroup.Name group accIndex)
-            secondaryIndex
+        |> List.fold (fun indexes keyGroup -> updateNamedGroup keyGroup.Name (updateSecondaryGroup keyGroup) indexes) secondaryIndex
+
+    let orderedEntry (keyGroup: IndexKeyGroup) rowId (row: Value[]) =
+        { CollationNames = keyGroup.Indices |> List.map (fun index -> columns.[index].Collation)
+          Directions = keyGroup.Directions
+          Values = indexValues keyGroup row
+          RowId = rowId }
+
+    let updateOrderedGroup (keyGroup: IndexKeyGroup) entries =
+        let entries =
+            removed
+            |> Option.fold
+                (fun (current: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) ->
+                    current.Remove(orderedEntry keyGroup rowId row))
+                entries
+
+        added
+        |> Option.fold
+            (fun (current: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) ->
+                current.Add(orderedEntry keyGroup rowId row))
+            entries
 
     let secondaryOrder =
-        let orderedGroups =
-            uniqueGroups @ secondaryGroups |> List.filter usesSecondaryOrder
-
-        orderedGroups
-        |> List.fold
-            (fun indexes keyGroup ->
-                let entry rowId (row: Value[]) =
-                    { CollationNames = keyGroup.Indices |> List.map (fun index -> columns.[index].Collation)
-                      Directions = keyGroup.Directions
-                      Values = indexValues keyGroup row
-                      RowId = rowId }
-
-                let entries = Map.find keyGroup.Name indexes
-
-                let entries =
-                    removed
-                    |> Option.fold
-                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Remove(entry rowId row))
-                        entries
-
-                let entries =
-                    added
-                    |> Option.fold
-                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Add(entry rowId row))
-                        entries
-
-                Map.add keyGroup.Name entries indexes)
-            secondaryOrder
+        uniqueGroups @ secondaryGroups
+        |> List.filter usesSecondaryOrder
+        |> List.fold (fun indexes keyGroup -> updateNamedGroup keyGroup.Name (updateOrderedGroup keyGroup) indexes) secondaryOrder
 
     uniqueIndex, secondaryIndex, secondaryOrder
 
