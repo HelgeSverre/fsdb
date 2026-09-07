@@ -3887,6 +3887,19 @@ let tests =
                     Expect.equal plan.Key (Some "ix_upper") "the functional grouping key is reported"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "contiguous functional groups avoid a temporary table"
 
+                    for reference in [ "folded"; "1" ] do
+                        let alias = if reference = "folded" then " AS folded" else ""
+
+                        let referencedPlan =
+                            runDefault store $"EXPLAIN SELECT UPPER(name){alias}, COUNT(*) FROM t GROUP BY {reference}"
+                            |> explainRow
+
+                        Expect.equal referencedPlan.AccessType (Some "index") "projection references retain functional grouping"
+                        Expect.equal referencedPlan.Key (Some "ix_upper") "projection references report the functional key"
+                        Expect.isFalse
+                            (referencedPlan.Extra |> Option.exists (_.Contains("temporary")))
+                            "projection references keep groups contiguous"
+
                 testCase "GROUP BY streams composite functional keys and fixed-prefix suffixes"
                 <| fun _ ->
                     let store = newStore ()
@@ -6147,6 +6160,19 @@ let tests =
 
                     Expect.equal lowerPlan.AccessType (Some "index") "LOWER uses its functional order"
                     Expect.equal lowerPlan.Key (Some "ix_lower") "LOWER reports its matching key"
+
+                    for reference in [ "folded"; "1" ] do
+                        let alias = if reference = "folded" then " AS folded" else ""
+
+                        let referencedPlan =
+                            runDefault store $"EXPLAIN SELECT UPPER(name){alias} FROM indexed ORDER BY {reference} LIMIT 2"
+                            |> explainRow
+
+                        Expect.equal referencedPlan.AccessType (Some "index") "projection references retain functional ordering"
+                        Expect.equal referencedPlan.Key (Some "ix_upper") "projection references report the functional key"
+                        Expect.isFalse
+                            (referencedPlan.Extra |> Option.exists (_.Contains("filesort")))
+                            "projection references avoid a filesort"
 
                     let rawPlan =
                         runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY name"
