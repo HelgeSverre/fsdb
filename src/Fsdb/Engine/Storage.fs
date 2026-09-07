@@ -6625,6 +6625,16 @@ type InsertOutcome =
       InsertedRows: Value[] list
       IgnoredErrors: StorageError list }
 
+type private InsertBatchState =
+    { AcceptedRev: Value[] list
+      IgnoredErrorsRev: StorageError list
+      NextAutoId: int64
+      FirstGeneratedId: int64 option
+      LastExplicitId: int64 option
+      UniqueIndex: Map<string, Map<string, RowId>>
+      SecondaryIndex: Map<string, Map<string, Set<RowId>>>
+      SecondaryOrder: SecondaryOrder }
+
 /// Validates rows against indexes updated by earlier candidates in the same
 /// batch. `INSERT IGNORE` skips constraint failures, but malformed row shapes
 /// remain statement errors.
@@ -6702,18 +6712,19 @@ let private insertCore
             && not (foreignKeyLookups |> Map.containsKey foreignKey.Name))
 
     let rows = table.RowsArray.ToBuilder()
+    let expectedColumnCount = idxs.Length
 
-    let step rowNumber acc (rowValues: Value list) =
-        acc
-        |> Result.bind (fun ((acceptedRev: Value[] list), (ignoredErrorsRev: StorageError list), nextAutoId, firstAuto, lastExplicit, index: Map<string, Map<string, RowId>>, secondaryIndex, secondaryOrder) ->
-            if List.length rowValues <> List.length idxs then
-                Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
+    let step rowNumber stateResult (rowValues: Value list) =
+        stateResult
+        |> Result.bind (fun state ->
+            if rowValues.Length <> expectedColumnCount then
+                Error(ColumnCountMismatch(expectedColumnCount, rowValues.Length))
             else
                 let provided = List.zip idxs rowValues |> Map.ofList
                 let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                 let rowResult =
-                    processRow mode generateAutoOnZero nextAutoId rawRow table.Columns deferred
+                    processRow mode generateAutoOnZero state.NextAutoId rawRow table.Columns deferred
                     |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
                         let candidate = Array.ofList finalValues
                         let before = Array.copy candidate
@@ -6739,7 +6750,7 @@ let private insertCore
                                     uniqueGroups
                                     |> List.tryPick (fun group ->
                                         match encodeUniqueKey table.Columns group candidate with
-                                        | Some key when Map.find group.Name index |> Map.containsKey key ->
+                                        | Some key when Map.find group.Name state.UniqueIndex |> Map.containsKey key ->
                                             let value =
                                                 group.Indices
                                                 |> List.map (fun index -> candidate.[index] |> toText |> Option.defaultValue "NULL")
@@ -6755,8 +6766,12 @@ let private insertCore
                                         // An unindexed self-reference needs earlier
                                         // rows from this INSERT overlaid in source order.
                                         let dbView =
-                                            if hasUnacceleratedSelfForeignKey && not acceptedRev.IsEmpty then
-                                                Map.add tableKey { table with RowsArray = table.RowsArray.AddRange(List.rev acceptedRev) } db
+                                            if hasUnacceleratedSelfForeignKey && not state.AcceptedRev.IsEmpty then
+                                                Map.add
+                                                    tableKey
+                                                    { table with
+                                                        RowsArray = table.RowsArray.AddRange(List.rev state.AcceptedRev) }
+                                                    db
                                             else
                                                 db
 
@@ -6777,7 +6792,11 @@ let private insertCore
 
                 match rowResult with
                 | Ok(candidate, nextAutoId', assigned) ->
-                    let firstAuto', lastExplicit' = trackAutoIncrementAssignment assigned firstAuto lastExplicit
+                    let firstGeneratedId, lastExplicitId =
+                        trackAutoIncrementAssignment
+                            assigned
+                            state.FirstGeneratedId
+                            state.LastExplicitId
 
                     for KeyValue(_, (_, selfParentIndices, lookup)) in foreignKeyLookups do
                         selfParentIndices
@@ -6785,12 +6804,28 @@ let private insertCore
                         |> Option.iter (fun key -> parentKeySourceAdd key lookup)
 
                     let rowId = rows.Add candidate
-                    let index, secondaryIndex, secondaryOrder =
-                        reindexRow table.Columns uniqueGroups secondaryGroups None (Some(rowId, candidate)) index secondaryIndex secondaryOrder
+                    let uniqueIndex, secondaryIndex, secondaryOrder =
+                        reindexRow
+                            table.Columns
+                            uniqueGroups
+                            secondaryGroups
+                            None
+                            (Some(rowId, candidate))
+                            state.UniqueIndex
+                            state.SecondaryIndex
+                            state.SecondaryOrder
 
-                    Ok(candidate :: acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto', lastExplicit', index, secondaryIndex, secondaryOrder)
+                    Ok
+                        { state with
+                            AcceptedRev = candidate :: state.AcceptedRev
+                            NextAutoId = nextAutoId'
+                            FirstGeneratedId = firstGeneratedId
+                            LastExplicitId = lastExplicitId
+                            UniqueIndex = uniqueIndex
+                            SecondaryIndex = secondaryIndex
+                            SecondaryOrder = secondaryOrder }
                 | Error error when ignoreErrors ->
-                    Ok(acceptedRev, error :: ignoredErrorsRev, nextAutoId, firstAuto, lastExplicit, index, secondaryIndex, secondaryOrder)
+                    Ok { state with IgnoredErrorsRev = error :: state.IgnoredErrorsRev }
                 | Error e -> Error e)
 
     rowsIn
@@ -6798,26 +6833,37 @@ let private insertCore
     |> List.fold
         (fun state (rowNumber, rowValues) ->
             Diagnostics.withRowNumber (rowNumber + 1) (fun () -> step rowNumber state rowValues))
-        (Ok([], [], firstReserved, None, None, table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder))
-    |> Result.map (fun (acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto, lastExplicit, index, secondaryIndex, secondaryOrder) ->
-        let accepted = List.rev acceptedRev
-        let firstAssigned = Option.orElse lastExplicit firstAuto
-        let nextAutoId' = max nextAutoId' reservedAutoNext
-        advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId'
+        (Ok
+            { AcceptedRev = []
+              IgnoredErrorsRev = []
+              NextAutoId = firstReserved
+              FirstGeneratedId = None
+              LastExplicitId = None
+              UniqueIndex = table.UniqueIndex
+              SecondaryIndex = table.SecondaryIndex
+              SecondaryOrder = table.SecondaryOrder })
+    |> Result.map (fun state ->
+        let accepted = List.rev state.AcceptedRev
+        let firstAssigned = Option.orElse state.LastExplicitId state.FirstGeneratedId
+        let nextAutoId = max state.NextAutoId reservedAutoNext
+        let ignoredErrors = List.rev state.IgnoredErrorsRev
+
+        advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId
         let table' =
             publishRows table
                 { table with
                     RowsArray = rows.DrainToImmutable()
-                    NextAutoId = nextAutoId'
-                    UniqueIndex = index
-                    SecondaryIndex = secondaryIndex
-                    SecondaryOrder = secondaryOrder }
+                    NextAutoId = nextAutoId
+                    UniqueIndex = state.UniqueIndex
+                    SecondaryIndex = state.SecondaryIndex
+                    SecondaryOrder = state.SecondaryOrder }
+
         Map.add tableKey table' db,
         { LastInsertId = Option.defaultValue 0L firstAssigned
-          GeneratedId = firstAuto
+          GeneratedId = state.FirstGeneratedId
           Affected = List.length accepted
           InsertedRows = accepted
-          IgnoredErrors = List.rev ignoredErrorsRev })
+          IgnoredErrors = ignoredErrors })
 
 /// Publishes rows after applying defaults, generated values, constraints, and
 /// optional statement callbacks.
