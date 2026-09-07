@@ -1255,6 +1255,40 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected one committed primary key, got %A" result
 
+          testCase "a waiting literal replace rebases before it writes"
+          <| fun _ ->
+              [ "REPLACE INTO tx_replace VALUES (1, %d)"
+                "REPLACE INTO tx_replace SET id = 1, v = %d" ]
+              |> List.iter (fun replacement ->
+                  let replace value = replacement.Replace("%d", string value)
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  let setup, _ = handle setup "CREATE TABLE tx_replace (id INT PRIMARY KEY, v INT)"
+                  let setup, _ = handle setup "INSERT INTO tx_replace VALUES (1, 0)"
+                  let first, _ = handle (create 2 store) "BEGIN"
+                  let second, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 5"
+                  let second, _ = handle second "BEGIN"
+                  let first, firstReplace = handle first (replace 10)
+                  Expect.equal firstReplace (Affected 2UL) "the first replacement owns the key"
+
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () -> handle second (replace 20))
+
+                  Expect.isFalse
+                      (waiting.Wait(TimeSpan.FromMilliseconds 100.0))
+                      "the second replacement waits for the key owner"
+
+                  Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first replacement commits"
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the waiting replacement resumes"
+
+                  let second, secondReplace = waiting.GetAwaiter().GetResult()
+                  Expect.equal secondReplace (Affected 2UL) "the waiter replaces the committed row"
+                  Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the rebased replacement commits"
+
+                  match handle setup "SELECT v FROM tx_replace WHERE id = 1" |> snd with
+                  | ResultSet(_, [ [ Some "20" ] ]) -> ()
+                  | result -> failtestf "expected the waiting replacement to win, got %A" result)
+
           testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

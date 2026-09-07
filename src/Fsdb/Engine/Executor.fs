@@ -19078,24 +19078,36 @@ let transactionWriteTargets (store: Store) (dbName: string) (statement: Statemen
             { RowIds = rows |> List.map fst
               Keys = [] })
 
+    let insertTargets tableName (columns: string list) rows =
+        let database, table = splitQualified dbName tableName
+        let columns = if columns.IsEmpty then None else Some columns
+
+        tryInsertLockTargets store database table columns rows
+        |> Option.map (fun targets -> database, table, targets)
+
+    let literalInsertTargets tableName columns rows =
+        rows
+        |> traverse (traverse (function
+            | Lit value -> Ok value
+            | _ -> Error()))
+        |> Result.toOption
+        |> Option.bind (insertTargets tableName columns)
+
     match statement with
     | Update update when update.Ctes.IsEmpty && update.Joins.IsEmpty -> targets update.From update.Where
     | Delete delete when delete.Ctes.IsEmpty && delete.Joins.IsEmpty -> targets delete.From delete.Where
-    | Insert(tableName, columns, rows, _, _) ->
-        let values =
-            rows
-            |> traverse (traverse (function
-                | Lit value -> Ok value
-                | _ -> Error()))
-            |> Result.toOption
-
-        values
-        |> Option.bind (fun rows ->
-            let database, table = splitQualified dbName tableName
-            let columns = if columns.IsEmpty then None else Some columns
-
-            tryInsertLockTargets store database table columns rows
-            |> Option.map (fun targets -> database, table, targets))
+    | Insert(tableName, columns, rows, _, _)
+    | Replace(tableName, columns, rows) -> literalInsertTargets tableName columns rows
+    | ReplaceSet(tableName, assignments) ->
+        assignments
+        |> traverse (fun (column, expression) ->
+            match expression with
+            | Lit value -> Ok(column, value)
+            | _ -> Error())
+        |> Result.toOption
+        |> Option.bind (fun values ->
+            let columns, row = List.unzip values
+            insertTargets tableName columns [ row ])
     | _ -> None
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =
