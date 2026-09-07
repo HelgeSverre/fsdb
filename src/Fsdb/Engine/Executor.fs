@@ -3651,18 +3651,9 @@ let private boundedTopN (capacity: int) (cmp: 'b -> 'b -> int) (f: 'a -> Result<
         | Some e -> Error e
         | None -> Ok(List.ofSeq buf)
 
-/// The no-`ORDER BY` `SELECT` pipeline's `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET`
-/// stage: pulls rows from `xs` one at a time through `f` and stops the
-/// enumerator outright the moment `offset + limit` survivors exist, rather
-/// than visiting every row the way `traverseSeq` (which every `ORDER BY`
-/// path still needs, since sorting requires seeing everything) does. This
-/// is the actual LIMIT short-circuit — verified against a real MySQL oracle
-/// that a row-level error past a `LIMIT`'s cut, with no `ORDER BY`, never
-/// surfaces, because the row is never evaluated in the first place; this
-/// mirrors that by never calling `f` on it. `distinct` dedupes on `f`'s
-/// returned key before counting a row toward `offset`/`limit`; SELECT uses
-/// the same projected-text key as its materialized path, while mutations
-/// disable deduplication and use the helper only for early LIMIT stopping.
+/// Stops pulling unordered input once enough surviving rows satisfy OFFSET
+/// and LIMIT. MySQL likewise does not surface row errors beyond that point;
+/// DISTINCT rows count only after deduplication.
 let private streamLimited
     (distinct: bool)
     (offset: int)
@@ -3699,27 +3690,9 @@ let private streamLimited
     | Some e -> Error e
     | None -> Ok(List.ofSeq acc)
 
-/// The hash-join build/probe loop `applyJoin`/`applyMutationJoin` each need
-/// on both sides of their own "build on the smaller side" choice: bucket
-/// `build` by `buildKeyOf`'s key into a `Dictionary`, then walk `probe` and
-/// yield one `(buildIndex, buildItem, probeIndex, probeItem)` per bucket
-/// match. Fully generic over what a "build"/"probe" item actually *is* — a
-/// plain `Value[]` row in `applyJoin`, an identity-tracking
-/// `Value[] option list * Value[]` pair in `applyMutationJoin` — since it
-/// only ever touches an item through `buildKeyOf`/`probeKeyOf`, never its
-/// shape. One definition instead of the fill-then-probe loop written out
-/// per build-side choice (three times across the two callers).
-///
-/// The build side fills a `Dictionary` eagerly (unavoidable — that's the
-/// whole point of a hash join), but the probe side `yield`s matches lazily:
-/// nothing past the last pair a caller actually pulls ever runs. Real only
-/// when a caller stops pulling early — `applyJoin`'s `INNER`/`CROSS`,
-/// no-residual-conjunct case hands this straight through to `runSelect`'s
-/// `WHERE`/`LIMIT` streaming instead of collecting it into a list first.
-/// Every other caller still drains the whole thing (`LEFT`/`RIGHT` needs
-/// every match to know which rows *didn't* match; a residual `ON` conjunct
-/// needs every candidate re-checked), so laziness costs those nothing
-/// beyond a `seq`'s per-item overhead over a list comprehension's.
+/// Builds one side eagerly and probes lazily so an inner join can stop as
+/// soon as a downstream LIMIT is satisfied. Outer joins still consume every
+/// pair because they must identify unmatched rows.
 let private hashPairs
     (collations: Collation.Collation list)
     (buildKeyOf: 'b -> Value[] option)
@@ -6575,30 +6548,8 @@ and private namedJoinOn
             | _ -> BinOp(And, acc, cond))
         (Lit(VInt 1L))
 
-/// Applies one `JOIN` clause against whatever's already in scope
-/// (`sourcesSoFar`/`rowsSoFar`, built by the `FROM` table and any earlier
-/// `JOIN`s in the same list): resolves the joined table, matches (left row,
-/// right row) pairs against `join.On`, then combines the matched pairs with
-/// whatever `join.Kind` needs added on top — `LEFT`/`RIGHT` also keep the
-/// side that matched nothing, `NULL`-padded on the other side; `INNER` and
-/// `CROSS` (the latter's `On` is always the literal-true `join.On` the
-/// parser gives it) keep only the matches. Indices (not row references)
-/// track which left/right rows matched anything, so outer-join padding is
-/// correct even if two rows happen to be structurally equal.
-///
-/// Matching itself is `extractEquiKeys`' choice: an `ON` with at least one
-/// extractable `col = col` equi-key (and every key's columns hash-safe
-/// together, `keyClassOf`) builds a `Dictionary` on whichever side has
-/// fewer rows and probes with the other, applying any residual conjuncts
-/// only to the (already key-equal) candidates a bucket lookup returns.
-/// Anything else — no equi-key at all, an `OR`, a range, `a.x + 1 = b.y` —
-/// falls back to a lazy nested loop over every pair instead: still
-/// evaluates `join.On` for each one, but as a `seq` (`traverseSeq`) rather
-/// than a materialized cross-product `list`, which is what lets a
-/// non-equi join at real table sizes actually finish instead of exhausting
-/// memory.
-/// The per-key-column collations `JoinKeyComparer` folds under. Non-string
-/// keys use the default only as an unused placeholder.
+/// String join keys must resolve a common collation. Non-string keys carry
+/// the default collation only as an unused comparer placeholder.
 and private joinKeyCollation
     (left: ColumnDef)
     (right: ColumnDef)
@@ -6798,10 +6749,8 @@ and private tryIndexedPreservedRightProbe
         equiKeys |> tryIndexProbe table leftColumns
     | _ -> None
 
-/// Early split on the join target: `JSON_TABLE` is lateral (its source
-/// re-evaluates per left row) and takes its own branch; everything else
-/// resolves once up front in `applyResolvedJoin` — the pre-JSON_TABLE
-/// `applyJoin` body, untouched.
+/// JSON_TABLE and LATERAL sources re-evaluate per left row; other join
+/// sources resolve once.
 and private applyJoin
     (store: Store)
     (registry: Registry)
@@ -7217,6 +7166,9 @@ and private alignPreparedRows
             prepared :> Value[] seq, id
     | _ -> rows, id
 
+/// Compatible equi-keys use a hash join; other predicates use lazy nested
+/// loops. Row indices distinguish duplicate-valued rows when padding outer
+/// joins.
 and private applyResolvedJoin
     (store: Store)
     (registry: Registry)
@@ -7844,28 +7796,8 @@ and private runMutationJoin
             (fun acc join -> acc |> Result.bind (fun state -> applyMutationJoin store registry dbName sourceOverrides state join))
             (Ok initial)
 
-/// Resolves a `SELECT`'s `FROM` (a real table, `information_schema`'s
-/// virtual one, a derived table, or none) plus every `JOIN` after it, and
-/// runs `select` against the combined result — the `Statement` case's
-/// `Select` branch and every subquery form (`Exists`/`Subquery`/
-/// `InSubquery`/quantified comparisons/a derived table's own `FROM`) all fund into this one place
-/// rather than each re-implementing the join-materialization logic.
-/// `outer` is `None` for a top-level statement and `Some` when this is
-/// itself a subquery — see `EvalContext.Outer`. Its per-column MySQL wire
-/// metadata (see `columnMetadataOf`) is only available here —
-/// by the time a `SELECT`'s rows reach `execute`'s return value they're
-/// already the wire's flat `string option list` text, with no `Value`
-/// left to read a type off of — but this can't be `public` itself (`outer:
-/// EvalContext option` would leak the `private` `EvalContext` type through
-/// a public signature); `runTopLevelSelect` near `execute` below is the
-/// type-preserving public entry point `QueryHandler` calls instead.
-/// Replaces every unqualified `Col` whose (case-insensitive) name is in
-/// `map` with `map`'s entry — the COALESCE expression a `NATURAL`/`USING`
-/// join synthesized for that common column, so WHERE/ORDER BY/GROUP
-/// BY/HAVING see MySQL's coalesced value instead of a 1052-ambiguous
-/// physical column. Subquery bodies (`Exists`/`Subquery`) are their own
-/// scope — their own `runSelectStmt` applies their own rewrite, and walking
-/// into them here could capture an inner column with an outer coalesce.
+/// NATURAL and USING joins expose common columns as coalesced values.
+/// Subqueries remain opaque because each introduces its own column scope.
 and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
     let sub = rewriteCoalescedCols map
 
@@ -11699,28 +11631,9 @@ and private runGroupedSelect
                         |> applyLimitOffset (Option.map rowCount select.Limit) (Option.map rowCount select.Offset)
                     ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
-/// `SELECT ..., ROW_NUMBER() OVER (...) | LAG(expr) OVER (...) [AS alias],
-/// ... FROM ...` (see `Ast.Expr.RowNumberOver`/`LagOver`'s docs) — every
-/// distinct window function `collectWindowFuncs` finds anywhere among the
-/// projections is computed once here, against the WHERE-filtered rows (real
-/// MySQL computes a window function after `WHERE`, before
-/// `SELECT`/`ORDER BY`/`LIMIT`), then handed back to the ordinary
-/// (non-windowed) `runSelect` path as one more real column each: a
-/// synthetic trailing `ColumnDef` per window function, appended to
-/// `columns`/each row, with every projection's `Star` expanded and every
-/// window-function occurrence (bare, or nested inside arithmetic/`CASE`/...)
-/// substituted for the matching synthetic `Col` reference — expanding `Star`
-/// explicitly here (rather than leaving it for `runSelect`'s own `Star`
-/// handling) keeps the synthetic columns out of a bare `SELECT *`'s
-/// expansion, so they show up only where a window function itself was
-/// written.
-/// `SELECT ..., SUM(COUNT(*)) OVER (...) ... GROUP BY ...` — a window
-/// function over *grouped* rows. MySQL evaluates windows after grouping, so
-/// this splits the query in two: an inner grouped SELECT projecting every
-/// group-level leaf (the GROUP BY keys and every aggregate call, including
-/// the ones inside a window function's arguments) as a synthetic column,
-/// then the ordinary window pass over those grouped rows with each leaf
-/// substituted for its synthetic column reference.
+/// MySQL evaluates windows after grouping. Group keys and aggregate leaves
+/// become synthetic columns for the ordinary window pass; explicit star
+/// expansion keeps those implementation columns out of SELECT *.
 and private runGroupedWindowSelect
     (store: Store)
     (registry: Registry)
@@ -13594,14 +13507,8 @@ and private runSelect
                 let limited = dedupedPaired |> applyLimitOffset limit offset
                 ResultSet(colNames, limited |> List.map (fst >> fst)), typesOf (limited |> List.map (fst >> snd)), limited |> List.map (fst >> snd)
 
-/// A reference-identity set of physical rows — `HashIdentity.Reference`
-/// rather than `Value[]`'s own structural equality, so two rows that happen
-/// to hold identical values are still distinguished, and so the set can be
-/// built from a `scan` snapshot taken *before* `Storage.updateRows`/
-/// `deleteRows` re-reads the table under its own lock and still match the
-/// exact same array instances (true as long as nothing else writes to the
-/// table in between — the same single-statement, single-connection
-/// assumption every other `scan`-then-mutate call site here already makes).
+/// Reference identity preserves duplicate-valued rows while matching scan
+/// candidates back to the same immutable table root.
 let private referenceSet (rows: Value[] list) : System.Collections.Generic.HashSet<Value[]> =
     System.Collections.Generic.HashSet<Value[]>(rows, HashIdentity.Reference)
 
