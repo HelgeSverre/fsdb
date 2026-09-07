@@ -472,6 +472,9 @@ let private hasCommitConsumer (store: Store) =
 let private collectsCommitEvents (store: Store) =
     store.PendingEvents.IsSome || hasCommitConsumer store
 
+let internal requiresImmediateAutoIncrementPublication (store: Store) =
+    hasCommitConsumer store
+
 let rec private eventRollbackWork = function
     | RowsInserted(_, _, rows)
     | RowsDeleted(_, _, rows) -> int64 rows.Length

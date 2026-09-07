@@ -2483,13 +2483,13 @@ let rec private statementStatusCommand = function
     | Explain(_, statement) -> statementStatusCommand statement
     | SetTriggerNew _ -> None
 
-let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) =
-    let retainsTransaction =
-        session.TransactionTracking.State.Kind = ExplicitTrackedTransaction
-        || lookupVar session "autocommit" |> Option.flatten = Some "0"
+let private retainsTransactionAfterStatement (session: Session) =
+    session.TransactionTracking.State.Kind = ExplicitTrackedTransaction
+    || lookupVar session "autocommit" |> Option.flatten = Some "0"
 
+let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) =
     match session.Tx with
-    | Some transaction when retainsTransaction && not (Storage.dynamicWriteRebaseActive store) ->
+    | Some transaction when retainsTransactionAfterStatement session && not (Storage.dynamicWriteRebaseActive store) ->
         let prepare baseCatalog privateCatalog =
             let liveCatalog, rebasedTransaction = Storage.beginTransactionSnapshotWithBase session.Store
             Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
@@ -2718,7 +2718,11 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
             | Delete _ -> true
             | _ -> false
 
-        if canAllocateAutoIncrement then
+        if
+            canAllocateAutoIncrement
+            && (retainsTransactionAfterStatement executed
+                || Storage.requiresImmediateAutoIncrementPublication executed.Store)
+        then
             executed.Tx
             |> Option.iter (fun transaction -> Storage.bumpAutoIncrementsInto executed.Store transaction.Snapshot.Catalog)
 
