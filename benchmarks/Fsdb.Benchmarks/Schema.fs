@@ -122,10 +122,11 @@ let createSchema (conn: MySqlConnection) =
             id INT PRIMARY KEY AUTO_INCREMENT,
             user_id INT NOT NULL,
             total DECIMAL(10,2) NOT NULL,
-            status VARCHAR(20) NOT NULL,
+            status VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
             created_at DATETIME NOT NULL,
             KEY ix_orders_user_id (user_id),
-            KEY ix_orders_user_status (user_id, status)
+            KEY ix_orders_user_status (user_id, status),
+            KEY ix_orders_status_user (status, user_id)
         )
         """
 
