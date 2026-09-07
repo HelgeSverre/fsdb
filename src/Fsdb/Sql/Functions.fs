@@ -4745,6 +4745,10 @@ let regexpFunction (name: string) (collation: Collation.Collation) : Scalar opti
     | "REGEXP_REPLACE" -> Some(fun arguments -> validateRegexpArity name arguments; regexpReplaceFn collation arguments)
     | _ -> None
 
+let private requiredRegexpFunction name =
+    regexpFunction name Collation.defaultCollation
+    |> Option.defaultWith (fun () -> invalidOp (sprintf "Unknown built-in regular expression function: %s" name))
+
 // ---------------------------------------------------------------------------
 // Math/misc.
 // ---------------------------------------------------------------------------
@@ -5874,10 +5878,10 @@ let builtins: Registry =
     |> registerScalarResult "RANDOM_BYTES" binaryResult randomBytesFn
     |> registerScalar "UUID_SHORT" uuidShortFn
     |> registerScalarResult "NAME_CONST" (InheritArgument 1) nameConstFn
-    |> registerScalar "REGEXP_LIKE" (regexpFunction "REGEXP_LIKE" Collation.defaultCollation |> Option.get)
-    |> registerScalarResult "REGEXP_REPLACE" (InheritArgument 0) (regexpFunction "REGEXP_REPLACE" Collation.defaultCollation |> Option.get)
-    |> registerScalarResult "REGEXP_SUBSTR" (InheritArgument 0) (regexpFunction "REGEXP_SUBSTR" Collation.defaultCollation |> Option.get)
-    |> registerScalar "REGEXP_INSTR" (regexpFunction "REGEXP_INSTR" Collation.defaultCollation |> Option.get)
+    |> registerScalar "REGEXP_LIKE" (requiredRegexpFunction "REGEXP_LIKE")
+    |> registerScalarResult "REGEXP_REPLACE" (InheritArgument 0) (requiredRegexpFunction "REGEXP_REPLACE")
+    |> registerScalarResult "REGEXP_SUBSTR" (InheritArgument 0) (requiredRegexpFunction "REGEXP_SUBSTR")
+    |> registerScalar "REGEXP_INSTR" (requiredRegexpFunction "REGEXP_INSTR")
     // Math/misc
     |> registerScalar "CEIL" ceilFn
     |> registerScalar "CEILING" ceilFn
