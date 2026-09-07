@@ -12305,19 +12305,18 @@ and private runWindowedSelect
                     else
                         grouped |> Seq.map sortGroup |> List.ofSeq
 
+                let partitionOrderKey (_, (key, _, _)) =
+                    List.map2 (fun value collation -> value, Some collation) key partitionCollations
+
                 let rememberRowNumberOrder () =
                     match windowAlias with
                     | Some alias when windowFuncs = [ windowFunc ] && matchesFinalOrder alias ->
                         let partitionDirections = List.replicate partitionBy.Length Asc
 
-                        let partitionOrderKey (group: WindowRow[]) =
-                            let _, (key, _, _) = group.[0]
-                            List.map2 (fun value collation -> value, Some collation) key partitionCollations
-
                         streamedRowOrder <-
                             partitions
                             |> List.sortWith (fun left right ->
-                                compareByOrderKeys partitionDirections (partitionOrderKey left) (partitionOrderKey right))
+                                compareByOrderKeys partitionDirections (partitionOrderKey left.[0]) (partitionOrderKey right.[0]))
                             |> Seq.collect id
                             |> Seq.map fst
                             |> Array.ofSeq
@@ -12327,15 +12326,11 @@ and private runWindowedSelect
                 let topRowNumbers requested =
                     let partitionDirections = List.replicate partitionBy.Length Asc
 
-                    let partitionOrderKey (group: ResizeArray<WindowRow>) =
-                        let _, (key, _, _) = group.[0]
-                        List.map2 (fun value collation -> value, Some collation) key partitionCollations
-
                     let orderedGroups =
                         grouped
                         |> Seq.filter (fun group -> group.Count > 0)
                         |> Seq.sortWith (fun left right ->
-                            compareByOrderKeys partitionDirections (partitionOrderKey left) (partitionOrderKey right))
+                            compareByOrderKeys partitionDirections (partitionOrderKey left.[0]) (partitionOrderKey right.[0]))
 
                     let selected = ResizeArray<int * Value>()
                     let order = ResizeArray<int>()

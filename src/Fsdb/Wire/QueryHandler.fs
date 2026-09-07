@@ -2083,11 +2083,13 @@ let private recoverXa convertXid session =
                     else
                         Text.Encoding.Latin1.GetString bytes
 
+                data,
                 [ Some(string xid.FormatId)
                   Some(string xid.GlobalId.Length)
                   Some(string xid.BranchQualifier.Length)
                   Some data ])
-            |> Seq.sortBy (fun row -> row.[3])
+            |> Seq.sortBy fst
+            |> Seq.map snd
             |> List.ofSeq
 
         session, ResultSet([ "formatID"; "gtrid_length"; "bqual_length"; "data" ], rows)
@@ -2455,7 +2457,7 @@ let rec private statementStatusCommand = function
     | Do _ -> Some InformationSchema.StatusCommand.doStatement
     | Update statement when statement.Joins.IsEmpty -> Some InformationSchema.StatusCommand.update
     | Update _ -> Some InformationSchema.StatusCommand.updateMulti
-    | Delete statement when statement.Joins.IsEmpty && statement.Targets.Length = 1 ->
+    | Delete { Joins = []; Targets = [ _ ] } ->
         Some InformationSchema.StatusCommand.delete
     | Delete _ -> Some InformationSchema.StatusCommand.deleteMulti
     | Truncate _ -> Some InformationSchema.StatusCommand.truncate

@@ -3966,8 +3966,8 @@ let ensureRootGrants (store: Store) : unit =
     let missing =
         rootDynamicGrantRows
         |> List.filter (fun row ->
-            match row.[2] with
-            | VString privilege -> Set.contains privilege granted |> not
+            match row with
+            | [| _; _; VString privilege; _ |] -> Set.contains privilege granted |> not
             | _ -> false)
 
     if not missing.IsEmpty then
