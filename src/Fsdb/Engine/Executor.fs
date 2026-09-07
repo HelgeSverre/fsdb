@@ -160,8 +160,10 @@ type private GroupInputOrder =
     | ContiguousGroupRows of (Value list * int) seq option
 
 type private IndexedGroupProjection =
-    | GroupKey of int
-    | GroupCount
+    | GroupValue of int
+    | GroupCardinality
+    | NonNullGroupCardinality of int
+    | ConstantGroupValue of Value
 
 type private OrderedIndexCandidate =
     { Terms: IndexOrderTerm list }
@@ -11618,13 +11620,39 @@ and private runGroupedSelect
                 && not select.CalculateFoundRows
                 && not select.Rollup
 
+            let groupValue expression =
+                groupExprs
+                |> List.tryFindIndex ((=) expression)
+                |> Option.map GroupValue
+
+            let isBuiltinAggregate name =
+                Functions.isUnmodifiedBuiltinAggregate name registry
+
             let classifyProjection (expression, _) =
                 match expression with
                 | FuncCall(name, [ Star None ])
                     when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
-                         && Functions.isUnmodifiedBuiltinAggregate name registry ->
-                    Some GroupCount
-                | _ -> groupExprs |> List.tryFindIndex ((=) expression) |> Option.map GroupKey
+                         && isBuiltinAggregate name ->
+                    Some GroupCardinality
+                | FuncCall(name, [ argument ])
+                    when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
+                         && isBuiltinAggregate name ->
+                    match groupValue argument with
+                    | Some(GroupValue index) -> Some(NonNullGroupCardinality index)
+                    | _ ->
+                        match argument with
+                        | Lit VNull -> Some(ConstantGroupValue(VInt 0L))
+                        | Lit _ -> Some GroupCardinality
+                        | _ ->
+                            tryDirectColumnForExpr (ctxFor (probeRow columns)) argument
+                            |> Option.filter (snd >> _.Nullable >> not)
+                            |> Option.map (fun _ -> GroupCardinality)
+                | FuncCall(name, [ argument ])
+                    when (name.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
+                          || name.Equals("MAX", System.StringComparison.OrdinalIgnoreCase))
+                         && isBuiltinAggregate name ->
+                    groupValue argument
+                | _ -> groupValue expression
 
             match groupInputOrder with
             | ContiguousGroupRows(Some groups) when simpleShape ->
@@ -11644,8 +11672,11 @@ and private runGroupedSelect
                                 (fun name projection ->
                                     let value =
                                         match projection with
-                                        | GroupKey index -> key.[index]
-                                        | GroupCount -> VInt(int64 count)
+                                        | GroupValue index -> key.[index]
+                                        | GroupCardinality -> VInt(int64 count)
+                                        | NonNullGroupCardinality index ->
+                                            if key.[index] = VNull then VInt 0L else VInt(int64 count)
+                                        | ConstantGroupValue value -> value
 
                                     name, value)
                                 colNames
