@@ -244,6 +244,11 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, sort_key FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 64} ORDER BY sort_key ASC LIMIT 20"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryOrder", "Planner")>]
+    member this.OrderByIndexedAlias() =
+        this.Query "SELECT id AS ordered_id FROM users ORDER BY ordered_id LIMIT 20"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale", "SecondaryRange")>]
     member this.UpdateBySecondaryRange() =
         let key = randomUserId () - 1
@@ -464,6 +469,11 @@ type ServerBenchmarks() =
     [<BenchmarkCategory("Scale")>]
     member this.GroupByAggregate() =
         this.Query "SELECT status, COUNT(*), SUM(total) FROM orders GROUP BY status"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryOrder", "Planner")>]
+    member this.GroupByIndexedAlias() =
+        this.Query "SELECT age AS bucket, COUNT(*) FROM users GROUP BY bucket"
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
