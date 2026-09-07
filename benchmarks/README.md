@@ -71,6 +71,13 @@ transactions, and mixed traffic.
 Reports include relative standard deviation and retryable lock or deadlock
 errors; throughput counts completed operations only.
 
+The [autocommit insert publication run](results/d59c142-autocommit-insert.md)
+separates sixteen serial round trips from sixteen overlapping ones. A
+conservative direct path for ordinary physical-table inserts reduced fsdb's
+single-insert latency by 22%, its serial burst by 27%, and its concurrent
+burst by 35%. Statements that can expand into nested database writes retain
+the private transaction root that provides statement atomicity.
+
 ### Workloads and reporting
 
 The default deterministic corpus contains 10,000 users, 50,000 orders, and
