@@ -8900,8 +8900,7 @@ and private pointLookupEqualities (registry: Registry) (tref: TableRef) (whereEx
         |> List.choose (function
             | BinOp(Eq, indexed, Lit value)
             | BinOp(Eq, Lit value, indexed) ->
-                indexedColumnFor tref indexed
-                |> Option.filter (snd >> transformUsesStoredSemantics registry)
+                storedIndexedColumnFor registry tref indexed
                 |> Option.map (fun (column, transform) ->
                     { Column = column
                       Transform = transform
@@ -8926,6 +8925,10 @@ and private indexedColumnFor (tref: TableRef) =
         caseTransform name |> Option.map (fun transform -> column, Some transform)
     | _ -> None
 
+and private storedIndexedColumnFor (registry: Registry) (tref: TableRef) expression =
+    indexedColumnFor tref expression
+    |> Option.filter (snd >> transformUsesStoredSemantics registry)
+
 and private literalInProbes (registry: Registry) (tref: TableRef) (whereExpr: Expr option) : LiteralInProbe list =
     whereExpr
     |> optionalConjuncts
@@ -8946,7 +8949,7 @@ and private literalInProbes (registry: Registry) (tref: TableRef) (whereExpr: Ex
 
             let columns =
                 indexedExpressions
-                |> List.map (indexedColumnFor tref >> Option.filter (snd >> transformUsesStoredSemantics registry))
+                |> List.map (storedIndexedColumnFor registry tref)
 
             let values =
                 candidateExpressions
