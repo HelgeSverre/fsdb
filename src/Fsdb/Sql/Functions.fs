@@ -5661,32 +5661,8 @@ let private mbrPredicateFn functionName predicate: Scalar =
         | Some _, Some _ -> VInt(if predicate first second then 1L else 0L)
     | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" (functionName.ToLowerInvariant())))
 
-let private everyArgument _ = true
-let private firstArgument index = index = 0
-let private arguments positions index = Set.contains index positions
-let private argumentsAfter position index = index > position
-
-let builtins: Registry =
-    empty
-    |> registerScalar "NOW" nowFn
-    |> registerScalar "CURRENT_TIMESTAMP" nowFn
-    |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) concatFn
-    |> registerStringScalar "UPPER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
-    |> registerStringScalar "UCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
-    |> registerStringScalar "LOWER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
-    |> registerStringScalar "LCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
-    |> registerByteTextScalar "LENGTH" firstArgument lengthFn
-    |> registerByteTextScalar "OCTET_LENGTH" firstArgument lengthFn
-    |> registerByteTextScalar "BIT_LENGTH" firstArgument bitLengthFn
-    |> registerTextScalar "CHAR_LENGTH" firstArgument charLengthFn
-    |> registerTextScalar "CHARACTER_LENGTH" firstArgument charLengthFn
-    |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
-    |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn
-    |> registerScalarResult "IF" (CombineArguments (arguments (set [ 1; 2 ]))) ifFn
-    |> registerScalar "ABS" absFn
-    |> registerScalar "ROUND" roundFn
-    |> registerScalar "MOD" modFn
-    // JSON
+let private registerJsonBuiltins registry =
+    registry
     |> registerScalarResult "JSON_EXTRACT" jsonResult jsonExtractFn
     |> registerScalarResult "JSON_VALUE" (FixedCollation("utf8mb4_0900_bin", 4)) jsonValueFn
     |> registerScalarResult "JSON_UNQUOTE" jsonTextResult jsonUnquoteFn
@@ -5716,7 +5692,9 @@ let builtins: Registry =
     |> registerScalarResult "JSON_TYPE" jsonTextResult jsonTypeFn
     |> registerScalarResult "JSON_KEYS" jsonResult jsonKeysFn
     |> registerScalarResult "JSON_SEARCH" jsonResult jsonSearchFn
-    |> registerScalarResult "WEIGHT_STRING" binaryResult weightStringFn
+
+let private registerSpatialBuiltins registry =
+    registry
     |> registerScalarResult "ST_GEOMFROMTEXT" binaryResult (geometryFromTextFn Geometry "ST_GeomFromText")
     |> registerScalarResult "ST_GEOMETRYFROMTEXT" binaryResult (geometryFromTextFn Geometry "ST_GeometryFromText")
     |> registerScalarResult "GEOMFROMTEXT" binaryResult (geometryFromTextFn Geometry "GeomFromText")
@@ -5760,6 +5738,35 @@ let builtins: Registry =
     |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)
     |> registerScalar "MBRWITHIN" (mbrPredicateFn "MBRWITHIN" (fun first second -> mbrContains second first))
     |> registerScalar "MBRINTERSECTS" (mbrPredicateFn "MBRINTERSECTS" mbrIntersects)
+
+let private everyArgument _ = true
+let private firstArgument index = index = 0
+let private arguments positions index = Set.contains index positions
+let private argumentsAfter position index = index > position
+
+let builtins: Registry =
+    empty
+    |> registerScalar "NOW" nowFn
+    |> registerScalar "CURRENT_TIMESTAMP" nowFn
+    |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) concatFn
+    |> registerStringScalar "UPPER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
+    |> registerStringScalar "UCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
+    |> registerStringScalar "LOWER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
+    |> registerStringScalar "LCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
+    |> registerByteTextScalar "LENGTH" firstArgument lengthFn
+    |> registerByteTextScalar "OCTET_LENGTH" firstArgument lengthFn
+    |> registerByteTextScalar "BIT_LENGTH" firstArgument bitLengthFn
+    |> registerTextScalar "CHAR_LENGTH" firstArgument charLengthFn
+    |> registerTextScalar "CHARACTER_LENGTH" firstArgument charLengthFn
+    |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
+    |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn
+    |> registerScalarResult "IF" (CombineArguments (arguments (set [ 1; 2 ]))) ifFn
+    |> registerScalar "ABS" absFn
+    |> registerScalar "ROUND" roundFn
+    |> registerScalar "MOD" modFn
+    |> registerJsonBuiltins
+    |> registerScalarResult "WEIGHT_STRING" binaryResult weightStringFn
+    |> registerSpatialBuiltins
     // Dates
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
     |> registerScalar "TIMESTAMPADD" timestampAddFn
