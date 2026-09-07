@@ -10503,7 +10503,7 @@ and private runUnionStmtWithOuter
             let orderKeyOf (typedRow: Value[]) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
                 match resolveOrder expr with
                 | Col name ->
-                    match cols |> List.tryFindIndex (fun c -> System.String.Equals(c, name, System.StringComparison.OrdinalIgnoreCase)) with
+                    match cols |> List.tryFindIndex (fun column -> equalsIgnoreCase column name) with
                     | Some i when i < typedRow.Length -> Ok(typedRow.[i], None)
                     | _ -> Ok(VNull, None)
                 | resolved -> evalExpr (ctxForOrder typedRow) resolved |> Result.map (fun v -> v, None)
@@ -10539,22 +10539,10 @@ and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
         evalExpr ctx expr
         |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ])
 
-/// An all-`VNull` row shaped like `columns` — used only to type-check a
-/// statement's expressions (unknown column/function) independent of the
-/// actual data, since those errors are about the schema, not row values.
-/// Without this, a table with zero matching (or zero total) rows would
-/// silently skip evaluating its WHERE/ORDER BY/projection at all and never
-/// surface a real error.
+/// An all-NULL row used to surface schema errors even when no data row matches.
 and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
 
-/// One aggregate call's value over the rows a `WHERE` already filtered to.
-/// `COUNT(*)` counts rows directly (`*` isn't a valid `Expr`, so there's
-/// nothing to evaluate per row); every other form evaluates its one
-/// argument per row first, drops the `NULL`s (SQL's aggregate rule), then
-/// folds via whatever `registry` has registered for `name` (see
-/// `Functions.Registry.Aggregates`) — except `COUNT(expr)`, which (unlike
-/// `SUM`/`AVG`/`MIN`/`MAX`) yields `0` rather than `NULL` on an empty
-/// non-NULL set, so it still folds even when there's nothing left to fold.
+/// Evaluates one aggregate over rows already filtered by WHERE.
 and private evalAggregate
     (registry: Registry)
     (ctxFor: Value[] -> EvalContext)
@@ -10562,13 +10550,10 @@ and private evalAggregate
     (name: string)
     (args: Expr list)
     : Result<Value, EvalError> =
-    let isCount = System.String.Equals(name, "COUNT", System.StringComparison.OrdinalIgnoreCase)
-    let isGroupConcat = System.String.Equals(name, "GROUP_CONCAT", System.StringComparison.OrdinalIgnoreCase)
+    let isCount = equalsIgnoreCase name "COUNT"
+    let isGroupConcat = equalsIgnoreCase name "GROUP_CONCAT"
     let upper = name.ToUpperInvariant()
 
-    // `COUNT(DISTINCT x)`/`SUM(DISTINCT x)`/... all unwrap the same way:
-    // dedupe the per-row values (after dropping `NULL`s) before folding,
-    // regardless of which aggregate wraps the `DISTINCT`.
     let unwrapDistinct =
         function
         | Distinct e -> true, e
@@ -10721,8 +10706,8 @@ and private evalAggregate
             |> Result.map Functions.jsonObjectAggregate
     | [ arg ] ->
         let distinct, innerExpr = unwrapDistinct arg
-        let isMin = System.String.Equals(name, "MIN", System.StringComparison.OrdinalIgnoreCase)
-        let isMax = System.String.Equals(name, "MAX", System.StringComparison.OrdinalIgnoreCase)
+        let isMin = equalsIgnoreCase name "MIN"
+        let isMax = equalsIgnoreCase name "MAX"
 
         // Every aggregate but COUNT/MIN/MAX folds numerically, and an ENUM in
         // numeric context is its declaration ordinal — `SUM(status)` adds
@@ -10766,14 +10751,7 @@ and private evalAggregate
                 else
                     Functions.tryEmptyAggregate name |> Option.defaultValue VNull)
     | Distinct firstExpr :: rest when isCount ->
-        // `COUNT(DISTINCT a, b)` — `distinctArg` (the call-argument parser)
-        // attaches `Distinct` only to the first comma-separated argument,
-        // but MySQL's `DISTINCT` here scopes over the whole tuple `(a, b)`,
-        // not just `a`. Evaluate every argument per row, drop a row if
-        // *any* column of it is NULL (SQL's usual "NULL drops the row from
-        // an aggregate" rule, applied to the whole tuple), dedupe the
-        // tuples — by each element's own collation — and count what's
-        // left.
+        // COUNT(DISTINCT a, b) drops NULL-bearing tuples and deduplicates by each column's collation.
         let allArgs = firstExpr :: rest
 
         rows
@@ -10789,21 +10767,10 @@ and private evalAggregate
             |> List.length
             |> int64
             |> VInt)
-    // `isAggregateCall` narrows this to single-argument aggregate calls,
-    // except `GROUP_CONCAT`'s optional `SEPARATOR` and
-    // `COUNT(DISTINCT a, b)`. Anything else
-    // multi-argument (e.g. `SUM(DISTINCT a, b)`, which MySQL itself
-    // rejects) is a syntax error, not a silent NULL.
+    // Other multi-argument aggregates are syntax errors in MySQL.
     | _ -> Error(1064, sprintf "Incorrect parameter count in the call to native function '%s'" name)
 
-/// Pre-evaluates every aggregate subtree of `expr` (anywhere it appears —
-/// nested in arithmetic, a function argument, ...) against `rows` into a
-/// `Lit`, so the caller can evaluate what's left as an ordinary per-row
-/// expression against one representative row. Same shape as
-/// `substituteValuesFunc`'s rewrite walk. Without this, `SELECT COUNT(*) +
-/// 1 FROM t` fails: the top-level node is `BinOp(Add, FuncCall("COUNT",
-/// [Star]), Lit 1)`, not a bare `FuncCall`, so plain per-row evaluation
-/// would try (and fail) to look `COUNT` up as a scalar function.
+/// Replaces aggregate subtrees with their values for ordinary expression evaluation.
 and private rewriteAggregates
     (registry: Registry)
     (ctxFor: Value[] -> EvalContext)
@@ -10856,72 +10823,44 @@ and private rewriteAggregates
     | Col _
     | QualifiedCol _
     | Star _
-    // A `RowNumberOver`/`LagOver` never reaches a grouped SELECT —
-    // `runSelect` sends any select with one to `runWindowedSelect` before
-    // the GROUP BY/aggregate check that would otherwise land here even gets
-    // evaluated (see `runSelect`'s dispatch) — but a leaf passthrough here
-    // is the same "nothing to pre-evaluate" answer `Star`'s already is if
-    // that ever changes.
     | WindowOver _
-    // A subquery is its own scope with its own grouping — nothing inside it
-    // is one of *this* query's aggregate calls to pre-evaluate, even though
-    // (via `EvalContext.Outer`) it can still read this query's columns.
+    // Subqueries own their aggregate scope.
     | Exists _
     | Subquery _
     | InSubquery _ -> Ok expr
 
-/// Resolves an `ORDER BY`/`GROUP BY` key that names a `SELECT ... AS alias`
-/// (`... ORDER BY n`) or a 1-based projection position (`... ORDER BY 2`,
-/// `GROUP BY 1`) against `projections`, falling back to the expression
-/// as-is for anything else (an ordinary column, or an expression that just
-/// happens not to match any alias).
-and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr) : Expr =
-    match expr with
-    | Lit(VInt n) when n >= 1L && n <= int64 (List.length projections) -> fst projections.[int n - 1]
-    | Col name ->
-        projections
-        |> List.tryPick (function
-            | e, Some alias when System.String.Equals(alias, name, System.StringComparison.OrdinalIgnoreCase) -> Some e
-            | _ -> None)
-        |> Option.defaultValue expr
-    | _ -> expr
+and private tryProjectionAtPosition (projections: Projection list) =
+    function
+    | Lit(VInt position) when position >= 1L && position <= int64 System.Int32.MaxValue ->
+        projections |> List.tryItem (int position - 1) |> Option.map fst
+    | _ -> None
 
-/// `resolvePositionalOrAlias`'s recursive counterpart — `GROUP BY`/`ORDER
-/// BY` keys are almost always a bare alias/column/position at the top
-/// level, but `HAVING`'s condition is a full boolean expression with the
-/// alias nested somewhere inside it (`HAVING c > 1`, not just `HAVING c`),
-/// so a shallow top-level check misses it entirely: `Col "c"` there isn't a
-/// real column at all, only the `SELECT` list's own alias, and evaluating
-/// it unresolved fails with 1054.
-///
-/// GROUP BY / HAVING's own column-name priority — the mirror image of
-/// ORDER BY's (see `resolveOrderKey`'s doc): a bare name is checked against
-/// the FROM-table columns first, and only falls back to the SELECT list's
-/// own alias/position when it isn't a FROM-table column at all (real MySQL
-/// documents this FROM-first order for GROUP BY/HAVING). A FROM-table match
-/// present in more than one joined table is error 1052 "group statement",
-/// same wording for both clauses.
+/// GROUP BY resolves source columns before projection aliases.
+and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr) : Expr =
+    tryProjectionAtPosition projections expr
+    |> Option.orElseWith (fun () ->
+        match expr with
+        | Col name ->
+            projections
+            |> List.tryPick (function
+                | expression, Some alias when equalsIgnoreCase alias name -> Some expression
+                | _ -> None)
+        | _ -> None)
+    |> Option.defaultValue expr
+
+/// GROUP BY and HAVING use MySQL's source-first name resolution.
 and private resolveGroupOrHavingCol (columnIndex: Map<string, int list>) (projections: Projection list) (name: string) : Result<Expr, EvalError> =
     match Map.tryFind (name.ToLowerInvariant()) columnIndex with
     | Some [ _ ] -> Ok(Col name)
     | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in group statement is ambiguous" name)
     | Some [] | None -> Ok(resolvePositionalOrAlias projections (Col name))
 
-/// `GROUP BY`'s key list: each key is a bare top-level expression, never
-/// searched inside a larger tree (unlike `HAVING`'s condition — see
-/// `resolveHavingRef`), so a `Col` only ever needs the shallow check above;
-/// anything else (a position number, or an expression that's neither) goes
-/// through `resolvePositionalOrAlias` unchanged.
 and private resolveGroupByRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
     match expr with
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | _ -> Ok(resolvePositionalOrAlias projections expr)
 
-/// `resolveGroupByRef`'s recursive counterpart for `HAVING`: `HAVING c > 1`'s
-/// alias `c` is nested inside a `BinOp`, not bare, so a shallow top-level
-/// check misses it. Same shape as `substituteValuesFunc`'s rewrite, but
-/// `Result`-threaded because resolving a `Col` can return the
-/// ambiguous-FROM-table error 1052.
+/// HAVING aliases may occur anywhere in the condition tree.
 and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
     let sub = resolveHavingRef columnIndex projections
 
@@ -10971,24 +10910,10 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Subquery _
     | InSubquery _ -> Ok expr
 
-/// `ORDER BY`'s 1-based projection position (`ORDER BY 2`) — separate from
-/// `resolvePositionalOrAlias` because aliases go through
-/// `resolveOrderKey`'s output-column matching (which needs
-/// to see the ambiguous-alias case `resolvePositionalOrAlias`'s
-/// first-match `tryPick` would otherwise hide).
 and private resolveOrderPosition (projections: Projection list) (expr: Expr) : Expr =
-    match expr with
-    | Lit(VInt n) when n >= 1L && n <= int64 (List.length projections) -> fst projections.[int n - 1]
-    | _ -> expr
+    tryProjectionAtPosition projections expr |> Option.defaultValue expr
 
-/// `ORDER BY`'s alias-then-FROM-table priority (see `resolveGroupOrHavingCol`'s
-/// doc for the opposite order GROUP BY/HAVING use): tries the bare name
-/// against `outputCols` — the SELECT list's own output columns, explicit
-/// aliases and every name `*`/`t.*` expanded into, in row order — first;
-/// exactly one match binds directly to that column's already-computed
-/// value, more than one is error 1052 "order clause", and zero falls
-/// through to `resolveCol` against the FROM-table columns instead (also
-/// tagged `OrderClause`, not `FieldList`).
+/// ORDER BY uses MySQL's projection-alias-first name resolution.
 and private resolveOrderKey
     (ctx: EvalContext)
     (projections: Projection list)
@@ -10997,7 +10922,7 @@ and private resolveOrderKey
     : Result<Value * Collation.Collation option, EvalError> =
     match expr with
     | Col name ->
-        match outputCols |> List.filter (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase)) with
+        match outputCols |> List.filter (fst >> fun candidate -> equalsIgnoreCase candidate name) with
         | [ (_, v) ] ->
             // An output alias retains its source expression's declared
             // type for sorting (`SELECT role AS r ... ORDER BY r`). A
@@ -11077,7 +11002,7 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
 
     let primary =
         table.Indexes
-        |> List.tryFind (fun index -> index.Name.Equals("PRIMARY", System.StringComparison.OrdinalIgnoreCase))
+        |> List.tryFind (fun index -> equalsIgnoreCase index.Name "PRIMARY")
         |> Option.bind tryCandidate
         |> Option.orElseWith (fun () ->
             let columns = Storage.primaryKeyColumns table
@@ -11095,7 +11020,7 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
 
     let secondary =
         table.Indexes
-        |> List.filter (fun index -> not (index.Name.Equals("PRIMARY", System.StringComparison.OrdinalIgnoreCase)))
+        |> List.filter (fun index -> not (equalsIgnoreCase index.Name "PRIMARY"))
         |> List.choose tryCandidate
 
     Option.toList primary @ secondary
@@ -11103,7 +11028,7 @@ and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
 and private tryIndexPrefix (pinned: Set<string>) (suffix: IndexOrderTerm list) (indexTerms: IndexOrderTerm list) : IndexPrefixMatch option =
     let sameKey left right =
         left.Transform = right.Transform
-        && left.Column.Equals(right.Column, System.StringComparison.OrdinalIgnoreCase)
+        && equalsIgnoreCase left.Column right.Column
 
     let rec pinnedCount count =
         function
@@ -11219,7 +11144,7 @@ and private validateOnlyFullGroupBy
         |> Map.tryFind (qualifier.ToLowerInvariant())
         |> Option.bind (fun (sourceColumns, offset) ->
             sourceColumns
-            |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
+            |> List.tryFindIndex (fun column -> equalsIgnoreCase column.Name name)
             |> Option.map ((+) offset))
 
     let tryColumnPosition =
@@ -11228,7 +11153,7 @@ and private validateOnlyFullGroupBy
         | Col name ->
             columns
             |> List.indexed
-            |> List.filter (fun (_, column) -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
+            |> List.filter (fun (_, column) -> equalsIgnoreCase column.Name name)
             |> function
                 | [ (position, _) ] -> Some position
                 | _ -> None
@@ -11284,13 +11209,13 @@ and private validateOnlyFullGroupBy
         physicalSources
         |> List.collect (fun (sourceColumns, offset, table) ->
             table.Indexes
-            |> List.filter (fun index -> index.Unique || System.String.Equals(index.Name, "PRIMARY", System.StringComparison.OrdinalIgnoreCase))
+            |> List.filter (fun index -> index.Unique || equalsIgnoreCase index.Name "PRIMARY")
             |> List.choose (fun index ->
                 let keyColumns =
                     index.Columns
                     |> List.choose (fun name ->
                         sourceColumns
-                        |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, name, System.StringComparison.OrdinalIgnoreCase))
+                        |> List.tryFindIndex (fun column -> equalsIgnoreCase column.Name name)
                         |> Option.map (fun position -> offset + position, sourceColumns.[position]))
 
                 if keyColumns.Length = index.Columns.Length && keyColumns |> List.forall (snd >> _.Nullable >> not) then
@@ -11324,14 +11249,9 @@ and private validateOnlyFullGroupBy
     let resolveOrderExpr expr =
         match resolveOrderPosition select.Projections expr with
         | Col name as column ->
-            select.Projections
-            |> List.choose (fun (projection, alias) ->
-                alias
-                |> Option.filter (fun alias -> System.String.Equals(alias, name, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.map (fun _ -> projection))
-            |> function
-                | [ projection ] -> projection
-                | _ -> column
+            projectionExpressionsNamed select.Projections name
+            |> List.tryExactlyOne
+            |> Option.defaultValue column
         | resolved -> resolved
 
     let columnLabel position =
@@ -11351,7 +11271,7 @@ and private validateOnlyFullGroupBy
                 | None when isAggregateCall registry node -> Expression.Prune None
                 | None ->
                     match node with
-                    | FuncCall(name, _) when System.String.Equals(name, "ANY_VALUE", System.StringComparison.OrdinalIgnoreCase) -> Expression.Prune None
+                    | FuncCall(name, _) when equalsIgnoreCase name "ANY_VALUE" -> Expression.Prune None
                     | Star None ->
                         [ 0 .. columns.Length - 1 ]
                         |> List.tryFind (fun position -> not (Set.contains position determined))
@@ -11457,10 +11377,10 @@ and private tryIndexedGroupProjection
 
     match expression with
     | FuncCall(name, [ Star None ])
-        when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) && isBuiltin name ->
+        when equalsIgnoreCase name "COUNT" && isBuiltin name ->
         Some GroupCardinality
     | FuncCall(name, [ argument ])
-        when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) && isBuiltin name ->
+        when equalsIgnoreCase name "COUNT" && isBuiltin name ->
         match groupValue argument, argument with
         | Some(GroupValue index), _ -> Some(GroupNonNullCardinality index)
         | _, Lit VNull -> Some(GroupConstant(VInt 0L))
@@ -11470,8 +11390,7 @@ and private tryIndexedGroupProjection
             |> Option.filter (snd >> _.Nullable >> not)
             |> Option.map (fun _ -> GroupCardinality)
     | FuncCall(name, [ argument ])
-        when (name.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
-              || name.Equals("MAX", System.StringComparison.OrdinalIgnoreCase))
+        when (equalsIgnoreCase name "MIN" || equalsIgnoreCase name "MAX")
              && isBuiltin name ->
         groupValue argument
     | _ -> groupValue expression
@@ -11521,29 +11440,17 @@ and private runGroupedSelect
         match select.Having with
         | None -> Ok true
         | Some h ->
-            // `resolveHavingRef` resolves a `SELECT ... AS alias` anywhere
-            // inside the condition (`HAVING`'s condition is a full boolean
-            // expression, not just a bare alias — MySQL allows a projection
-            // alias nested anywhere inside it, e.g. Eloquent's
-            // `having('aggregate_alias', ...)`), FROM-table columns first.
             resolveHavingRef columnIndex select.Projections h
             |> Result.map rollup
             |> Result.bind (rewriteAggregates registry ctxFor groupRows)
             |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = GroupStatement })
             |> Result.map (fun v -> truthy v = Some true)
 
-    // ORDER BY's alias-first priority (the opposite of GROUP BY/HAVING's
-    // FROM-first one — see `resolveOrderKey`'s doc) resolves against this
-    // group's own already-projected output columns (`outputCols`, from
-    // `projectGroup`) rather than the group's raw rows.
     let orderKeysOf (rollup: Expr -> Expr) (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<(Value * Collation.Collation option) list, EvalError> =
         let representative = representativeOf groupRows
         let ctx = ctxFor representative
 
-        // WITH ROLLUP materializes every grouped column into a nullable
-        // temporary that no longer carries its ENUM type, so MySQL sorts it
-        // lexically instead of by declaration ordinal (`ORDER BY status+0`
-        // still sees ordinals — that is an expression, not a column ref).
+        // ROLLUP keys lose their ENUM declaration and therefore sort lexically.
         let orderKeyOf (keyCtx: EvalContext) (expr: Expr) (value: Value) =
             if select.Rollup then
                 match value with
@@ -11560,7 +11467,7 @@ and private runGroupedSelect
         |> traverse (fun (expr, _) ->
             match resolveOrderPosition select.Projections expr with
             | Col name ->
-                match outputCols |> List.filter (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase)) with
+                match outputCols |> List.filter (fst >> fun candidate -> equalsIgnoreCase candidate name) with
                 | [ (_, v) ] ->
                     let sourceExpr =
                         projectionExpressionsNamed select.Projections name
@@ -11574,20 +11481,12 @@ and private runGroupedSelect
                     |> Result.bind (evalKey ctx)
             | e -> rewriteAggregates registry ctxFor groupRows (rollup e) |> Result.bind (evalKey ctx))
 
-    // Schema probe: type-checks WHERE/GROUP BY/HAVING/ORDER BY/projections
-    // against an all-NULL row first, the same reasoning as `probeRow`'s
-    // other use — an unknown column/function is a schema error independent
-    // of whether any row happens to match, or a real `GROUP BY` happens to
-    // produce zero groups.
+    // Schema errors are independent of whether the query produces a group.
     match select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok groupExprs ->
 
-    // `GROUPING(k, ...)` reports, per output row, which of its arguments this
-    // row rolled up: bit (argCount - 1 - i) for argument i, so the last
-    // argument is the low bit — MySQL's own encoding. Every argument must be
-    // a `GROUP BY` key (3602), and the whole function only exists under
-    // WITH ROLLUP (1111).
+    // GROUPING uses the last argument as the low bit in MySQL's rollup mask.
     let groupingCalls =
         (select.Projections |> List.map fst)
         @ (select.OrderBy |> List.map fst)
@@ -11608,9 +11507,7 @@ and private runGroupedSelect
             | None -> Error(3602, sprintf "Argument #%d of GROUPING function is not in GROUP BY" (i + 1)))
         |> Result.map (List.fold (|||) 0L >> VInt)
 
-    // The per-group expression rewrite: a key this row rolled up reads back
-    // as NULL (that is what a super-aggregate row *is*), and each GROUPING
-    // call collapses to its computed bitmask.
+    // Rolled-up keys read as NULL; GROUPING calls read as their bitmask.
     let rollupRewrite (rolledCount: int) : Result<Expr -> Expr, EvalError> =
         if not select.Rollup then
             if groupingCalls.IsEmpty then
@@ -11779,12 +11676,7 @@ and private runGroupedSelect
                     |> List.ofSeq
                     |> Ok
 
-            // `WITH ROLLUP` adds one super-aggregate row per dropped GROUP BY
-            // suffix. MySQL emits them in key order with each subtotal right
-            // after the rows it summarizes and the grand total last, which is
-            // exactly what walking the key-sorted groups prefix by prefix
-            // produces — so the rollup expansion also fixes the output order
-            // that a plain GROUP BY leaves to first-occurrence.
+            // MySQL emits each rollup subtotal after its key-ordered children.
             let expandRollup (groups: (Value list * Value[] list) list) : (int * Value list * Value[] list) list =
                 let probeCtx = ctxFor (probeRow columns)
                 let tagged keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
@@ -11839,19 +11731,12 @@ and private runGroupedSelect
 
                     let sorted =
                         if select.OrderBy.IsEmpty then
-                            // Same reasoning as the plain-`SELECT` `sortRows`
-                            // above: an empty `ORDER BY` makes every
-                            // comparison a no-op, so skip the sort outright.
                             kept
                         else
                             let directions = List.map snd select.OrderBy
                             kept |> List.sortWith (fun (_, ka, _) (_, kb, _) -> compareByOrderKeys directions ka kb)
 
-                    // Declared fsp per output column, same as the plain path
-                    // — a bare grouped temporal column (`SELECT dt ... GROUP
-                    // BY dt`) still renders its precision; an aggregate over
-                    // one (`MAX(dt)`) has no resolvable column type and falls
-                    // back to `toText`.
+                    // Bare temporal group keys retain their declared precision.
                     let groupCtx = ctxFor (probeRow columns)
                     let groupFormats = outputColumnFormats groupCtx columns select.Projections
                     let groupWireOverrides =
@@ -11871,9 +11756,7 @@ and private runGroupedSelect
                         |> applyLimitOffset (Option.map rowCount select.Limit) (Option.map rowCount select.Offset)
                     ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
-/// MySQL evaluates windows after grouping. Group keys and aggregate leaves
-/// become synthetic columns for the ordinary window pass; explicit star
-/// expansion keeps those implementation columns out of SELECT *.
+/// MySQL evaluates windows after grouping.
 and private runGroupedWindowSelect
     (store: Store)
     (registry: Registry)
@@ -11902,8 +11785,6 @@ and private runGroupedWindowSelect
     let leaves = (groupExprs @ aggregates) |> List.distinct
 
     if leaves.IsEmpty then
-        // Nothing to group on and nothing to aggregate — not this path's
-        // shape; the plain window pass handles it.
         runWindowedSelect store registry dbName columns qualifiers rows select outer
     else
 
@@ -11930,9 +11811,7 @@ and private runGroupedWindowSelect
                 (List.replicate leafNames.Length store.ExecutionSettings.ConnectionCollation)
                 groupedMetadata
 
-        // Each projection keeps the column name it would have had before the
-        // rewrite — the substitution below turns its expression into
-        // synthetic column references, which must not become its header.
+        // Synthetic columns must not leak into result headers.
         let rewrite (expr: Expr, alias: string option) =
             substituteExprs replacements expr, Some(alias |> Option.defaultValue (exprLabel expr))
 
