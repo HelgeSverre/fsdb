@@ -584,9 +584,12 @@ and private evalNodes
         if anyMatch && not excluded then Some(id, score) else None)
     |> Map.ofSeq
 
+let private visibleBooleanScore score =
+    if score = 0.0 then idfFloor * idfFloor else score
+
 let private booleanScoresWithinOption candidateIds (index: Index<'id>) (query: string) =
     evalNodes candidateIds index (parseBooleanQuery index.Collation query)
-    |> Map.map (fun _ score -> if score = 0.0 then idfFloor * idfFloor else score)
+    |> Map.map (fun _ score -> visibleBooleanScore score)
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
     booleanScoresWithinOption None index query
@@ -677,7 +680,7 @@ let internal tryFlatBooleanScoresDictionaryWithin
                     | Soft -> if matched then anyMatch <- true
 
                 if anyMatch && not excluded then
-                    scores.Add(id, if score = 0.0 then idfFloor * idfFloor else score)
+                    scores.Add(id, visibleBooleanScore score)
 
             scores
 
@@ -718,7 +721,7 @@ let internal tryFlatBooleanScoresDictionaryWithin
             |> Seq.sort
             |> Seq.iter (fun id ->
                 let score = totals.[id]
-                scores.Add(id, if score = 0.0 then idfFloor * idfFloor else score))
+                scores.Add(id, visibleBooleanScore score))
 
             scores
 

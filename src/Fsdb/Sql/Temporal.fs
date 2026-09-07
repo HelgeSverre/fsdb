@@ -255,11 +255,16 @@ let isAllZeroDateTime dateTime =
     let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
     isAllZeroDate date && hour = 0 && minute = 0 && second = 0 && microseconds = 0
 
+let private tryParseUnsignedInt (text: string) =
+    match Int32.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture) with
+    | true, value -> Some value
+    | false, _ -> None
+
 let tryParseDateParts (text: string) =
     match text.Split '-' with
     | [| year; month; day |] ->
-        match Int32.TryParse(year, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(month, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(day, NumberStyles.None, CultureInfo.InvariantCulture) with
-        | (true, year), (true, month), (true, day) -> Some(year, month, day)
+        match tryParseUnsignedInt year, tryParseUnsignedInt month, tryParseUnsignedInt day with
+        | Some year, Some month, Some day -> Some(year, month, day)
         | _ -> None
     | _ -> None
 
@@ -273,21 +278,20 @@ let tryParseZeroDateTime (text: string) =
     | [| dateText; timeText |] ->
         match tryParseZeroDate dateText with
         | Some date ->
-            let timeParts = timeText.Split '.'
-            let hms = timeParts.[0].Split ':'
-            let microseconds =
-                if timeParts.Length = 1 then
-                    Some 0
-                elif timeParts.Length = 2 && timeParts.[1] |> Seq.forall Char.IsDigit && timeParts.[1].Length <= 6 then
-                    Int32.TryParse(timeParts.[1].PadRight(6, '0'), NumberStyles.None, CultureInfo.InvariantCulture) |> function | true, value -> Some value | _ -> None
-                else
-                    None
-
-            match hms, microseconds with
-            | [| hour; minute; second |], Some microseconds ->
-                match Int32.TryParse(hour, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(minute, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(second, NumberStyles.None, CultureInfo.InvariantCulture) with
-                | (true, hour), (true, minute), (true, second) -> tryZeroDateTime date hour minute second microseconds
+            let parseClock (clockText: string) microseconds =
+                match clockText.Split ':' with
+                | [| hour; minute; second |] ->
+                    match tryParseUnsignedInt hour, tryParseUnsignedInt minute, tryParseUnsignedInt second with
+                    | Some hour, Some minute, Some second -> tryZeroDateTime date hour minute second microseconds
+                    | _ -> None
                 | _ -> None
+
+            match timeText.Split '.' with
+            | [| clockText |] -> parseClock clockText 0
+            | [| clockText; fraction |] when fraction.Length <= 6 && fraction |> Seq.forall Char.IsDigit ->
+                fraction.PadRight(6, '0')
+                |> tryParseUnsignedInt
+                |> Option.bind (parseClock clockText)
             | _ -> None
         | None -> None
     | _ -> None

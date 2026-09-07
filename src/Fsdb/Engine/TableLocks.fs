@@ -82,8 +82,10 @@ let private stateFor (manager: Manager) key =
         manager.Tables.Add(key, state)
         state
 
+let private hasNoOwners (owners: HashSet<int>) = owners.Count = 0
+
 let private hasNoOtherOwner owner (owners: HashSet<int>) =
-    owners.Count = 0 || (owners.Count = 1 && owners.Contains owner)
+    hasNoOwners owners || (owners.Count = 1 && owners.Contains owner)
 
 let private readerGateOpen owner (state: TableState) =
     hasNoOtherOwner owner state.WaitingWriters
@@ -93,14 +95,13 @@ let private explicitlyAvailable owner mode (state: TableState) =
     match mode with
     | ReadAccess ->
         state.ExplicitWriter |> Option.forall ((=) owner)
-        && (state.StatementWriters.Count = 0 || (state.StatementWriters.Count = 1 && state.StatementWriters.Contains owner))
+        && hasNoOtherOwner owner state.StatementWriters
         && readerGateOpen owner state
     | WriteAccess ->
         state.ExplicitWriter |> Option.forall ((=) owner)
-        && (state.ExplicitReaders.Count = 0
-            || (state.ExplicitReaders.Count = 1 && state.ExplicitReaders.Contains owner))
-        && (state.StatementReaders.Count = 0 || (state.StatementReaders.Count = 1 && state.StatementReaders.Contains owner))
-        && (state.StatementWriters.Count = 0 || (state.StatementWriters.Count = 1 && state.StatementWriters.Contains owner))
+        && hasNoOtherOwner owner state.ExplicitReaders
+        && hasNoOtherOwner owner state.StatementReaders
+        && hasNoOtherOwner owner state.StatementWriters
 
 let private explicitAvailable owner mode (manager: Manager) key =
     match manager.Tables.TryGetValue key with
@@ -110,15 +111,15 @@ let private explicitAvailable owner mode (manager: Manager) key =
 let private statementAvailable owner mode (state: TableState) =
     match mode with
     | ReadAccess -> state.ExplicitWriter.IsNone && readerGateOpen owner state
-    | WriteAccess -> state.ExplicitWriter.IsNone && state.ExplicitReaders.Count = 0
+    | WriteAccess -> state.ExplicitWriter.IsNone && hasNoOwners state.ExplicitReaders
 
 let private stateIsIdle (state: TableState) =
     state.ExplicitWriter.IsNone
-    && state.ExplicitReaders.Count = 0
-    && state.StatementReaders.Count = 0
-    && state.StatementWriters.Count = 0
-    && state.WaitingWriters.Count = 0
-    && state.PrioritizedWriters.Count = 0
+    && hasNoOwners state.ExplicitReaders
+    && hasNoOwners state.StatementReaders
+    && hasNoOwners state.StatementWriters
+    && hasNoOwners state.WaitingWriters
+    && hasNoOwners state.PrioritizedWriters
 
 let private removeIdleState (manager: Manager) key state =
     if stateIsIdle state then
