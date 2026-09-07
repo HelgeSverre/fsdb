@@ -8492,12 +8492,14 @@ and private materializeCte
                                 )
                             )
                     else
+                        let iterationRows = working
+
                         cteScope.Value <-
                             saved
                             |> Map.add
                                 (cte.CteName.ToLowerInvariant())
                                 { Columns = columns
-                                  Rows = lazy (Ok working)
+                                  Rows = lazy (Ok iterationRows)
                                   Origins = List.replicate columns.Length None
                                   StatementStable = false
                                   PhysicalProjection = None }
