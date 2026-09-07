@@ -7091,7 +7091,7 @@ let tests =
                             Expect.equal rows.Length 10 "the selected outer rows are retained"
                             Expect.equal
                                 (rows |> List.map (fun row -> row.[1]))
-                                (List.replicate 10 (Some(string expectedCount)))
+                                (List.replicate 10 (Some (string expectedCount)))
                                 "each key retains the expected candidates"
                         | other -> failtestf "expected correlated counts, got %A" other
 

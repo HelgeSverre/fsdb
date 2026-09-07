@@ -26,7 +26,7 @@ let nativePasswordHash (password: string) : string =
 /// bytes); XORing with `SHA1(scramble + stage2)` recovers `SHA1(pw)`, whose
 /// SHA1 must equal the stored `stage2 = SHA1(SHA1(pw))`.
 let verifyNative (storedHash: string) (scramble: byte[]) (response: byte[]) : bool =
-    if response.Length <> 20 then
+    if response.Length <> SHA1.HashSizeInBytes then
         false
     else
         try

@@ -298,10 +298,14 @@ type private PhysicalProjectionStep =
 
 type private PhysicalProjection =
     { OutputColumns: ColumnDef list
-      Source: TableRef
-      SourceTable: Table
-      SourceIndices: int list
+      PhysicalTableRef: TableRef
+      PhysicalTable: Table
+      PhysicalColumnIndices: int list
       Steps: PhysicalProjectionStep list }
+
+let private tryDuplicateIgnoreCase nameOf values =
+    let seen = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+    values |> List.tryFind (fun value -> not (seen.Add(nameOf value)))
 
 let private equalityMembershipKey domain value =
     match domain, value with
@@ -1741,34 +1745,14 @@ and private overLabel (over: OverClause) : string =
         |> String.concat " "
         |> sprintf "(%s)"
 
-/// Neither of these recurse into `evalExpr`, so they're plain top-level
-/// `let`s rather than tied into its `rec ... and` group.
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 
-/// LIKE under the engine's collation: case- and accent-insensitive per
-/// character ('ä' LIKE 'a' is true), but never expanding — 'æ' LIKE 'ae' is
-/// false while 'æ' = 'ae' is true, exactly as MySQL's per-character LIKE
-/// behaves (both verified against 8.4). A small backtracking matcher
-/// instead of `likeToRegex`: a regex can't fold per-character weight
-/// classes without enumerating every accented variant.
-/// `%` matches any run, `_` one character, and the escape character
-/// (default backslash, as the parser leaves it unresolved in the pattern)
-/// makes the following character literal. `LIKE BINARY` (caseSensitive)
-/// compares characters byte-for-byte.
-/// Every backtrack is guarded by `mark < slen`: once the last `%` has been
-/// stretched over the whole subject there is nothing left to give it, and
-/// resuming past the end would advance `mark` forever without the
-/// pattern-consumed branch ever being reached (`'x' LIKE '%\%'` hung the
-/// server that way).
-/// Iterative glob matcher (two pointers with `%`-backtracking) — O(1) stack,
-/// so a pattern with thousands of `%` or a long subject can't overflow it
-/// the way a recursive matcher would. `escape` before a `%`/`_` makes it a
-/// literal; `charEq` folds per the collation.
+/// MySQL folds LIKE one character at a time: `ä` matches `a`, but `æ` does
+/// not expand to `ae`. The iterative matcher also keeps adversarial patterns
+/// off the call stack.
 let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: string) (pattern: string) : bool =
     let slen, plen = subject.Length, pattern.Length
     let mutable si, pi = 0, 0
-    // The last `%` position and the subject index to resume from if the
-    // tail fails — the one backtrack point a glob match needs.
     let mutable star = -1
     let mutable mark = 0
 
@@ -1782,8 +1766,6 @@ let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: st
 
     while result.IsNone do
         if pi >= plen then
-            // Pattern consumed: match iff the subject is too, else backtrack
-            // to the last `%` if there was one.
             if si >= slen then result <- ValueSome true
             elif star >= 0 && mark < slen then
                 pi <- star + 1
@@ -1816,7 +1798,6 @@ let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: st
                     si <- si + 1
                     pi <- pi + 1
                 | _ ->
-                    // Mismatch (or `_`/literal past the subject): backtrack.
                     if star >= 0 && mark < slen then
                         pi <- star + 1
                         mark <- mark + 1
@@ -1841,17 +1822,6 @@ let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (esc
         let charEq = if caseSensitive then (=) else col.CharEquals
         boolToValue (likeMatch (escape |> Option.defaultValue '\\') charEq text pat)
 
-/// `REGEXP`/`RLIKE` — case sensitivity follows the operand's collation
-/// (case-insensitive under the usual `_ci` default, but case-sensitive
-/// under `_bin`/`_cs`, same as `LIKE`/`=`); unlike `LIKE`'s translated
-/// wildcard syntax, the pattern is
-/// already a real (POSIX-flavored, close enough to .NET's for the common
-/// cases Eloquent generates) regex, so it's handed to `Regex` directly
-/// rather than through `likeToRegex`. Every match carries a `MatchTimeout`
-/// so a catastrophically-backtracking pattern (`'(a+)+$'` against a long
-/// non-matching subject) errors out instead of pinning a core forever.
-/// No `Singleline`: MySQL's REGEXP `.` does not match a newline by default,
-/// so .NET's default (also newline-excluding) `.` is the matching behavior.
 let private regexpOp (coll: Collation.Collation option) (subject: Value) (pattern: Value) : Result<Value, EvalError> =
     match subject, pattern with
     | VNull, _
@@ -8021,11 +7991,6 @@ and private rewriteNaturalSelect
         Having = select.Having |> Option.map rewriteExpr
         OrderBy = select.OrderBy |> List.map (fun (e, d) -> rewriteExpr e, d) }
 
-/// Materializes every `WITH` binding in order (each one seeing the ones
-/// before it), runs `body` with them in scope, then restores the scope the
-/// caller had. Materializing up front rather than re-running the body per
-/// reference matches MySQL's own default for a CTE used more than once, and
-/// is what makes a recursive CTE expressible at all.
 and private selectOrUnionTableNames (body: SelectOrUnion) : Set<string> =
     let rec expressionNames expression =
         Expression.fold
@@ -8085,9 +8050,7 @@ and private selectOrUnionTableNames (body: SelectOrUnion) : Set<string> =
     bodyNames body
 
 and private referencedCtes (ctes: CommonTableExpr list) (tableNames: Set<string>) =
-    let names = System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
-
-    if ctes |> List.exists (fun cte -> not (names.Add cte.CteName)) then
+    if ctes |> tryDuplicateIgnoreCase (fun cte -> cte.CteName) |> Option.isSome then
         ctes
     else
         let byName = ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), cte) |> Map.ofList
@@ -8327,9 +8290,7 @@ and private withCteScope
         body ()
     else
 
-    let names = System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
-
-    match ctes |> List.tryFind (fun cte -> not (names.Add cte.CteName)) with
+    match ctes |> tryDuplicateIgnoreCase (fun cte -> cte.CteName) with
     | Some duplicate -> Err(1066, sprintf "Not unique table/alias: '%s'" duplicate.CteName), [], []
     | None ->
 
@@ -8386,7 +8347,7 @@ and private withCteScope
                         renameCteColumns cte projection.OutputColumns
                         |> Result.bind (fun columns ->
                             let projection = { projection with OutputColumns = columns }
-                            let rows = lazy (projectPhysicalRows store registry dbName projection projection.SourceTable.RowsArray)
+                            let rows = lazy (projectPhysicalRows store registry dbName projection projection.PhysicalTable.RowsArray)
                             bindCte columns rows (Some projection))
                     | None ->
                         materializeCte store registry dbName cte outer
@@ -9426,9 +9387,9 @@ and private tryPhysicalProjection
         |> Option.flatten
         |> Option.map (fun table ->
             { OutputColumns = table.Columns
-              Source = tableRef
-              SourceTable = table
-              SourceIndices = [ 0 .. table.Columns.Length - 1 ]
+              PhysicalTableRef = tableRef
+              PhysicalTable = table
+              PhysicalColumnIndices = [ 0 .. table.Columns.Length - 1 ]
               Steps = [] })
 
     let tableProjection (tableRef: TableRef) =
@@ -9498,9 +9459,7 @@ and private tryPhysicalProjection
                     |> Result.toOption
                     |> Option.bind (fun projected ->
                         let names = projected |> List.map snd
-                        let uniqueNames = HashSet<string>(names, System.StringComparer.OrdinalIgnoreCase)
-
-                        if uniqueNames.Count <> names.Length then
+                        if names |> tryDuplicateIgnoreCase id |> Option.isSome then
                             None
                         else
                             let outputIndices = projected |> List.map fst
@@ -9510,7 +9469,8 @@ and private tryPhysicalProjection
                                     OutputColumns =
                                         projected
                                         |> List.map (fun (index, name) -> derivedColumn input.OutputColumns.[index] name)
-                                    SourceIndices = outputIndices |> List.map (fun index -> input.SourceIndices.[index])
+                                    PhysicalColumnIndices =
+                                        outputIndices |> List.map (fun index -> input.PhysicalColumnIndices.[index])
                                     Steps =
                                         input.Steps
                                         @ [ { InputColumns = input.OutputColumns
@@ -9549,8 +9509,8 @@ and private projectPhysicalRows
         store
         registry
         dbName
-        (projection.Source.Alias |> Option.defaultValue projection.Source.Table)
-        projection.SourceTable.Columns
+        (projection.PhysicalTableRef.Alias |> Option.defaultValue projection.PhysicalTableRef.Table)
+        projection.PhysicalTable.Columns
     |> fun prepared -> projection.Steps |> List.fold applyStep prepared
     |> Result.map List.ofSeq
 
@@ -9571,10 +9531,10 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
                 projection.OutputColumns
                 |> List.tryFindIndex (fun candidate -> candidate.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
                 |> Option.bind (fun outputIndex ->
-                    let sourceIndex = projection.SourceIndices.[outputIndex]
-                    let sourceColumn = projection.SourceTable.Columns.[sourceIndex]
+                    let sourceIndex = projection.PhysicalColumnIndices.[outputIndex]
+                    let sourceColumn = projection.PhysicalTable.Columns.[sourceIndex]
 
-                    Storage.tryEqualityLookupInTable store projection.SourceTable sourceColumn.Name value
+                    Storage.tryEqualityLookupInTable store projection.PhysicalTable sourceColumn.Name value
                     |> Option.bind (fun (_, rows) ->
                         rows
                         |> List.map snd
