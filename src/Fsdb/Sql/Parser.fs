@@ -174,7 +174,7 @@ type private ParserState =
       mutable ExpressionDepth: int
       mutable PlaceholderCount: int }
 
-let private currentState = System.Threading.AsyncLocal<ParserState option>()
+let private currentState = new System.Threading.ThreadLocal<ParserState option>(fun () -> None)
 
 let private parserState () =
     currentState.Value
@@ -4628,7 +4628,7 @@ let private withParserState storedProgramSyntax (options: ParserOptions) (sql: s
           ExpressionDepth = 0
           PlaceholderCount = 0 }
 
-    DynamicScope.withValue currentState (Some state) (fun () ->
+    DynamicScope.withThreadValue currentState (Some state) (fun () ->
         sql |> expandVersionComments options |> rewriteSqlForOptions options |> parse)
 
 let private withStatementParserState options sql parse =
