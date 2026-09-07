@@ -3365,6 +3365,8 @@ let private conjuncts (expr: Expr) : Expr list =
 
     List.rev (loop [] expr)
 
+let private optionalConjuncts = Option.map conjuncts >> Option.defaultValue []
+
 let private combineConjuncts =
     function
     | [] -> None
@@ -8506,8 +8508,7 @@ and private tryIndexedSemiJoin
             | _ -> None
 
         select.Where
-        |> Option.toList
-        |> List.collect conjuncts
+        |> optionalConjuncts
         |> List.tryPick classify
 
     match inPredicate with
@@ -8919,8 +8920,7 @@ and private indexedColumnFor (tref: TableRef) =
 
 and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralInProbe list =
     whereExpr
-    |> Option.toList
-    |> List.collect conjuncts
+    |> optionalConjuncts
     |> List.choose (function
         | In(indexed, candidates) ->
             let indexedExpressions =
@@ -9044,8 +9044,7 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
             (geometry value)
 
     whereExpr
-    |> Option.toList
-    |> List.collect conjuncts
+    |> optionalConjuncts
     |> List.choose (function
         | FuncCall(name, [ left; right ]) ->
             match name.ToUpperInvariant() with
@@ -9276,8 +9275,7 @@ and private correlatedEqualityPredicates selfQualifier (whereExpr: Expr option) 
     outer
     |> Option.map (fun context ->
         whereExpr
-        |> Option.toList
-        |> List.collect conjuncts
+        |> optionalConjuncts
         |> List.choose (function
             | BinOp(Eq, left, right) ->
                 match innerColumn left, outerValue context right with
