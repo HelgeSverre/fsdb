@@ -10,25 +10,11 @@ open Fsdb.Value
 
 let private normalize (value: string) = value.ToLowerInvariant()
 
-let private overlayCatalog (catalog: Catalog) (overlay: Catalog) =
-    overlay
-    |> Map.fold (fun result database tables ->
-        result
-        |> Map.change database (fun current ->
-            current
-            |> Option.defaultValue Map.empty
-            |> fun existing -> Some(Map.fold (fun state name table -> Map.add name table state) existing tables))) catalog
-
-let private hasTemporaryTable (catalog: Catalog) database table =
-    catalog
-    |> Map.tryFind (normalize database)
-    |> Option.exists (Map.containsKey (normalizeTableName table))
-
 let private storeFor (session: Session) (handler: TableHandler) =
     let store = Session.currentStore session
 
     if handler.Temporary then
-        beginTransactionSnapshotFromCatalog store (overlayCatalog store.Catalog session.TemporaryCatalog)
+        beginTransactionSnapshotFromCatalog store (CatalogOverlay.merge store.Catalog session.TemporaryCatalog)
     else
         store
 
@@ -37,7 +23,7 @@ let private tableForOpen (session: Session) database table temporary =
 
     if temporary then
         tableSnapshot
-            (beginTransactionSnapshotFromCatalog store (overlayCatalog store.Catalog session.TemporaryCatalog))
+            (beginTransactionSnapshotFromCatalog store (CatalogOverlay.merge store.Catalog session.TemporaryCatalog))
             database
             table
     else
@@ -258,7 +244,7 @@ let run registry timeout (session: Session) = function
                 session, Err(1059, "Identifier name is too long")
             else
                 let handlerKey = normalize name
-                let temporary = hasTemporaryTable session.TemporaryCatalog database tableName
+                let temporary = CatalogOverlay.containsTable session.TemporaryCatalog database tableName
 
                 if Map.containsKey handlerKey session.TableHandlers then
                     session, Err(1066, sprintf "Not unique table/alias: '%s'" name)
@@ -329,7 +315,7 @@ let invalidate (before: Session) statement (after: Session) result =
             |> Option.exists (fun name -> handler.Database.Equals(name, StringComparison.OrdinalIgnoreCase))
             || (targets
                 |> List.exists (fun (database, table) ->
-                    handler.Temporary = hasTemporaryTable before.TemporaryCatalog database table
+                    handler.Temporary = CatalogOverlay.containsTable before.TemporaryCatalog database table
                     && handler.Database.Equals(database, StringComparison.OrdinalIgnoreCase)
                     && handler.Table.Equals(table, StringComparison.OrdinalIgnoreCase)))
 

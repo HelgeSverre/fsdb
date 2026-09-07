@@ -923,21 +923,12 @@ let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     let visible = rows |> List.filter (function | [ Some db ] -> canSessionSeeDatabase session store db | _ -> false)
     ResultSet(columns, visible)
 
-let private overlayCatalog (catalog: Storage.Catalog) (overlay: Storage.Catalog) =
-    overlay
-    |> Map.fold (fun result db tables ->
-        result
-        |> Map.change db (fun current ->
-            current
-            |> Option.defaultValue Map.empty
-            |> fun existing -> Some(Map.fold (fun acc name table -> Map.add name table acc) existing tables))) catalog
-
 /// The catalog `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX`
 /// should resolve against. Session-local and virtual tables aren't in the
 /// shared catalog, but clients still introspect them through these forms.
 let private catalogWithOverlay (session: Session) (dbName: string) (table: string) : Storage.Catalog =
     let store = Session.currentStore session
-    let catalog = overlayCatalog store.Catalog session.TemporaryCatalog
+    let catalog = CatalogOverlay.merge store.Catalog session.TemporaryCatalog
 
     if String.Equals(dbName, Storage.defaultDatabase, StringComparison.OrdinalIgnoreCase) then
         match Map.tryFind (table.ToLowerInvariant()) store.VirtualTables with
@@ -2895,38 +2886,11 @@ let private changesCatalogMembership = function
     | AlterDatabase _ -> true
     | _ -> false
 
-let private tableKey (db: string) (table: string) = db.ToLowerInvariant(), normalizeTableName table
-
 let private temporaryKeys (catalog: Catalog) =
     catalog
     |> Map.toSeq
-    |> Seq.collect (fun (db, tables) -> tables |> Map.keys |> Seq.map (fun table -> tableKey db table))
+    |> Seq.collect (fun (db, tables) -> tables |> Map.keys |> Seq.map (fun table -> CatalogOverlay.tableKey db table))
     |> Set.ofSeq
-
-let private hasTemporaryTable (catalog: Catalog) (db: string) (table: string) =
-    catalog
-    |> Map.tryFind (db.ToLowerInvariant())
-    |> Option.exists (Map.containsKey (normalizeTableName table))
-
-let private setCatalogTable (catalog: Catalog) (db: string) (table: string) (value: Table option) =
-    let db = db.ToLowerInvariant()
-    let table = normalizeTableName table
-
-    Map.change
-        db
-        (fun current ->
-            let tables = Option.defaultValue Map.empty current
-
-            let tables =
-                match value with
-                | Some item -> Map.add table item tables
-                | None -> Map.remove table tables
-
-            if Map.isEmpty tables then None else Some tables)
-        catalog
-
-let private catalogTable (catalog: Catalog) (db: string, table: string) =
-    catalog |> Map.tryFind (db.ToLowerInvariant()) |> Option.bind (Map.tryFind (normalizeTableName table))
 
 let private temporaryTargets (dbName: string) (action: TemporaryAction option) (stmt: Statement) =
     match action, stmt with
@@ -2937,10 +2901,10 @@ let private temporaryTargets (dbName: string) (action: TemporaryAction option) (
     | _ -> []
 
 let private moveTemporaryKey sourceDb sourceTable targetTable keys =
-    let source = tableKey sourceDb sourceTable
+    let source = CatalogOverlay.tableKey sourceDb sourceTable
 
     if Set.contains source keys then
-        keys |> Set.remove source |> Set.add (tableKey sourceDb targetTable)
+        keys |> Set.remove source |> Set.add (CatalogOverlay.tableKey sourceDb targetTable)
     else
         keys
 
@@ -2970,12 +2934,12 @@ let private temporaryRenameSourceKinds dbName beforeKeys pairs =
         (fun (hasTemporary, hasPermanent, keys) (sourceName, targetName) ->
             let sourceDb, sourceTable = splitQualified dbName sourceName
             let _, targetTable = splitQualified dbName targetName
-            let source = tableKey sourceDb sourceTable
+            let source = CatalogOverlay.tableKey sourceDb sourceTable
 
             if Set.contains source keys then
                 true,
                 hasPermanent,
-                keys |> Set.remove source |> Set.add (tableKey sourceDb targetTable)
+                keys |> Set.remove source |> Set.add (CatalogOverlay.tableKey sourceDb targetTable)
             else
                 hasTemporary, true, keys)
         (false, false, beforeKeys)
@@ -2991,7 +2955,7 @@ let private changesOnlyTemporaryCatalog dbName beforeKeys action stmt =
     | Some _, _ -> true
     | None, AlterTable(sourceName, _) ->
         let sourceDb, sourceTable = splitQualified dbName sourceName
-        Set.contains (tableKey sourceDb sourceTable) beforeKeys
+        Set.contains (CatalogOverlay.tableKey sourceDb sourceTable) beforeKeys
     | None, RenameTable pairs ->
         let hasTemporary, hasPermanent, _ = temporaryRenameSourceKinds dbName beforeKeys pairs
         hasTemporary && not hasPermanent
@@ -3000,11 +2964,11 @@ let private changesOnlyTemporaryCatalog dbName beforeKeys action stmt =
 let private statementUsesTemporary (catalog: Catalog) (dbName: string) (stmt: Statement) =
     Auth.requiredPrivileges dbName stmt
     |> List.exists (function
-        | _, Auth.OnTable(db, table) -> hasTemporaryTable catalog db table
+        | _, Auth.OnTable(db, table) -> CatalogOverlay.containsTable catalog db table
         | _ -> false)
 
 let rec private filterTemporaryEvent keys event =
-    let isTemporary db table = Set.contains (tableKey db table) keys
+    let isTemporary db table = Set.contains (CatalogOverlay.tableKey db table) keys
 
     match event with
     | RowsInserted(db, table, _)
@@ -3030,15 +2994,19 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
     let baseStore = Session.currentStore session
     let baseCatalog = baseStore.Catalog
     let beforeKeys = temporaryKeys session.TemporaryCatalog
-    let targets = temporaryTargets dbName action stmt |> List.map (fun (db, table) -> tableKey db table) |> Set.ofList
+    let targets =
+        temporaryTargets dbName action stmt
+        |> List.map (fun (db, table) -> CatalogOverlay.tableKey db table)
+        |> Set.ofList
 
     // The private root lets temporary names shadow shared tables without
     // publishing their schema, rows, or commit events.
-    let combined = overlayCatalog baseCatalog session.TemporaryCatalog
+    let combined = CatalogOverlay.merge baseCatalog session.TemporaryCatalog
 
     let combined =
         targets
-        |> Set.fold (fun catalog (db, table) -> if Set.contains (db, table) beforeKeys then catalog else setCatalogTable catalog db table None) combined
+        |> Set.fold (fun catalog (db, table) ->
+            if Set.contains (db, table) beforeKeys then catalog else CatalogOverlay.setTable catalog db table None) combined
 
     let working = Storage.beginTransactionSnapshotFromCatalog baseStore combined
     let workingSession = { session with Store = working; Tx = None }
@@ -3057,8 +3025,8 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             afterKeys
             |> Set.fold
                 (fun catalog (db, table) ->
-                    match catalogTable working.Catalog (db, table) with
-                    | Some value -> setCatalogTable catalog db table (Some value)
+                    match CatalogOverlay.tryTable working.Catalog (db, table) with
+                    | Some value -> CatalogOverlay.setTable catalog db table (Some value)
                     | None -> catalog)
                 Map.empty
 
@@ -3069,7 +3037,8 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
                 baseCatalog
             else
                 overlayKeys
-                |> Set.fold (fun catalog (db, table) -> setCatalogTable catalog db table (catalogTable baseCatalog (db, table))) working.Catalog
+                |> Set.fold (fun catalog (db, table) ->
+                    CatalogOverlay.setTable catalog db table (CatalogOverlay.tryTable baseCatalog (db, table))) working.Catalog
 
         working.Catalog <- permanentCatalog
 
@@ -4111,7 +4080,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let showCreate =
-            if hasTemporaryTable session.TemporaryCatalog dbName table then
+            if CatalogOverlay.containsTable session.TemporaryCatalog dbName table then
                 InformationSchema.showCreateTemporaryTable
             else
                 InformationSchema.showCreateTable

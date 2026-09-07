@@ -54,6 +54,7 @@
     <Compile Include="Wire/Packet.fs" />
     <Compile Include="Wire/Protocol.fs" />
     <Compile Include="Wire/Session.fs" />
+    <Compile Include="Wire/CatalogOverlay.fs" />
     <Compile Include="Wire/TableHandler.fs" />
     <Compile Include="Wire/PreparedMetadata.fs" />
     <Compile Include="Wire/QueryHandler.fs" />
