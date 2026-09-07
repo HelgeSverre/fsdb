@@ -14,6 +14,25 @@ module RowId =
 
 type private RowSlot<'T> = RowId * 'T
 
+[<RequireQualifiedAccess>]
+module private RowLookup =
+    let tryFind rowId (positions: Map<RowId, int>) slotCount slotAt =
+        let naturalPosition = RowId.value rowId
+
+        let direct =
+            if naturalPosition >= 0 && naturalPosition < slotCount then
+                match slotAt naturalPosition with
+                | Some(storedId, item) when storedId = rowId -> Some item
+                | _ -> None
+            else
+                None
+
+        direct
+        |> Option.orElseWith (fun () ->
+            positions
+            |> Map.tryFind rowId
+            |> Option.bind (slotAt >> Option.map snd))
+
 /// Builds one immutable row-store root without publishing partial changes.
 [<Sealed>]
 type RowStoreBuilder<'T> internal (
@@ -30,10 +49,7 @@ type RowStoreBuilder<'T> internal (
 
     member _.Count = count
 
-    member _.TryFind(rowId: RowId) =
-        positions
-        |> Map.tryFind rowId
-        |> Option.bind (fun index -> slots.[index] |> Option.map snd)
+    member _.TryFind(rowId: RowId) = RowLookup.tryFind rowId positions slots.Count (fun index -> slots.[index])
 
     member this.Item
         with get (rowId: RowId) : 'T =
@@ -91,10 +107,7 @@ type RowStore<'T> internal (
         let count, nextRowId, positions, slots, layoutIdentity = builder.Drain()
         RowStore<'T>(count, nextRowId, positions, slots, layoutIdentity)
 
-    member _.TryFind(rowId: RowId) =
-        positions
-        |> Map.tryFind rowId
-        |> Option.bind (fun index -> slots.[index] |> Option.map snd)
+    member _.TryFind(rowId: RowId) = RowLookup.tryFind rowId positions slots.Count (fun index -> slots.[index])
 
     member this.Item
         with get (rowId: RowId) : 'T =
