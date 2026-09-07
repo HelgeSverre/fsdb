@@ -5926,7 +5926,7 @@ and private tryInformationSchemaNarrow
         None
     else
         match
-            pointLookupEqualities tableRef where
+            pointLookupEqualities registry tableRef where
             |> List.choose (function
                 | { Column = name; Transform = None; Value = VString value } -> Some(name, value)
                 | _ -> None)
@@ -7182,6 +7182,7 @@ and private filterSourceRows
 
 and private narrowPhysicalSourceRows
     (store: Store)
+    (registry: Registry)
     (source: FromItem)
     (table: Table option)
     (predicate: Expr option)
@@ -7189,7 +7190,7 @@ and private narrowPhysicalSourceRows
     : Value[] seq =
     match source, table, predicate with
     | FromTable tableRef, Some table, Some predicate ->
-        tryPhysicalReadCandidatesInTable store table tableRef (Some predicate)
+        tryPhysicalReadCandidatesInTable store registry table tableRef (Some predicate)
         |> Option.map (snd >> Seq.map snd)
         |> Option.defaultValue rows
     | _ -> rows
@@ -7268,7 +7269,7 @@ and private applyResolvedJoin
                 if Map.containsKey qualifier sourceOverrides then
                     rows
                 else
-                    narrowPhysicalSourceRows store join.Table physicalTable predicate rows
+                    narrowPhysicalSourceRows store registry join.Table physicalTable predicate rows
 
             prepareVirtualRows store registry dbName joinQualifier columns rows
             |> Result.bind (fun rows ->
@@ -8600,6 +8601,7 @@ and private tryIndexedSemiJoin
 
 and private prepareLockingRead
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (select: SelectStmt)
     : Result<Map<string, Set<RowId>>, QueryResult> =
@@ -8653,10 +8655,10 @@ and private prepareLockingRead
             | None ->
                 let rowIdsFor (source: LockingReadSource) =
                     if sources.Length = 1 && select.Joins.IsEmpty then
-                        tryEqualityCandidates store dbName source.Reference select.Where
+                        tryEqualityCandidates store registry dbName source.Reference select.Where
                         |> Option.map (fun plan -> plan.Rows.Value |> List.map fst)
                         |> Option.orElseWith (fun () ->
-                            tryLiteralInCandidates store dbName source.Reference select.Where
+                            tryLiteralInCandidates store registry dbName source.Reference select.Where
                             |> Option.map (fun plan -> plan.Rows.Value |> List.map fst))
                         |> Option.orElseWith (fun () ->
                             trySpatialLookup BareOrQualifiedColumn store dbName source.Reference select.Where
@@ -8728,7 +8730,7 @@ and private runUnmergedSelectStmt
         else
             let initial = lockingReadStore.Value |> Option.map (fun current -> current ()) |> Option.defaultValue store
 
-            match prepareLockingRead initial dbName select with
+            match prepareLockingRead initial registry dbName select with
             | Error error -> error, [], []
             | Ok rows ->
                 let current = lockingReadStore.Value |> Option.map (fun refresh -> refresh ()) |> Option.defaultValue initial
@@ -8769,7 +8771,7 @@ and private runUnlockedSelectStmt
                 sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
 
             let basePredicate = Map.tryFind (baseQualifier.ToLowerInvariant()) pushedWhere
-            let baseRows = narrowPhysicalSourceRows store fromItem basePhysicalTable basePredicate baseRows
+            let baseRows = narrowPhysicalSourceRows store registry fromItem basePhysicalTable basePredicate baseRows
 
             match prepareVirtualRows store registry dbName baseQualifier baseColumns baseRows with
             | Error error -> error, [], []
@@ -8842,7 +8844,7 @@ and private runUnlockedSelectStmt
                 | Error error -> error, [], []
                 | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows None narrowed
                 | Ok None ->
-                  match tryIndexedLookup store dbName tref select.Where with
+                  match tryIndexedLookup store registry dbName tref select.Where with
                   | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                   | None ->
                     match tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer with
@@ -8890,7 +8892,7 @@ and private runUnlockedSelectStmt
                 | Ok(columns, rows) -> runArbitrary columns rows None select
 
 /// Literal equalities eligible for a single-table index candidate path.
-and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : PointEquality list =
+and private pointLookupEqualities (registry: Registry) (tref: TableRef) (whereExpr: Expr option) : PointEquality list =
     match whereExpr with
     | None -> []
     | Some whereExpr ->
@@ -8899,6 +8901,7 @@ and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : Po
             | BinOp(Eq, indexed, Lit value)
             | BinOp(Eq, Lit value, indexed) ->
                 indexedColumnFor tref indexed
+                |> Option.filter (snd >> transformUsesStoredSemantics registry)
                 |> Option.map (fun (column, transform) ->
                     { Column = column
                       Transform = transform
@@ -8923,7 +8926,7 @@ and private indexedColumnFor (tref: TableRef) =
         caseTransform name |> Option.map (fun transform -> column, Some transform)
     | _ -> None
 
-and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralInProbe list =
+and private literalInProbes (registry: Registry) (tref: TableRef) (whereExpr: Expr option) : LiteralInProbe list =
     whereExpr
     |> optionalConjuncts
     |> List.choose (function
@@ -8941,7 +8944,9 @@ and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralI
                     | _ :: _ :: _, Row expressions -> expressions
                     | _ -> [])
 
-            let columns = indexedExpressions |> List.map (indexedColumnFor tref)
+            let columns =
+                indexedExpressions
+                |> List.map (indexedColumnFor tref >> Option.filter (snd >> transformUsesStoredSemantics registry))
 
             let values =
                 candidateExpressions
@@ -9068,6 +9073,7 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
 and private tryEqualityAccessInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
+    (registry: Registry)
     (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
@@ -9075,7 +9081,7 @@ and private tryEqualityAccessInTableWith
     if not (storedValuesMatchReadValues store) then
         None
     else
-        let equalities = pointLookupEqualities tref whereExpr
+        let equalities = pointLookupEqualities registry tref whereExpr
         let storedEqualities =
             equalities
             |> List.choose (fun equality ->
@@ -9110,32 +9116,36 @@ and private tryEqualityAccessInTableWith
 and private tryEqualityAccessWith
     (policy: IndexAccessPolicy)
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
     physicalFastPathTable store dbName tref
-    |> Option.bind (fun table -> tryEqualityAccessInTableWith policy store table tref whereExpr)
+    |> Option.bind (fun table -> tryEqualityAccessInTableWith policy store registry table tref whereExpr)
 
 and private tryEqualityAccess
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryEqualityAccessWith CostedRead store dbName tref whereExpr
+    tryEqualityAccessWith CostedRead store registry dbName tref whereExpr
 
 and private tryEqualityCandidates
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryEqualityAccessWith CandidateNarrowing store dbName tref whereExpr
+    tryEqualityAccessWith CandidateNarrowing store registry dbName tref whereExpr
 
 and private tryLiteralInAccessInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
+    (registry: Registry)
     (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
@@ -9143,7 +9153,7 @@ and private tryLiteralInAccessInTableWith
     if not (storedValuesMatchReadValues store) then
         None
     else
-        literalInProbes tref whereExpr
+        literalInProbes registry tref whereExpr
         |> List.tryPick (fun probe ->
             let values =
                 probe.Values
@@ -9208,62 +9218,68 @@ and private tryLiteralInAccessInTableWith
 and private tryLiteralInAccessWith
     (policy: IndexAccessPolicy)
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
     physicalFastPathTable store dbName tref
-    |> Option.bind (fun table -> tryLiteralInAccessInTableWith policy store table tref whereExpr)
+    |> Option.bind (fun table -> tryLiteralInAccessInTableWith policy store registry table tref whereExpr)
 
 and private tryLiteralInAccess
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryLiteralInAccessWith CostedRead store dbName tref whereExpr
+    tryLiteralInAccessWith CostedRead store registry dbName tref whereExpr
 
 and private tryLiteralInCandidates
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    tryLiteralInAccessWith CandidateNarrowing store dbName tref whereExpr
+    tryLiteralInAccessWith CandidateNarrowing store registry dbName tref whereExpr
 
-and private tryIndexedLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
-    tryEqualityAccess store dbName tref whereExpr
-    |> Option.orElseWith (fun () -> tryLiteralInAccess store dbName tref whereExpr)
+and private tryIndexedLookup (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
+    tryEqualityAccess store registry dbName tref whereExpr
+    |> Option.orElseWith (fun () -> tryLiteralInAccess store registry dbName tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryIndexedCandidates
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     : (ColumnDef list * (RowId * Value[]) list) option =
-    tryEqualityCandidates store dbName tref whereExpr
-    |> Option.orElseWith (fun () -> tryLiteralInCandidates store dbName tref whereExpr)
+    tryEqualityCandidates store registry dbName tref whereExpr
+    |> Option.orElseWith (fun () -> tryLiteralInCandidates store registry dbName tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryIndexedLookupInTable
     (store: Store)
+    (registry: Registry)
     (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
     =
-    tryEqualityAccessInTableWith CostedRead store table tref whereExpr
-    |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CostedRead store table tref whereExpr)
+    tryEqualityAccessInTableWith CostedRead store registry table tref whereExpr
+    |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CostedRead store registry table tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private tryIndexedCandidatesInTable
     (store: Store)
+    (registry: Registry)
     (table: Table)
     (tref: TableRef)
     (whereExpr: Expr option)
     =
-    tryEqualityAccessInTableWith CandidateNarrowing store table tref whereExpr
-    |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CandidateNarrowing store table tref whereExpr)
+    tryEqualityAccessInTableWith CandidateNarrowing store registry table tref whereExpr
+    |> Option.orElseWith (fun () -> tryLiteralInAccessInTableWith CandidateNarrowing store registry table tref whereExpr)
     |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private correlatedEqualityPredicates selfQualifier (whereExpr: Expr option) (outer: EvalContext option) =
@@ -9693,18 +9709,18 @@ and private trySpatialLookup scope store dbName tref whereExpr =
     trySpatialAccess scope store dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows)
 
-and private tryPhysicalCandidates store dbName tref whereExpr =
-    tryIndexedCandidates store dbName tref whereExpr
+and private tryPhysicalCandidates store registry dbName tref whereExpr =
+    tryIndexedCandidates store registry dbName tref whereExpr
     |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tref whereExpr)
     |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref whereExpr)
 
-and private tryPhysicalReadCandidates store dbName tref whereExpr =
-    tryIndexedLookup store dbName tref whereExpr
+and private tryPhysicalReadCandidates store registry dbName tref whereExpr =
+    tryIndexedLookup store registry dbName tref whereExpr
     |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tref whereExpr)
     |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref whereExpr)
 
-and private tryPhysicalReadCandidatesInTable store table tref whereExpr =
-    tryIndexedLookupInTable store table tref whereExpr
+and private tryPhysicalReadCandidatesInTable store registry table tref whereExpr =
+    tryIndexedLookupInTable store registry table tref whereExpr
     |> Option.orElseWith (fun () ->
         trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
         |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows))
@@ -9712,8 +9728,8 @@ and private tryPhysicalReadCandidatesInTable store table tref whereExpr =
         tryRangeAccessInTable BareOrQualifiedColumn store table tref whereExpr
         |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value))
 
-and private tryPhysicalCandidatesInTable store table tref whereExpr =
-    tryIndexedCandidatesInTable store table tref whereExpr
+and private tryPhysicalCandidatesInTable store registry table tref whereExpr =
+    tryIndexedCandidatesInTable store registry table tref whereExpr
     |> Option.orElseWith (fun () ->
         trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
         |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows))
@@ -13162,7 +13178,7 @@ and private runFullTextSelect
 
                             match source.Item, candidatePredicate with
                             | FromTable tableRef, Some predicate when select.Locking.IsEmpty ->
-                                tryPhysicalReadCandidatesInTable store source.Table tableRef (Some predicate)
+                                tryPhysicalReadCandidatesInTable store registry source.Table tableRef (Some predicate)
                             | _ -> None
 
                         let candidateIds =
@@ -14521,7 +14537,7 @@ let rec private explainJoinBlock
               Extra = (if idx = tableCount - 1 then extra else []) }
 
     let tryExplainIndexedAccess accessExtra (whereExpr: Expr option) (tref: TableRef) : bool =
-        match tryEqualityAccess store dbName tref whereExpr with
+        match tryEqualityAccess store registry dbName tref whereExpr with
         | Some plan when plan.Unique && plan.CandidateRowIds.IsEmpty ->
             acc.Add
                 { Id = Some id
@@ -14547,7 +14563,7 @@ let rec private explainJoinBlock
 
             true
         | None ->
-            match tryLiteralInAccess store dbName tref whereExpr with
+            match tryLiteralInAccess store registry dbName tref whereExpr with
             | Some plan ->
                 acc.Add
                     { Id = Some id
@@ -14720,7 +14736,7 @@ and private explainSelectBlock
         | Some(FromTable tref), [] ->
             match tryGroupIndexOrder store registry dbName tref select with
             | Some plan -> Some plan
-            | None when tryIndexedLookup store dbName tref select.Where |> Option.isNone -> tryIndexOrder store registry dbName tref select
+            | None when tryIndexedLookup store registry dbName tref select.Where |> Option.isNone -> tryIndexOrder store registry dbName tref select
             | None -> None
         | _ -> None
 
@@ -18987,7 +19003,7 @@ let rec executeAs
         let physicalCandidates =
             tableRoot
             |> Option.bind (fun table ->
-                tryPhysicalCandidatesInTable store table updateStmt.From updateStmt.Where)
+                tryPhysicalCandidatesInTable store registry table updateStmt.From updateStmt.Where)
 
         let physicalCandidateIds =
             physicalCandidates
@@ -19398,7 +19414,7 @@ let rec executeAs
         let physicalCandidates =
             tableRoot
             |> Option.bind (fun table ->
-                tryPhysicalCandidatesInTable targetStore table deleteStmt.From deleteStmt.Where)
+                tryPhysicalCandidatesInTable targetStore registry table deleteStmt.From deleteStmt.Where)
 
         let physicalCandidateIds =
             physicalCandidates
@@ -19592,11 +19608,16 @@ let rec executeAs
     | Explain(format, inner) ->
         ids, explainStatement format store registry dbName inner
 
-let transactionWriteTargets (store: Store) (dbName: string) (statement: Statement) : (string * string * WriteLockTargets) option =
+let transactionWriteTargets
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (statement: Statement)
+    : (string * string * WriteLockTargets) option =
     let targets (tableRef: TableRef) predicate =
         let database = tableRef.Database |> Option.defaultValue dbName
 
-        tryPhysicalCandidates store dbName tableRef predicate
+        tryPhysicalCandidates store registry dbName tableRef predicate
         |> Option.map (fun (_, rows) ->
             database,
             tableRef.Table,

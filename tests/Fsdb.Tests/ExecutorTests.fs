@@ -6094,6 +6094,52 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "500" ] ] "updates move rows between transformed buckets"
                     | other -> failtestf "expected updated functional rows, got %A" other
 
+                testCase "expression index candidates respect scalar overrides"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, INDEX ix_upper ((UPPER(name))))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin)"
+                    |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store $"INSERT INTO {table} VALUES (1, 'Alpha'), (2, 'Beta'), (3, 'Gamma')" |> ignore
+
+                    let overridden =
+                        builtins
+                        |> registerScalar "UPPER" (fun _ -> VString "MATCH")
+
+                    let select table predicate =
+                        run store overridden $"SELECT id FROM {table} WHERE {predicate} ORDER BY id"
+
+                    for predicate in [ "UPPER(name) = 'MATCH'"; "UPPER(name) IN ('MATCH')" ] do
+                        Expect.equal
+                            (select "indexed" predicate)
+                            (select "scanned" predicate)
+                            "an extension override bypasses stored expression candidates"
+
+                    let plan =
+                        run store overridden "EXPLAIN SELECT id FROM indexed WHERE UPPER(name) = 'MATCH'"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "ALL") "the overridden function does not claim its stored index"
+                    Expect.equal plan.Key None "the overridden function reports no expression index"
+
+                    for table in [ "indexed"; "scanned" ] do
+                        Expect.equal
+                            (run store overridden $"UPDATE {table} SET name = 'Changed' WHERE UPPER(name) = 'MATCH'")
+                            (Affected 3UL)
+                            "UPDATE evaluates the runtime override"
+
+                        Expect.equal
+                            (run store overridden $"DELETE FROM {table} WHERE UPPER(name) IN ('MATCH')")
+                            (Affected 3UL)
+                            "DELETE evaluates the runtime override"
+
                 testCase "UPPER expression indexes enforce uniqueness and narrow predicates"
                 <| fun _ ->
                     let store = newStore ()
