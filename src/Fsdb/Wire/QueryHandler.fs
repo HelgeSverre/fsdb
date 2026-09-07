@@ -3399,6 +3399,17 @@ let private completionDirective (present: Group) (negated: Group) =
     else
         EnableCompletion
 
+let private (|RegexMatch|_|) (regex: Regex) input =
+    let matched = regex.Match input
+    if matched.Success then Some matched else None
+
+let private capture (index: int) (matched: Match) = matched.Groups.[index].Value
+
+let private hasCapture (index: int) (matched: Match) = matched.Groups.[index].Success
+
+let private tryCapture (index: int) (matched: Match) : string option =
+    if hasCapture index matched then Some(capture index matched) else None
+
 let private tryTransactionCompletion command =
     let matched = transactionCompletion.Match command
 
@@ -3418,168 +3429,110 @@ let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe
     let command = sql.TrimStart()
     let completion = tryTransactionCompletion command
 
-    if setAutocommit.IsMatch sql then
-        Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
-    elif setTransactionIsolation.IsMatch sql then
-        let m = setTransactionIsolation.Match sql
-
+    match sql, command with
+    | RegexMatch setAutocommit matched, _ -> Some(SetAutocommit(capture 1 matched))
+    | RegexMatch setTransactionIsolation matched, _ ->
         let scope =
-            match m.Groups.[1].Value.ToUpperInvariant() with
+            match (capture 1 matched).ToUpperInvariant() with
             | "SESSION" -> SessionIsolation
             | "GLOBAL" -> GlobalIsolation
             | _ -> NextTransactionIsolation
 
-        Some(SetTransactionIsolation(scope, m.Groups.[2].Value))
-    elif setTransactionAccess.IsMatch sql then
-        let m = setTransactionAccess.Match sql
-        Some(SetTransactionAccess(m.Groups.[1].Success, m.Groups.[2].Value.Equals("ONLY", StringComparison.OrdinalIgnoreCase)))
-    elif setCharacterSet.IsMatch sql then
-        Some(SetCharacterSet((setCharacterSet.Match sql).Groups.[1].Value))
-    elif alterCurrentUserPasswordRe.IsMatch sql then
-        Some(SetPassword(None, (alterCurrentUserPasswordRe.Match sql).Groups.[1].Value))
-    elif setPasswordRe.IsMatch sql then
-        let m = setPasswordRe.Match sql
-        Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
-    elif setDefaultRoleStatement.IsMatch command then
-        Some SetDefaultRoleStatement
-    elif setRoleStatement.IsMatch command then
-        Some SetRoleStatement
-    elif command.StartsWith("SET ", StringComparison.OrdinalIgnoreCase) then
-        Some SetVar
-    elif rollbackToSavepointStmt.IsMatch sql then
-        Some(RollbackTo((rollbackToSavepointStmt.Match sql).Groups.[2].Value))
-    elif beginTx.IsMatch command then
-        let mode = (beginTx.Match command).Groups.[1]
-        Some(Begin(if mode.Success then Some(mode.Value = "ONLY") else None))
-    elif completion.IsSome then
-        completion
-    elif savepointStmt.IsMatch sql then
-        Some(Savepoint((savepointStmt.Match sql).Groups.[1].Value))
-    elif releaseSavepointStmt.IsMatch sql then
-        Some(Release((releaseSavepointStmt.Match sql).Groups.[1].Value))
-    elif command.StartsWith("USE ", StringComparison.OrdinalIgnoreCase) then
+        Some(SetTransactionIsolation(scope, capture 2 matched))
+    | RegexMatch setTransactionAccess matched, _ ->
+        Some(
+            SetTransactionAccess(
+                hasCapture 1 matched,
+                (capture 2 matched).Equals("ONLY", StringComparison.OrdinalIgnoreCase)
+            )
+        )
+    | RegexMatch setCharacterSet matched, _ -> Some(SetCharacterSet(capture 1 matched))
+    | RegexMatch alterCurrentUserPasswordRe matched, _ -> Some(SetPassword(None, capture 1 matched))
+    | RegexMatch setPasswordRe matched, _ ->
+        Some(SetPassword(tryCapture 1 matched, capture 2 matched))
+    | _, RegexMatch setDefaultRoleStatement _ -> Some SetDefaultRoleStatement
+    | _, RegexMatch setRoleStatement _ -> Some SetRoleStatement
+    | _, _ when command.StartsWith("SET ", StringComparison.OrdinalIgnoreCase) -> Some SetVar
+    | RegexMatch rollbackToSavepointStmt matched, _ -> Some(RollbackTo(capture 2 matched))
+    | _, RegexMatch beginTx matched ->
+        let readOnly = tryCapture 1 matched |> Option.map (_.Equals("ONLY", StringComparison.OrdinalIgnoreCase))
+        Some(Begin readOnly)
+    | _, _ when completion.IsSome -> completion
+    | RegexMatch savepointStmt matched, _ -> Some(Savepoint(capture 1 matched))
+    | RegexMatch releaseSavepointStmt matched, _ -> Some(Release(capture 1 matched))
+    | _, _ when command.StartsWith("USE ", StringComparison.OrdinalIgnoreCase) ->
         Some(Use(command.Substring(4).Trim().Trim('`')))
-    elif showVariablesRe.IsMatch sql then
-        let scope = (showVariablesRe.Match sql).Groups.[1].Value
+    | RegexMatch showVariablesRe matched, _ ->
+        let scope = capture 1 matched
         Some(ShowVariables(scope.Trim().ToUpperInvariant() = "GLOBAL"))
-    elif showStatusRe.IsMatch sql then
-        let scope = (showStatusRe.Match sql).Groups.[1]
-        Some(ShowStatus(scope.Success && scope.Value.Equals("GLOBAL", StringComparison.OrdinalIgnoreCase)))
-    elif showEnginesRe.IsMatch sql then
-        Some ShowEngines
-    elif showEngineInnodbStatusRe.IsMatch sql then
-        Some ShowEngineInnodbStatus
-    elif showPluginsRe.IsMatch sql then
-        Some ShowPlugins
-    elif showBinaryLogsRe.IsMatch sql then
-        Some ShowBinaryLogs
-    elif showBinaryLogStatusRe.IsMatch sql then
-        Some ShowBinaryLogStatus
-    elif showReplicaStatusRe.IsMatch sql then
-        Some ShowReplicaStatus
-    elif maintenanceTableRe.IsMatch sql then
-        let matched = maintenanceTableRe.Match sql
-        let tables = matched.Groups.[2].Value.Split(',') |> Array.map (fun table -> table.Trim()) |> List.ofArray
-        Some(MaintainTables(matched.Groups.[1].Value.ToLowerInvariant(), tables))
-    elif partitionMaintenanceRe.IsMatch sql then
+    | RegexMatch showStatusRe matched, _ ->
+        let isGlobal = tryCapture 1 matched |> Option.exists (_.Equals("GLOBAL", StringComparison.OrdinalIgnoreCase))
+        Some(ShowStatus isGlobal)
+    | RegexMatch showEnginesRe _, _ -> Some ShowEngines
+    | RegexMatch showEngineInnodbStatusRe _, _ -> Some ShowEngineInnodbStatus
+    | RegexMatch showPluginsRe _, _ -> Some ShowPlugins
+    | RegexMatch showBinaryLogsRe _, _ -> Some ShowBinaryLogs
+    | RegexMatch showBinaryLogStatusRe _, _ -> Some ShowBinaryLogStatus
+    | RegexMatch showReplicaStatusRe _, _ -> Some ShowReplicaStatus
+    | RegexMatch maintenanceTableRe matched, _ ->
+        let tables = (capture 2 matched).Split(',') |> Array.map _.Trim() |> Array.toList
+        Some(MaintainTables((capture 1 matched).ToLowerInvariant(), tables))
+    | RegexMatch partitionMaintenanceRe _, _ ->
         match Parser.parsePartitionMaintenanceWithOptions parserOptions sql with
         | Ok(table, operation, partitions) -> Some(MaintainPartitions(operation, table, partitions))
         | Error _ -> None
-    elif showOpenTablesRe.IsMatch sql then
-        let m = showOpenTablesRe.Match sql
+    | RegexMatch showOpenTablesRe matched, _ ->
         Some(
             ShowOpenTables(
-                (if m.Groups.[1].Success then Some(stripIdentifierQuotes m.Groups.[1].Value) else None),
-                (if m.Groups.[2].Success then Some m.Groups.[2].Value else None)
+                tryCapture 1 matched |> Option.map stripIdentifierQuotes,
+                tryCapture 2 matched
             )
         )
-    elif showCreateDatabaseRe.IsMatch sql then
-        Some(ShowCreateDatabase(stripIdentifierQuotes (showCreateDatabaseRe.Match sql).Groups.[1].Value))
-    elif showCharsetRe.IsMatch sql then
-        Some ShowCharset
-    elif showPrivilegesRe.IsMatch sql then
-        Some ShowPrivileges
-    elif showCreateUserRe.IsMatch sql then
-        Some(ShowCreateUser((showCreateUserRe.Match sql).Groups.[1].Value))
-    elif showCreateProgramRe.IsMatch sql then
-        let matched = showCreateProgramRe.Match sql
-        Some(ShowCreateProgram(matched.Groups.[1].Value.ToUpperInvariant(), matched.Groups.[2].Value))
-    elif showCreateTriggerRe.IsMatch sql then
-        Some(ShowCreateTrigger((showCreateTriggerRe.Match sql).Groups.[1].Value))
-    elif showGrantsRe.IsMatch sql then
-        let m = showGrantsRe.Match sql
-        Some(
-            ShowGrants(
-                (if m.Groups.[1].Success then Some m.Groups.[1].Value else None),
-                (if m.Groups.[2].Success then Some m.Groups.[2].Value else None)
-            )
-        )
-    elif flushPrivilegesRe.IsMatch sql then
-        Some FlushPrivileges
-    elif flushUserResourcesRe.IsMatch sql then
-        Some FlushUserResources
-    elif flushStatusRe.IsMatch sql then
-        Some FlushStatus
-    elif flushTablesRe.IsMatch sql then
-        Some FlushTables
-    elif flushOptimizerCostsRe.IsMatch sql then
-        Some FlushOptimizerCosts
-    elif flushLogsRe.IsMatch sql then
-        Some FlushLogs
-    elif lockTablesRe.IsMatch sql then
-        Some LockTables
-    elif unlockTablesRe.IsMatch sql then
-        Some UnlockTables
-    elif showProcesslistRe.IsMatch sql then
-        Some(ShowProcesslist((showProcesslistRe.Match sql).Groups.[1].Success))
-    elif showTriggersRe.IsMatch sql then
-        let m = showTriggersRe.Match sql
-        Some(ShowTriggers(if m.Groups.[1].Success then Some(stripIdentifierQuotes m.Groups.[1].Value) else None))
-    elif showEventsRe.IsMatch sql then
-        let m = showEventsRe.Match sql
-        Some(ShowEvents(if m.Groups.[1].Success then Some(stripIdentifierQuotes m.Groups.[1].Value) else None))
-    elif showRoutineStatusRe.IsMatch sql then
-        Some(ShowRoutineStatus((showRoutineStatusRe.Match sql).Groups.[1].Value.ToUpperInvariant()))
-    elif killRe.IsMatch sql then
-        let m = killRe.Match sql
-        Some(Kill(m.Groups.[1].Value.ToUpperInvariant() = "QUERY", int64 m.Groups.[2].Value))
-    elif alterKeysRe.IsMatch sql then
-        Some(AlterKeysNoop(stripIdentifierQuotes (alterKeysRe.Match sql).Groups.[1].Value))
-    elif showCountWarningsRe.IsMatch sql then
-        Some(ShowMessageCount false)
-    elif showCountErrorsRe.IsMatch sql then
-        Some(ShowMessageCount true)
-    elif showWarningsRe.IsMatch sql then
-        Some(ShowConditions false)
-    elif showErrorsRe.IsMatch sql then
-        Some(ShowConditions true)
-    elif command.StartsWith("SHOW DATABASES", StringComparison.OrdinalIgnoreCase) then
-        Some ShowDatabases
-    elif command.StartsWith("SHOW TABLE STATUS", StringComparison.OrdinalIgnoreCase) then
-        Some ShowTableStatus
-    elif command.StartsWith("SHOW COLLATION", StringComparison.OrdinalIgnoreCase) then
-        Some ShowCollation
-    elif
-        command.StartsWith("SHOW TABLES", StringComparison.OrdinalIgnoreCase)
-        || command.StartsWith("SHOW FULL TABLES", StringComparison.OrdinalIgnoreCase)
-    then
+    | RegexMatch showCreateDatabaseRe matched, _ -> Some(ShowCreateDatabase(stripIdentifierQuotes (capture 1 matched)))
+    | RegexMatch showCharsetRe _, _ -> Some ShowCharset
+    | RegexMatch showPrivilegesRe _, _ -> Some ShowPrivileges
+    | RegexMatch showCreateUserRe matched, _ -> Some(ShowCreateUser(capture 1 matched))
+    | RegexMatch showCreateProgramRe matched, _ ->
+        Some(ShowCreateProgram((capture 1 matched).ToUpperInvariant(), capture 2 matched))
+    | RegexMatch showCreateTriggerRe matched, _ -> Some(ShowCreateTrigger(capture 1 matched))
+    | RegexMatch showGrantsRe matched, _ ->
+        Some(ShowGrants(tryCapture 1 matched, tryCapture 2 matched))
+    | RegexMatch flushPrivilegesRe _, _ -> Some FlushPrivileges
+    | RegexMatch flushUserResourcesRe _, _ -> Some FlushUserResources
+    | RegexMatch flushStatusRe _, _ -> Some FlushStatus
+    | RegexMatch flushTablesRe _, _ -> Some FlushTables
+    | RegexMatch flushOptimizerCostsRe _, _ -> Some FlushOptimizerCosts
+    | RegexMatch flushLogsRe _, _ -> Some FlushLogs
+    | RegexMatch lockTablesRe _, _ -> Some LockTables
+    | RegexMatch unlockTablesRe _, _ -> Some UnlockTables
+    | RegexMatch showProcesslistRe matched, _ -> Some(ShowProcesslist(hasCapture 1 matched))
+    | RegexMatch showTriggersRe matched, _ ->
+        Some(ShowTriggers(tryCapture 1 matched |> Option.map stripIdentifierQuotes))
+    | RegexMatch showEventsRe matched, _ ->
+        Some(ShowEvents(tryCapture 1 matched |> Option.map stripIdentifierQuotes))
+    | RegexMatch showRoutineStatusRe matched, _ -> Some(ShowRoutineStatus((capture 1 matched).ToUpperInvariant()))
+    | RegexMatch killRe matched, _ ->
+        Some(Kill((capture 1 matched).ToUpperInvariant() = "QUERY", int64 (capture 2 matched)))
+    | RegexMatch alterKeysRe matched, _ -> Some(AlterKeysNoop(stripIdentifierQuotes (capture 1 matched)))
+    | RegexMatch showCountWarningsRe _, _ -> Some(ShowMessageCount false)
+    | RegexMatch showCountErrorsRe _, _ -> Some(ShowMessageCount true)
+    | RegexMatch showWarningsRe _, _ -> Some(ShowConditions false)
+    | RegexMatch showErrorsRe _, _ -> Some(ShowConditions true)
+    | _, _ when command.StartsWith("SHOW DATABASES", StringComparison.OrdinalIgnoreCase) -> Some ShowDatabases
+    | _, _ when command.StartsWith("SHOW TABLE STATUS", StringComparison.OrdinalIgnoreCase) -> Some ShowTableStatus
+    | _, _ when command.StartsWith("SHOW COLLATION", StringComparison.OrdinalIgnoreCase) -> Some ShowCollation
+    | _, _
+        when command.StartsWith("SHOW TABLES", StringComparison.OrdinalIgnoreCase)
+             || command.StartsWith("SHOW FULL TABLES", StringComparison.OrdinalIgnoreCase) ->
         Some ShowTables
-    elif showCreateViewRe.IsMatch sql then
-        Some(ShowCreateView((showCreateViewRe.Match sql).Groups.[1].Value))
-    elif showCreateTableRe.IsMatch sql then
-        Some(ShowCreate((showCreateTableRe.Match sql).Groups.[1].Value))
-    elif showColumnsRe.IsMatch sql then
-        let m = showColumnsRe.Match sql
-        let dbOverride = if m.Groups.[4].Success then Some m.Groups.[4].Value else None
-        Some(ShowColumns(m.Groups.[1].Success, m.Groups.[2].Value, dbOverride))
-    elif describeRe.IsMatch sql then
-        Some(Describe((describeRe.Match sql).Groups.[1].Value))
-    elif showIndexRe.IsMatch sql then
-        let m = showIndexRe.Match sql
-        let dbOverride = if m.Groups.[3].Success then Some m.Groups.[3].Value else None
-        Some(ShowIndex(m.Groups.[1].Value, dbOverride))
-    else
-        None
+    | RegexMatch showCreateViewRe matched, _ -> Some(ShowCreateView(capture 1 matched))
+    | RegexMatch showCreateTableRe matched, _ -> Some(ShowCreate(capture 1 matched))
+    | RegexMatch showColumnsRe matched, _ ->
+        Some(ShowColumns(hasCapture 1 matched, capture 2 matched, tryCapture 4 matched))
+    | RegexMatch describeRe matched, _ -> Some(Describe(capture 1 matched))
+    | RegexMatch showIndexRe matched, _ ->
+        Some(ShowIndex(capture 1 matched, tryCapture 3 matched))
+    | _ -> None
 
 let private acquireResolvedTableAccesses (session: Session) (accesses: TableLocks.Access list) =
     let privileges =
