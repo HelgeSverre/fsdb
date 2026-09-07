@@ -228,7 +228,7 @@ let tests =
 
               Expect.equal dictionary (naturalScores index "database" |> restricted) "dictionary scoring uses the same restriction"
 
-          testCase "required-word boolean dictionaries preserve scores and candidate scope"
+          testCase "required-term boolean dictionaries preserve scores and candidate scope"
           <| fun _ ->
               let index =
                   buildIndexWith
@@ -244,7 +244,7 @@ let tests =
                   |> Map.ofSeq
 
               let expected = booleanScores index "+database +concurrency +database"
-              let actual = tryRequiredWordBooleanScoresDictionary index "+database +concurrency +database" |> Option.get |> asMap
+              let actual = tryRequiredTermBooleanScoresDictionary index "+database +concurrency +database" |> Option.get |> asMap
 
               Expect.equal actual expected "required terms retain duplicate-term scoring"
 
@@ -252,16 +252,23 @@ let tests =
               let restricted = expected |> Map.filter (fun id _ -> candidates.Contains id)
 
               let scoped =
-                  tryRequiredWordBooleanScoresDictionaryWithin (Some candidates) index "+database +concurrency +database"
+                  tryRequiredTermBooleanScoresDictionaryWithin (Some candidates) index "+database +concurrency +database"
                   |> Option.get
                   |> asMap
 
               Expect.equal scoped restricted "candidate scope changes rows, not corpus-wide IDF"
               Expect.isEmpty
-                  (tryRequiredWordBooleanScoresDictionary index "+database +missing" |> Option.get)
+                  (tryRequiredTermBooleanScoresDictionary index "+database +missing" |> Option.get)
                   "a missing required posting makes the result empty"
-              Expect.isNone (tryRequiredWordBooleanScoresDictionary index "database +concurrency") "optional terms use general scoring"
-              Expect.isNone (tryRequiredWordBooleanScoresDictionary index "+data*") "prefix terms use general scoring"
+
+              let prefixExpected = booleanScores index "+data* +concur*"
+              let prefixActual = tryRequiredTermBooleanScoresDictionary index "+data* +concur*" |> Option.get |> asMap
+
+              Expect.equal prefixActual prefixExpected "required prefixes use their maintained postings"
+              Expect.isEmpty
+                  (tryRequiredTermBooleanScoresDictionary index "+the" |> Option.get)
+                  "an unindexed required stopword cannot match"
+              Expect.isNone (tryRequiredTermBooleanScoresDictionary index "database +concurrency") "optional terms use general scoring"
 
           testCase "a deeply nested boolean query is bounded, not a stack overflow"
           <| fun _ ->

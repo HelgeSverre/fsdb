@@ -589,24 +589,29 @@ let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
 let internal booleanScoresWithin (candidateIds: Set<'id>) (index: Index<'id>) (query: string) =
     booleanScoresWithinOption (Some candidateIds) index query
 
-let internal tryRequiredWordBooleanScoresDictionaryWithin
+let internal tryRequiredTermBooleanScoresDictionaryWithin
     (candidateIds: Set<'id> option)
     (index: Index<'id>)
     (query: string)
     : Collections.Generic.Dictionary<'id, float> option =
-    let rec requiredWords (found: Token list) =
+    let rec requiredTerms (found: (Token * bool) list) =
         function
         | [] when not found.IsEmpty -> Some(List.rev found)
-        | (Must, BWord(term, false)) :: rest when isSearchable term -> requiredWords (term :: found) rest
+        | (Must, BWord(term, prefix)) :: rest -> requiredTerms ((term, prefix) :: found) rest
         | _ -> None
 
     parseBooleanQuery index.Collation query
-    |> requiredWords []
+    |> requiredTerms []
     |> Option.map (fun terms ->
+        let postingFor (term: Token, prefix) =
+            if prefix then Map.tryFind term.Key index.PrefixPostings
+            elif isSearchable term then Map.tryFind term.Key index.Postings
+            else None
+
         let postings =
             terms
             |> List.map (fun term ->
-                Map.tryFind term.Key index.Postings
+                postingFor term
                 |> Option.map (fun rows ->
                     let weight = idf index rows.Count
                     rows, weight * weight))
@@ -645,8 +650,8 @@ let internal tryRequiredWordBooleanScoresDictionaryWithin
 
             scores)
 
-let internal tryRequiredWordBooleanScoresDictionary index query =
-    tryRequiredWordBooleanScoresDictionaryWithin None index query
+let internal tryRequiredTermBooleanScoresDictionary index query =
+    tryRequiredTermBooleanScoresDictionaryWithin None index query
 
 let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
     // A matched row whose contributions all cancelled (only `~` terms hit,
