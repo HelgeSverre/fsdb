@@ -6734,6 +6734,65 @@ and private innerJoinChainPreservesLeftOrder
         preservesOrder [ source.Qualifier, source.Table.Columns ] joins
     | _ -> false
 
+and private tryFullTextDrivenJoinOrder
+    (store: Store)
+    (registry: Registry)
+    (sources: FullTextPhysicalSource list)
+    (ownedNodes: (FullTextPhysicalSource * Expr) list)
+    (select: SelectStmt)
+    : SelectStmt option =
+    let projectionsAreScalar =
+        select.Projections
+        |> List.forall (fun (expression, _) ->
+            not (containsAggregate registry expression)
+            && (collectWindowFuncs expression).IsEmpty)
+
+    let shapeAllowsReordering =
+        not select.StraightJoin
+        && select.Limit.IsSome
+        && not select.CalculateFoundRows
+        && select.OrderBy.IsEmpty
+        && select.GroupBy.IsEmpty
+        && not select.Rollup
+        && select.Windows.IsEmpty
+        && select.Ctes.IsEmpty
+        && select.Having.IsNone
+        && select.Locking.IsEmpty
+        && not select.Distinct
+        && projectionsAreScalar
+        && selectJoinExpressions select |> List.forall (hasUnqualifiedReference >> not)
+
+    match select.From, select.Joins, ownedNodes with
+    | Some(FromTable _ as originalBase), [ join ], [ owner, (MatchAgainst(_, _, mode) as matchNode) ]
+        when shapeAllowsReordering
+             && mode <> BooleanMode
+             && join.Kind = InnerJoin
+             && join.Using.IsEmpty
+             && (match join.Table with FromTable _ -> true | _ -> false)
+             && owner.Qualifier.Equals(fromItemQualifier join.Table, System.StringComparison.OrdinalIgnoreCase)
+             && select.Where |> Option.exists (collectMatchAgainst >> List.contains matchNode) ->
+        let reorderedJoin = { join with Table = originalBase }
+        let reordered =
+            { select with
+                From = Some join.Table
+                Joins = [ reorderedJoin ] }
+
+        let consumption = joinConsumptionFor reordered.Limit
+        let sourcePredicates, _ =
+            sourcePredicatesForInnerJoins join.Table reordered.Joins consumption reordered.Where
+
+        let baseKey = fromItemQualifier join.Table |> _.ToLowerInvariant()
+        let onlyBasePredicate = sourcePredicates |> Map.forall (fun qualifier _ -> qualifier = baseKey)
+
+        if
+            onlyBasePredicate
+            && innerJoinChainPreservesLeftOrder store sources join.Table reordered.Joins
+        then
+            Some reordered
+        else
+            None
+    | _ -> None
+
 and private tryIndexedPreservedRightProbe
     (store: Store)
     (join: Join)
@@ -6955,36 +7014,36 @@ and private applyJsonTableJoin
     | _ ->
         Error(Err(1064, "JSON_TABLE only supports comma-join, CROSS JOIN, [INNER] JOIN ... ON, and LEFT JOIN ... ON"))
 
+and private selectJoinExpressions (select: SelectStmt) =
+    (select.Projections |> List.map fst)
+    @ (select.Where |> Option.toList)
+    @ select.GroupBy
+    @ (select.Having |> Option.toList)
+    @ (select.OrderBy |> List.map fst)
+    @ (select.Joins |> List.map _.On)
+
+and private hasUnqualifiedReference expression =
+    Expression.exists
+        (function
+        | Col _
+        | Star None -> true
+        | _ -> false)
+        expression
+
+and private qualifiedReferences expression =
+    Expression.collect
+        (function
+        | QualifiedCol(name, _) -> Some(name.ToLowerInvariant())
+        | _ -> None)
+        expression
+    |> Set.ofList
+
 and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) : Join list =
     let qualifier (source: FromItem) = fromItemQualifier source |> _.ToLowerInvariant()
 
-    let references expression =
-        Expression.collect
-            (function
-            | QualifiedCol(name, _) -> Some(name.ToLowerInvariant())
-            | _ -> None)
-            expression
-        |> Set.ofList
-
-    let hasUnqualifiedReference expression =
-        Expression.exists
-            (function
-            | Col _
-            | Star None -> true
-            | _ -> false)
-            expression
-
-    let expressions =
-        (select.Projections |> List.map fst)
-        @ (select.Where |> Option.toList)
-        @ select.GroupBy
-        @ (select.Having |> Option.toList)
-        @ (select.OrderBy |> List.map fst)
-        @ (select.Joins |> List.map _.On)
-
     let eligible =
         not select.StraightJoin
-        && expressions |> List.forall (hasUnqualifiedReference >> not)
+        && selectJoinExpressions select |> List.forall (hasUnqualifiedReference >> not)
         && select.Joins
            |> List.forall (fun join ->
                join.Kind = InnerJoin
@@ -7032,7 +7091,7 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
                     remaining
                     |> List.indexed
                     |> List.filter (fun (_, join) ->
-                        references join.On
+                        qualifiedReferences join.On
                         |> Set.forall (fun name -> name = qualifier join.Table || bound |> Set.contains name))
 
                 match ready with
@@ -13001,16 +13060,21 @@ and private runFullTextSelect
     match select.From, fullTextPhysicalSources store dbName sourceItems with
     | None, _ -> unsupported ()
     | _, Error error -> error, [], []
-    | Some fromItem, Ok sources ->
-        let joinConsumption = joinConsumptionFor select.Limit
-        let sourcePredicates, remainingWhere =
-            sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
-
-        let select = { select with Where = remainingWhere }
-
+    | Some originalFromItem, Ok sources ->
         match matchNodes |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node)) with
         | Error error -> error, [], []
         | Ok ownedNodes ->
+            let select =
+                tryFullTextDrivenJoinOrder store registry sources ownedNodes select
+                |> Option.defaultValue select
+
+            let fromItem = select.From |> Option.defaultValue originalFromItem
+            let joinConsumption = joinConsumptionFor select.Limit
+            let sourcePredicates, remainingWhere =
+                sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
+
+            let select = { select with Where = remainingWhere }
+
             let prepared =
                 sources
                 |> traverse (fun (source: FullTextPhysicalSource) ->

@@ -382,6 +382,22 @@ let tests =
 
               Expect.equal calls 2 "the relevance-ordered unique join stops after the requested row"
 
+              calls <- 0
+
+              let reversedJoinedSearch =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT d.id, TOUCH(o.id) FROM owners o JOIN docs d ON d.id = o.id WHERE MATCH(d.body) AGAINST('needle') AND TOUCH(o.id) = d.id LIMIT 1"
+
+              match reversedJoinedSearch with
+              | ResultSet(_, [ [ Some id; Some touched ] ]) ->
+                  Expect.equal id "82" "the full-text source drives a reorderable inner join"
+                  Expect.equal id touched "the reordered join retains the written projection"
+              | other -> failtestf "expected one reordered full-text row, got %A" other
+
+              Expect.equal calls 4 "the reordered unique join evaluates only the surviving row"
+
               run store "DELETE FROM owners WHERE id = 82" |> ignore
               calls <- 0
 
