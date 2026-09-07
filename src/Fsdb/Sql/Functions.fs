@@ -3593,31 +3593,28 @@ type private AesConfiguration =
     { KeyLength: int
       CipherMode: AesCipherMode }
 
-let private aesModeNames =
+let private aesConfigurations =
     [ for keySize in [ 128; 192; 256 ] do
-          for cipherMode in [ "ecb"; "cbc"; "cfb1"; "cfb8"; "cfb128"; "ofb" ] do
-              yield sprintf "aes-%d-%s" keySize cipherMode ]
+          for suffix, cipherMode in
+              [ "ecb", AesEcb
+                "cbc", AesCbc
+                "cfb1", AesCfb1
+                "cfb8", AesCfb8
+                "cfb128", AesCfb128
+                "ofb", AesOfb ] do
+              sprintf "aes-%d-%s" keySize suffix,
+              { KeyLength = keySize / 8
+                CipherMode = cipherMode } ]
+    |> Map.ofList
 
 /// The canonical `block_encryption_mode` value, when MySQL supports it.
 let tryBlockEncryptionMode (value: string) : string option =
     let canonical = value.Trim().ToLowerInvariant()
-    if List.contains canonical aesModeNames then Some canonical else None
+    if Map.containsKey canonical aesConfigurations then Some canonical else None
 
 let private aesConfiguration (value: string) : AesConfiguration =
     match tryBlockEncryptionMode value with
-    | Some canonical ->
-        let parts = canonical.Split '-'
-
-        { KeyLength = int parts.[1] / 8
-          CipherMode =
-            match parts.[2] with
-            | "ecb" -> AesEcb
-            | "cbc" -> AesCbc
-            | "cfb1" -> AesCfb1
-            | "cfb8" -> AesCfb8
-            | "cfb128" -> AesCfb128
-            | "ofb" -> AesOfb
-            | _ -> invalidArg "value" "Unsupported AES cipher mode" }
+    | Some canonical -> Map.find canonical aesConfigurations
     | None -> invalidArg "value" "Unsupported AES block encryption mode"
 
 let private aesBytes (value: Value) : byte[] =
