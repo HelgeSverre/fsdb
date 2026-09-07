@@ -9413,21 +9413,48 @@ and private tryPhysicalProjection
         && not select.Distinct
         && not select.CalculateFoundRows
 
+    let physicalTable (tableRef: TableRef) =
+        tryPhysicalTableRef store dbName tableRef
+        |> Result.toOption
+        |> Option.flatten
+        |> Option.map (fun table ->
+            { OutputColumns = table.Columns
+              Source = tableRef
+              SourceTable = table
+              SourceIndices = [ 0 .. table.Columns.Length - 1 ] })
+
+    let tableProjection (tableRef: TableRef) =
+        if not tableRef.Partitions.IsEmpty then
+            None
+        elif tableRef.Database.IsSome then
+            physicalTable tableRef
+        else
+            match currentCteScope () |> Map.tryFind (tableRef.Table.ToLowerInvariant()) with
+            | Some binding when binding.StatementStable -> binding.PhysicalProjection
+            | Some _ -> None
+            | None -> physicalTable tableRef
+
+    let derivedColumn (sourceColumn: ColumnDef) name =
+        { sourceColumn with
+            Name = name
+            Default = None
+            AutoIncrement = false
+            PrimaryKey = false
+            Unique = false
+            Generated = None
+            Comment = ""
+            OnUpdateCurrentTimestamp = false
+            Srid = None }
+
     match source with
-    | FromTable tableRef when tableRef.Database.IsNone && tableRef.Partitions.IsEmpty ->
-        currentCteScope ()
-        |> Map.tryFind (tableRef.Table.ToLowerInvariant())
-        |> Option.bind (fun binding ->
-            if binding.StatementStable then binding.PhysicalProjection else None)
+    | FromTable tableRef -> tableProjection tableRef
     | FromSubquery(PlainSelect select, _)
         when storedValuesMatchReadValues store && simpleSelect select ->
         match select.From with
-        | Some(FromTable tableRef) when tableRef.Partitions.IsEmpty ->
-            tryPhysicalTableRef store dbName tableRef
-            |> Result.toOption
-            |> Option.flatten
-            |> Option.bind (fun table ->
-                let sourceQualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+        | Some innerSource ->
+            tryPhysicalProjection store dbName innerSource
+            |> Option.bind (fun input ->
+                let sourceQualifier = fromItemQualifier innerSource
 
                 let directColumn =
                     function
@@ -9442,7 +9469,7 @@ and private tryPhysicalProjection
                     match
                         directColumn expression
                         |> Option.bind (fun name ->
-                            resolveColumn table.Columns name
+                            resolveColumn input.OutputColumns name
                             |> Result.toOption
                             |> Option.map (fun index -> index, alias |> Option.defaultValue (exprLabel expression)))
                     with
@@ -9456,23 +9483,12 @@ and private tryPhysicalProjection
                     if uniqueNames.Count <> names.Length then
                         None
                     else
-                        let derivedColumn (index, name) =
-                            { table.Columns.[index] with
-                                Name = name
-                                Default = None
-                                AutoIncrement = false
-                                PrimaryKey = false
-                                Unique = false
-                                Generated = None
-                                Comment = ""
-                                OnUpdateCurrentTimestamp = false
-                                Srid = None }
-
                         Some
-                            { OutputColumns = projected |> List.map derivedColumn
-                              Source = tableRef
-                              SourceTable = table
-                              SourceIndices = projected |> List.map fst }))
+                            { input with
+                                OutputColumns =
+                                    projected
+                                    |> List.map (fun (index, name) -> derivedColumn input.OutputColumns.[index] name)
+                                SourceIndices = projected |> List.map (fst >> fun index -> input.SourceIndices.[index]) }))
         | _ -> None
     | _ -> None
 

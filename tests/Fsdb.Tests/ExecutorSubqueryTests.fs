@@ -292,6 +292,16 @@ let tests =
               assertRows
                   "WITH labels AS (SELECT label FROM inner_labels) SELECT o.id, EXISTS (SELECT 1 FROM labels d WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id"
 
+              assertRows
+                  ("SELECT o.id, EXISTS (SELECT 1 FROM "
+                   + "(SELECT candidate AS nested_candidate FROM (SELECT label AS candidate FROM inner_labels) first) d "
+                   + "WHERE d.nested_candidate = o.label) FROM outer_labels o ORDER BY o.id")
+
+              assertRows
+                  ("WITH first(candidate) AS (SELECT label FROM inner_labels), "
+                   + "labels(label) AS (SELECT candidate FROM first) "
+                   + "SELECT o.id, EXISTS (SELECT 1 FROM labels d WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id")
+
               match
                   runDefault
                       store

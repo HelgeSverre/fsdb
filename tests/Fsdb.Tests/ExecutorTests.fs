@@ -7102,6 +7102,17 @@ let tests =
                     assertIndexedWork
                         ("WITH candidates(id, user_id, observed) AS "
                          + "(SELECT id AS order_key, user_id AS owner_key, observed AS seen FROM orders)")
+                        "candidates c"
+
+                    assertIndexedWork
+                        ""
+                        ("(SELECT order_key AS id, owner_key AS user_id, seen AS observed FROM "
+                         + "(SELECT id AS order_key, user_id AS owner_key, observed AS seen FROM orders) nested) c")
+
+                    assertIndexedWork
+                        ("WITH first(order_key, owner_key, seen) AS "
+                         + "(SELECT id, user_id, observed FROM orders), "
+                         + "candidates(id, user_id, observed) AS (SELECT order_key, owner_key, seen FROM first)")
                         "candidates c" ]
 
           testList
