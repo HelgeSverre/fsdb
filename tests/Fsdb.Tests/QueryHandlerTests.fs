@@ -4039,6 +4039,18 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected failed outer DML to roll back function effects, got %A" other
 
+              match execute "INSERT INTO function_targets VALUES (record_value(1)), (2)" with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected duplicate VALUES failure, got %A" other
+
+              match execute "SELECT id FROM function_targets ORDER BY id" with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected failed VALUES rows to roll back, got %A" other
+
+              match execute "SELECT COUNT(*) FROM function_effects" with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected failed VALUES function effects to roll back, got %A" other
+
               expectAffected "BEGIN"
 
               match execute "SELECT record_value(7)" with

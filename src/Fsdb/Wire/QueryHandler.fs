@@ -2874,6 +2874,33 @@ let private startsTransaction = function
     | Do _ -> true
     | _ -> false
 
+let private isRegisteredScalar (session: Session) (dbName: string) (name: string) =
+    let normalized = name.ToUpperInvariant()
+
+    session.CustomFunctions.Scalars.ContainsKey normalized
+    || (not (normalized.Contains('.', StringComparison.Ordinal))
+        && session.CustomFunctions.Scalars.ContainsKey((dbName + "." + normalized).ToUpperInvariant()))
+
+let private canExecuteDirectAutocommit (session: Session) dbName statement =
+    match statement with
+    | Insert(table, _, _, _, _) ->
+        let mayRunNestedWrites =
+            Expression.statementExists
+                (function
+                | Exists _
+                | Subquery _
+                | InSubquery _
+                | QuantifiedComparison _ -> true
+                | FuncCall(name, _) -> isRegisteredScalar session dbName name
+                | _ -> false)
+                statement
+
+        let database, table = splitQualified dbName table
+
+        not mayRunNestedWrites
+        && (Storage.tableSnapshot (Session.currentStore session) database table |> Result.isOk)
+    | _ -> false
+
 let private autocommitDisabled (session: Session) =
     lookupVar session "autocommit" |> Option.flatten = Some "0"
 
@@ -3116,7 +3143,11 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
                 else
                     session
 
-            if session.Tx.IsSome || not (startsTransaction stmt) then
+            if
+                session.Tx.IsSome
+                || not (startsTransaction stmt)
+                || canExecuteDirectAutocommit session dbName stmt
+            then
                 executeParsedCore session stmt
             else
                 let mutable working =
