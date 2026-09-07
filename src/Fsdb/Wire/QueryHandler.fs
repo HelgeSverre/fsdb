@@ -112,16 +112,9 @@ let rec private containsResultSet =
     | Affected _
     | Err _ -> false
 
-/// Finds every top-level `?` placeholder in `sql` — one that isn't inside a
-/// `'...'`/`"..."` string literal, a `` `...` `` backtick identifier, or a
-/// `-- `/`#`/`/* ... */` comment — and returns its char offset, in order.
-/// Shared by COM_STMT_PREPARE (which only needs the count, for
-/// COM_STMT_PREPARE_OK's param count) and COM_STMT_EXECUTE (which needs the
-/// positions themselves, via `substitutePlaceholders`), so there's exactly
-/// one definition of "what counts as a placeholder". Backslash escapes a
-/// following quote inside `'`/`"` strings (MySQL's default
-/// NO_BACKSLASH_ESCAPES-off behavior); backtick identifiers only escape via
-/// a doubled backtick, matching MySQL's identifier-quoting rules.
+/// Returns placeholder offsets outside quoted values, identifiers, and
+/// comments. Prepare and execute share this scanner so parameter counts and
+/// substitution cannot drift.
 let private placeholderPositionsWithOptions (options: Parser.ParserOptions) (sql: string) : int list =
     let n = sql.Length
     let positions = ResizeArray<int>()
@@ -211,16 +204,9 @@ let private substitutePlaceholdersWithOptions
 let substitutePlaceholders (sql: string) (literals: string list) : string =
     substitutePlaceholdersWithOptions Parser.defaultOptions sql literals
 
-/// Renders a bound parameter value as a SQL literal safe to splice into the
-/// stored statement text. Default mode escapes backslash, quotes, and line
-/// endings with backslashes; `NO_BACKSLASH_ESCAPES` doubles quotes and keeps
-/// every other character literal. In default mode, CR/LF use `\r`/`\n`, not
-/// left as raw bytes — `Parser.quotedStringChar` already round-trips those
-/// two escapes back to CR/LF, but a raw CR spliced into the SQL text gets
-/// silently normalized away by FParsec's CharStream on re-parse (it treats
-/// bare `\r`/`\r\n` as line endings), corrupting any multi-line value
-/// (e.g. an HTML textarea's CRLF body) on the way through a prepared
-/// statement.
+/// FParsec normalizes raw CR and CRLF while reparsing prepared SQL, so the
+/// default mode escapes line endings. NO_BACKSLASH_ESCAPES instead preserves
+/// every character except doubled quotes.
 let private escapeSqlString (options: Parser.ParserOptions) (s: string) : string =
     if options.NoBackslashEscapes then
         s.Replace("'", "''")
@@ -6755,17 +6741,6 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
                         | None -> withStoredFunctionRegistry dispatch session (fun current -> executeStatement current sql rawSql)
 
-/// No SQL engine failure should ever escape as a raw .NET exception — the
-/// only two paths into `dispatch` (the parser, well guarded, and
-/// `Storage.coerceValue`'s numeric casts, which are not) both funnel into
-/// `Executor`, and `Server`'s connection loop only catches
-/// `PacketTooLargeException`, so anything else here would otherwise unwind
-/// straight to the socket read loop and silently drop the connection with
-/// no ERR packet. Verified reachable: `INSERT INTO t VALUES (1e300)` into a
-/// DECIMAL column throws `OverflowException` from `decimal d`.
-///
-/// `Storage.LockWaitTimeout` covers both an explicit gate timeout and an
-/// optimistic commit conflict; both are retryable 1205 errors.
 let private recordResult ((session, result): Session * QueryResult) : Session * QueryResult =
     let session = if containsResultSet result then Session.trackTransactionResultSet session else session
     let session =
@@ -6795,6 +6770,9 @@ let private abortTransaction (session: Session) =
     let session = { session with Tx = None }
     if hadTransaction then Session.endTransactionTracking session else session
 
+/// Converts engine exceptions into ERR results rather than dropping the
+/// connection. Unexpected failures abort the transaction; retryable lock
+/// conflicts retain MySQL's 1205 contract.
 let private recoverExecutionError (session: Session) (description: string) (error: exn) : Session * QueryResult =
     match error with
     | Storage.DeadlockVictim dbName ->
