@@ -488,7 +488,7 @@ type ServerBenchmarks() =
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "SecondaryOrder", "Planner")>]
     member this.GroupByStringFixedIndexPrefix() =
-        this.Query "SELECT user_id, COUNT(*) FROM orders WHERE status = 'paid' AND user_id <= 64 GROUP BY user_id"
+        this.Query "SELECT status_bucket, COUNT(*) FROM orders WHERE status = 'paid' GROUP BY status_bucket"
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale")>]

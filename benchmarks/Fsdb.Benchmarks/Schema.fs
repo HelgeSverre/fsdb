@@ -123,10 +123,11 @@ let createSchema (conn: MySqlConnection) =
             user_id INT NOT NULL,
             total DECIMAL(10,2) NOT NULL,
             status VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL,
+            status_bucket INT NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL,
             KEY ix_orders_user_id (user_id),
             KEY ix_orders_user_status (user_id, status),
-            KEY ix_orders_status_user (status, user_id)
+            KEY ix_orders_status_bucket (status, status_bucket)
         )
         """
 
@@ -176,10 +177,11 @@ let seed (conn: MySqlConnection) =
                 let userId = 1 + rng.Next(userCount)
                 let total = decimal (rng.Next(500, 100_000)) / 100m
                 let status = statuses.[rng.Next(statuses.Length)]
+                let statusBucket = userId % 64
                 let totalStr = total.ToString(CultureInfo.InvariantCulture)
-                $"({userId},{totalStr},'{status}','{randomDate ()}')" ]
+                $"({userId},{totalStr},'{status}',{statusBucket},'{randomDate ()}')" ]
 
-        runBatch "orders (user_id, total, status, created_at)" (String.Join(",", rows))
+        runBatch "orders (user_id, total, status, status_bucket, created_at)" (String.Join(",", rows))
 
     for batchStart in 0 .. batchSize .. articleCount - 1 do
         let batchEnd = min (batchStart + batchSize - 1) (articleCount - 1)
