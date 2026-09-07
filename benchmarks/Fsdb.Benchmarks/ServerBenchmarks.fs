@@ -419,6 +419,22 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedDerivedRange() =
+        this.Query(
+            "SELECT u.id, (SELECT COUNT(*) FROM (SELECT id, user_id FROM orders) candidates "
+            + "WHERE candidates.user_id < u.id) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedCteRange() =
+        this.Query(
+            "WITH candidates AS (SELECT id, user_id FROM orders) "
+            + "SELECT u.id, (SELECT COUNT(*) FROM candidates c WHERE c.user_id < u.id) FROM users u WHERE u.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.IndexedStringInSubquery() =
         this.Query "SELECT u.id, u.name FROM users u WHERE u.email IN (SELECT email FROM users WHERE id <= 100)"
 
