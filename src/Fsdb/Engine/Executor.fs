@@ -162,8 +162,8 @@ type private GroupInputOrder =
 type private IndexedGroupProjection =
     | GroupValue of int
     | GroupCardinality
-    | NonNullGroupCardinality of int
-    | ConstantGroupValue of Value
+    | GroupNonNullCardinality of int
+    | GroupConstant of Value
 
 type private OrderedIndexCandidate =
     { Terms: IndexOrderTerm list }
@@ -11591,10 +11591,13 @@ and private runGroupedSelect
     | Error(code, message) -> Err(code, message), [], []
     | Ok() ->
 
+    let probe = probeRow columns
+    let probeContext = ctxFor probe
+
     match
         withMetadataProbe (fun () ->
-            matches (probeRow columns)
-            |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr (ctxFor (probeRow columns))) |> Result.map ignore)
+            matches probe
+            |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr probeContext) |> Result.map ignore)
             |> Result.bind (fun _ -> havingOk probeRewrite [])
             |> Result.bind (fun _ -> projectGroup probeRewrite [])
             |> Result.bind (fun probeProjected ->
@@ -11605,7 +11608,7 @@ and private runGroupedSelect
     | Ok probeProjected ->
         let colNames = probeProjected |> List.map fst
 
-        let tryIndexOnlyCountGroups () =
+        let tryIndexOnlySimpleGroups () =
             let simpleShape =
                 select.Where.IsNone
                 && select.Having.IsNone
@@ -11638,13 +11641,13 @@ and private runGroupedSelect
                     when name.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase)
                          && isBuiltinAggregate name ->
                     match groupValue argument with
-                    | Some(GroupValue index) -> Some(NonNullGroupCardinality index)
+                    | Some(GroupValue index) -> Some(GroupNonNullCardinality index)
                     | _ ->
                         match argument with
-                        | Lit VNull -> Some(ConstantGroupValue(VInt 0L))
+                        | Lit VNull -> Some(GroupConstant(VInt 0L))
                         | Lit _ -> Some GroupCardinality
                         | _ ->
-                            tryDirectColumnForExpr (ctxFor (probeRow columns)) argument
+                            tryDirectColumnForExpr probeContext argument
                             |> Option.filter (snd >> _.Nullable >> not)
                             |> Option.map (fun _ -> GroupCardinality)
                 | FuncCall(name, [ argument ])
@@ -11674,9 +11677,9 @@ and private runGroupedSelect
                                         match projection with
                                         | GroupValue index -> key.[index]
                                         | GroupCardinality -> VInt(int64 count)
-                                        | NonNullGroupCardinality index ->
+                                        | GroupNonNullCardinality index ->
                                             if key.[index] = VNull then VInt 0L else VInt(int64 count)
-                                        | ConstantGroupValue value -> value
+                                        | GroupConstant value -> value
 
                                     name, value)
                                 colNames
@@ -11684,16 +11687,15 @@ and private runGroupedSelect
                         |> List.ofSeq
 
                     Limits.checkQueryCancellation 0
-                    let groupCtx = ctxFor (probeRow columns)
-                    let formats = outputColumnFormats groupCtx columns select.Projections
-                    let wireOverrides = outputColumnWireOverridesFor false groupCtx columns select
+                    let formats = outputColumnFormats probeContext columns select.Projections
+                    let wireOverrides = outputColumnWireOverridesFor false probeContext columns select
                     let rendered = projected |> List.map (renderOutputCols formats)
                     let typed = projected |> List.map (List.map snd >> Array.ofList)
                     let metadata = columnMetadataOf colNames.Length projected |> applyWireOverrides wireOverrides
                     Some(ResultSet(colNames, rendered), metadata, typed)
             | _ -> None
 
-        match tryIndexOnlyCountGroups () with
+        match tryIndexOnlySimpleGroups () with
         | Some result -> result
         | None when isPlainCountStarSelect registry select ->
             let mutable count = 0L
@@ -11717,14 +11719,13 @@ and private runGroupedSelect
             | Some(code, message) -> Err(code, message), [], []
             | None ->
                 let projected = [ List.head colNames, VInt count ]
-                let groupCtx = ctxFor (probeRow columns)
-                let formats = outputColumnFormats groupCtx columns select.Projections
-                let wireOverrides = outputColumnWireOverrides groupCtx columns select
+                let formats = outputColumnFormats probeContext columns select.Projections
+                let wireOverrides = outputColumnWireOverrides probeContext columns select
                 let rendered = renderOutputCols formats projected
                 let metadata = columnMetadataOf 1 [ projected ] |> applyWireOverrides wireOverrides
                 ResultSet(colNames, [ rendered ]), metadata, [ [| VInt count |] ]
         | None ->
-        let collations = groupExprs |> List.map (keyCollation (ctxFor (probeRow columns)))
+        let collations = groupExprs |> List.map (keyCollation probeContext)
         let comparer = SqlValueKeyComparer(collations, false)
         let equalityComparer = comparer :> IEqualityComparer<Value[]>
         let groupIndex = Dictionary<Value[], int>(comparer)

@@ -3862,22 +3862,51 @@ let tests =
                 testCase "indexed group keys retain simple aggregate semantics"
                 <| fun _ ->
                     let store = newStore ()
-                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, bucket INT NULL, KEY ix_bucket (bucket))" |> ignore
-                    runDefault store "INSERT INTO t VALUES (1, NULL), (2, NULL), (3, 1), (4, 1), (5, 2)" |> ignore
 
-                    match
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, bucket INT NULL, maybe INT NULL, KEY ix_bucket (bucket))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, bucket INT NULL, maybe INT NULL)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
                         runDefault
                             store
-                            "SELECT bucket, COUNT(*), COUNT(bucket), COUNT(id), MIN(bucket), MAX(bucket) FROM t GROUP BY bucket"
-                    with
+                            $"INSERT INTO {table} VALUES (1, NULL, NULL), (2, NULL, 2), (3, 1, NULL), (4, 1, 4), (5, 2, 5)"
+                        |> ignore
+
+                    let simpleAggregates table =
+                        runDefault
+                            store
+                            $"SELECT bucket, COUNT(*), COUNT(bucket), COUNT(id), COUNT(1), COUNT(NULL), MIN(bucket), MAX(bucket) FROM {table} GROUP BY bucket"
+
+                    Expect.equal
+                        (simpleAggregates "indexed")
+                        (simpleAggregates "scanned")
+                        "index-owned aggregates agree with ordinary grouping"
+
+                    match simpleAggregates "indexed" with
                     | ResultSet(_, rows) ->
                         Expect.equal
                             rows
-                            [ [ None; Some "2"; Some "0"; Some "2"; None; None ]
-                              [ Some "1"; Some "2"; Some "2"; Some "2"; Some "1"; Some "1" ]
-                              [ Some "2"; Some "1"; Some "1"; Some "1"; Some "2"; Some "2" ] ]
+                            [ [ None; Some "2"; Some "0"; Some "2"; Some "2"; Some "0"; None; None ]
+                              [ Some "1"; Some "2"; Some "2"; Some "2"; Some "2"; Some "0"; Some "1"; Some "1" ]
+                              [ Some "2"; Some "1"; Some "1"; Some "1"; Some "1"; Some "0"; Some "2"; Some "2" ] ]
                             "NULL keys and non-null columns retain their aggregate values"
                     | other -> failtestf "expected indexed simple aggregates, got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT bucket, COUNT(maybe) FROM indexed GROUP BY bucket")
+                        (runDefault store "SELECT bucket, COUNT(maybe) FROM scanned GROUP BY bucket")
+                        "a nullable non-key aggregate falls back to row evaluation"
+
+                    let overridden =
+                        builtins
+                        |> registerAggregate "MIN" (fun _ -> VInt 42L)
+
+                    Expect.equal
+                        (run store overridden "SELECT bucket, MIN(bucket) FROM indexed GROUP BY bucket")
+                        (run store overridden "SELECT bucket, MIN(bucket) FROM scanned GROUP BY bucket")
+                        "an aggregate override bypasses index-owned values"
 
                 testCase "GROUP BY streams a matching case-folding expression index"
                 <| fun _ ->
