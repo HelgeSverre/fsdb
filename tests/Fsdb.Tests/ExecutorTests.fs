@@ -5937,6 +5937,31 @@ let tests =
                     for direction in [ "ASC"; "DESC" ] do
                         Expect.equal (rows "indexed" direction) (rows "scanned" direction) $"the {direction} suffix agrees with a filesort"
 
+                    let bounded table =
+                        match
+                            runDefault
+                                store
+                                (sprintf
+                                    "SELECT id, priority, created_at FROM %s WHERE tenant_id = 2 AND priority >= 1 AND priority < 3 AND keep_row = 1 ORDER BY priority DESC, created_at DESC"
+                                    table)
+                        with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected bounded suffix rows, got %A" other
+
+                    Expect.equal
+                        (bounded "indexed")
+                        (bounded "scanned")
+                        "descending suffix bounds agree with a filesort"
+
+                    let boundedPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM indexed WHERE tenant_id = 2 AND priority >= 1 AND priority < 3 AND keep_row = 1 ORDER BY priority DESC, created_at DESC"
+                        |> explainRow
+
+                    Expect.equal boundedPlan.AccessType (Some "range") "bounded descending order reports range access"
+                    Expect.equal boundedPlan.EstimatedRows (Some "3") "the range estimate intersects prefix and suffix bounds"
+
                     let plan =
                         runDefault
                             store

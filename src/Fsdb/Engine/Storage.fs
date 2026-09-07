@@ -4502,20 +4502,20 @@ let private orderedSliceBounds
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     =
-    let lowerIndex (value, inclusive) =
+    let firstBoundaryIndex (value, inclusive) =
         if prefixTruncated || inclusive then firstEqual value else afterEqual value
 
-    let upperIndex (value, inclusive) =
+    let afterBoundaryIndex (value, inclusive) =
         if prefixTruncated || inclusive then afterEqual value else firstEqual value
 
     match direction with
     | Asc ->
-        let first = lower |> Option.map lowerIndex |> Option.defaultWith (fun () -> if includeNulls then 0 else afterEqual VNull)
-        let afterLast = upper |> Option.map upperIndex |> Option.defaultValue count
+        let first = lower |> Option.map firstBoundaryIndex |> Option.defaultWith (fun () -> if includeNulls then 0 else afterEqual VNull)
+        let afterLast = upper |> Option.map afterBoundaryIndex |> Option.defaultValue count
         first, afterLast
     | Desc ->
-        let first = upper |> Option.map upperIndex |> Option.defaultValue 0
-        let afterLast = lower |> Option.map lowerIndex |> Option.defaultWith (fun () -> if includeNulls then count else firstEqual VNull)
+        let first = upper |> Option.map firstBoundaryIndex |> Option.defaultValue 0
+        let afterLast = lower |> Option.map afterBoundaryIndex |> Option.defaultWith (fun () -> if includeNulls then count else firstEqual VNull)
         first, afterLast
 
 let private trySecondaryOrderSliceInTable
