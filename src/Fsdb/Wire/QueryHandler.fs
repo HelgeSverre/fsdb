@@ -1805,19 +1805,19 @@ let private syncTransactionView (session: Session) =
 
     session
 
-let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
-    let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
+let private rebaseTransactionOnto (tx: Transaction) baseCatalog transactionSnapshot =
     let snapshot =
         transactionSnapshot
         |> Storage.carryTransactionLocks tx.Snapshot
 
     Storage.mergeCatalogInto snapshot tx.BaseCatalog tx.Snapshot.Catalog
-
-    match tx.Snapshot.PendingEvents, snapshot.PendingEvents with
-    | Some source, Some target -> target.AddRange source
-    | _ -> ()
-
+    Storage.appendPendingEvents snapshot tx.Snapshot
     baseCatalog, snapshot
+
+let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
+    let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
+
+    rebaseTransactionOnto tx baseCatalog transactionSnapshot
 
 let private readUncommittedBase (session: Session) =
     let _, initial = Storage.beginTransactionSnapshotWithBase session.Store
@@ -1882,14 +1882,8 @@ let private readUncommittedBase (session: Session) =
 
 let private rebaseReadUncommittedSnapshot (session: Session) (tx: Transaction) =
     let baseCatalog, transactionSnapshot = readUncommittedBase session
-    let snapshot = transactionSnapshot |> Storage.carryTransactionLocks tx.Snapshot
-    Storage.mergeCatalogInto snapshot tx.BaseCatalog tx.Snapshot.Catalog
 
-    match tx.Snapshot.PendingEvents, snapshot.PendingEvents with
-    | Some source, Some target -> target.AddRange source
-    | _ -> ()
-
-    baseCatalog, snapshot
+    rebaseTransactionOnto tx baseCatalog transactionSnapshot
 
 /// Publishes a supplied transaction so local COMMIT and detached XA completion
 /// share one merge, durability, and lock-release path.

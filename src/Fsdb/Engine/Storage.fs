@@ -597,12 +597,14 @@ let beginTransactionWithBase (store: Store) : Catalog * Store =
 let carryTransactionLocks (source: Store) (snapshot: Store) : Store =
     { snapshot with TransactionLocks = source.TransactionLocks }
 
-let adoptTransactionSnapshot (target: Store) (source: Store) =
-    target.Catalog <- source.Catalog
-
+let appendPendingEvents (target: Store) (source: Store) =
     match target.PendingEvents, source.PendingEvents with
     | Some targetEvents, Some sourceEvents -> targetEvents.AddRange sourceEvents
     | _ -> ()
+
+let adoptTransactionSnapshot (target: Store) (source: Store) =
+    target.Catalog <- source.Catalog
+    appendPendingEvents target source
 
 let transactionRollbackWork (store: Store) =
     store.TransactionLocks
