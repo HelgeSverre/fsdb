@@ -439,6 +439,7 @@ type private StatementMemo =
       LiteralMemberships: Dictionary<Expr, EqualityMembership option>
       CorrelatedEqualities: Dictionary<string * string * string, Storage.TransientEqualityLookup option>
       MaterializedCorrelatedEqualities: Dictionary<FromItem, Dictionary<string, MaterializedEqualityLookup option>>
+      PhysicalProjections: Dictionary<FromItem, PhysicalProjection>
       Views: Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
 let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
@@ -450,6 +451,7 @@ let private freshStatementMemo () =
       CorrelatedEqualities = Dictionary<string * string * string, Storage.TransientEqualityLookup option>()
       MaterializedCorrelatedEqualities =
         Dictionary<FromItem, Dictionary<string, MaterializedEqualityLookup option>>(HashIdentity.Reference)
+      PhysicalProjections = Dictionary<FromItem, PhysicalProjection>(HashIdentity.Reference)
       Views = Dictionary<string * string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
 
 let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
@@ -5286,30 +5288,33 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
 
     match select.From with
     | Some source when countStar && select.Joins.IsEmpty ->
-        tryCorrelatedSourceLookup outer.Store outer.Registry outer.DbName source select.Where (Some outer)
-        |> Option.map (fun (columns, rows) ->
-            let qualifier = fromItemQualifier source
+        match tryCorrelatedEqualityCount outer source select.Where with
+        | Some count -> Some(Ok(VInt(int64 count)))
+        | None ->
+            tryCorrelatedSourceLookup outer.Store outer.Registry outer.DbName source select.Where (Some outer)
+            |> Option.map (fun (columns, rows) ->
+                let qualifier = fromItemQualifier source
 
-            let context =
-                contextFactory
-                    outer.Store
-                    outer.Registry
-                    outer.DbName
-                    (columnIndexOf columns)
-                    (singleQualifier qualifier columns)
-                    (Some outer)
+                let context =
+                    contextFactory
+                        outer.Store
+                        outer.Registry
+                        outer.DbName
+                        (columnIndexOf columns)
+                        (singleQualifier qualifier columns)
+                        (Some outer)
 
-            withMetadataProbe (fun () -> whereMatches context select.Where (probeRow columns))
-            |> Result.bind (fun _ ->
-                rows
-                |> List.fold
-                    (fun countResult row ->
-                        countResult
-                        |> Result.bind (fun count ->
-                            whereMatches context select.Where row
-                            |> Result.map (fun matches -> if matches then count + 1L else count)))
-                    (Ok 0L)
-                |> Result.map VInt))
+                withMetadataProbe (fun () -> whereMatches context select.Where (probeRow columns))
+                |> Result.bind (fun _ ->
+                    rows
+                    |> List.fold
+                        (fun countResult row ->
+                            countResult
+                            |> Result.bind (fun count ->
+                                whereMatches context select.Where row
+                                |> Result.map (fun matches -> if matches then count + 1L else count)))
+                        (Ok 0L)
+                    |> Result.map VInt))
     | _ -> None
 
 and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
@@ -9413,6 +9418,22 @@ and private tryPhysicalProjection
     (dbName: string)
     (source: FromItem)
     : PhysicalProjection option =
+    let projections = (currentStatementMemo ()).PhysicalProjections
+
+    match projections.TryGetValue source with
+    | true, projection -> Some projection
+    | _ ->
+        tryPhysicalProjectionUncached store registry dbName source
+        |> Option.map (fun projection ->
+            projections.[source] <- projection
+            projection)
+
+and private tryPhysicalProjectionUncached
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (source: FromItem)
+    : PhysicalProjection option =
     let simpleSelect (select: SelectStmt) =
         select.Ctes.IsEmpty
         && select.IntoVariables.IsEmpty
@@ -9699,6 +9720,50 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () -> tryProjectedPhysicalCorrelatedRangeLookup store registry dbName source whereExpr outer)
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
+
+and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (whereExpr: Expr option) : int option =
+    let predicates = whereExpr |> optionalConjuncts
+
+    let physicalEquality (projection: PhysicalProjection) (column, value) =
+        resolveColumn projection.OutputColumns column
+        |> Result.map (fun outputIndex ->
+            let physicalIndex = projection.PhysicalColumnIndices.[outputIndex]
+            projection.PhysicalTable.Columns.[physicalIndex], value)
+
+    let countRows (projection: PhysicalProjection) equalities =
+        if equalities |> List.exists (fst >> _.Type >> InformationSchema.isStringy) then
+            None
+        elif equalities |> List.exists (snd >> (=) VNull) then
+            Some 0
+        else
+            match equalities with
+            | [ column, value ] ->
+                Storage.tryEqualityIndex projection.PhysicalTable column.Name
+                |> Option.bind (fun index ->
+                    Storage.tryEqualityRowIdsForIndex outer.Store projection.PhysicalTable index [ value ])
+                |> Option.map Set.count
+            | _ :: _ :: _ ->
+                equalities
+                |> List.map (fun (column, value) -> column.Name, value)
+                |> Storage.tryCompositeEqualityLookupInTable outer.Store projection.PhysicalTable
+                |> Option.map (fun lookup -> lookup.LookupRowIds.Count)
+            | [] -> None
+
+    if predicates.IsEmpty || not (storedValuesMatchReadValues outer.Store) then
+        None
+    else
+        tryPhysicalProjection outer.Store outer.Registry outer.DbName source
+        |> Option.filter (fun projection -> projection.Steps |> List.forall (_.Predicate >> Option.isNone))
+        |> Option.bind (fun projection ->
+            correlatedEqualityPredicates (fromItemQualifier source) whereExpr (Some outer)
+            |> Option.filter (fun equalities ->
+                equalities.Length = predicates.Length
+                && (equalities |> tryDuplicateIgnoreCase fst |> Option.isNone))
+            |> Option.bind (fun equalities ->
+                equalities
+                |> traverse (physicalEquality projection)
+                |> Result.toOption
+                |> Option.bind (countRows projection)))
 
 and private tryRangeAccessInTable
     (scope: ColumnReferenceScope)

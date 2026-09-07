@@ -7396,6 +7396,97 @@ let tests =
 
                     Expect.isLessThan calls 2000 "the residual evaluates only indexed candidates, not the inner table for every outer row"
 
+                testCase "fully covered correlated counts use index cardinality"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY)" |> ignore
+
+                    run
+                        store
+                        registry
+                        "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, observed INT AS (TOUCH(id)) VIRTUAL, KEY ix_orders_user (user_id))"
+                    |> ignore
+
+                    runDefault store "INSERT INTO users VALUES (1), (2), (3)" |> ignore
+                    run store registry "INSERT INTO orders (id, user_id) VALUES (1, 1), (2, 1), (3, 2)" |> ignore
+
+                    let assertCounts prefix source =
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "%s SELECT users.id, (SELECT COUNT(*) FROM %s WHERE c.user_id = users.id) AS c FROM users ORDER BY users.id"
+                                    prefix
+                                    source)
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal
+                                rows
+                                [ [ Some "1"; Some "2" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+                                "the equality bucket cardinality matches the correlated counts"
+                        | other -> failtestf "expected correlated counts, got %A" other
+
+                        Expect.equal calls 0 "counting a covered index bucket does not resolve virtual row values"
+
+                    assertCounts "" "orders c"
+                    assertCounts "" "(SELECT id, user_id, observed FROM orders) c"
+                    assertCounts "WITH candidates AS (SELECT id, user_id, observed FROM orders)" "candidates c"
+
+                    match
+                        runDefault
+                            store
+                            ("SELECT users.id, (SELECT COUNT(*) FROM orders c "
+                             + "WHERE c.user_id = users.id AND c.user_id = 2) "
+                             + "FROM users ORDER BY users.id")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "0" ]; [ Some "2"; Some "1" ]; [ Some "3"; Some "0" ] ]
+                            "an additional equality remains a residual predicate"
+                    | other -> failtestf "expected residual correlated counts, got %A" other
+
+                    runDefault store "CREATE TABLE nullable_keys (id INT PRIMARY KEY, lookup_key INT)" |> ignore
+                    runDefault store "INSERT INTO nullable_keys VALUES (1, NULL)" |> ignore
+                    runDefault store "INSERT INTO orders (id, user_id) VALUES (4, NULL)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            ("SELECT (SELECT COUNT(*) FROM orders c WHERE c.user_id = nullable_keys.lookup_key) "
+                             + "FROM nullable_keys")
+                    with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected NULL equality to count no rows, got %A" other
+
+                    runDefault
+                        store
+                        "CREATE TABLE ci_keys (value VARCHAR(10) COLLATE utf8mb4_0900_ai_ci, KEY ix_value (value))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE binary_keys (value VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO ci_keys VALUES ('a')" |> ignore
+                    runDefault store "INSERT INTO binary_keys VALUES ('A')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT (SELECT COUNT(*) FROM ci_keys c WHERE c.value = binary_keys.value) FROM binary_keys"
+                    with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the binary outer collation to remain authoritative, got %A" other
+
                 testCase "an unindexed correlated equality materializes keyed candidates once"
                 <| fun _ ->
                     let mutable calls = 0
