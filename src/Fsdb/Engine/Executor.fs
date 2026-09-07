@@ -290,6 +290,12 @@ type private MaterializedEqualityLookup =
     { Columns: ColumnDef list
       FindRows: Value -> Value[] list option }
 
+type private PhysicalProjection =
+    { OutputColumns: ColumnDef list
+      Source: TableRef
+      SourceTable: Table
+      SourceIndices: int list }
+
 let private equalityMembershipKey domain value =
     match domain, value with
     | SignedIntegerMembership, VInt _
@@ -9366,6 +9372,124 @@ and private tryCorrelatedEqualityLookup
                 Storage.tryEqualityLookup store tableDb tref.Table column value
                 |> Option.orElseWith (fun () -> transientLookup tableDb column value))))
 
+and private tryPhysicalProjection
+    (store: Store)
+    (dbName: string)
+    (source: FromItem)
+    : PhysicalProjection option =
+    let simpleSelect (select: SelectStmt) =
+        select.Ctes.IsEmpty
+        && select.IntoVariables.IsEmpty
+        && select.Joins.IsEmpty
+        && select.Where.IsNone
+        && select.GroupBy.IsEmpty
+        && not select.Rollup
+        && select.Windows.IsEmpty
+        && select.Having.IsNone
+        && select.OrderBy.IsEmpty
+        && select.Limit.IsNone
+        && select.Offset.IsNone
+        && select.Locking.IsEmpty
+        && not select.Distinct
+        && not select.CalculateFoundRows
+
+    match source with
+    | FromSubquery(PlainSelect select, _)
+        when storedValuesMatchReadValues store && simpleSelect select ->
+        match select.From with
+        | Some(FromTable tableRef) when tableRef.Partitions.IsEmpty ->
+            tryPhysicalTableRef store dbName tableRef
+            |> Result.toOption
+            |> Option.flatten
+            |> Option.bind (fun table ->
+                let sourceQualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+
+                let directColumn =
+                    function
+                    | Col name -> Some name
+                    | QualifiedCol(qualifier, name)
+                        when qualifier.Equals(sourceQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                        Some name
+                    | _ -> None
+
+                select.Projections
+                |> traverse (fun (expression, alias) ->
+                    match
+                        directColumn expression
+                        |> Option.bind (fun name ->
+                            resolveColumn table.Columns name
+                            |> Result.toOption
+                            |> Option.map (fun index -> index, alias |> Option.defaultValue (exprLabel expression)))
+                    with
+                    | Some projected -> Ok projected
+                    | None -> Error())
+                |> Result.toOption
+                |> Option.bind (fun projected ->
+                    let names = projected |> List.map snd
+                    let uniqueNames = HashSet<string>(names, System.StringComparer.OrdinalIgnoreCase)
+
+                    if uniqueNames.Count <> names.Length then
+                        None
+                    else
+                        let derivedColumn (index, name) =
+                            { table.Columns.[index] with
+                                Name = name
+                                Default = None
+                                AutoIncrement = false
+                                PrimaryKey = false
+                                Unique = false
+                                Generated = None
+                                Comment = ""
+                                OnUpdateCurrentTimestamp = false
+                                Srid = None }
+
+                        Some
+                            { OutputColumns = projected |> List.map derivedColumn
+                              Source = tableRef
+                              SourceTable = table
+                              SourceIndices = projected |> List.map fst }))
+        | _ -> None
+    | _ -> None
+
+and private tryProjectedPhysicalCorrelatedEqualityLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (source: FromItem)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * Value[] list) option =
+    tryPhysicalProjection store dbName source
+    |> Option.bind (fun projection ->
+        correlatedEqualityPredicates (fromItemQualifier source) whereExpr outer
+        |> Option.bind (fun equalities ->
+            equalities
+            |> List.tryPick (fun (column, value) ->
+                projection.OutputColumns
+                |> List.tryFindIndex (fun candidate -> candidate.Name.Equals(column, System.StringComparison.OrdinalIgnoreCase))
+                |> Option.bind (fun outputIndex ->
+                    let sourceIndex = projection.SourceIndices.[outputIndex]
+                    let sourceColumn = projection.SourceTable.Columns.[sourceIndex]
+
+                    Storage.tryEqualityLookupInTable store projection.SourceTable sourceColumn.Name value
+                    |> Option.bind (fun (_, rows) ->
+                        rows
+                        |> List.map snd
+                        |> prepareVirtualRows
+                            store
+                            registry
+                            dbName
+                            (projection.Source.Alias |> Option.defaultValue projection.Source.Table)
+                            projection.SourceTable.Columns
+                        |> Result.toOption
+                        |> Option.map (fun prepared ->
+                            let projectedRows =
+                                prepared
+                                |> Seq.map (fun row -> projection.SourceIndices |> List.map (fun index -> row.[index]) |> Array.ofList)
+                                |> List.ofSeq
+
+                            projection.OutputColumns, projectedRows))))))
+
 and private tryMaterializedCorrelatedEqualityLookup
     (store: Store)
     (registry: Registry)
@@ -9434,6 +9558,9 @@ and private tryCorrelatedSourceLookup
     | FromTable table ->
         tryCorrelatedEqualityLookup store dbName table whereExpr outer
         |> Option.map (fun (columns, rows) -> columns, rows |> List.map snd)
+        |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
+    | FromSubquery _ ->
+        tryProjectedPhysicalCorrelatedEqualityLookup store registry dbName source whereExpr outer
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
 

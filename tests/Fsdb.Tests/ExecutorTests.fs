@@ -7040,7 +7040,60 @@ let tests =
                         Expect.isLessThan calls 1100 "the materialized source is keyed once instead of scanned per outer row"
 
                     assertCounts "WITH candidates AS (SELECT id, user_id FROM orders)" "candidates c"
-                    assertCounts "" "(SELECT id, user_id FROM orders) c" ]
+                    assertCounts "" "(SELECT id, user_id FROM orders) c"
+
+                testCase "an indexed pass-through derived source resolves only matching physical rows"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values.Head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY)" |> ignore
+
+                    Expect.equal
+                        (run
+                            store
+                            registry
+                            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, observed INT AS (TOUCH(id)) VIRTUAL, KEY ix_user (user_id))")
+                        (Affected 0UL)
+                        "created generated-column source"
+
+                    runDefault store ("INSERT INTO users VALUES " + ([ 1..50 ] |> List.map (sprintf "(%d)") |> String.concat ",")) |> ignore
+
+                    let rows =
+                        [ 1..1000 ]
+                        |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 50) + 1))
+                        |> String.concat ","
+
+                    Expect.equal
+                        (run store registry ("INSERT INTO orders (id, user_id) VALUES " + rows))
+                        (Affected 1000UL)
+                        "seeded generated-column source"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT users.id, (SELECT COUNT(*) FROM (SELECT id, user_id, observed FROM orders) c "
+                             + "WHERE c.user_id = users.id AND c.observed = c.id) AS c "
+                             + "FROM users WHERE users.id <= 10 ORDER BY users.id")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows.Length 10 "the selected outer rows are retained"
+                        Expect.equal
+                            (rows |> List.map (fun row -> row.[1]))
+                            (List.replicate 10 (Some "20"))
+                            "each key has twenty candidates"
+                    | other -> failtestf "expected correlated counts, got %A" other
+
+                    Expect.isLessThan calls 300 "the derived source reads generated values only for indexed candidates" ]
 
           testList
               "streaming SELECT pipeline"

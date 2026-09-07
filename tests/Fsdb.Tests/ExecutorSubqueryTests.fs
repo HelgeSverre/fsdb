@@ -275,7 +275,7 @@ let tests =
           <| fun _ ->
               let store = newStore ()
               runDefault store "CREATE TABLE outer_labels (id INT, label VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
-              runDefault store "CREATE TABLE inner_labels (label VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+              runDefault store "CREATE TABLE inner_labels (label VARCHAR(10) COLLATE utf8mb4_bin, KEY ix_label (label))" |> ignore
               runDefault store "INSERT INTO outer_labels VALUES (1, 'A'), (2, 'a'), (3, NULL)" |> ignore
               runDefault store "INSERT INTO inner_labels VALUES ('a'), (NULL)" |> ignore
 
@@ -287,7 +287,7 @@ let tests =
                   | other -> failtestf "expected correlated materialized results, got %A" other
 
               assertRows
-                  "SELECT o.id, EXISTS (SELECT 1 FROM (SELECT label FROM inner_labels) d WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id"
+                  "SELECT o.id, EXISTS (SELECT 1 FROM (SELECT label AS candidate FROM inner_labels) d WHERE d.candidate = o.label) FROM outer_labels o ORDER BY o.id"
 
               assertRows
                   "WITH labels AS (SELECT label FROM inner_labels) SELECT o.id, EXISTS (SELECT 1 FROM labels d WHERE d.label = o.label) FROM outer_labels o ORDER BY o.id"
