@@ -78,6 +78,13 @@ single-insert latency by 22%, its serial burst by 27%, and its concurrent
 burst by 35%. Statements that can expand into nested database writes retain
 the private transaction root that provides statement atomicity.
 
+The follow-up [direct-write run](results/3527901-direct-writes.md) applies the
+same classification to physical-table `REPLACE` and simple single-table
+writes. New-row `REPLACE`, existing-row `REPLACE`, and point `UPDATE` improved
+by 39%, 26%, and 9% against the prior recorded implementation. Views,
+subqueries, registered or stored functions, CTE and join-shaped writes, and
+multi-table deletes continue to use private roots.
+
 ### Workloads and reporting
 
 The default deterministic corpus contains 10,000 users, 50,000 orders, and
