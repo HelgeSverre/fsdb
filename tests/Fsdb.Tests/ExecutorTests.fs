@@ -4012,7 +4012,57 @@ let tests =
 
                     Expect.equal suffixPlan.AccessType (Some "index") "the fixed prefix exposes functional grouping"
                     Expect.equal suffixPlan.Key (Some "ix_tenant_upper") "the fixed-prefix grouping key is reported"
+                    Expect.equal suffixPlan.EstimatedRows (Some "3") "the fixed-prefix plan estimates only its matching slice"
                     Expect.isFalse (suffixPlan.Extra |> Option.exists (_.Contains("temporary"))) "functional suffix groups stay contiguous"
+
+                testCase "fixed-prefix GROUP BY agrees with a scan for aggregate and residual shapes"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE indexed (id INT PRIMARY KEY, tenant_id INT, bucket INT, keep_row INT, payload INT NULL, KEY ix_tenant_bucket (tenant_id, bucket))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, tenant_id INT, bucket INT, keep_row INT, payload INT NULL)"
+                    |> ignore
+
+                    let values =
+                        "(1, 1, NULL, 1, 10), (2, 1, 2, 1, NULL), (3, 1, 2, 0, 30), (4, 1, 3, 1, 40), "
+                        + "(5, 2, NULL, 1, 50), (6, 2, 2, 1, 60), (7, 2, 2, 1, NULL), (8, 3, 4, 1, 80)"
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES %s" table values) |> ignore
+
+                    let grouped table predicate =
+                        runDefault
+                            store
+                            (sprintf
+                                "SELECT bucket, COUNT(*), COUNT(bucket), COUNT(id), MIN(bucket), MAX(bucket) FROM %s WHERE %s GROUP BY bucket"
+                                table
+                                predicate)
+
+                    for predicate in [ "tenant_id = 1"; "tenant_id = 1 AND keep_row = 1"; "tenant_id = 1 AND tenant_id = 2" ] do
+                        Expect.equal
+                            (grouped "indexed" predicate)
+                            (grouped "scanned" predicate)
+                            $"the indexed grouping agrees with a scan for {predicate}"
+
+                    Expect.equal
+                        (grouped "indexed AS i" "i.tenant_id = 1")
+                        (grouped "scanned AS s" "s.tenant_id = 1")
+                        "qualified prefix pins retain their owning alias"
+
+                    let plan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT bucket, COUNT(*) FROM indexed WHERE tenant_id = 1 GROUP BY bucket"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "index") "the exact prefix streams its grouped suffix"
+                    Expect.equal plan.Key (Some "ix_tenant_bucket") "the matching composite index is reported"
+                    Expect.equal plan.EstimatedRows (Some "4") "the estimate is the exact tenant slice rather than the whole table"
+                    Expect.isFalse (plan.Extra |> Option.exists (_.Contains("temporary"))) "index-owned groups avoid a temporary table"
 
                 testCase "GROUP BY sorts through a composite index once WHERE pins every column ahead of the group key"
                 <| fun _ ->
@@ -5727,6 +5777,7 @@ let tests =
 
                     Expect.equal plan.AccessType (Some "index") "the fixed prefix streams the ordered suffix"
                     Expect.equal plan.Key (Some "ix_tenant_priority_created") "the composite key is reported"
+                    Expect.equal plan.EstimatedRows (Some "4") "the order plan estimates only the pinned tenant slice"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("filesort"))) "the suffix plan avoids a filesort"
 
                 testCase "composite prefix indexes do not claim full-value ORDER BY"

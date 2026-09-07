@@ -151,13 +151,18 @@ type private LiteralInProbe =
     { Columns: (string * IndexTransform option) list
       Values: Value list list }
 
+type private IndexedGroupInput =
+    { Counts: (Value list * int) seq
+      KeyOffset: int
+      PredicateCovered: bool }
+
 type private IndexOrderPlan =
     { KeyName: string
       ColumnIndices: int list
       Columns: ColumnDef list
       EstimatedRows: int
       Rows: Value[] seq
-      Groups: (Value list * int) seq option }
+      Groups: IndexedGroupInput option }
 
 type private IndexOrderTerm =
     { Column: string
@@ -166,7 +171,7 @@ type private IndexOrderTerm =
 
 type private GroupInputOrder =
     | ArbitraryGroupRows
-    | ContiguousGroupRows of (Value list * int) seq option
+    | ContiguousGroupRows of IndexedGroupInput option
 
 type private IndexedGroupProjection =
     | GroupValue of int
@@ -180,6 +185,17 @@ type private OrderedIndexCandidate =
 type private IndexPrefixMatch =
     { Terms: IndexOrderTerm list
       PinnedCount: int }
+
+type private ResolvedIndexPrefix =
+    { Database: string
+      Match: IndexPrefixMatch
+      PinnedValues: Value list
+      PredicateCovered: bool }
+
+type private GroupingIndexLookup =
+    { Lookup: Storage.OrderedLookup
+      KeyOffset: int
+      PredicateCovered: bool }
 
 type private IndexedJoinPlan =
     { Table: Table
@@ -9846,7 +9862,6 @@ and private tryIndexOrder
                 (columns: ColumnDef list)
                 (count: int)
                 (rows: Value[] seq)
-                groups
                 =
                 let unsupported =
                     indices
@@ -9865,7 +9880,7 @@ and private tryIndexOrder
                           Columns = columns
                           EstimatedRows = count
                           Rows = rows
-                          Groups = groups }
+                          Groups = None }
 
             let planLookup (lookup: Storage.OrderedLookup) =
                 plan
@@ -9874,7 +9889,6 @@ and private tryIndexOrder
                     lookup.OrderedColumns
                     lookup.OrderedRowCount
                     lookup.OrderedRows
-                    (Some lookup.OrderedGroups)
 
             let completeIndexOrder () =
                 orderedColumns
@@ -9892,13 +9906,13 @@ and private tryIndexOrder
                         |> Option.defaultValue (None, None)
 
                     Storage.trySecondaryOrderedLookup store tableDb tref.Table term.Column lower upper term.Direction
-                    |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows None)
+                    |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
                     |> Option.orElseWith completeIndexOrder
                 | _ -> completeIndexOrder ()
 
             direct
             |> Option.orElseWith (fun () ->
-                tryFixedPrefixIndexOrder store dbName tref select.Where orderedColumns
+                tryFixedPrefixIndexOrder store registry dbName tref select.Where orderedColumns
                 |> Option.bind planLookup))
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
@@ -10982,18 +10996,11 @@ and private equalityPinsOneStoredKey (table: Table) (name: string) (literal: Val
 
 /// A pinned prefix must identify one stored index key, not merely values
 /// equal after SQL coercion or collation folding.
-and private whereEqualityPinnedColumns (table: Table) (whereExpr: Expr option) : Set<string> =
-    let rec walk expr acc =
-        match expr with
-        | BinOp(And, l, r) -> walk r (walk l acc)
-        | BinOp(Eq, Col name, Lit literal)
-        | BinOp(Eq, Lit literal, Col name)
-        | BinOp(Eq, QualifiedCol(_, name), Lit literal)
-        | BinOp(Eq, Lit literal, QualifiedCol(_, name)) when equalityPinsOneStoredKey table name literal ->
-            Set.add (name.ToLowerInvariant()) acc
-        | _ -> acc
-
-    whereExpr |> Option.map (fun e -> walk e Set.empty) |> Option.defaultValue Set.empty
+and private exactStoredKeyPins (registry: Registry) (table: Table) (tref: TableRef) (whereExpr: Expr option) =
+    pointLookupEqualities registry tref whereExpr
+    |> List.filter (fun equality ->
+        equality.Transform.IsNone
+        && equalityPinsOneStoredKey table equality.Column equality.Value)
 
 and private orderedIndexCandidates (table: Table) : OrderedIndexCandidate list =
     let tryCandidate (index: IndexDef) =
@@ -11073,25 +11080,45 @@ and private storageOrderTerms (terms: IndexOrderTerm list) : Storage.OrderedKeyT
 
 and private orderedIndexPrefixMatches
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     (requestedTerms: IndexOrderTerm list)
-    : (string * IndexPrefixMatch) list =
+    : ResolvedIndexPrefix list =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     physicalFastPathTable store dbName tref
     |> Option.map (fun table ->
-        let pinned = whereEqualityPinnedColumns table whereExpr
+        let pins = exactStoredKeyPins registry table tref whereExpr
+        let pinnedColumns = pins |> List.map (_.Column >> _.ToLowerInvariant()) |> Set.ofList
+        let conjunctCount = whereExpr |> optionalConjuncts |> List.length
+
+        let valueFor (term: IndexOrderTerm) =
+            pins
+            |> List.tryPick (fun (equality: PointEquality) ->
+                if equalsIgnoreCase equality.Column term.Column then Some equality.Value else None)
 
         orderedIndexCandidates table
         |> List.choose (fun candidate ->
-            tryIndexPrefix pinned requestedTerms candidate.Terms
-            |> Option.map (fun matched -> tableDb, matched)))
+            tryIndexPrefix pinnedColumns requestedTerms candidate.Terms
+            |> Option.bind (fun matched ->
+                matched.Terms
+                |> List.take matched.PinnedCount
+                |> List.map valueFor
+                |> tryAllSome
+                |> Option.map (fun pinnedValues ->
+                    { Database = tableDb
+                      Match = matched
+                      PinnedValues = pinnedValues
+                      PredicateCovered =
+                        conjunctCount = pins.Length
+                        && pins.Length = matched.PinnedCount }))))
     |> Option.defaultValue []
 
 and private tryFixedPrefixIndexOrder
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
@@ -11100,8 +11127,10 @@ and private tryFixedPrefixIndexOrder
     let invert = function Asc -> Desc | Desc -> Asc
     let requestedDirections = orderedTerms |> List.map _.Direction
 
-    orderedIndexPrefixMatches store dbName tref whereExpr orderedTerms
-    |> List.tryPick (fun (tableDb, matched) ->
+    orderedIndexPrefixMatches store registry dbName tref whereExpr orderedTerms
+    |> List.tryPick (fun resolved ->
+        let matched = resolved.Match
+
         if matched.PinnedCount = 0 then
             None
         else
@@ -11117,20 +11146,36 @@ and private tryFixedPrefixIndexOrder
             |> Option.bind (fun directions ->
                 List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
                 |> storageOrderTerms
-                |> Storage.tryOrderedIndexLookup store tableDb tref.Table))
+                |> fun terms ->
+                    Storage.tryOrderedIndexPrefixLookup
+                        store
+                        resolved.Database
+                        tref.Table
+                        terms
+                        resolved.PinnedValues))
 
 and private tryGroupingIndexOrder
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tref: TableRef)
     (whereExpr: Expr option)
     (groupTerms: IndexOrderTerm list)
-    : Storage.OrderedLookup option =
-    orderedIndexPrefixMatches store dbName tref whereExpr groupTerms
-    |> List.tryPick (fun (tableDb, matched) ->
-        matched.Terms
-        |> storageOrderTerms
-        |> Storage.tryOrderedIndexLookup store tableDb tref.Table)
+    : GroupingIndexLookup option =
+    orderedIndexPrefixMatches store registry dbName tref whereExpr groupTerms
+    |> List.tryPick (fun resolved ->
+        let terms = resolved.Match.Terms |> storageOrderTerms
+
+        let lookup =
+            match resolved.PinnedValues with
+            | [] -> Storage.tryOrderedIndexLookup store resolved.Database tref.Table terms
+            | pinnedValues -> Storage.tryOrderedIndexPrefixLookup store resolved.Database tref.Table terms pinnedValues
+
+        lookup
+        |> Option.map (fun lookup ->
+            { Lookup = lookup
+              KeyOffset = resolved.Match.PinnedCount
+              PredicateCovered = resolved.PredicateCovered }))
 
 and private tryGroupIndexOrder (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
     if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
@@ -11138,14 +11183,20 @@ and private tryGroupIndexOrder (store: Store) (registry: Registry) (dbName: stri
     else
         physicalFastPathTable store dbName tref
         |> Option.bind (fun table -> groupByIndexTerms registry table tref select)
-        |> Option.bind (tryGroupingIndexOrder store dbName tref select.Where)
-        |> Option.map (fun lookup ->
+        |> Option.bind (tryGroupingIndexOrder store registry dbName tref select.Where)
+        |> Option.map (fun grouping ->
+            let lookup = grouping.Lookup
+
             { KeyName = lookup.OrderedIndexName
               ColumnIndices = lookup.OrderedColumnIndices
               Columns = lookup.OrderedColumns
               EstimatedRows = lookup.OrderedRowCount
               Rows = lookup.OrderedRows
-              Groups = Some lookup.OrderedGroups })
+              Groups =
+                Some
+                    { Counts = lookup.OrderedGroups
+                      KeyOffset = grouping.KeyOffset
+                      PredicateCovered = grouping.PredicateCovered } })
 
 and private validateOnlyFullGroupBy
     (store: Store)
@@ -11366,8 +11417,8 @@ and private validateOnlyFullGroupBy
                 |> traverse id
                 |> Result.map ignore))
 
-and private isIndexOwnedGroupingShape (select: SelectStmt) =
-    select.Where.IsNone
+and private isIndexOwnedGroupingShape predicateCovered (select: SelectStmt) =
+    predicateCovered
     && select.Having.IsNone
     && select.OrderBy.IsEmpty
     && select.Limit.IsNone
@@ -11413,12 +11464,12 @@ and private tryIndexedGroupProjection
         groupValue argument
     | _ -> groupValue expression
 
-and private indexedGroupProjectionValue (key: Value list) (count: int) =
+and private indexedGroupProjectionValue keyOffset (key: Value list) (count: int) =
     function
-    | GroupValue index -> key.[index]
+    | GroupValue index -> key.[keyOffset + index]
     | GroupCardinality -> VInt(int64 count)
     | GroupNonNullCardinality index ->
-        if key.[index] = VNull then VInt 0L else VInt(int64 count)
+        if key.[keyOffset + index] = VNull then VInt 0L else VInt(int64 count)
     | GroupConstant value -> value
 
 and private runGroupedSelect
@@ -11575,7 +11626,7 @@ and private runGroupedSelect
 
         let tryIndexOnlySimpleGroups () =
             match groupInputOrder with
-            | ContiguousGroupRows(Some groups) when isIndexOwnedGroupingShape select ->
+            | ContiguousGroupRows(Some groups) when isIndexOwnedGroupingShape groups.PredicateCovered select ->
                 let projections =
                     select.Projections
                     |> List.map (tryIndexedGroupProjection registry probeContext groupExprs)
@@ -11586,13 +11637,13 @@ and private runGroupedSelect
                     let projections = List.choose id projections
 
                     let projected =
-                        groups
+                        groups.Counts
                         |> Seq.mapi (fun position (key, count) ->
                             Limits.checkQueryCancellation position
 
                             List.map2
                                 (fun name projection ->
-                                    name, indexedGroupProjectionValue key count projection)
+                                    name, indexedGroupProjectionValue groups.KeyOffset key count projection)
                                 colNames
                                 projections)
                         |> List.ofSeq
