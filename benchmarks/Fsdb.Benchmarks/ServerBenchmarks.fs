@@ -481,6 +481,11 @@ type ServerBenchmarks() =
         this.Query "SELECT age AS bucket, COUNT(*), COUNT(age), COUNT(id), MIN(age), MAX(age) FROM users GROUP BY bucket"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryOrder", "Planner")>]
+    member this.GroupByFixedIndexPrefix() =
+        this.Query "SELECT status, COUNT(*) FROM orders WHERE user_id = 1 GROUP BY status"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.JsonExtract() =
         this.Query "SELECT id, name FROM users WHERE meta->>'$.plan' = 'pro' LIMIT 20"
