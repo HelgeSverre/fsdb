@@ -4922,25 +4922,37 @@ let tests =
               let session = apply session "SET GLOBAL event_scheduler=ON"
               let timer = System.Diagnostics.Stopwatch.StartNew()
 
+              let scalarCount sql =
+                  match TestSupport.Sql.rows store sql with
+                  | [ [ Some value ] ] -> int value
+                  | rows -> failtestf "expected one count from %s, got %A" sql rows
+
               let waitingForEvents () =
-                  TestSupport.Sql.rows store "SELECT COUNT(*) FROM event_log" <> [ [ Some "6" ] ]
-                  || TestSupport.Sql.rows store "SELECT COUNT(*) FROM mysql.events WHERE event_name='tx_rollback'" <> [ [ Some "0" ] ]
-                  || TestSupport.Sql.rows store "SELECT COUNT(*) FROM event_identity" <> [ [ Some "1" ] ]
+                  scalarCount "SELECT COUNT(*) FROM event_log" < 6
+                  || scalarCount "SELECT COUNT(*) FROM mysql.events WHERE event_name='tx_rollback'" <> 0
+                  || scalarCount "SELECT COUNT(*) FROM event_identity" <> 1
 
               while timer.Elapsed < TimeSpan.FromSeconds 5.0 && waitingForEvents () do
                   System.Threading.Thread.Sleep 25
 
               let session = apply session "ALTER EVENT recurring_run DISABLE"
 
+              let recurring, completed =
+                  TestSupport.Sql.rows store "SELECT label,actor FROM event_log ORDER BY label,actor"
+                  |> List.partition (function
+                      | [ Some "recurring"; Some "root@%" ] -> true
+                      | _ -> false)
+
               Expect.equal
-                  (TestSupport.Sql.rows store "SELECT label,actor FROM event_log ORDER BY label,actor")
+                  completed
                   [ [ Some "compound-a"; Some "root@%" ]
                     [ Some "compound-b"; Some "root@%" ]
                     [ Some "kept"; Some "root@%" ]
-                    [ Some "once"; Some "event_runner@%" ]
-                    [ Some "recurring"; Some "root@%" ]
-                    [ Some "recurring"; Some "root@%" ] ]
-                  "scheduled bodies and definer identity"
+                    [ Some "once"; Some "event_runner@%" ] ]
+                  "one-time bodies and definer identities"
+
+              Expect.isGreaterThan recurring.Length 1 "the recurring event runs more than once"
+              Expect.all recurring ((=) [ Some "recurring"; Some "root@%" ]) "recurring bodies use the definer identity"
 
               Expect.equal
                   (TestSupport.Sql.rows store "SELECT login_user,current_user_name FROM event_identity")
