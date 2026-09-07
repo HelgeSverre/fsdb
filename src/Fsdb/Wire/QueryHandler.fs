@@ -2881,9 +2881,18 @@ let private isRegisteredScalar (session: Session) (dbName: string) (name: string
     || (not (normalized.Contains('.', StringComparison.Ordinal))
         && session.CustomFunctions.Scalars.ContainsKey((dbName + "." + normalized).ToUpperInvariant()))
 
+let private directAutocommitTarget =
+    function
+    | Insert(table, _, _, _, _)
+    | Replace(table, _, _)
+    | ReplaceSet(table, _) -> Some table
+    | Update { Ctes = []; Joins = []; From = source } -> Some source.Table
+    | Delete { Ctes = []; Joins = []; Targets = [ _ ]; From = source } -> Some source.Table
+    | _ -> None
+
 let private canExecuteDirectAutocommit (session: Session) dbName statement =
-    match statement with
-    | Insert(table, _, _, _, _) ->
+    match directAutocommitTarget statement with
+    | Some table ->
         let mayRunNestedWrites =
             Expression.statementExists
                 (function
@@ -2899,7 +2908,7 @@ let private canExecuteDirectAutocommit (session: Session) dbName statement =
 
         not mayRunNestedWrites
         && (Storage.tableSnapshot (Session.currentStore session) database table |> Result.isOk)
-    | _ -> false
+    | None -> false
 
 let private autocommitDisabled (session: Session) =
     lookupVar session "autocommit" |> Option.flatten = Some "0"
