@@ -3037,8 +3037,6 @@ let private withWriteLocksFor
     body
     =
     let tableKey = lockNamespaceKey dbName tableName
-    let rowLocks = store.RowLocks.GetOrAdd(tableKey, (fun _ -> ConcurrentDictionary()))
-    let keyLocks = store.KeyLocks.GetOrAdd(tableKey, (fun _ -> ConcurrentDictionary()))
 
     let stripeIndex rowId =
         int64 (RowId.value rowId) % int64 rowLockStripeCount |> int
@@ -3046,19 +3044,23 @@ let private withWriteLocksFor
     let keyStripeIndex key =
         (StringComparer.Ordinal.GetHashCode key &&& Int32.MaxValue) % rowLockStripeCount
 
-    let rowStripes =
-        rowIds
-        |> List.map stripeIndex
-        |> List.distinct
-        |> List.sort
-        |> List.map (fun index -> rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ())))
+    let stripesFor
+        (namespaces: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>)
+        (indexOf: 'value -> int)
+        (values: 'value list)
+        =
+        match values with
+        | [] -> []
+        | _ ->
+            let locks = namespaces.GetOrAdd(tableKey, (fun _ -> ConcurrentDictionary()))
+            let stripe index = locks.GetOrAdd(index, (fun _ -> createRowLockStripe ()))
 
-    let keyStripes =
-        keys
-        |> List.map keyStripeIndex
-        |> List.distinct
-        |> List.sort
-        |> List.map (fun index -> keyLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ())))
+            match values with
+            | [ value ] -> [ stripe (indexOf value) ]
+            | _ -> values |> List.map indexOf |> Set.ofList |> Seq.map stripe |> List.ofSeq
+
+    let rowStripes = stripesFor store.RowLocks stripeIndex rowIds
+    let keyStripes = stripesFor store.KeyLocks keyStripeIndex keys
 
     let stripes = rowStripes @ keyStripes
     let context, releaseAfter =
@@ -3089,8 +3091,7 @@ let private withWriteLocksFor
             reraise ()
     finally
         if releaseAfter then
-            let temporary = { store with TransactionLocks = Some context }
-            releaseTransactionLocks temporary
+            releaseLockStripes context claimed
 
 let private withRowLocks store dbName tableName rowIds body =
     withWriteLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds [] body
