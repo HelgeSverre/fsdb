@@ -3356,13 +3356,8 @@ let rec private resolveStarQualifier (ctx: EvalContext) (qualifier: string) : Re
         | Some parent -> resolveStarQualifier parent qualifier
         | None -> Error(unknownColumn (sprintf "%s.*" qualifier))
 
-/// Splits an `ON`/`WHERE`-style expression into its top-level `AND`
-/// conjuncts — `a AND b AND c` flattens to `[a; b; c]`; anything else (an
-/// `OR`, a single predicate) is the one-element list `[expr]`. Only
-/// conjunction commutes freely enough to split an equi-join's hash keys
-/// from its residual filter (`extractEquiKeys` below) — `OR` can't, so a
-/// disjunction stays one opaque conjunct and reports no keys.
-let rec private conjuncts (expr: Expr) : Expr list =
+/// Splits only top-level conjunctions; disjunctions remain indivisible.
+let private conjuncts (expr: Expr) : Expr list =
     let rec loop acc expr =
         match expr with
         | BinOp(And, l, r) -> loop (loop acc l) r
@@ -7856,46 +7851,14 @@ and private runMutationJoin
             (Ok initial)
 
 /// NATURAL and USING joins expose common columns as coalesced values.
-/// Subqueries remain opaque because each introduces its own column scope.
-and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
-    let sub = rewriteCoalescedCols map
-
-    match expr with
-    | Placeholder _ -> expr
-    | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
-    | Col name ->
-        match Map.tryFind (name.ToLowerInvariant()) map with
-        | Some repl -> repl
-        | None -> expr
-    | QualifiedCol _
-    | Lit _
-    | UserVariable _
-    | SystemVariable _
-    | Star _
-    | Exists _
-    | Subquery _
-    | WindowOver _ -> expr
-    | Row values -> Row(values |> List.map sub)
-    | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
-    | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
-    | Not e -> Not(sub e)
-    | IsNull e -> IsNull(sub e)
-    | IsNotNull e -> IsNotNull(sub e)
-    | IsTrue e -> IsTrue(sub e)
-    | IsFalse e -> IsFalse(sub e)
-    | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
-    | Regexp(e, p) -> Regexp(sub e, sub p)
-    | In(e, xs) -> In(sub e, xs |> List.map sub)
-    | InSubquery(e, s) -> InSubquery(sub e, s)
-    | QuantifiedComparison(e, op, quantifier, s) -> QuantifiedComparison(sub e, op, quantifier, s)
-    | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
-    | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
-    | Distinct e -> Distinct(sub e)
-    | OrderBy(e, dir) -> OrderBy(sub e, dir)
-    | Cast(e, ty) -> Cast(sub e, ty)
-    | Collate(e, name) -> Collate(sub e, name)
-    | Case(subject, whens, elseBranch) ->
-        Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
+/// Window and subquery scopes keep their own column bindings.
+and private rewriteCoalescedCols (columns: Map<string, Expr>) (expression: Expr) : Expr =
+    Expression.rewrite
+        (function
+        | Col name -> Map.tryFind (name.ToLowerInvariant()) columns
+        | WindowOver _ as scoped -> Some scoped
+        | _ -> None)
+        expression
 
 /// Rewrites a select whose joins coalesce columns (`NATURAL`/`USING`) into
 /// MySQL's exact shape: `SELECT *` expands to the coalesced common columns
@@ -8544,7 +8507,7 @@ and private tryIndexedSemiJoin
 
         select.Where
         |> Option.toList
-        |> List.collect flattenAnd
+        |> List.collect conjuncts
         |> List.tryPick classify
 
     match inPredicate with
@@ -8920,18 +8883,12 @@ and private runUnlockedSelectStmt
                 | Error e -> e, [], []
                 | Ok(columns, rows) -> runArbitrary columns rows None select
 
-/// Flattens a top-level `AND` chain into conjuncts.
-and private flattenAnd (expr: Expr) : Expr list =
-    match expr with
-    | BinOp(And, l, r) -> flattenAnd l @ flattenAnd r
-    | e -> [ e ]
-
 /// Literal equalities eligible for a single-table index candidate path.
 and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : PointEquality list =
     match whereExpr with
     | None -> []
     | Some whereExpr ->
-        flattenAnd whereExpr
+        conjuncts whereExpr
         |> List.choose (function
             | BinOp(Eq, indexed, Lit value)
             | BinOp(Eq, Lit value, indexed) ->
@@ -8963,7 +8920,7 @@ and private indexedColumnFor (tref: TableRef) =
 and private literalInProbes (tref: TableRef) (whereExpr: Expr option) : LiteralInProbe list =
     whereExpr
     |> Option.toList
-    |> List.collect flattenAnd
+    |> List.collect conjuncts
     |> List.choose (function
         | In(indexed, candidates) ->
             let indexedExpressions =
@@ -9005,7 +8962,7 @@ and private collectRangeBounds columnName boundValue (whereExpr: Expr option) : 
             | Some(existingLower, existingUpper) ->
                 Map.add name (Option.orElse existingLower lower, Option.orElse existingUpper upper) bounds
 
-        flattenAnd whereExpr
+        conjuncts whereExpr
         |> List.fold
             (fun bounds expression ->
                 match expression with
@@ -9088,7 +9045,7 @@ and private spatialLookupPredicates (scope: ColumnReferenceScope) (tref: TableRe
 
     whereExpr
     |> Option.toList
-    |> List.collect flattenAnd
+    |> List.collect conjuncts
     |> List.choose (function
         | FuncCall(name, [ left; right ]) ->
             match name.ToUpperInvariant() with
@@ -9320,7 +9277,7 @@ and private correlatedEqualityPredicates selfQualifier (whereExpr: Expr option) 
     |> Option.map (fun context ->
         whereExpr
         |> Option.toList
-        |> List.collect flattenAnd
+        |> List.collect conjuncts
         |> List.choose (function
             | BinOp(Eq, left, right) ->
                 match innerColumn left, outerValue context right with
@@ -9765,35 +9722,39 @@ and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: Table
     tryRangeAccess QualifiedColumn store dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
 
+and private projectionExpressionsNamed (projections: Projection list) name =
+    projections
+    |> List.choose (function
+        | expression, Some alias when alias.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> Some expression
+        | _ -> None)
+
 and private indexOrderTerms (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
-
-    let projectionAlias name =
-        select.Projections
-        |> List.choose (function
-            | expression, Some alias when System.String.Equals(alias, name, System.StringComparison.OrdinalIgnoreCase) ->
-                Some expression
-            | _ -> None)
-        |> List.tryExactlyOne
 
     let resolveProjectionReference expression =
         match resolveOrderPosition select.Projections expression with
         | Col name as column ->
-            match projectionAlias name with
+            match projectionExpressionsNamed select.Projections name |> List.tryExactlyOne with
             | Some projected -> projected, true
             | None -> column, false
         | projected -> projected, true
 
     let directBareColumn name =
-        let directProjections =
-            select.Projections
-            |> List.map (function
-                | Col projection, None when System.String.Equals(projection, name, System.StringComparison.OrdinalIgnoreCase) -> 1
-                | Star None, None -> 1
-                | Col _, None -> 0
-                | _ -> 2)
+        let isSimpleProjection = function
+            | Col _, None
+            | Star None, None -> true
+            | _ -> false
 
-        if directProjections |> List.forall ((<>) 2) && List.sum directProjections <= 1 then Some name else None
+        let projectsName = function
+            | Col projection, None -> projection.Equals(name, System.StringComparison.OrdinalIgnoreCase)
+            | Star None, None -> true
+            | _ -> false
+
+        if List.forall isSimpleProjection select.Projections
+           && (select.Projections |> List.filter projectsName |> List.length) <= 1 then
+            Some name
+        else
+            None
 
     let directColumn projectionReference expression =
         match expression with
@@ -10998,12 +10959,7 @@ and private resolveOrderKey
             // type for sorting (`SELECT role AS r ... ORDER BY r`). A
             // computed alias has no direct ENUM column and stays lexical.
             let sourceExpr =
-                projections
-                |> List.choose (fun (projectionExpr, alias) ->
-                    alias
-                    |> Option.filter (fun aliasName ->
-                        System.String.Equals(aliasName, name, System.StringComparison.OrdinalIgnoreCase))
-                    |> Option.map (fun _ -> projectionExpr))
+                projectionExpressionsNamed projections name
                 |> function
                     | [ projectionExpr ] -> projectionExpr
                     | _ -> expr
