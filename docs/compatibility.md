@@ -13,11 +13,19 @@ How fsdb validates MySQL compatibility and records the supporting evidence.
 - [Temporal zones and offsets](#temporal-zones-and-offsets)
 - [Schema moves](#schema-moves)
 - [Views and triggers](#views-and-triggers)
+  - [Writable views](#writable-views)
+  - [Triggers](#triggers)
 - [ALTER execution options](#alter-execution-options)
 - [HASH partitioning](#hash-partitioning)
 - [Check constraints](#check-constraints)
 - [Server settings](#server-settings)
 - [Users, authentication, and privileges](#users-authentication-and-privileges)
+  - [Catalogs and accounts](#catalogs-and-accounts)
+  - [Authentication](#authentication)
+  - [Grants, proxy grants, and roles](#grants-proxy-grants-and-roles)
+  - [Host matching](#host-matching)
+  - [Text-probed statements](#text-probed-statements)
+  - [Deliberate limits](#deliberate-limits)
 
 ## Validation method
 
@@ -384,14 +392,24 @@ through `SHOW WARNINGS`; the OK/EOF warning count reports the same conditions.
 
 ## Server settings
 
-The tunables an operator would plausibly change live in `Fsdb.Limits` and are
-set from the standard server option files or an explicit `--defaults-file`:
+The process-wide numeric and boolean knobs live in `Fsdb.Limits`. Standard
+server option files and an explicit `--defaults-file` share the same parser and
+validation path:
 
-- `max_allowed_packet` and `max_connections`;
-- `wait_timeout`, `interactive_timeout`, and `net_read_timeout`;
-- `innodb_lock_wait_timeout` and `cte_max_recursion_depth`;
-- `max_points_in_geometry` for `ST_Buffer_Strategy` construction;
-- fsdb's WAL rotation thresholds.
+- connection and protocol limits: `max_allowed_packet`, `max_connections`,
+  `max_prepared_stmt_count`, `local_infile`, and `max_load_data_bytes`;
+- timeouts: `connect_timeout`, `wait_timeout`, `interactive_timeout`,
+  `net_read_timeout`, `net_write_timeout`, and
+  `innodb_lock_wait_timeout`;
+- execution and account defaults: `cte_max_recursion_depth`,
+  `default_password_lifetime`, `password_history`,
+  `password_reuse_interval`, `password_require_current`,
+  `default_week_format`, and `max_points_in_geometry`;
+- durability controls: `wal_rotate_bytes`, `wal_rotate_entries`, and
+  `wal_group_commit_queue_capacity`.
+
+`max_load_data_bytes` and the `wal_*` controls are fsdb-only configuration;
+they do not appear as invented MySQL system variables.
 
 The option-file parser follows MySQL's format rather than a generic ini
 dialect: `[mysqld]` and `[server]` groups, `name = value` and the bare-name
@@ -411,6 +429,11 @@ that fsdb does not implement. Every bad line is reported, not only the first.
 remain independently configurable. A client that negotiates
 `CLIENT_INTERACTIVE` inherits `interactive_timeout`; other clients inherit
 `wait_timeout`.
+
+`connect_timeout` bounds greeting, TLS, and authentication exchanges before an
+account exists. `net_read_timeout` governs a stalled packet after its first
+byte, while `net_write_timeout` bounds a client that stops reading server
+output.
 
 `SET GLOBAL` updates the live limits used by later accepts, packet reads,
 transaction conflict waits, and recursive CTEs. Session-scoped
@@ -446,13 +469,23 @@ help, log, statistics, GTID, NDB, and replication-channel data still differ or
 remain empty.
 
 `CREATE USER`, `DROP USER`, `ALTER USER`, `SET PASSWORD`, `GRANT`, and `REVOKE`
-persist through the WAL and snapshot path. New passwords use MySQL 8.4's
-`caching_sha2_password` storage transform. The wire server performs cached and
-full authentication, sending the full password through TLS or accepting the
-plugin's RSA-OAEP exchange on plaintext TCP. Explicit `sha256_password`
-accounts use MySQL's `$5$` SHA-256-crypt storage and full TLS or RSA exchange.
-`mysql_native_password` accounts remain available; either explicit plugin
-negotiates through an authentication switch when necessary.
+persist through the WAL and snapshot path. Account rows retain their plugin,
+credential hash, policy, grants, roles, and transport requirements.
+
+### Authentication
+
+New accounts default to `caching_sha2_password`. Its fast-auth cache is scoped
+to the server process; a cache miss uses the full TLS or RSA-protected password
+exchange and repopulates the cache after successful verification.
+
+`sha256_password` always uses the full exchange. On plaintext connections,
+clients request the matching public key and send an RSA-OAEP-SHA1 encrypted
+password. The server can load persistent PEM pairs for either SHA-2 plugin, or
+derive a process-local public key from a generated private key. `SHOW STATUS`
+reports the active public keys.
+
+`mysql_native_password` remains available for older clients. It does not share
+the SHA-2 full-auth or key configuration paths.
 
 Account locks, TLS requirements, password lifetimes, JSON attributes and
 comments, the expired-password reset sandbox, and resource limits are

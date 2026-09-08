@@ -19,9 +19,22 @@ in-memory, with an opt-in binary WAL and snapshots for durable use.
 - [Configuration](#configuration)
 - [Security and deployment](#security-and-deployment)
 - [How it works](#how-it-works)
+  - [Parser](#parser)
+  - [Engine](#engine)
+  - [Collations and charsets](#collations--charsets)
+  - [Prepared statements](#prepared-statements)
 - [SQL surface](#sql-surface)
 - [Persistence format](#persistence-format)
+  - [Write-ahead log](#write-ahead-log)
+  - [Snapshots](#snapshots)
 - [Embedding & extensibility](#embedding--extensibility)
+  - [Create an embedded host](#create-an-embedded-host)
+  - [Register an aggregate](#register-an-aggregate)
+  - [Use query context and cancellation](#use-query-context-and-cancellation)
+  - [Expose host data as a virtual table](#expose-host-data-as-a-virtual-table)
+  - [Consume committed changes](#consume-committed-changes)
+  - [Run SQL in-process or over the wire](#run-sql-in-process-or-over-the-wire)
+  - [Included examples](#included-examples)
 - [Benchmarking](#benchmarking)
 - [Development](#development)
 - [Documentation](#documentation)
@@ -75,43 +88,22 @@ Install as a single self-contained binary (no .NET needed on the machine):
 just install      # publishes to ~/.local/bin/fsdb, then: fsdb --help
 ```
 
-```
-USAGE: fsdb [--help] [--port <port>] [--listen <address>] [--data-dir <path>]
-            [--defaults-file <path>] [--ssl-cert <path>] [--ssl-key <path>]
-            [--ssl-ca <path>] [--caching-sha2-password-private-key-path <path>]
-            [--caching-sha2-password-public-key-path <path>]
-            [--sha256-password-private-key-path <path>]
-            [--sha256-password-public-key-path <path>]
-            [--require-secure-transport] [--version]
+`fsdb --help` is the authoritative command-line reference. The startup options
+fall into a few groups:
 
-OPTIONS:
-
-    --port, -p <port>     listen port (default 3307)
-    --listen <address>    bind address (default 127.0.0.1)
-    --data-dir <path>     persist trusted server state here (WAL + snapshots);
-                          omit for in-memory
-    --defaults-file <path>
-                          read server settings from a my.cnf-style file's
-                          [mysqld] section
-    --ssl-cert <path>     PEM server certificate for TLS
-    --ssl-key <path>      PEM private key for TLS
-    --ssl-ca <path>       PEM certificate authorities trusted for TLS clients
-    --caching-sha2-password-private-key-path <path>
-                          PEM private key for caching SHA-2 authentication
-    --caching-sha2-password-public-key-path <path>
-                          matching PEM public key for caching SHA-2
-                          authentication
-    --sha256-password-private-key-path <path>
-                          PEM private key for SHA-256 authentication
-    --sha256-password-public-key-path <path>
-                          matching PEM public key for SHA-256 authentication
-    --require-secure-transport
-                          reject plaintext MySQL sessions
-    --version             print the fsdb version and exit
-    --help                display this list of options.
-```
+| Concern | Options |
+|---|---|
+| Listener | `--listen`, `--port` / `-p` |
+| Storage | `--data-dir` |
+| Option files | `--defaults-file` |
+| TLS | `--ssl-cert`, `--ssl-key`, `--ssl-ca`, `--require-secure-transport` |
+| Caching SHA-2 RSA | `--caching-sha2-password-private-key-path`, `--caching-sha2-password-public-key-path` |
+| SHA-256 RSA | `--sha256-password-private-key-path`, `--sha256-password-public-key-path` |
+| Information | `--version`, `--help` |
 
 ## Configuration
+
+### Option files
 
 fsdb reads `/etc/my.cnf`, `/etc/mysql/my.cnf`, `$MYSQL_HOME/my.cnf`, and
 `~/.my.cnf` when present. `--defaults-file` reads only the named file instead.
@@ -139,10 +131,14 @@ max_points_in_geometry   = 65536
 local_infile             = OFF
 max_load_data_bytes      = 64M
 wait_timeout             = 600
+connect_timeout          = 10
 net_read_timeout         = 30
 net_write_timeout        = 60
 innodb_lock_wait_timeout = 50
 cte_max_recursion_depth  = 1000
+wal_rotate_bytes         = 64M
+wal_rotate_entries       = 100000
+wal_group_commit_queue_capacity = 1024
 loose-skip-name-resolve            # an option fsdb has no knob for
 ssl-cert                 = /etc/fsdb/server-cert.pem
 ssl-key                  = /etc/fsdb/server-key.pem
@@ -157,16 +153,23 @@ sha256-password-public-key-path        = /etc/fsdb/public-key.pem
 Option-file settings become process-wide defaults at startup. The standard
 files are auto-discovered unless `--defaults-file` selects one explicitly.
 
-The following MySQL-shaped settings also accept `SET GLOBAL`:
+### Live settings
 
-- connection and protocol limits: `max_connections`,
-  `max_prepared_stmt_count`, `max_allowed_packet`, and `local_infile`;
-- timeouts: `wait_timeout`, `interactive_timeout`, `net_read_timeout`,
-  `net_write_timeout`, and `innodb_lock_wait_timeout`;
-- server behavior: `cte_max_recursion_depth`, `default_password_lifetime`,
-  `password_history`, `password_reuse_interval`,
-  `password_require_current`, `default_week_format`,
-  `max_points_in_geometry`, and `time_zone`.
+The following MySQL-shaped option-file settings also accept `SET GLOBAL`:
+
+- connection and protocol limits: `max_allowed_packet`, `max_connections`,
+  `max_prepared_stmt_count`, and `local_infile`;
+- timeouts: `connect_timeout`, `wait_timeout`, `interactive_timeout`,
+  `net_read_timeout`, `net_write_timeout`, and
+  `innodb_lock_wait_timeout`;
+- execution and account defaults: `cte_max_recursion_depth`,
+  `default_password_lifetime`, `password_history`,
+  `password_reuse_interval`, `password_require_current`,
+  `default_week_format`, and `max_points_in_geometry`.
+
+Other live system variables, including `time_zone`, `max_sp_recursion_depth`,
+and `protocol_compression_algorithms`, are set through SQL but are not numeric
+option-file knobs.
 
 `max_points_in_geometry` is also eligible for MySQL's statement-scoped
 `/*+ SET_VAR(max_points_in_geometry=...) */` optimizer hint. The override is
@@ -179,6 +182,8 @@ deliberate divergences.
 
 ## Security and deployment
 
+### Deployment checklist
+
 The defaults favor local development: the listener binds to loopback, the
 bootstrap `root` account has an empty password, and data stays in memory. Before
 binding to a non-loopback address:
@@ -189,6 +194,8 @@ binding to a non-loopback address:
 3. use account-level `REQUIRE` rules when clients must present certificates;
 4. pass `--data-dir` when committed data must survive process exit, and restrict
    that directory to the server's operating-system account.
+
+### Password authentication
 
 New accounts use MySQL 8.4's `caching_sha2_password` by default. The server
 supports its full and cached exchanges: passwords travel inside TLS when the
@@ -896,9 +903,11 @@ The overview and compatibility guide describe the current implementation.
 findings are historical evidence and are intentionally left unchanged when the
 implementation moves on.
 
-- [Compatibility](docs/compatibility.md) — how MySQL 8.4 equivalence is validated
-- [Open gaps](GAPS.md) — current, evidence-backed differences from MySQL 8.4
-- [Comment style](docs/comment-style.md) — the grading every comment survives
-- [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
-- [Application smoke tests](smoke/README.md) — pinned upstream projects exercised over the wire
-- [Benchmarks](benchmarks/README.md) — workloads and methodology
+| Guide | Use it for |
+|---|---|
+| [Compatibility](docs/compatibility.md) | Validation method and detailed supported behavior |
+| [Open gaps](GAPS.md) | Current, evidence-backed differences from MySQL 8.4 |
+| [Comment style](docs/comment-style.md) | The grading every source comment and maintained document survives |
+| [Torture harness](torture/README.md) | Differential fuzzing against a MySQL 8.4 oracle |
+| [Application smoke tests](smoke/README.md) | Pinned upstream projects exercised over the wire |
+| [Benchmarks](benchmarks/README.md) | Workloads, isolation rules, and result interpretation |
