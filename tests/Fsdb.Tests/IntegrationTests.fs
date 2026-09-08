@@ -79,7 +79,7 @@ let private clientCertificate (issuer: X509Certificate2) =
 
     certificate.CopyWithPrivateKey key
 
-let private connectTls (port: int) (certificate: X509Certificate2 option) =
+let private connectTlsWithProtocols protocols (port: int) (certificate: X509Certificate2 option) =
     async {
         let client = new Net.Sockets.TcpClient()
         do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
@@ -97,7 +97,7 @@ let private connectTls (port: int) (certificate: X509Certificate2 option) =
         let secured = new SslStream(rawStream, false, fun _ _ _ _ -> true)
         let authentication = SslClientAuthenticationOptions()
         authentication.TargetHost <- "localhost"
-        authentication.EnabledSslProtocols <- SslProtocols.Tls12 ||| SslProtocols.Tls13
+        authentication.EnabledSslProtocols <- protocols
 
         certificate
         |> Option.iter (fun clientCertificate ->
@@ -113,6 +113,9 @@ let private connectTls (port: int) (certificate: X509Certificate2 option) =
             client.Dispose()
             return raise error
     }
+
+let private connectTls (port: int) (certificate: X509Certificate2 option) =
+    connectTlsWithProtocols (SslProtocols.Tls12 ||| SslProtocols.Tls13) port certificate
 
 let private connectRawAsWithCapabilitiesAndScramble
     (port: int)
@@ -1413,12 +1416,18 @@ let tests =
                       |> Fsdb.ServerOptions.withClientCertificateAuthority authority
 
                   use server = TestSupport.ServerFixture.startWithOptions options store Fsdb.Functions.empty
-                  let! client, stream, sequence = connectTls server.Port (Some certificate)
+                  let! client, stream, sequence =
+                      connectTlsWithProtocols SslProtocols.Tls12 server.Port (Some certificate)
                   use client = client
                   use stream = stream
                   let capabilities = ClientProtocol41 ||| ClientSsl ||| ClientSecureConnection
 
-                  let cipher = string stream.NegotiatedCipherSuite
+                  let cipher =
+                      match string stream.NegotiatedCipherSuite with
+                      | "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" -> "ECDHE-RSA-AES128-GCM-SHA256"
+                      | "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384" -> "ECDHE-RSA-AES256-GCM-SHA384"
+                      | "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256" -> "ECDHE-RSA-CHACHA20-POLY1305"
+                      | negotiated -> failtestf "unexpected TLS 1.2 cipher %s" negotiated
 
                   let sql =
                       sprintf

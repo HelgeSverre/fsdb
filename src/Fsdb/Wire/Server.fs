@@ -81,6 +81,31 @@ let private x500NameOneline (name: X500DistinguishedName) =
             | value -> Some(sprintf "/%s=%s" (shortName (relativeName.GetSingleElementType())) (escape value)))
     |> String.concat ""
 
+let private mysqlCipherName (cipherSuite: TlsCipherSuite) =
+    match string cipherSuite with
+    | "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" -> "ECDHE-ECDSA-AES128-GCM-SHA256"
+    | "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384" -> "ECDHE-ECDSA-AES256-GCM-SHA384"
+    | "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" -> "ECDHE-RSA-AES128-GCM-SHA256"
+    | "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384" -> "ECDHE-RSA-AES256-GCM-SHA384"
+    | "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256" -> "DHE-RSA-AES128-GCM-SHA256"
+    | "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384" -> "DHE-RSA-AES256-GCM-SHA384"
+    | "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256" -> "ECDHE-ECDSA-CHACHA20-POLY1305"
+    | "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256" -> "ECDHE-RSA-CHACHA20-POLY1305"
+    | "TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256" -> "DHE-RSA-CHACHA20-POLY1305"
+    | "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA" -> "ECDHE-ECDSA-AES128-SHA"
+    | "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA" -> "ECDHE-ECDSA-AES256-SHA"
+    | "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA" -> "ECDHE-RSA-AES128-SHA"
+    | "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA" -> "ECDHE-RSA-AES256-SHA"
+    | "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256" -> "ECDHE-ECDSA-AES128-SHA256"
+    | "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384" -> "ECDHE-ECDSA-AES256-SHA384"
+    | "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256" -> "ECDHE-RSA-AES128-SHA256"
+    | "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384" -> "ECDHE-RSA-AES256-SHA384"
+    | "TLS_RSA_WITH_AES_128_GCM_SHA256" -> "AES128-GCM-SHA256"
+    | "TLS_RSA_WITH_AES_256_GCM_SHA384" -> "AES256-GCM-SHA384"
+    | "TLS_RSA_WITH_AES_128_CBC_SHA" -> "AES128-SHA"
+    | "TLS_RSA_WITH_AES_256_CBC_SHA" -> "AES256-SHA"
+    | name -> name
+
 /// Carries byte progress across raw, TLS, and compressed buffering boundaries.
 type private ReadProgress() =
     let signal = new SemaphoreSlim(0, Int32.MaxValue)
@@ -1324,7 +1349,7 @@ let private handleConnection
                     | SslProtocols.Tls13 -> Some "TLSv1.3"
                     | protocol -> Some(string protocol)
 
-                tlsCipher <- Some(string secured.NegotiatedCipherSuite)
+                tlsCipher <- Some(mysqlCipherName secured.NegotiatedCipherSuite)
             }
 
         let transportSecurity () : Auth.TransportSecurity =
