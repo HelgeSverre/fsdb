@@ -1,14 +1,14 @@
-# FSDB torture harness
+# fsdb torture harness
 
 This directory contains an isolated, developer-only differential test harness
-for FSDB. It uses SQL Splitter to generate deterministic MySQL dumps, executes
-the same statements through MySqlConnector against MySQL and FSDB, and records
+for fsdb. It uses SQL Splitter to generate deterministic MySQL dumps, executes
+the same statements through MySqlConnector against MySQL and fsdb, and records
 enough evidence to classify and replay the first divergence.
 
-The durable strategy and scale-up guidance live in
-[`TORTURE-TESTING.md`](TORTURE-TESTING.md). Reviewed discovery reports
-live under [`findings/`](findings/); raw run bundles remain ignored under
-[`artifacts/`](artifacts/).
+This file is the operator guide. The evidence model, failure taxonomy, and
+scale-up strategy live in [`TORTURE-TESTING.md`](TORTURE-TESTING.md).
+Reviewed discovery reports live under [`findings/`](findings/); raw run
+bundles remain ignored under [`artifacts/`](artifacts/).
 
 Nothing here is part of the root solution or its normal test/benchmark gates.
 Focused bugs found here should be promoted into the normal Expecto suite after
@@ -52,7 +52,7 @@ The suite continues through all scenarios. Its exit codes are:
 
 - `0`: every scenario matched, or only exact registered gaps were reproduced;
 - `1`: generator, oracle, tool, or harness infrastructure failure;
-- `2`: one or more new FSDB findings;
+- `2`: one or more new fsdb findings;
 - `3`: replay did not reproduce its recorded failure signature.
 
 Run one scenario or replay a prior artifact bundle:
@@ -153,7 +153,7 @@ at most 10,000 mutations.
 
 MySQL error `1064` is matched by numeric code and SQLSTATE. Message text remains
 in the evidence but is excluded from parity because error-location prose is not
-a stable interface. MySQL-valid mutations must remain valid on FSDB. A mutation
+a stable interface. MySQL-valid mutations must remain valid on fsdb. A mutation
 that reaches another MySQL semantic error is classified separately.
 
 The baseline corpus covers implemented features such as HASH partitioning,
@@ -226,7 +226,7 @@ Syntax runs write their complete bounded corpus and mutation chains to
 result, both server outcomes, classification, and failure signature for every
 case.
 
-Outcomes distinguish generator rejection, MySQL rejection, FSDB parser and
+Outcomes distinguish generator rejection, MySQL rejection, fsdb parser and
 execution gaps, contained internal errors, protocol faults, timeouts, schema or
 data mismatches, invariant failures, and infrastructure failures. The harness
 never adds a finding to `support/known-gaps.json`; entries are reviewed and
@@ -247,7 +247,7 @@ logs, and the retained data directory. A durability mismatch exits `2`;
 child-process or harness failure exits `1`.
 
 Syntax classifications distinguish matched errors, accepted mutations,
-FSDB over-acceptance, FSDB rejection of MySQL-valid syntax, error-contract
+fsdb over-acceptance, fsdb rejection of MySQL-valid syntax, error-contract
 mismatches, semantic oracle rejection, and infrastructure failures.
 
 ## Development checks

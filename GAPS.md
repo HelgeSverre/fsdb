@@ -45,7 +45,7 @@ findings recorded under `torture/findings/`.
 | [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | — |
 | [Full-text](#11-full-text-search) | Maintained inverted indexes and MySQL-shaped scoring | CJK parsing and remaining plan combinations |
 | [Wire protocol](#12-wire-protocol-and-prepared-statements) | Prepared statements, TLS, compression, LOCAL INFILE, and multi-results | GTID state tracking and live TLS certificate reload |
-| [Authentication](#13-authentication-and-privileges) | Host accounts, grants, roles, proxy grants, and account policy | Authentication plugins cannot select a proxied identity |
+| [Authentication](#13-authentication-and-privileges) | Host accounts, grants, roles, proxy grants, and account policy | caching-SHA2 authentication and pluggable identity selection |
 | [Metadata and administration](#14-metadata-server-administration-logging-replication) | Broad metadata catalogs and live command/session state | Engine-owned contents, logging, and replication |
 
 ## 1. SQL statements and parser
@@ -99,12 +99,18 @@ refuses it through the prepared-statement protocol.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Locking-read granularity | row and next-key locks over the selected access path | `FOR UPDATE`, `FOR SHARE`, `LOCK IN SHARE MODE`, `OF`, `NOWAIT`, and `SKIP LOCKED` hold shared or exclusive row-stripe ownership until transaction end; direct indexed single-table predicates narrow their targets, while joins and scan-shaped reads conservatively lock every row in each named physical source; no next-key/gap locks | low | divergence |
-Expression coverage that does exist: full comparison/logical/arithmetic
-operators incl. `<=>`, row-value comparisons and `IN`, `XOR`, three-valued logic; CASE (both forms);
-CAST/CONVERT; EXISTS/IN/ANY/SOME/ALL/BETWEEN/LIKE [ESCAPE]/REGEXP; `->`/`->>` JSON
-operators; charset introducers; hex literals; typed temporal literals;
-`INTERVAL n unit`; MATCH…AGAINST; collation postfix; version-comment
-splicing `/*!NNNNN … */`; and MySQL's single-row `FROM DUAL` source.
+The expression grammar includes:
+
+- comparison, logical, and arithmetic operators, including `<=>`, `XOR`, and
+  three-valued logic;
+- scalar and nested row comparisons, row `IN`, both `CASE` forms, and
+  `CAST`/`CONVERT`;
+- `EXISTS`, `IN`, `ANY`/`SOME`, `ALL`, `BETWEEN`, `LIKE ... ESCAPE`, and
+  regular expressions;
+- JSON `->`/`->>` operators, charset introducers, hex and typed temporal
+  literals, intervals, `MATCH ... AGAINST`, and postfix collations;
+- MySQL version-comment splicing (`/*!NNNNN ... */`) and the single-row
+  `FROM DUAL` source.
 
 ## 2. Query execution
 
@@ -479,7 +485,7 @@ the statement.
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index conversion conditions, conditional DDL and unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |
-| Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateAccount` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
+| Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateAccount` downgrades caching_sha2 clients via auth-switch | medium (security; clients still connect) | divergence |
 | System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset or `SYSTEM` time-zone variables are live; most others are inert or absent, named time zones are unavailable, and `system_time_zone` retains its static bootstrap label | medium | divergence |
 
 ## 13. Authentication and privileges
@@ -601,5 +607,9 @@ implementation effort:
    configurable buffers, topology predicates, equality, and convex hull are
    covered.
 
-5. Replication, logging, broad engine counters, and the remaining metadata
+5. Modern authentication plugins. Common clients can follow the
+   `mysql_native_password` auth switch, but caching-SHA2 fast/full
+   authentication and its RSA exchange remain absent.
+
+6. Replication, logging, broad engine counters, and the remaining metadata
    tail. Core command counters are live; replication remains architectural.

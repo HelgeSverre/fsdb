@@ -440,7 +440,10 @@ remain empty.
 `CREATE USER`, `DROP USER`, `ALTER USER`, `SET PASSWORD`, `GRANT`, and `REVOKE`
 persist through the WAL and snapshot path. Passwords use
 `mysql_native_password` hashes verified during the handshake; clients that begin
-with `caching_sha2_password` receive an auth switch.
+with `caching_sha2_password` receive an auth switch. This preserves common
+client compatibility but is not equivalent to caching-SHA2 fast/full
+authentication; the active boundary belongs in the
+[wire-protocol ledger](../GAPS.md#12-wire-protocol-and-prepared-statements).
 
 Account locks, TLS requirements, password lifetimes, JSON attributes and
 comments, the expired-password reset sandbox, and resource limits are

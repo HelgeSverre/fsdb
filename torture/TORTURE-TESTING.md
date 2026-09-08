@@ -1,4 +1,4 @@
-# FSDB torture-testing design
+# fsdb torture-testing design
 
 ## Contents
 
@@ -19,16 +19,16 @@ projects, corpus, scripts, support ledger, findings, and ignored artifacts. It
 must not be added to the root solution, root task runner, or ordinary CI until
 the harness deliberately chooses a stable subset to promote.
 
-The harness is bespoke F# for FSDB. SQL Splitter supplies deterministic MySQL
-DDL and data; it does not decide whether FSDB is correct. MySQL 8.4 is the
-semantic reference, while FSDB's parser, commit stream, and in-memory catalog
+The harness is bespoke F# for fsdb. SQL Splitter supplies deterministic MySQL
+DDL and data; it does not decide whether fsdb is correct. MySQL 8.4 is the
+semantic reference, while fsdb's parser, commit stream, and in-memory catalog
 provide subject-side evidence that an external black-box runner could not.
 
-The goal is not merely to make FSDB return an error under load. A useful run
+The goal is not merely to make fsdb return an error under load. A useful run
 must answer:
 
 1. Which exact generated input and toolchain produced the failure?
-2. Did generation, MySQL, parsing, FSDB execution, an invariant, a semantic
+2. Did generation, MySQL, parsing, fsdb execution, an invariant, a semantic
    query, or the final state comparison first diverge?
 3. Was the failure contained, timed out, or did it damage later state?
 4. Can the same evidence signature be replayed?
@@ -48,7 +48,7 @@ byte-offset statement scanner
         |
         +--> MySQL executes first (acceptance oracle)
         |
-        +--> FSDB Parser.parse + wire-protocol execution
+        +--> fsdb Parser.parse + wire-protocol execution
                  |
                  +--> OnCommit summaries + direct catalog invariants
         |
@@ -63,7 +63,7 @@ classification + stable signature + replay bundle
 ```
 
 MySQL executes each generated statement first. If MySQL rejects it, the case
-is an oracle/generator problem and is not charged to FSDB. FSDB is not asked to
+is an oracle/generator problem and is not charged to fsdb. fsdb is not asked to
 execute a statement its own parser rejected; that keeps parser gaps distinct
 from protocol and executor gaps.
 
@@ -74,7 +74,7 @@ transactions through synchronized start/finish phases. Because every
 successful transfer has a deterministic additive effect, final balances,
 version counts, committed operation IDs, rollback absence, and total
 conservation have one exact answer regardless of scheduling. MySQL must satisfy
-that answer before FSDB is judged.
+that answer before fsdb is judged.
 
 The multi-database lane applies that workload to independent databases on one
 fsdb process. It compares each database with its own MySQL outcome, checks for
@@ -101,10 +101,10 @@ commas outside quoted values, covering legal boundaries that contain no
 whitespace in the source. Successful DDL mutations are removed before the next
 case so stored objects cannot contaminate later parser results. MySQL `1064`
 responses are compared by error code and SQLSTATE rather than location text.
-MySQL-valid mutations exercise FSDB acceptance; mutations that reach other
+MySQL-valid mutations exercise fsdb acceptance; mutations that reach other
 semantic errors remain visible without being mislabeled as syntax evidence.
 
-After each successful FSDB mutation, the harness records compact commit-event
+After each successful fsdb mutation, the harness records compact commit-event
 hashes and validates row arity, primary/unique keys, foreign-key references,
 and auto-increment state directly against `Store.Catalog`. This catches damage
 at the statement that introduced it instead of discovering it only in a final
@@ -114,13 +114,13 @@ SELECT.
 
 Every case bundle records:
 
-- FSDB revision, dirty flag, and assembly SHA-256;
+- fsdb revision, dirty flag, and assembly SHA-256;
 - SQL Splitter version/path/SHA-256, MySQL version, model and resolved-model
   hashes, seed, scale, row cap, batch size, invariant cadence, deadlines,
   generated SQL size/hash, phase timings, and process peak working set;
 - SQL Splitter stdout/stderr and structured diagnostics;
 - every statement's UTF-8 byte range, SHA-256, bounded SQL prefix/suffix,
-  parser result and AST kind, MySQL outcome, FSDB outcome, error code/SQLSTATE,
+  parser result and AST kind, MySQL outcome, fsdb outcome, error code/SQLSTATE,
   elapsed time, commit summaries, and invariant results; `generated.sql` is
   retained as the full byte-exact source and `failure.sql` retains a causal
   failing statement in full;
@@ -143,18 +143,18 @@ Passwords and the MySQL connection string are intentionally not persisted.
 |---|---|---|
 | Tool/generation | `generator_preflight`, `infrastructure` | Tool mismatch, invalid generated corpus, process or oracle setup failure |
 | Oracle | `oracle_rejected`, `oracle_timeout` | MySQL did not accept or complete the supposedly valid input |
-| Concurrency | `oracle_concurrency_failure`, `fsdb_concurrency_execution_gap`, `fsdb_transaction_atomicity_gap`, `multidb_scaling_gap` | The reference run failed, FSDB returned a protocol/execution error, successful replies produced the wrong committed state, or independent databases serialized beyond the configured scaling bound |
+| Concurrency | `oracle_concurrency_failure`, `fsdb_concurrency_execution_gap`, `fsdb_transaction_atomicity_gap`, `multidb_scaling_gap` | The reference run failed, fsdb returned a protocol/execution error, successful replies produced the wrong committed state, or independent databases serialized beyond the configured scaling bound |
 | Durability | `durability_failure`, `infrastructure` | Crash or snapshot recovery lost an acknowledgement, split a transaction, invented a row, or the child process could not be exercised |
-| Parser | `fsdb_parser_gap`, `fsdb_probe_parser_gap` | MySQL accepted SQL that FSDB cannot parse |
+| Parser | `fsdb_parser_gap`, `fsdb_probe_parser_gap` | MySQL accepted SQL that fsdb cannot parse |
 | Syntax mutation | `matched_syntax_error`, `accepted_mutation`, `fsdb_syntax_acceptance_gap`, `fsdb_syntax_rejection_gap`, `syntax_error_contract_mismatch` | Mutated syntax matched, remained valid, or exposed an acceptance/error-contract difference |
-| Subject execution | `fsdb_execution_gap`, `fsdb_probe_execution_gap`, `contained_internal_error` | Parsed SQL failed in FSDB; error 1105 remains separately visible |
+| Subject execution | `fsdb_execution_gap`, `fsdb_probe_execution_gap`, `contained_internal_error` | Parsed SQL failed in fsdb; error 1105 remains separately visible |
 | Wire/deadline | `protocol_fault`, `fsdb_timeout` | Driver/protocol failure or subject deadline |
-| Internal state | `invariant_failure` | FSDB committed a structurally invalid catalog/data state |
+| Internal state | `invariant_failure` | fsdb committed a structurally invalid catalog/data state |
 | Client contract | `statement_affected_rows_mismatch`, `dml_affected_rows_mismatch`, `probe_type_mismatch` | Successful mutations reported different counts, or equal values carried observably different result types |
 | Semantic query | `probe_schema_mismatch`, `probe_result_mismatch` | A bespoke query returned different columns or ordered typed rows |
 | Final state | `schema_mismatch`, `row_count_mismatch`, `data_mismatch`, `metadata_or_snapshot_failure` | Load succeeded but observable state diverged |
 
-Exit status distinguishes infrastructure (`1`), new FSDB findings (`2`), and
+Exit status distinguishes infrastructure (`1`), new fsdb findings (`2`), and
 replay drift (`3`). A known gap counts as passing only when its complete failure
 signature exactly matches a manually reviewed entry.
 
@@ -222,10 +222,10 @@ For each new signature:
 
 1. Replay the complete artifact case without changing seed or limits.
 2. Decide whether the earliest divergence belongs to SQL Splitter, MySQL setup,
-   the scanner/canonicalizer, or FSDB.
+   the scanner/canonicalizer, or fsdb.
 3. Minimize the SQL while preserving classification and error detail.
-4. Add a focused root Expecto regression when the FSDB behavior is understood.
-5. Fix FSDB, then replay both the minimized test and original generated case.
+4. Add a focused root Expecto regression when the fsdb behavior is understood.
+5. Fix fsdb, then replay both the minimized test and original generated case.
 6. If deferring, add the exact signature to `support/known-gaps.json` only after
    review and write a dated note under `findings/`.
 
@@ -241,16 +241,16 @@ all scenarios even when one finds a subject gap.
 Run broader seed/cardinality matrices manually or in a separate scheduled job.
 Archive only manifests/minimized failures and aggregate timing/signature
 indexes; raw SQL/data bundles can be large and may stay as short-lived ignored
-artifacts. Promote stable, fast regressions to the normal FSDB test suite rather
+artifacts. Promote stable, fast regressions to the normal fsdb test suite rather
 than wiring this whole harness into root builds.
 
 At large scale, choose invariant cadence deliberately. `--invariant-every 0`
 means final-only, not disabled; a positive value validates after every Nth
-statement and always once at the end. The harness currently reads and splits
-the complete generated SQL file in memory even though result snapshots are
-bounded. Treat its reported process working set as an upper bound on the
-combined harness/FSDB cost until generation hashing and statement scanning are
-streamed or FSDB is isolated in a measured child process.
+statement and always once at the end. The harness reads and splits the complete
+generated SQL file in memory even though result snapshots are bounded. Its
+reported process working set is therefore an upper bound on the combined
+harness/fsdb cost until generation hashing and statement scanning become
+streaming operations or fsdb runs in a separately measured child process.
 
 ## Acceptance checkpoints
 
@@ -258,7 +258,7 @@ streamed or FSDB is isolated in a measured child process.
 - All models pass SQL Splitter verification at the requested safety cap.
 - The scanner has focused tests for quoting, escaping, comments, UTF-8 byte
   offsets, directive rejection, and malformed input.
-- MySQL and FSDB use the same driver and deadlines for statements and probes.
+- MySQL and fsdb use the same driver and deadlines for statements and probes.
 - Every subject mutation produces commit/invariant evidence.
 - Every full load runs scenario probes, a normalized final snapshot, and a
   final direct-catalog invariant check regardless of periodic cadence.

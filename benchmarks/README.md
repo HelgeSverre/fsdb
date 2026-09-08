@@ -9,6 +9,7 @@ hotspots, not to chase parity — fsdb optimizes for readable F# first.
 - [Running](#running)
 - [Methodology](#methodology)
 - [Recorded results](#recorded-results)
+  - [Focused optimization reports](#focused-optimization-reports)
   - [Latency and scale](#latency-and-scale-snapshot)
   - [Durability](#durability-matched-latency)
   - [Concurrency](#concurrency-throughput)
@@ -119,8 +120,10 @@ These tables summarize immutable, linked result artifacts. They are historical
 measurements, not claims about the current branch; use a fresh run for a current
 comparison.
 
-Each run lands in `results/<git-sha>.md` with a provenance header
-(sha, date, OS, .NET, server mode). Representative snapshots, medians:
+Each recipe writes one or more tracked `results/<git-sha>[-label].md` files
+with a provenance header (revision, date, OS, .NET, server mode, and dataset).
+Disposable MySQL data directories and BenchmarkDotNet intermediates remain
+ignored. Representative historical snapshots, medians:
 
 | Workload | f1b15ab (baseline) | a90dfae (indexed) | f4ba12a (streaming) | MySQL 8.4 |
 |---|---:|---:|---:|---:|
@@ -144,6 +147,28 @@ O(n²) list-append in the UPDATE path, PK/unique hash indexes, a hash
 equi-join, and `TcpClient.NoDelay` (Nagle's algorithm had been taxing every
 round trip from the start).
 
+### Focused optimization reports
+
+The smaller reports isolate one implementation change against its immediate
+baseline. They are easier to interpret than comparing unrelated full-suite
+runs:
+
+- statement and subquery work: [recursive CTE steps](results/8a32897-recursive-cte.md),
+  [projected literal membership](results/2e36354-projected-literal-membership.md),
+  and [projected predicate pushdown](results/ca5d377-projected-predicate-pushdown.md);
+- correlated execution: [bare outer columns](results/ea70a23-correlated-bare-outer-columns.md),
+  [outer expressions](results/ddafec8-correlated-outer-expressions.md), and
+  [count cardinality](results/e883956-correlated-count-cardinality.md);
+- writes and publication: [autocommit inserts](results/d59c142-autocommit-insert.md),
+  [direct writes](results/3527901-direct-writes.md), and
+  [independent publication](results/d9d9bd4-independent-publications.md);
+- prepared predicates: [boolean scans](results/94a6026-prepared-boolean-scans.md),
+  [scan predicates](results/8f119e1-prepared-scan-predicates.md), and
+  [mutation predicates](results/584d606-prepared-mutation-predicates.md).
+
+These reports explain a measured revision pair. They do not replace the live
+compatibility and performance boundaries in [GAPS.md](../GAPS.md).
+
 ### Latency and scale snapshot
 
 The [10k/50k latency](results/98bc883-quick.md) and
@@ -162,22 +187,22 @@ work that still scans or replans its input:
 | Window query | 85.2 ms | 98.9 ms | 1.21 s | 1.20 s |
 | Natural FULLTEXT | 1.06 ms | 429 µs | 10.3 ms | 3.89 ms |
 
-Point writes, indexed joins, uncorrelated membership, JSON extraction, and
-secondary ranges retain shallow slopes. Scans, grouping, non-indexed updates,
-decimal membership, and window execution grow with their input. The scale
-window samples have high variance, but both engines finish in the same order
-of magnitude; the old multi-second fsdb-only cliff is gone. FULLTEXT uses
-maintained postings and scales approximately linearly, while the joined query
-remains 6.3x slower than MySQL at 100k articles.
+In these two artifacts, point writes, indexed joins, uncorrelated membership,
+JSON extraction, and secondary ranges have shallow slopes. Scans, grouping,
+non-indexed updates, decimal membership, and window execution grow with their
+input. The scale samples have high variance, but both engines finish in the
+same order of magnitude. The former multi-second fsdb-only cliff is absent in
+these runs; the joined FULLTEXT query is still 6.3x slower than MySQL at the
+larger recorded size.
 
-The quick matrix also exposes constant-factor work hidden by slope alone:
+That quick matrix also exposes constant-factor work hidden by slope alone:
 point reads are 237 µs versus 40 µs, recursive CTE evaluation is 953 µs versus
 54 µs, and correlated indexed counts are 1.22 ms versus 207 µs. A sampled CPU
 trace of a saturated recursive-CTE workload attributes most active managed
 time to per-statement query handling, binding, dynamic scope, and `AsyncLocal`
-state transitions rather than the 100-row recursive body itself. That makes
-shared statement setup the next profiling seam, not a special-purpose CTE
-container.
+state transitions rather than the 100-row recursive body itself. At that
+revision, shared statement setup was therefore the next profiling seam rather
+than a special-purpose CTE container.
 
 The [low-cardinality join profile](results/1c2270d-low-cardinality-joins.md)
 compares an indexed join with an otherwise identical unindexed hash-join twin.
@@ -243,8 +268,9 @@ by the [posting-candidate comparison](results/ef4b4ab-fulltext-postings.md), cov
 natural, boolean, accent-aware, and boolean-prefix queries. Against the
 pre-index 10k baseline, natural search fell from 53.7 ms to 2.76 ms,
 accent-aware search from 51.2 ms to 1.62 ms, boolean search from 50.7 ms to
-3.19 ms, and prefix search from 49.5 ms to 1.44 ms. At 100k, posting-driven
-boolean evaluation is 56.0 ms versus MySQL's 10.7 ms, while maintained prefix
-postings are 33.9 ms versus 2.62 ms. OR predicates, projection-only MATCH,
-and the general result pipeline are the remaining scale seams, not document
-re-tokenization or vocabulary scans.
+3.19 ms, and prefix search from 49.5 ms to 1.44 ms. At the larger recorded
+size, posting-driven boolean evaluation is 56.0 ms versus MySQL's 10.7 ms,
+while maintained prefix postings are 33.9 ms versus 2.62 ms. The profiles
+attribute the remaining cost to OR predicates, projection-only MATCH, and the
+general result pipeline rather than document re-tokenization or vocabulary
+scans. See [GAPS.md](../GAPS.md#11-full-text-search) for the current boundary.

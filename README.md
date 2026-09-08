@@ -17,6 +17,7 @@ in-memory, with an opt-in binary WAL and snapshots for durable use.
 
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
+- [Security and deployment](#security-and-deployment)
 - [How it works](#how-it-works)
 - [SQL surface](#sql-surface)
 - [Persistence format](#persistence-format)
@@ -39,9 +40,9 @@ mysql --protocol=tcp -h127.0.0.1 -P3307 -uroot -e 'SELECT 1'
 With `just`, the same two-terminal workflow is `just run` and `just client`.
 
 Port 3307 avoids a real MySQL on 3306 (`--port` overrides). The bootstrap
-account is `root` with all privileges and no password. Authentication uses
-`mysql_native_password`; a passwordless account accepts only an empty password,
-matching MySQL.
+account is `root` with all privileges and no password, intended only for the
+default loopback listener. See [Security and deployment](#security-and-deployment)
+before accepting remote connections.
 
 Manage accounts and grants with `CREATE USER`, `GRANT`, and `SET PASSWORD`.
 Account locks, expiry, history, reuse, current-password rules, resource
@@ -159,6 +160,29 @@ visible inside the hinted statement and disappears when that statement ends.
 limits rather than MySQL system variables. See the
 [compatibility guide](docs/compatibility.md) for detailed behavior and
 deliberate divergences.
+
+## Security and deployment
+
+The defaults favor local development: the listener binds to loopback, the
+bootstrap `root` account has an empty password, and data stays in memory. Before
+binding to a non-loopback address:
+
+1. create a password-protected administrative account and remove or lock the
+   passwordless bootstrap account;
+2. configure a server certificate and enable `--require-secure-transport`;
+3. use account-level `REQUIRE` rules when clients must present certificates;
+4. pass `--data-dir` when committed data must survive process exit, and restrict
+   that directory to the server's operating-system account.
+
+Passwords use `mysql_native_password`. Clients that begin with
+`caching_sha2_password` receive an authentication switch, so common drivers can
+connect, but fsdb does not yet provide caching-SHA2 fast/full authentication or
+its RSA exchange. The open protocol boundary is tracked in
+[GAPS.md](GAPS.md#12-wire-protocol-and-prepared-statements).
+
+The WAL and snapshots detect torn or accidentally corrupt data, not malicious
+changes by a local writer. Treat the data directory and TLS private key as
+trusted server state.
 
 ## How it works
 
@@ -336,8 +360,9 @@ protocol compression use the same typed execution path. The dynamic GLOBAL
 
 ## SQL surface
 
-The implemented surface targets statements used by MySQL-backed
-applications:
+The implemented surface targets statements used by MySQL-backed applications.
+This is an orientation map rather than an exhaustive compatibility claim; the
+current boundaries live in [GAPS.md](GAPS.md).
 
 - Queries: joins including `NATURAL`/`USING`, derived and lateral tables,
   `GROUP BY`/`HAVING`, window functions, `UNION [ALL]`, expression subqueries,
