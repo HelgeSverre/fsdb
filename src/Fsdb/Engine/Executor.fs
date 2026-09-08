@@ -8435,11 +8435,6 @@ and private materializeCte
     | PlainSelect _ ->
         Error(Err(3573, sprintf "Recursive Common Table Expression '%s' should contain a UNION" cte.CteName))
     | UnionSelect(anchor, recursiveBranches, _, _, _) ->
-        let runBranch (select: SelectStmt) =
-            match runSelectStmt store registry dbName select outer with
-            | Err(code, message), _, _ -> Error(Err(code, message))
-            | _, _, typedRows -> Ok typedRows
-
         let normalizeLiteralColumns (columns: ColumnDef list) =
             let expressions = anchor.Projections |> List.map fst
 
@@ -8456,20 +8451,21 @@ and private materializeCte
                     columns
 
         let conformRows (columns: ColumnDef list) rows =
+            let coercions = columns |> List.map (Storage.prepareStoredValueCoercion store) |> Array.ofList
+
             rows
             |> List.indexed
             |> traverse (fun (rowIndex, row: Value[]) ->
-                if row.Length <> columns.Length then
+                if row.Length <> coercions.Length then
                     Error(Err(1222, "The used SELECT statements have a different number of columns"))
                 else
                     Diagnostics.withRowNumber (rowIndex + 1) (fun () ->
-                        List.zip columns (List.ofArray row)
-                        |> traverse (fun (column, value) ->
-                            Storage.coerceStoredValue store column value
+                        row
+                        |> traverseArrayIndexed (fun index value ->
+                            coercions.[index] value
                             |> Result.mapError (fun error ->
                                 let code, message = Storage.toMySqlError error
-                                Err(code, message)))
-                        |> Result.map Array.ofList))
+                                Err(code, message)))))
 
         resolveFromSubquery store registry dbName (FromSubquery(PlainSelect anchor, cte.CteName)) outer
         |> Result.bind (fun (anchorColumns, anchorRows) ->
@@ -8480,60 +8476,175 @@ and private materializeCte
         |> Result.bind (fun (columns, anchorRows) ->
             let key (row: Value[]) = row |> Array.map (fun v -> Value.toText v |> Option.defaultValue "\u0000NULL") |> List.ofArray
             let distinctUnion = recursiveBranches |> List.exists (fun (op, _) -> match op with OpUnion all -> not all | _ -> false)
-            let seen = System.Collections.Generic.HashSet<string list>(anchorRows |> List.map key)
+            let seen =
+                if distinctUnion then
+                    Some(System.Collections.Generic.HashSet<string list>(anchorRows |> List.map key))
+                else
+                    None
+
             let accumulated = ResizeArray<Value[]>(anchorRows)
             let saved = currentCteScope ()
+            let cteKey = cte.CteName.ToLowerInvariant()
+            let recursiveOrigins = List.replicate columns.Length None
+            let recursionLimit = cteRecursionDepth.Value |> Option.defaultValue Limits.cteMaxRecursionDepth
+            let preparedBranches =
+                recursiveBranches
+                |> traverse (fun (_, select) ->
+                    prepareRecursiveBranch store registry dbName cte.CteName columns outer select
+                    |> Result.map (fun prepared -> select, prepared))
             let mutable working = anchorRows
             let mutable passes = 0
             let mutable failure = None
 
             try
-                while failure.IsNone && not working.IsEmpty do
-                    let recursionLimit = cteRecursionDepth.Value |> Option.defaultValue Limits.cteMaxRecursionDepth
+                match preparedBranches with
+                | Error error -> failure <- Some error
+                | Ok preparedBranches ->
+                    let needsScopeBinding =
+                        preparedBranches
+                        |> List.exists (fun (select, prepared) ->
+                            prepared.IsNone
+                            || ((select.Projections |> List.map fst) @ (select.Where |> Option.toList))
+                               |> List.exists (Expression.collectSubqueries >> List.isEmpty >> not))
 
-                    if recursionLimit <> 0L && int64 passes >= recursionLimit then
-                        failure <-
-                            Some(
-                                Err(
-                                    3636,
-                                    sprintf
-                                        "Recursive query aborted after %d iterations. Try increasing @@cte_max_recursion_depth to a larger value."
-                                        (recursionLimit + 1L)
+                    let runBranches iterationRows =
+                        let runBranch (select, prepared) =
+                            match prepared with
+                            | Some run -> run iterationRows
+                            | None ->
+                                match runSelectStmt store registry dbName select outer with
+                                | Err(code, message), _, _ -> Error(Err(code, message))
+                                | _, _, typedRows -> Ok typedRows
+
+                        match preparedBranches with
+                        | [ branch ] -> runBranch branch
+                        | branches -> branches |> traverse runBranch |> Result.map List.concat
+
+                    while failure.IsNone && not working.IsEmpty do
+                        if recursionLimit <> 0L && int64 passes >= recursionLimit then
+                            failure <-
+                                Some(
+                                    Err(
+                                        3636,
+                                        sprintf
+                                            "Recursive query aborted after %d iterations. Try increasing @@cte_max_recursion_depth to a larger value."
+                                            (recursionLimit + 1L)
+                                    )
                                 )
-                            )
-                    else
-                        let iterationRows = working
+                        else
+                            let iterationRows = working
 
-                        cteScope.Value <-
-                            saved
-                            |> Map.add
-                                (cte.CteName.ToLowerInvariant())
-                                { Columns = columns
-                                  Rows = lazy (Ok iterationRows)
-                                  Origins = List.replicate columns.Length None
-                                  StatementStable = false
-                                  PhysicalProjection = None }
+                            if needsScopeBinding then
+                                cteScope.Value <-
+                                    saved
+                                    |> Map.add
+                                        cteKey
+                                        { Columns = columns
+                                          Rows = lazy (Ok iterationRows)
+                                          Origins = recursiveOrigins
+                                          StatementStable = false
+                                          PhysicalProjection = None }
 
-                        match
-                            recursiveBranches
-                            |> traverse (snd >> runBranch)
-                            |> Result.bind (List.concat >> conformRows columns)
-                        with
-                        | Error err -> failure <- Some err
-                        | Ok freshRows ->
-                            let fresh =
-                                freshRows
-                                |> List.filter (fun row -> not distinctUnion || seen.Add(key row))
+                            match runBranches iterationRows |> Result.bind (conformRows columns) with
+                            | Error err -> failure <- Some err
+                            | Ok freshRows ->
+                                let fresh =
+                                    match seen with
+                                    | None -> freshRows
+                                    | Some seen -> freshRows |> List.filter (key >> seen.Add)
 
-                            accumulated.AddRange fresh
-                            working <- fresh
-                            passes <- passes + 1
+                                accumulated.AddRange fresh
+                                working <- fresh
+                                passes <- passes + 1
             finally
                 cteScope.Value <- saved
 
             match failure with
             | Some err -> Error err
             | None -> Ok(columns, List.ofSeq accumulated))
+
+/// Prepares invariant row-local work once instead of rebuilding the complete
+/// SELECT pipeline for every recursive pass.
+and private prepareRecursiveBranch
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (cteName: string)
+    (columns: ColumnDef list)
+    (outer: EvalContext option)
+    (select: SelectStmt)
+    : Result<(Value[] list -> Result<Value[] list, QueryResult>) option, QueryResult> =
+    let expressions =
+        (select.Projections |> List.map fst)
+        @ (select.Where |> Option.toList)
+
+    let readsRecursiveRows =
+        match select.From with
+        | Some(FromTable table) ->
+            table.Database.IsNone
+            && equalsIgnoreCase table.Table cteName
+        | _ -> false
+
+    let rowLocal =
+        readsRecursiveRows
+        && select.Joins.IsEmpty
+        && select.GroupBy.IsEmpty
+        && select.Having.IsNone
+        && select.OrderBy.IsEmpty
+        && select.Limit.IsNone
+        && select.Offset.IsNone
+        && select.Windows.IsEmpty
+        && select.Ctes.IsEmpty
+        && select.IntoVariables.IsEmpty
+        && select.Locking.IsEmpty
+        && not select.Distinct
+        && not select.CalculateFoundRows
+        && not select.Rollup
+        && expressions |> List.forall (containsAggregate registry >> not)
+        && expressions |> List.forall (collectWindowFuncs >> List.isEmpty)
+        && expressions |> List.forall (collectMatchAgainst >> List.isEmpty)
+
+    if not rowLocal then
+        Ok None
+    else
+        let qualifier = select.From |> Option.map fromItemQualifier |> Option.defaultValue cteName
+        let ctxFor = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) outer
+        let matches = prepareWhereMatches ctxFor select.Where
+        let scalarProjections =
+            if select.Projections |> List.forall (fst >> function Star _ -> false | _ -> true) then
+                select.Projections |> List.map fst |> List.toArray |> Some
+            else
+                None
+
+        let project row =
+            let context = ctxFor row
+
+            match scalarProjections with
+            | Some expressions -> expressions |> traverseArrayIndexed (fun _ -> evalExpr context)
+            | None ->
+                select.Projections
+                |> traverse (evalProjection context columns)
+                |> Result.map (List.collect id >> List.map snd >> Array.ofList)
+
+        let probe = probeRow columns
+
+        match
+            Diagnostics.suppress (fun () ->
+                withMetadataProbe (fun () ->
+                    withSuppressedVariableAssignments (fun () ->
+                        matches probe
+                        |> Result.bind (fun _ -> project probe)))) with
+        | Error(code, message) -> Error(Err(code, message))
+        | Ok _ ->
+            Some(fun rows ->
+                rows
+                |> traverse (fun row ->
+                    matches row
+                    |> Result.bind (fun keep ->
+                        if keep then project row |> Result.map Some else Ok None))
+                |> Result.map (List.choose id)
+                |> Result.mapError (fun (code, message) -> Err(code, message)))
+            |> Ok
 
 and private compatibleSemiJoinColumns (left: ColumnDef) (right: ColumnDef) =
     let sameTextDomain =

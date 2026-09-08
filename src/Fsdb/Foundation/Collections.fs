@@ -17,3 +17,18 @@ let internal sameLength left right =
         | _ -> false
 
     loop left right
+
+let internal traverseArrayIndexed mapping (values: 'a array) : Result<'b array, 'error> =
+    let mapped = Array.zeroCreate<'b> values.Length
+
+    let rec loop index =
+        if index = values.Length then
+            Ok mapped
+        else
+            match mapping index values.[index] with
+            | Ok value ->
+                mapped.[index] <- value
+                loop (index + 1)
+            | Error error -> Error error
+
+    loop 0

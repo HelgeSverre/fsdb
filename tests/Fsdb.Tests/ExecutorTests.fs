@@ -10706,6 +10706,20 @@ let tests =
                           [ Some "4"; Some "16" ]
                           [ Some "5"; Some "25" ] ]
 
+                testCase "row-local recursive members retain ordinary SELECT semantics"
+                <| fun _ ->
+                    expectRows
+                        ("WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL "
+                         + "SELECT (SELECT current.n + 1) FROM c AS current WHERE current.n < 3) "
+                         + "SELECT n FROM c")
+                        [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
+
+                    expectRows
+                        ("WITH RECURSIVE c(n) AS (SELECT 1 UNION "
+                         + "SELECT current.* FROM c AS current WHERE current.n < 2) "
+                         + "SELECT n FROM c")
+                        [ [ Some "1" ] ]
+
                 testCase "recursive CTE rows conform to their anchor types"
                 <| fun _ ->
                     match

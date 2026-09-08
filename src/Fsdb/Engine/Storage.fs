@@ -1511,6 +1511,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
     | TDecimal(precision, scale, _), _ when scale > precision ->
         Error(ExpressionError(1427, sprintf "For decimal(M,D), M must be >= D (column '%s')." col.Name))
     | _, VNull -> Ok VNull
+    | TBigInt false, VInt _ -> Ok v
     | _ ->
         match col.Type with
         // `BIGINT UNSIGNED` is the one integer column whose domain `VInt`
@@ -2031,8 +2032,12 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         col
         v
 
+let internal prepareStoredValueCoercion (store: Store) (col: ColumnDef) =
+    let mode = temporalCoercionMode store
+    coerceStoredValueWithMode mode col
+
 let coerceStoredValue (store: Store) (col: ColumnDef) (value: Value) : Result<Value, StorageError> =
-    coerceStoredValueWithMode (temporalCoercionMode store) col value
+    prepareStoredValueCoercion store col value
 
 let private supportsCurrentTimestamp (col: ColumnDef) =
     match col.Type with
