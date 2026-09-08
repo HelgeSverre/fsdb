@@ -50,6 +50,8 @@ covers phonetic, base64, ordinal, bit-selection, and common alias functions;
 signed and fractional time arithmetic, period and day-number conversion, and
 seeded randomness; `FROM DUAL`; row-value comparison and `IN` semantics;
 multi-column subquery operand errors; and empty-group bit aggregate identities.
+Planar spatial cases compare topology rather than WKT vertex order. They cover
+relations, overlays, and positive, zero, and negative default buffers.
 
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and
