@@ -309,7 +309,8 @@ SQL types for every statement handled by the grammar. The text-probed `SET`
 and `SHOW` forms still splice SQL literals.
 
 Forward-only prepared cursors, long parameter data, and zlib or Zstandard
-protocol compression use the same typed execution path.
+protocol compression use the same typed execution path. The dynamic GLOBAL
+`protocol_compression_algorithms` setting limits negotiation for new clients.
 
 ## SQL surface
 

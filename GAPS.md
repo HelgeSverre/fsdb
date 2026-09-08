@@ -444,6 +444,8 @@ CA certificates, and secure-transport enforcement. Packet, connection, and
 prepared-statement limits are enforced and advertised honestly. Mid-query
 disconnects cancel evaluation through `Server.watchForDisconnect`.
 `COM_SET_OPTION` toggles multi-statement handling for negotiated clients.
+The dynamic GLOBAL `protocol_compression_algorithms` policy controls zlib,
+Zstandard, and uncompressed negotiation for new connections.
 
 `CLIENT_SESSION_TRACK` reports default-schema changes and assignments to the
 configured system-variable set, including same-value assignments, plus the
@@ -459,7 +461,6 @@ the statement.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | TLS certificate lifecycle | live certificate/trust-store reload and CRL validation | server and client-CA certificates are loaded when the listener starts; client chains are validated without revocation checks | low (rotation requires restart) | subset |
-| Compression policy | `protocol_compression_algorithms` changes the algorithms offered to new connections | zlib and Zstandard are always offered; the global variable reports that static policy and refuses assignment | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index conversion conditions, conditional DDL and unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |

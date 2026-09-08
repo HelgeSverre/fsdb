@@ -66,8 +66,8 @@ version.
 
 The implemented surface includes:
 
-- the MySQL wire protocol, forward-only prepared cursors, and zlib or
-  Zstandard compression;
+- the MySQL wire protocol, forward-only prepared cursors, and policy-controlled
+  zlib or Zstandard compression;
 - PDO and mysql CLI compatibility;
 - the SQL engine, Laravel migrations, multi-table DML, and `EXPLAIN`;
 - the embedding API, opt-in persistence, and lazy result streaming.
