@@ -509,6 +509,46 @@ let tests =
               | Err(1054, _) -> ()
               | other -> failtestf "expected correlated hidden-column rejection, got %A" other
 
+          testCase "ordered views guide limited writes and inherit through nesting"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE order_rows (id INT PRIMARY KEY, n INT NOT NULL, note VARCHAR(20))") "create rows"
+              expectOk (run store "INSERT INTO order_rows VALUES (1, 10, 'a'), (2, 30, 'b'), (3, 20, 'c')") "seed rows"
+
+              expectOk
+                  (run store "CREATE VIEW ordered_rows AS SELECT id, n, note, n * 2 AS doubled FROM order_rows ORDER BY doubled DESC")
+                  "create ordered view"
+
+              expectOk
+                  (run store "CREATE VIEW inherited_order AS SELECT id, n, note FROM ordered_rows")
+                  "create inheriting view"
+
+              Expect.equal
+                  (rows store "SELECT table_name, is_updatable FROM information_schema.views WHERE table_name IN ('inherited_order', 'ordered_rows') ORDER BY table_name")
+                  [ [ Some "inherited_order"; Some "YES" ]; [ Some "ordered_rows"; Some "YES" ] ]
+                  "ordering does not make a view read-only"
+
+              expectOk (run store "UPDATE ordered_rows SET note = 'view-order' LIMIT 1") "use the view order"
+              expectOk (run store "UPDATE ordered_rows SET note = 'outer-order' ORDER BY id ASC LIMIT 1") "override the view order"
+
+              expectOk
+                  (run store "UPDATE inherited_order SET note = 'nested-order' WHERE id <> 2 LIMIT 1")
+                  "inherit the inner order"
+
+              Expect.equal
+                  (rows store "SELECT id, note FROM order_rows ORDER BY id")
+                  [ [ Some "1"; Some "outer-order" ]
+                    [ Some "2"; Some "view-order" ]
+                    [ Some "3"; Some "nested-order" ] ]
+                  "limited updates choose the same rows as MySQL"
+
+              expectOk (run store "DELETE FROM inherited_order WHERE id <> 2 LIMIT 1") "use inherited order for delete"
+
+              Expect.equal
+                  (rows store "SELECT id FROM order_rows ORDER BY id")
+                  [ [ Some "1" ]; [ Some "2" ] ]
+                  "limited delete chooses the highest remaining row"
+
           testCase "a grouped view rejects UPDATE"
           <| fun _ ->
               let store = setup ()
