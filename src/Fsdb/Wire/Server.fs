@@ -2,6 +2,7 @@
 module Fsdb.Server
 
 open System
+open System.Formats.Asn1
 open System.Security.Cryptography
 open System.Security.Cryptography.X509Certificates
 open System.Net
@@ -55,7 +56,7 @@ let private isValidClientCertificate
 
     chain.Build remoteCertificate
 
-let private x500NameOneline (name: X500DistinguishedName) =
+let internal x500NameOneline (name: X500DistinguishedName) =
     let shortName (oid: Oid) =
         match oid.Value with
         | "2.5.4.6" -> "C"
@@ -71,14 +72,51 @@ let private x500NameOneline (name: X500DistinguishedName) =
     let escape (value: string) =
         value.Replace("\\", "\\\\").Replace("/", "\\/").Replace("+", "\\+")
 
-    name.EnumerateRelativeDistinguishedNames(false)
-    |> Seq.choose (fun relativeName ->
+    let attributeText (attribute: AsnReader) =
+        let oid = Oid(attribute.ReadObjectIdentifier())
+        let tag = attribute.PeekTag()
+
+        let value =
+            if tag.TagClass <> TagClass.Universal then
+                "#" + Convert.ToHexString(attribute.ReadEncodedValue().Span)
+            else
+                match enum<UniversalTagNumber> tag.TagValue with
+                | UniversalTagNumber.UTF8String
+                | UniversalTagNumber.NumericString
+                | UniversalTagNumber.PrintableString
+                | UniversalTagNumber.TeletexString
+                | UniversalTagNumber.VideotexString
+                | UniversalTagNumber.IA5String
+                | UniversalTagNumber.GraphicString
+                | UniversalTagNumber.ISO646String
+                | UniversalTagNumber.GeneralString
+                | UniversalTagNumber.UniversalString
+                | UniversalTagNumber.BMPString as stringType -> attribute.ReadCharacterString stringType |> escape
+                | _ -> "#" + Convert.ToHexString(attribute.ReadEncodedValue().Span)
+
+        sprintf "%s=%s" (shortName oid) value
+
+    let relativeNameText (relativeName: X500RelativeDistinguishedName) =
         if relativeName.HasMultipleElements then
-            None
+            let reader = AsnReader(relativeName.RawData, AsnEncodingRules.DER)
+            let attributes = reader.ReadSetOf()
+
+            let values =
+                [ while attributes.HasData do
+                      let attribute = attributes.ReadSequence()
+                      yield attributeText attribute
+                      attribute.ThrowIfNotEmpty() ]
+
+            attributes.ThrowIfNotEmpty()
+            reader.ThrowIfNotEmpty()
+            "/" + String.concat "+" values
         else
             match relativeName.GetSingleElementValue() with
-            | null -> None
-            | value -> Some(sprintf "/%s=%s" (shortName (relativeName.GetSingleElementType())) (escape value)))
+            | null -> ""
+            | value -> sprintf "/%s=%s" (shortName (relativeName.GetSingleElementType())) (escape value)
+
+    name.EnumerateRelativeDistinguishedNames(false)
+    |> Seq.map relativeNameText
     |> String.concat ""
 
 let private mysqlCipherName (cipherSuite: TlsCipherSuite) =

@@ -1,6 +1,8 @@
 module Fsdb.Tests.ServerTests
 
 open System
+open System.Formats.Asn1
+open System.Security.Cryptography.X509Certificates
 open Expecto
 open Fsdb.Binary
 open Fsdb.Packet
@@ -26,7 +28,35 @@ let tests =
     testSequenced
     <| testList
         "Server"
-        [ testCase "second-valued connection timeouts cannot overflow milliseconds"
+        [ testCase "certificate subjects use MySQL's slash form"
+          <| fun _ ->
+              let writer = AsnWriter(AsnEncodingRules.DER)
+
+              let attribute (oid: string) (value: string) =
+                  writer.PushSequence() |> ignore
+                  writer.WriteObjectIdentifier oid
+                  writer.WriteCharacterString(UniversalTagNumber.UTF8String, value)
+                  writer.PopSequence()
+
+              let relativeName (attributes: (string * string) list) =
+                  writer.PushSetOf() |> ignore
+                  attributes |> List.iter (fun (oid, value) -> attribute oid value)
+                  writer.PopSetOf()
+
+              writer.PushSequence() |> ignore
+              relativeName [ "2.5.4.6", "NO" ]
+              relativeName [ "2.5.4.10", "fsdb" ]
+              relativeName [ "2.5.4.11", "unit"; "2.5.4.3", "client" ]
+              writer.PopSequence()
+
+              let name = X500DistinguishedName(writer.Encode())
+
+              Expect.equal
+                  (Fsdb.Server.x500NameOneline name)
+                  "/C=NO/O=fsdb/OU=unit+CN=client"
+                  "multi-valued relative names retain their OpenSSL-compatible grouping"
+
+          testCase "second-valued connection timeouts cannot overflow milliseconds"
           <| fun _ ->
               Expect.equal (Fsdb.Server.timeoutMilliseconds 300) 300_000 "ordinary timeout is exact"
               Expect.equal
