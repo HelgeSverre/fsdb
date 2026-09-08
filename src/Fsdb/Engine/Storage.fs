@@ -2151,6 +2151,35 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 with :? ArgumentException ->
                     temporalFallback ()
 
+            let tryAdjustOffset value sourceZone =
+                try
+                    let adjusted = adjustDateTimeToFsp mode fsp value
+                    let utc = sqlTimeZoneToUtc sourceZone adjusted
+
+                    let converted =
+                        match col.Type with
+                        | TTimestamp _ -> VTimestamp utc
+                        | _ -> VDateTime(sqlTimeZoneFromUtc mode.TimeZone utc)
+
+                    timestampRangeResult converted
+                with :? ArgumentException ->
+                    temporalFallback ()
+
+            let invalidOffset () =
+                if strict then
+                    Error(
+                        ExpressionError(
+                            1292,
+                            sprintf
+                                "Incorrect datetime value: '%s' for column '%s' at row %d"
+                                (v |> toText |> Option.defaultValue "")
+                                col.Name
+                                (Diagnostics.currentRowNumber ())
+                        )
+                    )
+                else
+                    temporalFallback ()
+
             match v with
             | VTimestamp utc ->
                 match col.Type with
@@ -2170,23 +2199,31 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 | None -> zeroDateError ()
             | VZeroDateTime dt -> zeroDateResult dt
             | VString s ->
-                match tryParseZeroDateTime (s.Trim()) with
-                | Some dt -> zeroDateResult dt
-                | None ->
-                    match tryParseZeroDate (s.Trim()) with
-                    | Some d ->
-                        match tryZeroDateTime d 0 0 0 0 with
-                        | Some dt -> zeroDateResult dt
-                        | None -> zeroDateError ()
-                    | None ->
-                        let datePart = s.Trim().Split([| ' '; 'T' |], StringSplitOptions.RemoveEmptyEntries) |> Array.tryHead
+                let text = s.Trim()
 
-                        match datePart |> Option.bind tryParseDateParts with
-                        | Some(year, month, day) when year = 0 || month = 0 || day = 0 -> invalidZeroDateResult year month day
-                        | _ ->
-                            match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                            | true, dt -> tryAdjust dt
-                            | false, _ -> temporalFallback ()
+                match tryParseDateTimeOffset text with
+                | ParsedDateTimeOffset(dateTime, sourceZone) -> tryAdjustOffset dateTime sourceZone
+                | InvalidDateTimeOffset -> invalidOffset ()
+                | ZeroDateTimeOffset ->
+                    Error(ExpressionError(1292, sprintf "Truncated incorrect temporal value: '%s'" text))
+                | NoDateTimeOffset ->
+                    match tryParseZeroDateTime text with
+                    | Some dt -> zeroDateResult dt
+                    | None ->
+                        match tryParseZeroDate text with
+                        | Some d ->
+                            match tryZeroDateTime d 0 0 0 0 with
+                            | Some dt -> zeroDateResult dt
+                            | None -> zeroDateError ()
+                        | None ->
+                            let datePart = text.Split([| ' '; 'T' |], StringSplitOptions.RemoveEmptyEntries) |> Array.tryHead
+
+                            match datePart |> Option.bind tryParseDateParts with
+                            | Some(year, month, day) when year = 0 || month = 0 || day = 0 -> invalidZeroDateResult year month day
+                            | _ ->
+                                match DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                                | true, dt -> tryAdjust dt
+                                | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
 let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =

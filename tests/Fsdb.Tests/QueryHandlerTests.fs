@@ -2083,6 +2083,96 @@ let tests =
               | Err(1292, "Incorrect datetime value: '1970-01-01 05:30:00' for column 'stamp' at row 1") -> ()
               | other -> failtestf "expected range validation after offset conversion, got %A" other
 
+          testCase "datetime inputs with explicit offsets convert through the session zone"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE explicit_offsets (id INT PRIMARY KEY, stamp TIMESTAMP(6), plain DATETIME(6))"
+              let session, _ = handle session "SET time_zone = '+00:00'"
+
+              let session, result =
+                  handle
+                      session
+                      "INSERT INTO explicit_offsets VALUES (1, '2024-01-01 10:10:10.123456+05:30', '2024-01-01 10:10:10.123456+05:30'), (2, '2024-01-01 10:10:10-08:00', '2024-01-01 10:10:10-08:00')"
+
+              Expect.equal result (Affected 2UL) "explicit offsets are accepted"
+
+              match handle session "SELECT stamp, plain FROM explicit_offsets ORDER BY id" |> snd with
+              | ResultSet(
+                  _,
+                  [ [ Some "2024-01-01 04:40:10.123456"; Some "2024-01-01 04:40:10.123456" ]
+                    [ Some "2024-01-01 18:10:10.000000"; Some "2024-01-01 18:10:10.000000" ] ]
+                ) -> ()
+              | other -> failtestf "expected offset inputs converted into UTC, got %A" other
+
+              let session, _ = handle session "SET time_zone = '+02:00'"
+
+              match handle session "SELECT stamp, plain FROM explicit_offsets ORDER BY id" |> snd with
+              | ResultSet(
+                  _,
+                  [ [ Some "2024-01-01 06:40:10.123456"; Some "2024-01-01 04:40:10.123456" ]
+                    [ Some "2024-01-01 20:10:10.000000"; Some "2024-01-01 18:10:10.000000" ] ]
+                ) -> ()
+              | other -> failtestf "expected only TIMESTAMP to follow a later session-zone change, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT TIMESTAMP '2024-01-01 10:10:10.123456+05:30', TIMESTAMP('2024-01-01 10:10:10.123456+05:30'), CAST('2024-01-01 10:10:10.123456+05:30' AS DATETIME(6))"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "2024-01-01 06:40:10.123456"
+                      Some "2024-01-01 06:40:10.123456"
+                      Some "2024-01-01 06:40:10.123456" ] ]
+                ) -> ()
+              | other -> failtestf "expected literals, functions, and casts to share offset conversion, got %A" other
+
+              let session, _ = handle session "SET sql_mode = ''"
+              let session, result = handle session "INSERT INTO explicit_offsets VALUES (3, '2024-01-01 10:10:10-00:00', '2024-01-01 10:10:10+14:01')"
+              Expect.equal result (Affected 1UL) "non-strict invalid offsets become zero values"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ Some "Warning"; Some "1265"; Some first ]; [ Some "Warning"; Some "1265"; Some second ] ]) ->
+                  Expect.stringContains first "column 'stamp' at row 1" "negative zero is rejected for TIMESTAMP"
+                  Expect.stringContains second "column 'plain' at row 1" "out-of-range offsets are rejected for DATETIME"
+              | other -> failtestf "expected invalid-offset warnings for both columns, got %A" other
+
+              match handle session "SELECT stamp, plain FROM explicit_offsets WHERE id=3" |> snd with
+              | ResultSet(_, [ [ Some "0000-00-00 00:00:00.000000"; Some "0000-00-00 00:00:00.000000" ] ]) -> ()
+              | other -> failtestf "expected zero temporal fallbacks for invalid offsets, got %A" other
+
+              match
+                  handle
+                      session
+                      "INSERT INTO explicit_offsets VALUES (4, '2024-00-01 10:10:10+05:30', '2024-01-01 10:10:10+05:30')"
+                  |> snd
+              with
+              | Err(1292, _) -> ()
+              | other -> failtestf "expected zero date parts with offsets to fail in non-strict mode, got %A" other
+
+              match prepareStatementForSession session "INSERT INTO explicit_offsets (id, stamp, plain) VALUES (5, ?, ?)" with
+              | Ok(Some ast, 2) ->
+                  let statement =
+                      { Ast = Some ast
+                        Sql = "INSERT INTO explicit_offsets (id, stamp, plain) VALUES (5, ?, ?)"
+                        ParamCount = 2
+                        LastParamTypes = None }
+
+                  let session, result =
+                      executePrepared
+                          session
+                          statement
+                          [ VString "2024-01-01 10:10:10+05:30"
+                            VString "2024-01-01 10:10:10+05:30" ]
+
+                  Expect.equal result (Affected 1UL) "prepared string parameters retain their explicit offsets"
+
+                  match handle session "SELECT stamp, plain FROM explicit_offsets WHERE id=5" |> snd with
+                  | ResultSet(_, [ [ Some "2024-01-01 06:40:10.000000"; Some "2024-01-01 06:40:10.000000" ] ]) -> ()
+                  | other -> failtestf "expected prepared offsets converted into the current session zone, got %A" other
+              | other -> failtestf "expected the offset insert to prepare, got %A" other
+
           testCase "collation_connection drives LIKE, DISTINCT, and GROUP BY over literals"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

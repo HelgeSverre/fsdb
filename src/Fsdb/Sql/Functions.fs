@@ -2673,13 +2673,27 @@ let private tryTimeTicks (value: Value) =
 
 let private timeResult ticks = VTime(timeValueOrClamp ticks)
 
+let private tryDateTimeValueInZone zone value =
+    match value with
+    | VString text ->
+        match tryParseDateTimeOffset text with
+        | ParsedDateTimeOffset(localTime, sourceZone) ->
+            try
+                localTime |> sqlTimeZoneToUtc sourceZone |> sqlTimeZoneFromUtc zone |> Some
+            with :? ArgumentException ->
+                None
+        | InvalidDateTimeOffset
+        | ZeroDateTimeOffset -> None
+        | NoDateTimeOffset -> tryDateTimeValue value
+    | _ -> tryDateTimeValue value
+
 /// `TIMESTAMP(expr)` coerces to a datetime; the two-argument form adds a
 /// TIME value to that datetime.
-let private timestampFn: Scalar =
+let internal timestampFn (zone: SqlTimeZone) : Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> tryDateTimeValue v |> Option.map VDateTime |> Option.defaultValue VNull
+    | [ v ] when not (anyNull [ v ]) -> tryDateTimeValueInZone zone v |> Option.map VDateTime |> Option.defaultValue VNull
     | [ date; time ] when not (anyNull [ date; time ]) ->
-        match tryDateTimeValue date, tryTimeTicks time with
+        match tryDateTimeValueInZone zone date, tryTimeTicks time with
         | Some value, Some ticks ->
             try
                 VDateTime(value.AddTicks ticks)
@@ -5702,7 +5716,7 @@ let private registerTemporalBuiltins registry =
     |> registerTextScalar "CONVERT" firstArgument convertFn
     |> registerScalar "DATE" dateFn
     |> registerScalar "TIME" timeFn
-    |> registerScalar "TIMESTAMP" timestampFn
+    |> registerScalar "TIMESTAMP" (timestampFn SystemTimeZone)
     |> registerScalar "YEAR" (zeroAwareDatePart (fun date -> let year, _, _ = zeroDateParts date in year) (fun d -> d.Year))
     |> registerScalar "MONTH" (zeroAwareDatePart (fun date -> let _, month, _ = zeroDateParts date in month) (fun d -> d.Month))
     |> registerScalar "DAY" (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day))

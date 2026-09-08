@@ -331,6 +331,54 @@ let tryParseDateParts (text: string) =
         | _ -> None
     | _ -> None
 
+type internal DateTimeOffsetParseResult =
+    | NoDateTimeOffset
+    | ParsedDateTimeOffset of localTime: DateTime * offset: SqlTimeZone
+    | InvalidDateTimeOffset
+    | ZeroDateTimeOffset
+
+let private dateTimeOffsetPattern =
+    Regex(@"^(?<datetime>.+)(?<offset>[+-]\d{2}:\d{2})$", RegexOptions.CultureInvariant)
+
+let private dateTimeOffsetLikePattern =
+    Regex(@"[Tt ]\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?(?:[+-].+|[zZ])$", RegexOptions.CultureInvariant)
+
+let private dateTimeFractionPattern =
+    Regex(@"\.(?<fraction>\d+)(?:[+-]\d{2}:\d{2})?$", RegexOptions.CultureInvariant)
+
+let internal tryParseDateTimeOffset (text: string) =
+    let text = text.Trim()
+    let matched = dateTimeOffsetPattern.Match text
+
+    if not matched.Success then
+        if dateTimeOffsetLikePattern.IsMatch text then InvalidDateTimeOffset else NoDateTimeOffset
+    else
+        let dateTimeText = matched.Groups.["datetime"].Value
+        let offsetText = matched.Groups.["offset"].Value
+
+        let hasZeroDatePart =
+            dateTimeText.Split([| ' '; 'T'; 't' |], StringSplitOptions.RemoveEmptyEntries)
+            |> Array.tryHead
+            |> Option.bind tryParseDateParts
+            |> Option.exists (fun (_, month, day) -> month = 0 || day = 0)
+
+        if hasZeroDatePart then
+            ZeroDateTimeOffset
+        elif offsetText = "-00:00" then
+            InvalidDateTimeOffset
+        else
+            match
+                trySqlTimeZone offsetText,
+                DateTime.TryParse(dateTimeText, CultureInfo.InvariantCulture, DateTimeStyles.None)
+            with
+            | Some(FixedOffset _ as offset), (true, dateTime) ->
+                ParsedDateTimeOffset(DateTime.SpecifyKind(dateTime, DateTimeKind.Unspecified), offset)
+            | _ -> InvalidDateTimeOffset
+
+let internal dateTimeFractionalPrecision (text: string) =
+    let matched = dateTimeFractionPattern.Match(text.Trim())
+    if matched.Success then min 6 matched.Groups.["fraction"].Value.Length else 0
+
 let tryParseZeroDate (text: string) =
     tryParseDateParts text |> Option.bind (fun (year, month, day) -> tryZeroDate year month day)
 

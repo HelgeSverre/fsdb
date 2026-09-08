@@ -1767,12 +1767,17 @@ let private temporalLit: Parser<Expr, unit> =
                 |> Option.map (VZeroDate >> Lit >> preturn)
                 |> Option.defaultWith (fun () -> refuse "DATE")
         | "TIMESTAMP" ->
-            match MySqlTemporal.tryDateTime text with
-            | Some dt -> preturn (Lit(VDateTime dt))
-            | None ->
-                tryParseZeroDateTime text
-                |> Option.map (VZeroDateTime >> Lit >> preturn)
-                |> Option.defaultWith (fun () -> refuse "DATETIME")
+            match tryParseDateTimeOffset text with
+            | ParsedDateTimeOffset _ -> preturn (Cast(Lit(VString text), TDateTime(dateTimeFractionalPrecision text)))
+            | InvalidDateTimeOffset
+            | ZeroDateTimeOffset -> refuse "DATETIME"
+            | NoDateTimeOffset ->
+                match MySqlTemporal.tryDateTime text with
+                | Some dt -> preturn (Lit(VDateTime dt))
+                | None ->
+                    tryParseZeroDateTime text
+                    |> Option.map (VZeroDateTime >> Lit >> preturn)
+                    |> Option.defaultWith (fun () -> refuse "DATETIME")
         | _ ->
             match MySqlTemporal.tryTime text with
             | Some normalized ->

@@ -683,6 +683,7 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "CURRENT_DATE" (Functions.currentDateFn timeZone)
     |> Functions.registerScalar "CURTIME" (Functions.currentTimeFn timeZone)
     |> Functions.registerScalar "CURRENT_TIME" (Functions.currentTimeFn timeZone)
+    |> Functions.registerScalar "TIMESTAMP" (Functions.timestampFn timeZone)
     |> Functions.registerScalar "UNIX_TIMESTAMP" (Functions.unixTimestampFn timeZone)
     |> Functions.registerScalar "FROM_UNIXTIME" (Functions.fromUnixTimeFn timeZone timeLocale)
     |> Functions.registerScalar "WEEK" (Functions.weekFn defaultWeekFormat)
