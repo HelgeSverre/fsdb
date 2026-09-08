@@ -280,7 +280,11 @@ let private textMap rawMap (f: string -> string) : Scalar =
 
 let private functionalIndexScalar transform: Scalar =
     function
-    | [ value ] -> FunctionalIndex.projectValue (Some transform) value
+    | [ value ] ->
+        try
+            FunctionalIndex.projectValue (Some transform) value
+        with Value.SignedOutOfRange ->
+            raise (Diagnostics.EvaluationError(1690, "BIGINT value is out of range"))
     | _ -> VNull
 
 /// True if any argument is NULL — the common case for multi-arg string/math
@@ -337,18 +341,6 @@ let private ifNullFn: Scalar =
 let private ifFn: Scalar =
     function
     | [ cond; a; b ] -> if truthy cond = Some true then a else b
-    | _ -> VNull
-
-let private absFn: Scalar =
-    function
-    | [ VNull ] -> VNull
-    | [ VInt i ] -> VInt(abs i)
-    // Already non-negative and outside `int64`/`double`'s exact reach past
-    // 2^63 — the generic `toDouble` arm below would answer 1.8446744073709552e19.
-    | [ VUInt u ] -> VUInt u
-    | [ VDouble d ] -> VDouble(abs d)
-    | [ VDecimal d ] -> VDecimal(abs d)
-    | [ v ] -> VDouble(abs (toDouble v))
     | _ -> VNull
 
 /// `Math.Round` throws outside 0..15 (double) / 0..28 (decimal) digits, so
@@ -5731,6 +5723,10 @@ let private registerFunctionalByteText transform registry =
     FunctionalIndex.names transform
     |> List.fold (fun registry name -> registerByteTextScalar name firstArgument (functionalIndexScalar transform) registry) registry
 
+let private registerFunctionalScalar transform registry =
+    FunctionalIndex.names transform
+    |> List.fold (fun registry name -> registerScalar name (functionalIndexScalar transform) registry) registry
+
 let private registerTemporalBuiltins registry =
     registry
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
@@ -5948,7 +5944,7 @@ let builtins: Registry =
     |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
     |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn
     |> registerScalarResult "IF" (CombineArguments (arguments (set [ 1; 2 ]))) ifFn
-    |> registerScalar "ABS" absFn
+    |> registerFunctionalScalar AbsoluteValue
     |> registerScalar "ROUND" roundFn
     |> registerScalar "MOD" modFn
     |> registerJsonBuiltins

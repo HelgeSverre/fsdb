@@ -24,6 +24,7 @@ open Fsdb.Engine
 exception LockWaitTimeout of dbName: string
 exception LockNowait of dbName: string
 exception DeadlockVictim of dbName: string
+exception IndexExpressionError of code: int * message: string
 
 /// Storage-layer failures, mapped to MySQL error codes by `toMySqlError`.
 /// `ExpressionError` carries an already-formed MySQL (code, message) pair
@@ -116,6 +117,12 @@ let toMySqlError (err: StorageError) : int * string =
     // MySQL's ER_OPEN_AS_READONLY — the closest real vocabulary for "this
     // table exists but refuses writes".
     | VirtualTableReadOnly name -> 1036, sprintf "Table '%s' is read only" name
+
+let private captureIndexExpressionError operation =
+    try
+        operation ()
+    with IndexExpressionError(code, message) ->
+        Error(ExpressionError(code, message))
 
 let private compareIndexedValues (collationName: string option) (left: Value) (right: Value) =
     match left, right with
@@ -975,57 +982,58 @@ let private withDatabasePublishing
     (eventsOf: 'a -> CommitEvent list)
     (f: Database -> Result<Database * 'a, StorageError>)
     : Result<'a, StorageError> =
-    match store.Databases.TryGetValue dbName with
-    | false, _ -> Error(NoSuchDatabase dbName)
-    | true, slot ->
-        // The database cell is also its mutation lock. Different databases
-        // use different cells, while writers within one database publish
-        // their immutable replacement maps atomically.
-        let published =
-            lock slot (fun () ->
-                let attached =
-                    match store.Databases.TryGetValue dbName with
-                    | true, current -> obj.ReferenceEquals(current, slot)
-                    | false, _ -> false
+    captureIndexExpressionError (fun () ->
+        match store.Databases.TryGetValue dbName with
+        | false, _ -> Error(NoSuchDatabase dbName)
+        | true, slot ->
+            // The database cell is also its mutation lock. Different databases
+            // use different cells, while writers within one database publish
+            // their immutable replacement maps atomically.
+            let published =
+                lock slot (fun () ->
+                    let attached =
+                        match store.Databases.TryGetValue dbName with
+                        | true, current -> obj.ReferenceEquals(current, slot)
+                        | false, _ -> false
 
-                if not attached then
-                    Error(NoSuchDatabase dbName)
-                else
-                    let original = slot.Value
+                    if not attached then
+                        Error(NoSuchDatabase dbName)
+                    else
+                        let original = slot.Value
 
-                    match f original with
-                    | Error e -> Error e
-                    | Ok(db', result) ->
-                        let current = slot.Value
+                        match f original with
+                        | Error e -> Error e
+                        | Ok(db', result) ->
+                            let current = slot.Value
 
-                        slot.Value <-
-                            if LanguagePrimitives.PhysicalEquality original current then
-                                db'
-                            else
-                                // Trigger bodies may re-enter this slot while the outer
-                                // statement still owns its immutable starting root.
-                                let keys =
-                                    Set.union
-                                        (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
-                                        (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                            slot.Value <-
+                                if LanguagePrimitives.PhysicalEquality original current then
+                                    db'
+                                else
+                                    // Trigger bodies may re-enter this slot while the outer
+                                    // statement still owns its immutable starting root.
+                                    let keys =
+                                        Set.union
+                                            (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                                            (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
 
-                                keys
-                                |> Set.fold
-                                    (fun published key ->
-                                        match Map.tryFind key original, Map.tryFind key db' with
-                                        | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
-                                        | _, Some after -> Map.add key after published
-                                        | Some _, None -> Map.remove key published
-                                        | None, None -> published)
-                                    current
+                                    keys
+                                    |> Set.fold
+                                        (fun published key ->
+                                            match Map.tryFind key original, Map.tryFind key db' with
+                                            | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
+                                            | _, Some after -> Map.add key after published
+                                            | Some _, None -> Map.remove key published
+                                            | None, None -> published)
+                                        current
 
-                        Ok(result, prepareResultEvents store eventsOf result))
+                            Ok(result, prepareResultEvents store eventsOf result))
 
-        match published with
-        | Error error -> Error error
-        | Ok(result, acknowledge) ->
-            acknowledge ()
-            Ok result
+            match published with
+            | Error error -> Error error
+            | Ok(result, acknowledge) ->
+                acknowledge ()
+                Ok result)
 
 let private withDatabase store dbName f =
     withDatabasePublishing store dbName (fun _ -> []) f
@@ -1104,7 +1112,7 @@ let private withReferentialCatalogPublishing
                 acknowledge ()
                 Ok result
 
-    withReferentialSchemaLock access store publish
+    captureIndexExpressionError (fun () -> withReferentialSchemaLock access store publish)
 
 /// Holds the named database cells in lexical order while `action` prepares
 /// and publishes a schema change. DML already uses these cells for its short
@@ -2341,7 +2349,17 @@ let private projectIndexValue (column: ColumnDef) prefixLength transform value =
         |> Option.map Charset.encode
         |> Option.defaultValue Encoding.UTF8.GetBytes
 
-    let transformed = FunctionalIndex.projectValueWith encodeText transform value
+    let transformed =
+        try
+            FunctionalIndex.projectValueWith encodeText transform value
+        with SignedOutOfRange ->
+            let expression =
+                transform
+                |> Option.bind FunctionalIndex.tryBuiltinName
+                |> Option.defaultValue "expression"
+                |> fun name -> sprintf "%s(`%s`)" (name.ToLowerInvariant()) (column.Name.Replace("`", "``"))
+
+            raise (IndexExpressionError(1690, sprintf "BIGINT value is out of range in '%s'" expression))
 
     match prefixLength, transformed with
     | Some length, VString text -> VString(truncateRunes length text |> Option.defaultValue text)
@@ -7125,10 +7143,11 @@ let private insertRowsPreparedCore
                             finish
                         |> Result.map (fun (database, result) -> setCatalogDatabase dbName database catalog, result))))
 
-    match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
-    | Some targets when not targets.Keys.IsEmpty ->
-        withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
-    | _ -> publish ()
+    captureIndexExpressionError (fun () ->
+        match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
+        | Some targets when not targets.Keys.IsEmpty ->
+            withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
+        | _ -> publish ())
 
 let insertRows
     (store: Store)
@@ -7600,9 +7619,11 @@ and upsertRowsWithOrdinal
                 |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
 
         let result =
-            match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
-            | Some targets when not targets.Keys.IsEmpty -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
-            | _ -> publish ()
+            captureIndexExpressionError (fun () ->
+                match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
+                | Some targets when not targets.Keys.IsEmpty ->
+                    withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
+                | _ -> publish ())
 
         match result with
         | Ok(summary, _, _) ->

@@ -371,6 +371,7 @@ and IndexTransform =
     | CharacterLength
     | ByteLength
     | BitLength
+    | AbsoluteValue
     | Expression of Expr
 
 and IndexColumn =

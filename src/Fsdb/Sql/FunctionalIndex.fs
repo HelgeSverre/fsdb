@@ -33,7 +33,10 @@ let private definitions =
         Transform = ByteLength }
       { CanonicalName = "BIT_LENGTH"
         Aliases = []
-        Transform = BitLength } ]
+        Transform = BitLength }
+      { CanonicalName = "ABS"
+        Aliases = []
+        Transform = AbsoluteValue } ]
 
 let private namesOf definition =
     definition.CanonicalName :: definition.Aliases
@@ -80,6 +83,20 @@ let supportsColumnType transform columnType =
         | TGeometry _
         | TVector _ -> false
         | _ -> true
+    | AbsoluteValue ->
+        match columnType with
+        | TBool
+        | TTinyInt _
+        | TSmallInt _
+        | TMediumInt _
+        | TInt _
+        | TBigInt _
+        | TBit _
+        | TFloat _
+        | TDouble _
+        | TDecimal _
+        | TYear -> true
+        | _ -> false
     | Expression _ -> false
 
 let fixedKeyLength =
@@ -165,6 +182,13 @@ let projectValueWith encodeText transform value =
     | Some CharacterLength, value -> VInt(characterLength value)
     | Some ByteLength, value -> VInt(byteLengthWith encodeText value)
     | Some BitLength, value -> VInt(byteLengthWith encodeText value * 8L)
+    | Some AbsoluteValue, VInt Int64.MinValue -> raise SignedOutOfRange
+    | Some AbsoluteValue, VInt value -> VInt(abs value)
+    | Some AbsoluteValue, VUInt value -> VUInt value
+    | Some AbsoluteValue, VBit(_, value) -> VUInt value
+    | Some AbsoluteValue, VDouble value -> VDouble(abs value)
+    | Some AbsoluteValue, VDecimal value -> VDecimal(abs value)
+    | Some AbsoluteValue, value -> VDouble(abs (toDouble value))
     | _ -> value
 
 let projectValue transform value =

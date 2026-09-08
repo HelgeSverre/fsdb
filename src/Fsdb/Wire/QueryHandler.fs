@@ -6732,6 +6732,9 @@ let private recoverExecutionError (session: Session) (description: string) (erro
     | Storage.LockWaitTimeout dbName ->
         Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- %s" dbName description
         session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
+    | Storage.IndexExpressionError(code, message) ->
+        Log.diagnostic "fsdb: ERR %d %s -- %s" code message description
+        session, Err(code, message)
     // MySQL's 1690 message names the offending expression; fsdb
     // needs an AST printer before it can do the same without reconstructing SQL.
     | Value.UnsignedOutOfRange ->
