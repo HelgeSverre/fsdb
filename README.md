@@ -385,16 +385,19 @@ the directory writable only by the account running fsdb.
 
 The payload is a `CommitEvent` encoded with tagged binary values. Schema
 events contain pre-encoded statement trees; row events contain physical
-`Value[]` rows. Replay therefore writes the exact committed values: a stored
-`NOW()` value does not advance to a new instant after restart.
+`Value[]` rows. Update and delete events also carry a stable row identity and
+the old image used to verify it. Replay therefore writes the exact committed
+values: a stored `NOW()` value does not advance to a new instant after restart.
 
 A crash during append can leave a torn final record. Replay stops at a length
 overrun or CRC mismatch, truncates the WAL to its last valid boundary, and
 continues future appends from there.
 
-Keyed changes replay through unique indexes while derived indexes are updated
-incrementally. A row-image event without a usable unique key needs one ordered
-pass over the table.
+Current update and delete events normally resolve their rows directly. If a
+transaction rebase has reused a private row identity, replay detects the image
+mismatch and resolves that exceptional event from its old image. WAL files
+written before row identities were persisted retain their image-based replay
+path. Derived indexes are maintained incrementally in every case.
 
 Concurrent commits use a bounded group-commit queue. Commits that arrive
 while a flush is in progress share the next append and `fsync`, while each
@@ -407,7 +410,9 @@ The `wal_group_commit_queue_capacity` option controls producer backpressure.
 ### Snapshots
 
 `snapshot.fsdb` stores the catalog as a self-delimiting binary tree: databases,
-tables, then rows. It uses the same tagged value format as the WAL.
+tables, stable row identities, then row values. It uses the same tagged value
+format as the WAL and reads earlier snapshot versions that did not retain row
+identities.
 
 A checkpoint is written to `snapshot.fsdb.new`, durably flushed, and renamed
 into place. On startup, a valid `.new` file wins; a torn one falls back to the

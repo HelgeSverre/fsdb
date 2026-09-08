@@ -9004,6 +9004,12 @@ let tests =
               Expect.equal created (Affected 0UL) "temporary table created"
               let first, inserted = handle first "INSERT INTO sample VALUES (2)"
               Expect.equal inserted (Affected 1UL) "temporary row inserted"
+              let first, updated = handle first "UPDATE sample SET n = 3"
+              Expect.equal updated (Affected 1UL) "temporary row updated"
+              let first, deleted = handle first "DELETE FROM sample"
+              Expect.equal deleted (Affected 1UL) "temporary row deleted"
+              let first, inserted = handle first "INSERT INTO sample VALUES (2)"
+              Expect.equal inserted (Affected 1UL) "temporary row reinserted"
 
               match handle first "SELECT n FROM sample" |> snd with
               | ResultSet(_, [ [ Some "2" ] ]) -> ()

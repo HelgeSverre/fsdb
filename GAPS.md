@@ -282,9 +282,13 @@ CRC-protected. A durable flush precedes acknowledgement, and fatal flush failure
 terminates the process rather than claiming a commit.
 
 Snapshot replacement verifies the `.new` file before preferring it and syncs
-the containing directory after rename on Unix. Replay applies ordered changes
-without re-entering checked write paths and maintains derived indexes
-incrementally.
+the containing directory after rename on Unix. Snapshots retain stable row
+identities. Current update and delete WAL records address those identities and
+verify their before-images, falling back to the image only when a concurrent
+transaction rebase has reassigned a private row identity. Replay applies the
+ordered changes without re-entering checked write paths and maintains derived
+indexes incrementally. Older image-only WAL and snapshot formats remain
+readable.
 
 Group commit, ordered checkpoint barriers, lock-step rotation, shutdown
 rotation, decode-depth limits, generated-expression codecs, and durable XA
@@ -297,7 +301,6 @@ snapshot restart.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Durability default | durable unless configured otherwise | in-memory unless `--data-dir` passed; process death loses everything | medium (deployment) | divergence |
-| Keyless WAL row lookup | redo addresses physical records directly | replay resolves rows through unique indexes when possible; events on tables without a usable unique key use one ordered table pass because the WAL stores row images rather than row ids | low (recovery and durable keyless-write throughput) | divergence |
 | Space reclamation | purge threads reclaim deleted rows | Delete-heavy tables compact immutable row roots after at least 256 tombstones occupy one quarter of physical slots; reclamation is foreground and occasionally scans one table root | low | divergence |
 
 ## 9. Views and triggers

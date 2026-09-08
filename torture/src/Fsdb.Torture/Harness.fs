@@ -198,8 +198,13 @@ module CommitEvents =
         | RowsUpdated(db, table, changes) ->
             let hashes = changes |> Seq.collect (fun (before, after) -> [ rowHash before; rowHash after ])
             sprintf "rows_updated db=%s table=%s count=%d hash=%s" db table changes.Length (Hashing.combine hashes)
+        | RowsUpdatedById(db, table, changes) ->
+            let hashes = changes |> Seq.collect (fun change -> [ rowHash change.Before; rowHash change.After ])
+            sprintf "rows_updated db=%s table=%s count=%d hash=%s" db table changes.Length (Hashing.combine hashes)
         | RowsDeleted(db, table, rows) ->
             sprintf "rows_deleted db=%s table=%s count=%d hash=%s" db table rows.Length (rows |> Seq.map rowHash |> Hashing.combine)
+        | RowsDeletedById(db, table, rows) ->
+            sprintf "rows_deleted db=%s table=%s count=%d hash=%s" db table rows.Length (rows |> Seq.map (_.Row >> rowHash) |> Hashing.combine)
         | AutoIncrementAdvanced(db, table, nextId) ->
             sprintf "auto_increment_advanced db=%s table=%s next=%d" db table nextId
         | SchemaChanged(db, statement) -> sprintf "schema_changed db=%s statement=%s" db (AstKind.ofStatement statement)

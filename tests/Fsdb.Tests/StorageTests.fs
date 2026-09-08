@@ -3527,7 +3527,7 @@ let tests =
 
                     Expect.isTrue
                         (match ordered with
-                         | [ [ TransactionCommitted _ ]; [ RowsUpdated _ ] ] -> true
+                         | [ [ TransactionCommitted _ ]; [ RowsUpdatedById _ ] ] -> true
                          | _ -> false)
                         "durable batches follow publication order"
 
@@ -3658,6 +3658,38 @@ let tests =
                     |> ignore
 
                     Expect.equal (List.ofSeq events) [] "a no-op ODKU match commits nothing"
+
+                testCase "XA observers retain the public row-image event shape"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit.Add events.Add
+                    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+
+                    updateRows
+                        snapshot
+                        defaultDatabase
+                        "users"
+                        None
+                        (fun _ -> Ok true)
+                        (fun row -> Ok [| row.[0]; row.[1]; VInt 31L |])
+                    |> ignore
+
+                    let xid: Xa.Xid =
+                        { GlobalId = [ 1uy ]
+                          BranchQualifier = []
+                          FormatId = 1u }
+
+                    Expect.isTrue (prepareXa store xid false baseCatalog snapshot) "the branch prepares"
+                    Expect.isTrue (commitPreparedXaWithTimeout (System.TimeSpan.FromSeconds 1.) store xid) "the branch commits"
+
+                    match List.ofSeq events with
+                    | [ XaCommitted(observed, [ RowsUpdated(_, "users", [ before, after ]) ]) ] ->
+                        Expect.equal observed xid "the observer receives the committed branch"
+                        Expect.equal before.[2] (VInt 30L) "the public event includes the old image"
+                        Expect.equal after.[2] (VInt 31L) "the public event includes the new image"
+                    | other -> failtestf "expected one public XA row-image event, got %A" other
 
                 testCase "schema changes emit logical DDL events"
                 <| fun _ ->

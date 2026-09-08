@@ -282,20 +282,32 @@ type Database = Map<string, Table>
 /// database rather than stored in one `Catalog` value.
 type Catalog = Map<string, Database>
 
-/// One committed change to the catalog, for a physical WAL. Data changes
-/// (`RowsInserted`/`RowsUpdated`/`RowsDeleted`) carry the actual `Value`s
-/// written, never SQL text — `INSERT ... VALUES (NOW(), UUID())` replayed as
-/// SQL would produce different values the second time, so replay must be
-/// "write exactly this row" rather than "re-run this expression". DDL
-/// (`SchemaChanged`) is logged logically as the parsed `Statement` instead.
+/// One committed change to the catalog, for a physical WAL. Data changes carry
+/// the actual `Value`s written, never SQL text — `INSERT ... VALUES (NOW(),
+/// UUID())` replayed as SQL would produce different values the second time.
+/// Current update and delete records also carry stable row identities; their
+/// images verify that the identity still names the intended row after a
+/// transaction rebase. DDL (`SchemaChanged`) is logged logically as the parsed
+/// `Statement` instead.
 /// `SchemaChangedAt` additionally retains clocks assigned by CREATE and
 /// TRUNCATE.
 /// `TransactionCommitted` keeps transaction and multi-table statement events
 /// indivisible during recovery.
+type RowUpdate =
+    { RowId: RowId
+      Before: Value[]
+      After: Value[] }
+
+type RowRemoval = { RowId: RowId; Row: Value[] }
+
 type CommitEvent =
     | RowsInserted of db: string * table: string * rows: Value[] list
+    /// Retained for WAL records written before stable row identities were persisted.
     | RowsUpdated of db: string * table: string * changes: (Value[] * Value[]) list
+    /// Retained for WAL records written before stable row identities were persisted.
     | RowsDeleted of db: string * table: string * rows: Value[] list
+    | RowsUpdatedById of db: string * table: string * changes: RowUpdate list
+    | RowsDeletedById of db: string * table: string * rows: RowRemoval list
     | AutoIncrementAdvanced of db: string * table: string * nextId: int64
     | SchemaChanged of db: string * Statement
     | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
@@ -551,7 +563,9 @@ let internal requiresImmediateAutoIncrementPublication (store: Store) =
 let rec private eventRollbackWork = function
     | RowsInserted(_, _, rows)
     | RowsDeleted(_, _, rows) -> int64 rows.Length
+    | RowsDeletedById(_, _, rows) -> int64 rows.Length
     | RowsUpdated(_, _, changes) -> int64 changes.Length
+    | RowsUpdatedById(_, _, changes) -> int64 changes.Length
     | TransactionCommitted events
     | XaPrepared(_, _, events)
     | XaCommitted(_, events) -> events |> List.sumBy eventRollbackWork
@@ -593,6 +607,16 @@ let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent li
         durableAction ()
         observerError |> Option.iter raise
 
+let rec private observerEvent = function
+    | RowsUpdatedById(db, table, changes) ->
+        RowsUpdated(db, table, changes |> List.map (fun change -> change.Before, change.After))
+    | RowsDeletedById(db, table, rows) -> RowsDeleted(db, table, rows |> List.map _.Row)
+    | TransactionCommitted events -> TransactionCommitted(List.map observerEvent events)
+    | XaPrepared(xid, validateWholeSnapshot, events) ->
+        XaPrepared(xid, validateWholeSnapshot, List.map observerEvent events)
+    | XaCommitted(xid, events) -> XaCommitted(xid, List.map observerEvent events)
+    | event -> event
+
 let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
     recordRollbackWork store events
 
@@ -607,7 +631,7 @@ let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> un
             | [ event ] -> [ event ]
             | events -> [ TransactionCommitted events ]
 
-        preparePublishedEvents store durableEvents events
+        preparePublishedEvents store durableEvents (List.map observerEvent events)
     | _ -> ignore
 
 let private prepareResultEvents (store: Store) (eventsOf: 'a -> CommitEvent list) (result: 'a) : unit -> unit =
@@ -847,7 +871,7 @@ let private prepareXaCommitEvents (xid: Xa.Xid) (store: Store) (snapshot: Store)
         ignore
     | None ->
         let committed = XaCommitted(xid, events)
-        preparePublishedEvents store [ committed ] [ committed ]
+        preparePublishedEvents store [ committed ] [ observerEvent committed ]
 
 let private persistXaControl (store: Store) (event: CommitEvent) : unit =
     preparePublishedEvents store [ event ] [] |> fun acknowledge -> acknowledge ()
@@ -7596,12 +7620,12 @@ let rec private cascadeUpdateVisited
     (checkFks: bool)
     (catalog: Catalog)
     (visited: Map<TableAddress, Value[] list>)
-    (changes: Map<TableAddress, (Value[] * Value[]) list>)
+    (changes: Map<TableAddress, RowUpdate list>)
     (parent: TableAddress)
     (parentColumns: ColumnDef list)
     (oldRow: Value[])
     (newRow: Value[])
-    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, (Value[] * Value[]) list>, StorageError> =
+    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, RowUpdate list>, StorageError> =
     cascadeUpdateVisitedFrom checkFks catalog visited changes (Set.singleton parent) parent parentColumns oldRow newRow
 
 /// `cascadeUpdateVisited`'s actual body, with `path` — every table on the
@@ -7613,13 +7637,13 @@ and private cascadeUpdateVisitedFrom
     (checkFks: bool)
     (catalog: Catalog)
     (visited: Map<TableAddress, Value[] list>)
-    (changes: Map<TableAddress, (Value[] * Value[]) list>)
+    (changes: Map<TableAddress, RowUpdate list>)
     (path: Set<TableAddress>)
     (parent: TableAddress)
     (parentColumns: ColumnDef list)
     (oldRow: Value[])
     (newRow: Value[])
-    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, (Value[] * Value[]) list>, StorageError> =
+    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, RowUpdate list>, StorageError> =
     if not checkFks then
         Ok(catalog, visited, changes)
     else
@@ -7678,7 +7702,13 @@ and private cascadeUpdateVisitedFrom
                                                         List.iter2 (fun i v -> row'.[i] <- v) childIdxs newKey
                                                         rows.[rowId] <- row'
                                                         let index, secondaryIndex, secondaryOrder = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex secondaryOrder
-                                                        (row, row') :: changes, index, secondaryIndex, secondaryOrder
+                                                        { RowId = rowId
+                                                          Before = row
+                                                          After = row' }
+                                                        :: changes,
+                                                        index,
+                                                        secondaryIndex,
+                                                        secondaryOrder
                                                     else
                                                         changes, index, secondaryIndex, secondaryOrder)
                                                 ([], childTbl.UniqueIndex, childTbl.SecondaryIndex, childTbl.SecondaryOrder)
@@ -7689,10 +7719,19 @@ and private cascadeUpdateVisitedFrom
 
                                         List.rev rowChanges
                                         |> List.fold
-                                            (fun acc (oldC, newC) ->
+                                            (fun acc change ->
                                                 acc
                                                 |> Result.bind (fun (catalog, visited, changes) ->
-                                                    cascadeUpdateVisitedFrom checkFks catalog visited changes (Set.add childAddress path) childAddress childTbl.Columns oldC newC))
+                                                    cascadeUpdateVisitedFrom
+                                                        checkFks
+                                                        catalog
+                                                        visited
+                                                        changes
+                                                        (Set.add childAddress path)
+                                                        childAddress
+                                                        childTbl.Columns
+                                                        change.Before
+                                                        change.After))
                                             (Ok(updatedCatalog, visited', changes'))
                                     | Some "SET NULL" ->
                                         match childIdxs |> List.tryFind (fun i -> not childTbl.Columns.[i].Nullable) with
@@ -7711,7 +7750,13 @@ and private cascadeUpdateVisitedFrom
                                                             childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
                                                             rows.[rowId] <- row'
                                                             let index, secondaryIndex, secondaryOrder = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex secondaryOrder
-                                                            (row, row') :: changes, index, secondaryIndex, secondaryOrder
+                                                            { RowId = rowId
+                                                              Before = row
+                                                              After = row' }
+                                                            :: changes,
+                                                            index,
+                                                            secondaryIndex,
+                                                            secondaryOrder
                                                         else
                                                             changes, index, secondaryIndex, secondaryOrder)
                                                     ([], childTbl.UniqueIndex, childTbl.SecondaryIndex, childTbl.SecondaryOrder)
@@ -7730,7 +7775,7 @@ type private UpsertSummary =
       GeneratedId: int64 option
       Affected: int
       InsertedRows: Value[] list
-      UpdatedRows: (Value[] * Value[]) list }
+      UpdatedRows: RowUpdate list }
 
 type private UpsertBatchState =
     { NextAutoId: int64
@@ -7738,13 +7783,13 @@ type private UpsertBatchState =
       LastExplicitId: int64 option
       Affected: int
       InsertedRev: Value[] list
-      UpdatedRev: (Value[] * Value[]) list
+      UpdatedRev: RowUpdate list
       UniqueIndex: Map<string, Map<string, RowId>>
       SecondaryIndex: Map<string, Map<string, Set<RowId>>>
       SecondaryOrder: SecondaryOrder
       Catalog: Catalog
       Visited: Map<TableAddress, Value[] list>
-      Cascaded: Map<TableAddress, (Value[] * Value[]) list> }
+      Cascaded: Map<TableAddress, RowUpdate list> }
 
 /// Upserts through the collation-aware unique indexes. MySQL counts a changed
 /// match as two affected rows; an unchanged match counts as one only with
@@ -7783,19 +7828,19 @@ and upsertRowsWithOrdinal
 
         let eventsOf
             (summary: UpsertSummary,
-             cascaded: Map<TableAddress, (Value[] * Value[]) list>,
+             cascaded: Map<TableAddress, RowUpdate list>,
              catalog: Catalog)
             =
             [ if not summary.InsertedRows.IsEmpty then
                   RowsInserted(dbName, tableName, summary.InsertedRows)
 
               if not summary.UpdatedRows.IsEmpty then
-                  RowsUpdated(dbName, tableName, summary.UpdatedRows)
+                  RowsUpdatedById(dbName, tableName, summary.UpdatedRows)
 
               for KeyValue(address, changes) in cascaded do
                   if not changes.IsEmpty then
                       let database, table = catalogTableIdentity catalog address
-                      RowsUpdated(database, table, changes) ]
+                      RowsUpdatedById(database, table, changes) ]
 
         let publish () =
             withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
@@ -7835,7 +7880,7 @@ and private upsertRowsInTable
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
-    : Result<Catalog * Map<TableAddress, (Value[] * Value[]) list> * UpsertSummary, StorageError> =
+    : Result<Catalog * Map<TableAddress, RowUpdate list> * UpsertSummary, StorageError> =
                 let checkFks = store.ForeignKeyChecks
 
                 let indices =
@@ -7947,7 +7992,10 @@ and private upsertRowsInTable
                                                             Affected = state.Affected + weight
                                                             UpdatedRev =
                                                                 if changed then
-                                                                    (existing, applied) :: state.UpdatedRev
+                                                                    { RowId = pos
+                                                                      Before = existing
+                                                                      After = applied }
+                                                                    :: state.UpdatedRev
                                                                 else
                                                                     state.UpdatedRev
                                                             UniqueIndex = uniqueIndex
@@ -8062,13 +8110,31 @@ and private upsertRowsInTable
 let rec private cascadeDeleteVisited
     (checkFks: bool)
     (catalog: Catalog)
-    (visited: Map<TableAddress, Value[] list>)
-    (blanked: Map<TableAddress, (Value[] * Value[]) list>)
+    (visited: Map<TableAddress, RowRemoval list>)
+    (blanked: Map<TableAddress, RowUpdate list>)
     (address: TableAddress)
     (toDelete: Value[] list)
-    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, (Value[] * Value[]) list>, StorageError> =
+    : Result<Catalog * Map<TableAddress, RowRemoval list> * Map<TableAddress, RowUpdate list>, StorageError> =
     let alreadyVisited = visited |> Map.tryFind address |> Option.defaultValue []
-    let toDelete = toDelete |> List.filter (fun row -> not (alreadyVisited |> List.exists ((=) row)))
+
+    let table = tryCatalogTable address catalog |> Option.get
+
+    let removals, _ =
+        table.RowsArray.Indexed
+        |> Seq.fold
+            (fun (removed, pending) (rowId, row) ->
+                if alreadyVisited |> List.exists (fun prior -> prior.RowId = rowId) then
+                    removed, pending
+                else
+                    match pending |> List.tryFindIndex ((=) row) with
+                    | Some pendingIndex ->
+                        { RowId = rowId; Row = row } :: removed,
+                        List.removeAt pendingIndex pending
+                    | None -> removed, pending)
+            ([], toDelete)
+
+    let removals = List.rev removals
+    let toDelete = removals |> List.map _.Row
 
     let removeFrom currentCatalog =
         let t = tryCatalogTable address currentCatalog |> Option.get
@@ -8076,31 +8142,34 @@ let rec private cascadeDeleteVisited
         let uniqueGroups = uniqueKeyGroups t
         let secondaryGroups = secondaryKeyGroups t
 
-        let index, secondaryIndex, secondaryOrder, _ =
-            t.RowsArray.Indexed
-            |> Seq.fold
-                (fun (index, secondaryIndex, secondaryOrder, pending) (rowId, row) ->
-                    match pending |> List.tryFindIndex ((=) row) with
-                    | Some pendingIndex ->
-                        rows.Remove rowId |> ignore
-                        let index, secondaryIndex, secondaryOrder = reindexRow t.Columns uniqueGroups secondaryGroups (Some(rowId, row)) None index secondaryIndex secondaryOrder
-                        index, secondaryIndex, secondaryOrder, List.removeAt pendingIndex pending
-                    | None -> index, secondaryIndex, secondaryOrder, pending)
-                (t.UniqueIndex, t.SecondaryIndex, t.SecondaryOrder, toDelete)
+        let index, secondaryIndex, secondaryOrder =
+            removals
+            |> List.fold
+                (fun (index, secondaryIndex, secondaryOrder) removed ->
+                    rows.Remove removed.RowId |> ignore
+
+                    reindexRow
+                        t.Columns
+                        uniqueGroups
+                        secondaryGroups
+                        (Some(removed.RowId, removed.Row))
+                        None
+                        index
+                        secondaryIndex
+                        secondaryOrder)
+                (t.UniqueIndex, t.SecondaryIndex, t.SecondaryOrder)
 
         let updated = publishRows t { t with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
         setCatalogTable address updated currentCatalog
 
-    if toDelete.IsEmpty then
+    if removals.IsEmpty then
         Ok(catalog, visited, blanked)
     else
-        let visited = visited |> Map.add address (alreadyVisited @ toDelete)
+        let visited = visited |> Map.add address (alreadyVisited @ removals)
 
         if not checkFks then
             Ok(removeFrom catalog, visited, blanked)
         else
-            let table = tryCatalogTable address catalog |> Option.get
-
             let applyChild acc (childAddress: TableAddress, fk: ForeignKeyDef) =
                 acc
                 |> Result.bind (fun (currentCatalog, visited, blanked) ->
@@ -8132,12 +8201,8 @@ let rec private cascadeDeleteVisited
                                     let childGroups = uniqueKeyGroups childTbl
                                     let secondaryGroups = secondaryKeyGroups childTbl
 
-                                    // Blanking retains row identities, so unique indexes can
-                                    // be rekeyed without a full rebuild.
-                                    // `changes` pairs each blanked row's before/after values —
-                                    // the WAL needs the exact same `RowsUpdated` shape a plain
-                                    // `UPDATE` reports, or replay resurrects the pre-blank FK
-                                    // value.
+                                    // Blanking retains row identities, so indexes and WAL
+                                    // replay can address the changed rows without a rebuild.
                                     let rows = childTbl.RowsArray.ToBuilder()
 
                                     let changes, index, secondaryIndex, secondaryOrder =
@@ -8149,7 +8214,13 @@ let rec private cascadeDeleteVisited
                                                     childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
                                                     rows.[rowId] <- row'
                                                     let index, secondaryIndex, secondaryOrder = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex secondaryOrder
-                                                    (row, row') :: changes, index, secondaryIndex, secondaryOrder
+                                                    { RowId = rowId
+                                                      Before = row
+                                                      After = row' }
+                                                    :: changes,
+                                                    index,
+                                                    secondaryIndex,
+                                                    secondaryOrder
                                                 else
                                                     changes, index, secondaryIndex, secondaryOrder)
                                             ([], childTbl.UniqueIndex, childTbl.SecondaryIndex, childTbl.SecondaryOrder)
@@ -8168,17 +8239,14 @@ let rec private cascadeDeleteVisited
 
 /// As `cascadeDeleteVisited`, seeded with empty `visited`/`blanked` — its
 /// second return value is every row actually removed, by table key,
-/// including `tableKey` itself and every table a `CASCADE` reached, for
-/// `deleteRows` to report as `RowsDeleted` events; its third is every
-/// `ON DELETE SET NULL` blanked row's before/after values, by table key, for
-/// `deleteRows` to report as `RowsUpdated` events the same way a plain
-/// `UPDATE` would.
+/// including `tableKey` itself and every table a `CASCADE` reached. Its third
+/// is every `ON DELETE SET NULL` update, also retaining its stable row id.
 let private cascadeDelete
     (checkFks: bool)
     (catalog: Catalog)
     (address: TableAddress)
     (toDelete: Value[] list)
-    : Result<Catalog * Map<TableAddress, Value[] list> * Map<TableAddress, (Value[] * Value[]) list>, StorageError> =
+    : Result<Catalog * Map<TableAddress, RowRemoval list> * Map<TableAddress, RowUpdate list>, StorageError> =
     cascadeDeleteVisited checkFks catalog Map.empty Map.empty address toDelete
 
 /// `REPLACE` inserts each candidate after deleting every row that conflicts
@@ -8212,20 +8280,20 @@ let private replaceRowsCore
                     let firstReserved, reservedAutoNext =
                         reserveAutoIncrementRange store dbName initialTable.OriginalName initialTable.NextAutoId reservationCount
                     let commitEvents
-                        (removed: Map<TableAddress, Value[] list>)
-                        (blanked: Map<TableAddress, (Value[] * Value[]) list>)
+                        (removed: Map<TableAddress, RowRemoval list>)
+                        (blanked: Map<TableAddress, RowUpdate list>)
                         (writeEvent: CommitEvent option)
                         =
                         let cascades =
                             [ for KeyValue(tableAddress, rows) in removed do
                                   if not rows.IsEmpty then
                                       let database, table = catalogTableIdentity initialCatalog tableAddress
-                                      RowsDeleted(database, table, rows)
+                                      RowsDeletedById(database, table, rows)
 
                               for KeyValue(tableAddress, changes) in blanked do
                                   if not changes.IsEmpty then
                                       let database, table = catalogTableIdentity initialCatalog tableAddress
-                                      RowsUpdated(database, table, changes) ]
+                                      RowsUpdatedById(database, table, changes) ]
 
                         cascades @ Option.toList writeEvent
 
@@ -8324,7 +8392,18 @@ let private replaceRowsCore
                                                                 UniqueIndex = uniqueIndex
                                                                 SecondaryIndex = secondaryIndex
                                                                 SecondaryOrder = secondaryOrder },
-                                                        (if changed then Some(RowsUpdated(dbName, tableName, [ existing, candidate ])) else None),
+                                                        (if changed then
+                                                             Some(
+                                                                 RowsUpdatedById(
+                                                                     dbName,
+                                                                     tableName,
+                                                                     [ { RowId = rowId
+                                                                         Before = existing
+                                                                         After = candidate } ]
+                                                                 )
+                                                             )
+                                                         else
+                                                             None),
                                                         deletedConflicts.Length + 1 + (if changed then 1 else 0)
                                                     | None ->
                                                         let rowId, rows = target.RowsArray.Append candidate
@@ -8422,20 +8501,20 @@ let private deleteRowsCore
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
     let eventsOf
-        (_,
+         (_,
          (catalog: Catalog),
-         (removed: Map<TableAddress, Value[] list>),
-         (blanked: Map<TableAddress, (Value[] * Value[]) list>))
+         (removed: Map<TableAddress, RowRemoval list>),
+         (blanked: Map<TableAddress, RowUpdate list>))
         =
         [ for KeyValue(address, rows) in removed do
               if not rows.IsEmpty then
                   let database, table = catalogTableIdentity catalog address
-                  RowsDeleted(database, table, rows)
+                  RowsDeletedById(database, table, rows)
 
           for KeyValue(address, changes) in blanked do
               if not changes.IsEmpty then
                   let database, table = catalogTableIdentity catalog address
-                  RowsUpdated(database, table, changes) ]
+                  RowsUpdatedById(database, table, changes) ]
 
     let apply () =
         withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
@@ -9000,17 +9079,17 @@ let updateRows
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
     let eventsOf
-        ((changes: (Value[] * Value[]) list),
-         (cascaded: Map<TableAddress, (Value[] * Value[]) list>),
+        ((changes: RowUpdate list),
+         (cascaded: Map<TableAddress, RowUpdate list>),
          (catalog: Catalog))
         =
         [ if not changes.IsEmpty then
-              RowsUpdated(dbName, tableName, changes)
+              RowsUpdatedById(dbName, tableName, changes)
 
           for KeyValue(address, updates) in cascaded do
               if not updates.IsEmpty then
                   let database, table = catalogTableIdentity catalog address
-                  RowsUpdated(database, table, updates) ]
+                  RowsUpdatedById(database, table, updates) ]
 
     let apply candidateRows catalog db =
         let key = normalizeTableName tableName
@@ -9029,13 +9108,13 @@ let updateRows
             let step acc (rowId, row) =
                 acc
                 |> Result.bind
-                    (fun (changesRev: (Value[] * Value[]) list,
+                    (fun (changesRev: RowUpdate list,
                           index: Map<string, Map<string, RowId>>,
                           secondaryIndex: Map<string, Map<string, Set<RowId>>>,
                           secondaryOrder: SecondaryOrder,
                           cascadeCatalog: Catalog,
                           visited: Map<TableAddress, Value[] list>,
-                          cascaded: Map<TableAddress, (Value[] * Value[]) list>) ->
+                          cascaded: Map<TableAddress, RowUpdate list>) ->
                             let rowId =
                                 match builder.TryFind rowId with
                                 | Some current when obj.ReferenceEquals(current, row) -> Some rowId
@@ -9086,7 +9165,19 @@ let updateRows
                                                     newRow, index, secondaryIndex, secondaryOrder, cascadeCatalog', visited', cascaded'))
                                         |> Result.map (fun (newRow, index', secondaryIndex', secondaryOrder', cascadeCatalog', visited', cascaded') ->
                                             builder.[rowId] <- newRow
-                                            (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', secondaryIndex', secondaryOrder', cascadeCatalog', visited', cascaded')))
+                                            (if newRow <> row then
+                                                 { RowId = rowId
+                                                   Before = row
+                                                   After = newRow }
+                                                 :: changesRev
+                                             else
+                                                 changesRev),
+                                            index',
+                                            secondaryIndex',
+                                            secondaryOrder',
+                                            cascadeCatalog',
+                                            visited',
+                                            cascaded')))
 
             candidateRows
             |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
@@ -9356,16 +9447,15 @@ let private reindexReplayRow
         secondaryIndex
         secondaryOrder
 
-/// Applies already-validated WAL updates while preserving stable row ids.
-let updateRowsForReplay
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (changes: (Value[] * Value[]) list)
-    (onMissing: string -> unit)
-    : unit =
-    let update (table: Table) =
-        let located = replayRowIds table (changes |> List.map fst)
+type private ReplayMutation =
+    { RowId: RowId
+      Before: Value[]
+      After: Value[] option }
+
+let private applyReplayMutations (table: Table) (mutations: ReplayMutation list) =
+    if mutations.IsEmpty then
+        table
+    else
         let rows = table.RowsArray.ToBuilder()
         let uniqueGroups = uniqueKeyGroups table
         let secondaryGroups = secondaryKeyGroups table
@@ -9373,18 +9463,25 @@ let updateRowsForReplay
         let mutable secondaryIndex = table.SecondaryIndex
         let mutable secondaryOrder = table.SecondaryOrder
 
-        for rowId, (before, after) in List.zip located changes do
-            match rowId with
-            | None -> ()
-            | Some rowId ->
-                rows.[rowId] <- after
+        for mutation in mutations do
+            match mutation.After with
+            | Some after -> rows.[mutation.RowId] <- after
+            | None -> rows.Remove mutation.RowId |> ignore
 
-                let nextUnique, nextSecondary, nextOrder =
-                    reindexReplayRow table uniqueGroups secondaryGroups (Some(rowId, before)) (Some(rowId, after)) uniqueIndex secondaryIndex secondaryOrder
+            let nextUnique, nextSecondary, nextOrder =
+                reindexReplayRow
+                    table
+                    uniqueGroups
+                    secondaryGroups
+                    (Some(mutation.RowId, mutation.Before))
+                    (mutation.After |> Option.map (fun after -> mutation.RowId, after))
+                    uniqueIndex
+                    secondaryIndex
+                    secondaryOrder
 
-                uniqueIndex <- nextUnique
-                secondaryIndex <- nextSecondary
-                secondaryOrder <- nextOrder
+            uniqueIndex <- nextUnique
+            secondaryIndex <- nextSecondary
+            secondaryOrder <- nextOrder
 
         publishRows table
             { table with
@@ -9393,46 +9490,79 @@ let updateRowsForReplay
                 SecondaryIndex = secondaryIndex
                 SecondaryOrder = secondaryOrder }
 
-    changeTableForReplay store dbName tableName update onMissing
+let private replayMutations store dbName tableName mutationsFor onMissing =
+    changeTableForReplay store dbName tableName (fun table -> mutationsFor table |> applyReplayMutations table) onMissing
 
-/// Applies already-validated WAL deletes while preserving stable row ids.
-let deleteRowsForReplay
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (targets: Value[] list)
-    (onMissing: string -> unit)
-    : unit =
-    let delete (table: Table) =
-        let located = replayRowIds table targets
-        let rows = table.RowsArray.ToBuilder()
-        let uniqueGroups = uniqueKeyGroups table
-        let secondaryGroups = secondaryKeyGroups table
-        let mutable uniqueIndex = table.UniqueIndex
-        let mutable secondaryIndex = table.SecondaryIndex
-        let mutable secondaryOrder = table.SecondaryOrder
+let private replayIdentityFallbackCountLocal = System.Threading.AsyncLocal<int>()
 
-        for rowId, row in List.zip located targets do
-            match rowId with
-            | None -> ()
-            | Some rowId ->
-                rows.Remove rowId |> ignore
+let internal replayIdentityFallbackCount () = replayIdentityFallbackCountLocal.Value
 
-                let nextUnique, nextSecondary, nextOrder =
-                    reindexReplayRow table uniqueGroups secondaryGroups (Some(rowId, row)) None uniqueIndex secondaryIndex secondaryOrder
+let private resolveReplayIdentity (table: Table) (consumed: HashSet<RowId>) preferred expected =
+    match table.RowsArray.TryFind preferred with
+    | Some current when current = expected && consumed.Add preferred -> Some preferred
+    | _ ->
+        // A transaction may allocate a private id that a concurrent live insert
+        // consumes before merge. Its before-image makes that rare rebase safe.
+        replayIdentityFallbackCountLocal.Value <- replayIdentityFallbackCountLocal.Value + 1
 
-                uniqueIndex <- nextUnique
-                secondaryIndex <- nextSecondary
-                secondaryOrder <- nextOrder
+        table.RowsArray.Indexed
+        |> Seq.tryPick (fun (rowId, row) ->
+            if row = expected && consumed.Add rowId then Some rowId else None)
 
-        publishRows table
-            { table with
-                RowsArray = rows.DrainToImmutable()
-                UniqueIndex = uniqueIndex
-                SecondaryIndex = secondaryIndex
-                SecondaryOrder = secondaryOrder }
+let private mutationsById table items identity before after onMissing =
+    let consumed = HashSet<RowId>()
 
-    changeTableForReplay store dbName tableName delete onMissing
+    items
+    |> List.choose (fun item ->
+        let preferred = identity item
+        let expected = before item
+
+        match resolveReplayIdentity table consumed preferred expected with
+        | Some rowId ->
+            Some
+                { RowId = rowId
+                  Before = expected
+                  After = after item }
+        | None ->
+            onMissing (sprintf "row identity %d does not match its WAL image" (RowId.value preferred))
+            None)
+
+/// Applies row-image WAL records written before snapshots retained row ids.
+let updateRowsForReplay store dbName tableName changes onMissing =
+    let mutations table =
+        List.zip (replayRowIds table (List.map fst changes)) changes
+        |> List.choose (fun (rowId, (before, after)) ->
+            rowId
+            |> Option.map (fun rowId ->
+                { RowId = rowId
+                  Before = before
+                  After = Some after }))
+
+    replayMutations store dbName tableName mutations onMissing
+
+let updateRowsByIdForReplay store dbName tableName (changes: RowUpdate list) onMissing =
+    let mutations table =
+        mutationsById table changes _.RowId _.Before (fun change -> Some change.After) onMissing
+
+    replayMutations store dbName tableName mutations onMissing
+
+/// Applies row-image WAL records written before snapshots retained row ids.
+let deleteRowsForReplay store dbName tableName targets onMissing =
+    let mutations table =
+        List.zip (replayRowIds table targets) targets
+        |> List.choose (fun (rowId, before) ->
+            rowId
+            |> Option.map (fun rowId ->
+                { RowId = rowId
+                  Before = before
+                  After = None }))
+
+    replayMutations store dbName tableName mutations onMissing
+
+let deleteRowsByIdForReplay store dbName tableName (targets: RowRemoval list) onMissing =
+    let mutations table = mutationsById table targets _.RowId _.Row (fun _ -> None) onMissing
+
+    replayMutations store dbName tableName mutations onMissing
 
 /// Restores metadata that is assigned at creation rather than derived from
 /// table contents.

@@ -1002,6 +1002,8 @@ let private KindSchemaChangedV6 = 0x13uy
 let private KindSchemaChangedAtV6 = 0x14uy
 let private KindSchemaChangedV7 = 0x15uy
 let private KindSchemaChangedAtV7 = 0x16uy
+let private KindRowsUpdatedById = 0x17uy
+let private KindRowsDeletedById = 0x18uy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -1063,6 +1065,25 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
 
         for row in rows do
             encodeRowBin w row
+    | RowsUpdatedById(db, table, changes) ->
+        w.WriteByte KindRowsUpdatedById
+        w.WriteLenEncString db
+        w.WriteLenEncString table
+        w.WriteInt32LE changes.Length
+
+        for change in changes do
+            w.WriteInt32LE(RowId.value change.RowId)
+            encodeRowBin w change.Before
+            encodeRowBin w change.After
+    | RowsDeletedById(db, table, rows) ->
+        w.WriteByte KindRowsDeletedById
+        w.WriteLenEncString db
+        w.WriteLenEncString table
+        w.WriteInt32LE rows.Length
+
+        for removed in rows do
+            w.WriteInt32LE(RowId.value removed.RowId)
+            encodeRowBin w removed.Row
     | AutoIncrementAdvanced(db, table, nextId) ->
         w.WriteByte KindAutoIncrementAdvanced
         w.WriteLenEncString db
@@ -1130,6 +1151,31 @@ let rec private decodeEventAt
         let table = str ()
         let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
         RowsDeleted(db, table, rows)
+    | k when k = KindRowsUpdatedById ->
+        let db = str ()
+        let table = str ()
+
+        let changes =
+            List.init
+                (r.ReadInt32LE())
+                (fun _ ->
+                    { RowId = RowId.create (r.ReadInt32LE())
+                      Before = decodeRowBin r
+                      After = decodeRowBin r })
+
+        RowsUpdatedById(db, table, changes)
+    | k when k = KindRowsDeletedById ->
+        let db = str ()
+        let table = str ()
+
+        let rows =
+            List.init
+                (r.ReadInt32LE())
+                (fun _ ->
+                    { RowId = RowId.create (r.ReadInt32LE())
+                      Row = decodeRowBin r })
+
+        RowsDeletedById(db, table, rows)
     | k when k = KindAutoIncrementAdvanced ->
         AutoIncrementAdvanced(str (), str (), r.ReadInt64LE())
     | k when k = KindSchemaChanged ->
@@ -1286,6 +1332,10 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
             appendRowsForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
     | RowsUpdated(db, table, changes) -> updateRowsForReplay store db table changes (Log.diagnostic "fsdb: WAL replay warning: %s")
     | RowsDeleted(db, table, rows) -> deleteRowsForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
+    | RowsUpdatedById(db, table, changes) ->
+        updateRowsByIdForReplay store db table changes (Log.diagnostic "fsdb: WAL replay warning: %s")
+    | RowsDeletedById(db, table, rows) ->
+        deleteRowsByIdForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
     | AutoIncrementAdvanced(db, table, nextId) ->
         warn "AutoIncrementAdvanced" (alterTable store db table [ SetAutoIncrement nextId ])
     | SchemaChanged(db, stmt) -> applyDdl store db stmt

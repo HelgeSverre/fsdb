@@ -1181,6 +1181,49 @@ let tests =
                       rowCount
                       reindexesDuringLoad)
 
+          testCase "current WAL updates address keyless rows without image scans"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let rowCount = 2500
+              let setupStore = create ()
+              let columns = [ mkCol "value" (TInt false); mkCol "state" (TInt false) ]
+              createTable setupStore defaultDatabase "keyless" columns [] [] None None |> ignore
+
+              insertRows
+                  setupStore
+                  defaultDatabase
+                  "keyless"
+                  None
+                  [ for value in 1 .. rowCount -> [ VInt(int64 value); VInt 0L ] ]
+              |> ignore
+
+              snapshotNow dir setupStore
+
+              let records =
+                  [ for index in 0 .. rowCount - 1 ->
+                        let value = VInt(int64 (index + 1))
+
+                        encodeWalRecord (
+                            RowsUpdatedById(
+                                defaultDatabase,
+                                "keyless",
+                                [ { RowId = Fsdb.RowId.create index
+                                    Before = [| value; VInt 0L |]
+                                    After = [| value; VInt 1L |] } ]
+                            )
+                        ) ]
+                  |> Array.concat
+
+              File.WriteAllBytes(Path.Combine(dir, "wal.bin"), records)
+              let fallbacksBefore = replayIdentityFallbackCount ()
+              let reloaded = load dir
+              let fallbacks = replayIdentityFallbackCount () - fallbacksBefore
+
+              Expect.equal fallbacks 0 "stable identities resolve directly"
+
+              rowsOf reloaded defaultDatabase "keyless"
+              |> List.iter (fun row -> Expect.equal row.[1] (VInt 1L) "every update replays")
+
           testCase "mysql account and proxy rows round-trip through snapshot reload"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -1661,8 +1704,55 @@ let tests =
                       Ok false)
               |> ignore
 
+              let fallbacksBefore = replayIdentityFallbackCount ()
               let reloaded = load dir
+              Expect.equal (replayIdentityFallbackCount () - fallbacksBefore) 0 "the persisted identity resolves directly"
               Expect.equal (rowsOf reloaded defaultDatabase "dups" |> List.length) 2 "only the one deleted row is gone after replay"
+
+              let remainingIds =
+                  reloaded.Catalog.[defaultDatabase].["dups"].RowsArray.Indexed
+                  |> Seq.map (fst >> Fsdb.RowId.value)
+                  |> List.ofSeq
+
+              Expect.equal remainingIds [ 1; 2 ] "identity-addressed replay removes only the selected duplicate"
+
+          testCase "rebased transaction row events fall back from stale private identities"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "rebased" [ mkCol "value" (TInt false) ] [] [] None None |> ignore
+
+              let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+              insertRows snapshot defaultDatabase "rebased" None [ [ VInt 1L ] ] |> ignore
+
+              let privateRow =
+                  snapshot.Catalog.[defaultDatabase].["rebased"].RowsArray.Indexed
+                  |> Seq.exactlyOne
+
+              updateRows
+                  snapshot
+                  defaultDatabase
+                  "rebased"
+                  (Some [ privateRow ])
+                  (fun _ -> Ok true)
+                  (fun _ -> Ok [| VInt 2L |])
+              |> ignore
+
+              insertRows store defaultDatabase "rebased" None [ [ VInt 9L ] ] |> ignore
+              commitCatalogInto store baseCatalog snapshot
+
+              let fallbacksBefore = replayIdentityFallbackCount ()
+              let recovered = load dir
+              Expect.isGreaterThan
+                  (replayIdentityFallbackCount () - fallbacksBefore)
+                  0
+                  "the reused private identity takes the verified image fallback"
+
+              Expect.equal
+                  (rowsOf recovered defaultDatabase "rebased" |> List.map (fun row -> row.[0]) |> List.sort)
+                  [ VInt 2L; VInt 9L ]
+                  "replay resolves the rebased transaction row by its before-image"
 
           testCase "WAL replay of a single RowsUpdated/RowsDeleted event over 10,000 rows doesn't stack-overflow"
           <| fun _ ->
