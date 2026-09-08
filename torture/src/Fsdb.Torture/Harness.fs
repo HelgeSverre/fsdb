@@ -298,6 +298,7 @@ module Invariants =
             | VBytes value -> "B" + Convert.ToHexString value
             | VDate value -> "T" + string value.DayNumber
             | VDateTime value -> "V" + string value.Ticks
+            | VTimestamp value -> "P" + string value.Ticks
             | VTime value -> "H" + string (Fsdb.Temporal.timeTicks value)
             | VZeroDate value -> "Z" + Fsdb.Temporal.formatZeroDate value
             | VZeroDateTime value -> "W" + Fsdb.Temporal.formatZeroDateTime value

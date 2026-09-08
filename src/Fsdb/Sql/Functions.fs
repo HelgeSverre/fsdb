@@ -2090,6 +2090,7 @@ let private dateTimeFormats =
 let tryDateTimeValue (v: Value) : DateTime option =
     match v with
     | VDateTime dt -> Some dt
+    | VTimestamp dt -> Some dt
     | VDate d -> Some(d.ToDateTime TimeOnly.MinValue)
     | VNull -> None
     | _ ->
@@ -2897,7 +2898,7 @@ let internal unixTimestampFn (zone: SqlTimeZone) : Scalar =
         |> Option.bind (fun dateTime ->
             try
                 Some(sqlTimeZoneToUtc zone dateTime)
-            with _ ->
+            with :? ArgumentException ->
                 None)
         |> Option.map (fun utc ->
             let seconds = decimal (utc - unixEpoch).Ticks / decimal TimeSpan.TicksPerSecond

@@ -385,7 +385,7 @@ let tests =
                       List.zip columns (Array.toList row)
                       |> List.pick (fun (column, value) ->
                           match column.Name, value with
-                          | "password_last_changed", VDateTime timestamp -> Some timestamp
+                          | "password_last_changed", VTimestamp timestamp -> Some timestamp
                           | _ -> None)
 
                   Expect.isFalse (Fsdb.Auth.isPasswordExpiredAt changed columns row) "fresh lifetime"
@@ -425,7 +425,7 @@ let tests =
                   List.zip columns (Array.toList row)
                   |> List.pick (fun (column, value) ->
                       match column.Name, value with
-                      | "password_last_changed", VDateTime timestamp -> Some timestamp
+                      | "password_last_changed", VTimestamp timestamp -> Some timestamp
                       | _ -> None)
 
               Expect.isFalse

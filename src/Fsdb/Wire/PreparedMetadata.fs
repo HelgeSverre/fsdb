@@ -120,6 +120,7 @@ let private metadataOfValue =
     | VZeroDate _ -> ColumnWire.parameterMetadataOfType TDate
     | VDateTime _
     | VZeroDateTime _ -> ColumnWire.parameterMetadataOfType(TDateTime 6)
+    | VTimestamp _ -> ColumnWire.parameterMetadataOfType(TTimestamp 6)
     | VTime _ -> ColumnWire.parameterMetadataOfType(TTime 6)
     | VBit(width, _) -> ColumnWire.parameterMetadataOfType(TBit width)
     | VJson _ -> ColumnWire.parameterMetadataOfType TJson

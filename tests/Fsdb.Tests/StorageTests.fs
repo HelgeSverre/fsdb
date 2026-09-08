@@ -439,7 +439,7 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
-                testCase "DEFAULT CURRENT_TIMESTAMP evaluates to a real VDateTime, not the marker text"
+                testCase "DEFAULT CURRENT_TIMESTAMP evaluates to a typed UTC timestamp"
                 <| fun _ ->
                     let store = create ()
 
@@ -456,8 +456,9 @@ let tests =
                             match List.ofSeq rows with
                             | [ row ] ->
                                 match row.[1] with
-                                | VDateTime _ -> ()
-                                | other -> failtestf "expected a VDateTime default, got %A" other
+                                | VTimestamp value ->
+                                    Expect.equal value.Kind System.DateTimeKind.Utc "timestamp defaults are stored as UTC instants"
+                                | other -> failtestf "expected a VTimestamp default, got %A" other
                             | other -> failtestf "expected one row, got %A" other
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
@@ -617,7 +618,8 @@ let tests =
                             { Strict = false
                               NoZeroDate = false
                               NoZeroInDate = false
-                              TruncateFractional = false }
+                              TruncateFractional = false
+                              TimeZone = SystemTimeZone }
                             (col "established" TDate false)
                             (VString "2020-00-01")
                     with

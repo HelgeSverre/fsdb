@@ -10,6 +10,7 @@ open Fsdb.Collections
 open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Functions
+open Fsdb.Temporal
 open Fsdb.Sql
 open Fsdb.Engine
 
@@ -2047,6 +2048,7 @@ let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
 
 let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : Value =
     match store.ExecutionSettings.SqlMode.PadCharToFullLength, column.Type, value with
+    | _, TTimestamp _, VTimestamp utc -> VDateTime(sqlTimeZoneFromUtc store.ExecutionSettings.TimeZone utc)
     | true, TChar length, VString _ when length > 255 ->
         raise (SqlError(1074, sprintf "Column length too big for column '%s' (max = 255); use BLOB or TEXT instead" column.Name))
     | true, TChar length, VString text ->
@@ -2060,8 +2062,13 @@ let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : 
             value
     | _ -> value
 
-let private storedValuesMatchReadValues (store: Store) =
-    not store.ExecutionSettings.SqlMode.PadCharToFullLength
+let private storedRowsMatchReadRows (store: Store) (columns: ColumnDef seq) =
+    columns
+    |> Seq.forall (fun column ->
+        match store.ExecutionSettings.SqlMode.PadCharToFullLength, column.Type with
+        | true, TChar _
+        | _, TTimestamp _ -> false
+        | _ -> true)
 
 /// Resolves a bare column against `ctx`, falling back to
 /// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`. Two or
@@ -2509,6 +2516,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
     | Lit(VDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VTimestamp _) -> simple TypeTimestamp |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VTime _) -> Some { ColumnWire.metadataOfType(TTime 0) with Flags = BinaryFlag ||| NotNullFlag }
     | Lit(VZeroDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VZeroDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
@@ -5224,7 +5232,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         { Strict = false
                           NoZeroDate = true
                           NoZeroInDate = true
-                          TruncateFractional = ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional }
+                          TruncateFractional = ctx.Store.ExecutionSettings.SqlMode.TimeTruncateFractional
+                          TimeZone = ctx.Store.ExecutionSettings.TimeZone }
                         castCol
                         v)
             with
@@ -6655,7 +6664,7 @@ and private prepareWhereMatches
 
     match where with
     | None -> fun _ -> Ok true
-    | Some expression when storedValuesMatchReadValues context.Store ->
+    | Some expression when storedRowsMatchReadRows context.Store (context.ColumnsByPosition |> Seq.choose id) ->
         let prepared = prepare expression
         fun row -> prepared row |> Result.map (truthy >> (=) (Some true))
     | Some expression ->
@@ -6842,7 +6851,7 @@ and private tryIndexedJoinProbe
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
     | (InnerJoin | NaturalJoin | LeftJoin | NaturalLeftJoin | RightJoin | NaturalRightJoin), _, Some table, _ :: _
-        when storedValuesMatchReadValues store
+        when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe table rightColumns
     | _ -> None
@@ -6964,7 +6973,7 @@ and private tryIndexedPreservedRightProbe
     : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
     | (RightJoin | NaturalRightJoin), _, Some table, _ :: _
-        when storedValuesMatchReadValues store
+        when storedRowsMatchReadRows store (Seq.append leftColumns rightColumns)
              && (equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex])) ->
         equiKeys |> tryIndexProbe table leftColumns
     | _ -> None
@@ -7616,7 +7625,7 @@ and private applyResolvedJoin
                 lazy
                     (match keyClasses with
                      | Some classes ->
-                         storedValuesMatchReadValues store
+                         storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
                          && not equiKeys.IsEmpty
                          && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                          && rowsMatchKeyClasses classes (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
@@ -8000,7 +8009,7 @@ and private applyMutationJoin
                 let hashEligible =
                     match keyClasses with
                     | Some classes ->
-                        storedValuesMatchReadValues store
+                        storedRowsMatchReadRows store (Seq.append combinedColumnsSoFar joinColumns)
                         && not equiKeys.IsEmpty
                         && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                         && rowsMatchKeyClasses classes (equiKeys |> List.map fst) leftFlatRows
@@ -8870,7 +8879,7 @@ and private tryIndexedSemiJoin
                 let index = Storage.tryEqualityIndexForColumns table columnNames
 
                 if
-                    not (storedValuesMatchReadValues store)
+                    not (storedRowsMatchReadRows store table.Columns)
                     || not (isStatementStableSelect store registry dbName emptySubqueryScope subquery)
                     || not compatible
                 then
@@ -9439,7 +9448,7 @@ and private tryEqualityAccessInTableWith
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedValuesMatchReadValues store) then
+    if not (storedRowsMatchReadRows store table.Columns) then
         None
     else
         let equalities = pointLookupEqualities registry tref whereExpr
@@ -9511,7 +9520,7 @@ and private tryLiteralInAccessInTableWith
     (tref: TableRef)
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
-    if not (storedValuesMatchReadValues store) then
+    if not (storedRowsMatchReadRows store table.Columns) then
         None
     else
         literalInProbes registry tref whereExpr
@@ -9731,7 +9740,8 @@ and private tryCorrelatedEqualityLookup
             lookup.FindRows value
             |> Option.map (fun rows -> lookup.TableColumns, rows))
 
-    (if storedValuesMatchReadValues store then physicalFastPathTable store dbName tref else None)
+    physicalFastPathTable store dbName tref
+    |> Option.filter (fun table -> storedRowsMatchReadRows store table.Columns)
     |> Option.bind (fun table ->
         correlatedEqualityPredicates (correlatedProbeSource selfQualifier table.Columns) whereExpr outer
         |> Option.bind (fun equalities ->
@@ -9818,11 +9828,11 @@ and private tryPhysicalProjectionUncached
 
     match source with
     | FromTable tableRef -> tableProjection tableRef
-    | FromSubquery(PlainSelect select, _)
-        when storedValuesMatchReadValues store && simpleSelect select ->
+    | FromSubquery(PlainSelect select, _) when simpleSelect select ->
         match select.From with
         | Some innerSource ->
             tryPhysicalProjection store registry dbName innerSource
+            |> Option.filter (fun input -> storedRowsMatchReadRows store input.PhysicalTable.Columns)
             |> Option.bind (fun input ->
                 let sourceQualifier = fromItemQualifier innerSource
                 let predicateScope =
@@ -10041,12 +10051,12 @@ and private tryProjectedPhysicalLiteralLookup
         | Lit value -> Some value
         | _ -> None
 
-    if not (storedValuesMatchReadValues store) then
-        None
-    else
-        tryPhysicalProjection store registry dbName source
-        |> Option.filter (fun projection -> not projection.Steps.IsEmpty)
-        |> Option.bind (fun projection ->
+    tryPhysicalProjection store registry dbName source
+    |> Option.filter (fun projection -> storedRowsMatchReadRows store projection.PhysicalTable.Columns)
+    |> Option.bind (fun projection ->
+        if projection.Steps.IsEmpty then
+            None
+        else
             let probeSource = correlatedProbeSource (fromItemQualifier source) projection.OutputColumns
             let projectedColumn expression =
                 tryCorrelatedInnerColumn probeSource expression
@@ -10164,22 +10174,20 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
                 |> Option.map (fun lookup -> lookup.LookupRowIds.Count)
             | [] -> None
 
-    if not (storedValuesMatchReadValues outer.Store) then
-        None
-    else
-        tryPhysicalProjection outer.Store outer.Registry outer.DbName source
-        |> Option.filter (fun projection -> projection.Steps |> List.forall (_.Predicate >> Option.isNone))
-        |> Option.bind (fun projection ->
-            tryAllCorrelatedEqualityPredicates
-                (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns)
-                whereExpr
-                (Some outer)
-            |> Option.filter (tryDuplicateIgnoreCase fst >> Option.isNone)
-            |> Option.bind (fun equalities ->
-                equalities
-                |> List.map (physicalEquality projection)
-                |> tryAllSome
-                |> Option.bind (countRows projection)))
+    tryPhysicalProjection outer.Store outer.Registry outer.DbName source
+    |> Option.filter (fun projection -> storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)
+    |> Option.filter (fun projection -> projection.Steps |> List.forall (_.Predicate >> Option.isNone))
+    |> Option.bind (fun projection ->
+        tryAllCorrelatedEqualityPredicates
+            (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns)
+            whereExpr
+            (Some outer)
+        |> Option.filter (tryDuplicateIgnoreCase fst >> Option.isNone)
+        |> Option.bind (fun equalities ->
+            equalities
+            |> List.map (physicalEquality projection)
+            |> tryAllSome
+            |> Option.bind (countRows projection)))
 
 and private tryRangeAccessInTable
     (scope: ColumnReferenceScope)
@@ -10188,7 +10196,7 @@ and private tryRangeAccessInTable
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.RangeLookup option =
-    (if storedValuesMatchReadValues store then
+    (if storedRowsMatchReadRows store table.Columns then
          rangeLookupBounds scope tref whereExpr
      else
          [])
@@ -10218,7 +10226,7 @@ and private trySpatialAccessInTable
     (tref: TableRef)
     (whereExpr: Expr option)
     : Storage.SpatialLookup option =
-    (if storedValuesMatchReadValues store then
+    (if storedRowsMatchReadRows store table.Columns then
          spatialLookupPredicates scope tref whereExpr
      else
          [])
@@ -10350,7 +10358,11 @@ and private tryIndexOrder
         && not (select.Projections |> List.exists (fst >> containsAggregate registry))
         && not (select.Projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not))
 
-    if not (storedValuesMatchReadValues store) || not canUseIndexOrder then
+    let storedRowsAreDirect =
+        physicalFastPathTable store dbName tref
+        |> Option.exists (fun table -> storedRowsMatchReadRows store table.Columns)
+
+    if not storedRowsAreDirect || not canUseIndexOrder then
         None
     else
         indexOrderTerms registry tref select
@@ -11740,10 +11752,8 @@ and private tryGroupingIndexOrder
                 && ((lower.IsNone && upper.IsNone) || rangeLookup.IsSome) }))
 
 and private tryGroupIndexOrder (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (select: SelectStmt) : IndexOrderPlan option =
-    if select.GroupBy.IsEmpty || not (storedValuesMatchReadValues store) then
-        None
-    else
-        physicalFastPathTable store dbName tref
+    physicalFastPathTable store dbName tref
+    |> Option.filter (fun table -> not select.GroupBy.IsEmpty && storedRowsMatchReadRows store table.Columns)
         |> Option.bind (fun table -> groupByIndexTerms registry table tref select)
         |> Option.bind (tryGroupingIndexOrder store registry dbName tref select.Where)
         |> Option.map (fun grouping ->
@@ -17492,6 +17502,7 @@ let rec executeAs
                             |> List.tryPick (fun (trigger, statements, account) ->
                                 let settings =
                                     ExecutionSettings.forStoredObject
+                                        runStore.ExecutionSettings.TimeZone
                                         trigger.SqlMode
                                         trigger.CharacterSetClient
                                         trigger.CollationConnection

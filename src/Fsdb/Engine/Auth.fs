@@ -323,6 +323,11 @@ let isPasswordExpiredAtWithDefault
             | _ -> int64 defaultLifetimeDays
 
         match userColumnValue cols row "password_last_changed" with
+        | Some(VTimestamp changed) when lifetime > 0L ->
+            let current =
+                if now.Kind = DateTimeKind.Utc then now else now.ToUniversalTime()
+
+            current >= changed && current - changed >= TimeSpan.FromDays(float lifetime)
         | Some(VDateTime changed) when lifetime > 0L && now >= changed ->
             now - changed >= TimeSpan.FromDays(float lifetime)
         | _ -> false

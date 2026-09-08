@@ -114,7 +114,8 @@ let private executionSession
           ConnectionCollation =
             entry.CollationConnection
             |> Collation.tryFind
-            |> Option.defaultValue Collation.defaultCollation }
+            |> Option.defaultValue Collation.defaultCollation
+          TimeZone = entry.TimeZone |> Temporal.trySqlTimeZone |> Option.defaultValue Temporal.SystemTimeZone }
 
     Storage.setExecutionSettings session.Store executionSettings
 

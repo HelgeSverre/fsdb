@@ -498,6 +498,31 @@ let tests =
               snapshotNow dir store
               Expect.equal (rowsOf (load dir) defaultDatabase "times") [ [| value |] ] "snapshot replay"
 
+          testCase "WAL and snapshot recovery retain TIMESTAMP instants"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+              let session, _ = handle session "CREATE TABLE timestamp_zones (stamp TIMESTAMP(6))"
+              let session, _ = handle session "SET time_zone = '+05:30'"
+              let _, result = handle session "INSERT INTO timestamp_zones VALUES ('2024-01-01 00:00:00.123456')"
+              Expect.equal result (Affected 1UL) "insert timestamp"
+
+              let expected = VTimestamp(DateTime(2023, 12, 31, 18, 30, 0, 123, DateTimeKind.Utc).AddTicks(4560L))
+              Expect.equal (rowsOf (load dir) defaultDatabase "timestamp_zones") [ [| expected |] ] "WAL preserves the UTC instant"
+
+              snapshotNow dir store
+              let reloaded = load dir
+              Expect.equal (rowsOf reloaded defaultDatabase "timestamp_zones") [ [| expected |] ] "snapshot preserves the UTC instant"
+
+              let reader = Fsdb.Session.create 2 reloaded
+              let reader, _ = handle reader "SET time_zone = '+00:00'"
+
+              match handle reader "SELECT stamp FROM timestamp_zones" |> snd with
+              | ResultSet(_, [ [ Some "2023-12-31 18:30:00.123456" ] ]) -> ()
+              | other -> failtestf "expected the recovered instant in UTC, got %A" other
+
           testCase "prepared XA branches survive snapshot rotation and restart"
           <| fun _ ->
               let dir = tempDataDir ()

@@ -235,6 +235,7 @@ let private valueToSqlLiteralWithOptions (options: Parser.ParserOptions) (v: Val
     | VBytes bytes -> "X'" + Convert.ToHexString(bytes) + "'"
     | VDate _
     | VDateTime _
+    | VTimestamp _
     | VTime _
     | VZeroDate _
     | VZeroDateTime _
@@ -1370,6 +1371,15 @@ let private parseSetFragment
                         match value with
                         | Some value -> sqlModeAction value sideEffects
                         | None -> Error(Err(1231, "Variable 'sql_mode' can't be set to the value of 'NULL'"))
+                    | Ok(_, sideEffects) when usesDefault && name = "time_zone" ->
+                        let value =
+                            if isGlobal then
+                                Session.defaultVariables.[name]
+                            else
+                                Session.tryGlobalVariable session.Store name
+                                |> Option.defaultValue Session.defaultVariables.[name]
+
+                        Ok(SetVarAction(name, value, isGlobal), sideEffects)
                     | Ok(value, sideEffects) when name = "max_sp_recursion_depth" ->
                         normalizeRoutineRecursionDepth value
                         |> Result.map (fun (depth, warning) ->
@@ -1482,6 +1492,13 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
                 match Collation.tryFind v with
                 | Some col -> setConnectionCollation session.Store col
                 | None -> ())
+
+        if name = "time_zone" then
+            value
+            |> Option.bind Temporal.trySqlTimeZone
+            |> Option.iter (fun timeZone ->
+                Storage.setTimeZone session.Store timeZone
+                session.Tx |> Option.iter (fun transaction -> Storage.setTimeZone transaction.Snapshot timeZone))
 
         { session with Variables = Map.add name value session.Variables }
     | SetTransactionIsolationAction(scope, isolation) ->
@@ -5656,7 +5673,8 @@ let private mergeRoutineExecutionSettings original changed result =
         if changedAny [ "collation_connection" ] then
             result.ConnectionCollation
         else
-            original.ConnectionCollation }
+            original.ConnectionCollation
+      TimeZone = result.TimeZone }
 
 let private invalidDiagnosticsCondition session =
     { session with Diagnostics = [ Diagnostics.invalidConditionNumber ] }, Affected 0UL
@@ -5863,7 +5881,11 @@ let rec private invokeStoredFunction
 
     let executionStore = Session.currentStore caller
     let capturedSettings =
-        ExecutionSettings.forStoredObject routine.SqlMode routine.CharacterSetClient routine.CollationConnection
+        ExecutionSettings.forStoredObject
+            executionStore.ExecutionSettings.TimeZone
+            routine.SqlMode
+            routine.CharacterSetClient
+            routine.CollationConnection
 
     let executionSession =
         { caller with
@@ -6302,7 +6324,11 @@ and private dispatchNormalized session rawSql parserOptions sql =
                             let executionStore = Session.currentStore callerSession
                             let originalSettings = Storage.executionSettings executionStore
                             let capturedSettings =
-                                ExecutionSettings.forStoredObject routine.SqlMode routine.CharacterSetClient routine.CollationConnection
+                                ExecutionSettings.forStoredObject
+                                    executionStore.ExecutionSettings.TimeZone
+                                    routine.SqlMode
+                                    routine.CharacterSetClient
+                                    routine.CollationConnection
                             let executionSession =
                                 { callerSession with
                                     User = account.Name

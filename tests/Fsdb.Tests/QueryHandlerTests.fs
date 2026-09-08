@@ -1972,6 +1972,53 @@ let tests =
               | Err(1298, "Unknown or incorrect time zone: 'UTC'") -> ()
               | other -> failtestf "expected unloaded named zones to be refused, got %A" other
 
+              let first, result = handle first "SET GLOBAL time_zone = '-03:00'"
+              Expect.equal result (Affected 0UL) "the global offset is accepted"
+
+              match handle first "SELECT @@time_zone" |> snd with
+              | ResultSet(_, [ [ Some "+05:30" ] ]) -> ()
+              | other -> failtestf "expected the existing session to keep its offset, got %A" other
+
+              let third = create 3 store
+
+              match handle third "SELECT @@time_zone, FROM_UNIXTIME(0)" |> snd with
+              | ResultSet(_, [ [ Some "-03:00"; Some "1969-12-31 21:00:00" ] ]) -> ()
+              | other -> failtestf "expected a new session to inherit the global offset, got %A" other
+
+              let first, result = handle first "SET time_zone = DEFAULT"
+              Expect.equal result (Affected 0UL) "session DEFAULT restores the global offset"
+
+              match handle first "SELECT @@time_zone" |> snd with
+              | ResultSet(_, [ [ Some "-03:00" ] ]) -> ()
+              | other -> failtestf "expected DEFAULT to select the current global offset, got %A" other
+
+          testCase "TIMESTAMP values cross session time zones through UTC storage"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE temporal_zones (id INT PRIMARY KEY, stamp TIMESTAMP(6), plain DATETIME(6))"
+              let session, _ = handle session "SET time_zone = '+00:00'"
+
+              let session, result =
+                  handle
+                      session
+                      "INSERT INTO temporal_zones VALUES (1, '2024-01-01 00:00:00.123456', '2024-01-01 00:00:00.123456')"
+
+              Expect.equal result (Affected 1UL) "seed UTC row"
+              let session, _ = handle session "SET time_zone = '+05:30'"
+
+              match handle session "SELECT stamp, plain, UNIX_TIMESTAMP(stamp), UNIX_TIMESTAMP(plain) FROM temporal_zones WHERE id=1" with
+              | session, ResultSet(_, [ [ Some "2024-01-01 05:30:00.123456"; Some "2024-01-01 00:00:00.123456"; Some "1704067200.123456"; Some "1704047400.123456" ] ]) ->
+                  let session, result =
+                      handle session "INSERT INTO temporal_zones VALUES (2, '2024-01-01 00:00:00', '2024-01-01 00:00:00')"
+
+                  Expect.equal result (Affected 1UL) "insert in shifted zone"
+                  let session, _ = handle session "SET time_zone = '+00:00'"
+
+                  match handle session "SELECT stamp, plain FROM temporal_zones WHERE id=2" |> snd with
+                  | ResultSet(_, [ [ Some "2023-12-31 18:30:00.000000"; Some "2024-01-01 00:00:00.000000" ] ]) -> ()
+                  | other -> failtestf "expected UTC rendering of the shifted insert, got %A" other
+              | _, other -> failtestf "expected TIMESTAMP-only zone conversion, got %A" other
+
           testCase "collation_connection drives LIKE, DISTINCT, and GROUP BY over literals"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

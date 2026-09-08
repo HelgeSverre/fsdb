@@ -1078,6 +1078,9 @@ type Value =
     | VBytes of byte[]
     | VDate of DateOnly
     | VDateTime of DateTime
+    /// A TIMESTAMP column's UTC storage instant. Executor converts it to the
+    /// session's local wall clock before expression evaluation or rendering.
+    | VTimestamp of DateTime
     | VTime of TimeValue
     | VZeroDate of ZeroDate
     | VZeroDateTime of ZeroDateTime
@@ -1230,7 +1233,8 @@ let toText (v: Value) : string option =
     | VString s -> Some s
     | VBytes b -> Some(Text.Encoding.Latin1.GetString b)
     | VDate d -> Some(d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
-    | VDateTime dt ->
+    | VDateTime dt
+    | VTimestamp dt ->
         // Render sub-second precision (MySQL DATETIME(6)) as exactly six
         // fractional digits when present, none when the value lands on a whole
         // second. Ticks are 100 ns, so the sub-second remainder / 10 is
@@ -1259,7 +1263,8 @@ let toText (v: Value) : string option =
 /// only chooses how many to show. Other values fall through to `toText`.
 let toTextFsp (fsp: int) (v: Value) : string option =
     match v with
-    | VDateTime dt ->
+    | VDateTime dt
+    | VTimestamp dt ->
         let baseStr = dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
 
         if fsp <= 0 then
@@ -1293,6 +1298,7 @@ let toWire (v: Value) : string =
     // "O" (round-trip) format, not `toText`'s display format — keeps
     // sub-second precision.
     | VDateTime dt -> "V" + dt.ToString("O", CultureInfo.InvariantCulture)
+    | VTimestamp dt -> "P" + dt.ToString("O", CultureInfo.InvariantCulture)
     | VTime value -> "H" + string (timeTicks value)
     | VZeroDate d -> "Z" + formatZeroDate d
     | VZeroDateTime dt -> "W" + formatZeroDateTime dt
@@ -1327,6 +1333,9 @@ let ofWire (s: string) : Value =
         | 'B' -> VBytes(Convert.FromBase64String payload)
         | 'T' -> VDate(DateOnly.Parse(payload, CultureInfo.InvariantCulture))
         | 'V' -> VDateTime(DateTime.Parse(payload, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind))
+        | 'P' ->
+            DateTime.Parse(payload, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).ToUniversalTime()
+            |> VTimestamp
         | 'H' ->
             payload
             |> Int64.Parse
@@ -1385,6 +1394,9 @@ let encodeValue (w: Writer) (v: Value) : unit =
         w.WriteByte 0x07uy
         w.WriteInt64LE dt.Ticks
         w.WriteByte(byte (int dt.Kind))
+    | VTimestamp dt ->
+        w.WriteByte 0x0fuy
+        w.WriteInt64LE dt.Ticks
     | VTime value ->
         w.WriteByte 0x0euy
         w.WriteInt64LE(timeTicks value)
@@ -1441,6 +1453,7 @@ let decodeValue (r: #IReader) : Value =
             | _ -> DateTimeKind.Local
 
         VDateTime(new DateTime(ticks, kind))
+    | 0x0fuy -> VTimestamp(new DateTime(r.ReadInt64LE(), DateTimeKind.Utc))
     | 0x08uy -> VJson(r.ReadLenEncString() |> Option.defaultValue "")
     | 0x0euy ->
         r.ReadInt64LE()
@@ -1490,6 +1503,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VBytes _ -> { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
     | VDate _ -> columnMetadata TypeDate
     | VDateTime _ -> columnMetadata TypeDateTime
+    | VTimestamp _ -> columnMetadata TypeTimestamp
     | VTime _ -> { columnMetadata TypeTime with Flags = BinaryFlag }
     | VZeroDate _ -> columnMetadata TypeDate
     | VZeroDateTime _ -> columnMetadata TypeDateTime
@@ -1558,6 +1572,7 @@ let toDouble (v: Value) : float =
     | VBytes _
     | VDate _
     | VDateTime _
+    | VTimestamp _
     | VZeroDate _
     | VZeroDateTime _
     | VJson _
@@ -1600,7 +1615,8 @@ let private asDateTime (v: Value) : DateTime =
     match v with
     | VDate d -> d.ToDateTime(TimeOnly.MinValue)
     | VDateTime dt -> dt
-    | _ -> invalidArg "v" "asDateTime expects VDate or VDateTime"
+    | VTimestamp dt -> dt
+    | _ -> invalidArg "v" "asDateTime expects a date or datetime"
 
 /// MySQL's JSON comparison precedence, ascending (the manual lists it
 /// descending, highest first): JSON NULL < number < string < object <
@@ -1649,6 +1665,7 @@ let private asJsonOperand (v: Value) : int * JsonNode =
     | VZeroDate _ -> 6, null
     | VTime _ -> 7, null
     | VDateTime _ -> 8, null
+    | VTimestamp _ -> 8, null
     | VZeroDateTime _ -> 8, null
     | VBytes _ -> 11, null
     | VGeometry _ -> 11, null
@@ -1768,6 +1785,9 @@ let rec compare (a: Value) (b: Value) : int =
     | VGeometry x, VGeometry y -> compareBytesLex (geometryToMySqlBinary x) (geometryToMySqlBinary y)
     | VDate x, VDate y -> Operators.compare x y
     | VDateTime x, VDateTime y -> Operators.compare x y
+    | VTimestamp x, VTimestamp y -> Operators.compare x y
+    | VTimestamp x, VDateTime y
+    | VDateTime x, VTimestamp y -> Operators.compare x y
     | VTime x, VTime y -> Operators.compare (timeTicks x) (timeTicks y)
     | VZeroDate x, VZeroDate y -> compareZeroDates x y
     | VZeroDateTime x, VZeroDateTime y -> compareZeroDateTimes x y
@@ -1783,7 +1803,7 @@ let rec compare (a: Value) (b: Value) : int =
     | VDate y, VZeroDateTime x -> -(compareZeroDateTimeToDateTime x (y.ToDateTime TimeOnly.MinValue))
     | VZeroDateTime x, VDateTime y -> compareZeroDateTimeToDateTime x y
     | VDateTime y, VZeroDateTime x -> -(compareZeroDateTimeToDateTime x y)
-    | (VDate _ | VDateTime _ | VZeroDate _ | VZeroDateTime _), VString s ->
+    | (VDate _ | VDateTime _ | VTimestamp _ | VZeroDate _ | VZeroDateTime _), VString s ->
         // A literal like a `WHERE date BETWEEN '2024-01-01 00:00:00' AND
         // ...` bound is still a bare VString here (nothing coerces it to the
         // column's type ahead of the comparison) — parsed as a real instant
@@ -1796,9 +1816,10 @@ let rec compare (a: Value) (b: Value) : int =
         match a, DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
         | VZeroDate _, _
         | VZeroDateTime _, _ -> compareStrings (toText a |> Option.defaultValue "") s
+        | VTimestamp value, (true, dt) -> Operators.compare value dt
         | _, (true, dt) -> Operators.compare (asDateTime a) dt
         | _, (false, _) -> compareStrings (toText a |> Option.defaultValue "") s
-    | VString _, (VDate _ | VDateTime _ | VZeroDate _ | VZeroDateTime _) -> -(compare b a)
+    | VString _, (VDate _ | VDateTime _ | VTimestamp _ | VZeroDate _ | VZeroDateTime _) -> -(compare b a)
     | VTime value, VString text ->
         match tryParseTimeValue text with
         | Some other -> Operators.compare (timeTicks value) (timeTicks other)
@@ -1908,6 +1929,7 @@ let private classify (v: Value) : NumKind option =
     | VBytes _
     | VDate _
     | VDateTime _
+    | VTimestamp _
     | VTime _
     | VZeroDate _
     | VZeroDateTime _

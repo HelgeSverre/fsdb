@@ -131,6 +131,7 @@ let tests =
                           VBytes [| 0uy; 255uy; 1uy |]
                           VDate(DateOnly(2024, 3, 5))
                           VDateTime(DateTime(2024, 3, 5, 13, 45, 9, 123))
+                          VTimestamp(DateTime(2024, 3, 5, 13, 45, 9, 123, DateTimeKind.Utc))
                           VTime(tryParseTimeValue "-838:59:58.123456" |> Option.get)
                           VZeroDate(tryZeroDate 2020 0 1 |> Option.get)
                           VZeroDateTime(tryZeroDateTime (tryZeroDate 0 0 0 |> Option.get) 0 0 0 0 |> Option.get)

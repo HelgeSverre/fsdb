@@ -42,13 +42,15 @@ let sqlTimeZoneText = function
 
 let sqlTimeZoneToUtc zone (value: DateTime) =
     match zone with
-    | FixedOffset minutes -> value.AddMinutes(float -minutes)
+    | FixedOffset minutes -> DateTime.SpecifyKind(value.AddMinutes(float -minutes), DateTimeKind.Utc)
     | SystemTimeZone -> TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(value, DateTimeKind.Unspecified), TimeZoneInfo.Local)
 
 let sqlTimeZoneFromUtc zone (value: DateTime) =
     match zone with
-    | FixedOffset minutes -> value.AddMinutes(float minutes)
-    | SystemTimeZone -> TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(value, DateTimeKind.Utc), TimeZoneInfo.Local)
+    | FixedOffset minutes -> DateTime.SpecifyKind(value.AddMinutes(float minutes), DateTimeKind.Unspecified)
+    | SystemTimeZone ->
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(value, DateTimeKind.Utc), TimeZoneInfo.Local)
+        |> fun local -> DateTime.SpecifyKind(local, DateTimeKind.Unspecified)
 
 type TimeValue =
     private

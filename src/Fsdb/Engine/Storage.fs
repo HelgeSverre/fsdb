@@ -422,7 +422,8 @@ type ExecutionSettings =
     { SqlModeText: string
       SqlMode: SqlMode.Settings
       ConnectionCharset: string
-      ConnectionCollation: Collation.Collation }
+      ConnectionCollation: Collation.Collation
+      TimeZone: SqlTimeZone }
 
 [<RequireQualifiedAccess>]
 module ExecutionSettings =
@@ -430,13 +431,15 @@ module ExecutionSettings =
         { SqlModeText = SqlMode.defaultText
           SqlMode = SqlMode.defaultSettings
           ConnectionCharset = "utf8mb4"
-          ConnectionCollation = Collation.defaultCollation }
+          ConnectionCollation = Collation.defaultCollation
+          TimeZone = SystemTimeZone }
 
-    let forStoredObject sqlModeText connectionCharset collationName =
+    let forStoredObject timeZone sqlModeText connectionCharset collationName =
         { SqlModeText = sqlModeText
           SqlMode = SqlMode.settingsFor sqlModeText
           ConnectionCharset = connectionCharset
-          ConnectionCollation = Collation.findOrDefault (Some collationName) }
+          ConnectionCollation = Collation.findOrDefault (Some collationName)
+          TimeZone = timeZone }
 
 type CatalogPublicationGate internal () =
     let sync = new ReaderWriterLockSlim()
@@ -908,6 +911,11 @@ let setConnectionCollation (store: Store) (collation: Collation.Collation) : uni
     store.ExecutionSettings <-
         { store.ExecutionSettings with
             ConnectionCollation = collation }
+
+let setTimeZone (store: Store) (timeZone: SqlTimeZone) : unit =
+    store.ExecutionSettings <-
+        { store.ExecutionSettings with
+            TimeZone = timeZone }
 
 let executionSettings (store: Store) : ExecutionSettings = store.ExecutionSettings
 
@@ -1447,13 +1455,15 @@ type TemporalCoercionMode =
     { Strict: bool
       NoZeroDate: bool
       NoZeroInDate: bool
-      TruncateFractional: bool }
+      TruncateFractional: bool
+      TimeZone: SqlTimeZone }
 
 let temporalCoercionMode (store: Store) =
     { Strict = store.ExecutionSettings.SqlMode.Strict
       NoZeroDate = store.ExecutionSettings.SqlMode.NoZeroDate
       NoZeroInDate = store.ExecutionSettings.SqlMode.NoZeroInDate
-      TruncateFractional = store.ExecutionSettings.SqlMode.TimeTruncateFractional }
+      TruncateFractional = store.ExecutionSettings.SqlMode.TimeTruncateFractional
+      TimeZone = store.ExecutionSettings.TimeZone }
 
 let private adjustTicksToFsp (mode: TemporalCoercionMode) (fsp: int) (ticks: int64) =
     if mode.TruncateFractional then
@@ -2082,7 +2092,12 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             // storage. MySQL rounds half-up by default and truncates under
             // TIME_TRUNCATE_FRACTIONAL; rendering then emits exactly `fsp`
             // digits from the stored ticks.
-            let adjust dt = VDateTime(adjustDateTimeToFsp mode fsp dt)
+            let adjust dt =
+                let adjusted = adjustDateTimeToFsp mode fsp dt
+
+                match col.Type with
+                | TTimestamp _ -> VTimestamp(sqlTimeZoneToUtc mode.TimeZone adjusted)
+                | _ -> VDateTime adjusted
             let zeroDateError () =
                 Error(ZeroTemporalForColumn("datetime", v |> toText |> Option.defaultValue "0000-00-00 00:00:00", col.Name))
 
@@ -2112,9 +2127,23 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 let warningCode = if month > 12 || day > 31 then 1265 else 1264
                 zeroDateFallback warningCode
 
+            let tryAdjust value =
+                try
+                    Ok(adjust value)
+                with :? ArgumentException ->
+                    temporalFallback ()
+
             match v with
-            | VDateTime dt -> Ok(adjust dt)
-            | VDate d -> Ok(adjust (d.ToDateTime(TimeOnly.MinValue)))
+            | VTimestamp utc ->
+                match col.Type with
+                | TTimestamp _ -> Ok(VTimestamp(adjustDateTimeToFsp mode fsp utc))
+                | _ ->
+                    try
+                        sqlTimeZoneFromUtc mode.TimeZone utc |> tryAdjust
+                    with :? ArgumentException ->
+                        temporalFallback ()
+            | VDateTime dt -> tryAdjust dt
+            | VDate d -> tryAdjust (d.ToDateTime(TimeOnly.MinValue))
             | VZeroDate d ->
                 match tryZeroDateTime d 0 0 0 0 with
                 | Some dt -> zeroDateResult dt
@@ -2136,7 +2165,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                         | Some(year, month, day) when year = 0 || month = 0 || day = 0 -> invalidZeroDateResult year month day
                         | _ ->
                             match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                            | true, dt -> Ok(adjust dt)
+                            | true, dt -> tryAdjust dt
                             | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
@@ -2151,7 +2180,8 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         { Strict = strict
           NoZeroDate = true
           NoZeroInDate = true
-          TruncateFractional = false }
+          TruncateFractional = false
+          TimeZone = SystemTimeZone }
         col
         v
 
@@ -2217,7 +2247,12 @@ let currentTimestampForColumn (mode: TemporalCoercionMode) (col: ColumnDef) : Va
         | TTimestamp fsp -> fsp
         | _ -> 0
 
-    VDateTime(adjustDateTimeToFsp mode fsp DateTime.Now)
+    match col.Type with
+    | TTimestamp _ -> VTimestamp(adjustDateTimeToFsp mode fsp DateTime.UtcNow)
+    | _ ->
+        sqlTimeZoneFromUtc mode.TimeZone DateTime.UtcNow
+        |> adjustDateTimeToFsp mode fsp
+        |> VDateTime
 
 /// Evaluates a column's `DEFAULT` clause into the value to insert when none
 /// was provided — `CURRENT_TIMESTAMP` evaluates fresh here (insert time),
@@ -2234,7 +2269,8 @@ let evalDefault (col: ColumnDef) : Value =
         { Strict = true
           NoZeroDate = true
           NoZeroInDate = true
-          TruncateFractional = false }
+          TruncateFractional = false
+          TimeZone = SystemTimeZone }
         col
 
 let private coerceAndCheck (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
@@ -2423,6 +2459,7 @@ let private encodeEqualityValues (columns: ColumnDef list) (indices: int list) (
         // unique index would let both through as distinct rows.
         | VUInt value -> "I" + string (decimal value)
         | VBit(_, value) -> "I" + string (decimal value)
+        | VTimestamp value -> "P" + string value.Ticks
         | VDouble value ->
             let normalized = if value = 0.0 then 0.0 else value
             "D" + normalized.ToString("R", CultureInfo.InvariantCulture)

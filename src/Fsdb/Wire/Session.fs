@@ -10,6 +10,7 @@ open Fsdb.Diagnostics
 open Fsdb.Protocol
 open Fsdb.Storage
 open Fsdb.Value
+open Fsdb.Temporal
 open Fsdb.Sql
 
 type LongDataBuffer() =
@@ -371,6 +372,13 @@ let create (connectionId: int) (store: Store) : Session =
     // New sessions inherit the current GLOBAL values.
     let variables =
         (globalVariablesOf store) |> Seq.fold (fun acc (KeyValue(k, v)) -> Map.add k v acc) (liveDefaults ())
+    let sessionStore = { store with ExecutionSettings = store.ExecutionSettings }
+
+    variables
+    |> Map.tryFind "time_zone"
+    |> Option.flatten
+    |> Option.bind trySqlTimeZone
+    |> Option.iter (setTimeZone sessionStore)
 
     { ConnectionId = connectionId
       User = "root"
@@ -383,7 +391,7 @@ let create (connectionId: int) (store: Store) : Session =
       Variables = variables
       UserVariables = Map.empty
       // Reference fields stay shared; mutable SQL-mode settings stay per session.
-      Store = { store with ExecutionSettings = store.ExecutionSettings }
+      Store = sessionStore
       TemporaryCatalog = Map.empty
       LastInsertId = 0L
       LastGeneratedId = 0L
