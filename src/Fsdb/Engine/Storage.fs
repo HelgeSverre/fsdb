@@ -4721,6 +4721,24 @@ let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : Equal
         |> List.tryFind matches
         |> Option.map (fun (unique, group) -> equalityIndex unique group))
 
+/// Finds a complete equality key within a wider set of bound columns,
+/// preferring unique keys and then the longest available key.
+let tryEqualityIndexCoveredByColumns (table: Table) (columnNames: string list) : EqualityIndex option =
+    columnNames
+    |> traverse (resolveColumn table.Columns)
+    |> Result.toOption
+    |> Option.bind (fun requested ->
+        let requested = Set.ofList requested
+
+        (uniqueKeyGroups table |> visibleGroups |> List.map (fun group -> true, group))
+        @ (secondaryKeyGroups table |> visibleGroups |> List.map (fun group -> false, group))
+        |> List.filter (fun (_, group) ->
+            group.Transforms |> List.forall Option.isNone
+            && group.Indices |> List.forall (fun index -> requested.Contains index))
+        |> List.sortBy (fun (unique, group) -> not unique, -group.Indices.Length)
+        |> List.tryHead
+        |> Option.map (fun (unique, group) -> equalityIndex unique group))
+
 let tryEqualityLookupForIndex
     (store: Store)
     (table: Table)

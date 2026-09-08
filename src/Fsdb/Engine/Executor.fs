@@ -6835,7 +6835,7 @@ and private tryIndexProbe
     : IndexedJoinProbe option =
     let indexedNames = indexToProbe |> List.map (fun (indexedIndex, _) -> indexedColumns.[indexedIndex].Name)
 
-    Storage.tryEqualityIndexForColumns table indexedNames
+    Storage.tryEqualityIndexCoveredByColumns table indexedNames
     |> Option.bind (fun index ->
         index.ColumnIndices
         |> traverse (fun indexedIndex ->
@@ -6901,7 +6901,8 @@ and private innerJoinChainPreservesLeftOrder
                 | Some probe
                     when residual.IsEmpty
                          && probe.Index.Unique
-                         && probe.Index.UsesWholeStoredValues ->
+                         && probe.Index.UsesWholeStoredValues
+                         && probe.ProbeIndices.Length = equiKeys.Length ->
                     preservesOrder joinedSources remaining
                 | _ -> false
             | _ -> false
@@ -7346,7 +7347,7 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
                     | _ -> None)
 
             tableForJoin join
-            |> Option.bind (fun table -> Storage.tryEqualityIndexForColumns table candidateColumns)
+            |> Option.bind (fun table -> Storage.tryEqualityIndexCoveredByColumns table candidateColumns)
             |> Option.isSome
 
         let rec choose bound (planned: Join list) (remaining: Join list) =
@@ -7727,6 +7728,7 @@ and private applyResolvedJoin
             match preservedRightProbe, indexedJoinProbe with
             | Some probe, _
                 when probe.Index.UsesWholeStoredValues
+                     && probe.ProbeIndices.Length = equiKeys.Length
                      && residualConjuncts |> List.forall safeLeftFilter ->
                 let leftRowsFor (right: Value[]) =
                     probe.ProbeIndices
@@ -7750,7 +7752,9 @@ and private applyResolvedJoin
                     }
                 Ok(newSources, rows, coalesceNames)
             | _, Some probe ->
-                let exactKey = probe.Index.UsesWholeStoredValues
+                let exactKey =
+                    probe.Index.UsesWholeStoredValues
+                    && probe.ProbeIndices.Length = equiKeys.Length
 
                 let candidateHolds combined =
                     if exactKey then
@@ -15108,7 +15112,8 @@ let private indexedJoinExplainPlans
                                   References = probe.ProbeIndices |> List.map (leftColumnReference leftSources)
                                   HasResidual =
                                     not residual.IsEmpty
-                                    || not probe.Index.UsesWholeStoredValues }))
+                                    || not probe.Index.UsesWholeStoredValues
+                                    || probe.ProbeIndices.Length <> equiKeys.Length }))
                     | _ -> None
 
                 let sources' =

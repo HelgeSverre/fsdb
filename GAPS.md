@@ -116,8 +116,9 @@ The expression grammar includes:
 
 Equi-joins use collation-folded hash keys; other joins use lazy nested loops.
 Direct physical inner tables can use single or composite equality probes, and
-join ordering recognizes those access paths. `ORDER BY ... LIMIT` uses a
-bounded top-N sort.
+join ordering recognizes those access paths. A fully covered key can narrow a
+wider equality join while the remaining conditions stay residual predicates.
+`ORDER BY ... LIMIT` uses a bounded top-N sort.
 
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
