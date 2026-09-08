@@ -3337,6 +3337,23 @@ let tests =
                     Expect.isError (parse "CREATE USER app PASSWORD EXPIRE INTERVAL 65536 DAY") "oversized lifetime"
                     Expect.isError (parse "CREATE USER app WITH MAX_QUERIES_PER_HOUR 4294967296") "oversized resource limit"
 
+                testCase "CREATE and ALTER USER parse password history, reuse, and current-password policy"
+                <| fun _ ->
+                    Expect.isOk
+                        (parse
+                            "CREATE USER app IDENTIFIED BY 'alpha' PASSWORD HISTORY 3 PASSWORD REUSE INTERVAL 5 DAY PASSWORD REQUIRE CURRENT")
+                        "specific policy"
+
+                    Expect.isOk
+                        (parse
+                            "ALTER USER app IDENTIFIED BY 'beta' REPLACE 'alpha' PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT OPTIONAL")
+                        "password replacement and default policy"
+
+                    Expect.isOk
+                        (parse
+                            "ALTER USER app PASSWORD HISTORY 1 PASSWORD HISTORY 2 PASSWORD REUSE INTERVAL 3 DAY PASSWORD REUSE INTERVAL 4 DAY PASSWORD REQUIRE CURRENT PASSWORD REQUIRE CURRENT OPTIONAL")
+                        "the final repeated policy option wins"
+
                 testCase "CREATE and ALTER USER parse comments and JSON attributes"
                 <| fun _ ->
                     Expect.equal

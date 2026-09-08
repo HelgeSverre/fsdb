@@ -188,6 +188,62 @@ let tests =
                   | None -> failtest "root vanished"
               | other -> failtestf "expected SET PASSWORD to succeed, got %A" other
 
+          testCase "password history, reuse, and current-password policies match MySQL"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+
+              let root, created =
+                  handle
+                      root
+                      "CREATE USER policy_user IDENTIFIED BY 'alpha' PASSWORD HISTORY 2 PASSWORD REUSE INTERVAL 1 DAY PASSWORD REQUIRE CURRENT"
+
+              Expect.equal created (Affected 0UL) "policy account created"
+
+              match
+                  handle
+                      root
+                      "SELECT Password_reuse_history,Password_reuse_time,Password_require_current FROM mysql.user WHERE User='policy_user'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "2"; Some "1"; Some "Y" ] ]) -> ()
+              | other -> failtestf "expected stored password policy, got %A" other
+
+              match handle root "SHOW CREATE USER policy_user" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) ->
+                  Expect.stringContains ddl "PASSWORD HISTORY 2" "history renders"
+                  Expect.stringContains ddl "PASSWORD REUSE INTERVAL 1 DAY" "reuse interval renders"
+                  Expect.stringContains ddl "PASSWORD REQUIRE CURRENT" "current-password rule renders"
+              | other -> failtestf "expected SHOW CREATE USER policy, got %A" other
+
+              let policyUser = { create 2 store with User = "policy_user" }
+
+              match handle policyUser "SET PASSWORD = 'beta'" |> snd with
+              | Err(3892, _) -> ()
+              | other -> failtestf "expected missing-current-password error, got %A" other
+
+              match handle policyUser "SET PASSWORD = 'beta' REPLACE 'wrong'" |> snd with
+              | Err(3891, _) -> ()
+              | other -> failtestf "expected incorrect-current-password error, got %A" other
+
+              let policyUser, changed = handle policyUser "SET PASSWORD = 'beta' REPLACE 'alpha'"
+              Expect.equal changed (Affected 0UL) "correct current password accepted"
+
+              let policyUser, changedAgain = handle policyUser "ALTER USER USER() IDENTIFIED BY 'gamma' REPLACE 'beta'"
+              Expect.equal changedAgain (Affected 0UL) "ALTER USER accepts current password"
+
+              match handle policyUser "SET PASSWORD = 'alpha' REPLACE 'gamma'" |> snd with
+              | Err(3638, _) -> ()
+              | other -> failtestf "expected password-history rejection, got %A" other
+
+              match handle root "SET PASSWORD FOR policy_user = 'delta' REPLACE 'gamma'" |> snd with
+              | Err(3893, _) -> ()
+              | other -> failtestf "expected REPLACE-for-other-account rejection, got %A" other
+
+              match handle root "SET PASSWORD FOR policy_user = 'delta'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected administrative password reset, got %A" other
+
           testCase "SET PASSWORD and SHOW GRANTS keep host-qualified accounts separate"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
