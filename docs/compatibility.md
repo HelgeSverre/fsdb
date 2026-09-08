@@ -2,6 +2,23 @@
 
 How fsdb validates MySQL compatibility and records the supporting evidence.
 
+## Contents
+
+- [Validation method](#validation-method)
+- [Application gauntlet](#application-gauntlet)
+- [Implemented surface](#implemented-surface)
+- [GUI clients and introspection](#gui-clients-and-introspection)
+- [TLS transport](#tls-transport)
+- [Bulk wire commands](#bulk-wire-commands)
+- [Temporal zones and offsets](#temporal-zones-and-offsets)
+- [Schema moves](#schema-moves)
+- [Views and triggers](#views-and-triggers)
+- [ALTER execution options](#alter-execution-options)
+- [HASH partitioning](#hash-partitioning)
+- [Check constraints](#check-constraints)
+- [Server settings](#server-settings)
+- [Users, authentication, and privileges](#users-authentication-and-privileges)
+
 ## Validation method
 
 fsdb is validated by migrating and running the test suites of real Laravel
@@ -44,9 +61,9 @@ The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and
 the optimizer-only SELECT modifiers without changing query results.
 
-## Gauntlet
+## Application gauntlet
 
-| Application | Laravel | Result |
+| Application | Laravel major | Oracle result |
 |---|---|---|
 | App A | 11 | full parity |
 | App B | 11 | residual failures reproduce identically on real MySQL (app-side factory/collation bugs) |

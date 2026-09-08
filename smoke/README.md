@@ -7,7 +7,7 @@ failed installer cannot affect another target.
 These applications add compatibility evidence that the Laravel application
 gauntlet does not provide:
 
-| Target | Client stack | Quick gate |
+| Target | Client stack | Probe |
 |---|---|---|
 | Gitea | Go MySQL driver and XORM | Current schema, fixtures, and one integration test |
 | MediaWiki | PHP mysqli and MediaWiki RDBMS | Full install and `DatabaseIntegrationTest` |
@@ -29,7 +29,7 @@ The upstream commits live in `versions.env`. Updating a pin is a deliberate
 compatibility-corpus change: run that target against MySQL 8.4 as well as fsdb
 before classifying new failures.
 
-## Run
+## Running the probes
 
 The runner uses the repository's .NET toolchain and Docker; the `just` recipes
 also require `just`. The first run builds language runtimes and downloads
@@ -64,9 +64,10 @@ the ignored `smoke/results/<UTC timestamp>-<process ID>/` directory. The command
 continues through all selected targets and exits nonzero when any target fails.
 
 Reproducible fsdb failures found by these probes become focused regression
-tests. Deliberate compatibility boundaries remain inventoried in `GAPS.md`.
+tests. Deliberate compatibility boundaries remain inventoried in
+[`GAPS.md`](../GAPS.md).
 
-### Drupal's full-suite gate
+## Drupal's full-suite gate
 
 Most targets are focused compatibility gates. Drupal instead runs every
 upstream PHPUnit suite at the pinned revision, including tests that never reach

@@ -4,6 +4,16 @@ fsdb vs a native MySQL 8.4 on identical schema, seed data, and queries,
 via BenchmarkDotNet + MySqlConnector. The suite exists to find and track
 hotspots, not to chase parity — fsdb optimizes for readable F# first.
 
+## Contents
+
+- [Running](#running)
+- [Methodology](#methodology)
+- [Recorded results](#recorded-results)
+  - [Latency and scale](#latency-and-scale-snapshot)
+  - [Durability](#durability-matched-latency)
+  - [Concurrency](#concurrency-throughput)
+  - [Full-text search](#full-text-search)
+
 ## Running
 
 ```sh
@@ -175,9 +185,10 @@ The planner uses observed distinct-key counts to avoid repeated broad index
 bucket resolution when the full join result is consumed, while preserving the
 index path for early-stopping queries.
 
-### Durability-matched (single-connection latency, `ebc3fca-durable.md`)
+### Durability-matched latency
 
-fsdb in-memory vs fsdb `--data-dir` (binary WAL) vs MySQL durable vs MySQL no-fsync:
+The [`ebc3fca` run](results/ebc3fca-durable.md) compares in-memory fsdb,
+WAL-backed fsdb, durable MySQL, and MySQL without commit-time `fsync`:
 
 | Workload | fsdb | fsdb-wal | mysql | mysql-nofsync |
 |---|---:|---:|---:|---:|
@@ -194,7 +205,7 @@ cost.
 
 ### Concurrency throughput
 
-The broad eight-worker baseline in `4897506-load.md` predates optimistic
+The broad [eight-worker baseline](results/4897506-load.md) predates optimistic
 row-conflict merging:
 
 | Workload | fsdb | mysql |

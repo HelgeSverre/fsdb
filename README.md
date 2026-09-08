@@ -834,6 +834,11 @@ is not part of `just check`; see the
 
 ## Documentation
 
+The overview and compatibility guide describe the current implementation.
+`GAPS.md` contains only active differences. Benchmark results and dated torture
+findings are historical evidence and are intentionally left unchanged when the
+implementation moves on.
+
 - [Compatibility](docs/compatibility.md) — how MySQL 8.4 equivalence is validated
 - [Open gaps](GAPS.md) — current, evidence-backed differences from MySQL 8.4
 - [Comment style](docs/comment-style.md) — the grading every comment survives

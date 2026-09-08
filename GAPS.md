@@ -34,7 +34,7 @@ findings recorded under `torture/findings/`.
 | Area | Current boundary | Largest remaining gap |
 |---|---|---|
 | [SQL statements](#1-sql-statements-and-parser) | Application-facing DML and DDL are broad | Replication and administrative SQL |
-| [Query execution](#2-query-execution) | Common index, join, subquery, ordering, and grouping paths are planned | General cost-based planning and broader correlated forms |
+| [Query execution](#2-query-execution) | Common index, join, subquery, ordering, and grouping paths have dedicated plans | General cost-based planning and broader correlated forms |
 | [Built-in functions](#3-built-in-functions) | Broad scalar, aggregate, JSON, temporal, and planar geometry coverage | Geographic SRS semantics and arbitrary round-buffer resolutions |
 | [Data types](#4-data-types-and-values) | Common scalar, temporal, JSON, and OGC geometry values | Binary JSON representation |
 | [Constraints and indexes](#5-constraints-and-indexes) | Constraints and common equality, range, ordering, grouping, join, and spatial probes | Arbitrary expression ordering and broader grouping paths |
@@ -42,7 +42,7 @@ findings recorded under `torture/findings/`.
 | [Transactions](#7-transactions-and-concurrency) | Supported isolation levels, row ownership, optimistic merge, and XA | Remaining coarse write shapes |
 | [Persistence](#8-persistence-and-durability) | Opt-in WAL, snapshots, recovery, rotation, and group commit | Foreground rather than background row reclamation |
 | [Views and triggers](#9-views-and-triggers) | Single-table, nested, and restricted join views; ordered compound triggers | Complex updatable views |
-| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | No material gap recorded |
+| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | — |
 | [Full-text](#11-full-text-search) | Maintained inverted indexes and MySQL-shaped scoring | CJK parsing and remaining plan combinations |
 | [Wire protocol](#12-wire-protocol-and-prepared-statements) | Prepared statements, TLS, compression, LOCAL INFILE, and multi-results | GTID state tracking and live TLS certificate reload |
 | [Authentication](#13-authentication-and-privileges) | Host accounts, grants, roles, proxy grants, and account policy | Authentication plugins cannot select a proxied identity |
@@ -532,18 +532,33 @@ routines, events, and administrative probes.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| INFORMATION_SCHEMA breadth | INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | Every MySQL 8.4 view is present. `INNODB_TRX` projects active transaction identity, lifecycle, isolation, checks, logical write weight, and held row stripes; fields that require InnoDB's lock-memory and scheduling internals remain zero or NULL. Other InnoDB dictionary views project live table, column, index, statistics, and virtual-column metadata; physical diagnostics return truthful empty rowsets where fsdb has no matching buffer-pool, tablespace, compression, or metrics subsystem. ST_SPATIAL_REFERENCE_SYSTEMS exposes fsdb's supported SRID 0 instead of MySQL's full EPSG registry | low | divergence |
+| INFORMATION_SCHEMA breadth | INNODB_*, KEYWORDS, PLUGINS, spatial-reference catalogs, and usage views | MySQL 8.4's catalog names are present. `INNODB_TRX` projects active transaction identity, lifecycle, isolation, checks, logical write weight, and held row stripes; fields that require InnoDB's lock-memory and scheduling internals remain zero or NULL. Other InnoDB dictionary views project live table, column, index, statistics, and virtual-column metadata; physical diagnostics return truthful empty rowsets where fsdb has no matching buffer-pool, tablespace, compression, or metrics subsystem. ST_SPATIAL_REFERENCE_SYSTEMS exposes fsdb's supported SRID 0 instead of MySQL's full EPSG registry | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
-| Optimizer cost overrides | `mysql.server_cost` and `mysql.engine_cost` values feed plan costs after `FLUSH OPTIMIZER_COSTS` | both tables expose MySQL's eight bootstrap rows, generated defaults, and mutable override columns; fsdb's shape-driven planner does not consume their overrides | low | divergence |
-| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | `Com_*` names have distinct session/global values and supported commands are live; unsupported commands remain truthfully zero, while engine/latency families remain absent (`InformationSchema.fs`) | low | divergence |
-| Logging | general log, slow log, error-log file | `mysql.general_log` and `mysql.slow_log` expose their catalog schemas but remain empty; diagnostics go to credential-redacted stderr (`Log.fs`) | low | divergence |
-| Replication | binlog, GTID, source/replica channels | no replication execution; REPLICATION privileges are vocabulary only and internal WAL is not a binlog; native catalog schemas plus the three stock group-action configuration rows exist for metadata compatibility | architectural | refusal |
+| Optimizer cost overrides | `mysql.server_cost` and `mysql.engine_cost` values feed plan costs after `FLUSH OPTIMIZER_COSTS` | both tables expose MySQL's bootstrap rows, generated defaults, and mutable override columns; fsdb's shape-driven planner does not consume their overrides | low | divergence |
+| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | `Com_*` names have distinct session/global values and supported commands are live; unsupported commands remain truthfully zero, while engine/latency families remain absent ([`InformationSchema.fs`](src/Fsdb/Engine/InformationSchema.fs)) | low | divergence |
+| Logging | general log, slow log, error-log file | `mysql.general_log` and `mysql.slow_log` expose their catalog schemas but remain empty; diagnostics go to credential-redacted stderr ([`Log.fs`](src/Fsdb/Foundation/Log.fs)) | low | divergence |
+| Replication | binlog, GTID, source/replica channels | no replication execution; REPLICATION privileges are vocabulary only and internal WAL is not a binlog; native catalog schemas and stock group-action configuration rows exist for metadata compatibility | architectural | refusal |
 
 ## 15. Differential-testing and performance tails
 
-| Open campaign | Current gap |
-|---|---|
-| Planner constant factors | Indexed joins, equality/`IN`, and secondary ranges retain a constant-factor gap. Low-cardinality joins push safe source-local predicates below full-consumption fan-out and stream plain `COUNT(*)`; relevance-ordered full-text limits can drive either side of a qualified two-table exact-unique join, flat boolean word searches score from postings directly, phrase and proximity checks are linear in candidate-document length, grouped boolean evaluation narrows from required children, unindexed grouping filters and groups in one pass, and mutation scans retain only matched targets while unordered limits stop early. Direct column/literal scan predicates bind their column and comparison metadata once per statement across read and mutation paths; `AND`/`OR` trees prepare those eligible leaves while retaining lazy three-valued evaluation. Computed leaves and broader join-shaped full-text plans remain input-sensitive. Benchmark result artifacts carry the measurements; shared statement setup and scan-shaped plans remain the principal measured seams. |
+The remaining campaign is planner constant factors. Indexed joins,
+equality/`IN`, and secondary ranges retain measurable fixed overhead compared
+with MySQL.
+
+The engine already avoids several earlier cliffs:
+
+- low-cardinality joins can push safe source-local predicates below fan-out and
+  stream plain `COUNT(*)`;
+- flat boolean full-text searches score from postings, while required groups
+  narrow their candidate set;
+- mutation scans retain matched targets only, and unordered limits stop early;
+- eligible direct column/literal predicates bind comparison metadata once per
+  statement, including leaves inside `AND` and `OR` trees.
+
+Shared statement setup, computed scan predicates, phrase/proximity matching,
+and broader join-shaped full-text plans remain input-sensitive. Immutable
+[benchmark artifacts](benchmarks/results/) hold the measurements; this ledger
+records the open shape rather than copying numbers that go stale.
 
 ## 16. Deliberate divergences (accepted, not targeted for parity)
 

@@ -13,7 +13,7 @@ its sqlite baseline, fsdb must match real MySQL 8.4.
 - `just check` — build + test
 - `just run [--port … --listen … --data-dir …]` — start server (default 127.0.0.1:3307)
 - `just client [port=…]` / `just smoke [port=…]` — mysql shell / liveness probe
-- `just coverage` — branch coverage (needs `dotnet tool install -g coverlet.console` once)
+- `just coverage` — branch coverage with the repository-pinned Coverlet tool
 - `just bench` / `bench-features` / `bench-quick` / `bench-durable` /
   `bench-scale` / `bench-load` / `bench-load-scale` / `bench-comprehensive` —
   vs MySQL 8.4
@@ -47,7 +47,7 @@ build fails with "not defined".
   NOT in the root solution or root CI/task gates. Differential harness against a
   MySQL 8.4 oracle. Exit codes: 0 pass/known gaps, 1 infra, 2 new fsdb findings,
   3 replay drift. Promote fixed bugs into the Expecto suite; never auto-enroll
-  known gaps (`support/known-gaps.json` is hand-reviewed only).
+  known gaps (`torture/support/known-gaps.json` is hand-reviewed only).
 
 ## Conventions and gotchas
 

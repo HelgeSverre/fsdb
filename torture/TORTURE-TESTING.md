@@ -1,5 +1,17 @@
 # FSDB torture-testing design
 
+## Contents
+
+- [Decision and boundaries](#decision-and-boundaries)
+- [Execution pipeline](#execution-pipeline)
+- [Evidence contract](#evidence-contract)
+- [Failure taxonomy](#failure-taxonomy)
+- [Corpus](#corpus)
+- [Scaling into a torture campaign](#scaling-into-a-torture-campaign)
+- [Finding lifecycle](#finding-lifecycle)
+- [Automation policy](#automation-policy)
+- [Acceptance checkpoints](#acceptance-checkpoints)
+
 ## Decision and boundaries
 
 Keep the complete torture system under `torture/`. It has its own solution,

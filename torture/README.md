@@ -7,11 +7,25 @@ enough evidence to classify and replay the first divergence.
 
 The durable strategy and scale-up guidance live in
 [`TORTURE-TESTING.md`](TORTURE-TESTING.md). Reviewed discovery reports
-live under `findings/`; raw run bundles remain ignored under `artifacts/`.
+live under [`findings/`](findings/); raw run bundles remain ignored under
+[`artifacts/`](artifacts/).
 
 Nothing here is part of the root solution or its normal test/benchmark gates.
 Focused bugs found here should be promoted into the normal Expecto suite after
 they are understood and minimized.
+
+## Contents
+
+- [Design](#design)
+- [Quick start](#quick-start)
+- [Transaction concurrency](#transaction-concurrency)
+- [Cross-database concurrency](#cross-database-concurrency)
+- [Crash recovery](#crash-recovery)
+- [Syntax mutation](#syntax-mutation)
+- [Corpus scale and tools](#corpus-scale-and-tools)
+- [Scenarios](#scenarios)
+- [Artifacts and classification](#artifacts-and-classification)
+- [Development checks](#development-checks)
 
 ## Design
 
@@ -123,7 +137,7 @@ Run the bounded syntax-mutation lane:
 ```bash
 ./scripts/run.sh syntax --seed 101 --syntax-cases 2000 --syntax-depth 3
 
-# Execute only the MySQL-accepted feature and gap baselines.
+# Execute only the MySQL-accepted feature baselines.
 ./scripts/run.sh syntax --seed 101 --syntax-cases 0
 ```
 
@@ -142,16 +156,14 @@ in the evidence but is excluded from parity because error-location prose is not
 a stable interface. MySQL-valid mutations must remain valid on FSDB. A mutation
 that reaches another MySQL semantic error is classified separately.
 
-The baseline corpus covers:
+The baseline corpus covers implemented features such as HASH partitioning,
+compound stored programs, data-changing stored functions, scheduled events,
+account options, transaction isolation, administration statements, and planar
+spatial operations.
 
-- implemented features such as HASH partitioning, compound stored programs,
-  data-changing stored functions, account options, transaction isolation, and
-  administration statements;
-- declared gaps in administration, event scheduling, and spatial operations.
-
-A baseline-only run is an executable gap inventory. Declared refusals remain
-findings until they are implemented or added to the hand-reviewed known-gap
-ledger.
+A baseline-only run is an executable feature inventory. Any disagreement still
+becomes a finding; a deliberate refusal counts as expected only when its exact
+signature is present in the hand-reviewed known-gap ledger.
 
 ### Corpus scale and tools
 
