@@ -266,8 +266,9 @@ different access pattern:
   also supports `LIMIT` and `OFFSET`. Composite keys may contain
   built-in functional parts: `LOWER`/`LCASE`, `UPPER`/`UCASE`, `TRIM`,
   `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`, `LENGTH`/`OCTET_LENGTH`, and
-  `BIT_LENGTH`, plus `ABS` for numeric columns. Other expression orderings and
-  full-value ordering through a prefix key still sort.
+  `BIT_LENGTH`, plus `ABS` for numeric and text/binary columns. Text and binary
+  values follow MySQL's leading-double conversion and diagnostics. Other
+  expression orderings and full-value ordering through a prefix key still sort.
 
 - **Spatial access.** Planar `SPATIAL` and `RTREE` declarations maintain
   immutable minimum-bounding-rectangle entries. They narrow direct
