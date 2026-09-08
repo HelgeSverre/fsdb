@@ -4167,7 +4167,7 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
                   None
                   None
                   None
-                  (view.Created |> Option.map (truncateToSecond >> VDateTime >> Value.toText) |> Option.flatten)
+                  (view.Created |> Option.bind (truncateToSecond >> VDateTime >> Value.toText))
                   None
                   None
                   None

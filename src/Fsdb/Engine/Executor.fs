@@ -6165,7 +6165,7 @@ and private selectColumnFsps
     if sameLength fsps names then
         fsps
     else
-        names |> List.map (fun _ -> None)
+        List.replicate names.Length None
 
 /// Synthetic column metadata for a `JSON_TABLE(...)`'s COLUMNS clause —
 /// every column nullable (empty/error yields NULL, the only mode this
@@ -6957,7 +6957,7 @@ and private applyLateralJoin
             |> traverse (fun leftRow ->
                 runBody (Some leftRow)
                 |> Result.bind (fun (bodyColumns, bodyRows) ->
-                    let padding = bodyColumns |> List.map (fun _ -> VNull) |> Array.ofList
+                    let padding = Array.create bodyColumns.Length VNull
 
                     let expanded =
                         if bodyRows.IsEmpty && join.Kind = LeftJoin then
@@ -7358,8 +7358,8 @@ and private applyResolvedJoin
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
         let rowsSoFar, readLeft = alignPreparedRows combinedColumnsSoFar leftPhysicalTable rowsSoFar
         let joinRows, readRight = alignPreparedRows joinColumns physicalTable joinRows
-        let leftNullPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
-        let rightNullPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
+        let leftNullPadding = Array.create combinedColumnsSoFar.Length VNull
+        let rightNullPadding = Array.create joinColumns.Length VNull
 
         // The column names this join coalesces (`SELECT *` shows them once):
         // `NATURAL`'s intersection, or `USING`'s explicit list — empty for a
@@ -7774,9 +7774,9 @@ and private applyMutationJoin
             let newSources = sourcesSoFar @ [ { Qualifier = joinQualifier; PhysicalTable = tableRef; Columns = joinColumns } ]
             let qualifiers = qualifierRanges (newSources |> List.map (fun source -> source.Qualifier, source.Columns))
             let combinedColumnsSoFar = sourcesSoFar |> List.collect _.Columns
-            let leftFlatPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
-            let rightFlatPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
-            let leftIdentityPadding = sourcesSoFar |> List.map (fun _ -> None)
+            let leftFlatPadding = Array.create combinedColumnsSoFar.Length VNull
+            let rightFlatPadding = Array.create joinColumns.Length VNull
+            let leftIdentityPadding = List.replicate sourcesSoFar.Length None
 
             let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers None
 
@@ -12077,7 +12077,7 @@ and private runGroupedSelect
             let expandRollup (groups: (Value list * Value[] list) list) : (int * Value list * Value[] list) list =
                 let probeCtx = ctxFor (probeRow columns)
                 let tagged keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
-                let ascending = groupExprs |> List.map (fun _ -> Asc)
+                let ascending = List.replicate groupExprs.Length Asc
 
                 let sortedGroups =
                     groups |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys ascending (tagged ka) (tagged kb))
