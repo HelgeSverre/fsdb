@@ -2103,7 +2103,12 @@ let private recoverXa convertXid session =
             |> Seq.map snd
             |> List.ofSeq
 
-        session, ResultSet([ "formatID"; "gtrid_length"; "bqual_length"; "data" ], rows)
+        let columns = [ "formatID"; "gtrid_length"; "bqual_length"; "data" ]
+
+        if convertXid then
+            session, ResultSet(columns, rows)
+        else
+            session, ResultSetWithRawColumns(columns, rows, Set.singleton 3)
 
 let private runXa (parserOptions: Parser.ParserOptions) (session: Session) sql =
     let charset =

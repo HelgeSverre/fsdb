@@ -405,6 +405,15 @@ let tests =
               Expect.equal (reader.ReadLenEncInt ()) (Some(uint64 expected.Length)) "UTF-8 byte length"
               Expect.equal (reader.ReadBytes expected.Length) expected "UTF-8 payload"
 
+          testCase "binary rows honor explicit raw result columns"
+          <| fun _ ->
+              let bytes = [| 0x00uy; 0xffuy |]
+              let carrier = Text.Encoding.Latin1.GetString bytes
+              let reader = Reader(binaryRowPayloadWithRawColumns (Set.singleton 0) [ columnMetadata TypeVarString ] [ Some carrier ])
+              reader.ReadBytes 2 |> ignore
+              Expect.equal (reader.ReadLenEncInt ()) (Some 2UL) "raw byte length"
+              Expect.equal (reader.ReadBytes 2) bytes "raw bytes"
+
           testCase "BLOB column definitions advertise binary collation and flags"
           <| fun _ ->
               let metadata =

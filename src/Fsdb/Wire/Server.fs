@@ -302,7 +302,8 @@ let private sendRows
     (stream: IO.Stream)
     (startSeq: byte)
     (metadata: ColumnMetadata list)
-    (rowEncoder: ColumnMetadata list -> string option list -> byte[])
+    (rowEncoder: Set<int> -> ColumnMetadata list -> string option list -> byte[])
+    (rawColumns: Set<int>)
     (rows: string option list seq)
     : Async<byte> =
     async {
@@ -318,7 +319,7 @@ let private sendRows
             }
 
         for row in rows do
-            let payload = rowEncoder metadata row
+            let payload = rowEncoder rawColumns metadata row
 
             if payload.Length < maxPacketPayload then
                 buf.Add(byte (payload.Length &&& 0xff))
@@ -387,7 +388,7 @@ let rec private sendResult
     (warningCount: int)
     (sessionStateChanges: SessionStateChange list)
     (columnMetadata: ColumnMetadata list)
-    (rowEncoder: ColumnMetadata list -> string option list -> byte[])
+    (rowEncoder: Set<int> -> ColumnMetadata list -> string option list -> byte[])
     (result: Executor.QueryResult)
     : Async<byte> =
     async {
@@ -435,6 +436,7 @@ let rec private sendResult
             return! sendParts startSeq results
         | ResultSet(columns, rows) ->
             let metadata = resultMetadata columns rows columnMetadata
+            let rawColumns = Executor.rawResultColumns result
 
             let! seqId =
                 sendPayloads
@@ -442,7 +444,7 @@ let rec private sendResult
                     startSeq
                     (resultHeadPayloads capabilities statusFlags lastInsertId warningCount sessionStateChanges metadata result)
 
-            let! seqId = sendRows stream seqId metadata rowEncoder rows
+            let! seqId = sendRows stream seqId metadata rowEncoder rawColumns rows
 
             let deprecateEof = hasCapability ClientDeprecateEof capabilities
 
@@ -500,7 +502,7 @@ let private sendCursorRows
     (rows: string option list seq)
     : Async<unit> =
     async {
-        let! seqId = sendRows stream startSeq metadata binaryRowPayload rows
+        let! seqId = sendRows stream startSeq metadata binaryRowPayloadWithRawColumns Set.empty rows
         let terminator =
             if hasCapability ClientDeprecateEof capabilities then
                 okEndOfResultSetPayloadWithWarnings capabilities statusFlags warningCount
@@ -529,7 +531,7 @@ let private sendTextResult
         warningCount
         sessionStateChanges
         columnMetadata
-        textRowPayloadTyped
+        textRowPayloadWithRawColumns
         result
 
 /// Writes a text resultset (or OK/ERR) as one or more packets, continuing
@@ -596,7 +598,7 @@ let private sendBinaryResult
         warningCount
         sessionStateChanges
         columnMetadata
-        binaryRowPayload
+        binaryRowPayloadWithRawColumns
         result
     |> Async.Ignore
 

@@ -181,6 +181,44 @@ let tests =
                   Expect.equal (definition.ReadByte()) 4uy "fractional precision" }
               |> Async.RunSynchronously
 
+          testCase "text results can preserve raw bytes without changing advertised metadata"
+          <| fun _ ->
+              async {
+                  use stream = new IO.MemoryStream()
+                  let bytes = [| 0x00uy; 0xffuy |]
+                  let carrier = Text.Encoding.Latin1.GetString bytes
+                  let metadata = { columnMetadata TypeVarString with CollationId = Some 255us }
+                  let result = ResultSetWithRawColumns([ "data" ], [ [ Some carrier ] ], Set.singleton 0)
+
+                  do!
+                      Fsdb.Server.sendQueryResult
+                          stream
+                          (ClientProtocol41 ||| ClientDeprecateEof)
+                          1uy
+                          StatusAutocommit
+                          0UL
+                          0
+                          [ metadata ]
+                          result
+
+                  stream.Position <- 0L
+                  let! packets = readAllPackets stream
+                  let definition = Reader(packets.[1].Payload)
+
+                  for _ in 1..6 do
+                      definition.ReadLenEncString() |> ignore
+
+                  definition.ReadLenEncInt() |> ignore
+                  Expect.equal (definition.ReadInt16LE()) 255 "the advertised collation remains utf8mb4_0900_ai_ci"
+                  definition.ReadInt32LE() |> ignore
+                  Expect.equal (definition.ReadByte()) TypeVarString "the advertised type remains VAR_STRING"
+                  Expect.equal (definition.ReadInt16LE()) 0 "the advertised flags remain textual"
+
+                  let row = Reader(packets.[2].Payload)
+                  Expect.equal (row.ReadLenEncInt()) (Some 2UL) "the raw identifier length is exact"
+                  Expect.equal (row.ReadBytes 2) bytes "the raw identifier bytes are not expanded as UTF-8" }
+              |> Async.RunSynchronously
+
           // ReadAsync timeout behavior requires a real socket that can be closed.
           testCase "readPacketWithTimeoutMs reaps a connection that never sends a packet"
           <| fun _ ->

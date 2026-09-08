@@ -605,21 +605,28 @@ let textRowPayload (values: string option list) : byte[] =
     w.ToArray()
 
 /// Text-protocol row encoding with the advertised column types available.
-/// `Executor.QueryResult` represents VBytes losslessly as a Latin-1 string;
-/// turn that carrier back into its original bytes for binary columns rather
-/// than UTF-8-encoding it and changing every byte above 0x7f.
-let textRowPayloadTyped (columns: ColumnMetadata list) (values: string option list) : byte[] =
+/// `Executor.QueryResult` represents raw values losslessly as Latin-1 strings;
+/// turn those carriers back into bytes when the type is binary or the producer
+/// explicitly marks a text-metadata column as raw.
+let textRowPayloadWithRawColumns
+    (rawColumns: Set<int>)
+    (columns: ColumnMetadata list)
+    (values: string option list)
+    : byte[] =
     let w = Writer()
 
     List.zip columns values
-    |> List.iter (fun (metadata, value) ->
+    |> List.iteri (fun index (metadata, value) ->
         match value with
         | None -> w.WriteLenEncNull()
-        | Some s when carriesRawBytes metadata ->
+        | Some s when Set.contains index rawColumns || carriesRawBytes metadata ->
             w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
         | Some s -> w.WriteLenEncString s)
 
     w.ToArray()
+
+let textRowPayloadTyped (columns: ColumnMetadata list) (values: string option list) : byte[] =
+    textRowPayloadWithRawColumns Set.empty columns values
 
 /// Writes one non-NULL binary-protocol row value already rendered as
 /// `Value.toText`-style text (`Executor.QueryResult` never keeps the
@@ -760,7 +767,11 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
 /// column as (see `writeBinaryValue`'s doc on why); a shorter/longer list
 /// than `values` is a caller bug, not a value this falls back for. None
 /// means SQL NULL.
-let binaryRowPayload (columns: ColumnMetadata list) (values: string option list) : byte[] =
+let binaryRowPayloadWithRawColumns
+    (rawColumns: Set<int>)
+    (columns: ColumnMetadata list)
+    (values: string option list)
+    : byte[] =
     let w = Writer()
     w.WriteByte 0uy // packet header, always 0x00 for a row
 
@@ -777,12 +788,16 @@ let binaryRowPayload (columns: ColumnMetadata list) (values: string option list)
     w.WriteBytes nullBitmap
 
     List.zip columns values
-    |> List.iter (fun (metadata, v) ->
+    |> List.iteri (fun index (metadata, v) ->
         match v with
+        | Some s when Set.contains index rawColumns -> w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
         | Some s -> writeBinaryValue w metadata s
         | None -> ())
 
     w.ToArray()
+
+let binaryRowPayload (columns: ColumnMetadata list) (values: string option list) : byte[] =
+    binaryRowPayloadWithRawColumns Set.empty columns values
 
 /// Builds the fixed COM_STMT_PREPARE_OK header. Parameter and result-column
 /// definitions follow as separate packets.

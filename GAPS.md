@@ -69,7 +69,8 @@ cross a database boundary.
 by `QueryHandler.dispatch`.
 
 XA supports start, end, prepare, one- and two-phase commit, rollback, detached
-recovery, binary transaction identifiers, and durable prepared branches.
+recovery, byte-exact raw and converted transaction identifiers, and durable
+prepared branches.
 
 `LOCK TABLES` enforces READ/WRITE ownership, aliases, atomic lock lists,
 temporary-table exemptions, transaction boundaries, and implicit view/trigger
@@ -273,7 +274,6 @@ resolved.
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; AUTO_INCREMENT identities are reserved across transaction snapshots; keyless inserts, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
-| XA recovery result encoding | unconverted `XA RECOVER` returns binary identifier data | `XA_RECOVER_ADMIN` is enforced through `mysql.global_grants`; use `CONVERT XID` for byte-exact non-ASCII identifiers because the unconverted result still crosses the string result carrier | low | divergence |
 
 ## 8. Persistence and durability
 

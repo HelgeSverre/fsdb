@@ -8638,6 +8638,18 @@ let tests =
               let session, _ = handle session "XA END X'00FF'"
               let session, _ = handle session "XA PREPARE X'00FF'"
 
+              let observer, rawRecovery = handle observer "XA RECOVER"
+
+              match rawRecovery with
+              | ResultSet(_, [ [ Some "1"; Some "2"; Some "0"; Some data ] ]) ->
+                  Expect.equal (data |> Seq.map int |> List.ofSeq) [ 0; 255 ] "the internal carrier retains every XID byte"
+                  Expect.equal (rawResultColumns rawRecovery) (Set.singleton 3) "only the XID data column bypasses UTF-8 encoding"
+                  let dataMetadata = observer.LastResultColumnMetadata.[3]
+                  Expect.equal dataMetadata.TypeId TypeVarString "raw recovery retains MySQL's text type"
+                  Expect.equal dataMetadata.CollationId (Some 255us) "raw recovery retains MySQL's utf8mb4 collation"
+                  Expect.isFalse (hasMetadataFlag BinaryFlag dataMetadata) "raw recovery does not falsify MySQL's flags"
+              | other -> failtestf "expected the raw byte XID, got %A" other
+
               match handle observer "XA RECOVER CONVERT XID" |> snd with
               | ResultSet(_, [ [ Some "1"; Some "2"; Some "0"; Some "0x00FF" ] ]) -> ()
               | other -> failtestf "expected a byte-exact converted XID, got %A" other
