@@ -4030,6 +4030,22 @@ let private comparisonResult
             let compared = Value.compare comparedLeft comparedRight
             Ok(finish compared (compared = 0))
 
+let private comparisonResultWithNulls
+    (ctx: EvalContext)
+    (leftExpr: Expr)
+    (leftColumn: ColumnDef option)
+    (left: Value)
+    (rightExpr: Expr)
+    (rightColumn: ColumnDef option)
+    (op: Op)
+    (right: Value)
+    : Result<Value, EvalError> =
+    match op, left, right with
+    | NullSafeEq, VNull, VNull -> Ok(VInt 1L)
+    | NullSafeEq, VNull, _
+    | NullSafeEq, _, VNull -> Ok(VInt 0L)
+    | _ -> comparisonResult ctx leftExpr leftColumn left rightExpr rightColumn op right
+
 let private quantifiedComparisonResult
     (ctx: EvalContext)
     (leftExpr: Expr)
@@ -4140,12 +4156,15 @@ let private rowComparisonResult
     let scalarComparison left right comparisonOp =
         match left, right with
         | RowScalar(leftExpr, leftColumn, leftValue), RowScalar(rightExpr, rightColumn, rightValue) ->
-            match comparisonOp, leftValue, rightValue with
-            | NullSafeEq, VNull, VNull -> Ok(VInt 1L)
-            | NullSafeEq, VNull, _
-            | NullSafeEq, _, VNull -> Ok(VInt 0L)
-            | NullSafeEq, _, _ -> comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn NullSafeEq rightValue
-            | _ -> comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn comparisonOp rightValue
+            comparisonResultWithNulls
+                ctx
+                leftExpr
+                leftColumn
+                leftValue
+                rightExpr
+                rightColumn
+                comparisonOp
+                rightValue
         | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (width left))
 
     let rec compareRows comparisonOp left right =
@@ -4457,7 +4476,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 eval b
                 |> Result.bind (fun vb ->
                     let compareWith comparison =
-                        comparisonResult
+                        comparisonResultWithNulls
                             ctx
                             a
                             (tryColumnDefForExpr ctx a)
@@ -4513,15 +4532,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Lte -> compareWith Lte
                     | Gt -> compareWith Gt
                     | Gte -> compareWith Gte
-                    // Never unknown, unlike every other comparison here: both
-                    // sides `NULL` is true, either side (but not both) `NULL` is
-                    // false, otherwise it uses the same equality resolver.
-                    | NullSafeEq ->
-                        match va, vb with
-                        | VNull, VNull -> Ok(VInt 1L)
-                        | VNull, _
-                        | _, VNull -> Ok(VInt 0L)
-                        | _ -> compareWith NullSafeEq))
+                    | NullSafeEq -> compareWith NullSafeEq))
         with Value.UnsignedOutOfRange ->
             let expression = InformationSchema.exprToSql (BinOp(op, a, b))
             Error(1690, sprintf "BIGINT UNSIGNED value is out of range in '%s'" expression)
@@ -6513,6 +6524,38 @@ and private whereMatches (ctxFor: Value[] -> EvalContext) (where: Expr option) (
     match where with
     | None -> Ok true
     | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+
+and private prepareMutationPredicate
+    (ctxFor: Value[] -> EvalContext)
+    (where: Expr option)
+    : Result<Value[] -> Result<bool, EvalError>, EvalError> =
+    let fallback = whereMatches ctxFor where
+    let context = { ctxFor [||] with Clause = WhereClause }
+
+    let directComparison op columnExpression literalExpression columnOnLeft =
+        match tryDirectColumnForExpr context columnExpression, literalExpression with
+        | Some(index, column), Lit _ ->
+            evalExpr context literalExpression
+            |> Result.map (fun literal (row: Value[]) ->
+                let stored = row.[index]
+
+                (if columnOnLeft then
+                     comparisonResultWithNulls context columnExpression (Some column) stored literalExpression None op literal
+                 else
+                     comparisonResultWithNulls context literalExpression None literal columnExpression (Some column) op stored)
+                |> Result.map (truthy >> (=) (Some true)))
+            |> Some
+        | _ -> None
+
+    if not (storedValuesMatchReadValues context.Store) then
+        Ok fallback
+    else
+        match where with
+        | Some(BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), column, (Lit _ as literal))) ->
+            directComparison op column literal true |> Option.defaultValue (Ok fallback)
+        | Some(BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (Lit _ as literal), column)) ->
+            directComparison op column literal false |> Option.defaultValue (Ok fallback)
+        | _ -> Ok fallback
 
 /// `NATURAL JOIN`'s name set: every column name the two sides share,
 /// matched case-insensitively (MySQL matches `c1(X)` against `c2(x)`), in
@@ -19147,13 +19190,21 @@ let rec executeAs
                     for rowId, row in plan.Rows do
                         fullTextRowIds.[row] <- rowId)
 
+                let preparedPredicate =
+                    match fullTextPlan with
+                    | None -> prepareMutationPredicate ctxFor updateStmt.Where
+                    | Some _ -> Ok(whereMatches ctxFor updateStmt.Where)
+
                 let check row =
                     match fullTextPlan with
                     | Some plan ->
                         match fullTextRowIds.TryGetValue row with
                         | true, rowId -> whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
                         | false, _ -> Ok false
-                    | None -> whereMatches ctxFor updateStmt.Where row
+                    | None ->
+                        match preparedPredicate with
+                        | Ok predicate -> predicate row
+                        | Error error -> Error error
 
                 let probePredicate =
                     fullTextPlan
@@ -19551,13 +19602,21 @@ let rec executeAs
                 for rowId, row in plan.Rows do
                     fullTextRowIds.[row] <- rowId)
 
+            let preparedPredicate =
+                match fullTextPlan with
+                | None -> prepareMutationPredicate ctxFor deleteStmt.Where
+                | Some _ -> Ok(whereMatches ctxFor deleteStmt.Where)
+
             let check row =
                 match fullTextPlan with
                 | Some plan ->
                     match fullTextRowIds.TryGetValue row with
                     | true, rowId -> whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
                     | false, _ -> Ok false
-                | None -> whereMatches ctxFor deleteStmt.Where row
+                | None ->
+                    match preparedPredicate with
+                    | Ok predicate -> predicate row
+                    | Error error -> Error error
 
             let probePredicate =
                 fullTextPlan

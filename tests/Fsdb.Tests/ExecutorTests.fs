@@ -5404,7 +5404,46 @@ let tests =
 
           testList
               "Equality-index lookup paths"
-              [ testCase "WHERE pk = <literal>, alone or ANDed with a residual condition, matches a forced-scan twin table over randomized data"
+              [ testCase "scan-shaped mutations preserve direct comparison semantics"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE scanned (id INT, name VARCHAR(10) COLLATE utf8mb4_bin, status ENUM('open','closed'), nullable INT, marker INT)"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO scanned VALUES (1,'a','open',NULL,0),(2,'A','closed',1,0),(3,'b','open',NULL,0)"
+                    |> ignore
+
+                    Expect.equal
+                        (runDefault store "UPDATE scanned SET marker = 10 WHERE name = 'A'")
+                        (Affected 1UL)
+                        "binary collation stays case-sensitive"
+
+                    Expect.equal
+                        (runDefault store "UPDATE scanned SET marker = 20 WHERE status = 1")
+                        (Affected 2UL)
+                        "ENUM comparisons use declaration ordinals"
+
+                    Expect.equal
+                        (runDefault store "UPDATE scanned SET marker = 30 WHERE nullable <=> NULL")
+                        (Affected 2UL)
+                        "null-safe equality retains its two-valued result"
+
+                    Expect.equal
+                        (runDefault store "DELETE FROM scanned WHERE 2 < id")
+                        (Affected 1UL)
+                        "a literal-left comparison keeps its operand direction"
+
+                    match runDefault store "SELECT id, marker FROM scanned ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "30" ]; [ Some "2"; Some "10" ] ] "only matching rows changed"
+                    | other -> failtestf "expected the surviving scan rows, got %A" other
+
+                testCase "WHERE pk = <literal>, alone or ANDed with a residual condition, matches a forced-scan twin table over randomized data"
                 <| fun _ ->
                     // `indexed`'s `id` is PRIMARY KEY, so a point SELECT on
                     // it takes runSelectStmt's index fast path;
