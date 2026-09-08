@@ -6749,12 +6749,12 @@ let tests =
                     Expect.equal
                         (runDefault
                             store
-                            "CREATE TABLE measured (id INT PRIMARY KEY, value VARCHAR(40) COLLATE utf8mb4_bin, bits BIT(64), UNIQUE INDEX uq_octets ((OCTET_LENGTH(value))), INDEX ix_bits ((BIT_LENGTH(value))), INDEX ix_bit_width ((LENGTH(bits))))")
+                            "CREATE TABLE measured (id INT PRIMARY KEY, value VARCHAR(40) COLLATE utf8mb4_bin, latin_value VARCHAR(40) CHARACTER SET latin1, bits BIT(64), UNIQUE INDEX uq_octets ((OCTET_LENGTH(value))), INDEX ix_latin_octets ((LENGTH(latin_value))), INDEX ix_bits ((BIT_LENGTH(value))), INDEX ix_bit_width ((LENGTH(bits))))")
                         (Affected 0UL)
                         "create byte-length indexes"
 
                     Expect.equal
-                        (runDefault store "INSERT INTO measured VALUES (1, 'é', b'1'), (2, 'abc', b'10'), (3, NULL, NULL)")
+                        (runDefault store "INSERT INTO measured VALUES (1, 'é', 'é', b'1'), (2, 'abc', 'abc', b'10'), (3, NULL, NULL, NULL)")
                         (Affected 3UL)
                         "seed byte-length keys"
 
@@ -6769,6 +6769,18 @@ let tests =
 
                     Expect.equal lengthPlan.AccessType (Some "const") "unique byte-length access"
                     Expect.equal lengthPlan.Key (Some "uq_octets") "byte-length key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM measured WHERE LENGTH(latin_value) = 1")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "byte length uses the source charset"
+
+                    let latinLengthPlan =
+                        runDefault store "EXPLAIN SELECT id FROM measured WHERE LENGTH(latin_value) = 1"
+                        |> explainRow
+
+                    Expect.equal latinLengthPlan.AccessType (Some "ref") "charset-aware byte-length access"
+                    Expect.equal latinLengthPlan.Key (Some "ix_latin_octets") "charset-aware byte-length key"
 
                     Expect.equal
                         (runDefault store "SELECT id FROM measured WHERE BIT_LENGTH(value) = 24")
@@ -6792,7 +6804,7 @@ let tests =
                         (Affected 1UL)
                         "update through bit-length key"
 
-                    match runDefault store "INSERT INTO measured VALUES (4, 'zz', b'11')" with
+                    match runDefault store "INSERT INTO measured VALUES (4, 'zz', 'zz', b'11')" with
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected byte-length uniqueness, got %A" other
 
