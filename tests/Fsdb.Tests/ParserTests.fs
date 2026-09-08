@@ -3540,6 +3540,18 @@ let tests =
                       "only statement delimiters split the batch"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "statement batches retain executable optimizer hints"
+          <| fun _ ->
+              let hinted = "SELECT /*+ SET_VAR(max_points_in_geometry=3) */ 1"
+
+              match splitStatements (hinted + "; SELECT /* ordinary */ 2") with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ hinted; "SELECT   2" ]
+                      "the dispatcher receives optimizer metadata but not ordinary comments"
+              | Error error -> failtestf "unexpected split error: %s" error
+
           testCase "compound detection does not rescan repeated header tokens"
           <| fun _ ->
               let sql = "CREATE DEFINER=x " + String.replicate 10000 "TRIGGER " + "BEGIN"

@@ -172,6 +172,8 @@ module SyntaxFuzz =
            "spatial_buffer_strategy",
            "SELECT ST_Equals(ST_Buffer(ST_PointFromText('POINT(0 0)'), 2, ST_Buffer_Strategy('point_square')), ST_GeomFromText('POLYGON((-2 -2,2 -2,2 2,-2 2,-2 -2))'))"
            "spatial_buffer_ceiling", "SET SESSION max_points_in_geometry = 32"
+           "spatial_buffer_statement_ceiling",
+           "SELECT /*+ SET_VAR(max_points_in_geometry=32) */ HEX(ST_Buffer_Strategy('point_circle', 32))"
            "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix
            "numeric_display", sprintf "CREATE TABLE syntax_display_%s (i INT(7) ZEROFILL, d DECIMAL(7,2) ZEROFILL, f FLOAT(8,2) ZEROFILL)" suffix
            "bit_type", sprintf "CREATE TABLE syntax_bit_%s (b BIT(64) DEFAULT b'1')" suffix |]

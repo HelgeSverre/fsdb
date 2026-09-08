@@ -648,6 +648,110 @@ let tests =
                   | ResultSet(_, [ [ Some "65536" ] ]) -> ()
                   | other -> failtestf "expected the compiled global ceiling after DEFAULT, got %A" other)
 
+          testCase "SET_VAR scopes the geometry point ceiling to one statement"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let session = create 1 (Fsdb.Storage.create ())
+                  let emptyGeometry = "ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')"
+
+                  let bufferWith limit points =
+                      sprintf
+                          "SELECT /*+ SET_VAR(max_points_in_geometry=%s) */ ST_IsEmpty(ST_Buffer(%s, 1, ST_Buffer_Strategy('point_circle', %d)))"
+                          limit
+                          emptyGeometry
+                          points
+
+                  match handle session (bufferWith "3" 4) |> snd with
+                  | Err(3134, message) -> Expect.stringContains message "(3)" "the hint changes strategy validation"
+                  | other -> failtestf "expected the statement ceiling to reject four points, got %A" other
+
+                  match handle session (sprintf "SELECT ST_IsEmpty(ST_Buffer(%s, 1, ST_Buffer_Strategy('point_circle', 4)))" emptyGeometry) |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected the hint not to leak into the next statement, got %A" other
+
+                  match handle session "SELECT /*+ SET_VAR(max_points_in_geometry=3) */ @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "3" ] ]) -> ()
+                  | other -> failtestf "expected @@SESSION to expose the statement override, got %A" other
+
+                  match handle session "SELECT @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "65536" ] ]) -> ()
+                  | other -> failtestf "expected the visible session value to revert after the statement, got %A" other
+
+                  let low, lowResult = handle session (bufferWith "2" 3)
+
+                  match lowResult with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected the lower hint to clamp to three, got %A" other
+
+                  Expect.equal (low.Diagnostics |> List.map _.Code) [ 1292 ] "the hint clamp warns"
+
+                  let high, highResult = handle session "SELECT /*+ SET_VAR(max_points_in_geometry=1048577) */ 1"
+
+                  match highResult with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected the upper hint to clamp, got %A" other
+
+                  Expect.equal (high.Diagnostics |> List.map _.Code) [ 1292 ] "the upper clamp warns"
+
+                  let enormous, enormousResult =
+                      handle
+                          session
+                          (sprintf
+                              "SELECT /*+ SET_VAR(max_points_in_geometry=%s) */ 1"
+                              (String.replicate 4096 "9"))
+
+                  match enormousResult with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected an oversized numeric hint to clamp safely, got %A" other
+
+                  Expect.equal (enormous.Diagnostics |> List.map _.Code) [ 1292 ] "oversized decimal text does not overflow"
+
+                  for sql, warning in
+                      [ "SELECT /*+ SET_VAR(max_points_in_geometry='3') */ 1", 1232
+                        "SELECT /*+ SET_VAR(no_such_variable=3) */ 1", 3128
+                        "SELECT /*+ SET_VAR(max_points_in_geometry=-1) */ 1", 1064
+                        "SELECT /*+ SET_VAR(max_points_in_geometry=3) SET_VAR(max_points_in_geometry=4) */ 1", 3126 ] do
+                      let executed, result = handle session sql
+
+                      match result with
+                      | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                      | other -> failtestf "expected the ignored hint not to fail the statement, got %A" other
+
+                      Expect.equal (executed.Diagnostics |> List.map _.Code) [ warning ] "the optimizer warning matches MySQL"
+
+                  for sql in
+                      [ sprintf "/*+ SET_VAR(max_points_in_geometry=3) */ SELECT ST_IsEmpty(ST_Buffer(%s, 1, ST_Buffer_Strategy('point_circle', 4)))" emptyGeometry
+                        sprintf "SELECT /* ordinary */ /*+ SET_VAR(max_points_in_geometry=3) */ ST_IsEmpty(ST_Buffer(%s, 1, ST_Buffer_Strategy('point_circle', 4)))" emptyGeometry
+                        sprintf "SELECT '/*+ SET_VAR(max_points_in_geometry=3) */', ST_IsEmpty(ST_Buffer(%s, 1, ST_Buffer_Strategy('point_circle', 4)))" emptyGeometry
+                        sprintf "SELECT /*+ SET_VAR(no_such_variable='SET_VAR(max_points_in_geometry=3)') */ ST_IsEmpty(ST_Buffer(%s, 1, ST_Buffer_Strategy('point_circle', 4)))" emptyGeometry ] do
+                      match handle session sql |> snd with
+                      | ResultSet _ -> ()
+                      | other -> failtestf "expected a misplaced hint to remain inert, got %A" other
+
+                  let cteSql =
+                      sprintf
+                          "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=3) */ 1 AS n) SELECT ST_IsEmpty(ST_Buffer(%s, 1, ST_Buffer_Strategy('point_circle', 4))) FROM c"
+                          emptyGeometry
+
+                  match handle session cteSql |> snd with
+                  | Err(3134, _) -> ()
+                  | other -> failtestf "expected a nested query-block hint to scope the statement, got %A" other
+
+                  let preparedSql = bufferWith "3" 4
+
+                  match prepareStatementForSession session preparedSql with
+                  | Ok(Some ast, 0) ->
+                      let prepared =
+                          { Ast = Some ast
+                            Sql = preparedSql
+                            ParamCount = 0
+                            LastParamTypes = None }
+
+                      match executePrepared session prepared [] |> snd with
+                      | Err(3134, _) -> ()
+                      | other -> failtestf "expected a prepared hint to apply at execution, got %A" other
+                  | other -> failtestf "expected the hinted SELECT to prepare, got %A" other)
+
           // `max_allowed_packet` is what the wire actually enforces
           // (`Packet.readPacketAsync`), so a client that reads the variable
           // and a client that gets 1153'd must see the same number. Two

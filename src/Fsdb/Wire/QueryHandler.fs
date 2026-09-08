@@ -27,6 +27,7 @@ let private storedProgramProtectedTables = System.Threading.AsyncLocal<Set<strin
 let private storedFunctionSession = System.Threading.AsyncLocal<Session option>()
 let private storedFunctionCalls = System.Threading.AsyncLocal<(string * string) list option>()
 let private creatingTable = System.Threading.AsyncLocal<string option>()
+let private maxPointsInGeometryOverride = System.Threading.AsyncLocal<int option>()
 
 let private insideFunctionOrTrigger (session: Session) =
     session.RoutineStack
@@ -299,6 +300,13 @@ let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name
         Some(Some(string (conditionCount false session)))
     elif sigil = "@@" && not (isGlobalScope scope) && name = "error_count" then
         Some(Some(string (conditionCount true session)))
+    elif
+        sigil = "@@"
+        && not (isGlobalScope scope)
+        && name = "max_points_in_geometry"
+        && maxPointsInGeometryOverride.Value.IsSome
+    then
+        maxPointsInGeometryOverride.Value |> Option.map string |> Some
     elif sigil = "@@" then
         if isGlobalScope scope || globalScopeOnlyVariables.Contains name then
             Session.tryGlobalVariable session.Store name
@@ -659,8 +667,8 @@ let private registryFor (session: Session) : Functions.Registry =
         |> Option.bind tryInt32
         |> Option.defaultValue 0
     let maxPointsInGeometry =
-        sessionValue session "max_points_in_geometry"
-        |> Option.bind tryInt32
+        maxPointsInGeometryOverride.Value
+        |> Option.orElseWith (fun () -> sessionValue session "max_points_in_geometry" |> Option.bind tryInt32)
         |> Option.defaultValue Limits.defaultMaxPointsInGeometry
 
     let loginUser = if session.LoginUser = "" then session.User else session.LoginUser
@@ -1190,6 +1198,152 @@ let private normalizeGeometryPointLimit =
     | VUInt value when value > uint64 Int64.MaxValue -> Ok Limits.maxPointsInGeometryLimit
     | VUInt value -> bounded (int64 value)
     | _ -> Error(Err(1232, "Incorrect argument type to variable 'max_points_in_geometry'"))
+
+let private setVarHint = Regex(@"(?:^|[\s,])SET_VAR\b", RegexOptions.IgnoreCase)
+
+let private isTopLevelHintToken (hint: string) stop =
+    let mutable index = 0
+    let mutable depth = 0
+    let mutable quote = None
+
+    while index < stop do
+        match quote with
+        | Some delimiter when hint.[index] = '\\' && index + 1 < stop -> index <- index + 2
+        | Some delimiter when hint.[index] = delimiter && index + 1 < stop && hint.[index + 1] = delimiter ->
+            index <- index + 2
+        | Some delimiter when hint.[index] = delimiter ->
+            quote <- None
+            index <- index + 1
+        | Some _ -> index <- index + 1
+        | None when hint.[index] = '\'' || hint.[index] = '"' || hint.[index] = '`' ->
+            quote <- Some hint.[index]
+            index <- index + 1
+        | None when hint.[index] = '(' ->
+            depth <- depth + 1
+            index <- index + 1
+        | None when hint.[index] = ')' ->
+            depth <- max 0 (depth - 1)
+            index <- index + 1
+        | None -> index <- index + 1
+
+    quote.IsNone && depth = 0
+
+let private tryHintArgument (hint: string) afterName =
+    let mutable openAt = afterName
+
+    while openAt < hint.Length && Char.IsWhiteSpace hint.[openAt] do
+        openAt <- openAt + 1
+
+    if openAt = hint.Length || hint.[openAt] <> '(' then
+        None
+    else
+        let mutable index = openAt + 1
+        let mutable depth = 1
+        let mutable quote = None
+
+        while index < hint.Length && depth > 0 do
+            match quote with
+            | Some delimiter when hint.[index] = '\\' && index + 1 < hint.Length -> index <- index + 2
+            | Some delimiter when hint.[index] = delimiter && index + 1 < hint.Length && hint.[index + 1] = delimiter ->
+                index <- index + 2
+            | Some delimiter when hint.[index] = delimiter ->
+                quote <- None
+                index <- index + 1
+            | Some _ -> index <- index + 1
+            | None when hint.[index] = '\'' || hint.[index] = '"' || hint.[index] = '`' ->
+                quote <- Some hint.[index]
+                index <- index + 1
+            | None when hint.[index] = '(' ->
+                depth <- depth + 1
+                index <- index + 1
+            | None when hint.[index] = ')' ->
+                depth <- depth - 1
+                index <- index + 1
+            | None -> index <- index + 1
+
+        if depth = 0 then
+            Some(hint.Substring(openAt + 1, index - openAt - 2))
+        else
+            None
+
+let private statementGeometryPointLimit options sql =
+    let mutable pointLimit = None
+
+    let syntaxWarning () =
+        Diagnostics.warning 1064 "Optimizer hint syntax error near SET_VAR"
+
+    let applyAssignment (assignment: string) =
+        let equalsAt = assignment.IndexOf '='
+
+        if equalsAt <= 0 then
+            syntaxWarning ()
+        else
+            let rawName = assignment.Substring(0, equalsAt)
+            let rawValue = assignment.Substring(equalsAt + 1)
+            let name = rawName.Trim().ToLowerInvariant()
+            let value = rawValue.Trim()
+
+            if rawName.Contains ',' || not (Regex.IsMatch(name, @"^[a-z_][a-z0-9_]*$", RegexOptions.IgnoreCase)) then
+                syntaxWarning ()
+            elif name <> "max_points_in_geometry" then
+                Diagnostics.warning 3128 (sprintf "Unresolved name '%s' for SET_VAR hint" name)
+            elif
+                value
+                |> Seq.mapi (fun index character -> index, character)
+                |> Seq.exists (fun (index, character) -> character = ',' && isTopLevelHintToken value index)
+            then
+                syntaxWarning ()
+            elif pointLimit.IsSome then
+                Diagnostics.warning
+                    3126
+                    (sprintf "Hint SET_VAR(max_points_in_geometry=%s) is ignored as conflicting/duplicated" value)
+            elif value.Length > 0 && (value |> Seq.forall Char.IsDigit) then
+                let mutable significant = 0
+
+                while significant < value.Length && value.[significant] = '0' do
+                    significant <- significant + 1
+
+                let digitCount = value.Length - significant
+
+                let parsed =
+                    if digitCount = 0 then
+                        0
+                    elif digitCount > 7 then
+                        Limits.maxPointsInGeometryLimit + 1
+                    else
+                        Int32.Parse(value.Substring significant, Globalization.CultureInfo.InvariantCulture)
+
+                let bounded =
+                    parsed
+                    |> max Limits.minPointsInGeometry
+                    |> min Limits.maxPointsInGeometryLimit
+
+                if bounded <> parsed then
+                    Diagnostics.warning
+                        1292
+                        (sprintf "Truncated incorrect max_points_in_geometry value: '%s'" value)
+
+                pointLimit <- Some bounded
+            else
+                if value.StartsWith("-", StringComparison.Ordinal) then
+                    syntaxWarning ()
+                else
+                    Diagnostics.warning 1232 "Incorrect argument type to variable 'max_points_in_geometry'"
+
+    for hint in Parser.optimizerHintsWithOptions options sql do
+        let matches = setVarHint.Matches hint
+
+        for matched in matches |> Seq.cast<Match> |> Seq.filter (fun found -> isTopLevelHintToken hint found.Index) do
+            match tryHintArgument hint (matched.Index + matched.Length) with
+            | Some assignment -> applyAssignment assignment
+            | None -> syntaxWarning ()
+
+    pointLimit
+
+let private withStatementHints options sql body =
+    match statementGeometryPointLimit options sql with
+    | Some pointLimit -> DynamicScope.withValue maxPointsInGeometryOverride (Some pointLimit) body
+    | None -> body ()
 
 let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
     markRoutineVariables connectionVariableNames
@@ -6056,8 +6210,9 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
     let parserOptions = parserOptionsForSession session
     let sql = normalizeDispatchedSql parserOptions rawSql
 
-    withTriggerTextExecution session (fun () ->
-        dispatchNormalized session rawSql parserOptions sql)
+    withStatementHints parserOptions rawSql (fun () ->
+        withTriggerTextExecution session (fun () ->
+            dispatchNormalized session rawSql parserOptions sql))
 
 and private withTriggerTextExecution session body =
     let executeTriggerText (context: Executor.TriggerTextExecution) sql =
@@ -6145,8 +6300,9 @@ and private dispatchNormalized session rawSql parserOptions sql =
 
                 match statement.Ast with
                 | Some ast ->
-                    withStoredFunctionRegistry dispatch session (fun current ->
-                        executeParsed current (bindPlaceholders ast values))
+                    withStatementHints parserOptions statement.Sql (fun () ->
+                        withStoredFunctionRegistry dispatch session (fun current ->
+                            executeParsed current (bindPlaceholders ast values)))
                 | None ->
                     dispatch
                         session
@@ -7098,8 +7254,9 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
                 | Ok() ->
                     try
                         let executed, result =
-                            withTriggerTextExecution session (fun () ->
-                                dispatchNormalized session rawSql parserOptions sql)
+                            withStatementHints parserOptions rawSql (fun () ->
+                                withTriggerTextExecution session (fun () ->
+                                    dispatchNormalized session rawSql parserOptions sql))
                         let executed =
                             if resetsPassword && terminalErrorInfo result |> Option.isNone then
                                 { executed with PasswordExpired = false }
@@ -7258,37 +7415,38 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
         let executed, result =
             recordDiagnostics session false (fun () ->
                 try
-                    let statement = bindPlaceholders ast values
-                    let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
+                    withStatementHints (parserOptionsForSession session) stmt.Sql (fun () ->
+                        let statement = bindPlaceholders ast values
+                        let resetsPassword = resetsOwnPassword session (ParsedAccountStatement statement)
 
-                    if session.PasswordExpired && not resetsPassword then
-                        session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
-                    elif isRoleSessionStatement statement then
-                        applyRoleStatement session statement
-                    else
-                        let accountStatement = ParsedAccountStatement statement
-                        let account = accountOf session
-                        let store = Session.currentStore session
+                        if session.PasswordExpired && not resetsPassword then
+                            session, Err(1820, "You must reset your password using ALTER USER statement before executing this statement.")
+                        elif isRoleSessionStatement statement then
+                            applyRoleStatement session statement
+                        else
+                            let accountStatement = ParsedAccountStatement statement
+                            let account = accountOf session
+                            let store = Session.currentStore session
 
-                        match
-                            Auth.tryConsumeAccountStatementWithLimits
-                                store
-                                account
-                                (Auth.tryAccountLimits store account)
-                                (accountStatementCountsAsUpdate accountStatement
-                                 && accountUpdateIsAuthorized session accountStatement)
-                        with
-                        | Error(code, message) -> session, Err(code, message)
-                        | Ok() ->
-                            let executed, result =
-                                withTriggerTextExecution session (fun () ->
-                                    withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
+                            match
+                                Auth.tryConsumeAccountStatementWithLimits
+                                    store
+                                    account
+                                    (Auth.tryAccountLimits store account)
+                                    (accountStatementCountsAsUpdate accountStatement
+                                     && accountUpdateIsAuthorized session accountStatement)
+                            with
+                            | Error(code, message) -> session, Err(code, message)
+                            | Ok() ->
+                                let executed, result =
+                                    withTriggerTextExecution session (fun () ->
+                                        withStoredFunctionRegistry dispatch session (fun current -> executeParsed current statement))
 
-                            (if resetsPassword && terminalErrorInfo result |> Option.isNone then
-                                 { executed with PasswordExpired = false }
-                             else
-                                 executed),
-                            result
+                                (if resetsPassword && terminalErrorInfo result |> Option.isNone then
+                                     { executed with PasswordExpired = false }
+                                 else
+                                     executed),
+                                result)
                 with
                 | PlaceholderCountMismatch(expected, got) ->
                     session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)

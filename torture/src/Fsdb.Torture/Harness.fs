@@ -1204,6 +1204,8 @@ module ScenarioProbes =
                "SELECT ST_Equals(ST_Buffer(ST_PointFromText('POINT(0 0)'), 2, ST_Buffer_Strategy('point_square')), ST_GeomFromText('POLYGON((-2 -2,2 -2,2 2,-2 2,-2 -2))')) AS square_matches, ST_Equals(ST_Buffer(ST_GeomFromText('LINESTRING(0 0,0 2,2 2)'), 1, ST_Buffer_Strategy('end_flat'), ST_Buffer_Strategy('join_miter',32)), ST_GeomFromText('POLYGON((1 1,2 1,2 3,0 3,-1 3,-1 2,-1 0,1 0,1 1))')) AS miter_matches"
                "spatial_buffer_ceiling",
                "SELECT @@SESSION.max_points_in_geometry AS point_limit, HEX(ST_Buffer_Strategy('point_circle', 32)) AS strategy_bytes"
+               "spatial_buffer_statement_ceiling",
+               "SELECT /*+ SET_VAR(max_points_in_geometry=32) */ @@SESSION.max_points_in_geometry AS persistent_limit, HEX(ST_Buffer_Strategy('point_circle', 32)) AS strategy_bytes"
 
                // ORDER BY over generated-column-style expressions.
                "expression_order_by_generated_style",

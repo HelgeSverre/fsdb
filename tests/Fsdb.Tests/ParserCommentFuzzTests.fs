@@ -136,4 +136,27 @@ let tests =
               for sql in [ "SEL/*!80400 ECT*/ 1"; "SELECT 1 FR/*!80400 OM*/ DUAL" ] do
                   match Fsdb.Parser.parse sql with
                   | Error _ -> ()
-                  | Ok statement -> failtestf "executable comments must not splice identifiers: %s parsed as %A" sql statement ]
+                  | Ok statement -> failtestf "executable comments must not splice identifiers: %s parsed as %A" sql statement
+
+          testCase "optimizer hints are collected only at query heads"
+          <| fun _ ->
+              let hints sql = Fsdb.Parser.optimizerHintsWithOptions Fsdb.Parser.defaultOptions sql
+
+              Expect.equal
+                  (hints "SELECT /*+ SET_VAR(max_points_in_geometry=3) */ 1")
+                  [ " SET_VAR(max_points_in_geometry=3) " ]
+                  "a SELECT-head hint is executable metadata"
+
+              Expect.equal
+                  (hints
+                      "WITH c AS (SELECT /*+ SET_VAR(max_points_in_geometry=4) */ 1) SELECT /*+ SET_VAR(max_points_in_geometry=5) */ * FROM c")
+                  [ " SET_VAR(max_points_in_geometry=4) "; " SET_VAR(max_points_in_geometry=5) " ]
+                  "nested query heads are retained in source order"
+
+              for sql in
+                  [ "/*+ SET_VAR(max_points_in_geometry=3) */ SELECT 1"
+                    "SELECT /* ordinary */ /*+ SET_VAR(max_points_in_geometry=3) */ 1"
+                    "SELECT '/*+ SET_VAR(max_points_in_geometry=3) */'"
+                    "SELECT 1, /*+ SET_VAR(max_points_in_geometry=3) */ 2"
+                    "SELECT `/*+ SET_VAR(max_points_in_geometry=3) */`" ] do
+                  Expect.isEmpty (hints sql) (sprintf "misplaced hint stays an ordinary comment: %s" sql) ]

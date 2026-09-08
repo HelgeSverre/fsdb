@@ -266,21 +266,39 @@ let private lineEnd (sql: string) (start: int) =
 /// `stripVersionComments` also removes ordinary comments for text probes;
 /// parser entry points preserve them because a comment is not interchangeable
 /// with whitespace between a built-in name and `(` under `IGNORE_SPACE`.
-let private rewriteVersionComments (stripOrdinaryComments: bool) (options: ParserOptions) (sql: string) =
-    let sb = Text.StringBuilder(sql.Length)
+let private scanComments (rewrite: bool) (stripOrdinaryComments: bool) (options: ParserOptions) (sql: string) =
+    let output = if rewrite then Text.StringBuilder(sql.Length) else null
+    let optimizerHints = ResizeArray<string>()
     let mutable i = 0
+    let mutable optimizerHintMayFollow = false
+
+    let appendChar (value: char) =
+        if not (isNull output) then
+            output.Append value |> ignore
+
+    let appendPair (first: char) (second: char) =
+        if not (isNull output) then
+            output.Append(first).Append(second) |> ignore
+
+    let appendText value =
+        if not (isNull output) then
+            output.Append(value: string) |> ignore
+
+    let appendSlice start length =
+        if not (isNull output) then
+            output.Append(sql, start, length) |> ignore
 
     let appendExecutable (text: string) =
         if text.Length = 0 then
-            sb.Append ' ' |> ignore
+            appendChar ' '
         else
             if not (Char.IsWhiteSpace text.[0]) then
-                sb.Append ' ' |> ignore
+                appendChar ' '
 
-            sb.Append text |> ignore
+            appendText text
 
             if not (Char.IsWhiteSpace text.[text.Length - 1]) then
-                sb.Append ' ' |> ignore
+                appendChar ' '
 
     // `'`/`"`/`` ` `` while inside a string/identifier literal — a `/*!`
     // that appears there is data, not a version comment (see the copy loop
@@ -291,31 +309,33 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (options: Parse
         match quoteChar with
         | Some q when not options.NoBackslashEscapes && sql.[i] = '\\' && q <> '`' && i + 1 < sql.Length ->
             // backslash-escapes only apply inside '...'/"...", not `...`
-            sb.Append(sql.[i]).Append(sql.[i + 1]) |> ignore
+            appendPair sql.[i] sql.[i + 1]
             i <- i + 2
         | Some q when sql.[i] = q && i + 1 < sql.Length && sql.[i + 1] = q ->
             // a doubled quote char is an escaped literal quote, not the close
-            sb.Append(sql.[i]).Append(sql.[i + 1]) |> ignore
+            appendPair sql.[i] sql.[i + 1]
             i <- i + 2
         | Some q when sql.[i] = q ->
             quoteChar <- None
-            sb.Append(sql.[i]) |> ignore
+            appendChar sql.[i]
             i <- i + 1
         | Some _ ->
-            sb.Append(sql.[i]) |> ignore
+            appendChar sql.[i]
             i <- i + 1
         | None when sql.[i] = '\'' || sql.[i] = '"' || sql.[i] = '`' ->
+            optimizerHintMayFollow <- false
             quoteChar <- Some sql.[i]
-            sb.Append(sql.[i]) |> ignore
+            appendChar sql.[i]
             i <- i + 1
         | None when sql.[i] = '#' ->
+            optimizerHintMayFollow <- false
             // `# ...` comment: to end of line.
             let stop = lineEnd sql i
 
             if stripOrdinaryComments then
-                sb.Append ' ' |> ignore
+                appendChar ' '
             else
-                sb.Append(sql, i, stop - i) |> ignore
+                appendSlice i (stop - i)
 
             i <- stop
         | None when
@@ -324,12 +344,13 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (options: Parse
             && sql.[i + 1] = '-'
             && (i + 2 = sql.Length || Char.IsWhiteSpace sql.[i + 2])
             ->
+            optimizerHintMayFollow <- false
             let stop = lineEnd sql i
 
             if stripOrdinaryComments then
-                sb.Append ' ' |> ignore
+                appendChar ' '
             else
-                sb.Append(sql, i, stop - i) |> ignore
+                appendSlice i (stop - i)
 
             i <- stop
         | None when
@@ -343,19 +364,26 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (options: Parse
             let closeAt = sql.IndexOf("*/", i + 2)
 
             if closeAt = -1 then
-                sb.Append(sql.Substring i) |> ignore
+                appendText (sql.Substring i)
                 i <- sql.Length
             else
-                if stripOrdinaryComments then
-                    sb.Append ' ' |> ignore
+                if sql.[i + 2] = '+' && optimizerHintMayFollow then
+                    optimizerHints.Add(sql.Substring(i + 3, closeAt - (i + 3)))
+
+                optimizerHintMayFollow <- false
+
+                if stripOrdinaryComments && sql.[i + 2] <> '+' then
+                    appendChar ' '
                 else
-                    sb.Append(sql, i, closeAt + 2 - i) |> ignore
+                    appendSlice i (closeAt + 2 - i)
 
                 i <- closeAt + 2
         | None when i + 2 < sql.Length && sql.[i] = '/' && sql.[i + 1] = '*' && sql.[i + 2] = '!' ->
+            optimizerHintMayFollow <- false
+
             match sql.IndexOf("*/", i + 3) with
             | -1 ->
-                sb.Append(sql.Substring i) |> ignore
+                appendText (sql.Substring i)
                 i <- sql.Length
             | closeAt ->
                 let inner = sql.Substring(i + 3, closeAt - (i + 3))
@@ -380,22 +408,52 @@ let private rewriteVersionComments (stripOrdinaryComments: bool) (options: Parse
                     if version <= serverVersionNumber then
                         appendExecutable (inner.Substring versionLength)
                     else
-                        sb.Append ' ' |> ignore
+                        appendChar ' '
                 else
-                    sb.Append ' ' |> ignore
+                    appendChar ' '
 
                 i <- closeAt + 2
+        | None when Char.IsLetter sql.[i] || sql.[i] = '_' ->
+            let start = i
+
+            while i < sql.Length && (Char.IsLetterOrDigit sql.[i] || sql.[i] = '_') do
+                i <- i + 1
+
+            let word = sql.Substring(start, i - start)
+            appendText word
+
+            optimizerHintMayFollow <-
+                word.Equals("SELECT", StringComparison.OrdinalIgnoreCase)
+                || word.Equals("INSERT", StringComparison.OrdinalIgnoreCase)
+                || word.Equals("REPLACE", StringComparison.OrdinalIgnoreCase)
+                || word.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)
+                || word.Equals("DELETE", StringComparison.OrdinalIgnoreCase)
         | None ->
-            sb.Append(sql.[i]) |> ignore
+            if not (Char.IsWhiteSpace sql.[i]) then
+                optimizerHintMayFollow <- false
+
+            appendChar sql.[i]
             i <- i + 1
 
-    sb.ToString()
+    (if isNull output then None else Some(output.ToString())), List.ofSeq optimizerHints
+
+let private rewriteVersionComments stripOrdinaryComments options sql =
+    scanComments true stripOrdinaryComments options sql |> fst |> Option.get
 
 let stripVersionCommentsWithOptions (options: ParserOptions) (sql: string) : string =
     rewriteVersionComments true options sql
 
 let stripVersionComments (sql: string) : string =
     stripVersionCommentsWithOptions defaultOptions sql
+
+/// Optimizer-hint bodies attached to a statement or nested query keyword.
+/// Comment-like text inside literals and misplaced `/*+ ... */` comments is
+/// intentionally excluded here, before individual hint grammars inspect it.
+let internal optimizerHintsWithOptions (options: ParserOptions) (sql: string) : string list =
+    if sql.IndexOf("/*+", StringComparison.Ordinal) < 0 then
+        []
+    else
+        scanComments false false options sql |> snd
 
 let private expandVersionComments (options: ParserOptions) (sql: string) =
     rewriteVersionComments false options sql
