@@ -1145,17 +1145,11 @@ let private authSwitchPayload plugin (authData: byte[]) =
 
 let private authMoreData data = Array.append [| 0x01uy |] data
 
-type private RsaAuthenticationKeys =
-    { PrivateKey: RSA
-      PublicKey: byte[] }
-
-let private rsaAuthenticationKeys =
+let private defaultRsaAuthenticationKey =
     lazy
-        let rsa = RSA.Create()
+        use rsa = RSA.Create()
         rsa.KeySize <- 2048
-
-        { PrivateKey = rsa
-          PublicKey = Encoding.ASCII.GetBytes(rsa.ExportSubjectPublicKeyInfoPem()) }
+        Authentication.rsaKeyPair rsa
 
 let private tryPasswordBytes (bytes: byte[]) =
     if bytes.Length = 0 || bytes.[bytes.Length - 1] <> 0uy then
@@ -1166,9 +1160,8 @@ let private tryPasswordBytes (bytes: byte[]) =
         with :? DecoderFallbackException ->
             None
 
-let private tryDecryptPassword (authData: byte[]) (encrypted: byte[]) =
+let private tryDecryptPassword (keys: Authentication.RsaKeyPair) (authData: byte[]) (encrypted: byte[]) =
     try
-        let keys = rsaAuthenticationKeys.Value
         let clear = lock keys.PrivateKey (fun () -> keys.PrivateKey.Decrypt(encrypted, RSAEncryptionPadding.OaepSHA1))
         let password = Array.mapi (fun index value -> value ^^^ authData.[index % authData.Length]) clear
         tryPasswordBytes password
@@ -1178,6 +1171,7 @@ let private tryDecryptPassword (authData: byte[]) (encrypted: byte[]) =
 let private receiveFullPassword
     (client: TcpClient)
     (stream: IO.Stream)
+    (keys: Authentication.RsaKeyPair)
     (authData: byte[])
     (transportSecurity: Auth.TransportSecurity)
     (publicKeyRequest: byte)
@@ -1188,15 +1182,15 @@ let private receiveFullPassword
         if transportSecurity.Encrypted then
             return Some(tryPasswordBytes response, nextSeq)
         elif response = [| publicKeyRequest |] then
-            let publicKey = rsaAuthenticationKeys.Value.PublicKey
+            let publicKey = keys.PublicKeyBytes
             do! writePacketAsync stream { SeqId = nextSeq; Payload = authMoreData publicKey } |> Async.Ignore
 
             match! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream with
             | Some encrypted ->
-                return Some(tryDecryptPassword authData encrypted.Payload, encrypted.SeqId + 1uy)
+                return Some(tryDecryptPassword keys authData encrypted.Payload, encrypted.SeqId + 1uy)
             | None -> return None
         else
-            return Some(tryDecryptPassword authData response, nextSeq)
+            return Some(tryDecryptPassword keys authData response, nextSeq)
     }
 
 let private authenticateAccount
@@ -1208,6 +1202,7 @@ let private authenticateAccount
     (resp: HandshakeResponse)
     (clientHost: string option)
     (transportSecurity: Auth.TransportSecurity)
+    (authenticationRsaKeys: Map<Authentication.Plugin, Authentication.RsaKeyPair>)
     (forceAuthSwitch: bool)
     (firstSeq: byte)
     : Async<(byte * Auth.Account * bool) option> =
@@ -1251,6 +1246,11 @@ let private authenticateAccount
             || (resp.ClientPlugin
                 |> Option.exists (fun clientPlugin ->
                     String.Equals(clientPlugin, Authentication.name plugin, StringComparison.OrdinalIgnoreCase)))
+
+        let rsaKeyFor plugin =
+            authenticationRsaKeys
+            |> Map.tryFind plugin
+            |> Option.defaultWith (fun () -> defaultRsaAuthenticationKey.Value)
 
         let! accountReady =
             async {
@@ -1334,6 +1334,7 @@ let private authenticateAccount
                                     receiveFullPassword
                                         client
                                         stream
+                                        (rsaKeyFor plugin)
                                         authData
                                         transportSecurity
                                         0x02uy
@@ -1352,6 +1353,7 @@ let private authenticateAccount
                             receiveFullPassword
                                 client
                                 stream
+                                (rsaKeyFor plugin)
                                 authData
                                 transportSecurity
                                 0x01uy
@@ -1634,6 +1636,7 @@ let private handleConnection
                             resp
                             clientHost
                             (transportSecurity ())
+                            options.AuthenticationRsaKeys
                             false
                             (handshakeResp.SeqId + 1uy)
                 let! authOkSeq =
@@ -1797,6 +1800,7 @@ let private handleConnection
                                         response
                                         clientHost
                                         (transportSecurity ())
+                                        options.AuthenticationRsaKeys
                                         supportsPluginAuth
                                         seqId
 

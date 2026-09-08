@@ -3,6 +3,7 @@
 module Fsdb.Db
 
 open System.Net
+open System.Security.Cryptography
 open System.Security.Cryptography.X509Certificates
 open Fsdb.Functions
 
@@ -56,6 +57,11 @@ let withClientCertificateAuthority (certificateAuthority: X509Certificate2) (db:
 /// Refuses plaintext MySQL sessions; a TLS certificate is required before serving.
 let requireSecureTransport (db: Db) : Db =
     { db with Transport = db.Transport |> ServerOptions.requireSecureTransport }
+
+/// Uses a host-supplied RSA private key for plaintext full authentication.
+let withAuthenticationRsaKey plugin (privateKey: RSA) (db: Db) : Db =
+    { db with
+        Transport = db.Transport |> ServerOptions.withAuthenticationRsaKey plugin privateKey }
 
 /// Registers a scalar function under `name`, e.g.
 /// `db |> Db.registerScalar "slugify" (function ...)`. Free to override a

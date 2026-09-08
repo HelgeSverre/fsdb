@@ -217,6 +217,48 @@ let tests =
                       Expect.isEmpty remaining "TLS entries are consumed"
                   | Error message -> failtestf "valid TLS material should load: %s" message)
 
+          testCase "authentication RSA key paths load matching PEM pairs"
+          <| fun _ ->
+              TestSupport.withDirectory "authentication-rsa-options" (fun directory ->
+                  use key = RSA.Create 2048
+                  let privatePath = Path.Combine(directory, "private.pem")
+                  let publicPath = Path.Combine(directory, "public.pem")
+                  File.WriteAllText(privatePath, key.ExportPkcs8PrivateKeyPem())
+                  File.WriteAllText(publicPath, key.ExportSubjectPublicKeyInfoPem())
+
+                  let entry name path : Fsdb.OptionFile.Entry =
+                      { Name = name
+                        Value = Some path
+                        Source = "test.cnf"
+                        Line = 1 }
+
+                  match
+                      Fsdb.ServerOptions.fromEntries
+                          [ entry "sha256_password_private_key_path" privatePath
+                            entry "sha256_password_public_key_path" publicPath ]
+                  with
+                  | Ok(settings, remaining) ->
+                      let loaded = settings.AuthenticationRsaKeys |> Map.tryFind Fsdb.Authentication.Sha256Password
+                      Expect.isSome loaded "the SHA-256 key is available"
+                      Expect.sequenceEqual loaded.Value.PublicKey (Text.Encoding.ASCII.GetBytes(key.ExportSubjectPublicKeyInfoPem())) "public key"
+                      Expect.isEmpty remaining "authentication entries are consumed"
+                  | Error message -> failtestf "valid RSA material should load: %s" message
+
+                  match Fsdb.ServerOptions.fromEntries [ entry "sha256_password_private_key_path" privatePath ] with
+                  | Ok _ -> failtest "a private key without its public half is rejected"
+                  | Error message -> Expect.stringContains message "requires sha256_password_public_key_path" "missing pair"
+
+                  use other = RSA.Create 2048
+                  File.WriteAllText(publicPath, other.ExportSubjectPublicKeyInfoPem())
+
+                  match
+                      Fsdb.ServerOptions.fromEntries
+                          [ entry "caching_sha2_password_private_key_path" privatePath
+                            entry "caching_sha2_password_public_key_path" publicPath ]
+                  with
+                  | Ok _ -> failtest "different public and private keys are rejected"
+                  | Error message -> Expect.stringContains message "does not match" "mismatched pair")
+
           testCase "a bad config reports every offending line with its number, not just the first"
           <| fun _ ->
               withSettings [] (fun () ->

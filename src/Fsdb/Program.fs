@@ -12,6 +12,10 @@ type Arguments =
     | Ssl_Cert of path: string
     | Ssl_Key of path: string
     | Ssl_Ca of path: string
+    | Caching_Sha2_Password_Private_Key_Path of path: string
+    | Caching_Sha2_Password_Public_Key_Path of path: string
+    | Sha256_Password_Private_Key_Path of path: string
+    | Sha256_Password_Public_Key_Path of path: string
     | Require_Secure_Transport
     | Version
 
@@ -25,6 +29,10 @@ type Arguments =
             | Ssl_Cert _ -> "PEM server certificate for TLS"
             | Ssl_Key _ -> "PEM private key for TLS"
             | Ssl_Ca _ -> "PEM certificate authorities trusted for TLS clients"
+            | Caching_Sha2_Password_Private_Key_Path _ -> "PEM private key for caching SHA-2 authentication"
+            | Caching_Sha2_Password_Public_Key_Path _ -> "matching PEM public key for caching SHA-2 authentication"
+            | Sha256_Password_Private_Key_Path _ -> "PEM private key for SHA-256 authentication"
+            | Sha256_Password_Public_Key_Path _ -> "matching PEM public key for SHA-256 authentication"
             | Require_Secure_Transport -> "reject plaintext MySQL sessions"
             | Version -> "print the fsdb version and exit"
 
@@ -80,6 +88,18 @@ let main argv =
                   match results.TryGetResult Ssl_Ca with
                   | Some path -> yield commandLineEntry "ssl_ca" (Some path)
                   | None -> ()
+                  match results.TryGetResult Caching_Sha2_Password_Private_Key_Path with
+                  | Some path -> yield commandLineEntry "caching_sha2_password_private_key_path" (Some path)
+                  | None -> ()
+                  match results.TryGetResult Caching_Sha2_Password_Public_Key_Path with
+                  | Some path -> yield commandLineEntry "caching_sha2_password_public_key_path" (Some path)
+                  | None -> ()
+                  match results.TryGetResult Sha256_Password_Private_Key_Path with
+                  | Some path -> yield commandLineEntry "sha256_password_private_key_path" (Some path)
+                  | None -> ()
+                  match results.TryGetResult Sha256_Password_Public_Key_Path with
+                  | Some path -> yield commandLineEntry "sha256_password_public_key_path" (Some path)
+                  | None -> ()
                   if results.Contains <@ Require_Secure_Transport @> then
                       yield commandLineEntry "require_secure_transport" None ]
 
@@ -108,21 +128,7 @@ let main argv =
                     Db.create () |> Db.withDataDir dataDir
                 | None -> Db.create ()
 
-            let db =
-                match options.Certificate with
-                | Some certificate -> db |> Db.withTlsCertificate certificate
-                | None -> db
-
-            let db =
-                options.ClientCertificateAuthorities
-                |> List.fold (fun current certificateAuthority ->
-                    current |> Db.withClientCertificateAuthority certificateAuthority) db
-
-            let db =
-                if options.RequireSecureTransport then
-                    db |> Db.requireSecureTransport
-                else
-                    db
+            let db = { db with Transport = options }
 
             try
                 let serve = db |> Db.listen address port

@@ -2116,7 +2116,45 @@ let tests =
                   |> Result.mapError snd
                   |> Result.defaultWith failtest
 
-                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  use authenticationKey = RSA.Create 2048
+                  let authenticationOptions =
+                      Fsdb.ServerOptions.defaults
+                      |> Fsdb.ServerOptions.withAuthenticationRsaKey Fsdb.Authentication.Sha256Password authenticationKey
+
+                  use server = TestSupport.ServerFixture.startWithOptions authenticationOptions store Fsdb.Functions.empty
+
+                  use rawClient = new Net.Sockets.TcpClient()
+                  do! rawClient.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                  let rawStream = rawClient.GetStream()
+                  let! handshakeSeq, _, offeredPlugin = readHandshake rawStream
+                  let capabilities = ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+
+                  do!
+                      writePacketAsync
+                          rawStream
+                          { SeqId = handshakeSeq + 1uy
+                            Payload = handshakeResponseWithAuth capabilities "sha_user" [||] offeredPlugin }
+                      |> Async.Ignore
+
+                  let! switched = readPacketAsync rawStream
+                  let switchReader = Reader(switched.Value.Payload)
+                  Expect.equal (switchReader.ReadByte()) 0xfeuy "account selects its authentication plugin"
+                  Expect.equal (switchReader.ReadNullTerminatedString()) "sha256_password" "SHA-256 switch"
+
+                  do!
+                      writePacketAsync
+                          rawStream
+                          { SeqId = switched.Value.SeqId + 1uy
+                            Payload = [| 0x01uy |] }
+                      |> Async.Ignore
+
+                  let! publicKey = readPacketAsync rawStream
+                  Expect.equal publicKey.Value.Payload.[0] 0x01uy "the key uses AuthMoreData framing"
+                  Expect.sequenceEqual
+                      publicKey.Value.Payload.[1..]
+                      (Text.Encoding.ASCII.GetBytes(authenticationKey.ExportSubjectPublicKeyInfoPem()))
+                      "the configured public key is served"
+
                   let connectionString =
                       sprintf
                           "Server=127.0.0.1;Port=%d;User ID=cached;Password=secret;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"

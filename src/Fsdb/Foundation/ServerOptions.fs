@@ -2,6 +2,8 @@
 module Fsdb.ServerOptions
 
 open System
+open System.IO
+open System.Security.Cryptography
 open System.Security.Cryptography.X509Certificates
 open Fsdb.OptionFile
 
@@ -9,12 +11,14 @@ open Fsdb.OptionFile
 type Settings =
     { Certificate: X509Certificate2 option
       ClientCertificateAuthorities: X509Certificate2 list
+      AuthenticationRsaKeys: Map<Authentication.Plugin, Authentication.RsaKeyPair>
       RequireSecureTransport: bool }
 
 /// Settings for a plaintext listener.
 let defaults =
     { Certificate = None
       ClientCertificateAuthorities = []
+      AuthenticationRsaKeys = Map.empty
       RequireSecureTransport = false }
 
 /// Adds a server certificate to the transport settings.
@@ -29,6 +33,13 @@ let withClientCertificateAuthority (certificateAuthority: X509Certificate2) (set
 /// Refuses plaintext handshakes.
 let requireSecureTransport (settings: Settings) =
     { settings with RequireSecureTransport = true }
+
+/// Uses `privateKey` for full authentication by accounts assigned to `plugin`.
+let withAuthenticationRsaKey plugin (privateKey: RSA) (settings: Settings) =
+    { settings with
+        AuthenticationRsaKeys =
+            settings.AuthenticationRsaKeys
+            |> Map.add plugin (Authentication.rsaKeyPair privateKey) }
 
 let private boolValue (name: string) (value: string option) =
     match value |> Option.map (fun text -> text.Trim().ToLowerInvariant()) with
@@ -64,11 +75,31 @@ let private loadCertificateAuthorities (path: string) =
     with ex ->
         Error ex.Message
 
+let private loadAuthenticationRsaKey (privatePath: string) (publicPath: string) =
+    try
+        use privateKey = RSA.Create()
+        privateKey.ImportFromPem(File.ReadAllText privatePath)
+        let pair = Authentication.rsaKeyPair privateKey
+
+        use publicKey = RSA.Create()
+        publicKey.ImportFromPem(File.ReadAllText publicPath)
+
+        if Authentication.matchesPublicKey pair publicKey then
+            Ok pair
+        else
+            Error "public key does not match the private key"
+    with ex ->
+        Error ex.Message
+
 /// Splits TLS options from unrelated server options and validates the final TLS settings.
 let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
     let mutable certificatePath: (string * Entry) option = None
     let mutable keyPath: (string * Entry) option = None
     let mutable certificateAuthorityPath: (string * Entry) option = None
+    let mutable cachingPrivateKeyPath: (string * Entry) option = None
+    let mutable cachingPublicKeyPath: (string * Entry) option = None
+    let mutable sha256PrivateKeyPath: (string * Entry) option = None
+    let mutable sha256PublicKeyPath: (string * Entry) option = None
     let mutable requireSecure = defaults.RequireSecureTransport
     let remaining = ResizeArray<Entry>()
     let errors = ResizeArray<string>()
@@ -91,6 +122,22 @@ let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
             match entry.Value with
             | Some path when not (String.IsNullOrWhiteSpace path) -> certificateAuthorityPath <- Some(path, entry)
             | _ -> errors.Add(sprintf "%s:%d: ssl_ca needs a path" entry.Source entry.Line)
+        | "caching_sha2_password_private_key_path" ->
+            match entry.Value with
+            | Some path when not (String.IsNullOrWhiteSpace path) -> cachingPrivateKeyPath <- Some(path, entry)
+            | _ -> errors.Add(sprintf "%s:%d: caching_sha2_password_private_key_path needs a path" entry.Source entry.Line)
+        | "caching_sha2_password_public_key_path" ->
+            match entry.Value with
+            | Some path when not (String.IsNullOrWhiteSpace path) -> cachingPublicKeyPath <- Some(path, entry)
+            | _ -> errors.Add(sprintf "%s:%d: caching_sha2_password_public_key_path needs a path" entry.Source entry.Line)
+        | "sha256_password_private_key_path" ->
+            match entry.Value with
+            | Some path when not (String.IsNullOrWhiteSpace path) -> sha256PrivateKeyPath <- Some(path, entry)
+            | _ -> errors.Add(sprintf "%s:%d: sha256_password_private_key_path needs a path" entry.Source entry.Line)
+        | "sha256_password_public_key_path" ->
+            match entry.Value with
+            | Some path when not (String.IsNullOrWhiteSpace path) -> sha256PublicKeyPath <- Some(path, entry)
+            | _ -> errors.Add(sprintf "%s:%d: sha256_password_public_key_path needs a path" entry.Source entry.Line)
         | "require_secure_transport" ->
             match boolValue "require_secure_transport" entry.Value with
             | Ok value -> requireSecure <- value
@@ -129,10 +176,37 @@ let fromEntries (entries: Entry list) : Result<Settings * Entry list, string> =
     if not (List.isEmpty certificateAuthorities) && certificate.IsNone then
         errors.Add "ssl_ca needs ssl_cert and ssl_key"
 
+    let loadKeyPair plugin optionName privatePath publicPath =
+        match privatePath, publicPath with
+        | None, None -> None
+        | Some _, None ->
+            errors.Add(sprintf "%s_private_key_path requires %s_public_key_path" optionName optionName)
+            None
+        | None, Some _ ->
+            errors.Add(sprintf "%s_public_key_path requires %s_private_key_path" optionName optionName)
+            None
+        | Some(privatePath, entry), Some(publicPath, _) ->
+            match loadAuthenticationRsaKey privatePath publicPath with
+            | Ok key -> Some(plugin, key)
+            | Error message ->
+                errors.Add(sprintf "%s:%d: cannot load authentication RSA keys: %s" entry.Source entry.Line message)
+                None
+
+    let authenticationRsaKeys =
+        [ loadKeyPair
+              Authentication.CachingSha2Password
+              "caching_sha2_password"
+              cachingPrivateKeyPath
+              cachingPublicKeyPath
+          loadKeyPair Authentication.Sha256Password "sha256_password" sha256PrivateKeyPath sha256PublicKeyPath ]
+        |> List.choose id
+        |> Map.ofList
+
     if errors.Count = 0 then
         Ok(
             { Certificate = certificate
               ClientCertificateAuthorities = certificateAuthorities
+              AuthenticationRsaKeys = authenticationRsaKeys
               RequireSecureTransport = requireSecure },
             List.ofSeq remaining
         )

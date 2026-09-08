@@ -16,9 +16,9 @@
     <Compile Include="Foundation/GroupCommit.fs" />
     <Compile Include="Foundation/OptionFile.fs" />
     <Compile Include="Foundation/Limits.fs" />
+    <Compile Include="Engine/Authentication.fs" />
     <Compile Include="Foundation/ServerOptions.fs" />
     <Compile Include="Foundation/Binary.fs" />
-    <Compile Include="Engine/Authentication.fs" />
     <Compile Include="Sql/SingleByteCharset.fs" />
     <Compile Include="Sql/Charset.fs" />
     <Compile Include="Sql/Collation.fs" />

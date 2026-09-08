@@ -5,6 +5,38 @@ open System
 open System.Security.Cryptography
 open System.Text
 
+type RsaKeyPair internal (privateKey: RSA, publicKey: byte[]) =
+    member internal _.PrivateKey = privateKey
+    member internal _.PublicKeyBytes = publicKey
+    member _.PublicKey = Array.copy publicKey
+
+let rsaKeyPair (privateKey: RSA) =
+    if isNull privateKey then
+        nullArg (nameof privateKey)
+
+    try
+        let encoded = privateKey.ExportPkcs8PrivateKey()
+
+        try
+            let copy = RSA.Create()
+            let mutable bytesRead = 0
+            copy.ImportPkcs8PrivateKey(encoded, &bytesRead)
+
+            let publicKey =
+                copy.ExportSubjectPublicKeyInfoPem()
+                |> Encoding.ASCII.GetBytes
+
+            RsaKeyPair(copy, publicKey)
+        finally
+            CryptographicOperations.ZeroMemory encoded
+    with :? CryptographicException as ex ->
+        invalidArg (nameof privateKey) ("authentication RSA key has no usable private key: " + ex.Message)
+
+let internal matchesPublicKey (keyPair: RsaKeyPair) (publicKey: RSA) =
+    let expected = keyPair.PrivateKey.ExportSubjectPublicKeyInfo()
+    let supplied = publicKey.ExportSubjectPublicKeyInfo()
+    CryptographicOperations.FixedTimeEquals(expected, supplied)
+
 type Plugin =
     | MysqlNativePassword
     | CachingSha2Password
