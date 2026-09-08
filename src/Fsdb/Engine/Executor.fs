@@ -7063,26 +7063,23 @@ and private applyLateralJoin
     | _ ->
         Error(Err(1064, "LATERAL only supports comma-join, CROSS JOIN, [INNER] JOIN ... ON and LEFT JOIN ... ON"))
 
-/// `applyJoin`'s JSON_TABLE branch — MySQL's lateral semantics: the source
-/// expression re-evaluates against each left row (over the columns joined
-/// so far, so `FROM t, JSON_TABLE(t.doc, ...) jt` sees `t`'s row), and each
-/// document's expansion is appended to its own left row. FOR ORDINALITY
-/// restarts per left row because each row is its own `jsonTableRows`
-/// invocation. A NULL doc, a row path with no match, and a scalar under
-/// `$[*]` all yield zero expansion rows; inner joins drop the left row and
-/// left joins retain it with NULLs for the table-function columns.
-and private applyJsonTableJoin
+/// Expands a lateral JSON_TABLE source while retaining caller-owned state
+/// such as writable row identities.
+and private expandJsonTableJoinRows
     (store: Store)
     (registry: Registry)
     (dbName: string)
     (outer: EvalContext option)
-    ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
+    (sourcesSoFar: (string * ColumnDef list) list)
+    (rowsSoFar: 'Row seq)
+    (flatRow: 'Row -> Value[])
+    (combine: 'Row -> Value[] -> 'Result)
     (join: Join)
     (source: Expr)
     (path: string)
     (columns: JsonTableColumn list)
     (alias: string)
-    : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    : Result<ColumnDef list * 'Result seq * string list, QueryResult> =
     match join.Kind, validateJsonTableAllocationBounds columns with
     | _, Error error -> Error error
     | (InnerJoin | CrossJoin | LeftJoin), Ok joinColumns ->
@@ -7114,7 +7111,8 @@ and private applyJsonTableJoin
                 ctx.Qualifiers.ContainsKey(qualifier.ToLowerInvariant())
                 || (ctx.Outer |> Option.exists (fun outerCtx -> qualifierInScope outerCtx qualifier))
 
-            let expandLeft (left: Value[]) : Result<Value[] list, QueryResult> =
+            let expandLeft (row: 'Row) : Result<'Result list, QueryResult> =
+                let left = flatRow row
                 let leftCtx = leftCtxFor left
 
                 let sourceResult =
@@ -7140,22 +7138,53 @@ and private applyJsonTableJoin
                             let combined = Array.append left right
 
                             evalExpr { ctxFor combined with Clause = OnClause } join.On
-                            |> Result.map (fun value -> combined, truthy value = Some true))
+                            |> Result.map (fun value -> combine row combined, truthy value = Some true))
                         |> Result.mapError Err
                         |> Result.map (fun checkedRows ->
                             let matches = checkedRows |> List.filter snd |> List.map fst
 
                             if matches.IsEmpty && join.Kind = LeftJoin then
-                                [ Array.append left (Array.create joinColumns.Length VNull) ]
+                                [ combine row (Array.append left (Array.create joinColumns.Length VNull)) ]
                             else
                                 matches))
 
             rowsSoFar
             |> List.ofSeq
             |> traverse expandLeft
-            |> Result.map (fun expanded -> newSources, (expanded |> List.concat |> Seq.ofList), join.Using))
+            |> Result.map (fun expanded -> joinColumns, (expanded |> List.concat |> Seq.ofList), join.Using))
     | _ ->
         Error(Err(1064, "JSON_TABLE only supports comma-join, CROSS JOIN, [INNER] JOIN ... ON, and LEFT JOIN ... ON"))
+
+/// `applyJoin`'s JSON_TABLE branch — MySQL's lateral semantics: the source
+/// expression re-evaluates against each left row. NULL documents and empty
+/// expansions drop inner rows and retain null-padded left rows.
+and private applyJsonTableJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (outer: EvalContext option)
+    ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
+    (join: Join)
+    (source: Expr)
+    (path: string)
+    (columns: JsonTableColumn list)
+    (alias: string)
+    : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    expandJsonTableJoinRows
+        store
+        registry
+        dbName
+        outer
+        sourcesSoFar
+        rowsSoFar
+        id
+        (fun _ combined -> combined)
+        join
+        source
+        path
+        columns
+        alias
+    |> Result.map (fun (joinColumns, rows, using) -> sourcesSoFar @ [ alias, joinColumns ], rows, using)
 
 and private selectJoinExpressions (select: SelectStmt) =
     (select.Projections |> List.map fst)
@@ -7816,10 +7845,29 @@ and private applyMutationJoin
     match join.Table with
     | FromLateral _ ->
         Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
-    | FromJsonTable _ ->
-        // ponytail: Read-only JSON_TABLE join sources need a mutation-specific
-        // lateral join that preserves existing physical target identities.
-        Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+    | FromJsonTable(source, path, columns, alias) ->
+        let sourceColumns = sourcesSoFar |> List.map (fun source -> source.Qualifier, source.Columns)
+
+        expandJsonTableJoinRows
+            store
+            registry
+            dbName
+            None
+            sourceColumns
+            rowsSoFar
+            snd
+            (fun (identities, _) combined -> identities @ [ None ], combined)
+            join
+            source
+            path
+            columns
+            alias
+        |> Result.map (fun (joinColumns, rows, _) ->
+            sourcesSoFar
+            @ [ { Qualifier = alias
+                  PhysicalTable = None
+                  Columns = joinColumns } ],
+            List.ofSeq rows)
     | source ->
         let resolved =
             match source with
@@ -7835,7 +7883,7 @@ and private applyMutationJoin
                 resolveFromSubquery store registry dbName source None
                 |> Result.map (fun (columns, rows) -> fromItemQualifier source, None, columns, rows, fun _ -> None)
             | FromLateral _
-            | FromJsonTable _ -> failwith "applyMutationJoin: source handled above"
+            | FromJsonTable _ -> failwith "applyMutationJoin: lateral source handled above"
 
         match resolved with
         | Error e -> Error e
@@ -15412,7 +15460,8 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 resolveFromSubquery store validationRegistry dbName j.Table None
                 |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
             | FromLateral _ -> Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
-            | FromJsonTable _ -> Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+            | FromJsonTable(_, _, columns, alias) ->
+                validateJsonTableAllocationBounds columns |> Result.map (fun definitions -> alias, definitions)
             | FromTable tref -> resolveTableRef store validationRegistry dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
 
         withPlanningProbe (fun () ->

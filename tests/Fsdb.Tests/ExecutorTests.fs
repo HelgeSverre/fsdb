@@ -9053,17 +9053,60 @@ let tests =
                         Expect.equal rows [ [ Some "1"; Some "2" ]; [ Some "2"; None ]; [ Some "3"; None ] ] "outer rows"
                     | other -> failtestf "expected a result set, got %A" other
 
-                testCase "JSON_TABLE as a multi-table UPDATE join source is rejected"
+                testCase "JSON_TABLE filters multi-table mutations without becoming writable"
                 <| fun _ ->
                     let store = newStore ()
-                    runDefault store "CREATE TABLE t (id INT, j JSON)" |> ignore
-                    runDefault store "INSERT INTO t VALUES (1, '[1]')" |> ignore
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, j JSON, n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, '[1,2,2]', 0), (2, '[3]', 0), (3, '[]', 0)" |> ignore
 
                     match
-                        runDefault store "UPDATE t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt SET t.id = jt.x"
+                        runDefault
+                            store
+                            "EXPLAIN UPDATE t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt SET t.n = 1 WHERE jt.x = 2"
                     with
-                    | Err(1064, _) -> ()
-                    | other -> failtestf "expected 1064, got %A" other ]
+                    | ResultSet _ -> ()
+                    | other -> failtestf "expected a JSON_TABLE mutation plan, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "UPDATE t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt SET t.n = t.n + 1 WHERE jt.x = 2"
+                    with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one physical row to be updated once, got %A" other
+
+                    match runDefault store "SELECT id, n FROM t ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ] "updated rows"
+                    | other -> failtestf "expected updated rows, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "UPDATE t LEFT JOIN JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt ON TRUE SET t.n = 5 WHERE jt.x IS NULL"
+                    with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the empty expansion to retain one left row, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "DELETE t FROM t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt WHERE jt.x = 3"
+                    with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one physical row to be deleted, got %A" other
+
+                    match runDefault store "SELECT id, n FROM t ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "1" ]; [ Some "3"; Some "5" ] ] "remaining rows"
+                    | other -> failtestf "expected rows after delete, got %A" other
+
+                    match runDefault store "UPDATE t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt SET jt.x = 7" with
+                    | Err(1288, "The target table 'jt' of the UPDATE is not updatable") -> ()
+                    | other -> failtestf "expected read-only JSON_TABLE update error, got %A" other
+
+                    match runDefault store "DELETE jt FROM t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt" with
+                    | Err(1288, "The target table 'jt' of the DELETE is not updatable") -> ()
+                    | other -> failtestf "expected read-only JSON_TABLE delete error, got %A" other ]
 
           // Every expected value below is the answer a live MySQL 8.4.11
           // oracle gives for the same statement.
