@@ -1489,7 +1489,7 @@ let mysqlTypeOf (v: Value) : byte = (mysqlMetadataOf v).TypeId
 let private leadingNumeric =
     Regex(@"^\s*[-+]?(\d+\.\d*|\.\d+|\d+)([eE][-+]?\d+)?")
 
-let leadingDouble (s: string) : float * bool =
+let coerceLeadingDouble (s: string) : float * bool =
     let m = leadingNumeric.Match s
     let hasTrailingText = m.Success && not (String.IsNullOrWhiteSpace(s.Substring m.Length))
 
@@ -1502,7 +1502,7 @@ let leadingDouble (s: string) : float * bool =
     else
         0.0, not (String.IsNullOrWhiteSpace s)
 
-let private parseLeadingNumeric s = leadingDouble s |> fst
+let private parseLeadingNumeric s = coerceLeadingDouble s |> fst
 
 let private compareDecimalString (value: decimal) (text: string) =
     let matched = leadingNumeric.Match text

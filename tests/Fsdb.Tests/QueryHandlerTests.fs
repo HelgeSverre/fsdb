@@ -142,7 +142,7 @@ let tests =
 
               let session, selected = handle session "SELECT id FROM measured_text WHERE ABS(value) = 12"
               Expect.equal selected (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "4" ] ])) "text ABS lookup"
-              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292; 1292 ] "scalar residual warnings"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292 ] "indexed residual warning"
 
               let session, _ = handle session "SET sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'"
               let session, inserted = handle session "INSERT IGNORE INTO measured_text VALUES (7, 'oops'), (8, '8')"
@@ -191,6 +191,28 @@ let tests =
               with
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected the failed binary index build to remain unpublished, got %A" other
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TABLE upsert_abs (id INT PRIMARY KEY, value VARCHAR(40), INDEX ix_upsert_abs ((ABS(value))))"
+              let session, _ = handle session "INSERT INTO upsert_abs VALUES (1, '1')"
+
+              let session, inserted =
+                  handle
+                      session
+                      "INSERT IGNORE INTO upsert_abs VALUES (2, 'not-a-number') ON DUPLICATE KEY UPDATE value = 'unused'"
+
+              Expect.equal inserted (Affected 1UL) "IGNORE applies to an upsert insert"
+              Expect.contains (session.Diagnostics |> List.map _.Code) 3751 "upsert insert warning"
+
+              let session, updated =
+                  handle
+                      session
+                      "INSERT IGNORE INTO upsert_abs VALUES (1, 'unused') ON DUPLICATE KEY UPDATE value = 'still-not-a-number'"
+
+              Expect.equal updated (Affected 2UL) "IGNORE applies to an upsert update"
+              Expect.contains (session.Diagnostics |> List.map _.Code) 3751 "upsert update warning"
 
           testCase "deprecated utf8 charsets report once per spelling"
           <| fun _ ->

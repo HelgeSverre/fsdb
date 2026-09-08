@@ -19180,7 +19180,8 @@ let rec executeAs
                                 (fun _ candidate -> finish candidate)
                                 ignoreDuplicates)
                 else
-                    upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
+                    Storage.withPermissiveIndexExpressions ignoreDuplicates (fun () ->
+                        upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate)
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table
@@ -19256,7 +19257,8 @@ let rec executeAs
                                     (fun _ candidate -> finish candidate)
                                     ignoreDuplicates)
                     else
-                        upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate
+                        Storage.withPermissiveIndexExpressions ignoreDuplicates (fun () ->
+                            upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate)
 
     | Replace(table, columns, rowsExprs) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table

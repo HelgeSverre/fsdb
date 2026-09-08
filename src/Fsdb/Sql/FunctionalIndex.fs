@@ -4,6 +4,7 @@
 module internal Fsdb.Sql.FunctionalIndex
 
 open System
+open System.Globalization
 open Fsdb.Ast
 open Fsdb.Value
 
@@ -64,6 +65,37 @@ let tryBuiltinName transform =
 
 let isBuiltin transform = tryBuiltinName transform |> Option.isSome
 
+let private isTextOrBinary =
+    function
+    | TChar _
+    | TVarchar _
+    | TTinyText
+    | TText
+    | TMediumText
+    | TLongText
+    | TBinary _
+    | TVarBinary _
+    | TTinyBlob
+    | TBlob
+    | TMediumBlob
+    | TLongBlob -> true
+    | _ -> false
+
+let private isNumeric =
+    function
+    | TBool
+    | TTinyInt _
+    | TSmallInt _
+    | TMediumInt _
+    | TInt _
+    | TBigInt _
+    | TBit _
+    | TFloat _
+    | TDouble _
+    | TDecimal _
+    | TYear -> true
+    | _ -> false
+
 let supportsColumnType transform columnType =
     match transform with
     | Lowercase
@@ -84,31 +116,7 @@ let supportsColumnType transform columnType =
         | TVector _ -> false
         | _ -> true
     | AbsoluteValue ->
-        match columnType with
-        | TBool
-        | TTinyInt _
-        | TSmallInt _
-        | TMediumInt _
-        | TInt _
-        | TBigInt _
-        | TBit _
-        | TFloat _
-        | TDouble _
-        | TDecimal _
-        | TYear
-        | TChar _
-        | TVarchar _
-        | TTinyText
-        | TText
-        | TMediumText
-        | TLongText
-        | TBinary _
-        | TVarBinary _
-        | TTinyBlob
-        | TBlob
-        | TMediumBlob
-        | TLongBlob -> true
-        | _ -> false
+        isNumeric columnType || isTextOrBinary columnType
     | Expression _ -> false
 
 let fixedKeyLength =
@@ -172,11 +180,54 @@ let private tryExactInt64 =
         Some(int64 value)
     | _ -> None
 
-let tryNormalizeProbe transform normalizeStored value =
-    match transform with
-    | Some CharacterLength
-    | Some ByteLength
-    | Some BitLength -> tryExactInt64 value |> Option.map VInt
+let private tryExactUInt64 =
+    let ofDecimal value =
+        if value >= 0m && value <= decimal UInt64.MaxValue && Decimal.Truncate value = value then
+            Some(uint64 value)
+        else
+            None
+
+    let ofText (text: string) =
+        match Decimal.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, value -> ofDecimal value
+        | false, _ -> None
+
+    function
+    | VInt value when value >= 0L -> Some(uint64 value)
+    | VUInt value
+    | VBit(_, value) -> Some value
+    | VDecimal value -> ofDecimal value
+    | VDouble value
+        when Double.IsFinite value
+             && value >= 0.0
+             && value < 18446744073709551616.0
+             && Math.Truncate value = value ->
+        Some(uint64 value)
+    | VString text -> ofText text
+    | VBytes bytes -> bytes |> Text.Encoding.Latin1.GetString |> ofText
+    | _ -> None
+
+let tryNormalizeProbe columnType transform normalizeStored value =
+    match transform, value with
+    | Some AbsoluteValue, VNull -> Some VNull
+    | Some AbsoluteValue, _ when isTextOrBinary columnType ->
+        match value with
+        | VString text -> text |> coerceLeadingDouble |> fst |> VDouble |> Some
+        | VBytes bytes -> bytes |> Text.Encoding.Latin1.GetString |> coerceLeadingDouble |> fst |> VDouble |> Some
+        | value -> value |> toDouble |> VDouble |> Some
+    | Some AbsoluteValue, _ ->
+        match columnType with
+        | TBit width ->
+            let maximum = if width = 64 then UInt64.MaxValue else (1UL <<< width) - 1UL
+
+            value
+            |> tryExactUInt64
+            |> Option.filter (fun value -> value <= maximum)
+            |> Option.map VUInt
+        | _ -> normalizeStored value
+    | Some CharacterLength, _
+    | Some ByteLength, _
+    | Some BitLength, _ -> tryExactInt64 value |> Option.map VInt
     | _ -> normalizeStored value
 
 let private mapTextOrBytes mapText mapBytes value =
@@ -202,7 +253,7 @@ let projectValueWithStatus encodeText transform value =
     | Some AbsoluteValue, VDecimal value -> VDecimal(abs value), None
     | Some AbsoluteValue, ((VString _ | VBytes _) as value) ->
         let text = value |> toText |> Option.defaultValue ""
-        let number, truncated = leadingDouble text
+        let number, truncated = coerceLeadingDouble text
         VDouble(abs number), (if truncated then Some text else None)
     | Some AbsoluteValue, value -> VDouble(abs (toDouble value)), None
     | _ -> value, None

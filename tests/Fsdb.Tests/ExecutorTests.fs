@@ -6881,6 +6881,54 @@ let tests =
                         "unsigned, decimal, and double values retain their domains"
 
                     Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE text_magnitudes (id INT PRIMARY KEY, value VARCHAR(20), UNIQUE INDEX uq_abs_text ((ABS(value))))")
+                        (Affected 0UL)
+                        "create text ABS index"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO text_magnitudes VALUES (1, '-12'), (2, '5')")
+                        (Affected 2UL)
+                        "seed text magnitudes"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM text_magnitudes WHERE ABS(value) = 12")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "text ABS equality lookup"
+
+                    let textPlan =
+                        runDefault store "EXPLAIN SELECT id FROM text_magnitudes WHERE ABS(value) = 12"
+                        |> explainRow
+
+                    Expect.equal textPlan.AccessType (Some "const") "unique text ABS access"
+                    Expect.equal textPlan.Key (Some "uq_abs_text") "text ABS key"
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE bit_magnitudes (id INT PRIMARY KEY, value BIT(8), UNIQUE INDEX uq_abs_bit ((ABS(value))))")
+                        (Affected 0UL)
+                        "create BIT ABS index"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO bit_magnitudes VALUES (1, b'101'), (2, b'110'), (3, b'111')")
+                        (Affected 3UL)
+                        "seed BIT magnitude"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM bit_magnitudes WHERE ABS(value) = 5")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "BIT ABS equality lookup"
+
+                    let bitPlan =
+                        runDefault store "EXPLAIN SELECT id FROM bit_magnitudes WHERE ABS(value) = 5"
+                        |> explainRow
+
+                    Expect.equal bitPlan.AccessType (Some "const") "unique BIT ABS access"
+                    Expect.equal bitPlan.Key (Some "uq_abs_bit") "BIT ABS key"
+
+                    Expect.equal
                         (runDefault store "UPDATE magnitudes SET signed_value = -9 WHERE ABS(signed_value) = 7")
                         (Affected 1UL)
                         "update through ABS key"

@@ -4266,7 +4266,7 @@ let private equalityKeyGroup (index: EqualityIndex) =
       Directions = List.replicate index.ColumnIndices.Length Asc
       Visible = true }
 
-type private ProbeNormalizer = IndexTransform option -> (Value -> Value option) -> Value -> Value option
+type private ProbeNormalizer = ColumnType -> IndexTransform option -> (Value -> Value option) -> Value -> Value option
 
 let private tryNormalizedProbeValues
     (store: Store)
@@ -4279,7 +4279,7 @@ let private tryNormalizedProbeValues
     else
         List.zip3 index.ColumnIndices index.Transforms values
         |> traverse (fun (columnIndex, transform, value) ->
-            match normalize transform (exactProbeValue store table columnIndex) value with
+            match normalize table.Columns.[columnIndex].Type transform (exactProbeValue store table columnIndex) value with
             | Some exact -> Ok(columnIndex, exact)
             | None -> Error())
         |> Result.toOption
@@ -4306,9 +4306,9 @@ let private equalityLookupRowIds
     (probeValues: EqualityProbeValues)
     (values: Value list)
     : Set<RowId> option =
-    let normalize transform normalizeStored value =
+    let normalize columnType transform normalizeStored value =
         match probeValues with
-        | ProjectedValues -> FunctionalIndex.tryNormalizeProbe transform normalizeStored value
+        | ProjectedValues -> FunctionalIndex.tryNormalizeProbe columnType transform normalizeStored value
         | StoredValues -> normalizeStored value
 
     values
