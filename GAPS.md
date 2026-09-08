@@ -160,8 +160,8 @@ or locking retain the general SELECT pipeline.
 |---|---|---|
 | Geometry topology and relations | overlays, non-point buffers, buffer strategies, and geographic SRS semantics; planar point `ST_Buffer` and common predicates work | low |
 
-`CONVERT_TZ` resolves numeric offsets and `SYSTEM`, but named zones return NULL
-without loaded time-zone tables;
+`CONVERT_TZ` and the session `time_zone` resolve numeric offsets and `SYSTEM`,
+but named zones remain unavailable without MySQL's optional time-zone tables.
 `WEIGHT_STRING()` returns host-ICU sort-key bytes for textual collations, not
 MySQL's UCA weight-table bytes.
 
@@ -186,6 +186,8 @@ ENUM, and SET families with per-column charset and collation metadata.
 Temporal values cover DATE, YEAR, and microsecond-precision DATETIME,
 TIMESTAMP, and signed TIME durations. Fractional values round half-up unless
 `TIME_TRUNCATE_FRACTIONAL` applies, and SQL modes control zero-date acceptance.
+TIMESTAMP values are stored as UTC instants and converted at the session
+`time_zone` boundary; DATETIME values retain their wall-clock fields.
 
 JSON, functional defaults, virtual generated columns, normalized comments,
 and OGC WKB geometry values also persist through the regular value and wire
@@ -476,7 +478,7 @@ the statement.
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index conversion conditions, conditional DDL and unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateAccount` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
-| System variables | hundreds live | common connector, limit, transaction, password-lifetime, and week-format variables are live; most others are inert or absent, and time_zone remains a static string without conversion | medium | divergence |
+| System variables | hundreds live | common connector, limit, transaction, password-lifetime, week-format, and fixed-offset or `SYSTEM` time-zone variables are live; most others are inert or absent, named time zones are unavailable, and `system_time_zone` retains its static bootstrap label | medium | divergence |
 
 ## 13. Authentication and privileges
 

@@ -140,7 +140,7 @@ The following MySQL-shaped settings also accept `SET GLOBAL`:
 - timeouts: `wait_timeout`, `interactive_timeout`, `net_read_timeout`,
   `net_write_timeout`, and `innodb_lock_wait_timeout`;
 - server behavior: `cte_max_recursion_depth`, `default_password_lifetime`,
-  and `default_week_format`.
+  `default_week_format`, and `time_zone`.
 
 `max_load_data_bytes` and the `wal_*` settings are configuration-only fsdb
 limits rather than MySQL system variables. See the
@@ -357,6 +357,11 @@ comparison under `utf8mb4_0900_ai_ci` is 1.
 Charsets transcode on write. `SHOW CREATE TABLE` reports declared collations
 and column comments, while `information_schema.COLUMNS` exposes
 `CHARACTER_SET_NAME`, `COLLATION_NAME`, and `COLUMN_COMMENT`.
+
+Fixed-offset and `SYSTEM` session time zones drive current-time and Unix-epoch
+functions. `TIMESTAMP` columns store UTC instants and render in the session
+zone; `DATETIME` columns retain the wall-clock fields that were written. Named
+zones require MySQL's optional time-zone tables and are not currently loaded.
 
 The open compatibility ledger, including complex updatable views and
 replication, lives in [GAPS.md](GAPS.md). The
