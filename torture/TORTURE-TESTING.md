@@ -77,10 +77,11 @@ Partial transactions, missing acknowledgements, and rows outside the attempted
 set are always failures. A final graceful checkpoint and restart covers the
 snapshot path with the same recovered-state oracle.
 
-The syntax lane starts from known-valid statements spanning recently added
-grammar and execution surfaces. It executes each baseline on both servers,
-then applies a seed-ordered, bounded set of structural mutations. A run may
-chain up to three edits while deduplicating equivalent SQL before sampling.
+The syntax lane starts from known-valid statements spanning implemented
+grammar and the open compatibility ledger. It executes each baseline on both
+servers, then applies a seed-ordered, bounded set of structural mutations. A
+run may chain up to three edits while deduplicating equivalent SQL before
+sampling.
 Comment mutations replace natural token boundaries with MySQL block, hash,
 dash, executable-version, or future-version comments and never recurse into an
 existing comment. Block and version comments also surround parentheses and
@@ -177,7 +178,7 @@ Scale dimensions independently before combining them:
 3. **Cardinality:** move through 8, 128, 1,000, 10,000, 100,000, 1,000,000,
    and 2,000,000 rows while recording generation, per-statement, invariant,
    probe, snapshot, throughput, and memory evidence. Flat volume, relational,
-   and commerce lanes have now crossed one million rows; repeat them after
+   and commerce lanes have crossed one million rows; repeat them after
    storage/query-plan changes as stable A/B benchmarks.
 4. **Type boundaries:** add dedicated models for signed/unsigned limits,
    precision/scale edges, zero/empty values, Unicode normalization, NUL bytes,

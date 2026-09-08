@@ -359,9 +359,11 @@ and column comments, while `information_schema.COLUMNS` exposes
 `CHARACTER_SET_NAME`, `COLLATION_NAME`, and `COLUMN_COMMENT`.
 
 Fixed-offset and `SYSTEM` session time zones drive current-time and Unix-epoch
-functions. `TIMESTAMP` columns store UTC instants and render in the session
-zone; `DATETIME` columns retain the wall-clock fields that were written. Named
-zones require MySQL's optional time-zone tables and are not currently loaded.
+functions. A numeric offset appended to a DATETIME or TIMESTAMP input is
+converted into the session zone before storage. TIMESTAMP columns then retain
+the UTC instant and render in the active session zone; DATETIME columns retain
+the converted wall-clock fields. Named zones require MySQL's optional
+time-zone tables, which fsdb does not load.
 
 The open compatibility ledger, including complex updatable views and
 replication, lives in [GAPS.md](GAPS.md). The
@@ -830,4 +832,5 @@ is not part of `just check`; see the
 - [Open gaps](GAPS.md) — current, evidence-backed differences from MySQL 8.4
 - [Comment style](docs/comment-style.md) — the grading every comment survives
 - [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
+- [Application smoke tests](smoke/README.md) — pinned upstream projects exercised over the wire
 - [Benchmarks](benchmarks/README.md) — workloads and methodology

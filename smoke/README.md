@@ -4,7 +4,7 @@ These probes run unmodified, pinned upstream projects against a fresh fsdb
 process. Every target gets an isolated Docker network and database server, so a
 failed installer cannot affect another target.
 
-The ten applications add compatibility evidence that the Laravel application
+These applications add compatibility evidence that the Laravel application
 gauntlet does not provide:
 
 | Target | Client stack | Quick gate |
@@ -20,7 +20,7 @@ gauntlet does not provide:
 | Rails | Ruby mysql2 and Active Record | Full test schema plus a MySQL adapter test |
 | Magento | PHP PDO and Magento DB adapter | Full application install with OpenSearch |
 
-The pinned Nextcloud suite currently has one order-dependent upstream failure:
+The pinned Nextcloud suite has one order-dependent upstream failure:
 `TrashbinTest` retains `test-trashbin-user2`, which changes the following
 recipient-search expectation. The same two-class sequence fails against MySQL
 8.4; it is not an fsdb compatibility difference.
@@ -74,9 +74,8 @@ so nested requests cannot exhaust the request pool. Set `DRUPAL_CONCURRENCY` or
 `DRUPAL_HTTP_WORKERS` to tune either pool locally. Its per-class JUnit reports,
 runner database, HTTP log, and WebDriver log are kept with the campaign
 results. A failure is a candidate fsdb compatibility only when the same pinned
-test
-succeeds against MySQL 8.4; environment and upstream failures remain separate
-classifications.
+test succeeds against MySQL 8.4; environment and upstream failures remain
+separate classifications.
 
 Set `DRUPAL_TEST_CLASSES` to a comma-separated list of fully qualified class
 names to resume or isolate part of the Drupal inventory.

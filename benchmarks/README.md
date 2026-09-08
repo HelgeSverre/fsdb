@@ -121,8 +121,9 @@ Each run lands in `results/<git-sha>.md` with a provenance header
 | JSON extract | 131 ms | 9.4 ms | 225 µs | 62 µs |
 
 \* Numbers in the leftmost column after the join row were inflated by
-benchmark poisoning (the timed-out join kept computing server-side); the
-harness now isolates cases. See `results/f1b15ab.md`'s annotation.
+benchmark poisoning because the timed-out join kept computing server-side.
+Each benchmark case now runs against an isolated server process. See
+`results/f1b15ab.md` for the original annotation.
 
 Notable one-line context for the jump between the first two columns: an
 O(n²) list-append in the UPDATE path, PK/unique hash indexes, a hash
@@ -165,8 +166,8 @@ shared statement setup the next profiling seam, not a special-purpose CTE
 container.
 
 The [low-cardinality join profile](results/1c2270d-low-cardinality-joins.md)
-compares an indexed join with an otherwise identical unindexed hash-join
-twin. fsdb now uses observed distinct-key counts to avoid repeated broad index
+compares an indexed join with an otherwise identical unindexed hash-join twin.
+The planner uses observed distinct-key counts to avoid repeated broad index
 bucket resolution when the full join result is consumed, while preserving the
 index path for early-stopping queries.
 
@@ -232,6 +233,3 @@ boolean evaluation is 56.0 ms versus MySQL's 10.7 ms, while maintained prefix
 postings are 33.9 ms versus 2.62 ms. OR predicates, projection-only MATCH,
 and the general result pipeline are the remaining scale seams, not document
 re-tokenization or vocabulary scans.
-
-Add a column here for each representative snapshot; keep intermediate runs in
-`results/` without a column.

@@ -186,10 +186,11 @@ ENUM, and SET families with per-column charset and collation metadata.
 Temporal values cover DATE, YEAR, and microsecond-precision DATETIME,
 TIMESTAMP, and signed TIME durations. Fractional values round half-up unless
 `TIME_TRUNCATE_FRACTIONAL` applies, and SQL modes control zero-date acceptance.
-TIMESTAMP values are stored as UTC instants and converted at the session
-`time_zone` boundary; DATETIME values retain their wall-clock fields. Range
-validation happens after conversion, including MySQL's reserved epoch zero and
-2038 upper boundary.
+Numeric offsets appended to DATETIME and TIMESTAMP inputs are converted into
+the session `time_zone`. TIMESTAMP values then retain the UTC instant and
+follow later session-zone changes; DATETIME values retain the converted
+wall-clock fields. TIMESTAMP range validation happens after conversion,
+including MySQL's reserved epoch zero and 2038 upper boundary.
 
 JSON, functional defaults, virtual generated columns, normalized comments,
 and OGC WKB geometry values also persist through the regular value and wire

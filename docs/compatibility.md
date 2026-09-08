@@ -134,6 +134,25 @@ enclosure and escape markers, `REPLACE` or `IGNORE`, header-line skipping,
 target columns or user variables, and ordered `SET` transformations.
 Server-side `LOAD DATA INFILE` remains unsupported.
 
+## Temporal zones and offsets
+
+The session `time_zone` accepts MySQL's numeric offsets and `SYSTEM`. It drives
+current-time functions, Unix timestamp conversion, TIMESTAMP storage, and
+result rendering. Named zones depend on MySQL's optional time-zone tables and
+are not loaded by fsdb.
+
+DATETIME and TIMESTAMP strings may carry a numeric offset such as
+`2024-01-01 10:10:10.123456+05:30`. Both are converted into the active session
+zone on input. DATETIME retains that converted wall time; TIMESTAMP retains the
+corresponding UTC instant and follows later session-zone changes. The same
+conversion path handles typed temporal literals, casts, scalar functions,
+ordinary writes, and prepared string parameters.
+
+Offsets use MySQL's `-13:59` through `+14:00` range. The `-00:00` spelling,
+named suffixes, malformed widths, and out-of-range offsets are rejected or
+coerced according to the active SQL mode. Zero date parts remain invalid when
+an explicit offset is present.
+
 ## Schema moves
 
 `RENAME TABLE` evaluates its pairs from left to right and publishes the whole
