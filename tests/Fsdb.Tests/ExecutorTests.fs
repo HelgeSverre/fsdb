@@ -6978,8 +6978,20 @@ let tests =
                     | other -> failtestf "expected transformed uniqueness, got %A" other
 
                     match runDefault store "SELECT ABS(CAST(-9223372036854775808 AS SIGNED))" with
-                    | Err(1690, message) -> Expect.stringContains message "BIGINT value is out of range" "scalar overflow"
+                    | Err(1690, message) ->
+                        Expect.equal
+                            message
+                            "BIGINT value is out of range in 'abs(cast(-(9223372036854775808) as signed))'"
+                            "scalar overflow expression"
                     | other -> failtestf "expected ABS(BIGINT_MIN) to fail with 1690, got %A" other
+
+                    match runDefault store "SELECT 1 + ABS(CAST(-9223372036854775808 AS SIGNED))" with
+                    | Err(1690, message) ->
+                        Expect.equal
+                            message
+                            "BIGINT value is out of range in 'abs(cast(-(9223372036854775808) as signed))'"
+                            "closest failing expression"
+                    | other -> failtestf "expected nested ABS(BIGINT_MIN) to fail with 1690, got %A" other
 
                     match runDefault store "INSERT INTO magnitudes VALUES (4, -9223372036854775808, 3, 3, 3)" with
                     | Err(1690, message) -> Expect.stringContains message "abs(`signed_value`)" "indexed write overflow"
@@ -9393,6 +9405,14 @@ let tests =
                             "BIGINT UNSIGNED value is out of range in '(cast(1 as unsigned) - 2)'"
                             "offending expression"
                     | other -> failtestf "expected 1690, got %A" other
+
+                    match runDefault (newStore ()) "SELECT ROUND(CAST(18446744073709551615 AS UNSIGNED), -1)" with
+                    | Err(1690, message) ->
+                        Expect.equal
+                            message
+                            "BIGINT UNSIGNED value is out of range in 'round(cast(18446744073709551615 as unsigned),-(1))'"
+                            "function expression"
+                    | other -> failtestf "expected ROUND overflow to fail with 1690, got %A" other
 
                     // Unary minus is part of the literal, not `0 - x`, so
                     // these stay answers (MySQL agrees).

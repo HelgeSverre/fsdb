@@ -67,7 +67,16 @@ let private literal =
     function
     | VNull -> "NULL"
     | VString value -> "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
-    | value -> value |> toText |> Option.defaultValue "NULL"
+    | value ->
+        let text = value |> toText |> Option.defaultValue "NULL"
+        let negative =
+            match value with
+            | VInt number -> number < 0L
+            | VDecimal number -> number < 0M
+            | VDouble number -> number < 0.0
+            | _ -> false
+
+        if negative then "-(" + text[1..] + ")" else text
 
 type ViewRenderOptions =
     { DefaultSchema: string

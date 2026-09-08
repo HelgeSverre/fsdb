@@ -1706,7 +1706,11 @@ let tests =
               | other -> failtestf "expected parse-cache isolation for signed subtraction, got %A" other
 
               match handle signedSession "SELECT CAST(9223372036854775808 AS UNSIGNED) - 0" |> snd with
-              | Err(1690, message) -> Expect.stringContains message "BIGINT value" "signed overflow names the signed domain"
+              | Err(1690, message) ->
+                  Expect.equal
+                      message
+                      "BIGINT value is out of range in '(cast(9223372036854775808 as unsigned) - 0)'"
+                      "signed overflow expression"
               | other -> failtestf "expected signed subtraction overflow, got %A" other
 
               match handle defaultSession "SELECT CAST(0 AS UNSIGNED) - 1" |> snd with

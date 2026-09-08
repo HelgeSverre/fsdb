@@ -6775,8 +6775,6 @@ let private recoverExecutionError (session: Session) (description: string) (erro
     | Storage.IndexExpressionError(code, message) ->
         Log.diagnostic "fsdb: ERR %d %s -- %s" code message description
         session, Err(code, message)
-    // ponytail: Matching MySQL's expression-specific 1690 text requires
-    // arithmetic errors to carry their originating expression.
     | Value.UnsignedOutOfRange ->
         Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- %s" description
         session, Err(1690, "BIGINT UNSIGNED value is out of range")

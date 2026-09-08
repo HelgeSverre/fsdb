@@ -4473,6 +4473,15 @@ let private isSubstringSearchFunction (name: string) =
     | _ -> false
 
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
+    try
+        evalExprCore ctx expr
+    with
+    | Value.UnsignedOutOfRange ->
+        Error(1690, sprintf "BIGINT UNSIGNED value is out of range in '%s'" (InformationSchema.exprToSql expr))
+    | Value.SignedOutOfRange ->
+        Error(1690, sprintf "BIGINT value is out of range in '%s'" (InformationSchema.exprToSql expr))
+
+and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
 
     match expr with
@@ -4541,11 +4550,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | BinOp(And, a, b) -> evalLogicalAnd (eval a) (fun () -> eval b)
     | BinOp(Or, a, b) -> evalLogicalOr (eval a) (fun () -> eval b)
     | BinOp(op, a, b) ->
-        // Arithmetic can leave the `BIGINT UNSIGNED` domain, which MySQL
-        // refuses with 1690 rather than answering in a wider type. That
-        // refusal arrives as an exception (`Value.narrowUnsigned` — the
-        // arithmetic has no error channel of its own) and becomes an
-        // ordinary `EvalError` here, at the first frame that has one.
+        // Value arithmetic has no error channel, so the closest expression
+        // frame maps signed and unsigned domain exceptions to error 1690.
         try
             eval a
             |> Result.bind (fun va ->
@@ -4609,9 +4615,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Gt -> compareWith Gt
                     | Gte -> compareWith Gte
                     | NullSafeEq -> compareWith NullSafeEq))
-        with Value.UnsignedOutOfRange ->
+        with
+        | Value.UnsignedOutOfRange ->
             let expression = InformationSchema.exprToSql (BinOp(op, a, b))
             Error(1690, sprintf "BIGINT UNSIGNED value is out of range in '%s'" expression)
+        | Value.SignedOutOfRange ->
+            let expression = InformationSchema.exprToSql (BinOp(op, a, b))
+            Error(1690, sprintf "BIGINT value is out of range in '%s'" expression)
     | Like(e, p, caseSensitive, escape) ->
         eval e
         |> Result.bind (fun ve ->
@@ -5057,8 +5067,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | Some account ->
                             DynamicScope.withValue scalarExecutionAccount (Some account) invoke |> Ok
                         | None -> Ok(invoke ())
-                    with Diagnostics.EvaluationError(code, message) ->
-                        Error(code, message)))
+                    with
+                    | Diagnostics.EvaluationError(1690, message) ->
+                        Error(1690, sprintf "%s in '%s'" message (InformationSchema.exprToSql (FuncCall(name, args))))
+                    | Diagnostics.EvaluationError(code, message) -> Error(code, message)))
     // `expr COLLATE name` evaluates as its inner expression — the tag
     // only steers which collation comparisons resolve under.
     | Collate(e, _) -> eval e
