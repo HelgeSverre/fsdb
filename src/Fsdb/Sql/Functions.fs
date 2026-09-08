@@ -472,12 +472,10 @@ let private nowFn: Scalar =
         VDateTime(roundDateTimeToFsp fsp DateTime.Now)
     | _ -> VDateTime(truncateToSecond DateTime.Now)
 
-// ---------------------------------------------------------------------------
 // JSON columns reach scalar functions as `VString`, while JSON constructors
 // return `VJson`; both carry raw JSON text and therefore share one parser.
 // Mutable `JsonNode` containers provide the update semantics needed by
 // JSON_SET/INSERT/REPLACE/REMOVE.
-// ---------------------------------------------------------------------------
 
 /// One step of a `$.a[2].b`-style path. The wildcards are the minimal
 /// one-level forms, not a recursive descent operator — and they're two
@@ -3254,9 +3252,8 @@ let private substringFn: Scalar =
 /// Character-by-character substring search using the engine's default
 /// collation's `CharEquals`, so accent/case sensitivity follows the
 /// collation (e.g. `_bin`/`_cs` don't fold, `_ai_ci` also ignores accents).
-/// Not per-column collation-aware (that needs the column's collation
-/// threaded through `Scalar`'s signature, which this engine doesn't do
-/// yet).
+/// ponytail: Per-column behavior requires carrying the operand's collation
+/// through the scalar-function signature.
 let private collationIndexOf (str: string) (sub: string) (startIdx: int) : int =
     if sub = "" then
         startIdx
@@ -3475,6 +3472,9 @@ let private spaceFn: Scalar =
         if k > Limits.maxAllowedPacket then VNull else VString(String(' ', k))
     | _ -> VNull
 
+let private firstByteValue bytes =
+    bytes |> Array.tryHead |> Option.defaultValue 0uy |> int64 |> VInt
+
 /// The first byte of the string's UTF-8 encoding, not the first UTF-16 code
 /// unit — `ASCII('é')` is `195` (0xC3, the lead byte of é's 2-byte UTF-8
 /// encoding) in MySQL, not é's UTF-16 value 233.
@@ -3482,17 +3482,15 @@ let private asciiFn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
         match tryRawBytes value with
-        | Some bytes -> VInt(if bytes.Length = 0 then 0L else int64 bytes.[0])
-        | None ->
-            let text = req value
-            VInt(if text = "" then 0L else int64 (Text.Encoding.UTF8.GetBytes(text).[0]))
+        | Some bytes -> firstByteValue bytes
+        | None -> value |> req |> Text.Encoding.UTF8.GetBytes |> firstByteValue
     | _ -> VNull
 
 let private ordFn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
         match tryRawBytes value with
-        | Some bytes -> VInt(if bytes.Length = 0 then 0L else int64 bytes.[0])
+        | Some bytes -> firstByteValue bytes
         | None ->
             let text = req value
 
@@ -4082,9 +4080,8 @@ let private fromBase64Fn: Scalar =
             VNull
     | _ -> VNull
 
-let private bytesOfValue =
-    function
-    | value -> tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.UTF8.GetBytes(req value))
+let private bytesOfValue value =
+    tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.UTF8.GetBytes(req value))
 
 let private compressFn: Scalar =
     function
@@ -5151,9 +5148,8 @@ let private inet6AtonFn: Scalar =
         | None -> tryParseIpv6 text |> Option.map (fun address -> VBytes(address.GetAddressBytes())) |> Option.defaultValue VNull
     | _ -> VNull
 
-let private packedAddressBytes =
-    function
-    | value -> tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.Latin1.GetBytes(req value))
+let private packedAddressBytes value =
+    tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.Latin1.GetBytes(req value))
 
 let private hasPackedAddressLength (bytes: byte[]) =
     bytes.Length = ipv4ByteLength || bytes.Length = ipv6ByteLength

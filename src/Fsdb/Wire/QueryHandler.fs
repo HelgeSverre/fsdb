@@ -2731,40 +2731,35 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
         executed, result
     | None -> execute session
 
-let private executeWithStatementAccess session accesses execute =
-    match
-        TableLocks.withStatementAccess
-            (lockWaitTimeout session)
-            session.Store
-            session.ConnectionId
-            accesses
-            execute
-    with
+let private lockedExecutionResult session = function
     | Ok result -> result
     | Error(code, message) -> session, Err(code, message)
+
+let private executeWithStatementAccess session accesses execute =
+    TableLocks.withStatementAccess
+        (lockWaitTimeout session)
+        session.Store
+        session.ConnectionId
+        accesses
+        execute
+    |> lockedExecutionResult session
 
 let private executeWithTemporaryStatementAccess session accesses execute =
-    match
-        TableLocks.withTemporaryStatementAccess
-            (lockWaitTimeout session)
-            session.Store
-            session.ConnectionId
-            accesses
-            execute
-    with
-    | Ok result -> result
-    | Error(code, message) -> session, Err(code, message)
+    TableLocks.withTemporaryStatementAccess
+        (lockWaitTimeout session)
+        session.Store
+        session.ConnectionId
+        accesses
+        execute
+    |> lockedExecutionResult session
 
 let private executeWithGlobalWriteAccess session execute =
-    match
-        TableLocks.withGlobalWriteAccess
-            (lockWaitTimeout session)
-            session.Store
-            session.ConnectionId
-            execute
-    with
-    | Ok result -> result
-    | Error(code, message) -> session, Err(code, message)
+    TableLocks.withGlobalWriteAccess
+        (lockWaitTimeout session)
+        session.Store
+        session.ConnectionId
+        execute
+    |> lockedExecutionResult session
 
 type private StatementLockBoundary =
     | AcquireStatementLock
@@ -6780,8 +6775,7 @@ let private recoverExecutionError (session: Session) (description: string) (erro
     | Storage.IndexExpressionError(code, message) ->
         Log.diagnostic "fsdb: ERR %d %s -- %s" code message description
         session, Err(code, message)
-    // MySQL's 1690 message names the offending expression; fsdb
-    // needs an AST printer before it can do the same without reconstructing SQL.
+    // ponytail: Naming the offending expression requires a complete AST printer.
     | Value.UnsignedOutOfRange ->
         Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- %s" description
         session, Err(1690, "BIGINT UNSIGNED value is out of range")

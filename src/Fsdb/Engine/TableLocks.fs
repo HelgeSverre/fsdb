@@ -100,15 +100,22 @@ let private readerGateOpen owner (state: TableState) =
     && hasNoOtherOwner owner state.PrioritizedWriters
 
 let private globalWriteAvailable policy (manager: Manager) =
-    policy = IgnoreGlobalRead
-    || (hasNoOwners manager.GlobalReaders
-        && hasNoOwners manager.WaitingGlobalReaders)
+    match policy with
+    | IgnoreGlobalRead -> true
+    | RespectGlobalRead ->
+        hasNoOwners manager.GlobalReaders
+        && hasNoOwners manager.WaitingGlobalReaders
 
 let private containsWrite physical =
     physical |> Map.exists (fun _ mode -> mode = WriteAccess)
 
 let private conflictsWithOwnedGlobalRead owner (manager: Manager) physical =
     containsWrite physical && manager.GlobalReaders.Contains owner
+
+let private blockedByOwnedGlobalRead policy owner manager physical =
+    match policy with
+    | IgnoreGlobalRead -> false
+    | RespectGlobalRead -> conflictsWithOwnedGlobalRead owner manager physical
 
 let private explicitlyAvailable policy owner mode (manager: Manager) (state: TableState) =
     match mode with
@@ -380,7 +387,7 @@ let private withStatementAccessUnder policy timeout store owner accesses body =
 
     let acquired =
         lock manager.SyncRoot (fun () ->
-            if policy = RespectGlobalRead && conflictsWithOwnedGlobalRead owner manager physical then
+            if blockedByOwnedGlobalRead policy owner manager physical then
                 Error(1223, "Can't execute the query because you have a conflicting read lock")
             else
                 match manager.Explicit.TryGetValue owner with
@@ -448,6 +455,11 @@ let rec private expressionAccesses boundCtes defaultDb expression =
     Expression.collectSubqueries expression
     |> List.collect (selectAccesses boundCtes defaultDb)
 
+and private optionalExpressionAccesses boundCtes defaultDb expression =
+    expression
+    |> Option.toList
+    |> List.collect (expressionAccesses boundCtes defaultDb)
+
 and private sourceAccesses boundCtes defaultDb =
     function
     | FromTable table when table.Database.IsNone && Set.contains (normalize table.Table) boundCtes -> []
@@ -463,8 +475,8 @@ and private selectOrUnionAccesses boundCtes defaultDb =
         selectAccesses boundCtes defaultDb first
         @ (rest |> List.collect (snd >> selectAccesses boundCtes defaultDb))
         @ (orderBy |> List.collect (fst >> expressionAccesses boundCtes defaultDb))
-        @ (limit |> Option.map (expressionAccesses boundCtes defaultDb) |> Option.defaultValue [])
-        @ (offset |> Option.map (expressionAccesses boundCtes defaultDb) |> Option.defaultValue [])
+        @ optionalExpressionAccesses boundCtes defaultDb limit
+        @ optionalExpressionAccesses boundCtes defaultDb offset
 
 and private cteAccesses boundCtes defaultDb ctes =
     ctes
@@ -479,20 +491,20 @@ and private selectAccesses boundCtes defaultDb (select: SelectStmt) =
     let ctes, localCtes = cteAccesses boundCtes defaultDb select.Ctes
 
     ctes
-    @ (select.From |> Option.map (sourceAccesses localCtes defaultDb) |> Option.defaultValue [])
+    @ (select.From |> Option.toList |> List.collect (sourceAccesses localCtes defaultDb))
     @ (select.Joins
        |> List.collect (fun join ->
            sourceAccesses localCtes defaultDb join.Table
            @ expressionAccesses localCtes defaultDb join.On))
     @ (select.Projections |> List.collect (fst >> expressionAccesses localCtes defaultDb))
-    @ (select.Where |> Option.map (expressionAccesses localCtes defaultDb) |> Option.defaultValue [])
+    @ optionalExpressionAccesses localCtes defaultDb select.Where
     @ (select.GroupBy |> List.collect (expressionAccesses localCtes defaultDb))
-    @ (select.Having |> Option.map (expressionAccesses localCtes defaultDb) |> Option.defaultValue [])
+    @ optionalExpressionAccesses localCtes defaultDb select.Having
     @ (select.OrderBy |> List.collect (fst >> expressionAccesses localCtes defaultDb))
     @ (select.Windows
        |> List.collect (snd >> OverSpec >> Expression.overExpressions >> List.collect (expressionAccesses localCtes defaultDb)))
-    @ (select.Limit |> Option.map (expressionAccesses localCtes defaultDb) |> Option.defaultValue [])
-    @ (select.Offset |> Option.map (expressionAccesses localCtes defaultDb) |> Option.defaultValue [])
+    @ optionalExpressionAccesses localCtes defaultDb select.Limit
+    @ optionalExpressionAccesses localCtes defaultDb select.Offset
 
 let private splitName defaultDb name =
     let database, table = splitQualified defaultDb name
@@ -541,9 +553,9 @@ let private updateAccesses defaultDb (update: UpdateStmt) =
             | source -> sourceAccesses boundCtes defaultDb source)
            @ expressionAccesses boundCtes defaultDb join.On))
     @ (update.Assignments |> List.collect (_.Value >> expressionAccesses boundCtes defaultDb))
-    @ (update.Where |> Option.map (expressionAccesses boundCtes defaultDb) |> Option.defaultValue [])
+    @ optionalExpressionAccesses boundCtes defaultDb update.Where
     @ (update.OrderBy |> List.collect (fst >> expressionAccesses boundCtes defaultDb))
-    @ (update.Limit |> Option.map (expressionAccesses boundCtes defaultDb) |> Option.defaultValue [])
+    @ optionalExpressionAccesses boundCtes defaultDb update.Limit
 
 let private deleteAccesses defaultDb (delete: DeleteStmt) =
     let ctes, boundCtes = cteAccesses Set.empty defaultDb delete.Ctes
@@ -564,9 +576,9 @@ let private deleteAccesses defaultDb (delete: DeleteStmt) =
             | FromTable table -> source table
             | nested -> sourceAccesses boundCtes defaultDb nested)
            @ expressionAccesses boundCtes defaultDb join.On))
-    @ (delete.Where |> Option.map (expressionAccesses boundCtes defaultDb) |> Option.defaultValue [])
+    @ optionalExpressionAccesses boundCtes defaultDb delete.Where
     @ (delete.OrderBy |> List.collect (fst >> expressionAccesses boundCtes defaultDb))
-    @ (delete.Limit |> Option.map (expressionAccesses boundCtes defaultDb) |> Option.defaultValue [])
+    @ optionalExpressionAccesses boundCtes defaultDb delete.Limit
 
 let rec private directStatementAccesses defaultDb =
     function
@@ -622,28 +634,24 @@ let private mergeAccesses accesses =
     |> Map.values
     |> List.ofSeq
 
+let private systemEntries store table read =
+    match scan store "mysql" table with
+    | Error _ -> Seq.empty
+    | Ok(_, rows) -> rows |> Seq.choose read
+
+let private keyedEntries key entries =
+    entries |> Seq.map (fun entry -> key entry, entry) |> Map.ofSeq
+
 let private viewEntries store =
-    match scan store "mysql" "views" with
-    | Error _ -> Map.empty
-    | Ok(_, rows) ->
-        rows
-        |> Seq.choose SystemCatalog.View.tryRead
-        |> Seq.map (fun view -> tableKey view.Schema view.Name, view)
-        |> Map.ofSeq
+    systemEntries store "views" SystemCatalog.View.tryRead
+    |> keyedEntries (fun view -> tableKey view.Schema view.Name)
 
 let private triggerEntries store =
-    match scan store "mysql" "triggers" with
-    | Error _ -> []
-    | Ok(_, rows) -> rows |> Seq.choose SystemCatalog.Trigger.tryRead |> List.ofSeq
+    systemEntries store "triggers" SystemCatalog.Trigger.tryRead |> List.ofSeq
 
 let private routineEntries store : Map<string, SystemCatalog.Routine.Entry> =
-    match scan store "mysql" "routines" with
-    | Error _ -> Map.empty
-    | Ok(_, rows) ->
-        rows
-        |> Seq.choose SystemCatalog.Routine.tryRead
-        |> Seq.map (fun routine -> tableKey routine.Schema routine.Name, routine)
-        |> Map.ofSeq
+    systemEntries store "routines" SystemCatalog.Routine.tryRead
+    |> keyedEntries (fun routine -> tableKey routine.Schema routine.Name)
 
 let private storedProgramStatements
     (routines: Map<string, SystemCatalog.Routine.Entry>)
