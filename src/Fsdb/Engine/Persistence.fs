@@ -1264,9 +1264,6 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
         setStrictMode store false
         warn "AlterTable" (alterTable store db table actions)
         setStrictMode store saved
-    // One catalog swap for the whole event, matching how it was logged (see
-    // `Storage.renameTables`) — replaying pair-by-pair would reintroduce the
-    // partial rename the single event exists to prevent.
     | RenameTable pairs -> warn "RenameTable" (renameTables store db pairs)
     | Truncate table -> warn "Truncate" (truncate store db table)
     | other -> Log.diagnostic "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other

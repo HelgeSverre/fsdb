@@ -2678,7 +2678,14 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         onTables "ALTER" [ target ]
         @ onTables "REFERENCES" (referencedTables (fst target) foreignKeys)
         @ if truncatesPartitions then onTables "DROP" [ target ] else []
-    | RenameTable pairs -> onTables "ALTER" (pairs |> List.map (fst >> split))
+    | RenameTable pairs ->
+        let sources = pairs |> List.map (fst >> split)
+        let destinations = pairs |> List.map (snd >> split)
+
+        onTables "ALTER" sources
+        @ onTables "DROP" sources
+        @ onTables "CREATE" destinations
+        @ onTables "INSERT" destinations
     | CreateIndex(_, table, _, _, _, _) -> onTables "INDEX" [ split table ]
     | DropIndexStmt(_, table, _) -> onTables "INDEX" [ split table ]
     | CreateDatabase(name, _, _) -> [ "CREATE", OnDb name ]

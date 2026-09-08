@@ -2758,6 +2758,34 @@ let tests =
               Expect.equal (rowsOf reloaded defaultDatabase "b") [ [| VInt 1L |] ] "b kept a's row"
               Expect.equal (rowsOf reloaded defaultDatabase "d") [ [| VInt 2L |] ] "d kept c's row"
 
+          testCase "a cross-database rename survives WAL replay and snapshot replacement"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let run (session: Fsdb.Session.Session) sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let session = run session "CREATE DATABASE archive"
+              let session = run session "CREATE TABLE movable (id INT PRIMARY KEY, label VARCHAR(20))"
+              let session = run session "INSERT INTO movable VALUES (1, 'kept')"
+              let _ = run session "RENAME TABLE fsdb.movable TO archive.moved"
+
+              let reloaded = load dir
+              Expect.equal (rowsOf reloaded "archive" "moved") [ [| VInt 1L; VString "kept" |] ] "WAL replay keeps the moved table"
+
+              match scan reloaded defaultDatabase "movable" with
+              | Error(NoSuchTable _) -> ()
+              | other -> failtestf "expected the WAL-replayed source to be absent, got %A" other
+
+              snapshotNow dir reloaded
+              let snapshotted = load dir
+              Expect.equal (rowsOf snapshotted "archive" "moved") [ [| VInt 1L; VString "kept" |] ] "the snapshot keeps the moved table"
+
           testCase "a GENERATED column using CASE/LIKE ESCAPE/IN/BETWEEN/row comparison/CAST/CONCAT survives a restart and still computes correctly"
           <| fun _ ->
               let dir = tempDataDir ()

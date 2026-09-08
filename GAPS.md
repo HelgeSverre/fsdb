@@ -59,6 +59,10 @@ appear within set-operation branches.
 
 DDL covers databases, tables, indexes, views, triggers, users, grants,
 `CREATE TABLE ... AS SELECT`, temporary tables, `TRUNCATE`, and `RENAME TABLE`.
+Multi-pair renames resolve from left to right and publish atomically. Base tables
+may move between databases; their data, generated constraint names, and foreign
+key relationships move with them. As in MySQL, a triggered table and a view
+cannot cross a database boundary.
 `EXPLAIN` supports traditional, JSON, and ANALYZE forms. Transaction control,
 `SET`, `SHOW`, `USE`, `KILL`, and `DESCRIBE` are text-probed before the grammar
 by `QueryHandler.dispatch`.
@@ -83,7 +87,6 @@ refuses it through the prepared-statement protocol.
 |---|---|---|
 | Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; `FLUSH PRIVILEGES`/`USER_RESOURCES`/`STATUS`, all log-channel forms, plain, named, and global `TABLES` locks (including `LOCAL`/`NO_WRITE_TO_BINLOG`, `WITH READ LOCK`, and `FOR EXPORT`), and `OPTIMIZER_COSTS` work | low | divergence |
-| `RENAME TABLE` is atomic within one database; moving a table between databases remains unsupported | low | refusal |
 | `ALTER TABLE` retains last-wins `ALGORITHM`/`LOCK` options, accepts known engine names, follows `NO_ENGINE_SUBSTITUTION` for unknown engines, and rejects unsupported operation, generated-column, foreign-key, and lock combinations with MySQL errors; engine changes and InnoDB's COPY/INPLACE/INSTANT lock duration still collapse to one atomic immutable-root publication | low | divergence |
 | `CREATE TABLE` rejects unknown engines under `NO_ENGINE_SUBSTITUTION` and otherwise reports MySQL's substitution warnings; known non-InnoDB engine names still use and report fsdb's shared InnoDB-shaped row store | low | divergence |
 | HASH and LINEAR HASH partition definitions, `pN` selection, INFORMATION_SCHEMA/SHOW metadata, `ADD`/`COALESCE`/`TRUNCATE PARTITION`, and logical `ANALYZE`/`CHECK`/`OPTIMIZE`/`REPAIR PARTITION` operate over the shared row store; `DROP PARTITION` returns MySQL's HASH-specific refusal, while physical pruning and partition renaming through `REORGANIZE PARTITION` remain absent | low | divergence/refusal |

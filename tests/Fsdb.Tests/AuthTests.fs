@@ -263,6 +263,12 @@ let tests =
               Expect.contains truncatePartition ("ALTER", OnTable("app", "logs")) "partition DDL alters the table"
               Expect.contains truncatePartition ("DROP", OnTable("app", "logs")) "partition truncation removes rows"
 
+              let rename = requirements "RENAME TABLE source_db.old_name TO target_db.new_name"
+              Expect.contains rename ("ALTER", OnTable("source_db", "old_name")) "source alteration"
+              Expect.contains rename ("DROP", OnTable("source_db", "old_name")) "source removal"
+              Expect.contains rename ("CREATE", OnTable("target_db", "new_name")) "destination creation"
+              Expect.contains rename ("INSERT", OnTable("target_db", "new_name")) "destination population"
+
           testCase "ON DUPLICATE KEY UPDATE requires UPDATE on the target table"
           <| fun _ ->
               for sql in

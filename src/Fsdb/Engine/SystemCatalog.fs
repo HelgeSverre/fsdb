@@ -150,6 +150,8 @@ module View =
                   Algorithm = textOr "UNDEFINED" 8 row })
             row
 
+    let withName name row = withValue 0 (VString name) row
+
 module Server =
     type Entry =
         { Name: string
@@ -420,5 +422,6 @@ module Check =
             row
 
     let withName name row = withValue 0 (VString name) row
+    let withSchema schema row = withValue 1 (VString schema) row
     let withTable table row = withValue 2 (VString table) row
     let withEnforced enforced row = withValue 4 (VString(if enforced then "YES" else "NO")) row

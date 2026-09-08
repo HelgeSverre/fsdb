@@ -128,6 +128,25 @@ enclosure and escape markers, `REPLACE` or `IGNORE`, header-line skipping,
 target columns or user variables, and ordered `SET` transformations.
 Server-side `LOAD DATA INFILE` remains unsupported.
 
+## Schema moves
+
+`RENAME TABLE` evaluates its pairs from left to right and publishes the whole
+statement atomically. This permits swaps through an intermediate name and
+ensures a later missing source or occupied target leaves every earlier object
+unchanged.
+
+Base tables may move between databases. Rows, AUTO_INCREMENT state, generated
+check and foreign-key names, outgoing references, and incoming references move
+with the table. The source requires `ALTER` and `DROP`; the destination requires
+`CREATE` and `INSERT`. Grants remain attached to their original object names,
+matching MySQL.
+
+Views may be renamed within their database. MySQL rejects a cross-database view
+move, or a cross-database move of a table that has triggers; fsdb returns the
+same errors rather than detaching those stored objects from their schema.
+See MySQL 8.4's [`RENAME TABLE` reference](https://dev.mysql.com/doc/refman/8.4/en/rename-table.html)
+for the corresponding object, privilege, and metadata-lock rules.
+
 ## Views and triggers
 
 MySQL views are stored queries, not persisted materialized results. `MERGE`

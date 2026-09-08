@@ -2962,11 +2962,11 @@ let private temporaryTargets (dbName: string) (action: TemporaryAction option) (
     | Some DropTemporary, DropTable(names, _) -> names |> List.map (splitQualified dbName)
     | _ -> []
 
-let private moveTemporaryKey sourceDb sourceTable targetTable keys =
+let private moveTemporaryKey sourceDb sourceTable targetDb targetTable keys =
     let source = CatalogOverlay.tableKey sourceDb sourceTable
 
     if Set.contains source keys then
-        keys |> Set.remove source |> Set.add (CatalogOverlay.tableKey sourceDb targetTable)
+        keys |> Set.remove source |> Set.add (CatalogOverlay.tableKey targetDb targetTable)
     else
         keys
 
@@ -2977,8 +2977,8 @@ let private temporaryKeysAfterStatement dbName beforeKeys stmt =
         |> List.fold
             (fun keys (sourceName, targetName) ->
                 let sourceDb, sourceTable = splitQualified dbName sourceName
-                let _, targetTable = splitQualified dbName targetName
-                moveTemporaryKey sourceDb sourceTable targetTable keys)
+                let targetDb, targetTable = splitQualified dbName targetName
+                moveTemporaryKey sourceDb sourceTable targetDb targetTable keys)
             beforeKeys
     | AlterTable(sourceName, actions) ->
         let sourceDb, sourceTable = splitQualified dbName sourceName
@@ -2986,7 +2986,7 @@ let private temporaryKeysAfterStatement dbName beforeKeys stmt =
         actions
         |> List.choose (function RenameTo target -> Some target | _ -> None)
         |> List.tryLast
-        |> Option.map (fun target -> moveTemporaryKey sourceDb sourceTable target beforeKeys)
+        |> Option.map (fun target -> moveTemporaryKey sourceDb sourceTable sourceDb target beforeKeys)
         |> Option.defaultValue beforeKeys
     | _ -> beforeKeys
 
@@ -2995,13 +2995,13 @@ let private temporaryRenameSourceKinds dbName beforeKeys pairs =
     |> List.fold
         (fun (hasTemporary, hasPermanent, keys) (sourceName, targetName) ->
             let sourceDb, sourceTable = splitQualified dbName sourceName
-            let _, targetTable = splitQualified dbName targetName
+            let targetDb, targetTable = splitQualified dbName targetName
             let source = CatalogOverlay.tableKey sourceDb sourceTable
 
             if Set.contains source keys then
                 true,
                 hasPermanent,
-                keys |> Set.remove source |> Set.add (CatalogOverlay.tableKey sourceDb targetTable)
+                keys |> Set.remove source |> Set.add (CatalogOverlay.tableKey targetDb targetTable)
             else
                 hasTemporary, true, keys)
         (false, false, beforeKeys)

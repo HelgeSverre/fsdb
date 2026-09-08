@@ -324,8 +324,8 @@ applications:
   ordinary and recursive CTEs, JSON paths, and `JSON_TABLE`.
 - Writes and schema: `INSERT`, `INSERT ... SELECT`, `REPLACE`, multi-table
   `UPDATE`/`DELETE`, generated columns, foreign keys, HASH partition metadata,
-  foreign-server catalog DDL, `EXPLAIN`, and enforced or `NOT ENFORCED`
-  `CHECK` constraints.
+  atomic multi-pair and cross-database `RENAME TABLE`, foreign-server catalog
+  DDL, `EXPLAIN`, and enforced or `NOT ENFORCED` `CHECK` constraints.
 - Stored objects: views and `WITH CHECK OPTION`, procedures, functions,
   scheduled events, and `BEFORE`/`AFTER` triggers with compound bodies and
   nested procedure calls.

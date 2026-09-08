@@ -9079,6 +9079,179 @@ let tests =
 
               Expect.isFalse published "temporary table was not published"
 
+          testCase "RENAME TABLE moves base tables between databases with their relationships"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let apply session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let session = apply session "CREATE DATABASE rename_source"
+              let session = apply session "CREATE DATABASE rename_target"
+              let session = apply session "CREATE TABLE rename_source.parent (id INT AUTO_INCREMENT PRIMARY KEY, n INT, CHECK (n > 0))"
+
+              let session =
+                  apply
+                      session
+                      "CREATE TABLE rename_source.child (id INT PRIMARY KEY, parent_id INT, CONSTRAINT child_ibfk_1 FOREIGN KEY (parent_id) REFERENCES rename_source.parent(id))"
+
+              let session = apply session "INSERT INTO rename_source.parent VALUES (1, 10)"
+              let session = apply session "INSERT INTO rename_source.child VALUES (1, 1)"
+              let session = apply session "RENAME TABLE rename_source.parent TO rename_target.parent_moved"
+              let session = apply session "INSERT INTO rename_target.parent_moved (n) VALUES (20)"
+
+              match handle session "SELECT id FROM rename_target.parent_moved WHERE n = 20" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the AUTO_INCREMENT state to follow the table, got %A" other
+
+              match handle session "SHOW CREATE TABLE rename_source.child" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "REFERENCES `rename_target`.`parent_moved` (`id`)" "incoming foreign key follows the parent"
+              | other -> failtestf "expected child metadata after parent move, got %A" other
+
+              match handle session "SHOW CREATE TABLE rename_target.parent_moved" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "CONSTRAINT `parent_moved_chk_1`" "generated CHECK name follows the table"
+              | other -> failtestf "expected moved parent metadata, got %A" other
+
+              let session = apply session "RENAME TABLE rename_source.child TO rename_target.child_moved"
+
+              match handle session "SHOW CREATE TABLE rename_target.child_moved" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "CONSTRAINT `child_moved_ibfk_1`" "generated foreign-key name follows the child"
+                  Expect.stringContains ddl "REFERENCES `parent_moved` (`id`)" "same-schema parent is rendered locally"
+              | other -> failtestf "expected moved child metadata, got %A" other
+
+              match handle session "SELECT p.n, c.parent_id FROM rename_target.parent_moved p JOIN rename_target.child_moved c ON c.parent_id=p.id" |> snd with
+              | ResultSet(_, [ [ Some "10"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected moved rows and relationship, got %A" other
+
+          testCase "cross-database rename batches are atomic and ordered left to right"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let apply session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let session = apply session "CREATE DATABASE rename_left"
+              let session = apply session "CREATE DATABASE rename_right"
+              let session = apply session "CREATE TABLE rename_left.item (n INT)"
+              let session = apply session "CREATE TABLE rename_right.item (n INT)"
+              let session = apply session "INSERT INTO rename_left.item VALUES (10)"
+              let session = apply session "INSERT INTO rename_right.item VALUES (20)"
+
+              let session =
+                  apply
+                      session
+                      "RENAME TABLE rename_left.item TO rename_right.swap_tmp, rename_right.item TO rename_left.item, rename_right.swap_tmp TO rename_right.item"
+
+              match handle session "SELECT (SELECT n FROM rename_left.item), (SELECT n FROM rename_right.item)" |> snd with
+              | ResultSet(_, [ [ Some "20"; Some "10" ] ]) -> ()
+              | other -> failtestf "expected the cross-schema swap, got %A" other
+
+              match handle session "RENAME TABLE rename_left.item TO rename_right.item" |> snd with
+              | Err(1050, _) -> ()
+              | other -> failtestf "expected an occupied destination to be rejected, got %A" other
+
+              match handle session "SELECT (SELECT n FROM rename_left.item), (SELECT n FROM rename_right.item)" |> snd with
+              | ResultSet(_, [ [ Some "20"; Some "10" ] ]) -> ()
+              | other -> failtestf "expected an occupied destination not to overwrite either table, got %A" other
+
+              let session = apply session "CREATE TABLE rename_left.atomic_source (n INT)"
+
+              match
+                  handle
+                      session
+                      "RENAME TABLE rename_left.atomic_source TO rename_right.atomic_target, rename_right.missing TO rename_left.never_created"
+                  |> snd
+              with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected the missing later source to reject the batch, got %A" other
+
+              match handle session "SELECT COUNT(*) FROM rename_left.atomic_source" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected the rejected batch to retain its first source, got %A" other
+
+              match handle session "SELECT * FROM rename_right.atomic_target" |> snd with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected no partially-created destination, got %A" other
+
+          testCase "cross-database rename enforces trigger and view schema boundaries"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let apply session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let session = apply session "CREATE DATABASE rename_objects"
+              let session = apply session "CREATE DATABASE rename_elsewhere"
+              let session = apply session "CREATE TABLE rename_objects.triggered (n INT)"
+              let session = apply session "CREATE TRIGGER triggered_bi BEFORE INSERT ON rename_objects.triggered FOR EACH ROW SET NEW.n = NEW.n + 1"
+
+              match handle session "RENAME TABLE rename_objects.triggered TO rename_elsewhere.triggered" |> snd with
+              | Err(1435, "Trigger in wrong schema") -> ()
+              | other -> failtestf "expected the trigger schema refusal, got %A" other
+
+              let session = apply session "CREATE TABLE rename_objects.view_source (n INT)"
+              let session = apply session "CREATE VIEW rename_objects.named_view AS SELECT n FROM rename_objects.view_source"
+              let session = apply session "RENAME TABLE rename_objects.named_view TO rename_objects.renamed_view"
+
+              match handle session "SELECT COUNT(*) FROM rename_objects.renamed_view" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected the same-schema renamed view, got %A" other
+
+              match handle session "RENAME TABLE rename_objects.renamed_view TO rename_elsewhere.renamed_view" |> snd with
+              | Err(1450, _) -> ()
+              | other -> failtestf "expected the view schema refusal, got %A" other
+
+          testCase "RENAME TABLE requires source and destination privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+
+              let apply session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let root = apply root "CREATE DATABASE rename_priv_source"
+              let root = apply root "CREATE DATABASE rename_priv_target"
+              let root = apply root "CREATE TABLE rename_priv_source.private_table (n INT)"
+              let root = apply root "CREATE USER rename_guest"
+              let guest = { create 2 store with User = "rename_guest" }
+              let root = apply root "GRANT ALTER ON rename_priv_source.private_table TO rename_guest"
+
+              match handle guest "RENAME TABLE rename_priv_source.private_table TO rename_priv_target.moved" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "DROP" "source DROP privilege"
+              | other -> failtestf "expected DROP to be required, got %A" other
+
+              let root = apply root "GRANT DROP ON rename_priv_source.private_table TO rename_guest"
+
+              match handle guest "RENAME TABLE rename_priv_source.private_table TO rename_priv_target.moved" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "CREATE" "destination CREATE privilege"
+              | other -> failtestf "expected CREATE to be required, got %A" other
+
+              let root = apply root "GRANT CREATE ON rename_priv_target.* TO rename_guest"
+
+              match handle guest "RENAME TABLE rename_priv_source.private_table TO rename_priv_target.moved" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "INSERT" "destination INSERT privilege"
+              | other -> failtestf "expected INSERT to be required, got %A" other
+
+              let _ = apply root "GRANT INSERT ON rename_priv_target.* TO rename_guest"
+
+              match handle guest "RENAME TABLE rename_priv_source.private_table TO rename_priv_target.moved" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected all four privileges to permit the rename, got %A" other
+
           testCase "renamed temporary tables remain private and preserve permanent namesakes"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

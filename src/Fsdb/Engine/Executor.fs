@@ -18549,30 +18549,13 @@ let rec executeAs
             | Error e -> ids, storageErr e
 
     | RenameTable pairs ->
-        // Each database group publishes one catalog root and WAL event while
-        // preserving the requested rename order.
-        // ponytail: Cross-database renames require coordinated removal and
-        // insertion across the source and destination database roots.
-        let groups =
-            pairs
-            |> List.map (fun (oldName, newName) ->
-                let db, oldTable = splitQualified dbName oldName
-                let _, newTable = splitQualified dbName newName
-                db, (oldTable, newTable))
-            |> List.groupBy fst
-            |> List.map (fun (db, entries) -> db, entries |> List.map snd)
-
         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
         Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
-        match groups |> traverse (fun (db, dbPairs) -> renameTables snapshot db dbPairs) with
-        | Ok _ ->
-            let retargetTriggers (db, dbPairs) =
-                let renames =
-                    dbPairs
-                    |> List.map (fun (oldName, newName) -> normalizeTableName oldName, normalizeTableName newName)
-                    |> Map.ofList
+        let sameName left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
+        let retargetTableObjects sourceDb sourceTable targetDb targetTable =
+            let retargetTriggers =
                 updateRows
                     snapshot
                     "mysql"
@@ -18581,64 +18564,77 @@ let rec executeAs
                     (fun row ->
                         row
                         |> SystemCatalog.Trigger.tryRead
-                        |> Option.exists (fun trigger ->
-                            System.String.Equals(trigger.Schema, db, System.StringComparison.OrdinalIgnoreCase)
-                            && Map.containsKey (normalizeTableName trigger.Table) renames)
+                        |> Option.exists (fun trigger -> sameName trigger.Schema sourceDb && sameName trigger.Table sourceTable)
                         |> Ok)
-                    (fun row ->
-                        match SystemCatalog.Trigger.tryRead row with
-                        | Some trigger ->
-                            row
-                            |> SystemCatalog.Trigger.withTable (Map.find (normalizeTableName trigger.Table) renames)
-                            |> Ok
-                        | None -> Ok row)
+                    (fun row -> row |> SystemCatalog.Trigger.withTable (normalizeTableName targetTable) |> Ok)
                 |> Result.map ignore
 
-            let retargetChecks (db, dbPairs) =
-                let renames =
-                    dbPairs
-                    |> List.map (fun (oldName, newName) -> normalizeTableName oldName, newName)
-                    |> Map.ofList
-
+            let retargetChecks =
                 updateRows
                     snapshot
                     "mysql"
                     "check_constraints"
                     None
-                    (fun row ->
-                        Ok(
-                            checkRowSatisfies
-                                (fun check ->
-                                    System.String.Equals(check.Schema, db, System.StringComparison.OrdinalIgnoreCase)
-                                    && Map.containsKey (normalizeTableName check.Table) renames)
-                                row
-                        ))
+                    (fun row -> Ok(checkRowSatisfies (fun check -> sameName check.Schema sourceDb && sameName check.Table sourceTable) row))
                     (fun row ->
                         match SystemCatalog.Check.tryRead row with
                         | Some check ->
-                            let oldName = normalizeTableName check.Table
-                            let newName = Map.find oldName renames
-                            let updated = SystemCatalog.Check.withTable newName row
+                            let oldKey = normalizeTableName sourceTable
+
+                            let updated =
+                                row
+                                |> SystemCatalog.Check.withSchema targetDb
+                                |> SystemCatalog.Check.withTable targetTable
 
                             if check.GeneratedName then
                                 let suffix =
-                                    if check.Name.StartsWith(oldName + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
-                                        check.Name.Substring(oldName.Length)
+                                    if check.Name.StartsWith(oldKey + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
+                                        check.Name.Substring(oldKey.Length)
                                     else
                                         "_chk_1"
 
-                                updated |> SystemCatalog.Check.withName (newName + suffix) |> Ok
+                                updated |> SystemCatalog.Check.withName (targetTable + suffix) |> Ok
                             else
                                 Ok updated
                         | None -> Ok row)
                 |> Result.map ignore
 
-            match groups |> traverse retargetTriggers |> Result.bind (fun _ -> groups |> traverse retargetChecks) with
-            | Ok _ ->
-                Storage.commitCatalogInto store baseCatalog snapshot
-                ids, Affected 0UL
-            | Error error -> ids, storageErr error
-        | Error e -> ids, storageErr e
+            retargetTriggers |> Result.bind (fun () -> retargetChecks)
+
+        let renameView sourceDb sourceView targetDb targetView =
+            if not (sameName sourceDb targetDb) then
+                Error(ExpressionError(1450, sprintf "Changing schema from '%s' to '%s' is not allowed." sourceDb targetDb))
+            elif scan snapshot targetDb targetView |> Result.isOk || tryStoredView snapshot targetDb targetView |> Option.isSome then
+                Error(TableExists targetView)
+            else
+                updateRows
+                    snapshot
+                    "mysql"
+                    "views"
+                    None
+                    (fun row ->
+                        row
+                        |> SystemCatalog.View.tryRead
+                        |> Option.exists (fun view -> sameName view.Schema sourceDb && sameName view.Name sourceView)
+                        |> Ok)
+                    (fun row -> row |> SystemCatalog.View.withName targetView |> Ok)
+                |> Result.map ignore
+
+        let renameOne (sourceName, targetName) =
+            let sourceDb, sourceTable = splitQualified dbName sourceName
+            let targetDb, targetTable = splitQualified dbName targetName
+
+            match tryStoredView snapshot sourceDb sourceTable with
+            | Some _ -> renameView sourceDb sourceTable targetDb targetTable
+            | None ->
+                renameTables snapshot dbName [ sourceName, targetName ]
+                |> Result.bind (fun () -> retargetTableObjects sourceDb sourceTable targetDb targetTable)
+
+        match pairs |> List.fold (fun state pair -> state |> Result.bind (fun () -> renameOne pair)) (Ok()) with
+        | Ok() ->
+            Storage.commitCatalogInto store baseCatalog snapshot
+            ids, Affected 0UL
+        | Error error -> ids, storageErr error
 
     | CreateIndex(name, table, columns, unique, kind, visible) ->
         let db, table = splitQualified dbName table

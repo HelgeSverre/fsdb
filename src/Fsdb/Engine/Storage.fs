@@ -5174,7 +5174,12 @@ let private referencingForeignKeys (catalog: Catalog) (parent: TableAddress) : (
                 else
                     None)))
 
-let private retargetForeignKeys (oldParent: TableAddress) (newTableName: string) (catalog: Catalog) =
+let private retargetForeignKeys
+    (oldParent: TableAddress)
+    (newParentDatabase: string)
+    (newTableName: string)
+    (catalog: Catalog)
+    =
     catalog
     |> Map.map (fun childDatabase database ->
         database
@@ -5190,7 +5195,13 @@ let private retargetForeignKeys (oldParent: TableAddress) (newTableName: string)
                         table.ForeignKeys
                         |> List.map (fun foreignKey ->
                             if referencesParent foreignKey then
-                                { foreignKey with RefTable = newTableName }
+                                { foreignKey with
+                                    RefDatabase =
+                                        if String.Equals(childDatabase, newParentDatabase, StringComparison.OrdinalIgnoreCase) then
+                                            None
+                                        else
+                                            Some newParentDatabase
+                                    RefTable = newTableName }
                             else
                                 foreignKey) }))
 
@@ -6584,44 +6595,115 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                     if finalKey = origKey then
                         updatedCatalog, ()
                     else
-                        retargetForeignKeys (tableAddress dbName origKey) finalTable.OriginalName updatedCatalog, ())))
+                        retargetForeignKeys (tableAddress dbName origKey) dbName finalTable.OriginalName updatedCatalog, ())))
 
 let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
     alterTable store dbName oldName [ RenameTo newName ]
 
-/// Atomically renames a batch and retargets incoming foreign keys.
-let renameTables (store: Store) (dbName: string) (pairs: (string * string) list) : Result<unit, StorageError> =
+let private storedViewExists (catalog: Catalog) databaseName tableName =
+    catalog
+    |> tryCatalogTable (tableAddress "mysql" "views")
+    |> Option.exists (fun views ->
+        views.RowsArray
+        |> Seq.choose SystemCatalog.View.tryRead
+        |> Seq.exists (fun view ->
+            String.Equals(view.Schema, databaseName, StringComparison.OrdinalIgnoreCase)
+            && String.Equals(view.Name, tableName, StringComparison.OrdinalIgnoreCase)))
+
+let private tableHasTriggers (catalog: Catalog) address =
+    catalog
+    |> tryCatalogTable (tableAddress "mysql" "triggers")
+    |> Option.exists (fun triggers ->
+        triggers.RowsArray
+        |> Seq.choose SystemCatalog.Trigger.tryRead
+        |> Seq.exists (fun trigger ->
+            String.Equals(trigger.Schema, address.Database, StringComparison.OrdinalIgnoreCase)
+            && String.Equals(trigger.Table, address.Table, StringComparison.OrdinalIgnoreCase)))
+
+let private renamedForeignKeyName oldTableName newTableName (foreignKey: ForeignKeyDef) =
+    let prefix = oldTableName + "_ibfk_"
+
+    if foreignKey.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) then
+        newTableName + foreignKey.Name.Substring(oldTableName.Length)
+    else
+        foreignKey.Name
+
+let private moveTableInCatalog
+    (store: Store)
+    (defaultDatabase: string)
+    (catalog: Catalog)
+    (sourceName: string, targetName: string)
+    =
+    let requestedSourceDatabase, sourceTableName = splitQualified defaultDatabase sourceName
+    let requestedTargetDatabase, targetTableName = splitQualified defaultDatabase targetName
+
+    match tryCatalogDatabaseEntry requestedSourceDatabase catalog, tryCatalogDatabaseEntry requestedTargetDatabase catalog with
+    | None, _ -> Error(NoSuchDatabase requestedSourceDatabase)
+    | _, None -> Error(NoSuchDatabase requestedTargetDatabase)
+    | Some(sourceDatabaseName, sourceDatabase), Some(targetDatabaseName, targetDatabase) ->
+        let sourceKey = normalizeTableName sourceTableName
+        let targetKey = normalizeTableName targetTableName
+        let sourceAddress = tableAddress sourceDatabaseName sourceKey
+        let crossesDatabases = not (String.Equals(sourceDatabaseName, targetDatabaseName, StringComparison.OrdinalIgnoreCase))
+
+        virtualWriteGuard store sourceDatabaseName sourceTableName
+        |> Result.bind (fun () -> virtualWriteGuard store targetDatabaseName targetTableName)
+        |> Result.bind (fun () -> tryGetTable sourceDatabase sourceTableName)
+        |> Result.bind (fun table ->
+            if Map.containsKey targetKey targetDatabase || storedViewExists catalog targetDatabaseName targetTableName then
+                Error(TableExists targetTableName)
+            elif crossesDatabases && tableHasTriggers catalog sourceAddress then
+                Error(ExpressionError(1435, "Trigger in wrong schema"))
+            else
+                let foreignKeys =
+                    table.ForeignKeys
+                    |> List.map (fun foreignKey ->
+                        let parentDatabase, parentTable =
+                            referencedTableAddress sourceDatabaseName foreignKey
+                            |> catalogTableIdentity catalog
+
+                        { foreignKey with
+                            Name = renamedForeignKeyName table.OriginalName targetTableName foreignKey
+                            RefDatabase =
+                                if String.Equals(parentDatabase, targetDatabaseName, StringComparison.OrdinalIgnoreCase) then
+                                    None
+                                else
+                                    Some parentDatabase
+                            RefTable = parentTable })
+
+                let moved =
+                    { table with
+                        OriginalName = targetTableName
+                        ForeignKeys = foreignKeys }
+
+                let withoutSource =
+                    catalog
+                    |> setCatalogDatabase sourceDatabaseName (Map.remove sourceKey sourceDatabase)
+
+                let destination = tryCatalogDatabase targetDatabaseName withoutSource |> Option.get
+
+                withoutSource
+                |> setCatalogDatabase targetDatabaseName (Map.add targetKey moved destination)
+                |> retargetForeignKeys sourceAddress targetDatabaseName targetTableName
+                |> Ok)
+
+/// Atomically renames a left-to-right batch, including qualified cross-database moves.
+let renameTables (store: Store) (defaultDatabase: string) (pairs: (string * string) list) : Result<unit, StorageError> =
     withReferentialCatalogPublishing
         store
-        dbName
+        defaultDatabase
         ExclusiveAccess
-        (fun () -> [ SchemaChanged(dbName, RenameTable pairs) ])
-        (fun catalog db ->
-            let step acc (oldName, newName) =
-                acc
-                |> Result.bind (fun (catalog, db) ->
-                    virtualWriteGuard store dbName oldName
-                    |> Result.bind (fun () -> tryGetTable db oldName)
-                    |> Result.bind (fun table ->
-                        applyAlterAction (temporalCoercionMode store) table (RenameTo newName)
-                        |> Result.map (fun (table', newKey) ->
-                            let origKey = normalizeTableName oldName
-                            let key = newKey |> Option.defaultValue origKey
-                            let database = db |> Map.remove origKey |> Map.add key (reindexTable table')
-                            let updatedCatalog =
-                                catalog
-                                |> setCatalogDatabase dbName database
-                                |> retargetForeignKeys (tableAddress dbName origKey) table'.OriginalName
-
-                            updatedCatalog, tryCatalogDatabase dbName updatedCatalog |> Option.get)))
-
+        (fun () -> [ SchemaChanged(defaultDatabase, RenameTable pairs) ])
+        (fun catalog _ ->
             pairs
-            |> List.fold step (Ok(catalog, db))
-            |> Result.map (fun (catalog, _) ->
+            |> List.fold (fun state pair -> state |> Result.bind (fun catalog -> moveTableInCatalog store defaultDatabase catalog pair)) (Ok catalog)
+            |> Result.map (fun catalog ->
                 pairs
-                |> List.iter (fun (oldName, newName) ->
-                    invalidateAutoIncrementCounter store dbName oldName
-                    invalidateAutoIncrementCounter store dbName newName)
+                |> List.iter (fun (source, target) ->
+                    let sourceDatabase, sourceTable = splitQualified defaultDatabase source
+                    let targetDatabase, targetTable = splitQualified defaultDatabase target
+                    invalidateAutoIncrementCounter store sourceDatabase sourceTable
+                    invalidateAutoIncrementCounter store targetDatabase targetTable)
 
                 catalog, ()))
 
