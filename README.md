@@ -327,7 +327,7 @@ applications:
 - Queries: joins including `NATURAL`/`USING`, derived and lateral tables,
   `GROUP BY`/`HAVING`, window functions, `UNION [ALL]`, expression subqueries,
   ordinary and recursive CTEs, JSON paths, `JSON_TABLE`, and planar spatial
-  predicates, overlays, and buffers.
+  predicates, overlays, and configurable buffers.
 - Writes and schema: `INSERT`, `INSERT ... SELECT`, `REPLACE`, multi-table
   `UPDATE`/`DELETE`, generated columns, foreign keys, HASH partition metadata,
   atomic multi-pair and cross-database table renames, foreign-server catalog

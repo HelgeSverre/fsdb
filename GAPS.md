@@ -35,7 +35,7 @@ findings recorded under `torture/findings/`.
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Replication and admin SQL |
 | Query execution | Composite equality/range access, index ordering, restricted join reordering and source-local predicate pushdown, and stable/correlated index probes | General cost-based planning and broader correlated forms |
-| Built-in functions | Broad scalar, aggregate, JSON, time, and planar geometry coverage | Geographic SRS semantics and configurable buffer strategies |
+| Built-in functions | Broad scalar, aggregate, JSON, time, and planar geometry coverage | Geographic SRS semantics and arbitrary round-buffer resolutions |
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry with planar MBR indexing | Binary JSON representation |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner/left/right joins, PK/unique/secondary/spatial range, grouping, and index-order probes | Arbitrary expression ordering and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
@@ -158,7 +158,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Advanced spatial behavior | configurable buffer strategies and geographic SRS semantics; planar overlays, default buffers, and common predicates work | low |
+| Advanced spatial behavior | round-buffer resolutions that do not divide evenly into quadrants, mixed round resolutions, the mutable `max_points_in_geometry` ceiling, and geographic SRS semantics; planar overlays, default buffers, point-square, flat-end, miter-join, and compatible round strategies work | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets and `SYSTEM`,
 but named zones remain unavailable without MySQL's optional time-zone tables.
@@ -198,7 +198,7 @@ metadata paths. Virtual generated values are recomputed when queried.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes, configurable buffer strategies, geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays and default point, line, and area buffers work, but the internal augmented interval tree is not an R-tree | low | subset |
+| Spatial indexes and operations | R-tree indexes, arbitrary round-buffer resolutions, geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays, default buffers, and square, flat-end, miter-join, and quadrant-compatible round strategies work, but the internal augmented interval tree is not an R-tree | low | subset |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
@@ -578,9 +578,9 @@ implementation effort:
    handlers, SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential
    data-changing statements.
 
-4. Geographic SRS behavior and configurable buffer strategies. Planar spatial
-   indexes, overlays, default buffers, topology predicates, equality, and
-   convex hull are covered.
+4. Geographic SRS behavior and arbitrary or mixed round-buffer resolutions.
+   Planar spatial indexes, overlays, default and common configurable buffers,
+   topology predicates, equality, and convex hull are covered.
 
 5. Replication, logging, broad engine counters, and the remaining metadata
    tail. Core command counters are live; replication remains architectural.
