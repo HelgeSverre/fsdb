@@ -128,27 +128,26 @@ let empty: Registry =
       Aggregates = Map.empty
       Extensions = Map.empty }
 
-let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
+let private replaceScalar (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
     let name = name.ToUpperInvariant()
+    let scalarMetadata =
+        match metadata with
+        | Some value -> Map.add name value registry.ScalarMetadata
+        | None -> Map.remove name registry.ScalarMetadata
 
     { registry with
         Scalars = Map.add name fn registry.Scalars
-        ScalarMetadata = Map.remove name registry.ScalarMetadata
+        ScalarMetadata = scalarMetadata
         ScalarParameters = Map.remove name registry.ScalarParameters
         TextArguments = Map.remove name registry.TextArguments
         ByteArguments = Map.remove name registry.ByteArguments
         ResultCollations = Map.remove name registry.ResultCollations }
+
+let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
+    replaceScalar name None fn registry
 
 let registerScalarWithMetadata (name: string) metadata (fn: Scalar) (registry: Registry) : Registry =
-    let name = name.ToUpperInvariant()
-
-    { registry with
-        Scalars = Map.add name fn registry.Scalars
-        ScalarMetadata = Map.add name metadata registry.ScalarMetadata
-        ScalarParameters = Map.remove name registry.ScalarParameters
-        TextArguments = Map.remove name registry.TextArguments
-        ByteArguments = Map.remove name registry.ByteArguments
-        ResultCollations = Map.remove name registry.ResultCollations }
+    replaceScalar name (Some metadata) fn registry
 
 let internal registerScalarWithSignature
     (name: string)
