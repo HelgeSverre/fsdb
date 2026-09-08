@@ -9404,10 +9404,31 @@ and private tryCorrelatedInnerColumn selfQualifier = function
     | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
     | _ -> None
 
-and private tryCorrelatedOuterValue selfQualifier context = function
-    | QualifiedCol(qualifier, _) as expression when not (qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase)) ->
-        evalExpr context expression |> Result.toOption
-    | _ -> None
+/// A correlated probe key can be evaluated once per outer row when every
+/// column dependency is explicitly outer and every function is stable. Bare
+/// names stay on the row evaluator because an inner column shadows an outer
+/// column with the same name.
+and private tryCorrelatedOuterScope selfQualifier expression =
+    Expression.fold
+        (fun scope node ->
+            match scope, node with
+            | None, _ -> Expression.Prune None
+            | Some _, Col _ -> Expression.Prune None
+            | Some _, QualifiedCol(qualifier, _) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                Expression.Prune None
+            | Some(scope: SubqueryScope), QualifiedCol(qualifier, _) ->
+                Expression.Descend(Some { scope with Qualifiers = Set.add (qualifier.ToLowerInvariant()) scope.Qualifiers })
+            | Some _, (Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ | MatchAgainst _ | WindowOver _) ->
+                Expression.Prune None
+            | Some scope, _ -> Expression.Descend(Some scope))
+        (Some emptySubqueryScope)
+        expression
+    |> Option.filter (fun scope -> not scope.Qualifiers.IsEmpty)
+
+and private tryCorrelatedOuterValue selfQualifier context expression =
+    tryCorrelatedOuterScope selfQualifier expression
+    |> Option.filter (fun scope -> isStatementStableExpr context.Store context.Registry context.DbName scope expression)
+    |> Option.bind (fun _ -> evalExpr context expression |> Result.toOption)
 
 and private tryCorrelatedEqualityPredicate selfQualifier context = function
     | BinOp(Eq, left, right) ->

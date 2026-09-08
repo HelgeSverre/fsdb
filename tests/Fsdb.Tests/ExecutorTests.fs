@@ -7470,18 +7470,68 @@ let tests =
                     |> fun rows -> runDefault store ("INSERT INTO orders VALUES " + rows)
                     |> ignore
 
+                    let assertIndexed prefix source condition =
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "%s SELECT users.id, (SELECT COUNT(*) FROM %s WHERE %s AND TOUCH(candidate.id) = candidate.id) AS c FROM users ORDER BY users.id"
+                                    prefix
+                                    source
+                                    condition)
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal rows.Length 50 "every outer row is retained"
+                            Expect.isTrue (rows |> List.forall (fun row -> row.[1] = Some "20")) "each user has twenty orders"
+                        | other -> failtestf "expected correlated counts, got %A" other
+
+                        Expect.isLessThan calls 2000 "the residual evaluates only indexed candidates, not the inner table for every outer row"
+
+                    assertIndexed "" "orders candidate" "candidate.user_id = users.id"
+                    assertIndexed "" "orders candidate" "candidate.user_id = users.id + 0"
+                    assertIndexed "" "(SELECT id, user_id FROM orders) candidate" "candidate.user_id = users.id + 0"
+                    assertIndexed
+                        "WITH candidates AS (SELECT id, user_id FROM orders)"
+                        "candidates candidate"
+                        "candidate.user_id = users.id + 0"
+
+                    runDefault store "CREATE TABLE text_orders (lookup_key VARCHAR(10), KEY ix_lookup (lookup_key))" |> ignore
+                    runDefault store "INSERT INTO text_orders VALUES ('1')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT (SELECT COUNT(*) FROM text_orders t WHERE t.lookup_key = users.id + 0) FROM users WHERE id = 1"
+                    with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected an inexact index probe to retain scan coercion, got %A" other
+
+                    let mutable effects = 0
+
+                    let outerKey (values: Value list) =
+                        effects <- effects + 1
+                        values.Head
+
+                    let effectful =
+                        builtins
+                        |> registerScalar "OUTER_KEY" outerKey
+                        |> registerExtension (ScalarFunction.create "OUTER_KEY" (fun _ values -> outerKey values) |> ScalarFunction.effectful)
+
                     match
                         run
                             store
-                            registry
-                            "SELECT users.id, (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id AND TOUCH(orders.id) = orders.id) AS c FROM users ORDER BY users.id"
+                            effectful
+                            ("SELECT users.id, (SELECT COUNT(*) FROM orders candidate "
+                             + "WHERE candidate.user_id = OUTER_KEY(users.id)) FROM users WHERE users.id <= 3")
                     with
                     | ResultSet(_, rows) ->
-                        Expect.equal rows.Length 50 "every outer row is retained"
-                        Expect.isTrue (rows |> List.forall (fun row -> row.[1] = Some "20")) "each user has twenty orders"
-                    | other -> failtestf "expected correlated counts, got %A" other
+                        Expect.equal (rows |> List.map (fun row -> row.[1])) [ Some "20"; Some "20"; Some "20" ] "effectful keys retain results"
+                    | other -> failtestf "expected effectful correlated counts, got %A" other
 
-                    Expect.isLessThan calls 2000 "the residual evaluates only indexed candidates, not the inner table for every outer row"
+                    Expect.isGreaterThan effects 1000 "an effectful outer expression is not hoisted into an index probe"
 
                 testCase "fully covered correlated counts use index cardinality"
                 <| fun _ ->

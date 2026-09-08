@@ -477,6 +477,11 @@ type ServerBenchmarks() =
         this.Query "SELECT u.id, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) FROM users u WHERE u.id <= 100"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedOuterExpression() =
+        this.Query "SELECT u.id, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id + 0) FROM users u WHERE u.id <= 100"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.GroupByAggregate() =
         this.Query "SELECT status, COUNT(*), SUM(total) FROM orders GROUP BY status"
