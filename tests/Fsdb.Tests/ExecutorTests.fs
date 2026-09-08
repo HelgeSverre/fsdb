@@ -6582,6 +6582,48 @@ let tests =
                     | ResultSet(_, []) -> ()
                     | other -> failtestf "expected the updated row to leave its transformed bucket, got %A" other
 
+                testCase "TRIM expression indexes enforce uniqueness and narrow predicates"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE labels (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, UNIQUE INDEX uq_trim ((TRIM(name))))")
+                        (Affected 0UL)
+                        "create functional index"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO labels VALUES (1, ' Reference '), (2, 'Other')")
+                        (Affected 2UL)
+                        "seed labels"
+
+                    match runDefault store "INSERT INTO labels VALUES (3, 'Reference')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected trim-equivalent values to collide, got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM labels WHERE TRIM(name) = 'Reference'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "the transformed key supplies the matching row"
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM labels WHERE TRIM(name) = 'Reference'"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "const") "the unique transformed key is a const lookup"
+                    Expect.equal plan.Key (Some "uq_trim") "the transformed key is reported"
+
+                    Expect.equal
+                        (runDefault store "UPDATE labels SET name = 'Different' WHERE TRIM(name) = 'Reference'")
+                        (Affected 1UL)
+                        "update through functional key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM labels WHERE TRIM(name) = 'Reference'")
+                        (ResultSet([ "id" ], []))
+                        "updates maintain the transformed bucket"
+
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->
                     let store = newStore ()
