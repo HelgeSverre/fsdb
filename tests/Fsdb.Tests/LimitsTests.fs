@@ -429,7 +429,8 @@ let tests =
                     "password_reuse_interval", "3"
                     "password_require_current", "ON" ]
                   (fun () ->
-                      let session = create 1 (Fsdb.Storage.create ())
+                      let store = Fsdb.Storage.create ()
+                      let session = create 1 store
 
                       match
                           handle
@@ -450,7 +451,29 @@ let tests =
 
                       match handle session "SET GLOBAL password_history = 65536" |> snd with
                       | Err(1232, _) -> ()
-                      | other -> failtestf "expected the history ceiling, got %A" other)
+                      | other -> failtestf "expected the history ceiling, got %A" other
+
+                      let session, created = handle session "CREATE USER inherited_policy IDENTIFIED BY 'alpha'"
+                      Expect.equal created (Affected 0UL) "account inherits the policy"
+
+                      match
+                          handle
+                              session
+                              "SELECT Password_reuse_history,Password_reuse_time,Password_require_current FROM mysql.user WHERE User='inherited_policy'"
+                          |> snd
+                      with
+                      | ResultSet(_, [ [ None; None; None ] ]) -> ()
+                      | other -> failtestf "expected nullable default-policy fields, got %A" other
+
+                      match handle session "SELECT COUNT(*) FROM mysql.password_history WHERE User='inherited_policy'" |> snd with
+                      | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                      | other -> failtestf "expected inherited history recording, got %A" other
+
+                      let inherited = { create 2 store with User = "inherited_policy" }
+
+                      match handle inherited "SET PASSWORD = 'beta'" |> snd with
+                      | Err(3892, _) -> ()
+                      | other -> failtestf "expected inherited current-password enforcement, got %A" other)
 
           testCase "default_week_format controls one-argument WEEK"
           <| fun _ ->
