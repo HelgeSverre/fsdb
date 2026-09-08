@@ -8,6 +8,7 @@ open System.Collections.Concurrent
 open System.Collections.Generic
 open System.Collections.Immutable
 open System.Globalization
+open System.Runtime.CompilerServices
 open System.Text
 open System.Threading
 open Fsdb.Collections
@@ -440,11 +441,12 @@ type Store =
       /// Detached XA branches remain shared across session clones and are
       /// reconstructed from WAL during recovery.
       PreparedXas: ConcurrentDictionary<Xa.Xid, PreparedXa>
-      RowLockSequence: int64 array
+      /// An addressable cell keeps lock-owner IDs process-wide across snapshots.
+      RowLockSequence: StrongBox<int64>
       TransactionLocks: TransactionLockContext option }
 
     member internal this.NextLockOwnerId() =
-        Interlocked.Increment(&this.RowLockSequence.[0])
+        Interlocked.Increment(&this.RowLockSequence.Value)
 
     /// Materializes one catalog root in O(database count), with row structures
     /// shared immutably. Hot single-database paths read `Databases` directly.
@@ -4008,7 +4010,7 @@ let create () : Store =
           Edges = Dictionary() }
       AccountResources = ConcurrentDictionary()
       PreparedXas = ConcurrentDictionary()
-      RowLockSequence = [| 0L |]
+      RowLockSequence = StrongBox 0L
       TransactionLocks = None }
 
 /// The parent table's persistent unique-key index for exactly the column
@@ -4110,6 +4112,10 @@ type EqualityIndex =
       PrefixLengths: int option list
       Transforms: IndexTransform option list
       Unique: bool }
+
+    member index.UsesWholeStoredValues =
+        index.PrefixLengths |> List.forall Option.isNone
+        && index.Transforms |> List.forall Option.isNone
 
 let private equalityIndex unique (group: IndexKeyGroup) =
     { Name = group.Name

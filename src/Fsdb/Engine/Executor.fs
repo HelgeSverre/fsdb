@@ -695,6 +695,10 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
               SecurityType = view.SecurityType
               Algorithm = view.Algorithm })
 
+let private isStoredView store defaultDatabase qualifiedName =
+    let database, view = splitQualified defaultDatabase qualifiedName
+    tryStoredView store database view |> Option.isSome
+
 let private updatableViewOfSelect (store: Store) (view: StoredView) (select: SelectStmt) : UpdatableView option =
     let combine left right =
         match left, right with
@@ -735,6 +739,31 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
     let hasWritableProjection (projections: (string * Expr * ViewColumnTarget option) list) =
         projections |> List.exists (fun (_, _, target) -> target.IsSome)
+
+    let projectedColumn rewrite targetOf (expression, alias) =
+        let defaultName =
+            match expression with
+            | Col column
+            | QualifiedCol(_, column) -> column
+            | _ -> InformationSchema.exprToSql expression
+
+        alias |> Option.defaultValue defaultName, rewrite expression, targetOf expression
+
+    let expressionsByOutput outputNames projected =
+        List.map2
+            (fun (output: string) (_, expression, _) -> output.ToLowerInvariant(), expression)
+            outputNames
+            projected
+        |> Map.ofList
+
+    let targetsByOutput outputNames projected =
+        List.map2
+            (fun (output: string) (_, _, target) ->
+                target |> Option.map (fun target -> output.ToLowerInvariant(), target))
+            outputNames
+            projected
+        |> List.choose id
+        |> Map.ofList
 
     let selectExpressions (select: SelectStmt) =
         (select.Projections |> List.map fst)
@@ -938,14 +967,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     let projected =
                         expandedProjections
-                        |> List.map (fun (expression, alias) ->
-                            let defaultName =
-                                match expression with
-                                | Col column
-                                | QualifiedCol(_, column) -> column
-                                | _ -> InformationSchema.exprToSql expression
-
-                            alias |> Option.defaultValue defaultName, rewriteSource expression, directTarget expression)
+                        |> List.map (projectedColumn rewriteSource directTarget)
 
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
@@ -975,14 +997,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     then
                         None
                     else
-                        let expressions =
-                            List.map2 (fun (output: string) (_, expression, _) -> output.ToLowerInvariant(), expression) outputNames projected
-                            |> Map.ofList
-
-                        let writableTargets =
-                            List.map2 (fun (output: string) (_, _, target) -> target |> Option.map (fun target -> output.ToLowerInvariant(), target)) outputNames projected
-                            |> List.choose id
-                            |> Map.ofList
+                        let expressions = expressionsByOutput outputNames projected
+                        let writableTargets = targetsByOutput outputNames projected
 
                         let ownPredicate = select.Where |> Option.map rewriteSource
                         let underlyingPredicate = underlying |> Option.bind _.Predicate
@@ -1262,14 +1278,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     let projected =
                         expandedProjections
-                        |> List.map (fun (expression, alias) ->
-                            let defaultName =
-                                match expression with
-                                | Col column
-                                | QualifiedCol(_, column) -> column
-                                | _ -> InformationSchema.exprToSql expression
-
-                            alias |> Option.defaultValue defaultName, rewriteSources expression, directTarget expression)
+                        |> List.map (projectedColumn rewriteSources directTarget)
 
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
@@ -1279,14 +1288,8 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                     then
                         None
                     else
-                        let expressions =
-                            List.map2 (fun (output: string) (_, expression, _) -> output.ToLowerInvariant(), expression) outputNames projected
-                            |> Map.ofList
-
-                        let targets =
-                            List.map2 (fun (output: string) (_, _, target) -> target |> Option.map (fun target -> output.ToLowerInvariant(), target)) outputNames projected
-                            |> List.choose id
-                            |> Map.ofList
+                        let expressions = expressionsByOutput outputNames projected
+                        let targets = targetsByOutput outputNames projected
 
                         let directTargets = projected |> List.choose (fun (_, _, target) -> target)
 
@@ -6795,8 +6798,7 @@ and private innerJoinChainPreservesLeftOrder
                 | Some probe
                     when residual.IsEmpty
                          && probe.Index.Unique
-                         && (probe.Index.PrefixLengths |> List.forall Option.isNone)
-                         && (probe.Index.Transforms |> List.forall Option.isNone) ->
+                         && probe.Index.UsesWholeStoredValues ->
                     preservesOrder joinedSources remaining
                 | _ -> false
             | _ -> false
@@ -7530,8 +7532,7 @@ and private applyResolvedJoin
 
             match preservedRightProbe, indexedJoinProbe with
             | Some probe, _
-                when probe.Index.PrefixLengths |> List.forall Option.isNone
-                     && probe.Index.Transforms |> List.forall Option.isNone
+                when probe.Index.UsesWholeStoredValues
                      && residualConjuncts |> List.forall safeLeftFilter ->
                 let leftRowsFor (right: Value[]) =
                     probe.ProbeIndices
@@ -7555,9 +7556,7 @@ and private applyResolvedJoin
                     }
                 Ok(newSources, rows, coalesceNames)
             | _, Some probe ->
-                let exactKey =
-                    probe.Index.PrefixLengths |> List.forall Option.isNone
-                    && probe.Index.Transforms |> List.forall Option.isNone
+                let exactKey = probe.Index.UsesWholeStoredValues
 
                 let candidateHolds combined =
                     if exactKey then
@@ -10142,6 +10141,15 @@ and private projectionExpressionsNamed (projections: Projection list) name =
         | expression, Some alias when alias.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> Some expression
         | _ -> None)
 
+and private tryProjectionExpressionNamed projections name =
+    projectionExpressionsNamed projections name |> List.tryExactlyOne
+
+and private resolveOrderAliasValue name outputColumns =
+    match outputColumns |> List.filter (fst >> fun candidate -> equalsIgnoreCase candidate name) with
+    | [] -> Ok None
+    | [ _, value ] -> Ok(Some value)
+    | _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
+
 and private transformUsesStoredSemantics (registry: Registry) = function
     | None -> true
     | Some Lowercase -> Functions.isUnmodifiedBuiltinScalar "LOWER" registry
@@ -10154,7 +10162,7 @@ and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: Selec
     let resolveProjectionReference expression =
         match resolveOrderPosition select.Projections expression with
         | Col name as column ->
-            match projectionExpressionsNamed select.Projections name |> List.tryExactlyOne with
+            match tryProjectionExpressionNamed select.Projections name with
             | Some projected -> projected, true
             | None -> column, false
         | projected -> projected, true
@@ -11310,20 +11318,18 @@ and private resolveOrderKey
     : Result<Value * Collation.Collation option, EvalError> =
     match expr with
     | Col name ->
-        match outputCols |> List.filter (fst >> fun candidate -> equalsIgnoreCase candidate name) with
-        | [ (_, v) ] ->
+        resolveOrderAliasValue name outputCols
+        |> Result.bind (function
+        | Some value ->
             // An output alias retains its source expression's declared
             // type for sorting (`SELECT role AS r ... ORDER BY r`). A
             // computed alias has no direct ENUM column and stays lexical.
             let sourceExpr =
-                projectionExpressionsNamed projections name
-                |> function
-                    | [ projectionExpr ] -> projectionExpr
-                    | _ -> expr
+                tryProjectionExpressionNamed projections name
+                |> Option.defaultValue expr
 
-            Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr v)
-        | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
-        | [] -> evalOrderKey ctx (Col name)
+            Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr value)
+        | None -> evalOrderKey ctx (Col name))
     | e -> evalOrderKey ctx e
 
 and private groupByIndexTerms (registry: Registry) (table: Table) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
@@ -11754,8 +11760,7 @@ and private validateOnlyFullGroupBy
     let resolveOrderExpr expr =
         match resolveOrderPosition select.Projections expr with
         | Col name as column ->
-            projectionExpressionsNamed select.Projections name
-            |> List.tryExactlyOne
+            tryProjectionExpressionNamed select.Projections name
             |> Option.defaultValue column
         | resolved -> resolved
 
@@ -11972,18 +11977,17 @@ and private runGroupedSelect
         |> traverse (fun (expr, _) ->
             match resolveOrderPosition select.Projections expr with
             | Col name ->
-                match outputCols |> List.filter (fst >> fun candidate -> equalsIgnoreCase candidate name) with
-                | [ (_, v) ] ->
+                resolveOrderAliasValue name outputCols
+                |> Result.bind (function
+                | Some value ->
                     let sourceExpr =
-                        projectionExpressionsNamed select.Projections name
-                        |> List.tryExactlyOne
+                        tryProjectionExpressionNamed select.Projections name
                         |> Option.defaultValue (Col name)
 
-                    Ok(orderKeyOf { ctx with Clause = OrderClause } sourceExpr v)
-                | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
-                | [] ->
+                    Ok(orderKeyOf { ctx with Clause = OrderClause } sourceExpr value)
+                | None ->
                     rewriteAggregates registry ctxFor groupRows (rollup (Col name))
-                    |> Result.bind (evalKey ctx)
+                    |> Result.bind (evalKey ctx))
             | e -> rewriteAggregates registry ctxFor groupRows (rollup e) |> Result.bind (evalKey ctx))
 
     // Schema errors are independent of whether the query produces a group.
@@ -12654,8 +12658,9 @@ and private runWindowedSelect
             matched
             |> traverse (fun row ->
                 keyOf partitionBy row
-                |> Result.bind (fun partKey ->
-                    orderKeyOf row |> Result.map (fun ordKey -> partKey, ordKey, row)))
+                |> Result.bind (fun partitionKey ->
+                    orderKeyOf row
+                    |> Result.map (fun orderKey -> partitionKey, orderKey, row)))
             |> Result.bind (fun keyed ->
                 let rankedOrderKeys =
                     keyed
@@ -14892,8 +14897,7 @@ let private indexedJoinExplainPlans
                                   References = probe.ProbeIndices |> List.map (leftColumnReference leftSources)
                                   HasResidual =
                                     not residual.IsEmpty
-                                    || (probe.Index.PrefixLengths |> List.exists Option.isSome)
-                                    || (probe.Index.Transforms |> List.exists Option.isSome) }))
+                                    || not probe.Index.UsesWholeStoredValues }))
                     | _ -> None
 
                 let sources' =
@@ -18905,7 +18909,7 @@ let rec executeAs
         | Ok() -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 
-    | LoadData load when tryStoredView store (splitQualified dbName load.Table |> fst) (splitQualified dbName load.Table |> snd) |> Option.isSome ->
+    | LoadData load when isStoredView store dbName load.Table ->
         let viewDb, viewName = splitQualified dbName load.Table
 
         match tryUpdatableView store viewDb viewName with
@@ -19098,7 +19102,7 @@ let rec executeAs
                                     (finishFor targetStore currentColumns)
                                     load.Ignore)
 
-    | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+    | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table
 
         match tryUpdatableView store viewDb viewName with
@@ -19151,7 +19155,7 @@ let rec executeAs
                 else
                     upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
 
-    | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+    | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table
 
         match tryUpdatableView store viewDb viewName with
@@ -19227,7 +19231,7 @@ let rec executeAs
                     else
                         upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate
 
-    | Replace(table, columns, rowsExprs) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+    | Replace(table, columns, rowsExprs) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table
 
         match tryUpdatableView store viewDb viewName with
@@ -19255,7 +19259,7 @@ let rec executeAs
             let cols = if columns.IsEmpty then None else Some columns
             replaceEvaluated db table cols rowsValues
 
-    | ReplaceSelect(table, columns, select) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+    | ReplaceSelect(table, columns, select) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table
 
         match tryUpdatableView store viewDb viewName with
@@ -19286,7 +19290,7 @@ let rec executeAs
             let cols = if columns.IsEmpty then None else Some columns
             replaceEvaluated db table cols rowsValues
 
-    | ReplaceSet(table, assignments) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+    | ReplaceSet(table, assignments) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table
 
         match tryUpdatableView store viewDb viewName with
