@@ -27,7 +27,13 @@ let private definitions =
         Transform = Reversed }
       { CanonicalName = "CHAR_LENGTH"
         Aliases = [ "CHARACTER_LENGTH" ]
-        Transform = CharacterLength } ]
+        Transform = CharacterLength }
+      { CanonicalName = "LENGTH"
+        Aliases = [ "OCTET_LENGTH" ]
+        Transform = ByteLength }
+      { CanonicalName = "BIT_LENGTH"
+        Aliases = []
+        Transform = BitLength } ]
 
 let private namesOf definition =
     definition.CanonicalName :: definition.Aliases
@@ -67,7 +73,9 @@ let supportsColumnType transform columnType =
         | TBinary _
         | TVarBinary _ -> true
         | _ -> false
-    | CharacterLength ->
+    | CharacterLength
+    | ByteLength
+    | BitLength ->
         match columnType with
         | TGeometry _
         | TVector _ -> false
@@ -76,7 +84,9 @@ let supportsColumnType transform columnType =
 
 let fixedKeyLength =
     function
-    | CharacterLength -> Some 8
+    | CharacterLength
+    | ByteLength
+    | BitLength -> Some 8
     | _ -> None
 
 let private trimBinarySpaces (bytes: byte[]) =
@@ -108,6 +118,14 @@ let characterLength value =
     | Some bytes -> int64 bytes.Length
     | None -> value |> toText |> Option.map runeLength |> Option.defaultValue 0L
 
+/// Text byte length follows the source character set; callers without a
+/// declared source use UTF-8, matching ordinary string literals.
+let byteLengthWith encodeText value =
+    match tryRawBytes value, value with
+    | Some bytes, _ -> int64 bytes.Length
+    | None, VString text -> text |> encodeText |> Array.length |> int64
+    | None, _ -> value |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetByteCount |> int64
+
 let private tryExactInt64 =
     function
     | VInt value -> Some value
@@ -127,7 +145,9 @@ let private tryExactInt64 =
 
 let tryNormalizeProbe transform normalizeStored value =
     match transform with
-    | Some CharacterLength -> tryExactInt64 value |> Option.map VInt
+    | Some CharacterLength
+    | Some ByteLength
+    | Some BitLength -> tryExactInt64 value |> Option.map VInt
     | _ -> normalizeStored value
 
 let private mapTextOrBytes mapText mapBytes value =
@@ -135,7 +155,7 @@ let private mapTextOrBytes mapText mapBytes value =
     | Some bytes -> VBytes(mapBytes bytes)
     | None -> value |> toText |> Option.defaultValue "" |> mapText |> VString
 
-let projectValue transform value =
+let projectValueWith encodeText transform value =
     match transform, value with
     | Some _, VNull -> VNull
     | Some Lowercase, value -> mapTextOrBytes _.ToLowerInvariant() id value
@@ -143,4 +163,9 @@ let projectValue transform value =
     | Some Trimmed, value -> mapTextOrBytes _.Trim(' ') trimBinarySpaces value
     | Some Reversed, value -> mapTextOrBytes reverseText Array.rev value
     | Some CharacterLength, value -> VInt(characterLength value)
+    | Some ByteLength, value -> VInt(byteLengthWith encodeText value)
+    | Some BitLength, value -> VInt(byteLengthWith encodeText value * 8L)
     | _ -> value
+
+let projectValue transform value =
+    projectValueWith Text.Encoding.UTF8.GetBytes transform value

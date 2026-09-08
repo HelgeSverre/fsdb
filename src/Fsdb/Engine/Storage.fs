@@ -2331,35 +2331,40 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
     else
         Some(encodeEqualityKey columns indices row)
 
-let private projectIndexValue prefixLength transform value =
-    let transformed = FunctionalIndex.projectValue transform value
+let private projectIndexValue (column: ColumnDef) prefixLength transform value =
+    let encodeText =
+        column.Charset
+        |> Option.map Charset.encode
+        |> Option.defaultValue Encoding.UTF8.GetBytes
+
+    let transformed = FunctionalIndex.projectValueWith encodeText transform value
 
     match prefixLength, transformed with
     | Some length, VString text -> VString(truncateRunes length text |> Option.defaultValue text)
     | Some length, VBytes bytes -> VBytes(Array.truncate length bytes)
     | _ -> transformed
 
-let private projectIndexRow (group: IndexKeyGroup) (row: Value[]) =
+let private projectIndexRow (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) =
     let projected = Array.copy row
 
     List.zip3 group.Indices group.PrefixLengths group.Transforms
     |> List.iter (fun (index, prefixLength, transform) ->
-        projected.[index] <- projectIndexValue prefixLength transform projected.[index])
+        projected.[index] <- projectIndexValue columns.[index] prefixLength transform projected.[index])
 
     projected
 
-let private indexValues (group: IndexKeyGroup) (row: Value[]) =
+let private indexValues (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) =
     if indexesWholeColumns group then
         group.Indices |> List.map (fun index -> row.[index])
     else
-        let projected = projectIndexRow group row
+        let projected = projectIndexRow columns group row
         group.Indices |> List.map (fun index -> projected.[index])
 
 let private encodeIndexKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string =
     if indexesWholeColumns group then
         encodeEqualityKey columns group.Indices row
     else
-        encodeEqualityKey columns group.Indices (projectIndexRow group row)
+        encodeEqualityKey columns group.Indices (projectIndexRow columns group row)
 
 let private encodeUniqueKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string option =
     if group.Indices |> List.exists (fun index -> row.[index] = VNull) then
@@ -2502,7 +2507,7 @@ let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
                     entries.Add
                         { CollationNames = group.Indices |> List.map (fun index -> table.Columns.[index].Collation)
                           Directions = group.Directions
-                          Values = indexValues group row
+                          Values = indexValues table.Columns group row
                           RowId = rowId })
                 ImmutableSortedSet<SecondaryOrderEntry>.Empty
 
@@ -2639,11 +2644,11 @@ let private reindexRow
     let orderedEntry (keyGroup: IndexKeyGroup) rowId (row: Value[]) =
         { CollationNames = keyGroup.Indices |> List.map (fun index -> columns.[index].Collation)
           Directions = keyGroup.Directions
-          Values = indexValues keyGroup row
+          Values = indexValues columns keyGroup row
           RowId = rowId }
 
     let updateOrderedGroup (keyGroup: IndexKeyGroup) entries =
-        if rowKeyUnchanged (indexValues keyGroup) then
+        if rowKeyUnchanged (indexValues columns keyGroup) then
             entries
         else
             let entries =
@@ -4079,7 +4084,7 @@ let coerceHandlerIndexValues
         |> List.zip values
         |> traverse (fun (value, (columnIndex, prefixLength, transform)) ->
             Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) index.Columns.[columnIndex] value)
-            |> Result.map (projectIndexValue prefixLength transform))
+            |> Result.map (projectIndexValue index.Columns.[columnIndex] prefixLength transform))
 
 let compareHandlerIndexValues (index: HandlerIndexRows) (left: Value list) (right: Value list) : int =
     let count = min left.Length right.Length
@@ -4564,7 +4569,7 @@ let private trySecondaryOrderSliceInTable
             | Some(VNull, _) -> None
             | Some(value, inclusive) ->
                 exactProbeValue store table index value
-                |> Option.map (projectIndexValue group.PrefixLength group.Transform)
+                |> Option.map (projectIndexValue table.Columns.[index] group.PrefixLength group.Transform)
                 |> Option.map (fun value -> Some(value, inclusive))
 
         match normalizeBound lower, normalizeBound upper with
@@ -4834,7 +4839,7 @@ let private tryOrderedIndexLookupWithPrefix
                     | [], _, _, _ -> Some []
                     | value :: rest, index :: indices, prefixLength :: lengths, transform :: remainingTransforms ->
                         exactProbeValue store table index value
-                        |> Option.map (projectIndexValue prefixLength transform)
+                        |> Option.map (projectIndexValue table.Columns.[index] prefixLength transform)
                         |> Option.bind (fun normalized ->
                             normalizePrefix rest indices lengths remainingTransforms
                             |> Option.map (fun normalizedRest -> normalized :: normalizedRest))
@@ -4853,7 +4858,11 @@ let private tryOrderedIndexLookupWithPrefix
                             None
                         else
                             exactProbeValue store table indices.[position] value
-                            |> Option.map (projectIndexValue group.PrefixLengths.[position] group.Transforms.[position])
+                            |> Option.map
+                                (projectIndexValue
+                                    table.Columns.[indices.[position]]
+                                    group.PrefixLengths.[position]
+                                    group.Transforms.[position])
                             |> Option.map (fun value -> Some(value, inclusive))
 
                 match Map.tryFind group.Name table.SecondaryOrder, normalizedPrefix, normalizeBound lower, normalizeBound upper with

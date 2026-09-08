@@ -325,29 +325,6 @@ let private roundNumeric (v: Value) : Value =
     | VDouble d -> VDouble(Math.Round(d, MidpointRounding.ToEven))
     | _ -> v
 
-/// `LENGTH` counts UTF-8 bytes (MySQL's `LENGTH` is a byte length, not a
-/// character count — that's `CHAR_LENGTH`). `VBytes`' own byte count is
-/// used directly rather than round-tripping through `toText` (which decodes
-/// raw bytes 1:1 as Latin-1 chars for display, and re-encoding *that* as
-/// UTF-8 would inflate any byte ≥ 0x80 to two bytes).
-let private lengthFn: Scalar =
-    function
-    | [ VNull ] -> VNull
-    | [ value ] ->
-        match tryRawBytes value with
-        | Some bytes -> VInt(int64 bytes.Length)
-        | None -> value |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetByteCount |> int64 |> VInt
-    | _ -> VNull
-
-let private bitLengthFn: Scalar =
-    function
-    | [ VNull ] -> VNull
-    | [ value ] ->
-        match tryRawBytes value with
-        | Some bytes -> VInt(int64 bytes.Length * 8L)
-        | None -> VInt(int64 (Text.Encoding.UTF8.GetByteCount(req value)) * 8L)
-    | _ -> VNull
-
 let private coalesceFn (args: Value list) : Value =
     args |> List.tryFind (function VNull -> false | _ -> true) |> Option.defaultValue VNull
 
@@ -5750,6 +5727,10 @@ let private registerFunctionalText transform registry =
     FunctionalIndex.names transform
     |> List.fold (fun registry name -> registerTextScalar name firstArgument (functionalIndexScalar transform) registry) registry
 
+let private registerFunctionalByteText transform registry =
+    FunctionalIndex.names transform
+    |> List.fold (fun registry name -> registerByteTextScalar name firstArgument (functionalIndexScalar transform) registry) registry
+
 let private registerTemporalBuiltins registry =
     registry
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
@@ -5961,9 +5942,8 @@ let builtins: Registry =
     |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) concatFn
     |> registerFunctionalString Uppercase
     |> registerFunctionalString Lowercase
-    |> registerByteTextScalar "LENGTH" firstArgument lengthFn
-    |> registerByteTextScalar "OCTET_LENGTH" firstArgument lengthFn
-    |> registerByteTextScalar "BIT_LENGTH" firstArgument bitLengthFn
+    |> registerFunctionalByteText ByteLength
+    |> registerFunctionalByteText BitLength
     |> registerFunctionalText CharacterLength
     |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
     |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn

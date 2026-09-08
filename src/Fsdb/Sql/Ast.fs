@@ -369,6 +369,8 @@ and IndexTransform =
     | Trimmed
     | Reversed
     | CharacterLength
+    | ByteLength
+    | BitLength
     | Expression of Expr
 
 and IndexColumn =

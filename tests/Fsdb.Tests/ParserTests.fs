@@ -2359,6 +2359,14 @@ let tests =
                     | CreateIndex("ix_lcase", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Lowercase; Direction = Asc } ], false, BTree, true) -> ()
                     | other -> failtestf "expected LCASE to normalize to the lowercase transform, got %A" other
 
+                    match parseOk "CREATE INDEX ix_octets ON t ((OCTET_LENGTH(external_id)))" with
+                    | CreateIndex("ix_octets", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some ByteLength; Direction = Asc } ], false, BTree, true) -> ()
+                    | other -> failtestf "expected OCTET_LENGTH to normalize to the byte-length transform, got %A" other
+
+                    match parseOk "CREATE INDEX ix_bits ON t ((BIT_LENGTH(external_id)))" with
+                    | CreateIndex("ix_bits", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some BitLength; Direction = Asc } ], false, BTree, true) -> ()
+                    | other -> failtestf "expected a bit-length functional key part, got %A" other
+
                     match
                         parseOk
                             "CREATE TABLE companies (name VARCHAR(255), rating BIGINT, firm_name VARCHAR(255), firm_id BIGINT, client_of BIGINT, INDEX company_name_index USING btree (name), INDEX company_expression_index ((CASE WHEN rating > 0 THEN lower(name) END) DESC), INDEX full_name_index ((CONCAT_WS(firm_name, name, _utf8mb4' '))), INDEX company_disabled_index (firm_id, client_of) INVISIBLE)"

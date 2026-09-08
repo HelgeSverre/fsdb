@@ -595,6 +595,8 @@ let private uppercaseIndexColumnPrefix = "\u0000U:"
 let private trimmedIndexColumnPrefix = "\u0000T:"
 let private reversedIndexColumnPrefix = "\u0000R:"
 let private characterLengthIndexColumnPrefix = "\u0000C:"
+let private byteLengthIndexColumnPrefix = "\u0000O:"
+let private bitLengthIndexColumnPrefix = "\u0000B:"
 let private expressionIndexColumnPrefix = "\u0000E:"
 let private descendingIndexColumnPrefix = "\u0000D:"
 let private literalIndexColumnPrefix = "\u0000N:"
@@ -618,6 +620,8 @@ let private encodeIndexColumn (format: SnapshotFormat) column =
         | Some Trimmed, _ -> trimmedIndexColumnPrefix + column.Name
         | Some Reversed, _ -> reversedIndexColumnPrefix + column.Name
         | Some CharacterLength, _ -> characterLengthIndexColumnPrefix + column.Name
+        | Some ByteLength, _ -> byteLengthIndexColumnPrefix + column.Name
+        | Some BitLength, _ -> bitLengthIndexColumnPrefix + column.Name
         | Some(Expression expression), _ ->
             let expressionBytes = Writer()
             encodeExpr expressionBytes expression
@@ -654,6 +658,8 @@ let private decodeIndexColumn (format: SnapshotFormat) (columnNames: Set<string>
         | Prefixed trimmedIndexColumnPrefix name -> column direction name None (Some Trimmed)
         | Prefixed reversedIndexColumnPrefix name -> column direction name None (Some Reversed)
         | Prefixed characterLengthIndexColumnPrefix name -> column direction name None (Some CharacterLength)
+        | Prefixed byteLengthIndexColumnPrefix name -> column direction name None (Some ByteLength)
+        | Prefixed bitLengthIndexColumnPrefix name -> column direction name None (Some BitLength)
         | Prefixed expressionIndexColumnPrefix expression ->
             try
                 let expression = expression |> Convert.FromBase64String |> Reader |> decodeExpr

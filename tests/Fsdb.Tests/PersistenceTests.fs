@@ -2491,6 +2491,10 @@ let tests =
                     "INSERT INTO lookup_reverse VALUES (1, 'a😀b'), (2, 'Other')"
                     "CREATE TABLE lookup_chars (id INT PRIMARY KEY, name VARCHAR(20), INDEX ix_name_chars ((CHAR_LENGTH(name))))"
                     "INSERT INTO lookup_chars VALUES (1, 'a😀b'), (2, 'Other')"
+                    "CREATE TABLE lookup_octets (id INT PRIMARY KEY, name VARCHAR(20) CHARACTER SET latin1, UNIQUE INDEX ix_name_octets ((OCTET_LENGTH(name))))"
+                    "INSERT INTO lookup_octets VALUES (1, 'é'), (2, 'Other')"
+                    "CREATE TABLE lookup_bits (id INT PRIMARY KEY, name VARCHAR(20), INDEX ix_name_bits ((BIT_LENGTH(name))))"
+                    "INSERT INTO lookup_bits VALUES (1, 'é'), (2, 'Other')"
                     "CREATE TABLE lookup_composite (id INT PRIMARY KEY, tenant_id INT, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_tenant_upper (tenant_id, (UPPER(name))))"
                     "INSERT INTO lookup_composite VALUES (1, 1, 'zeta'), (2, 1, 'Alpha'), (3, 2, 'beta')" ]
                   |> List.fold run session
@@ -2551,8 +2555,20 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered character-length bucket returns its row"
               | other -> failtestf "expected recovered character-length lookup rows, got %A" other
 
+              match handle (Fsdb.Session.create 10 reloaded) "SELECT id FROM lookup_octets WHERE LENGTH(name) = 1" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered byte-length bucket retains its charset"
+              | other -> failtestf "expected recovered byte-length lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 11 reloaded) "INSERT INTO lookup_octets VALUES (3, 'x')" |> snd with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected the recovered byte-length unique key to reject a duplicate, got %A" other
+
+              match handle (Fsdb.Session.create 12 reloaded) "SELECT id FROM lookup_bits WHERE BIT_LENGTH(name) = 16" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered bit-length bucket returns its row"
+              | other -> failtestf "expected recovered bit-length lookup rows, got %A" other
+
               let recoveredOrderPlan =
-                  handle (Fsdb.Session.create 10 reloaded) "EXPLAIN SELECT id FROM lookup_upper ORDER BY UPPER(name)"
+                  handle (Fsdb.Session.create 13 reloaded) "EXPLAIN SELECT id FROM lookup_upper ORDER BY UPPER(name)"
                   |> snd
                   |> TestSupport.Sql.explainRow
 
@@ -2561,7 +2577,7 @@ let tests =
 
               let recoveredCompositePlan =
                   handle
-                      (Fsdb.Session.create 11 reloaded)
+                      (Fsdb.Session.create 14 reloaded)
                       "EXPLAIN SELECT id FROM lookup_composite WHERE tenant_id = 1 ORDER BY UPPER(name)"
                   |> snd
                   |> TestSupport.Sql.explainRow
