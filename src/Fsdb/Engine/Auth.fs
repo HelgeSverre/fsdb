@@ -25,6 +25,11 @@ let nativePasswordHash (password: string) : string =
 let private storedHashForPassword password =
     if password = "" then "" else nativePasswordHash password
 
+let private passwordHashesEqual (left: string) (right: string) =
+    let left = Text.Encoding.ASCII.GetBytes left
+    let right = Text.Encoding.ASCII.GetBytes right
+    left.Length = right.Length && CryptographicOperations.FixedTimeEquals(left, right)
+
 /// Verifies a client's mysql_native_password challenge answer.
 /// The client sends `SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw)))` (20
 /// bytes); XORing with `SHA1(scramble + stage2)` recovers `SHA1(pw)`, whose
@@ -1109,7 +1114,7 @@ let private validateCurrentPassword actor wanted columns row replacement policy 
         match replacement with
         | None when policy.RequireCurrent ->
             Error(3892, "Current password needs to be specified in the REPLACE clause in order to change it.")
-        | Some current when storedHashForPassword current <> storedPasswordHash columns row ->
+        | Some current when not (passwordHashesEqual (storedHashForPassword current) (storedPasswordHash columns row)) ->
             Error(3891, "Incorrect current password. Specify the correct password which has to be replaced.")
         | _ -> Ok()
     elif replacement.IsSome then
@@ -1174,7 +1179,11 @@ let private alterUserInStore
                     |> Result.bind (fun entries ->
                         let active = retainedPasswordEntries now policy entries
 
-                        if newHash <> "" && (active |> List.exists (fun (entry, keep) -> keep && entry.Hash = newHash)) then
+                        if
+                            newHash <> ""
+                            && (active
+                                |> List.exists (fun (entry, keep) -> keep && passwordHashesEqual entry.Hash newHash))
+                        then
                             Error(
                                 3638,
                                 sprintf
