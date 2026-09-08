@@ -2278,7 +2278,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
 
         match inferred, leftMetadata, rightMetadata with
         | Some result, Some leftType, Some rightType
-            when leftType.Flags &&& NotNullFlag <> 0us && rightType.Flags &&& NotNullFlag <> 0us ->
+            when hasMetadataFlag NotNullFlag leftType && hasMetadataFlag NotNullFlag rightType ->
             Some { result with Flags = result.Flags ||| NotNullFlag }
         | _ -> inferred
 
@@ -2287,7 +2287,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         let metadata = inferred |> List.choose snd
         let notNull =
             sameLength metadata expressions
-            && (metadata |> List.forall (fun item -> item.Flags &&& NotNullFlag <> 0us))
+            && (metadata |> List.forall (hasMetadataFlag NotNullFlag))
 
         let isText item =
             item.TypeId = TypeString || item.TypeId = TypeVarString || item.TypeId = TypeBlob
@@ -2337,7 +2337,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             |> withNullability
             |> Some
         | _ when not metadata.IsEmpty && metadata |> List.forall isInteger ->
-            let isUnsigned = metadata |> List.forall (fun item -> item.Flags &&& UnsignedFlag <> 0us)
+            let isUnsigned = metadata |> List.forall (hasMetadataFlag UnsignedFlag)
 
             simple TypeLongLong
             |> Option.map (fun item ->
@@ -2355,7 +2355,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         let notNull =
             expressions
             |> List.choose (metadataOfExpr ctx)
-            |> List.exists (fun item -> item.Flags &&& NotNullFlag <> 0us)
+            |> List.exists (hasMetadataFlag NotNullFlag)
 
         choose expressions
         |> Option.map (fun result ->
@@ -2555,7 +2555,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         let metadata = ColumnWire.metadataOfType ty
 
         metadataOfExpr ctx value
-        |> Option.filter (fun source -> source.Flags &&& NotNullFlag <> 0us)
+        |> Option.filter (hasMetadataFlag NotNullFlag)
         |> Option.map (fun _ -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
         |> Option.orElse (Some metadata)
     | Collate(inner, collation) ->
@@ -2591,7 +2591,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             | Some metadata when
                 metadata.TypeId = TypeDouble
                 || metadata.TypeId = TypeFloat
-                || metadata.Flags &&& (EnumFlag ||| SetFlag) <> 0us
+                || hasMetadataFlag (EnumFlag ||| SetFlag) metadata
                 ->
                 simple TypeDouble
             | _ -> simple TypeNewDecimal
@@ -2602,7 +2602,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | ("MIN" | "MAX"), [ arg ] ->
             metadataOfExpr ctx arg
             |> Option.map (fun metadata ->
-                if metadata.Flags &&& (EnumFlag ||| SetFlag) <> 0us then
+                if hasMetadataFlag (EnumFlag ||| SetFlag) metadata then
                     { metadata with Flags = metadata.Flags &&& ~~~(EnumFlag ||| SetFlag) }
                 else
                     metadata)
@@ -6094,7 +6094,7 @@ and private deriveColumns
     (metadata: ColumnMetadata list)
     : ColumnDef list =
     let declaredType (column: ColumnMetadata) =
-        let unsigned = column.Flags &&& UnsignedFlag <> 0us
+        let unsigned = hasMetadataFlag UnsignedFlag column
         let characters = int column.ColumnLength / 4
 
         if column.TypeId = TypeTiny && column.ColumnLength = 1u then TBool
@@ -6104,7 +6104,7 @@ and private deriveColumns
         elif column.TypeId = TypeLongLong then TBigInt unsigned
         elif column.TypeId = TypeFloat then TFloat false
         elif column.TypeId = TypeDouble then TDouble false
-        elif column.TypeId = TypeNewDecimal then TDecimal(65, int column.Decimals, column.Flags &&& UnsignedFlag <> 0us)
+        elif column.TypeId = TypeNewDecimal then TDecimal(65, int column.Decimals, hasMetadataFlag UnsignedFlag column)
         elif column.TypeId = TypeBit then TBit(int column.ColumnLength)
         elif column.TypeId = TypeDate then TDate
         elif column.TypeId = TypeDateTime then TDateTime(int column.Decimals)
@@ -6113,13 +6113,13 @@ and private deriveColumns
         elif column.TypeId = TypeYear then TYear
         elif column.TypeId = TypeJson then TJson
         elif column.TypeId = TypeGeometry then TGeometry Geometry
-        elif column.TypeId = TypeString && column.Flags &&& EnumFlag <> 0us then TEnum []
-        elif column.TypeId = TypeString && column.Flags &&& SetFlag <> 0us then TSet []
-        elif column.TypeId = TypeString && column.Flags &&& BinaryFlag <> 0us then TBinary(int column.ColumnLength)
+        elif column.TypeId = TypeString && hasMetadataFlag EnumFlag column then TEnum []
+        elif column.TypeId = TypeString && hasMetadataFlag SetFlag column then TSet []
+        elif column.TypeId = TypeString && hasMetadataFlag BinaryFlag column then TBinary(int column.ColumnLength)
         elif column.TypeId = TypeString then TChar characters
-        elif column.TypeId = TypeVarString && column.Flags &&& BinaryFlag <> 0us then TVarBinary(int column.ColumnLength)
+        elif column.TypeId = TypeVarString && hasMetadataFlag BinaryFlag column then TVarBinary(int column.ColumnLength)
         elif column.TypeId = TypeVarString then TVarchar characters
-        elif column.TypeId = TypeBlob && column.Flags &&& BinaryFlag <> 0us then TBlob
+        elif column.TypeId = TypeBlob && hasMetadataFlag BinaryFlag column then TBlob
         elif column.TypeId = TypeBlob then TText
         else TText
 
@@ -6134,7 +6134,7 @@ and private deriveColumns
             { Name = n
               Type = declaredType columnMetadata
               NumericDisplay = None
-              Nullable = columnMetadata.Flags &&& NotNullFlag = 0us
+              Nullable = not (hasMetadataFlag NotNullFlag columnMetadata)
               Default = None
               AutoIncrement = false
               PrimaryKey = false
@@ -10636,7 +10636,7 @@ and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
     elif types |> List.forall isInt then
         { Value.columnMetadata Value.TypeLongLong with
             Flags =
-                if columns |> List.exists (fun column -> column.Flags &&& Value.UnsignedFlag <> 0us) then
+                if columns |> List.exists (hasMetadataFlag Value.UnsignedFlag) then
                     Value.UnsignedFlag
                 else
                     0us }
@@ -10658,7 +10658,7 @@ and private coerceUnionValue (metadata: ColumnMetadata) (v: Value) : Value =
         match ty with
         | t when t = Value.TypeTiny || t = Value.TypeShort || t = Value.TypeLong || t = Value.TypeLongLong ->
             match v with
-            | VUInt _ when metadata.Flags &&& Value.UnsignedFlag <> 0us -> v
+            | VUInt _ when hasMetadataFlag Value.UnsignedFlag metadata -> v
             | _ -> VInt(int64 (Value.toDouble v))
         | t when t = Value.TypeNewDecimal -> VDecimal(decimal (Value.toDouble v))
         | t when t = Value.TypeDouble || t = Value.TypeFloat -> VDouble(Value.toDouble v)

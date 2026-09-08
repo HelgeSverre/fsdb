@@ -364,7 +364,7 @@ let private resultHeadPayloads
         [ errPayloadWithState capabilities code state message ]
     | MultipleResults _ -> invalidArg (nameof result) "Nested result collections must be sent through sendResult"
     | ResultSet(columns, _) ->
-        let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
+        let deprecateEof = hasCapability ClientDeprecateEof capabilities
 
         let columnCountPayload =
             let w = Writer()
@@ -445,7 +445,7 @@ let rec private sendResult
 
             let! seqId = sendRows stream seqId metadata rowEncoder rows
 
-            let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
+            let deprecateEof = hasCapability ClientDeprecateEof capabilities
 
             let! nextSeqId =
                 sendPayloads
@@ -480,7 +480,7 @@ let private sendCursorHead
     let columnCount = Writer()
     columnCount.WriteLenEncInt(uint64 columns.Length)
     let terminator =
-        if capabilities &&& ClientDeprecateEof <> 0u then
+        if hasCapability ClientDeprecateEof capabilities then
             okEndOfResultSetPayloadWithWarnings capabilities statusFlags warningCount
         else
             eofPayloadWithWarnings capabilities statusFlags warningCount
@@ -503,7 +503,7 @@ let private sendCursorRows
     async {
         let! seqId = sendRows stream startSeq metadata binaryRowPayload rows
         let terminator =
-            if capabilities &&& ClientDeprecateEof <> 0u then
+            if hasCapability ClientDeprecateEof capabilities then
                 okEndOfResultSetPayloadWithWarnings capabilities statusFlags warningCount
             else
                 eofPayloadWithWarnings capabilities statusFlags warningCount
@@ -946,7 +946,7 @@ let private sessionTimeout (name: string) (fallback: int) (session: Session) =
     | None -> fallback
 
 let private sessionWaitTimeout (session: Session) =
-    if session.Capabilities &&& ClientInteractive <> 0u then
+    if hasCapability ClientInteractive session.Capabilities then
         sessionTimeout "interactive_timeout" Limits.interactiveTimeoutSeconds session
     else
         sessionTimeout "wait_timeout" Limits.waitTimeoutSeconds session
@@ -1091,7 +1091,7 @@ let private authenticateAccount
                 let expired =
                     Auth.isPasswordExpiredAtWithDefault Limits.defaultPasswordLifetimeDays DateTime.Now cols row
 
-                if expired && capabilities &&& ClientCanHandleExpiredPasswords = 0u then
+                if expired && not (hasCapability ClientCanHandleExpiredPasswords capabilities) then
                     let message =
                         "Your password has expired. To log in you must change it using a client that supports expired passwords."
 
@@ -1439,7 +1439,7 @@ let private handleConnection
                         CustomFunctions = customFunctions
                         Capabilities = capabilities
                         Compression = compression
-                        MultiStatementsEnabled = capabilities &&& ClientMultiStatements <> 0u
+                        MultiStatementsEnabled = hasCapability ClientMultiStatements capabilities
                         TlsVersion = tlsVersion
                         TlsCipher = tlsCipher
                         TransportMetrics = metrics }
@@ -1546,7 +1546,7 @@ let private handleConnection
 
                                 return! loop session
                             | Some(ChangeUser request) ->
-                                let supportsPluginAuth = capabilities &&& ClientPluginAuth <> 0u
+                                let supportsPluginAuth = hasCapability ClientPluginAuth capabilities
                                 let changeAuthData = if supportsPluginAuth then randomAuthPluginData () else authData
 
                                 let response =
@@ -1696,7 +1696,8 @@ let private handleConnection
                                         | Result.Ok statements -> Result.Ok statements
                                         | Result.Error _ -> Result.Error(1064, "You have an error in your SQL syntax")
 
-                                    let multiStatements = session.MultiStatementsEnabled && capabilities &&& ClientMultiResults <> 0u
+                                    let multiStatements =
+                                        session.MultiStatementsEnabled && hasCapability ClientMultiResults capabilities
 
                                     match statements with
                                     | Result.Error(code, message) ->
@@ -1746,7 +1747,9 @@ let private handleConnection
                                                                     runCancellable statement (fun () -> QueryHandler.handle session statement)
                                                                     |> Option.map (fun (nextSession, result) -> nextSession, result, seqId)
                                                             }
-                                                        | Result.Ok(Some load) when not Limits.localInfile || capabilities &&& ClientLocalFiles = 0u ->
+                                                        | Result.Ok(Some load)
+                                                            when not Limits.localInfile
+                                                                 || not (hasCapability ClientLocalFiles capabilities) ->
                                                             async {
                                                                 return
                                                                     Some(
@@ -1961,7 +1964,7 @@ let private handleConnection
                                             Statements = Map.add stmtId stmt session.Statements
                                             NextStmtId = stmtId + 1 }
 
-                                    let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
+                                    let deprecateEof = hasCapability ClientDeprecateEof capabilities
 
                                     let paramDefEof =
                                         if paramCount > 0 && not deprecateEof then

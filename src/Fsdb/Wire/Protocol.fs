@@ -103,6 +103,9 @@ let ClientSessionTrack = 0x00800000u
 let ClientDeprecateEof = 0x01000000u
 let ClientZstdCompressionAlgorithm = 0x04000000u
 
+let internal hasCapability capability capabilities =
+    capabilities &&& capability <> 0u
+
 /// What this server offers during the handshake. Effective per-connection
 /// capabilities are this AND-ed with whatever the client requests.
 let ServerCapabilities =
@@ -237,7 +240,7 @@ let tryParseSslRequest (payload: byte[]) : SslRequest option =
     if payload.Length = sslRequestPayloadLength then
         let capabilities = uint32 (Reader(payload).ReadInt32LE())
 
-        if capabilities &&& ClientSsl <> 0u then
+        if hasCapability ClientSsl capabilities then
             Some { Capabilities = capabilities }
         else
             None
@@ -259,18 +262,18 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
     let username = r.ReadNullTerminatedString()
 
     let authResponse =
-        if capabilities &&& ClientPluginAuthLenencClientData <> 0u then
+        if hasCapability ClientPluginAuthLenencClientData capabilities then
             match r.ReadLenEncInt() with
             | Some len -> r.ReadBytes(boundedLen len)
             | None -> [||]
-        elif capabilities &&& ClientSecureConnection <> 0u then
+        elif hasCapability ClientSecureConnection capabilities then
             let len = int (r.ReadByte())
             r.ReadBytes len
         else
             Text.Encoding.UTF8.GetBytes(r.ReadNullTerminatedString())
 
     let database =
-        if capabilities &&& ClientConnectWithDb <> 0u && r.Remaining > 0 then
+        if hasCapability ClientConnectWithDb capabilities && r.Remaining > 0 then
             match r.ReadNullTerminatedString() with
             | "" -> None
             | name -> Some name
@@ -278,13 +281,13 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
             None
 
     let clientPlugin =
-        if capabilities &&& ClientPluginAuth <> 0u && r.Remaining > 0 then
+        if hasCapability ClientPluginAuth capabilities && r.Remaining > 0 then
             Some(r.ReadNullTerminatedString())
         else
             None
 
     let zstdCompressionLevel =
-        if capabilities &&& ClientZstdCompressionAlgorithm <> 0u && r.Remaining > 0 then
+        if hasCapability ClientZstdCompressionAlgorithm capabilities && r.Remaining > 0 then
             Some(int (r.ReadByte()))
         else
             None
@@ -297,9 +300,9 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
       ZstdCompressionLevel = zstdCompressionLevel }
 
 let negotiatedCompression capabilities zstdCompressionLevel =
-    if capabilities &&& ClientCompress <> 0u then
+    if hasCapability ClientCompress capabilities then
         Ok(Some Compression.Algorithm.Zlib)
-    elif capabilities &&& ClientZstdCompressionAlgorithm <> 0u then
+    elif hasCapability ClientZstdCompressionAlgorithm capabilities then
         match zstdCompressionLevel with
         | Some level when level >= 1 && level <= 22 ->
             Ok(Some(Compression.Algorithm.Zstandard(min level Limits.maxZstdCompressionLevel)))
@@ -325,7 +328,7 @@ let parseChangeUserRequest (capabilities: uint32) (payload: byte[]) : ChangeUser
     let username = reader.ReadNullTerminatedString()
 
     let authResponse =
-        if capabilities &&& ClientSecureConnection <> 0u then
+        if hasCapability ClientSecureConnection capabilities then
             reader.ReadBytes(int (reader.ReadByte()))
         else
             readNullTerminatedBytes ()
@@ -336,13 +339,13 @@ let parseChangeUserRequest (capabilities: uint32) (payload: byte[]) : ChangeUser
         | name -> Some name
 
     let characterSet =
-        if capabilities &&& ClientProtocol41 <> 0u && reader.Remaining > 0 then
+        if hasCapability ClientProtocol41 capabilities && reader.Remaining > 0 then
             Some(reader.ReadInt16LE())
         else
             None
 
     let clientPlugin =
-        if capabilities &&& ClientPluginAuth <> 0u && reader.Remaining > 0 then
+        if hasCapability ClientPluginAuth capabilities && reader.Remaining > 0 then
             Some(reader.ReadNullTerminatedString())
         else
             None
@@ -391,7 +394,7 @@ let private okPayloadWithHeader
 
         writer.ToArray()
 
-    let tracksSession = capabilities &&& ClientSessionTrack <> 0u
+    let tracksSession = hasCapability ClientSessionTrack capabilities
     let statusFlags =
         if tracksSession && sessionState.Length > 0 then
             statusFlags ||| StatusSessionStateChanged
@@ -403,7 +406,7 @@ let private okPayloadWithHeader
     w.WriteLenEncInt affectedRows
     w.WriteLenEncInt lastInsertId
 
-    if capabilities &&& ClientProtocol41 <> 0u then
+    if hasCapability ClientProtocol41 capabilities then
         w.WriteInt16LE statusFlags
         w.WriteInt16LE warnings
 
@@ -475,7 +478,7 @@ let errPayloadWithState (capabilities: uint32) (code: int) (state: string) (mess
     w.WriteByte 0xffuy
     w.WriteInt16LE code
 
-    if capabilities &&& ClientProtocol41 <> 0u then
+    if hasCapability ClientProtocol41 capabilities then
         w.WriteByte(byte '#')
         w.WriteBytes(Encoding.ASCII.GetBytes state)
 
@@ -492,7 +495,7 @@ let eofPayload (capabilities: uint32) (statusFlags: int) : byte[] =
     let w = Writer()
     w.WriteByte 0xfeuy
 
-    if capabilities &&& ClientProtocol41 <> 0u then
+    if hasCapability ClientProtocol41 capabilities then
         w.WriteInt16LE 0
         w.WriteInt16LE statusFlags
 
@@ -502,7 +505,7 @@ let eofPayloadWithWarnings (capabilities: uint32) (statusFlags: int) (warnings: 
     let w = Writer()
     w.WriteByte 0xfeuy
 
-    if capabilities &&& ClientProtocol41 <> 0u then
+    if hasCapability ClientProtocol41 capabilities then
         w.WriteInt16LE warnings
         w.WriteInt16LE statusFlags
 
@@ -541,7 +544,7 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
     let isBinary =
         col.Metadata.TypeId <> TypeJson
-        && (col.Metadata.Flags &&& BinaryFlag <> 0us || col.Metadata.TypeId = TypeBit)
+        && (hasMetadataFlag BinaryFlag col.Metadata || col.Metadata.TypeId = TypeBit)
     let collation =
         if isBinary then
             BinaryCollation
@@ -594,7 +597,8 @@ let textRowPayloadTyped (columns: ColumnMetadata list) (values: string option li
     |> List.iter (fun (metadata, value) ->
         match value with
         | None -> w.WriteLenEncNull()
-        | Some s when metadata.Flags &&& BinaryFlag <> 0us || metadata.TypeId = TypeBit -> w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
+        | Some s when hasMetadataFlag BinaryFlag metadata || metadata.TypeId = TypeBit ->
+            w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
         | Some s -> w.WriteLenEncString s)
 
     w.ToArray()
@@ -654,7 +658,7 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
     if typeId = TypeBit then
         w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
     elif typeId = TypeLongLong then
-        if metadata.Flags &&& UnsignedFlag <> 0us then
+        if hasMetadataFlag UnsignedFlag metadata then
             w.WriteInt64LE(int64 (UInt64.Parse(s, Globalization.CultureInfo.InvariantCulture)))
         else
             w.WriteInt64LE(Int64.Parse(s, Globalization.CultureInfo.InvariantCulture))
@@ -727,7 +731,7 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
         w.WriteInt16LE(int (int16 (parseIntOr 0L s)))
     elif typeId = TypeLong then
         w.WriteInt32LE(int (int32 (parseIntOr 0L s)))
-    elif metadata.Flags &&& BinaryFlag <> 0us then
+    elif hasMetadataFlag BinaryFlag metadata then
         w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
     else
         w.WriteLenEncString s

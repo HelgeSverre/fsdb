@@ -177,7 +177,7 @@ let withIndexFlags (indexes: IndexDef list) (columnName: string) (metadata: Colu
 
     let keyMask = UniqueKeyFlag ||| MultipleKeyFlag ||| PartKeyFlag
     let baseFlags = metadata.Flags &&& ~~~keyMask
-    let primaryPart = metadata.Flags &&& PrimaryKeyFlag <> 0us
+    let primaryPart = hasMetadataFlag PrimaryKeyFlag metadata
 
     { metadata with
         Flags =

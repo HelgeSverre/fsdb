@@ -458,7 +458,7 @@ let private trackingIsEnabled name (session: Session) =
         || value.Equals("ON", StringComparison.OrdinalIgnoreCase))
 
 let private appendSessionStateChanges stateChanged (changes: Protocol.SessionStateChange list) (session: Session) =
-    if session.Capabilities &&& ClientSessionTrack = 0u then
+    if not (hasCapability ClientSessionTrack session.Capabilities) then
         session
     else
         let changes =
@@ -484,7 +484,7 @@ let private trackedSystemVariableNames (session: Session) =
         |> Set.ofSeq
 
 let trackSystemVariableAssignments stateChanged (names: string list) (session: Session) =
-    if session.Capabilities &&& ClientSessionTrack = 0u then
+    if not (hasCapability ClientSessionTrack session.Capabilities) then
         session
     else
         let tracked = trackedSystemVariableNames session
@@ -602,7 +602,7 @@ let trackExplicitTableLocks readTransactional wroteTransactional (session: Sessi
                         LockedTables = true } } }
 
 let finalizeTransactionTracking (previous: Session) (session: Session) =
-    if session.Capabilities &&& ClientSessionTrack = 0u then
+    if not (hasCapability ClientSessionTrack session.Capabilities) then
         session
     else
         let previousLevel = transactionTrackingLevel previous

@@ -1143,6 +1143,9 @@ type ColumnMetadata =
       CollationId: uint16 option
       Origin: ColumnOrigin option }
 
+let internal hasMetadataFlag flag metadata =
+    metadata.Flags &&& flag <> 0us
+
 let columnMetadata typeId =
     { TypeId = typeId
       ColumnLength = 0u

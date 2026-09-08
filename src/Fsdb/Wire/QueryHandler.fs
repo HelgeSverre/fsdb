@@ -2638,7 +2638,7 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
                     session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
                 | _ ->
-                    let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
+                    let foundRows = Fsdb.Protocol.hasCapability Fsdb.Protocol.ClientFoundRows session.Capabilities
 
                     let (lastInsertId, lastGeneratedId), result =
                         withExecutionLimits (fun () ->
@@ -5016,7 +5016,7 @@ let private runRoutineStatements
         let valueAt index (value: string option) =
             match value, List.tryItem index session.LastResultColumnMetadata with
             | Some text, Some metadata
-                when metadata.Flags &&& BinaryFlag <> 0us
+                when hasMetadataFlag BinaryFlag metadata
                      && (metadata.TypeId = TypeString
                          || metadata.TypeId = TypeVarString
                          || metadata.TypeId = TypeBlob)
