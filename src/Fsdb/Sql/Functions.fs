@@ -5761,10 +5761,10 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
     |> registerScalarResult "ST_BUFFER" binaryResult geometryBufferFn
     |> registerScalarResult "ST_BUFFER_STRATEGY" binaryResult geometryBufferStrategyFn
-    |> registerScalarResult "ST_INTERSECTION" binaryResult (geometryOverlayFn "ST_INTERSECTION" Intersection)
-    |> registerScalarResult "ST_UNION" binaryResult (geometryOverlayFn "ST_UNION" Union)
-    |> registerScalarResult "ST_DIFFERENCE" binaryResult (geometryOverlayFn "ST_DIFFERENCE" Difference)
-    |> registerScalarResult "ST_SYMDIFFERENCE" binaryResult (geometryOverlayFn "ST_SYMDIFFERENCE" SymmetricDifference)
+    |> registerScalarResult "ST_INTERSECTION" binaryResult (geometryOverlayFn "ST_INTERSECTION" OverlayKind.Intersection)
+    |> registerScalarResult "ST_UNION" binaryResult (geometryOverlayFn "ST_UNION" OverlayKind.Union)
+    |> registerScalarResult "ST_DIFFERENCE" binaryResult (geometryOverlayFn "ST_DIFFERENCE" OverlayKind.Difference)
+    |> registerScalarResult "ST_SYMDIFFERENCE" binaryResult (geometryOverlayFn "ST_SYMDIFFERENCE" OverlayKind.SymmetricDifference)
     |> registerScalarResult "ST_CONVEXHULL" binaryResult geometryConvexHullFn
     |> registerScalarResult "ST_ENVELOPE" binaryResult geometryEnvelopeFn
     |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)

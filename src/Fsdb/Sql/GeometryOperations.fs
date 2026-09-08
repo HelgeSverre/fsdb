@@ -8,14 +8,15 @@ open NetTopologySuite.Operation.Overlay
 open NetTopologySuite.Operation.OverlayNG
 open Fsdb.Value
 
-type OverlayKind =
+[<RequireQualifiedAccess>]
+type internal OverlayKind =
     | Intersection
     | Union
     | Difference
     | SymmetricDifference
 
 [<RequireQualifiedAccess>]
-type BufferStrategy =
+type internal BufferStrategy =
     | EndRound of pointsPerCircle: float
     | EndFlat
     | JoinRound of pointsPerCircle: float
@@ -24,12 +25,12 @@ type BufferStrategy =
     | PointSquare
 
 [<RequireQualifiedAccess>]
-type BufferError =
+type internal BufferError =
     | InvalidStrategy
     | UnsupportedRoundResolution
     | OperationFailed of detail: string
 
-let maxBufferPointsPerCircle = 65_536
+let internal maxBufferPointsPerCircle = 65_536
 let private defaultPointsPerCircle = 32.0
 let private strategyCodeLength = sizeof<int32>
 let private encodedStrategyLength = strategyCodeLength + sizeof<double>
@@ -42,14 +43,14 @@ let private strategyCodeAndPoints = function
     | BufferStrategy.PointCircle points -> 5, points
     | BufferStrategy.PointSquare -> 6, 0.0
 
-let encodeBufferStrategy strategy =
+let internal encodeBufferStrategy strategy =
     let code, points = strategyCodeAndPoints strategy
     let bytes = Array.zeroCreate<byte> encodedStrategyLength
     BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(0, strategyCodeLength), code)
     BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(strategyCodeLength, sizeof<double>), BitConverter.DoubleToInt64Bits points)
     bytes
 
-let tryDecodeBufferStrategy (bytes: byte[]) =
+let internal tryDecodeBufferStrategy (bytes: byte[]) =
     if bytes.Length <> encodedStrategyLength then
         None
     else
@@ -90,13 +91,13 @@ let private attempt srid operation =
     | :? ParseException as error -> Error error.Message
     | :? ArgumentException as error -> Error error.Message
 
-let overlay kind (first: Geometry) (second: Geometry) =
+let internal overlay kind (first: Geometry) (second: Geometry) =
     let spatialFunction =
         match kind with
-        | Intersection -> SpatialFunction.Intersection
-        | Union -> SpatialFunction.Union
-        | Difference -> SpatialFunction.Difference
-        | SymmetricDifference -> SpatialFunction.SymDifference
+        | OverlayKind.Intersection -> SpatialFunction.Intersection
+        | OverlayKind.Union -> SpatialFunction.Union
+        | OverlayKind.Difference -> SpatialFunction.Difference
+        | OverlayKind.SymmetricDifference -> SpatialFunction.SymDifference
 
     attempt first.Srid (fun () -> OverlayNGRobust.Overlay(toNts first, toNts second, spatialFunction))
 
@@ -185,7 +186,7 @@ let private configureBuffer geometry strategies =
 
             Ok parameters
 
-let buffer strategies distance (geometry: Geometry) =
+let internal buffer strategies distance (geometry: Geometry) =
     configureBuffer geometry strategies
     |> Result.bind (fun parameters ->
         attempt geometry.Srid (fun () -> BufferOp.Buffer(toNts geometry, distance, parameters))

@@ -432,120 +432,133 @@ let tests =
                         | Fsdb.Functions.SqlError(1210, _) -> ()
                         | error -> failtestf "expected negative line buffer error 1210, got %A" error)
 
-                testCase "buffer strategies retain MySQL bytes and shape policy"
-                <| fun _ ->
-                    let geometry text = call "ST_GeomFromText" [ VString text ]
-                    let strategy name points = call "ST_Buffer_Strategy" (VString name :: points)
+                testList
+                    "buffer strategies"
+                    [ testCase "use MySQL's binary representation"
+                      <| fun _ ->
+                          let strategy name points = call "ST_Buffer_Strategy" (VString name :: points)
 
-                    Expect.equal
-                        (strategy "point_square" [])
-                        (VBytes(Convert.FromHexString "060000000000000000000000"))
-                        "point-square bytes"
+                          Expect.equal
+                              (strategy "point_square" [])
+                              (VBytes(Convert.FromHexString "060000000000000000000000"))
+                              "point-square bytes"
 
-                    Expect.equal
-                        (strategy "join_miter" [ VInt 32L ])
-                        (VBytes(Convert.FromHexString "040000000000000000004040"))
-                        "join-miter bytes"
+                          Expect.equal
+                              (strategy "join_miter" [ VInt 32L ])
+                              (VBytes(Convert.FromHexString "040000000000000000004040"))
+                              "join-miter bytes"
 
-                    Expect.equal (strategy "point_circle" [ VNull ]) VNull "NULL points"
+                          Expect.equal (strategy "point_circle" [ VNull ]) VNull "NULL points"
 
-                    let square = call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 2L; strategy "point_square" [] ]
+                          Expect.throwsC
+                              (fun () -> strategy "point_circle" [ VInt 65_537L ] |> ignore)
+                              (function
+                              | Fsdb.Functions.SqlError(3134, _) -> ()
+                              | error -> failtestf "expected points ceiling error 3134, got %A" error)
 
-                    Expect.equal
-                        (call "ST_Equals" [ square; geometry "POLYGON((-2 -2,2 -2,2 2,-2 2,-2 -2))" ])
-                        (VInt 1L)
-                        "square point buffer"
+                      testCase "shape point and line buffers"
+                      <| fun _ ->
+                          let geometry text = call "ST_GeomFromText" [ VString text ]
+                          let strategy name points = call "ST_Buffer_Strategy" (VString name :: points)
+                          let square = call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 2L; strategy "point_square" [] ]
 
-                    match call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 1L; strategy "point_circle" [ VInt 5L ] ] with
-                    | VGeometry { Shape = GPolygon [ ring ] } -> Expect.equal ring.Length 6 "five edges plus closure"
-                    | value -> failtestf "expected a five-edge point buffer, got %A" value
+                          Expect.equal
+                              (call "ST_Equals" [ square; geometry "POLYGON((-2 -2,2 -2,2 2,-2 2,-2 -2))" ])
+                              (VInt 1L)
+                              "square point buffer"
 
-                    let flat = call "ST_Buffer" [ geometry "LINESTRING(0 0,2 0)"; VInt 1L; strategy "end_flat" [] ]
+                          match call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 1L; strategy "point_circle" [ VInt 5L ] ] with
+                          | VGeometry { Shape = GPolygon [ ring ] } -> Expect.equal ring.Length 6 "five edges plus closure"
+                          | value -> failtestf "expected a five-edge point buffer, got %A" value
 
-                    Expect.equal
-                        (call "ST_Equals" [ flat; geometry "POLYGON((0 -1,0 1,2 1,2 -1,0 -1))" ])
-                        (VInt 1L)
-                        "flat line ends"
+                          let flat = call "ST_Buffer" [ geometry "LINESTRING(0 0,2 0)"; VInt 1L; strategy "end_flat" [] ]
 
-                    let mitered =
-                        call
-                            "ST_Buffer"
-                            [ geometry "LINESTRING(0 0,0 2,2 2)"
-                              VInt 1L
-                              strategy "end_flat" []
-                              strategy "join_miter" [ VInt 32L ] ]
+                          Expect.equal
+                              (call "ST_Equals" [ flat; geometry "POLYGON((0 -1,0 1,2 1,2 -1,0 -1))" ])
+                              (VInt 1L)
+                              "flat line ends"
 
-                    Expect.equal
-                        (call "ST_Equals" [ mitered; geometry "POLYGON((1 1,2 1,2 3,0 3,-1 3,-1 2,-1 0,1 0,1 1))" ])
-                        (VInt 1L)
-                        "mitered join"
+                          let mitered =
+                              call
+                                  "ST_Buffer"
+                                  [ geometry "LINESTRING(0 0,0 2,2 2)"
+                                    VInt 1L
+                                    strategy "end_flat" []
+                                    strategy "join_miter" [ VInt 32L ] ]
 
-                    Expect.equal
-                        (call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 1L; VNull ])
-                        VNull
-                        "NULL strategy propagates"
+                          Expect.equal
+                              (call
+                                  "ST_Equals"
+                                  [ mitered
+                                    geometry "POLYGON((1 1,2 1,2 3,0 3,-1 3,-1 2,-1 0,1 0,1 1))" ])
+                              (VInt 1L)
+                              "mitered join"
 
-                    Expect.equal
-                        (call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 0L; VBytes [| 0uy |] ])
-                        (geometry "POINT(0 0)")
-                        "zero distance ignores strategy bytes"
+                      testCase "validate arguments in MySQL's order"
+                      <| fun _ ->
+                          let geometry text = call "ST_GeomFromText" [ VString text ]
+                          let strategy name points = call "ST_Buffer_Strategy" (VString name :: points)
 
-                    let empty = geometry "GEOMETRYCOLLECTION EMPTY"
-                    Expect.equal (call "ST_Buffer" [ empty; VInt 1L; strategy "point_square" [] ]) empty "empty positive buffer"
-                    Expect.equal (call "ST_Buffer" [ empty; VInt -1L; strategy "point_square" [] ]) empty "empty negative buffer"
+                          let expectWrongArguments invoke =
+                              Expect.throwsC
+                                  (invoke >> ignore)
+                                  (function
+                                  | Fsdb.Functions.SqlError(1210, _) -> ()
+                                  | error -> failtestf "expected wrong-arguments error 1210, got %A" error)
 
-                    let polygonCollection =
-                        geometry "GEOMETRYCOLLECTION(POLYGON((0 0,4 0,4 4,0 4,0 0)))"
+                          Expect.equal
+                              (call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 1L; VNull ])
+                              VNull
+                              "NULL strategy propagates"
 
-                    Expect.equal
-                        (call
-                            "ST_Equals"
-                            [ call "ST_Buffer" [ polygonCollection; VInt -1L ]
-                              geometry "POLYGON((3 1,3 3,1 3,1 1,3 1))" ])
-                        (VInt 1L)
-                        "area-only collections support erosion"
+                          Expect.equal
+                              (call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 0L; VBytes [| 0uy |] ])
+                              (geometry "POINT(0 0)")
+                              "zero distance ignores strategy bytes"
 
-                    let expectWrongArguments invoke =
-                        Expect.throwsC
-                            (invoke >> ignore)
-                            (function
-                            | Fsdb.Functions.SqlError(1210, _) -> ()
-                            | error -> failtestf "expected wrong-arguments error 1210, got %A" error)
+                          let empty = geometry "GEOMETRYCOLLECTION EMPTY"
+                          Expect.equal (call "ST_Buffer" [ empty; VInt 1L; strategy "point_square" [] ]) empty "empty positive buffer"
+                          Expect.equal (call "ST_Buffer" [ empty; VInt -1L; strategy "point_square" [] ]) empty "empty negative buffer"
 
-                    expectWrongArguments (fun () -> strategy "point_circle" [])
-                    expectWrongArguments (fun () -> strategy "point_square" [ VInt 4L ])
-                    expectWrongArguments (fun () -> strategy "not_a_strategy" [])
-                    expectWrongArguments (fun () -> call "ST_Buffer" [ empty; VInt 1L; VBytes [| 0uy |] ])
+                          let polygonCollection =
+                              geometry "GEOMETRYCOLLECTION(POLYGON((0 0,4 0,4 4,0 4,0 0)))"
 
-                    Expect.throwsC
-                        (fun () -> strategy "point_circle" [ VInt 65_537L ] |> ignore)
-                        (function
-                        | Fsdb.Functions.SqlError(3134, _) -> ()
-                        | error -> failtestf "expected points ceiling error 3134, got %A" error)
+                          Expect.equal
+                              (call
+                                  "ST_Equals"
+                                  [ call "ST_Buffer" [ polygonCollection; VInt -1L ]
+                                    geometry "POLYGON((3 1,3 3,1 3,1 1,3 1))" ])
+                              (VInt 1L)
+                              "area-only collections support erosion"
 
-                    expectWrongArguments (fun () ->
-                        call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 1L; strategy "end_flat" [] ])
+                          expectWrongArguments (fun () -> strategy "point_circle" [])
+                          expectWrongArguments (fun () -> strategy "point_square" [ VInt 4L ])
+                          expectWrongArguments (fun () -> strategy "not_a_strategy" [])
+                          expectWrongArguments (fun () -> call "ST_Buffer" [ empty; VInt 1L; VBytes [| 0uy |] ])
 
-                    expectWrongArguments (fun () ->
-                        call
-                            "ST_Buffer"
-                            [ geometry "LINESTRING(0 0,2 0)"
-                              VInt 1L
-                              strategy "end_flat" []
-                              strategy "end_round" [ VInt 32L ] ])
+                          expectWrongArguments (fun () ->
+                              call "ST_Buffer" [ geometry "POINT(0 0)"; VInt 1L; strategy "end_flat" [] ])
 
-                    Expect.throwsC
-                        (fun () ->
-                            call
-                                "ST_Buffer"
-                                [ geometry "LINESTRING(0 0,0 2,2 2)"
-                                  VInt 1L
-                                  strategy "end_flat" []
-                                  strategy "join_round" [ VInt 10L ] ]
-                            |> ignore)
-                        (function
-                        | Fsdb.Functions.SqlError(1235, _) -> ()
-                        | error -> failtestf "expected unsupported-resolution error 1235, got %A" error)
+                          expectWrongArguments (fun () ->
+                              call
+                                  "ST_Buffer"
+                                  [ geometry "LINESTRING(0 0,2 0)"
+                                    VInt 1L
+                                    strategy "end_flat" []
+                                    strategy "end_round" [ VInt 32L ] ])
+
+                          Expect.throwsC
+                              (fun () ->
+                                  call
+                                      "ST_Buffer"
+                                      [ geometry "LINESTRING(0 0,0 2,2 2)"
+                                        VInt 1L
+                                        strategy "end_flat" []
+                                        strategy "join_round" [ VInt 10L ] ]
+                                  |> ignore)
+                              (function
+                              | Fsdb.Functions.SqlError(1235, _) -> ()
+                              | error -> failtestf "expected unsupported-resolution error 1235, got %A" error) ]
 
                 testCase "planar intersections reject nonzero and mismatched SRIDs"
                 <| fun _ ->
