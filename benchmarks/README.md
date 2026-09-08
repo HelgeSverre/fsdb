@@ -103,7 +103,11 @@ Sub-millisecond cases include a substantial fixed wire and MySqlConnector
 cost. Use the point-query cases in the same result artifact as that run's
 loopback baseline.
 
-## Results history
+## Recorded results
+
+These tables summarize immutable, linked result artifacts. They are historical
+measurements, not claims about the current branch; use a fresh run for a current
+comparison.
 
 Each run lands in `results/<git-sha>.md` with a provenance header
 (sha, date, OS, .NET, server mode). Representative snapshots, medians:

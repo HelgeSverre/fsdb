@@ -15,27 +15,15 @@ they are understood and minimized.
 
 ## Design
 
-- The harness is native F# and references FSDB directly.
-- FSDB runs in-process on an OS-assigned port, while all SQL still travels over
-  its real MySQL wire protocol.
-- `Store.OnCommit`, `Store.Catalog`, and `Parser.parse` provide subject-side
-  diagnostics without adding production tracing APIs.
-- MySQL 8.4.11 is the semantic oracle. The Compose file pins its image digest.
-- SQL Splitter 1.21.0 is the deterministic corpus generator and preflight
-  verifier. It is not treated as the database oracle.
-- Scenario-specific SELECT probes compare column names, declared result types,
-  and ordered typed results before the final schema/data snapshot.
-- An ordered DML battery compares affected-row counts in both found-row and
-  changed-row client modes, including composite-index, checked-view, nested
-  join-view, and ordered compound-trigger writes.
-- A deterministic syntax lane mutates known-valid feature statements and
-  compares MySQL and FSDB error codes and SQLSTATEs.
-- A durability lane runs fsdb as a child process, kills it during concurrent
-  commits, and verifies repeated checkpoint rotation, WAL-tail recovery, and
-  graceful snapshots independently of MySQL.
-- A multi-database lane checks independent transaction outcomes, state
-  isolation, and publication scaling on one fsdb process.
-- Generated artifacts stay under `artifacts/`, which is ignored.
+| Concern | Design |
+|---|---|
+| Subject | Native F# starts fsdb on an OS-assigned port; all SQL still crosses the real MySQL wire protocol. Internal catalog, parser, and commit data enrich failure artifacts without adding production tracing APIs. |
+| Oracle | A digest-pinned MySQL 8.4.11 container decides semantics. SQL Splitter generates and validates deterministic corpora but is never the database oracle. |
+| Differential checks | Scenario probes compare column names, declared result types, ordered typed results, affected rows, and final schema/data state. |
+| Syntax checks | Deterministic mutations of known-valid statements compare acceptance, error code, and SQLSTATE. |
+| Concurrency checks | Prepared transactions exercise contention, cancellation, savepoints, disconnects, and independent databases. |
+| Durability checks | A child fsdb process is killed during commits and checkpoint rotation, then verified through WAL-tail and snapshot recovery. |
+| Evidence | Replayable artifacts stay under the ignored `artifacts/` directory. Known gaps are added only by manual review. |
 
 ## Quick start
 

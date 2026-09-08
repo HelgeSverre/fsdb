@@ -31,23 +31,22 @@ findings recorded under `torture/findings/`.
 
 ## Summary by area
 
-| Area | State | Largest single gap |
+| Area | Current boundary | Largest remaining gap |
 |---|---|---|
-| SQL statements | Broad core; large admin/programmatic tail missing | Replication and admin SQL |
-| Query execution | Composite equality/range access, index ordering, restricted join reordering and source-local predicate pushdown, and stable/correlated index probes | General cost-based planning and broader correlated forms |
-| Built-in functions | Broad scalar, aggregate, JSON, time, and planar geometry coverage | Geographic SRS semantics and arbitrary round-buffer resolutions |
-| Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry with planar MBR indexing | Binary JSON representation |
-| Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner/left/right joins, PK/unique/secondary/spatial range, grouping, and index-order probes | Arbitrary expression ordering and broader grouping paths still scan |
-| Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
-| Transactions | Dirty-read, read-committed, repeatable-read, and conservatively validated serializable views with optimistic row-version merge | Remaining coarse write shapes |
-| Persistence | WAL + snapshot, crash-tested through automatic rotations and WAL tails, with bounded group commit | Opt-in only; row tombstones are reclaimed during bounded foreground compaction rather than by a background purge worker |
-| Views & triggers | Single-table, nested, and direct physical inner-join updatable views; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers across single- and multi-table DML, with compound condition-handling bodies and procedure calls | Complex updatable views |
-| Routines & events | Typed procedures with configurable recursion, trigger-invoked procedure calls, data-changing stored functions, and persisted definer-context event scheduling | No material gap recorded |
-| Full-text | Oracle-verified scoring over maintained inverted indexes | CJK parsing and remaining plan combinations |
-| Wire protocol | Handshake through COM_STMT_FETCH, mutual TLS, zlib/Zstandard compression, LOCAL INFILE, multi-result batches, and transaction-aware session-state tracking | No GTID state tracker or live TLS certificate reload |
-| Auth & privileges | Static, dynamic, column, role, and proxy grants; per-host accounts; expiry sandboxes; resource caps; account locks; mandatory/default/session roles; inherited authorization | Auth plugins cannot select a proxied identity |
-| Metadata | Broad INFORMATION_SCHEMA coverage, every MySQL 8.4 `mysql.*` table schema, fsdb catalogs, active transaction metadata, and the complete keyword and `Com_*` registries | Engine-maintained physical contents remain absent |
-| Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
+| [SQL statements](#1-sql-statements-and-parser) | Application-facing DML and DDL are broad | Replication and administrative SQL |
+| [Query execution](#2-query-execution) | Common index, join, subquery, ordering, and grouping paths are planned | General cost-based planning and broader correlated forms |
+| [Built-in functions](#3-built-in-functions) | Broad scalar, aggregate, JSON, temporal, and planar geometry coverage | Geographic SRS semantics and arbitrary round-buffer resolutions |
+| [Data types](#4-data-types-and-values) | Common scalar, temporal, JSON, and OGC geometry values | Binary JSON representation |
+| [Constraints and indexes](#5-constraints-and-indexes) | Constraints and common equality, range, ordering, grouping, join, and spatial probes | Arbitrary expression ordering and broader grouping paths |
+| [Charsets and collations](#6-charsets-and-collations) | ICU-backed charset and collation registry | Exact MySQL UCA weight tables |
+| [Transactions](#7-transactions-and-concurrency) | Supported isolation levels, row ownership, optimistic merge, and XA | Remaining coarse write shapes |
+| [Persistence](#8-persistence-and-durability) | Opt-in WAL, snapshots, recovery, rotation, and group commit | Foreground rather than background row reclamation |
+| [Views and triggers](#9-views-and-triggers) | Single-table, nested, and restricted join views; ordered compound triggers | Complex updatable views |
+| [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | No material gap recorded |
+| [Full-text](#11-full-text-search) | Maintained inverted indexes and MySQL-shaped scoring | CJK parsing and remaining plan combinations |
+| [Wire protocol](#12-wire-protocol-and-prepared-statements) | Prepared statements, TLS, compression, LOCAL INFILE, and multi-results | GTID state tracking and live TLS certificate reload |
+| [Authentication](#13-authentication-and-privileges) | Host accounts, grants, roles, proxy grants, and account policy | Authentication plugins cannot select a proxied identity |
+| [Metadata and administration](#14-metadata-server-administration-logging-replication) | Broad metadata catalogs and live command/session state | Engine-owned contents, logging, and replication |
 
 ## 1. SQL statements and parser
 
@@ -85,16 +84,16 @@ refuses it through the prepared-statement protocol.
 
 ### Statement-level gaps
 
-| Statement family | Impact | Class |
-|---|---|---|
-| Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE`; `IMPORT TABLE` | medium | refusal |
-| `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; `FLUSH PRIVILEGES`/`USER_RESOURCES`/`STATUS`, all log-channel forms, plain, named, and global `TABLES` locks (including `LOCAL`/`NO_WRITE_TO_BINLOG`, `WITH READ LOCK`, and `FOR EXPORT`), and `OPTIMIZER_COSTS` work | low | divergence |
-| `ALTER TABLE` retains last-wins `ALGORITHM`/`LOCK` options, accepts known engine names, follows `NO_ENGINE_SUBSTITUTION` for unknown engines, and rejects unsupported operation, generated-column, foreign-key, and lock combinations with MySQL errors; engine changes and InnoDB's COPY/INPLACE/INSTANT lock duration still collapse to one atomic immutable-root publication | low | divergence |
-| `CREATE TABLE` rejects unknown engines under `NO_ENGINE_SUBSTITUTION` and otherwise reports MySQL's substitution warnings; known non-InnoDB engine names still use and report fsdb's shared InnoDB-shaped row store | low | divergence |
-| HASH and LINEAR HASH partition definitions, `pN` selection, INFORMATION_SCHEMA/SHOW metadata, `ADD`/`COALESCE`/`TRUNCATE PARTITION`, and logical `ANALYZE`/`CHECK`/`OPTIMIZE`/`REPAIR PARTITION` operate over the shared row store; `DROP PARTITION` returns MySQL's HASH-specific refusal, while physical pruning and partition renaming through `REORGANIZE PARTITION` remain absent | low | divergence/refusal |
-| Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, and `TABLESPACE` statements | low | refusal |
-| `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
-| `CREATE/ALTER USER` enforce account locks, `REQUIRE SSL`/`X509`, per-account query/update/connection limits, explicit and global-default password lifetimes, mergeable JSON attributes/comments, and the expired-password reset sandbox. Auth-plugin selection, issuer/subject/cipher requirements, and password history/reuse/current policy remain absent | medium | refusal |
+| Area | Remaining difference | Impact | Class |
+|---|---|---|---|
+| Server-side files | `LOAD DATA INFILE`, `SELECT … INTO OUTFILE/DUMPFILE`, and `IMPORT TABLE` are unsupported | medium | refusal |
+| Table maintenance | `CHECKSUM TABLE` uses a stable fsdb row checksum rather than MySQL's engine-specific value; supported `FLUSH` forms operate on fsdb state rather than InnoDB internals | low | divergence |
+| ALTER execution | Accepted changes publish one immutable root; MySQL's COPY/INPLACE/INSTANT algorithms and lock durations do not exist | low | divergence |
+| Storage engines | Known engine names still use fsdb's shared InnoDB-shaped row store | low | divergence |
+| HASH partitions | Definitions and logical maintenance use the shared row store; physical pruning and `REORGANIZE PARTITION` renames remain absent | low | divergence/refusal |
+| Administration and replication | Replication source, binlog purge/reset, plugin/component installation, instance, and tablespace statements are unsupported | low | refusal |
+| EXPLAIN | JSON/TREE expose the logical plan without MySQL's cost model; ANALYZE reports aggregate rather than per-iterator observations | low | divergence |
+| Account policy | Authentication-plugin selection, issuer/subject/cipher requirements, and password history/reuse/current policy are unsupported | medium | refusal |
 
 ### SELECT-level syntax gaps
 
@@ -132,10 +131,10 @@ or locking retain the general SELECT pipeline.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | fully-bound composite equality probes, scalar/composite literal `IN` lists, and matching physical inner/left/right joins use B-tree buckets; full-result inner/left joins reject broad repeated probes in favor of one compatible hash build, while early-stopping joins retain streaming probes; a simple physical `RIGHT JOIN` can reverse-probe an exact left index and stream the preserved right side; direct literal ranges feed single-table SELECT/UPDATE/DELETE and locking reads through primary, unique, and secondary indexes; `ORDER BY` and `GROUP BY` stream matching stored-column and supported built-in functional key prefixes, including suffixes after numeric, binary, or order-compatible text literal equalities, projection aliases, and ordinal references; compatible literal bounds on the next suffix key intersect those fixed-prefix slices, while folded and PAD SPACE text prefixes retain scan/sort; simple fully covered groups derive built-in counts and grouping-key `MIN`/`MAX` directly from adjacent keys; residual predicates retain row evaluation; arbitrary expression ordering and broader grouping still scan/sort | high (scale) | divergence |
-| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | qualified physical inner-join stars choose ready indexed sources by cardinality; conservative qualified source-local predicates use compatible equality, literal-list, spatial, and range candidates before residual evaluation and full-consumption all-inner join fan-out; base-source predicates retain the same treatment for early-stopping queries; direct-column derived and CTE projections map compatible literal equality, range, and scalar or composite literal-`IN` predicates back to physical indexes before projection; `STRAIGHT_JOIN` preserves written order; direct physical range and equality probes compare immutable index cardinality with table cardinality before resolving rows, literal `IN` lists use distinct-key distribution plus a bounded bucket count to avoid broad unions, tied equality work favors the sequential scan, and full-result equi-joins compare repeated index row resolution with one hash build; outer/lateral joins and statements with name-resolution-sensitive unqualified references retain source order; broader pushdown, persisted statistics, and a general cost model remain absent | medium | divergence |
+| Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | common composite equality, literal membership, range, join, ordering, and grouping shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
+| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | qualified inner joins and source-local predicates use shape- and cardinality-driven choices; outer/lateral joins, ambiguous unqualified references, and plans needing persisted statistics retain source order or conservative execution | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
-| Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once; compatible integer/string/decimal scalar `IN`, scalar equality quantifiers, and row-value `IN` reuse typed equality sets, while `IN`/`= ANY` also narrow direct indexed physical outer tables with residual, prefix-key, and row-NULL checks; simple EXISTS stops at one row; correlated equalities with a direct inner column and either qualified outer dependencies or bare names absent from the inner schema use persistent equality indexes through physical tables and composed direct-column derived or CTE projections, while selective inequalities use their range indexes; deterministic outer expressions share those paths; plain `COUNT(*)` over fully covered non-text equalities consumes persistent bucket cardinalities through unfiltered forms of those sources; broad ranges retain one-time materialization; other materialized equalities use statement-local typed lookups; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
+| Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | sql_mode | MySQL 8.4 modes affect parsing and execution | mode names are validated, deduplicated, expanded, and reported in MySQL order; strictness, zero-date modes, ERROR_FOR_DIVISION_BY_ZERO diagnostics, ONLY_FULL_GROUP_BY, NO_ENGINE_SUBSTITUTION, ANSI_QUOTES, IGNORE_SPACE, PIPES_AS_CONCAT, REAL_AS_FLOAT (including ANSI implications), HIGH_NOT_PRECEDENCE, NO_AUTO_VALUE_ON_ZERO, NO_UNSIGNED_SUBTRACTION, NO_BACKSLASH_ESCAPES, TIME_TRUNCATE_FRACTIONAL, and PAD_CHAR_TO_FULL_LENGTH have effect; most other mode bits remain inert | medium | divergence |
 
@@ -215,8 +214,8 @@ unique key over colliding data returns 1062 without publishing a corrupt index.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, scalar and composite-row literal `IN` lists, prefix-key candidates with full residual checks, matching physical inner/left/right-join keys, direct literal SELECT/UPDATE/DELETE ranges, and matching stored-column or supported built-in functional ordering and grouping prefixes after optional numeric, binary, or order-compatible text literal equalities; compatible literal bounds on the next suffix key intersect those fixed-prefix slices, while folded and PAD SPACE text prefixes retain scan/sort; projection aliases and ordinals retain MySQL's opposite ORDER BY/GROUP BY name precedence, and simple fully covered groups derive built-in counts and grouping-key `MIN`/`MAX` from adjacent keys; residual predicates retain row evaluation; broad full-result inner/left join probes yield to a compatible hash build; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; other expression ordering and grouping still sort | high (scale) | divergence |
-| Expression indexes | functional key parts participate in physical access and uniqueness | direct-column `LOWER`/`LCASE`, `UPPER`/`UCASE`, `TRIM`, `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`, `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, and `ABS` key parts maintain physical equality buckets for matching equality and literal-`IN` SELECT/DML predicates, maintain ordered entries for matching `ORDER BY` and `GROUP BY` prefixes and fixed-prefix suffixes, and enforce uniqueness; byte-length keys honor the source column charset, while text/binary `ABS` keys apply MySQL's strict, permissive, and `IGNORE` conversion diagnostics; other non-unique expressions retain DDL, persistence, and metadata but use scan fallback, while other unique expressions are refused | low | divergence/refusal |
+| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality and ordered structures cover common composite probes, joins, ranges, ordering, and grouping; unsupported expression orderings and grouping shapes retain scan/sort fallback | high (scale) | divergence |
+| Expression indexes | functional key parts participate in physical access and uniqueness | the [supported functional keys](README.md#indexes-and-joins) have physical equality and ordering paths; other non-unique expressions retain DDL and metadata but scan, while unsupported unique expressions are refused | low | divergence/refusal |
 
 ## 6. Charsets and collations
 

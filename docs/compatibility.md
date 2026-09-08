@@ -9,34 +9,25 @@ applications against it, unmodified. Where a suite diverges from its sqlite
 baseline, the dispute is settled by running the same tests against a real
 MySQL 8.4 — fsdb must match MySQL, not sqlite.
 
-`torture/` adds a differential fuzz harness: generated SQL runs against both
-fsdb and a MySQL 8.4 oracle, and the first divergence is classified and
-replayable (`torture/scripts/run.sh suite`; exit 0 = pass/known gaps, 2 = new
-fsdb findings).
+`torture/` supplies the differential and failure-injection layers. Each lane
+has a distinct contract:
 
-The separate syntax lane starts from valid feature statements,
-applies up to three deterministic bounded mutations, and compares MySQL and
-fsdb error codes and SQLSTATEs
-(`torture/scripts/run.sh syntax --syntax-cases 2000 --syntax-depth 3`). Its
-comment operators cover block, hash, dash, executable-version, and
-future-version comments while avoiding unsupported nested comments.
+| Lane | What it establishes |
+|---|---|
+| Differential suite | Generated SQL produces the same typed results, affected rows, and final state on fsdb and MySQL 8.4. |
+| Syntax mutation | Valid feature statements and bounded token/comment mutations agree on acceptance, error code, and SQLSTATE. |
+| Transaction concurrency | Prepared transactions preserve balances, ledger identity, rollback, and lock reuse under contention and disconnects. |
+| Multi-database concurrency | Independent databases do not leak state and publish without an unnecessary catalog-wide bottleneck. |
+| Durability | Acknowledged commits survive forced crashes; transactions remain atomic across WAL tails and snapshot rotation. |
 
-The fsdb-only durability lane kills a WAL-backed child server during
-concurrent two-table commits and verifies acknowledged, ambiguous, atomic, and
-snapshot-restart outcomes (`torture/scripts/run.sh durability --workers 16
---operations 500 --restarts 20`).
+Every divergence produces a replayable artifact. Exit code 0 means parity or
+only hand-reviewed known gaps; 2 means a new fsdb finding. Exact commands and
+artifact formats live in the [torture harness guide](../torture/README.md).
 
-The multi-database lane runs the prepared-transaction workload across several
-independent databases on one fsdb process. It compares every database with a
-MySQL outcome, checks for cross-database state bleed, and records concurrent
-wall-clock scaling against a separate single-database fsdb baseline
-(`torture/scripts/run.sh multidb`).
-
-The ordered DML battery covers `REPLACE` values, `REPLACE ... SELECT`, and
-`REPLACE ... SET` in both client affected-row modes. It includes unchanged
-replacements, conflicts spanning separate unique keys, same-statement key
-reuse, defaults, source-row ordering, composite-index updates, checked-view
-inserts, and ordered compound-trigger side effects.
+The ordered DML battery covers every supported `REPLACE` source form in both
+client affected-row modes. It includes unchanged replacements, conflicts
+across unique keys, same-statement key reuse, defaults, source ordering,
+composite indexes, checked views, and ordered trigger side effects.
 
 For `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`, assignments may read
 qualified columns from direct, derived, and joined SELECT sources, including
@@ -44,15 +35,10 @@ source columns omitted from the inserted projection and qualified correlations
 inside assignment subqueries. `VALUES(column)` remains available for the
 candidate value.
 
-The scalar-expression battery pins logarithmic, exponential, trigonometric,
-IPv4, and IPv6 functions to MySQL 8.4 values and domain behavior. It also
-covers phonetic, base64, ordinal, bit-selection, and common alias functions;
-signed and fractional time arithmetic, period and day-number conversion, and
-seeded randomness; `FROM DUAL`; row-value comparison and `IN` semantics;
-multi-column subquery operand errors; and empty-group bit aggregate identities.
-Planar spatial cases compare topology rather than WKT vertex order. They cover
-relations, overlays, positive, zero, and negative default buffers, and square,
-flat-end, miter-join, and compatible round strategies.
+The scalar-expression battery covers numeric, string, network, temporal, JSON,
+row-value, subquery, and aggregate edge behavior. Spatial comparisons use
+topology rather than WKT vertex order and exercise relations, overlays, signed
+default buffers, and supported buffer strategies.
 
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and
