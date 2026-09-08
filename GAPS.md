@@ -120,6 +120,9 @@ multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,
 statement-atomic multi-table DML, and exact ODKU affected-row counts. Row
 comparisons retain null-safe behavior and MySQL's 1241 error for invalid
 multi-column subqueries; empty-group bit aggregates retain their identities.
+Row-local recursive CTE members prepare their invariant predicate, projection,
+and type coercions once; members needing joins, grouping, windows, full-text,
+or locking retain the general SELECT pipeline.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
