@@ -6915,11 +6915,10 @@ let tests =
                     | other -> failtestf "expected index creation over BIGINT_MIN to fail with 1690, got %A" other
 
                     Expect.equal
-                        (runDefault store "SHOW INDEX FROM existing_magnitude")
-                        (ResultSet(
-                            [ "Table"; "Non_unique"; "Key_name"; "Seq_in_index"; "Column_name"; "Collation"; "Cardinality"; "Sub_part"; "Packed"; "Null"; "Index_type"; "Comment"; "Index_comment"; "Visible"; "Expression" ],
-                            []
-                        ))
+                        (runDefault
+                            store
+                            "SELECT index_name FROM information_schema.statistics WHERE table_schema = 'fsdb' AND table_name = 'existing_magnitude'")
+                        (ResultSet([ "index_name" ], []))
                         "failed index creation publishes no metadata"
 
                     let overridden = builtins |> registerScalar "ABS" (fun _ -> VInt 99L)
