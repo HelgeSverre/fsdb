@@ -422,6 +422,36 @@ let tests =
                   | Err(1232, _) -> ()
                   | other -> failtestf "expected the 65535-day ceiling, got %A" other)
 
+          testCase "password policy defaults are bounded global variables"
+          <| fun _ ->
+              withSettings
+                  [ "password_history", "2"
+                    "password_reuse_interval", "3"
+                    "password_require_current", "ON" ]
+                  (fun () ->
+                      let session = create 1 (Fsdb.Storage.create ())
+
+                      match
+                          handle
+                              session
+                              "SELECT @@GLOBAL.password_history,@@GLOBAL.password_reuse_interval,@@GLOBAL.password_require_current"
+                          |> snd
+                      with
+                      | ResultSet(_, [ [ Some "2"; Some "3"; Some "1" ] ]) -> ()
+                      | other -> failtestf "expected password policy globals, got %A" other
+
+                      match handle session "SHOW GLOBAL VARIABLES LIKE 'password_require_current'" |> snd with
+                      | ResultSet(_, [ [ Some "password_require_current"; Some "ON" ] ]) -> ()
+                      | other -> failtestf "expected boolean SHOW VARIABLES rendering, got %A" other
+
+                      match handle session "SET SESSION password_history = 1" |> snd with
+                      | Err(1229, _) -> ()
+                      | other -> failtestf "expected password_history to be global-only, got %A" other
+
+                      match handle session "SET GLOBAL password_history = 65536" |> snd with
+                      | Err(1232, _) -> ()
+                      | other -> failtestf "expected the history ceiling, got %A" other)
+
           testCase "default_week_format controls one-argument WEEK"
           <| fun _ ->
               withSettings [ "default_week_format", "3" ] (fun () ->

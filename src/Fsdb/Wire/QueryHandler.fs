@@ -278,6 +278,9 @@ let private globalOnlyVariables =
         (Set.ofList
             [ "event_scheduler"
               "default_password_lifetime"
+              "password_history"
+              "password_reuse_interval"
+              "password_require_current"
               "local_infile"
               "max_allowed_packet"
               "max_connections"
@@ -349,6 +352,9 @@ let private numericSystemVariables =
           "max_sp_recursion_depth"
           "net_read_timeout"
           "net_write_timeout"
+          "password_history"
+          "password_reuse_interval"
+          "password_require_current"
           "performance_schema"
           "query_cache_size"
           "sql_notes"
@@ -361,9 +367,11 @@ let private numericSystemVariables =
 let private systemVariableValue (name: string) =
     function
     | Some(value: string) when Set.contains (name.ToLowerInvariant()) numericSystemVariables ->
-        match UInt64.TryParse value with
-        | true, number -> Some(VUInt number)
-        | false, _ -> Some(VString value)
+        match value.ToUpperInvariant(), UInt64.TryParse value with
+        | "ON", _ -> Some(VUInt 1UL)
+        | "OFF", _ -> Some(VUInt 0UL)
+        | _, (true, number) -> Some(VUInt number)
+        | _ -> Some(VString value)
     | Some value -> Some(VString value)
     | None -> None
 
@@ -1854,14 +1862,34 @@ let private canUseRequestedDefiner session requested =
     Auth.sameAccount definer (accountOf session)
     || hasSessionGlobalPrivilege session "SUPER"
 
+let private sqlQuotedStringPattern = @"'(?:''|\\.|[^'])*'"
+
 let private setPasswordRe =
-    Regex(@"^SET\s+PASSWORD\s*(?:FOR\s+([^=\s]+)\s*)?=\s*'([^']*)'\s*;?$", RegexOptions.IgnoreCase)
+    Regex(
+        @"^SET\s+PASSWORD\s*(?:FOR\s+(.+?)\s*)?=\s*("
+        + sqlQuotedStringPattern
+        + @")(?:\s+REPLACE\s+("
+        + sqlQuotedStringPattern
+        + @"))?\s*;?$",
+        RegexOptions.IgnoreCase ||| RegexOptions.NonBacktracking,
+        Limits.regexpMatchTimeout
+    )
 
 let private alterCurrentUserPasswordRe =
     Regex(
-        @"^ALTER\s+USER\s+(?:USER|CURRENT_USER)\s*\(\s*\)\s+IDENTIFIED\s+BY\s+'([^']*)'\s*;?$",
-        RegexOptions.IgnoreCase
+        @"^ALTER\s+USER\s+(?:USER|CURRENT_USER)\s*\(\s*\)\s+IDENTIFIED\s+BY\s*("
+        + sqlQuotedStringPattern
+        + @")(?:\s+REPLACE\s+("
+        + sqlQuotedStringPattern
+        + @"))?\s*;?$",
+        RegexOptions.IgnoreCase ||| RegexOptions.NonBacktracking,
+        Limits.regexpMatchTimeout
     )
+
+let private passwordCapture parserOptions (matched: Match) (index: int) =
+    match Parser.parseExpressionWithOptions parserOptions matched.Groups.[index].Value with
+    | Ok(Lit(VString password)) -> Some password
+    | _ -> None
 
 let private showGrantsRe =
     Regex(
@@ -3538,7 +3566,7 @@ type private Probe =
     | SetRoleStatement
     | SetDefaultRoleStatement
     | SetCharacterSet of charset: string
-    | SetPassword of user: string option * password: string
+    | SetPassword of user: string option * change: PasswordChange
     | SetVar
     | RollbackTo of savepoint: string
     | Begin of readOnly: bool option
@@ -3752,9 +3780,22 @@ let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe
             )
         )
     | RegexMatch setCharacterSet matched, _ -> Some(SetCharacterSet(capture 1 matched))
-    | RegexMatch alterCurrentUserPasswordRe matched, _ -> Some(SetPassword(None, capture 1 matched))
+    | RegexMatch alterCurrentUserPasswordRe matched, _ ->
+        passwordCapture parserOptions matched 1
+        |> Option.map (fun password ->
+            SetPassword(
+                None,
+                { NewPassword = password
+                  CurrentPassword = tryCapture 2 matched |> Option.bind (fun _ -> passwordCapture parserOptions matched 2) }
+            ))
     | RegexMatch setPasswordRe matched, _ ->
-        Some(SetPassword(tryCapture 1 matched, capture 2 matched))
+        passwordCapture parserOptions matched 2
+        |> Option.map (fun password ->
+            SetPassword(
+                tryCapture 1 matched,
+                { NewPassword = password
+                  CurrentPassword = tryCapture 3 matched |> Option.bind (fun _ -> passwordCapture parserOptions matched 3) }
+            ))
     | _, RegexMatch setDefaultRoleStatement _ -> Some SetDefaultRoleStatement
     | _, RegexMatch setRoleStatement _ -> Some SetRoleStatement
     | _, _ when command.StartsWith("SET ", StringComparison.OrdinalIgnoreCase) -> Some SetVar
@@ -3988,7 +4029,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Some collation ->
             let updated = applyConnectionEncoding session charset (Collation.tryFind collation)
             Session.trackSystemVariableAssignments true connectionVariableNames updated, Affected 0UL
-    | SetPassword(userOpt, password) ->
+    | SetPassword(userOpt, change) ->
         // No FOR clause selects the session's authenticated account.
         let wanted = userOpt |> Option.map accountRefOf |> Option.defaultValue (accountOf session)
         let store = Session.currentStore session
@@ -3998,7 +4039,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         // gate, so this one carries its own check.
         let required = if Auth.sameAccount wanted (accountOf session) then [] else [ "CREATE USER", Auth.Global ]
 
-        match checkSessionAccess session store required |> Result.bind (fun () -> Auth.setPassword store wanted.Name wanted.Host password) with
+        match
+            checkSessionAccess session store required
+            |> Result.bind (fun () -> Auth.setPasswordAs store (accountOf session) wanted change)
+        with
         | Ok() -> { session with PasswordExpired = false }, Affected 0UL
         | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql

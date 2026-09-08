@@ -784,6 +784,23 @@ type PasswordExpiration =
     | NeverExpirePassword
     | ExpirePasswordAfterDays of uint16
 
+type PasswordHistoryPolicy =
+    | DefaultPasswordHistory
+    | RetainPasswordHistory of uint16
+
+type PasswordReusePolicy =
+    | DefaultPasswordReuse
+    | ForbidPasswordReuseForDays of uint16
+
+type CurrentPasswordPolicy =
+    | DefaultCurrentPasswordPolicy
+    | RequireCurrentPassword
+    | CurrentPasswordOptional
+
+type PasswordChange =
+    { NewPassword: string
+      CurrentPassword: string option }
+
 type AccountAttribute =
     | AccountComment of string
     | AccountAttributeJson of string
@@ -792,6 +809,9 @@ type AccountOptions =
     { TlsRequirement: AccountTlsRequirement option
       ResourceLimits: AccountResourceLimits
       PasswordExpiration: PasswordExpiration option
+      PasswordHistory: PasswordHistoryPolicy option
+      PasswordReuse: PasswordReusePolicy option
+      CurrentPassword: CurrentPasswordPolicy option
       Locked: bool option
       Attribute: AccountAttribute option }
 
@@ -804,6 +824,9 @@ module AccountOptions =
               MaxConnectionsPerHour = None
               MaxUserConnections = None }
           PasswordExpiration = None
+          PasswordHistory = None
+          PasswordReuse = None
+          CurrentPassword = None
           Locked = None
           Attribute = None }
 
@@ -943,7 +966,7 @@ type Statement =
     /// `DROP USER [IF EXISTS] 'name'@'host', ...`
     | DropUser of users: (string * string) list * ifExists: bool
     | RenameUser of users: ((string * string) * (string * string)) list
-    | AlterUser of name: string * host: string * password: string option * ifExists: bool * options: AccountOptions
+    | AlterUser of name: string * host: string * password: PasswordChange option * ifExists: bool * options: AccountOptions
     | CreateServer of name: string * wrapper: string * options: ForeignServerOptions
     | AlterServer of name: string * options: ForeignServerOptions
     | DropServer of name: string * ifExists: bool

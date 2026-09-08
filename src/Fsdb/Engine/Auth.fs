@@ -22,6 +22,9 @@ let private sha1 (bytes: byte[]) : byte[] = SHA1.HashData bytes
 let nativePasswordHash (password: string) : string =
     "*" + Convert.ToHexString(sha1 (sha1 (Text.Encoding.UTF8.GetBytes password)))
 
+let private storedHashForPassword password =
+    if password = "" then "" else nativePasswordHash password
+
 /// Verifies a client's mysql_native_password challenge answer.
 /// The client sends `SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw)))` (20
 /// bytes); XORing with `SHA1(scramble + stage2)` recovers `SHA1(pw)`, whose
@@ -581,6 +584,69 @@ let private initialPasswordExpiration = function
     | Some ExpirePasswordByDefault
     | None -> VString "N", VNull
 
+let private passwordHistoryValue = function
+    | Some DefaultPasswordHistory
+    | None -> VNull
+    | Some(RetainPasswordHistory count) -> VInt(int64 count)
+
+let private passwordReuseValue = function
+    | Some DefaultPasswordReuse
+    | None -> VNull
+    | Some(ForbidPasswordReuseForDays days) -> VInt(int64 days)
+
+let private currentPasswordValue = function
+    | Some RequireCurrentPassword -> VString "Y"
+    | Some CurrentPasswordOptional -> VString "N"
+    | Some DefaultCurrentPasswordPolicy
+    | None -> VNull
+
+type private EffectivePasswordPolicy =
+    { History: int
+      ReuseDays: int
+      RequireCurrent: bool }
+
+let private numericPolicyValue fallback = function
+    | Some(VInt value) -> int value
+    | Some(VUInt value) -> int value
+    | _ -> fallback
+
+let private effectivePasswordPolicy columns row =
+    { History = userColumnValue columns row "Password_reuse_history" |> numericPolicyValue Limits.passwordHistory
+      ReuseDays = userColumnValue columns row "Password_reuse_time" |> numericPolicyValue Limits.passwordReuseIntervalDays
+      RequireCurrent =
+        match userColumnText columns row "Password_require_current" with
+        | "Y" -> true
+        | "N" -> false
+        | _ -> Limits.passwordRequireCurrent }
+
+let private policyWithOptions policy options =
+    { History =
+        match options.PasswordHistory with
+        | Some DefaultPasswordHistory -> Limits.passwordHistory
+        | Some(RetainPasswordHistory count) -> int count
+        | None -> policy.History
+      ReuseDays =
+        match options.PasswordReuse with
+        | Some DefaultPasswordReuse -> Limits.passwordReuseIntervalDays
+        | Some(ForbidPasswordReuseForDays days) -> int days
+        | None -> policy.ReuseDays
+      RequireCurrent =
+        match options.CurrentPassword with
+        | Some DefaultCurrentPasswordPolicy -> Limits.passwordRequireCurrent
+        | Some RequireCurrentPassword -> true
+        | Some CurrentPasswordOptional -> false
+        | None -> policy.RequireCurrent }
+
+let private insertPasswordHistory store wanted timestamp hash =
+    insertRows
+        store
+        "mysql"
+        "password_history"
+        (Some [ "Host"; "User"; "Password_timestamp"; "Password" ])
+        [ [ VString wanted.Host; VString wanted.Name; VTimestamp timestamp; VString hash ] ]
+    |> Result.map ignore
+    |> Result.mapError toMySqlError
+
 let private resourceLimitValue value =
     VInt(int64 (Option.defaultValue 0u value))
 
@@ -645,7 +711,7 @@ let private mergeAccountAttribute cols row attribute =
 
         "User_attributes", storedAccountAttributes metadata)
 
-let createUserWithOptions
+let private createUserWithOptionsInStore
     (store: Store)
     (name: string)
     (host: string)
@@ -659,7 +725,7 @@ let createUserWithOptions
     else
         createAccountAttributeValue options.Attribute
         |> Result.bind (fun attributes ->
-            let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
+            let hash = password |> Option.map storedHashForPassword |> Option.defaultValue ""
             let expired, lifetime = initialPasswordExpiration options.PasswordExpiration
             let tlsRequirement = options.TlsRequirement |> Option.defaultValue RequireNone
             let tlsAttributes = tlsAttributeValues tlsRequirement
@@ -681,6 +747,9 @@ let createUserWithOptions
                   "password_last_changed"
                   "password_lifetime"
                   "account_locked"
+                  "Password_reuse_history"
+                  "Password_reuse_time"
+                  "Password_require_current"
                   "User_attributes" ]
 
             let values =
@@ -700,11 +769,36 @@ let createUserWithOptions
                   VDateTime(Functions.truncateToSecond DateTime.Now)
                   lifetime
                   VString(if Option.defaultValue false options.Locked then "Y" else "N")
+                  passwordHistoryValue options.PasswordHistory
+                  passwordReuseValue options.PasswordReuse
+                  currentPasswordValue options.CurrentPassword
                   attributes ]
 
             match insertRows store "mysql" "user" (Some columns) [ values ] with
-            | Ok _ -> Ok()
+            | Ok _ ->
+                let policy =
+                    { History = Limits.passwordHistory
+                      ReuseDays = Limits.passwordReuseIntervalDays
+                      RequireCurrent = Limits.passwordRequireCurrent }
+                    |> fun inherited -> policyWithOptions inherited options
+
+                if hash <> "" && (policy.History > 0 || policy.ReuseDays > 0) then
+                    insertPasswordHistory store wanted DateTime.UtcNow hash
+                else
+                    Ok()
             | Error error -> Error(toMySqlError error))
+
+let createUserWithOptions
+    (store: Store)
+    (name: string)
+    (host: string)
+    (password: string option)
+    (options: AccountOptions)
+    : Result<unit, int * string> =
+    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+
+    createUserWithOptionsInStore snapshot name host password options
+    |> Result.map (fun () -> commitCatalogInto store baseCatalog snapshot)
 
 let createUserWithTlsRequirement
     (store: Store)
@@ -746,6 +840,7 @@ let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * s
         deleteWhere "columns_priv"
         deleteWhere "global_grants"
         deleteWhere "proxies_priv"
+        deleteWhere "password_history"
 
         let deleteRoleReferences table accountColumns =
             match scanList store "mysql" table with
@@ -859,7 +954,7 @@ let renameUser
                     |> Result.map ignore
                     |> Result.mapError toMySqlError)
 
-        [ for table in [ "user"; "db"; "tables_priv"; "columns_priv"; "global_grants"; "proxies_priv" ] do
+        [ for table in [ "user"; "db"; "tables_priv"; "columns_priv"; "global_grants"; "proxies_priv"; "password_history" ] do
               yield renameRows table
           yield renameRoleRows "role_edges" [ "FROM_USER", "FROM_HOST"; "TO_USER", "TO_HOST" ]
           yield renameRoleRows "default_roles" [ "USER", "HOST"; "DEFAULT_ROLE_USER", "DEFAULT_ROLE_HOST" ] ]
@@ -923,6 +1018,9 @@ let private accountOptionChanges (options: AccountOptions) =
           limits.MaxUpdatesPerHour |> Option.map (fun value -> "max_updates", VInt(int64 value))
           limits.MaxConnectionsPerHour |> Option.map (fun value -> "max_connections", VInt(int64 value))
           limits.MaxUserConnections |> Option.map (fun value -> "max_user_connections", VInt(int64 value))
+          options.PasswordHistory |> Option.map (fun value -> "Password_reuse_history", passwordHistoryValue (Some value))
+          options.PasswordReuse |> Option.map (fun value -> "Password_reuse_time", passwordReuseValue (Some value))
+          options.CurrentPassword |> Option.map (fun value -> "Password_require_current", currentPasswordValue (Some value))
           options.Locked |> Option.map (fun locked -> "account_locked", VString(if locked then "Y" else "N")) ]
         |> List.choose id
 
@@ -941,11 +1039,90 @@ let private hasResourceLimitChanges (limits: AccountResourceLimits) =
     || limits.MaxConnectionsPerHour.IsSome
     || limits.MaxUserConnections.IsSome
 
-let alterUser
+type private PasswordHistoryEntry =
+    { Timestamp: DateTime
+      Hash: string }
+
+let private passwordHistoryEntries store wanted =
+    match scanList store "mysql" "password_history" with
+    | Error error -> Error(toMySqlError error)
+    | Ok(columns, rows) ->
+        let timestamp row =
+            match userColumnValue columns row "Password_timestamp" with
+            | Some(VTimestamp value)
+            | Some(VDateTime value) -> Some value
+            | _ -> None
+
+        rows
+        |> List.choose (fun row ->
+            if rowAccount columns row |> Option.exists (sameAccount wanted) then
+                timestamp row
+                |> Option.map (fun value ->
+                    { Timestamp = value
+                      Hash = userColumnText columns row "Password" })
+            else
+                None)
+        |> List.sortByDescending _.Timestamp
+        |> Ok
+
+let private retainedPasswordEntries (now: DateTime) (policy: EffectivePasswordPolicy) (entries: PasswordHistoryEntry list) =
+    let reuseBoundary = now.AddDays(float -policy.ReuseDays)
+
+    entries
+    |> List.mapi (fun index entry -> entry, index < policy.History || (policy.ReuseDays > 0 && entry.Timestamp >= reuseBoundary))
+
+let private prunePasswordHistory store wanted retained =
+    let retainedTimestamps =
+        retained
+        |> List.choose (fun (entry, keep) -> if keep then Some entry.Timestamp else None)
+        |> Set.ofList
+
+    match scanList store "mysql" "password_history" with
+    | Error error -> Error(toMySqlError error)
+    | Ok(columns, _) ->
+        deleteRows
+            store
+            "mysql"
+            "password_history"
+            (fun row ->
+                let matching = rowAccount columns row |> Option.exists (sameAccount wanted)
+
+                let timestamp =
+                    match userColumnValue columns row "Password_timestamp" with
+                    | Some(VTimestamp value)
+                    | Some(VDateTime value) -> Some value
+                    | _ -> None
+
+                Ok(matching && (timestamp |> Option.forall (fun value -> not (retainedTimestamps.Contains value)))))
+        |> Result.map ignore
+        |> Result.mapError toMySqlError
+
+let private nextPasswordHistoryTimestamp (now: DateTime) (entries: PasswordHistoryEntry list) =
+    let now = now.AddTicks(-(now.Ticks % 10L))
+
+    match entries with
+    | latest :: _ when latest.Timestamp >= now -> latest.Timestamp.AddTicks 10L
+    | _ -> now
+
+let private validateCurrentPassword actor wanted columns row replacement policy =
+    if sameAccount actor wanted then
+        match replacement with
+        | None when policy.RequireCurrent ->
+            Error(3892, "Current password needs to be specified in the REPLACE clause in order to change it.")
+        | Some current when storedHashForPassword current <> storedPasswordHash columns row ->
+            Error(3891, "Incorrect current password. Specify the correct password which has to be replaced.")
+        | _ -> Ok()
+    elif replacement.IsSome then
+        Error(3893, "Do not specify the current password while changing it for other users.")
+    else
+        Ok()
+
+let private alterUserInStore
     (store: Store)
+    (actor: Account)
     (name: string)
     (host: string)
-    (password: string option)
+    (password: PasswordChange option)
     (options: AccountOptions)
     : Result<unit, int * string> =
     let wanted = account name host
@@ -958,13 +1135,21 @@ let alterUser
             | None -> Ok None
             | Some attribute -> mergeAccountAttribute cols row attribute |> Result.map Some
 
-        attributeChange
+        let policy = effectivePasswordPolicy cols row |> fun current -> policyWithOptions current options
+
+        let passwordCheck =
+            match password with
+            | None -> Ok()
+            | Some change -> validateCurrentPassword actor wanted cols row change.CurrentPassword policy
+
+        passwordCheck
+        |> Result.bind (fun () -> attributeChange)
         |> Result.bind (fun attributeChange ->
             let baseChanges =
                 match password with
                 | None -> accountOptionChanges options
-                | Some password ->
-                    [ "authentication_string", VString(if password = "" then "" else nativePasswordHash password)
+                | Some change ->
+                    [ "authentication_string", VString(storedHashForPassword change.NewPassword)
                       "password_expired", VString "N"
                       "password_last_changed", VDateTime(Functions.truncateToSecond DateTime.Now) ]
                     @ accountOptionChanges options
@@ -978,18 +1163,64 @@ let alterUser
                     updateSystemRows store "user" (matchUserRow wanted) changes
 
             updated
-            |> Result.map (fun _ ->
+            |> Result.bind (fun _ ->
+                match password with
+                | None -> Ok()
+                | Some change ->
+                    let newHash = storedHashForPassword change.NewPassword
+                    let now = DateTime.UtcNow
+
+                    passwordHistoryEntries store wanted
+                    |> Result.bind (fun entries ->
+                        let active = retainedPasswordEntries now policy entries
+
+                        if newHash <> "" && (active |> List.exists (fun (entry, keep) -> keep && entry.Hash = newHash)) then
+                            Error(
+                                3638,
+                                sprintf
+                                    "Cannot use these credentials for '%s@%s' because they contradict the password history policy"
+                                    wanted.Name
+                                    wanted.Host
+                            )
+                        else
+                            let record = newHash <> "" && (policy.History > 0 || policy.ReuseDays > 0)
+
+                            (if record then
+                                 insertPasswordHistory store wanted (nextPasswordHistoryTimestamp now entries) newHash
+                             else
+                                 Ok())
+                            |> Result.bind (fun () ->
+                                passwordHistoryEntries store wanted
+                                |> Result.bind (retainedPasswordEntries now policy >> prunePasswordHistory store wanted))))
+            |> Result.map (fun () ->
                 if hasResourceLimitChanges options.ResourceLimits then
                     resetAccountResources store wanted))
 
+let alterUserAs store actor name host password options =
+    match password with
+    | None -> alterUserInStore store actor name host password options
+    | Some _ ->
+        let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+
+        alterUserInStore snapshot actor name host password options
+        |> Result.map (fun () -> commitCatalogInto store baseCatalog snapshot)
+
 let alterUserOptions (store: Store) (name: string) (host: string) (options: AccountOptions) : Result<unit, int * string> =
-    alterUser store name host None options
+    alterUserAs store (account "root" "%") name host None options
 
 /// `ALTER USER ... IDENTIFIED BY 'pw'` / `SET PASSWORD [FOR user] = 'pw'` —
 /// rewrites the stored hash (empty password clears it back to
 /// accept-anything).
+let setPasswordAs (store: Store) (actor: Account) (wanted: Account) (change: PasswordChange) : Result<unit, int * string> =
+    alterUserAs store actor wanted.Name wanted.Host (Some change) AccountOptions.empty
+
 let setPassword (store: Store) (name: string) (host: string) (password: string) : Result<unit, int * string> =
-    alterUser store name host (Some password) AccountOptions.empty
+    setPasswordAs
+        store
+        (account "root" "%")
+        (account name host)
+        { NewPassword = password
+          CurrentPassword = None }
 
 let setAccountLocked (store: Store) (name: string) (host: string) (locked: bool) : Result<unit, int * string> =
     alterUserOptions store name host { AccountOptions.empty with Locked = Some locked }
@@ -3171,6 +3402,21 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
                 | Some(VInt days) when days > 0L -> sprintf "PASSWORD EXPIRE INTERVAL %d DAY" days
                 | Some(VUInt days) when days > 0UL -> sprintf "PASSWORD EXPIRE INTERVAL %d DAY" days
                 | _ -> "PASSWORD EXPIRE DEFAULT"
+        let passwordHistory =
+            match userColumnValue cols row "Password_reuse_history" with
+            | Some(VInt count) -> sprintf "PASSWORD HISTORY %d" count
+            | Some(VUInt count) -> sprintf "PASSWORD HISTORY %d" count
+            | _ -> "PASSWORD HISTORY DEFAULT"
+        let passwordReuse =
+            match userColumnValue cols row "Password_reuse_time" with
+            | Some(VInt days) -> sprintf "PASSWORD REUSE INTERVAL %d DAY" days
+            | Some(VUInt days) -> sprintf "PASSWORD REUSE INTERVAL %d DAY" days
+            | _ -> "PASSWORD REUSE INTERVAL DEFAULT"
+        let currentPassword =
+            match userColumnText cols row "Password_require_current" with
+            | "Y" -> "PASSWORD REQUIRE CURRENT"
+            | "N" -> "PASSWORD REQUIRE CURRENT OPTIONAL"
+            | _ -> "PASSWORD REQUIRE CURRENT DEFAULT"
         let account = sprintf "`%s`@`%s`" (name.Replace("`", "``")) (host.Replace("`", "``"))
         let attributes =
             match accountAttributeText cols row with
@@ -3180,7 +3426,7 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
         Ok(
             sprintf "CREATE USER for %s@%s" name host,
             sprintf
-                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE %s%s %s ACCOUNT %s PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT%s"
+                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE %s%s %s ACCOUNT %s %s %s %s%s"
                 account
                 plugin
                 hash
@@ -3188,6 +3434,9 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
                 resources
                 passwordExpiration
                 accountState
+                passwordHistory
+                passwordReuse
+                currentPassword
                 attributes
         )
 

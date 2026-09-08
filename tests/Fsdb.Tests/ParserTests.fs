@@ -3306,11 +3306,11 @@ let tests =
                           MaxUserConnections = Some 3u }
 
                     let options =
-                        { TlsRequirement = Some RequireSsl
-                          ResourceLimits = resources
-                          PasswordExpiration = Some(ExpirePasswordAfterDays 180us)
-                          Locked = Some true
-                          Attribute = None }
+                        { AccountOptions.empty with
+                            TlsRequirement = Some RequireSsl
+                            ResourceLimits = resources
+                            PasswordExpiration = Some(ExpirePasswordAfterDays 180us)
+                            Locked = Some true }
 
                     Expect.equal
                         (parseOk
@@ -3349,10 +3349,15 @@ let tests =
                             "ALTER USER app IDENTIFIED BY 'beta' REPLACE 'alpha' PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT OPTIONAL")
                         "password replacement and default policy"
 
-                    Expect.isOk
-                        (parse
-                            "ALTER USER app PASSWORD HISTORY 1 PASSWORD HISTORY 2 PASSWORD REUSE INTERVAL 3 DAY PASSWORD REUSE INTERVAL 4 DAY PASSWORD REQUIRE CURRENT PASSWORD REQUIRE CURRENT OPTIONAL")
-                        "the final repeated policy option wins"
+                    match
+                        parseOk
+                            "ALTER USER app PASSWORD HISTORY 1 PASSWORD HISTORY 2 PASSWORD REUSE INTERVAL 3 DAY PASSWORD REUSE INTERVAL 4 DAY PASSWORD REQUIRE CURRENT PASSWORD REQUIRE CURRENT OPTIONAL"
+                    with
+                    | AlterUser(_, _, _, _, options) ->
+                        Expect.equal options.PasswordHistory (Some(RetainPasswordHistory 2us)) "history"
+                        Expect.equal options.PasswordReuse (Some(ForbidPasswordReuseForDays 4us)) "reuse"
+                        Expect.equal options.CurrentPassword (Some CurrentPasswordOptional) "current password"
+                    | other -> failtestf "expected ALTER USER, got %A" other
 
                 testCase "CREATE and ALTER USER parse comments and JSON attributes"
                 <| fun _ ->
@@ -3489,7 +3494,13 @@ let tests =
 
                     Expect.equal
                         (parseOk "ALTER USER 'bob'@'%' IDENTIFIED BY 'newpw'")
-                        (AlterUser("bob", "%", Some "newpw", false, AccountOptions.empty))
+                        (AlterUser(
+                            "bob",
+                            "%",
+                            Some { NewPassword = "newpw"; CurrentPassword = None },
+                            false,
+                            AccountOptions.empty
+                        ))
                         "alter password"
 
                     Expect.equal

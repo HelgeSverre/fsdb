@@ -236,6 +236,14 @@ let tests =
               | Err(3638, _) -> ()
               | other -> failtestf "expected password-history rejection, got %A" other
 
+              match Fsdb.Auth.tryUserRow store "policy_user" with
+              | Some(columns, row) ->
+                  Expect.equal
+                      (Fsdb.Auth.storedPasswordHash columns row)
+                      (Fsdb.Auth.nativePasswordHash "gamma")
+                      "a rejected reuse leaves the current hash unchanged"
+              | None -> failtest "expected policy account"
+
               match handle root "SET PASSWORD FOR policy_user = 'delta' REPLACE 'gamma'" |> snd with
               | Err(3893, _) -> ()
               | other -> failtestf "expected REPLACE-for-other-account rejection, got %A" other
@@ -243,6 +251,20 @@ let tests =
               match handle root "SET PASSWORD FOR policy_user = 'delta'" |> snd with
               | Affected 0UL -> ()
               | other -> failtestf "expected administrative password reset, got %A" other
+
+              let root, renamed = handle root "RENAME USER policy_user TO renamed_policy_user"
+              Expect.equal renamed (Affected 0UL) "policy account renamed"
+
+              match handle root "SELECT DISTINCT User FROM mysql.password_history" |> snd with
+              | ResultSet(_, [ [ Some "renamed_policy_user" ] ]) -> ()
+              | other -> failtestf "expected renamed history ownership, got %A" other
+
+              let _, dropped = handle root "DROP USER renamed_policy_user"
+              Expect.equal dropped (Affected 0UL) "policy account dropped"
+
+              match handle root "SELECT COUNT(*) FROM mysql.password_history" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected dropped password history, got %A" other
 
           testCase "SET PASSWORD and SHOW GRANTS keep host-qualified accounts separate"
           <| fun _ ->
@@ -275,6 +297,33 @@ let tests =
               | ResultSet([ "Grants for alice@localhost" ], [ [ Some grant ] ]) ->
                   Expect.stringContains grant "`alice`@`localhost`" "selected account renders"
               | other -> failtestf "expected localhost grants, got %A" other
+
+          testCase "SET PASSWORD decodes quoted accounts and password literals"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ =
+                  handle root "CREATE USER 'policy account'@'%' IDENTIFIED BY 'a''b' PASSWORD REQUIRE CURRENT"
+
+              let account =
+                  { create 2 store with
+                      User = "policy account" }
+
+              match handle account "SET PASSWORD = 'c''d' REPLACE 'a''b'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected escaped self-service password change, got %A" other
+
+              match handle root "SET PASSWORD FOR 'policy account'@'%' = 'e''f'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected quoted administrative password change, got %A" other
+
+              match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account "policy account" "%") with
+              | Some(columns, row) ->
+                  Expect.equal
+                      (Fsdb.Auth.storedPasswordHash columns row)
+                      (Fsdb.Auth.nativePasswordHash "e'f")
+                      "SQL string literals are decoded before hashing"
+              | None -> failtest "expected quoted account"
 
           testCase "RENAME USER moves the account and its grants"
           <| fun _ ->

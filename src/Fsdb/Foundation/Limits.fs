@@ -130,6 +130,11 @@ let tryAcquireStoredProgramFrame () : IDisposable option =
 /// Password lifetime inherited by accounts whose mysql.user row stores NULL.
 let mutable defaultPasswordLifetimeDays = 0
 
+/// Password-policy defaults inherited by nullable mysql.user fields.
+let mutable passwordHistory = 0
+let mutable passwordReuseIntervalDays = 0
+let mutable passwordRequireCurrent = false
+
 /// Mode inherited by WEEK(date) when its optional second argument is absent.
 let mutable defaultWeekFormat = 0
 
@@ -236,6 +241,24 @@ let private knobs =
         Max = 65535L
         Set = fun v -> defaultPasswordLifetimeDays <- int v
         Get = fun () -> int64 defaultPasswordLifetimeDays
+        Reportable = true }
+      { Name = "password_history"
+        Min = 0L
+        Max = 65535L
+        Set = fun value -> passwordHistory <- int value
+        Get = fun () -> int64 passwordHistory
+        Reportable = true }
+      { Name = "password_reuse_interval"
+        Min = 0L
+        Max = 65535L
+        Set = fun value -> passwordReuseIntervalDays <- int value
+        Get = fun () -> int64 passwordReuseIntervalDays
+        Reportable = true }
+      { Name = "password_require_current"
+        Min = 0L
+        Max = 1L
+        Set = fun value -> passwordRequireCurrent <- value <> 0L
+        Get = fun () -> if passwordRequireCurrent then 1L else 0L
         Reportable = true }
       { Name = "default_week_format"
         Min = 0L
@@ -346,6 +369,8 @@ let private parseSize (text: string) : int64 option =
 /// option names are case-insensitive.
 let private normalizeName = OptionFile.normalizeName
 
+let private booleanSettings = Set.ofList [ "local_infile"; "password_require_current" ]
+
 /// Whether `name` is a knob at all — the question `loose-` asks, since that
 /// prefix suppresses an unknown option but not a bad value for a known one.
 let private isKnownSetting (name: string) : bool =
@@ -368,7 +393,7 @@ let private validatedSetting (name: string) (value: string) : Result<Knob * int6
         )
     | Some knob ->
         let parsed =
-            if name = "local_infile" then
+            if booleanSettings.Contains name then
                 match value.Trim().ToLowerInvariant() with
                 | "1"
                 | "on"
@@ -401,8 +426,8 @@ let variables () : (string * string) list =
     [ for knob in knobs do
           if knob.Reportable then
               let value =
-                  if knob.Name = "local_infile" then
-                      if localInfile then "ON" else "OFF"
+                  if booleanSettings.Contains knob.Name then
+                      if knob.Get() <> 0L then "ON" else "OFF"
                   else
                       string (knob.Get())
 

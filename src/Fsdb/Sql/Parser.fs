@@ -4090,9 +4090,12 @@ let private explainStmt: Parser<Statement, unit> =
 let private userRef: Parser<string * string, unit> =
     identOrString .>>. (opt (sym "@" >>. identOrString) |>> Option.defaultValue "%")
 
+let private passwordLiteral: Parser<string, unit> =
+    stringLit |>> (function VString value -> value | _ -> "")
+
 let private identifiedBy: Parser<string, unit> =
     keyword "IDENTIFIED" >>. keyword "BY"
-    >>. (stringLit |>> (function VString s -> s | _ -> ""))
+    >>. passwordLiteral
 
 type private AccountTlsAttribute =
     | TlsCipher of string
@@ -4193,6 +4196,33 @@ let private passwordExpiration: Parser<PasswordExpiration, unit> =
               attempt lifetime
               preturn ExpirePassword ]
 
+let private passwordPolicyValue: Parser<uint16, unit> =
+    // mysql.user stores both policy values as SMALLINT UNSIGNED. MySQL
+    // accepts a wider integer token and narrows it to that catalog shape.
+    puint64 .>> ws |>> uint16
+
+let private passwordHistory: Parser<PasswordHistoryPolicy, unit> =
+    keyword "PASSWORD"
+    >>. keyword "HISTORY"
+    >>. ((keyword "DEFAULT" >>% DefaultPasswordHistory)
+         <|> (passwordPolicyValue |>> RetainPasswordHistory))
+
+let private passwordReuse: Parser<PasswordReusePolicy, unit> =
+    keyword "PASSWORD"
+    >>. keyword "REUSE"
+    >>. keyword "INTERVAL"
+    >>. ((keyword "DEFAULT" >>% DefaultPasswordReuse)
+         <|> (passwordPolicyValue .>> keyword "DAY" |>> ForbidPasswordReuseForDays))
+
+let private currentPasswordPolicy: Parser<CurrentPasswordPolicy, unit> =
+    keyword "PASSWORD"
+    >>. keyword "REQUIRE"
+    >>. keyword "CURRENT"
+    >>. choice
+            [ keyword "DEFAULT" >>% DefaultCurrentPasswordPolicy
+              keyword "OPTIONAL" >>% CurrentPasswordOptional
+              preturn RequireCurrentPassword ]
+
 let private accountLock: Parser<bool, unit> =
     keyword "ACCOUNT"
     >>. ((keyword "LOCK" >>% true) <|> (keyword "UNLOCK" >>% false))
@@ -4207,22 +4237,47 @@ let private accountAttribute: Parser<AccountAttribute, unit> =
              | VString json -> AccountAttributeJson json
              | _ -> AccountAttributeJson ""))
 
+type private AccountPolicyOption =
+    | PasswordExpirationOption of PasswordExpiration
+    | PasswordHistoryOption of PasswordHistoryPolicy
+    | PasswordReuseOption of PasswordReusePolicy
+    | CurrentPasswordOption of CurrentPasswordPolicy
+    | AccountLockOption of bool
+
+let private accountPolicyOption: Parser<AccountPolicyOption, unit> =
+    choice
+        [ attempt (passwordExpiration |>> PasswordExpirationOption)
+          attempt (passwordHistory |>> PasswordHistoryOption)
+          attempt (passwordReuse |>> PasswordReuseOption)
+          attempt (currentPasswordPolicy |>> CurrentPasswordOption)
+          accountLock |>> AccountLockOption ]
+
+let private applyAccountPolicyOption options = function
+    | PasswordExpirationOption value -> { options with PasswordExpiration = Some value }
+    | PasswordHistoryOption value -> { options with PasswordHistory = Some value }
+    | PasswordReuseOption value -> { options with PasswordReuse = Some value }
+    | CurrentPasswordOption value -> { options with CurrentPassword = Some value }
+    | AccountLockOption value -> { options with Locked = Some value }
+
 let private accountOptions: Parser<AccountOptions, unit> =
     opt accountTlsRequirement
     .>>. opt accountResourceLimits
-    .>>. opt passwordExpiration
-    .>>. opt accountLock
+    .>>. many accountPolicyOption
     .>>. opt accountAttribute
-    |>> fun ((((tls, resources), expiration), locked), attribute) ->
-        { TlsRequirement = tls
-          ResourceLimits = Option.defaultValue AccountOptions.empty.ResourceLimits resources
-          PasswordExpiration = expiration
-          Locked = locked
-          Attribute = attribute }
+    |>> fun (((tls, resources), policies), attribute) ->
+        policies
+        |> List.fold applyAccountPolicyOption
+            { AccountOptions.empty with
+                TlsRequirement = tls
+                ResourceLimits = Option.defaultValue AccountOptions.empty.ResourceLimits resources
+                Attribute = attribute }
 
 let private hasAccountOptions (options: AccountOptions) =
     options.TlsRequirement.IsSome
     || options.PasswordExpiration.IsSome
+    || options.PasswordHistory.IsSome
+    || options.PasswordReuse.IsSome
+    || options.CurrentPassword.IsSome
     || options.Locked.IsSome
     || options.Attribute.IsSome
     || options.ResourceLimits <> AccountOptions.empty.ResourceLimits
@@ -4314,9 +4369,15 @@ let private alterUserStmt: Parser<Statement, unit> =
     (keyword "ALTER" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. userRef
-     .>>. opt identifiedBy
+     .>>. opt (identifiedBy .>>. opt (keyword "REPLACE" >>. passwordLiteral))
      .>>. accountOptions)
-    >>= fun (((ifExists, (name, host)), password), options) ->
+    >>= fun (((ifExists, (name, host)), passwordAndCurrent), options) ->
+        let password =
+            passwordAndCurrent
+            |> Option.map (fun (newPassword, currentPassword) ->
+                { NewPassword = newPassword
+                  CurrentPassword = currentPassword })
+
         if password.IsSome || hasAccountOptions options then
             preturn (AlterUser(name, host, password, ifExists, options))
         else

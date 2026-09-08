@@ -19027,7 +19027,7 @@ let rec executeAs
         | Error(code, msg) -> ids, Err(code, msg)
 
     | AlterUser(name, host, password, ifExists, options) ->
-        match Auth.alterUser store name host password options with
+        match Auth.alterUserAs store currentAccount name host password options with
         | Ok() -> ids, Affected 0UL
         | Error(1396, _) when ifExists ->
             noteAuthorizationMissing name host

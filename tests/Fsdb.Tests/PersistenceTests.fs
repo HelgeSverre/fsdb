@@ -1567,6 +1567,9 @@ let tests =
                             MaxQueriesPerHour = Some 11u
                             MaxUserConnections = Some 2u }
                       PasswordExpiration = Some(ExpirePasswordAfterDays 30us)
+                      PasswordHistory = Some(RetainPasswordHistory 2us)
+                      PasswordReuse = Some(ForbidPasswordReuseForDays 7us)
+                      CurrentPassword = Some RequireCurrentPassword
                       Locked = Some true
                       Attribute = Some(AccountAttributeJson "{\"team\":\"storage\"}") }
 
@@ -1595,8 +1598,16 @@ let tests =
                       "replayed account attribute"
 
                   match Fsdb.Auth.renderCreateUserForAccount reloaded (Fsdb.Auth.account "alice" "%") with
-                  | Ok(_, ddl) -> Expect.stringContains ddl "PASSWORD EXPIRE INTERVAL 30 DAY" "replayed password lifetime"
+                  | Ok(_, ddl) ->
+                      Expect.stringContains ddl "PASSWORD EXPIRE INTERVAL 30 DAY" "replayed password lifetime"
+                      Expect.stringContains ddl "PASSWORD HISTORY 2" "replayed history policy"
+                      Expect.stringContains ddl "PASSWORD REUSE INTERVAL 7 DAY" "replayed reuse policy"
+                      Expect.stringContains ddl "PASSWORD REQUIRE CURRENT" "replayed current-password policy"
                   | Error error -> failtestf "expected SHOW CREATE USER state, got %A" error
+
+                  match scanList reloaded "mysql" "password_history" with
+                  | Ok(_, rows) -> Expect.equal rows.Length 2 "current and previous password hashes replay"
+                  | Error error -> failtestf "expected replayed password history, got %A" error
               | None -> failtest "expected alice to survive the reload"
 
               match Fsdb.Auth.tryUserRowForAccount reloaded (Fsdb.Auth.account "alice" "localhost") with
