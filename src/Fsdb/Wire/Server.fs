@@ -55,6 +55,32 @@ let private isValidClientCertificate
 
     chain.Build remoteCertificate
 
+let private x500NameOneline (name: X500DistinguishedName) =
+    let shortName (oid: Oid) =
+        match oid.Value with
+        | "2.5.4.6" -> "C"
+        | "2.5.4.8" -> "ST"
+        | "2.5.4.7" -> "L"
+        | "2.5.4.10" -> "O"
+        | "2.5.4.11" -> "OU"
+        | "2.5.4.3" -> "CN"
+        | "2.5.4.5" -> "serialNumber"
+        | "1.2.840.113549.1.9.1" -> "emailAddress"
+        | value -> value
+
+    let escape (value: string) =
+        value.Replace("\\", "\\\\").Replace("/", "\\/").Replace("+", "\\+")
+
+    name.EnumerateRelativeDistinguishedNames(false)
+    |> Seq.choose (fun relativeName ->
+        if relativeName.HasMultipleElements then
+            None
+        else
+            match relativeName.GetSingleElementValue() with
+            | null -> None
+            | value -> Some(sprintf "/%s=%s" (shortName (relativeName.GetSingleElementType())) (escape value)))
+    |> String.concat ""
+
 /// Carries byte progress across raw, TLS, and compressed buffering boundaries.
 type private ReadProgress() =
     let signal = new SemaphoreSlim(0, Int32.MaxValue)
@@ -1068,8 +1094,7 @@ let private authenticateAccount
     (authData: byte[])
     (resp: HandshakeResponse)
     (clientHost: string option)
-    (encryptedTransport: bool)
-    (clientCertificate: bool)
+    (transportSecurity: Auth.TransportSecurity)
     (forceAuthSwitch: bool)
     (firstSeq: byte)
     : Async<(byte * Auth.Account * bool) option> =
@@ -1129,8 +1154,7 @@ let private authenticateAccount
             | Some(_, cols, row) when
                 not (
                     Auth.transportSatisfiesAccount
-                        { Encrypted = encryptedTransport
-                          ClientCertificateValidated = clientCertificate }
+                        transportSecurity
                         cols
                         row
                 ) ->
@@ -1238,6 +1262,8 @@ let private handleConnection
         let mutable tlsVersion: string option = None
         let mutable tlsCipher: string option = None
         let mutable clientCertificateValidated = false
+        let mutable clientCertificateIssuer: string option = None
+        let mutable clientCertificateSubject: string option = None
         let compressionPolicy =
             Session.tryGlobalVariable store "protocol_compression_algorithms"
             |> Option.flatten
@@ -1272,6 +1298,12 @@ let private handleConnection
                                 isValidClientCertificate options.ClientCertificateAuthorities presented presentedChain
 
                             clientCertificateValidated <- valid
+
+                            if valid then
+                                use certificate = X509CertificateLoader.LoadCertificate(presented.Export X509ContentType.Cert)
+                                clientCertificateIssuer <- Some(x500NameOneline certificate.IssuerName)
+                                clientCertificateSubject <- Some(x500NameOneline certificate.SubjectName)
+
                             valid
 
                 use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(float Limits.connectTimeoutSeconds))
@@ -1294,6 +1326,13 @@ let private handleConnection
 
                 tlsCipher <- Some(string secured.NegotiatedCipherSuite)
             }
+
+        let transportSecurity () : Auth.TransportSecurity =
+            { Encrypted = tlsVersion.IsSome
+              Cipher = tlsCipher
+              ClientCertificateValidated = clientCertificateValidated
+              ClientCertificateIssuer = clientCertificateIssuer
+              ClientCertificateSubject = clientCertificateSubject }
 
         // Negotiated once the handshake response arrives; used as a fallback
         // for the "packet too large" ERR reply if that happens beforehand.
@@ -1410,8 +1449,7 @@ let private handleConnection
                             authData
                             resp
                             clientHost
-                            tlsVersion.IsSome
-                            clientCertificateValidated
+                            (transportSecurity ())
                             false
                             (handshakeResp.SeqId + 1uy)
                 let! authOkSeq =
@@ -1574,8 +1612,7 @@ let private handleConnection
                                         changeAuthData
                                         response
                                         clientHost
-                                        tlsVersion.IsSome
-                                        false
+                                        (transportSecurity ())
                                         supportsPluginAuth
                                         seqId
 

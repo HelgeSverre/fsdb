@@ -761,10 +761,16 @@ type ViewSpec =
       Columns: string list
       Definition: string }
 
+type AccountTlsAttributes =
+    { Cipher: string option
+      Issuer: string option
+      Subject: string option }
+
 type AccountTlsRequirement =
     | RequireNone
     | RequireSsl
     | RequireX509
+    | RequireSpecified of AccountTlsAttributes
 
 type AccountResourceLimits =
     { MaxQueriesPerHour: uint32 option

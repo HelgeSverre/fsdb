@@ -344,7 +344,10 @@ let tests =
                   | Some(columns, row) ->
                       Fsdb.Auth.transportSatisfiesAccount
                           { Encrypted = encrypted
-                            ClientCertificateValidated = clientCertificate }
+                            Cipher = None
+                            ClientCertificateValidated = clientCertificate
+                            ClientCertificateIssuer = None
+                            ClientCertificateSubject = None }
                           columns
                           row
                   | None -> failtestf "expected account %s" name
@@ -353,6 +356,70 @@ let tests =
               Expect.isTrue (transportAllowed "ssl_user" true false) "SSL accepts encryption"
               Expect.isFalse (transportAllowed "x509_user" true false) "X509 requires a client certificate"
               Expect.isTrue (transportAllowed "x509_user" true true) "X509 accepts an encrypted certificate transport"
+
+          testCase "specific TLS requirements persist, render, and match exactly"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE USER specific_tls REQUIRE SUBJECT '/CN=fsdb client' AND ISSUER '/CN=fsdb test CA' CIPHER 'TLS_AES_256_GCM_SHA384'"
+
+              Expect.equal created (Affected 0UL) "specific TLS account created"
+
+              match
+                  handle
+                      session
+                      "SELECT ssl_type,ssl_cipher,x509_issuer,x509_subject FROM mysql.user WHERE User='specific_tls'"
+                  |> snd
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "SPECIFIED"
+                      Some "TLS_AES_256_GCM_SHA384"
+                      Some "/CN=fsdb test CA"
+                      Some "/CN=fsdb client" ] ]
+                ) -> ()
+              | other -> failtestf "expected stored TLS attributes, got %A" other
+
+              match handle session "SHOW CREATE USER specific_tls" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) ->
+                  Expect.stringContains
+                      ddl
+                      "REQUIRE SUBJECT '/CN=fsdb client' ISSUER '/CN=fsdb test CA' CIPHER 'TLS_AES_256_GCM_SHA384'"
+                      "specific requirements render in MySQL order"
+              | other -> failtestf "expected SHOW CREATE USER, got %A" other
+
+              let allows transport =
+                  match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account "specific_tls" "%") with
+                  | Some(columns, row) -> Fsdb.Auth.transportSatisfiesAccount transport columns row
+                  | None -> failtest "expected specific TLS account"
+
+              let matching: Fsdb.Auth.TransportSecurity =
+                  { Encrypted = true
+                    Cipher = Some "TLS_AES_256_GCM_SHA384"
+                    ClientCertificateValidated = true
+                    ClientCertificateIssuer = Some "/CN=fsdb test CA"
+                    ClientCertificateSubject = Some "/CN=fsdb client" }
+
+              Expect.isTrue (allows matching) "all exact attributes match"
+              Expect.isFalse (allows { matching with Cipher = Some "TLS_AES_128_GCM_SHA256" }) "cipher differs"
+              Expect.isFalse (allows { matching with ClientCertificateIssuer = Some "/CN=other CA" }) "issuer differs"
+              Expect.isFalse (allows { matching with ClientCertificateSubject = Some "/CN=FSDB CLIENT" }) "subject is case-sensitive"
+
+              let session, altered = handle session "ALTER USER specific_tls REQUIRE NONE"
+              Expect.equal altered (Affected 0UL) "TLS policy cleared"
+
+              match
+                  handle
+                      session
+                      "SELECT ssl_type,ssl_cipher,x509_issuer,x509_subject FROM mysql.user WHERE User='specific_tls'"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some ""; Some ""; Some ""; Some "" ] ]) -> ()
+              | other -> failtestf "expected cleared TLS attributes, got %A" other
 
           testCase "CREATE and ALTER USER persist resource, expiry, TLS, and lock options"
           <| fun _ ->

@@ -4094,9 +4094,52 @@ let private identifiedBy: Parser<string, unit> =
     keyword "IDENTIFIED" >>. keyword "BY"
     >>. (stringLit |>> (function VString s -> s | _ -> ""))
 
+type private AccountTlsAttribute =
+    | TlsCipher of string
+    | TlsIssuer of string
+    | TlsSubject of string
+
 let private accountTlsRequirement: Parser<AccountTlsRequirement, unit> =
+    let text =
+        stringLit
+        |>> (function
+            | VString value -> value
+            | _ -> "")
+
+    let attribute =
+        choice
+            [ keyword "CIPHER" >>. text |>> TlsCipher
+              keyword "ISSUER" >>. text |>> TlsIssuer
+              keyword "SUBJECT" >>. text |>> TlsSubject ]
+
+    let specified =
+        attribute
+        .>>. many (opt (keyword "AND") >>. attribute)
+        >>= fun (first, rest) ->
+            let apply attributes = function
+                | TlsCipher value when attributes.Cipher.IsNone -> Result.Ok { attributes with Cipher = Some value }
+                | TlsIssuer value when attributes.Issuer.IsNone -> Result.Ok { attributes with Issuer = Some value }
+                | TlsSubject value when attributes.Subject.IsNone -> Result.Ok { attributes with Subject = Some value }
+                | TlsCipher _ -> Result.Error "CIPHER"
+                | TlsIssuer _ -> Result.Error "ISSUER"
+                | TlsSubject _ -> Result.Error "SUBJECT"
+
+            (Result.Ok
+                { Cipher = None
+                  Issuer = None
+                  Subject = None },
+             first :: rest)
+            ||> List.fold (fun state item -> state |> Result.bind (fun attributes -> apply attributes item))
+            |> function
+                | Result.Ok attributes -> preturn (RequireSpecified attributes)
+                | Result.Error duplicate -> fail (sprintf "duplicate REQUIRE %s option" duplicate)
+
     keyword "REQUIRE"
-    >>. choice [ keyword "NONE" >>% RequireNone; keyword "SSL" >>% RequireSsl; keyword "X509" >>% RequireX509 ]
+    >>. choice
+            [ keyword "NONE" >>% RequireNone
+              keyword "SSL" >>% RequireSsl
+              keyword "X509" >>% RequireX509
+              specified ]
 
 type private AccountResourceLimit =
     | QueriesPerHour of uint32

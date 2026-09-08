@@ -265,6 +265,12 @@ let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string
 let private userColumnValue (cols: ColumnDef list) (row: Value[]) (name: string) =
     resolveColumn cols name |> Result.toOption |> Option.map (fun index -> row.[index])
 
+let private userColumnBlobText (cols: ColumnDef list) (row: Value[]) (name: string) =
+    match userColumnValue cols row name with
+    | Some(VBytes bytes) -> Text.Encoding.UTF8.GetString bytes
+    | Some value -> Value.toText value |> Option.defaultValue ""
+    | None -> ""
+
 let private userColumnUInt32 (cols: ColumnDef list) (row: Value[]) (name: string) =
     match userColumnValue cols row name with
     | Some(VInt value) when value > 0L -> uint32 (min value (int64 UInt32.MaxValue))
@@ -277,19 +283,42 @@ let storedPasswordHash (cols: ColumnDef list) (row: Value[]) : string = userColu
 let accountTlsRequirement (cols: ColumnDef list) (row: Value[]) =
     match (userColumnText cols row "ssl_type").ToUpperInvariant() with
     | "ANY" -> RequireSsl
-    | "X509"
-    | "SPECIFIED" -> RequireX509
+    | "X509" -> RequireX509
+    | "SPECIFIED" ->
+        let optional name =
+            match userColumnBlobText cols row name with
+            | "" -> None
+            | value -> Some value
+
+        RequireSpecified
+            { Cipher = optional "ssl_cipher"
+              Issuer = optional "x509_issuer"
+              Subject = optional "x509_subject" }
     | _ -> RequireNone
 
 type TransportSecurity =
     { Encrypted: bool
-      ClientCertificateValidated: bool }
+      Cipher: string option
+      ClientCertificateValidated: bool
+      ClientCertificateIssuer: string option
+      ClientCertificateSubject: string option }
 
 let transportSatisfiesAccount (transport: TransportSecurity) (cols: ColumnDef list) (row: Value[]) =
+    let equals required actual =
+        actual |> Option.exists (fun value -> String.Equals(required, value, StringComparison.Ordinal))
+
     match accountTlsRequirement cols row with
     | RequireNone -> true
     | RequireSsl -> transport.Encrypted
     | RequireX509 -> transport.Encrypted && transport.ClientCertificateValidated
+    | RequireSpecified attributes ->
+        let certificateRequired = attributes.Issuer.IsSome || attributes.Subject.IsSome
+
+        transport.Encrypted
+        && (not certificateRequired || transport.ClientCertificateValidated)
+        && (attributes.Cipher |> Option.forall (fun required -> equals required transport.Cipher))
+        && (attributes.Issuer |> Option.forall (fun required -> equals required transport.ClientCertificateIssuer))
+        && (attributes.Subject |> Option.forall (fun required -> equals required transport.ClientCertificateSubject))
 
 type AccountLimits =
     { MaxQuestions: uint32
@@ -531,6 +560,19 @@ let private sslType = function
     | RequireNone -> ""
     | RequireSsl -> "ANY"
     | RequireX509 -> "X509"
+    | RequireSpecified _ -> "SPECIFIED"
+
+let private tlsAttributeValues = function
+    | RequireSpecified attributes -> attributes
+    | _ ->
+        { Cipher = None
+          Issuer = None
+          Subject = None }
+
+let private blobText (value: string option) =
+    value
+    |> Option.map (fun text -> Text.Encoding.UTF8.GetBytes text |> VBytes)
+    |> Option.defaultValue (VBytes [||])
 
 let private initialPasswordExpiration = function
     | Some ExpirePassword -> VString "Y", VNull
@@ -619,6 +661,8 @@ let createUserWithOptions
         |> Result.bind (fun attributes ->
             let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
             let expired, lifetime = initialPasswordExpiration options.PasswordExpiration
+            let tlsRequirement = options.TlsRequirement |> Option.defaultValue RequireNone
+            let tlsAttributes = tlsAttributeValues tlsRequirement
 
             let columns =
                 [ "Host"
@@ -626,6 +670,9 @@ let createUserWithOptions
                   "plugin"
                   "authentication_string"
                   "ssl_type"
+                  "ssl_cipher"
+                  "x509_issuer"
+                  "x509_subject"
                   "max_questions"
                   "max_updates"
                   "max_connections"
@@ -641,7 +688,10 @@ let createUserWithOptions
                   VString name
                   VString "mysql_native_password"
                   VString hash
-                  VString(options.TlsRequirement |> Option.defaultValue RequireNone |> sslType)
+                  VString(sslType tlsRequirement)
+                  blobText tlsAttributes.Cipher
+                  blobText tlsAttributes.Issuer
+                  blobText tlsAttributes.Subject
                   resourceLimitValue options.ResourceLimits.MaxQueriesPerHour
                   resourceLimitValue options.ResourceLimits.MaxUpdatesPerHour
                   resourceLimitValue options.ResourceLimits.MaxConnectionsPerHour
@@ -857,13 +907,26 @@ let private matchUserRow (wanted: Account) (cols: ColumnDef list) (row: Value[])
 let private accountOptionChanges (options: AccountOptions) =
     let limits = options.ResourceLimits
 
-    [ options.TlsRequirement |> Option.map (fun requirement -> "ssl_type", VString(sslType requirement))
-      limits.MaxQueriesPerHour |> Option.map (fun value -> "max_questions", VInt(int64 value))
-      limits.MaxUpdatesPerHour |> Option.map (fun value -> "max_updates", VInt(int64 value))
-      limits.MaxConnectionsPerHour |> Option.map (fun value -> "max_connections", VInt(int64 value))
-      limits.MaxUserConnections |> Option.map (fun value -> "max_user_connections", VInt(int64 value))
-      options.Locked |> Option.map (fun locked -> "account_locked", VString(if locked then "Y" else "N")) ]
-    |> List.choose id
+    let tlsChanges =
+        options.TlsRequirement
+        |> Option.map (fun requirement ->
+            let attributes = tlsAttributeValues requirement
+
+            [ "ssl_type", VString(sslType requirement)
+              "ssl_cipher", blobText attributes.Cipher
+              "x509_issuer", blobText attributes.Issuer
+              "x509_subject", blobText attributes.Subject ])
+        |> Option.defaultValue []
+
+    let optionChanges =
+        [ limits.MaxQueriesPerHour |> Option.map (fun value -> "max_questions", VInt(int64 value))
+          limits.MaxUpdatesPerHour |> Option.map (fun value -> "max_updates", VInt(int64 value))
+          limits.MaxConnectionsPerHour |> Option.map (fun value -> "max_connections", VInt(int64 value))
+          limits.MaxUserConnections |> Option.map (fun value -> "max_user_connections", VInt(int64 value))
+          options.Locked |> Option.map (fun locked -> "account_locked", VString(if locked then "Y" else "N")) ]
+        |> List.choose id
+
+    tlsChanges @ optionChanges
     |> fun changes ->
         match options.PasswordExpiration with
         | Some ExpirePassword -> ("password_expired", VString "Y") :: changes
@@ -3076,10 +3139,18 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
         let hash = userColumnText cols row "authentication_string"
         let accountState = if isAccountLocked cols row then "LOCK" else "UNLOCK"
         let tlsRequirement =
+            let quoteTlsText (value: string) = "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
+
             match accountTlsRequirement cols row with
             | RequireNone -> "NONE"
             | RequireSsl -> "SSL"
             | RequireX509 -> "X509"
+            | RequireSpecified attributes ->
+                [ attributes.Subject |> Option.map (fun value -> "SUBJECT " + quoteTlsText value)
+                  attributes.Issuer |> Option.map (fun value -> "ISSUER " + quoteTlsText value)
+                  attributes.Cipher |> Option.map (fun value -> "CIPHER " + quoteTlsText value) ]
+                |> List.choose id
+                |> String.concat " "
         let limits = accountLimits cols row
         let resources =
             [ "MAX_QUERIES_PER_HOUR", limits.MaxQuestions

@@ -1398,6 +1398,89 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "specific TLS requirements inspect the negotiated certificate and cipher"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let root = Fsdb.Session.create 1 store
+                  use serverCertificate = selfSignedCertificate ()
+                  use authority = certificateAuthority ()
+                  use certificate = clientCertificate authority
+
+                  let options =
+                      Fsdb.ServerOptions.defaults
+                      |> Fsdb.ServerOptions.withCertificate serverCertificate
+                      |> Fsdb.ServerOptions.withClientCertificateAuthority authority
+
+                  use server = TestSupport.ServerFixture.startWithOptions options store Fsdb.Functions.empty
+                  let! client, stream, sequence = connectTls server.Port (Some certificate)
+                  use client = client
+                  use stream = stream
+                  let capabilities = ClientProtocol41 ||| ClientSsl ||| ClientSecureConnection
+
+                  let cipher = string stream.NegotiatedCipherSuite
+
+                  let sql =
+                      sprintf
+                          "CREATE USER 'specific_tls'@'%%' REQUIRE SUBJECT '/CN=fsdb client' ISSUER '/CN=fsdb test CA' CIPHER '%s'"
+                          cipher
+
+                  let _, created = Fsdb.QueryHandler.handle root sql
+                  Expect.equal created (Affected 0UL) "specific TLS account created"
+
+                  do!
+                      writePacketAsync
+                          stream
+                          { SeqId = sequence + 2uy
+                            Payload = passwordlessHandshakeResponse capabilities "root" }
+                      |> Async.Ignore
+
+                  let! authenticated = readPacketAsync stream
+                  Expect.equal authenticated.Value.Payload.[0] 0uy "trusted TLS connection authenticates"
+
+                  do!
+                      writePacketAsync
+                          stream
+                          { SeqId = 0uy
+                            Payload = changeUserPayload "specific_tls" [||] "" 45 None }
+                      |> Async.Ignore
+
+                  let! firstReply = readPacketAsync stream
+
+                  let! changed =
+                      if firstReply.Value.Payload.[0] = 0xfeuy then
+                          async {
+                              do!
+                                  writePacketAsync
+                                      stream
+                                      { SeqId = firstReply.Value.SeqId + 1uy
+                                        Payload = [||] }
+                                  |> Async.Ignore
+
+                              return! readPacketAsync stream
+                          }
+                      else
+                          async.Return firstReply
+
+                  Expect.equal changed.Value.Payload.[0] 0uy "change-user retains certificate and cipher identity"
+
+                  let! missingClient, missingStream, missingSequence = connectTls server.Port None
+                  use missingClient = missingClient
+                  use missingStream = missingStream
+
+                  do!
+                      writePacketAsync
+                          missingStream
+                          { SeqId = missingSequence + 2uy
+                            Payload = passwordlessHandshakeResponse capabilities "specific_tls" }
+                      |> Async.Ignore
+
+                  let! rejected = readPacketAsync missingStream
+                  Expect.equal rejected.Value.Payload.[0] 0xffuy "missing client certificate is rejected"
+                  Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 1045 "account denial uses access denied"
+              }
+              |> Async.RunSynchronously
+
           testCase "expired-password capability enters the password-reset sandbox"
           <| fun _ ->
               async {

@@ -3278,6 +3278,25 @@ let tests =
                         ))
                         "X509 requirement"
 
+                    let specified =
+                        { Cipher = Some "TLS_AES_256_GCM_SHA384"
+                          Issuer = Some "/CN=fsdb test CA"
+                          Subject = Some "/CN=fsdb client" }
+
+                    Expect.equal
+                        (parseOk
+                            "CREATE USER certified_client REQUIRE SUBJECT '/CN=fsdb client' AND ISSUER '/CN=fsdb test CA' CIPHER 'TLS_AES_256_GCM_SHA384'")
+                        (CreateUser(
+                            [ "certified_client", "%", None ],
+                            false,
+                            { AccountOptions.empty with TlsRequirement = Some(RequireSpecified specified) }
+                        ))
+                        "specific TLS attributes"
+
+                    Expect.isError
+                        (parse "CREATE USER duplicate_tls REQUIRE SUBJECT '/CN=one' AND SUBJECT '/CN=two'")
+                        "a TLS attribute cannot be repeated"
+
                 testCase "CREATE and ALTER USER parse resource and password-expiry options"
                 <| fun _ ->
                     let resources =
