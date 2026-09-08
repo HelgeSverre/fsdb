@@ -615,7 +615,7 @@ let textRowPayloadTyped (columns: ColumnMetadata list) (values: string option li
     |> List.iter (fun (metadata, value) ->
         match value with
         | None -> w.WriteLenEncNull()
-        | Some s when hasMetadataFlag BinaryFlag metadata || metadata.TypeId = TypeBit ->
+        | Some s when carriesRawBytes metadata ->
             w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
         | Some s -> w.WriteLenEncString s)
 

@@ -5023,12 +5023,7 @@ let private runRoutineStatements
     let valuesOfResultRow (session: Session) (row: string option list) =
         let valueAt index (value: string option) =
             match value, List.tryItem index session.LastResultColumnMetadata with
-            | Some text, Some metadata
-                when hasMetadataFlag BinaryFlag metadata
-                     && (metadata.TypeId = TypeString
-                         || metadata.TypeId = TypeVarString
-                         || metadata.TypeId = TypeBlob)
-                     || metadata.TypeId = TypeBit ->
+            | Some text, Some metadata when carriesRawBytes metadata ->
                 VBytes(Encoding.Latin1.GetBytes text)
             | Some text, _ -> VString text
             | None, _ -> VNull

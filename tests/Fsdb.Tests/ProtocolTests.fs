@@ -387,6 +387,15 @@ let tests =
               Expect.equal (reader.ReadLenEncInt ()) (Some(uint64 expected.Length)) "UTF-8 byte length"
               Expect.equal (reader.ReadBytes expected.Length) expected "UTF-8 payload"
 
+          testCase "typed text rows encode JSON text as UTF-8 despite its binary flag"
+          <| fun _ ->
+              let value = "{\"label\":\"blåbær 🎉\"}"
+              let metadata = { columnMetadata TypeJson with Flags = BinaryFlag }
+              let reader = Reader(textRowPayloadTyped [ metadata ] [ Some value ])
+              let expected = Text.Encoding.UTF8.GetBytes value
+              Expect.equal (reader.ReadLenEncInt ()) (Some(uint64 expected.Length)) "UTF-8 byte length"
+              Expect.equal (reader.ReadBytes expected.Length) expected "UTF-8 payload"
+
           testCase "binary rows encode textual BLOB values as UTF-8"
           <| fun _ ->
               let value = "blåbær"

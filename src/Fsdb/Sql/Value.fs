@@ -1146,6 +1146,17 @@ type ColumnMetadata =
 let internal hasMetadataFlag flag metadata =
     metadata.Flags &&& flag <> 0us
 
+let internal carriesRawBytes metadata =
+    match metadata.TypeId with
+    | typeId when typeId = TypeBit || typeId = TypeGeometry -> true
+    | typeId when
+        typeId = TypeString
+        || typeId = TypeVarchar
+        || typeId = TypeVarString
+        || typeId = TypeBlob ->
+        hasMetadataFlag BinaryFlag metadata
+    | _ -> false
+
 let columnMetadata typeId =
     { TypeId = typeId
       ColumnLength = 0u
