@@ -50,6 +50,11 @@ let private nestedSubqueryResultsError = 1105, "Multiple resultsets are not vali
 let private equalsIgnoreCase (left: string) (right: string) =
     System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
+let private (|NamedFunction|_|) expected =
+    function
+    | FuncCall(name, arguments) when equalsIgnoreCase name expected -> Some arguments
+    | _ -> None
+
 /// An expression-evaluation failure: a MySQL error code and message, the
 /// same shape `Storage.toMySqlError` produces, so both error sources funnel
 /// into `Err` the same way.
@@ -2183,19 +2188,23 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
     | Cast(_, ty) -> fspOfType ty
     | Lit(VDouble _) -> Some 6
     | Lit value -> fspOfValue value
-    | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "MAX" || n = "MIN") -> fspOfExpr ctx arg
-    | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "TIME" || n = "SEC_TO_TIME") ->
+    | NamedFunction "MAX" [ arg ]
+    | NamedFunction "MIN" [ arg ] -> fspOfExpr ctx arg
+    | NamedFunction "TIME" [ arg ]
+    | NamedFunction "SEC_TO_TIME" [ arg ] ->
         fspOfExpr ctx arg |> Option.defaultValue 0 |> Some
-    | FuncCall(name, [ _; _; seconds ]) when name.Equals("MAKETIME", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "MAKETIME" [ _; _; seconds ] ->
         fspOfExpr ctx seconds |> Option.defaultValue 0 |> Some
-    | FuncCall(name, [ left; right ]) when name.Equals("TIMEDIFF", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "TIMEDIFF" [ left; right ] ->
         greatestFsp [ left; right ]
-    | FuncCall(name, args)
-        when (let n = name.ToUpperInvariant() in n = "CURTIME" || n = "CURRENT_TIME" || n = "UTC_TIME") ->
+    | NamedFunction "CURTIME" args
+    | NamedFunction "CURRENT_TIME" args
+    | NamedFunction "UTC_TIME" args ->
         match args with
         | [ Lit value ] -> Some(Value.toDouble value |> int |> max 0 |> min 6)
         | _ -> Some 0
-    | FuncCall(name, args) when (let n = name.ToUpperInvariant() in n = "NOW" || n = "CURRENT_TIMESTAMP") ->
+    | NamedFunction "NOW" args
+    | NamedFunction "CURRENT_TIMESTAMP" args ->
         match args with
         | [ Lit v ] -> Some(Value.toDouble v |> int |> max 0 |> min 6)
         | _ -> Some 0
@@ -2205,7 +2214,7 @@ let rec private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
     match expr with
     | Collate(_, name) -> Collation.charsetOfCollation name
     | Cast(value, _) -> sourceCharset ctx value
-    | FuncCall(name, [ _; Lit(VString charset) ]) when name.Equals("CONVERT", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "CONVERT" [ _; Lit(VString charset) ] ->
         Charset.canonicalName charset
     | _ ->
         tryColumnDefForExpr ctx expr
@@ -2394,7 +2403,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     let dateArithmetic expression first interval =
         let timeUnit =
             match interval with
-            | FuncCall(name, [ _; Lit(VString unit) ]) when name.Equals("INTERVAL", System.StringComparison.OrdinalIgnoreCase) ->
+            | NamedFunction "INTERVAL" [ _; Lit(VString unit) ] ->
                 not (dateOnlyIntervalUnits.Contains(unit.ToUpperInvariant()))
             | _ -> true
 
@@ -2556,24 +2565,22 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 CollationId = metadataCollationId collation })
     | Distinct inner
     | OrderBy(inner, _) -> metadataOfExpr ctx inner
-    | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "DEFAULT" [ argument ] ->
         metadataOfExpr ctx argument
-    | FuncCall(name, [ _ ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "COERCIBILITY" [ _ ] ->
         simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | FuncCall(name, [ _ ]) when
-        name.Equals("COLLATION", System.StringComparison.OrdinalIgnoreCase)
-        || name.Equals("CHARSET", System.StringComparison.OrdinalIgnoreCase)
-        ->
+    | NamedFunction "COLLATION" [ _ ]
+    | NamedFunction "CHARSET" [ _ ] ->
         Some { Value.columnMetadata TypeVarString with ColumnLength = 64u; Flags = NotNullFlag }
-    | FuncCall(name, [ _ ]) when name.Equals("SLEEP", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "SLEEP" [ _ ] ->
         simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | FuncCall(name, [ _; _ ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "BENCHMARK" [ _; _ ] ->
         simple TypeLongLong
-    | FuncCall(name, [ Cast(source, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "WEIGHT_STRING" [ Cast(source, TBinary length) ] ->
         weightStringMetadata (Cast(source, TBinary length)) (Some length)
-    | FuncCall(name, [ Cast(source, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "WEIGHT_STRING" [ Cast(source, TChar length) ] ->
         weightStringMetadata source (Some length)
-    | FuncCall(name, [ source ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "WEIGHT_STRING" [ source ] ->
         weightStringMetadata source None
     | FuncCall(RegisteredScalarResult metadata, _) -> Some metadata
     | FuncCall(name, args) ->
@@ -4849,20 +4856,20 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         |> Result.bind (fun lower ->
                             resolvedCompare ctx "<=" e ve hi vhi
                             |> Result.map (fun upper -> boolToValue (lower >= 0 && upper <= 0))))))
-    | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "DEFAULT" [ argument ] ->
         match tryColumnDefForExpr ctx argument with
         | Some { Default = Some(DExpression expression) } -> eval expression
         | Some column when column.Default.IsSome || column.Nullable ->
             Ok(Storage.evalDefaultWithMode (Storage.temporalCoercionMode ctx.Store) column)
         | Some column -> Error(1364, sprintf "Field '%s' doesn't have a default value" column.Name)
         | None -> Error(1054, "Unknown column in 'field list'")
-    | FuncCall(name, [ argument ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "COERCIBILITY" [ argument ] ->
         expressionCollation ctx argument |> Result.map (fun descriptor -> VInt(int64 descriptor.Coercibility))
-    | FuncCall(name, [ argument ]) when name.Equals("COLLATION", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "COLLATION" [ argument ] ->
         expressionCollation ctx argument |> Result.map (fun descriptor -> VString descriptor.Collation.Name)
-    | FuncCall(name, [ argument ]) when name.Equals("CHARSET", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "CHARSET" [ argument ] ->
         expressionCollation ctx argument |> Result.map (fun descriptor -> VString descriptor.Charset)
-    | FuncCall(name, [ argument ]) when name.Equals("SLEEP", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "SLEEP" [ argument ] ->
         eval argument
         |> Result.bind (fun value ->
             let seconds = Value.toDouble value
@@ -4890,7 +4897,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     Error(1235, "This version of MySQL doesn't yet support BENCHMARK execution beyond its resource limit")
                 else
                     Ok(VInt 0L))
-    | FuncCall(name, [ countExpr; body ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "BENCHMARK" [ countExpr; body ] ->
         eval countExpr
         |> Result.bind (fun value ->
             let repetitions = Value.toDouble value
@@ -4936,12 +4943,12 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     match failure with
                     | Some error -> Error error
                     | None -> Ok(VInt 0L))
-    | FuncCall(name, [ Cast(argument, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "WEIGHT_STRING" [ Cast(argument, TChar length) ] ->
         eval argument |> Result.map (Functions.weightStringChar (keyCollation ctx argument) length)
-    | FuncCall(name, [ Cast(argument, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "WEIGHT_STRING" [ Cast(argument, TBinary length) ] ->
         eval argument
         |> Result.map (Functions.weightStringBinaryWith (Charset.encode (sourceCharset ctx argument)) length)
-    | FuncCall(name, [ argument ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+    | NamedFunction "WEIGHT_STRING" [ argument ] ->
         let source =
             match argument with
             | Cast(value, TChar _) -> value

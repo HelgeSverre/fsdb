@@ -36,10 +36,8 @@ let private triggerTableKey (database: string) table =
     database.ToLowerInvariant(), normalizeTableName table
 
 let private syntaxError (sql: string) =
-    // Truncate: this message gets echoed straight into an ERR packet, and an
-    // unbounded echo of the query text is a reachable way to blow past
-    // writePacketAsync's single-packet framing (see the Packet.fs framing
-    // fix for the real root cause of >16 MiB payloads).
+    // ERR packets echo this text through a single packet, so bound it before
+    // constructing the response.
     let truncated = sql.Substring(0, min sql.Length 1024)
 
     Err(
@@ -67,12 +65,24 @@ let private hasKeywordPrefix (keyword: string) (text: string) =
 let private lookupVar (session: Session) (name: string) : string option option =
     session.Variables |> Map.tryFind (name.ToLowerInvariant())
 
+let private sessionValue session name =
+    lookupVar session name |> Option.flatten
+
+let private tryInt32 (value: string) =
+    match Int32.TryParse value with
+    | true, parsed -> Some parsed
+    | false, _ -> None
+
+let private tryInt64 (value: string) =
+    match Int64.TryParse value with
+    | true, parsed -> Some parsed
+    | false, _ -> None
+
 let private completeResultMetadata (session: Session) (result: QueryResult) (metadata: ColumnMetadata list) =
     match result with
     | ResultSet(columns, _) when metadata.Length <> columns.Length ->
         let collationId =
-            lookupVar session "collation_connection"
-            |> Option.flatten
+            sessionValue session "collation_connection"
             |> Option.bind (fun name -> Collation.idAndSortlen |> Map.tryFind (name.ToLowerInvariant()))
             |> Option.map (fst >> uint16)
 
@@ -423,12 +433,9 @@ let private maintenanceResult rows =
     ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
 
 let private lockWaitTimeout (session: Session) =
-    lookupVar session "innodb_lock_wait_timeout"
-    |> Option.flatten
-    |> Option.bind (fun value ->
-        match Int32.TryParse value with
-        | true, seconds -> Some(TimeSpan.FromSeconds(float seconds))
-        | _ -> None)
+    sessionValue session "innodb_lock_wait_timeout"
+    |> Option.bind tryInt32
+    |> Option.map (float >> TimeSpan.FromSeconds)
     |> Option.defaultWith Limits.lockWaitTimeout
 
 let private canInspectRoutine (session: Session) schema definer =
@@ -637,19 +644,14 @@ let private registryFor (session: Session) : Functions.Registry =
         |> fun current -> { current with Extensions = session.CustomFunctions.Extensions }
 
     let database _ = session.Database |> Option.map VString |> Option.defaultValue VNull
-    let blockEncryptionMode = lookupVar session "block_encryption_mode" |> Option.flatten |> Option.defaultValue "aes-128-ecb"
+    let blockEncryptionMode = sessionValue session "block_encryption_mode" |> Option.defaultValue "aes-128-ecb"
     let timeLocale =
-        lookupVar session "lc_time_names"
-        |> Option.flatten
+        sessionValue session "lc_time_names"
         |> Option.bind Functions.tryTimeLocale
         |> Option.defaultValue Functions.defaultTimeLocale
     let defaultWeekFormat =
-        lookupVar session "default_week_format"
-        |> Option.flatten
-        |> Option.bind (fun value ->
-            match Int32.TryParse value with
-            | true, mode -> Some mode
-            | _ -> None)
+        sessionValue session "default_week_format"
+        |> Option.bind tryInt32
         |> Option.defaultValue 0
 
     let loginUser = if session.LoginUser = "" then session.User else session.LoginUser
@@ -677,7 +679,7 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "FOUND_ROWS" (fun _ -> VUInt session.FoundRows)
     |> Functions.registerScalar
         "VERSION"
-        (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
+        (fun _ -> sessionValue session "version" |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
     |> Functions.registerScalar "GET_LOCK" (getAdvisoryLock session)
     |> Functions.registerScalar "RELEASE_LOCK" (releaseAdvisoryLock session)
@@ -1037,8 +1039,7 @@ let private literalSetRhs (options: Parser.ParserOptions) (rhs: string) : Value 
         None
 
 let private parserOptionsForSession (session: Session) =
-    lookupVar session "sql_mode"
-    |> Option.flatten
+    sessionValue session "sql_mode"
     |> Option.defaultValue ""
     |> SqlMode.parserOptionsFor
 
@@ -1324,10 +1325,7 @@ let private parseSetFragment
                             else
                                 Session.tryGlobalVariable session.Store name
                                 |> Option.flatten
-                                |> Option.bind (fun value ->
-                                    match Int32.TryParse value with
-                                    | true, depth -> Some depth
-                                    | false, _ -> None)
+                                |> Option.bind tryInt32
                                 |> Option.defaultValue 0
 
                         Ok(SetRoutineRecursionDepthAction(depth, isGlobal, None), sideEffects)
@@ -1722,9 +1720,7 @@ let private removeTransactionView (session: Session) =
     TransactionRegistry.remove session.Store session.ConnectionId
 
 let private enabledSessionFlag name (session: Session) =
-    lookupVar session name
-    |> Option.flatten
-    |> Option.forall ((<>) "0")
+    sessionValue session name |> Option.forall ((<>) "0")
 
 let private transactionCatalogChanges (baseCatalog: Catalog) (catalog: Catalog) =
     let mutable databases = Set.empty
@@ -1929,12 +1925,12 @@ let private rollbackSession (session: Session) : Session =
 /// transaction before starting another one, so this does too.
 let private configuredReadOnly (session: Session) =
     session.PendingTransactionReadOnly
-    |> Option.defaultWith (fun () -> lookupVar session "transaction_read_only" |> Option.flatten = Some "1")
+    |> Option.defaultWith (fun () -> sessionValue session "transaction_read_only" = Some "1")
 
 let private configuredIsolation (session: Session) =
     session.PendingTransactionIsolation
     |> Option.defaultWith (fun () ->
-        match lookupVar session "transaction_isolation" |> Option.flatten with
+        match sessionValue session "transaction_isolation" with
         | Some value ->
             match transactionIsolationOf value with
             | Ok isolation -> isolation
@@ -2486,7 +2482,7 @@ let rec private statementStatusCommand = function
 
 let private retainsTransactionAfterStatement (session: Session) =
     session.TransactionTracking.State.Kind = ExplicitTrackedTransaction
-    || lookupVar session "autocommit" |> Option.flatten = Some "0"
+    || sessionValue session "autocommit" = Some "0"
 
 let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) =
     match session.Tx with
@@ -2563,20 +2559,15 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
         // Transaction stores begin with default strictness. Derive the full
         // mode value from the session before each statement.
-        lookupVar session "sql_mode"
-        |> Option.flatten
+        sessionValue session "sql_mode"
         |> Option.iter (setSqlMode store)
 
         let registry = registryFor session
 
         let withRecursionDepth body =
             let sessionLimit =
-                lookupVar session "cte_max_recursion_depth"
-                |> Option.flatten
-                |> Option.bind (fun value ->
-                    match Int64.TryParse value with
-                    | true, parsed -> Some parsed
-                    | _ -> None)
+                sessionValue session "cte_max_recursion_depth"
+                |> Option.bind tryInt64
                 |> Option.defaultValue Limits.cteMaxRecursionDepth
 
             // A session may tighten the administrator's process-wide cap,
@@ -2591,20 +2582,15 @@ let private executeParsedStatement (session: Session) (stmt: Statement) : Sessio
 
         let withExecutionLimits body =
             let groupConcatLimit =
-                lookupVar session "group_concat_max_len"
-                |> Option.flatten
-                |> Option.bind (fun value -> match Int32.TryParse value with | true, parsed when parsed >= 4 -> Some parsed | _ -> None)
+                sessionValue session "group_concat_max_len"
+                |> Option.bind tryInt32
+                |> Option.filter (fun value -> value >= 4)
                 |> Option.defaultValue 1024
 
             Executor.withGroupConcatMaxLen groupConcatLimit (fun () -> withRecursionDepth body)
 
-        // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
-        // points instead of the plain `execute` every other statement uses
-        // — those are the only two statement kinds that reach the wire as
-        // a `ResultSet`, and only they still have the typed `Value`s
-        // (rather than already-rendered text) the metadata pass needs. See
-        // `Session.LastResultColumnMetadata`'s doc for why this rides along
-        // on `session` instead of widening this function's own return type.
+        // SELECT and UNION retain typed values until their wire metadata is
+        // derived; other statements are already rendered by Executor.
         let variables = expressionVariables session
 
         let evaluate () =
@@ -2912,7 +2898,7 @@ let private canExecuteDirectAutocommit (session: Session) dbName statement =
     | None -> false
 
 let private autocommitDisabled (session: Session) =
-    lookupVar session "autocommit" |> Option.flatten = Some "0"
+    sessionValue session "autocommit" = Some "0"
 
 let private implicitCommitDatabases dbName stmt =
     Auth.requiredPrivileges dbName stmt
@@ -6196,12 +6182,8 @@ and private dispatchNormalized session rawSql parserOptions sql =
                 |> List.length
 
             let recursionLimit =
-                lookupVar session "max_sp_recursion_depth"
-                |> Option.flatten
-                |> Option.bind (fun value ->
-                    match Int32.TryParse value with
-                    | true, depth -> Some depth
-                    | false, _ -> None)
+                sessionValue session "max_sp_recursion_depth"
+                |> Option.bind tryInt32
                 |> Option.defaultValue 0
 
             match routineEntries () |> List.tryFind (SystemCatalog.Routine.matches database name) with
