@@ -174,11 +174,15 @@ binding to a non-loopback address:
 4. pass `--data-dir` when committed data must survive process exit, and restrict
    that directory to the server's operating-system account.
 
-Passwords use `mysql_native_password`. Clients that begin with
-`caching_sha2_password` receive an authentication switch, so common drivers can
-connect, but fsdb does not yet provide caching-SHA2 fast/full authentication or
-its RSA exchange. The open protocol boundary is tracked in
-[GAPS.md](GAPS.md#12-wire-protocol-and-prepared-statements).
+New accounts use MySQL 8.4's `caching_sha2_password` by default. The server
+supports its full and cached exchanges: passwords travel inside TLS when the
+connection is encrypted, while plaintext TCP clients can request the server's
+process-local RSA public key. Clients that disable public-key retrieval should
+use TLS.
+
+`CREATE USER` and `ALTER USER` also accept explicit
+`mysql_native_password` credentials for older clients. That plugin is retained
+for compatibility rather than used as the default.
 
 The WAL and snapshots detect torn or accidentally corrupt data, not malicious
 changes by a local writer. Treat the data directory and TLS private key as
@@ -409,8 +413,6 @@ time-zone tables, which fsdb does not load.
 The open compatibility ledger, including complex updatable views and
 replication, lives in [GAPS.md](GAPS.md). The
 [compatibility guide](docs/compatibility.md) describes the validation method.
-Bounded implementation ceilings may also carry a `ponytail:` marker beside
-the relevant code when the upgrade path is concrete.
 
 ## Persistence format
 

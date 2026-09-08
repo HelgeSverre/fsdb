@@ -438,12 +438,12 @@ help, log, statistics, GTID, NDB, and replication-channel data still differ or
 remain empty.
 
 `CREATE USER`, `DROP USER`, `ALTER USER`, `SET PASSWORD`, `GRANT`, and `REVOKE`
-persist through the WAL and snapshot path. Passwords use
-`mysql_native_password` hashes verified during the handshake; clients that begin
-with `caching_sha2_password` receive an auth switch. This preserves common
-client compatibility but is not equivalent to caching-SHA2 fast/full
-authentication; the active boundary belongs in the
-[wire-protocol ledger](../GAPS.md#12-wire-protocol-and-prepared-statements).
+persist through the WAL and snapshot path. New passwords use MySQL 8.4's
+`caching_sha2_password` storage transform. The wire server performs cached and
+full authentication, sending the full password through TLS or accepting the
+plugin's RSA-OAEP exchange on plaintext TCP. Explicit
+`mysql_native_password` accounts remain available and negotiate through an
+authentication switch when necessary.
 
 Account locks, TLS requirements, password lifetimes, JSON attributes and
 comments, the expired-password reset sandbox, and resource limits are
@@ -476,7 +476,7 @@ does not imply them.
 
 `GRANT/REVOKE PROXY` persist relationships in `mysql.proxies_priv`, enforce
 target-specific delegation, follow grantee rename/drop lifecycle, and appear
-in `SHOW GRANTS`. The built-in mysql_native_password flow cannot select an
+in `SHOW GRANTS`. The built-in authentication plugins do not select an
 alternate proxied identity.
 
 `CREATE SERVER`, `ALTER SERVER`, and `DROP SERVER` persist foreign-server

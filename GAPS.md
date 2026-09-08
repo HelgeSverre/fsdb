@@ -26,8 +26,8 @@ divergences; rows marked *refusal* fail loudly, rows marked *divergence*
 behave differently from MySQL without erroring.
 
 The torture ledger `torture/support/known-gaps.json` is hand-reviewed. This
-document also covers deliberate divergences marked `ponytail:` in source and
-findings recorded under `torture/findings/`.
+document also covers deliberate implementation ceilings and findings recorded
+under `torture/findings/`.
 
 ## Summary by area
 
@@ -45,7 +45,7 @@ findings recorded under `torture/findings/`.
 | [Routines and events](#10-stored-routines-events-schedulers) | Procedures, functions, and scheduled events are persisted and executable | — |
 | [Full-text](#11-full-text-search) | Maintained inverted indexes and MySQL-shaped scoring | CJK parsing and remaining plan combinations |
 | [Wire protocol](#12-wire-protocol-and-prepared-statements) | Prepared statements, TLS, compression, LOCAL INFILE, and multi-results | GTID state tracking and live TLS certificate reload |
-| [Authentication](#13-authentication-and-privileges) | Host accounts, grants, roles, proxy grants, and account policy | caching-SHA2 authentication and pluggable identity selection |
+| [Authentication](#13-authentication-and-privileges) | Host accounts, caching-SHA2/native credentials, grants, roles, proxy grants, and account policy | Pluggable identity and proxy-user selection |
 | [Metadata and administration](#14-metadata-server-administration-logging-replication) | Broad metadata catalogs and live command/session state | Engine-owned contents, logging, and replication |
 
 ## 1. SQL statements and parser
@@ -449,9 +449,10 @@ evaluating join conditions, predicates, and assignments.
 ## 12. Wire protocol and prepared statements
 
 HandshakeV10 negotiates capabilities, deprecated EOF behavior, authentication,
-compression, TLS, packet limits, and affected-row mode. Authentication can
-switch caching-SHA2 clients to `mysql_native_password` and verifies credentials
-in constant time.
+compression, TLS, packet limits, and affected-row mode. Authentication defaults
+to `caching_sha2_password`, supports cached and full exchanges over TLS or an
+RSA public-key request, and can switch clients to an account's explicit
+`mysql_native_password` plugin.
 
 The command surface covers query, database selection, ping, field listing,
 quit, connection reset, and the complete prepared-statement lifecycle. Prepared
@@ -485,14 +486,15 @@ the statement.
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index conversion conditions, conditional DDL and unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |
-| Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateAccount` downgrades caching_sha2 clients via auth-switch | medium (security; clients still connect) | divergence |
+| Auth plugins | built-in caching_sha2_password and sha256_password, configurable RSA key files, and component-provided identity plugins | caching_sha2_password cached/full TLS and process-local RSA exchange plus mysql_native_password; sha256_password, configurable RSA key files, and pluggable identity providers are absent | low (specialized accounts) | refusal |
 | System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset or `SYSTEM` time-zone variables are live; most others are inert or absent, named time zones are unavailable, and `system_time_zone` retains its static bootstrap label | medium | divergence |
 
 ## 13. Authentication and privileges
 
 The account catalog follows MySQL 8.4's `mysql.user` column order and includes
-a root bootstrap account. Passwords use double-SHA1 hashes with constant-time
-comparison.
+a root bootstrap account. New credentials use salted
+`caching_sha2_password` hashes; explicit legacy accounts retain
+`mysql_native_password` hashes.
 
 Account DDL covers locks, expiry, history, reuse intervals, current-password
 rules, resource limits, mergeable JSON attributes or comments, and transport
@@ -521,7 +523,7 @@ its subject table before checking the `TRIGGER` privilege.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
-| Proxy identity selection | authentication plugins can map a login to an authorized proxied account | proxy declarations, target-specific grant-option delegation, lifecycle cleanup, persistence, and `SHOW GRANTS` lines work; mysql_native_password never returns an alternate identity and fsdb has no pluggable authentication provider | low | refusal |
+| Proxy identity selection | authentication plugins can map a login to an authorized proxied account | proxy declarations, target-specific grant-option delegation, lifecycle cleanup, persistence, and `SHOW GRANTS` lines work; fsdb's built-in plugins never return an alternate identity and there is no pluggable authentication provider | low | refusal |
 | System-table coverage | mysql.* tables with engine-maintained contents | MySQL 8.4 table schemas preserve column order, types, nullability, key membership, defaults, and generated columns alongside fsdb's stored-object catalogs; stock optimizer-cost and group-replication configuration/action rows are present, but native catalog collations and engine-maintained help, log, GTID, InnoDB-statistics, procedure-grant, NDB, and replication-channel rows still differ or remain empty unless ordinary fsdb DML populates them | low | divergence |
 
 ## 14. Metadata, server administration, logging, replication
@@ -607,9 +609,9 @@ implementation effort:
    configurable buffers, topology predicates, equality, and convex hull are
    covered.
 
-5. Modern authentication plugins. Common clients can follow the
-   `mysql_native_password` auth switch, but caching-SHA2 fast/full
-   authentication and its RSA exchange remain absent.
+5. Extensible authentication providers and `sha256_password`. The built-in
+   caching-SHA2 and native password exchanges are covered; external identity
+   providers and proxy-user selection are not.
 
 6. Replication, logging, broad engine counters, and the remaining metadata
    tail. Core command counters are live; replication remains architectural.

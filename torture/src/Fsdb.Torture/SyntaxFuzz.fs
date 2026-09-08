@@ -174,6 +174,16 @@ module SyntaxFuzz =
                suffix
            "account_password_change",
            sprintf "ALTER USER 'syntax_policy_%s'@'%%' IDENTIFIED BY 'beta'" suffix
+           "account_caching_sha2",
+           sprintf
+               "CREATE USER 'syntax_sha2_%s'@'%%' IDENTIFIED WITH caching_sha2_password BY 'secret'"
+               suffix
+           "account_caching_sha2_empty",
+           sprintf "CREATE USER 'syntax_sha2_empty_%s'@'%%' IDENTIFIED WITH caching_sha2_password" suffix
+           "account_caching_sha2_hash",
+           sprintf
+               "CREATE USER 'syntax_sha2_hash_%s'@'%%' IDENTIFIED WITH caching_sha2_password AS '$A$005$abcdefghijklmnopqrstltGH7WP6BeJcDPwwlMdP4WaLY.f6.aTZGQXE5aAMc58'"
+               suffix
            "read_uncommitted", "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
            "partition_selection", "SELECT id FROM syntax_partitioned PARTITION (p0) ORDER BY id"
            "partition_growth", "ALTER TABLE syntax_partitioned ADD PARTITION PARTITIONS 1"
