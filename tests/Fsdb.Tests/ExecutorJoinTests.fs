@@ -87,6 +87,43 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ] ] "reordering preserves the bare-column result"
               | other -> failtestf "expected joined rows, got %A" other
 
+          testCase "join ordering recognizes composite equality probes"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE base_pairs (tenant_id INT, code INT)" |> ignore
+              runDefault store "CREATE TABLE large_single (id INT PRIMARY KEY, tenant_id INT, KEY ix_tenant (tenant_id))" |> ignore
+
+              runDefault
+                  store
+                  "CREATE TABLE small_composite (id INT PRIMARY KEY, tenant_id INT, code INT, KEY ix_pair (tenant_id, code))"
+              |> ignore
+
+              runDefault store "INSERT INTO base_pairs VALUES (1, 10)" |> ignore
+
+              [ 1..100 ]
+              |> List.map (fun id -> sprintf "(%d,1)" id)
+              |> String.concat ","
+              |> fun rows -> runDefault store ("INSERT INTO large_single VALUES " + rows)
+              |> ignore
+
+              runDefault store "INSERT INTO small_composite VALUES (1, 1, 10)" |> ignore
+
+              let sql =
+                  "SELECT b.tenant_id FROM base_pairs b "
+                  + "JOIN large_single l ON l.tenant_id = b.tenant_id "
+                  + "JOIN small_composite s ON s.tenant_id = b.tenant_id AND s.code = b.code"
+
+              let tables =
+                  runDefault store ("EXPLAIN " + sql)
+                  |> TestSupport.Sql.explainRows
+                  |> List.choose _.Table
+
+              Expect.equal tables [ "b"; "s"; "l" ] "the smaller composite-index source runs first"
+
+              match runDefault store sql with
+              | ResultSet(_, rows) -> Expect.equal rows.Length 100 "join reordering preserves all matches"
+              | other -> failtestf "expected composite join rows, got %A" other
+
           testCase "a qualified base-table range narrows before joining"
           <| fun _ ->
               let mutable calls = 0

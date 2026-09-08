@@ -115,8 +115,9 @@ The expression grammar includes:
 ## 2. Query execution
 
 Equi-joins use collation-folded hash keys; other joins use lazy nested loops.
-Direct physical inner tables can build statement-local equality buckets.
-`ORDER BY ... LIMIT` uses a bounded top-N sort.
+Direct physical inner tables can use single or composite equality probes, and
+join ordering recognizes those access paths. `ORDER BY ... LIMIT` uses a
+bounded top-N sort.
 
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership

@@ -7328,13 +7328,13 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
         let tableForJoin (join: Join) =
             tableFor join.Table
 
-        let indexedByBoundColumn bound (join: Join) =
+        let indexedByBoundColumns bound (join: Join) =
             let candidate = qualifier join.Table
 
-            conjuncts join.On
-            |> List.exists (function
-                | BinOp(Eq, left, right) ->
-                    let candidateColumn =
+            let candidateColumns =
+                conjuncts join.On
+                |> List.choose (function
+                    | BinOp(Eq, left, right) ->
                         match tryOwnedColumn sources left, tryOwnedColumn sources right with
                         | Some(leftQualifier, leftColumn), Some(rightQualifier, _)
                             when leftQualifier = candidate && bound |> Set.contains rightQualifier ->
@@ -7343,13 +7343,11 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
                             when rightQualifier = candidate && bound |> Set.contains leftQualifier ->
                             Some rightColumn
                         | _ -> None
+                    | _ -> None)
 
-                    candidateColumn
-                    |> Option.bind (fun column ->
-                        tableForJoin join
-                        |> Option.bind (fun table -> Storage.tryEqualityIndexForColumns table [ column ]))
-                    |> Option.isSome
-                | _ -> false)
+            tableForJoin join
+            |> Option.bind (fun table -> Storage.tryEqualityIndexForColumns table candidateColumns)
+            |> Option.isSome
 
         let rec choose bound (planned: Join list) (remaining: Join list) =
             match remaining with
@@ -7371,7 +7369,7 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
                         ready
                         |> List.minBy (fun (originalIndex, join) ->
                             let rowCount = tableForJoin join |> Option.map (_.RowsArray.Count) |> Option.defaultValue System.Int32.MaxValue
-                            (if indexedByBoundColumn bound join then 0 else 1), rowCount, originalIndex)
+                            (if indexedByBoundColumns bound join then 0 else 1), rowCount, originalIndex)
 
                     let remaining = remaining |> List.mapi (fun i join -> i, join) |> List.choose (fun (i, join) -> if i = index then None else Some join)
                     choose (Set.add (qualifier next.Table) bound) (next :: planned) remaining
