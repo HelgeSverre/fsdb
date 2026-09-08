@@ -242,8 +242,10 @@ foreign-key validation protect publication.
 
 Savepoints follow MySQL establishment order. Autocommit uses implicit
 transactions, read-only transactions do not block writers, and unrelated
-databases use independent roots. Row-stripe ownership coordinates finer-grained
-writes. Redo-backed AUTO_INCREMENT reservations survive rollback and restart.
+databases use independent roots. Whole-catalog consumers sample those roots
+under the brief publication boundary, so a multi-database commit appears as
+one coherent catalog. Row-stripe ownership coordinates finer-grained writes.
+Redo-backed AUTO_INCREMENT reservations survive rollback and restart.
 
 `READ UNCOMMITTED` composes the immutable deltas of active transactions into a
 fresh statement view without publishing them; rolled-back deltas disappear on
@@ -270,7 +272,6 @@ has resolved.
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; AUTO_INCREMENT identities are reserved across transaction snapshots; keyless inserts, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
-| Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 | XA recovery details | recovered branches retain InnoDB locks and `XA RECOVER` requires `XA_RECOVER_ADMIN` | live prepared branches retain row/key ownership and `XA_RECOVER_ADMIN` is enforced through `mysql.global_grants`; after restart, overlapping completion returns 1205 through optimistic validation instead of waiting on reconstructed locks; use `CONVERT XID` for byte-exact non-ASCII identifiers because the unconverted result still crosses the string result carrier | low | divergence |
 
 ## 8. Persistence and durability

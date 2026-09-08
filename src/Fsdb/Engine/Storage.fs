@@ -416,6 +416,33 @@ module ExecutionSettings =
           ConnectionCharset = connectionCharset
           ConnectionCollation = Collation.findOrDefault (Some collationName) }
 
+type CatalogPublicationGate internal () =
+    let sync = new ReaderWriterLockSlim()
+
+    member internal _.Read(read) =
+        sync.EnterReadLock()
+
+        try
+            read ()
+        finally
+            sync.ExitReadLock()
+
+    member internal _.Publish(publish) =
+        sync.EnterWriteLock()
+
+        try
+            publish ()
+        finally
+            sync.ExitWriteLock()
+
+    member internal _.AcquireRead() =
+        sync.EnterReadLock()
+
+        { new IDisposable with
+            member _.Dispose() = sync.ExitReadLock() }
+
+    member internal _.WaitingWriters = sync.WaitingWriteCount
+
 /// Shared catalog state plus session-local coercion and transaction settings.
 /// Session clones share reference-typed synchronization fields but copy the
 /// mutable SQL-mode, FK, and collation values.
@@ -436,6 +463,9 @@ type Store =
       mutable PendingEvents: ResizeArray<CommitEvent> option
       /// Serializes catalog membership and serializable publication.
       Lock: obj
+      /// Whole-catalog readers share this gate with the brief immutable-root
+      /// publication step. Statement work remains coordinated per database.
+      CatalogPublication: CatalogPublicationGate
       /// DML shares this lock; schema changes take it exclusively so a
       /// foreign-key definition cannot appear between relationship lookup
       /// and publication.
@@ -467,21 +497,29 @@ type Store =
     member internal this.NextLockOwnerId() =
         Interlocked.Increment(&this.RowLockSequence.Value)
 
-    /// Materializes one catalog root in O(database count), with row structures
-    /// shared immutably. Hot single-database paths read `Databases` directly.
-    /// ponytail: Linearizable cross-database reads require a store-wide epoch
-    /// that brackets sampling of the independently published database roots.
+    /// Materializes one coherent catalog root in O(database count), with row
+    /// structures shared immutably. Hot single-database paths read
+    /// `Databases` directly.
     member this.Catalog
-        with get () : Catalog = this.Databases |> Seq.map (fun kv -> kv.Key, kv.Value.Value) |> Map.ofSeq
+        with get () : Catalog =
+            this.CatalogPublication.Read(fun () ->
+                this.Databases |> Seq.map (fun kv -> kv.Key, kv.Value.Value) |> Map.ofSeq
+            )
+
         /// Whole-catalog replacement is safe only during startup, private
         /// transaction rollback, or isolated test setup.
         and set (catalog: Catalog) =
-            this.Databases.Clear()
+            this.CatalogPublication.Publish(fun () ->
+                this.Databases.Clear()
 
-            for KeyValue(dbName, db) in catalog do
-                this.Databases.[dbName] <- ref db
+                for KeyValue(dbName, db) in catalog do
+                    this.Databases.[dbName] <- ref db
+            )
 
 let setCatalog (store: Store) (catalog: Catalog) : unit = store.Catalog <- catalog
+
+let private publishCatalogRoots (store: Store) publication =
+    store.CatalogPublication.Publish publication
 
 let private withIndexExpressionDiagnostics (store: Store) operation =
     let behavior =
@@ -602,6 +640,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       // Nested statement snapshots inherit the outer transaction's buffering.
       PendingEvents = if collectsCommitEvents store then Some(ResizeArray()) else None
       Lock = obj ()
+      CatalogPublication = CatalogPublicationGate()
       ReferentialSchemaLock = store.ReferentialSchemaLock
       CommitLock = store.CommitLock
       RowLocks = store.RowLocks
@@ -940,7 +979,7 @@ let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> 
         withReferentialSchemaLock ExclusiveAccess store (fun () ->
             lock store.Lock (fun () ->
                 lock slot (fun () ->
-                    if store.Databases.TryAdd(dbName, slot) then
+                    if publishCatalogRoots store (fun () -> store.Databases.TryAdd(dbName, slot)) then
                         invalidateDatabaseAutoIncrementCounters store dbName
                         Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false, [])) ])
                     else
@@ -990,7 +1029,7 @@ let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
                                     )
                                 )
                             | _ ->
-                                match store.Databases.TryRemove dbName with
+                                match publishCatalogRoots store (fun () -> store.Databases.TryRemove dbName) with
                                 | true, _ ->
                                     invalidateDatabaseAutoIncrementCounters store dbName
                                     Ok(prepareEvents store [ SchemaChanged(dbName, DropDatabase(dbName, false)) ])
@@ -1033,26 +1072,27 @@ let private withDatabasePublishing
                     | Ok(db', result) ->
                         let current = slot.Value
 
-                        slot.Value <-
-                            if LanguagePrimitives.PhysicalEquality original current then
-                                db'
-                            else
-                                // Trigger bodies may re-enter this slot while the outer
-                                // statement still owns its immutable starting root.
-                                let keys =
-                                    Set.union
-                                        (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
-                                        (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                        publishCatalogRoots store (fun () ->
+                            slot.Value <-
+                                if LanguagePrimitives.PhysicalEquality original current then
+                                    db'
+                                else
+                                    // Trigger bodies may re-enter this slot while the outer
+                                    // statement still owns its immutable starting root.
+                                    let keys =
+                                        Set.union
+                                            (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                                            (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
 
-                                keys
-                                |> Set.fold
-                                    (fun published key ->
-                                        match Map.tryFind key original, Map.tryFind key db' with
-                                        | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
-                                        | _, Some after -> Map.add key after published
-                                        | Some _, None -> Map.remove key published
-                                        | None, None -> published)
-                                    current
+                                    keys
+                                    |> Set.fold
+                                        (fun published key ->
+                                            match Map.tryFind key original, Map.tryFind key db' with
+                                            | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
+                                            | _, Some after -> Map.add key after published
+                                            | Some _, None -> Map.remove key published
+                                            | None, None -> published)
+                                        current)
 
                         Ok(result, prepareResultEvents store eventsOf result))
 
@@ -1129,8 +1169,9 @@ let private withReferentialCatalogPublishing
                                 captureIndexExpressionError (fun () ->
                                     withIndexExpressionDiagnostics store (fun () -> operation currentCatalog database))
                                 |> Result.map (fun (updatedCatalog, result) ->
-                                    for name, slot in slots do
-                                        slot.Value <- Map.find name updatedCatalog
+                                    publishCatalogRoots store (fun () ->
+                                        for name, slot in slots do
+                                            slot.Value <- Map.find name updatedCatalog)
 
                                     result, prepareResultEvents store eventsOf result)))
 
@@ -1198,7 +1239,7 @@ let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
                     liveDb
 
             if not (obj.ReferenceEquals(mergedDb, liveDb)) then
-                slot.Value <- mergedDb)
+                publishCatalogRoots store (fun () -> slot.Value <- mergedDb))
 
     for KeyValue(dbName, snapshotDb) in snapshotCatalog do
         match store.Databases.TryGetValue dbName with
@@ -1261,7 +1302,7 @@ let tableSnapshot (store: Store) (dbName: string) (tableName: string) : Result<T
 /// `QueryHandler`'s `Use` probe). `ConcurrentDictionary.TryAdd` publishes
 /// the database atomically without a retry loop.
 let ensureDatabase (store: Store) (dbName: string) : unit =
-    store.Databases.TryAdd(dbName, ref Map.empty) |> ignore
+    publishCatalogRoots store (fun () -> store.Databases.TryAdd(dbName, ref Map.empty) |> ignore)
 
 /// Whether `dbName` is a real catalog entry, or the always-present virtual
 /// `information_schema` — what `USE`/`COM_INIT_DB` check to match real
@@ -4058,6 +4099,7 @@ let create () : Store =
       Durability = { Sink = None }
       PendingEvents = None
       Lock = obj ()
+      CatalogPublication = CatalogPublicationGate()
       ReferentialSchemaLock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion)
       CommitLock = obj ()
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
@@ -8616,6 +8658,7 @@ let private mergeDatabase dbName (baseDb: Database) (batchDb: Database) (liveDb:
 
 let private mergeDatabaseSlotPublishing
     (timeout: TimeSpan)
+    (store: Store)
     (dbName: string)
     (slot: Database ref)
     (baseDb: Database)
@@ -8627,14 +8670,23 @@ let private mergeDatabaseSlotPublishing
 
     try
         let liveDb = slot.Value
-        slot.Value <- mergeDatabase dbName baseDb batchDb liveDb
+        let mergedDb = mergeDatabase dbName baseDb batchDb liveDb
+        publishCatalogRoots store (fun () -> slot.Value <- mergedDb)
 
         prepare ()
     finally
         Monitor.Exit slot
 
-let private mergeDatabaseSlot (timeout: TimeSpan) (dbName: string) (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
-    mergeDatabaseSlotPublishing timeout dbName slot baseDb batchDb (fun () -> ignore) |> fun acknowledge -> acknowledge ()
+let private mergeDatabaseSlot
+    (timeout: TimeSpan)
+    (store: Store)
+    (dbName: string)
+    (slot: Database ref)
+    (baseDb: Database)
+    (batchDb: Database)
+    : unit =
+    mergeDatabaseSlotPublishing timeout store dbName slot baseDb batchDb (fun () -> ignore)
+    |> fun acknowledge -> acknowledge ()
 
 /// Merges a private statement or transaction snapshot into the live catalog.
 /// Rows changed from the same base row conflict; disjoint row changes combine
@@ -8646,16 +8698,18 @@ let private mergeCatalogIntoWithTimeoutCore (timeout: TimeSpan) (store: Store) (
         match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
         | Some _, None ->
             match store.Databases.TryGetValue dbName with
-            | true, slot when obj.ReferenceEquals(slot.Value, Map.find dbName baseCatalog) -> store.Databases.TryRemove dbName |> ignore
+            | true, slot when obj.ReferenceEquals(slot.Value, Map.find dbName baseCatalog) ->
+                publishCatalogRoots store (fun () -> store.Databases.TryRemove dbName |> ignore)
             | _ -> raise (LockWaitTimeout dbName)
         | None, Some batchDb ->
-            if not (store.Databases.TryAdd(dbName, ref batchDb)) then
+            if not (publishCatalogRoots store (fun () -> store.Databases.TryAdd(dbName, ref batchDb))) then
                 raise (LockWaitTimeout dbName)
         | None, None -> ()
         | Some baseDb, Some batchDb when obj.ReferenceEquals(baseDb, batchDb) -> ()
         | Some baseDb, Some batchDb ->
-            let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
-            mergeDatabaseSlot timeout dbName slot baseDb batchDb
+            match store.Databases.TryGetValue dbName with
+            | true, slot -> mergeDatabaseSlot timeout store dbName slot baseDb batchDb
+            | false, _ -> raise (LockWaitTimeout dbName)
 
     if store.ForeignKeyChecks && catalogHasQualifiedForeignKeys batchCatalog then
         validateCatalogForeignKeys baseCatalog store.Catalog
@@ -8754,13 +8808,14 @@ let private commitCatalogIntoWith
                         | _ -> raise (LockWaitTimeout dbName))
                     |> Seq.toList
 
-                for dbName, slot, database in publicationPlan do
-                    match database with
-                    | Some database when Set.contains dbName newKeys ->
-                        slot.Value <- database
-                        store.Databases.TryAdd(dbName, slot) |> ignore
-                    | Some database -> slot.Value <- database
-                    | None -> store.Databases.TryRemove dbName |> ignore
+                publishCatalogRoots store (fun () ->
+                    for dbName, slot, database in publicationPlan do
+                        match database with
+                        | Some database when Set.contains dbName newKeys ->
+                            slot.Value <- database
+                            store.Databases.TryAdd(dbName, slot) |> ignore
+                        | Some database -> slot.Value <- database
+                        | None -> store.Databases.TryRemove dbName |> ignore)
 
                 prepareCommit store snapshot)
 
@@ -8891,15 +8946,17 @@ let private withPointUpdateDatabase
                     if not attached then
                         Error(NoSuchDatabase dbName)
                     elif obj.ReferenceEquals(liveDb, baseDb) then
-                        slot.Value <- batchDb
+                        publishCatalogRoots store (fun () -> slot.Value <- batchDb)
                         Ok(prepareResultEvents store eventsOf result)
                     elif not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb then
-                        slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
+                        let mergedDb = mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
+                        publishCatalogRoots store (fun () -> slot.Value <- mergedDb)
                         Ok(prepareResultEvents store eventsOf result)
                     else
                         Ok(
                             mergeDatabaseSlotPublishing
                                 (Fsdb.Limits.lockWaitTimeout ())
+                                store
                                 dbName
                                 slot
                                 baseDb

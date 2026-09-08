@@ -218,6 +218,11 @@ statements wait for an existing row owner and rebase before applying their
 changes; other overlapping write shapes fail with MySQL's retryable 1205
 error.
 
+Database roots publish independently for ordinary writes. A transaction that
+changes several databases swaps all of its prepared roots behind one short
+publication boundary, so schema and diagnostic consumers cannot observe a
+partially committed catalog.
+
 The row store uses immutable, copy-on-write pages with stable row identities.
 A merge can therefore inspect changed pages and update derived indexes without
 copying the entire table.

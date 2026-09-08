@@ -3751,6 +3751,57 @@ let tests =
                     Expect.equal (value "atomic_b") (VInt 2L) "the concurrent value remains"
                     Expect.isEmpty events "the rejected transaction emits no commit events"
 
+                testCase "a whole-catalog reader cannot observe a partial cross-database commit"
+                <| fun _ ->
+                    let store = create ()
+                    let columns = [ col "value" (TInt false) false ]
+
+                    for database in [ "coherent_a"; "coherent_b" ] do
+                        createDatabase store database |> ignore
+                        createTable store database "items" columns [] [] None None |> ignore
+                        insertRows store database "items" None [ [ VInt 0L ] ] |> ignore
+
+                    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+                    let setOne _ = Ok [| VInt 1L |]
+                    updateRows snapshot "coherent_a" "items" None (fun _ -> Ok true) setOne |> ignore
+                    updateRows snapshot "coherent_b" "items" None (fun _ -> Ok true) setOne |> ignore
+
+                    let heldCatalog = store.CatalogPublication.AcquireRead()
+
+                    let commit =
+                        System.Threading.Tasks.Task.Factory.StartNew(
+                            (fun () -> commitCatalogInto store baseCatalog snapshot),
+                            System.Threading.CancellationToken.None,
+                            System.Threading.Tasks.TaskCreationOptions.LongRunning,
+                            System.Threading.Tasks.TaskScheduler.Default
+                        )
+
+                    try
+                        Expect.isTrue
+                            (System.Threading.SpinWait.SpinUntil(
+                                (fun () -> store.CatalogPublication.WaitingWriters > 0),
+                                System.TimeSpan.FromSeconds 5.
+                            ))
+                            "the commit reaches the catalog publication boundary"
+
+                        let currentValue database =
+                            store.Databases.[database].Value.["items"].RowsArray
+                            |> Seq.exactlyOne
+                            |> fun row -> row.[0]
+
+                        Expect.equal (currentValue "coherent_a") (VInt 0L) "the first root remains unpublished"
+                        Expect.equal (currentValue "coherent_b") (VInt 0L) "the second root remains unpublished"
+                    finally
+                        heldCatalog.Dispose()
+
+                    Expect.isTrue (commit.Wait(System.TimeSpan.FromSeconds 5.)) "the commit completes after the reader leaves"
+                    commit.GetAwaiter().GetResult()
+
+                    let catalog = store.Catalog
+                    let committedValue database = catalog.[database].["items"].RowsArray |> Seq.exactlyOne |> fun row -> row.[0]
+                    Expect.equal (committedValue "coherent_a") (VInt 1L) "the first root is visible"
+                    Expect.equal (committedValue "coherent_b") (VInt 1L) "the second root is visible"
+
                 testCase "a later database lock timeout publishes none of the transaction"
                 <| fun _ ->
                     let store = create ()
