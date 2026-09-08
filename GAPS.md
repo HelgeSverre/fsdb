@@ -480,15 +480,20 @@ the statement.
 | Session state tracking | schema, system-variable, generic state, transaction, and GTID trackers | schema, configured system-variable, generic state-change, transaction-characteristic, and transaction-state blocks are encoded in final OK packets; GTID blocks remain absent because fsdb has no binlog | low | subset |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, functional-index conversion conditions, conditional DDL and unknown-engine substitution, GROUP_CONCAT truncation, deprecated numeric displays, `utf8` aliases and explicit `utf8mb3` declarations/conversions, plus `SQL_CALC_FOUND_ROWS`, `FOUND_ROWS()`, and ODKU `VALUES()` are captured; other warning producers remain silent | low | divergence |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateAccount` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
-| System variables | hundreds live | common connector, limit, transaction, password-lifetime, week-format, and fixed-offset or `SYSTEM` time-zone variables are live; most others are inert or absent, named time zones are unavailable, and `system_time_zone` retains its static bootstrap label | medium | divergence |
+| System variables | hundreds live | common connector, limit, transaction, password-policy, week-format, and fixed-offset or `SYSTEM` time-zone variables are live; most others are inert or absent, named time zones are unavailable, and `system_time_zone` retains its static bootstrap label | medium | divergence |
 
 ## 13. Authentication and privileges
 
-The account catalog follows MySQL 8.4's `mysql.user` column order and includes a
-root bootstrap account. Passwords use double-SHA1 hashes with constant-time
-comparison. Account DDL covers locks, password expiry, resource limits,
-mergeable JSON attributes or comments, and transport policy from `REQUIRE SSL`
-through exact X509 subject, issuer, and cipher attributes.
+The account catalog follows MySQL 8.4's `mysql.user` column order and includes
+a root bootstrap account. Passwords use double-SHA1 hashes with constant-time
+comparison.
+
+Account DDL covers locks, expiry, history, reuse intervals, current-password
+rules, resource limits, mergeable JSON attributes or comments, and transport
+policy from `REQUIRE SSL` through exact X509 subject, issuer, and cipher
+attributes. Default password policies inherit live global variables, while
+retained hashes use `mysql.password_history` and follow account persistence,
+rename, and drop lifecycle.
 
 Static and dynamic grants apply at global, database, table, and column scope.
 Grant option is checked at the target level, unknown privileges fail closed,
@@ -510,7 +515,6 @@ its subject table before checking the `TRIGGER` privilege.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
-| Advanced account policy | auth-plugin selection and password history/reuse/current policy | explicit/default expiry lifetimes, resource limits, and account attributes/comments are enforced; advanced policy clauses remain absent | low | refusal |
 | Proxy identity selection | authentication plugins can map a login to an authorized proxied account | proxy declarations, target-specific grant-option delegation, lifecycle cleanup, persistence, and `SHOW GRANTS` lines work; mysql_native_password never returns an alternate identity and fsdb has no pluggable authentication provider | low | refusal |
 | System-table coverage | mysql.* tables with engine-maintained contents | MySQL 8.4 table schemas preserve column order, types, nullability, key membership, defaults, and generated columns alongside fsdb's stored-object catalogs; stock optimizer-cost and group-replication configuration/action rows are present, but native catalog collations and engine-maintained help, log, GTID, InnoDB-statistics, procedure-grant, NDB, and replication-channel rows still differ or remain empty unless ordinary fsdb DML populates them | low | divergence |
 

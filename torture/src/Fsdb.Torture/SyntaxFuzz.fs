@@ -164,6 +164,16 @@ module SyntaxFuzz =
            sprintf
                "CREATE USER 'syntax_tls_%s'@'%%' REQUIRE SUBJECT '/CN=syntax client' ISSUER '/CN=syntax authority' CIPHER 'TLS_AES_256_GCM_SHA384'"
                suffix
+           "account_password_policy",
+           sprintf
+               "CREATE USER 'syntax_policy_%s'@'%%' IDENTIFIED BY 'alpha' PASSWORD HISTORY 2 PASSWORD REUSE INTERVAL 7 DAY PASSWORD REQUIRE CURRENT"
+               suffix
+           "account_password_policy_metadata",
+           sprintf
+               "SELECT Password_reuse_history, Password_reuse_time, Password_require_current FROM mysql.user WHERE User = 'syntax_policy_%s'"
+               suffix
+           "account_password_change",
+           sprintf "ALTER USER 'syntax_policy_%s'@'%%' IDENTIFIED BY 'beta'" suffix
            "read_uncommitted", "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
            "partition_selection", "SELECT id FROM syntax_partitioned PARTITION (p0) ORDER BY id"
            "partition_growth", "ALTER TABLE syntax_partitioned ADD PARTITION PARTITIONS 1"

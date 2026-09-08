@@ -443,9 +443,22 @@ persist through the WAL and snapshot path. Passwords use
 with `caching_sha2_password` receive an auth switch.
 
 Account locks, TLS requirements, password lifetimes, JSON attributes and
-comments, the expired-password reset sandbox, and resource limits are enforced.
-Statements are checked at global, database, table, and column scope with MySQL's
-1045, 1142, 1044, and 1227 error shapes.
+comments, the expired-password reset sandbox, and resource limits are
+enforced.
+
+Password history, day-based reuse intervals, and current-password rules use
+the native nullable `mysql.user` policy fields. `DEFAULT` values inherit the
+live `password_history`, `password_reuse_interval`, and
+`password_require_current` globals. Retained hashes live in
+`mysql.password_history` and follow account rename, drop, WAL, and snapshot
+lifecycle.
+
+Self-service `ALTER USER` and `SET PASSWORD` accept MySQL's `REPLACE` clause.
+Missing and incorrect current passwords report 3892 and 3891; administrators
+changing another account are exempt and may not supply `REPLACE`.
+
+Statements are checked at global, database, table, and column scope with
+MySQL's 1045, 1142, 1044, and 1227 error shapes.
 
 `SHOW GRANTS [FOR user]`, `SHOW PRIVILEGES`,
 `information_schema.USER_PRIVILEGES`, and the no-op `FLUSH PRIVILEGES` are
@@ -494,8 +507,7 @@ status, table maintenance, FLUSH, KILL, and explicit table locks.
 The complete ledger lives in [GAPS.md](../GAPS.md). Notable deliberate limits
 include:
 
-- Pluggable authentication, proxy identity selection, and password
-  history/reuse/current policy are absent.
+- Pluggable authentication and proxy identity selection are absent.
 - Every MySQL `mysql.*` table schema is exposed, but engine-owned help, log,
   GTID, statistics, NDB, and replication-channel rows remain empty unless
   ordinary fsdb DML populates them.
