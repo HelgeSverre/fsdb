@@ -189,10 +189,9 @@ let private stmtLongDataHeaderLength = 6
 /// Empty command packets signal disconnect; malformed non-empty packets
 /// remain protocol errors on the live connection.
 let private parseCommand (capabilities: uint32) (payload: byte[]) : Command option =
-    if payload.Length = 0 then
-        None
-    else
-        let commandByte = payload.[0]
+    match Array.tryHead payload with
+    | None -> None
+    | Some commandByte ->
         let rest () = Encoding.UTF8.GetString(payload, 1, payload.Length - 1)
         let sql () = payload.[1..] |> decodeSqlBytes
         let restBytes () = payload.[1..]
@@ -652,7 +651,7 @@ let private localInfileRequestPayload (fileName: string) =
     Array.append [| 0xfbuy |] (Encoding.UTF8.GetBytes fileName)
 
 let private singleCharacter (value: string) =
-    if value.Length = 1 then Some value.[0] else None
+    Seq.tryExactlyOne value
 
 let private decodeLocalLoad (load: Parser.LocalLoad) (bytes: byte[]) : Result<Value list list, int * string> =
     try

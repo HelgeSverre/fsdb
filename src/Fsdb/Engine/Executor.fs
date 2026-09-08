@@ -12777,6 +12777,9 @@ and private runWindowedSelect
                 let partitionOrderKey (_, (key, _, _)) =
                     List.map2 (fun value collation -> value, Some collation) key partitionCollations
 
+                let partitionGroupKey group =
+                    group |> Seq.head |> partitionOrderKey
+
                 let rememberRowNumberOrder () =
                     match windowAlias with
                     | Some alias when windowFuncs = [ windowFunc ] && matchesFinalOrder alias ->
@@ -12785,7 +12788,7 @@ and private runWindowedSelect
                         streamedRowOrder <-
                             partitions
                             |> List.sortWith (fun left right ->
-                                compareByOrderKeys partitionDirections (partitionOrderKey left.[0]) (partitionOrderKey right.[0]))
+                                compareByOrderKeys partitionDirections (partitionGroupKey left) (partitionGroupKey right))
                             |> Seq.collect id
                             |> Seq.map fst
                             |> Array.ofSeq
@@ -12799,7 +12802,7 @@ and private runWindowedSelect
                         grouped
                         |> Seq.filter (fun group -> group.Count > 0)
                         |> Seq.sortWith (fun left right ->
-                            compareByOrderKeys partitionDirections (partitionOrderKey left.[0]) (partitionOrderKey right.[0]))
+                            compareByOrderKeys partitionDirections (partitionGroupKey left) (partitionGroupKey right))
 
                     let selected = ResizeArray<int * Value>()
                     let order = ResizeArray<int>()

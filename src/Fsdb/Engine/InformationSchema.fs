@@ -4134,7 +4134,10 @@ let showPlugins () : ShowResult =
 let showCharacterSet (likeOpt: string option) : ShowResult =
     let rows =
         characterSetsRows
-        |> List.filter (fun r -> match r.[0] with VString n -> likeFilter likeOpt n | _ -> true)
+        |> List.filter (fun row ->
+            match Array.tryHead row with
+            | Some(VString name) -> likeFilter likeOpt name
+            | _ -> true)
         |> List.map (fun r -> r |> Array.toList |> List.map Value.toText)
 
     Ok([ "Charset"; "Default collation"; "Description"; "Maxlen" ], rows)
