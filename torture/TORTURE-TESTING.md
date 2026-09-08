@@ -1,4 +1,4 @@
-# FSDB torture-testing plan
+# FSDB torture-testing design
 
 ## Decision and boundaries
 
@@ -64,6 +64,11 @@ version counts, committed operation IDs, rollback absence, and total
 conservation have one exact answer regardless of scheduling. MySQL must satisfy
 that answer before FSDB is judged.
 
+The multi-database lane applies that workload to independent databases on one
+fsdb process. It compares each database with its own MySQL outcome, checks for
+cross-database state bleed, and compares concurrent wall-clock time with a
+separate single-database fsdb baseline.
+
 The durability lane is also separate from the differential oracle. It runs a
 WAL-backed fsdb child process and repeatedly kills it while synchronized
 workers commit two-table transactions. A returned COMMIT is durable evidence;
@@ -125,7 +130,7 @@ Passwords and the MySQL connection string are intentionally not persisted.
 |---|---|---|
 | Tool/generation | `generator_preflight`, `infrastructure` | Tool mismatch, invalid generated corpus, process or oracle setup failure |
 | Oracle | `oracle_rejected`, `oracle_timeout` | MySQL did not accept or complete the supposedly valid input |
-| Concurrency | `oracle_concurrency_failure`, `fsdb_concurrency_execution_gap`, `fsdb_transaction_atomicity_gap` | The reference run failed, FSDB returned a protocol/execution error, or successful transaction replies produced the wrong committed state |
+| Concurrency | `oracle_concurrency_failure`, `fsdb_concurrency_execution_gap`, `fsdb_transaction_atomicity_gap`, `multidb_scaling_gap` | The reference run failed, FSDB returned a protocol/execution error, successful replies produced the wrong committed state, or independent databases serialized beyond the configured scaling bound |
 | Durability | `durability_failure`, `infrastructure` | Crash or snapshot recovery lost an acknowledgement, split a transaction, invented a row, or the child process could not be exercised |
 | Parser | `fsdb_parser_gap`, `fsdb_probe_parser_gap` | MySQL accepted SQL that FSDB cannot parse |
 | Syntax mutation | `matched_syntax_error`, `accepted_mutation`, `fsdb_syntax_acceptance_gap`, `fsdb_syntax_rejection_gap`, `syntax_error_contract_mismatch` | Mutated syntax matched, remained valid, or exposed an acceptance/error-contract difference |
@@ -140,9 +145,9 @@ Exit status distinguishes infrastructure (`1`), new FSDB findings (`2`), and
 replay drift (`3`). A known gap counts as passing only when its complete failure
 signature exactly matches a manually reviewed entry.
 
-## Initial vertical corpus
+## Corpus
 
-The first three cases intentionally cross different layers:
+The scenarios intentionally cross different layers:
 
 - `scalar`: integer widths/signs, large exact and approximate numbers, CHAR and
   Unicode/escaping, text, bytes/blob, JSON, booleans, dates/timestamps, NULL,
@@ -159,9 +164,7 @@ The first three cases intentionally cross different layers:
   primary/unique/FK enforcement.
 
 These are vertical diagnostics. A case stops at its first causal divergence so
-later failures are not artifacts of corrupted or missing state. The first
-million-row campaign is recorded in
-[`findings/2026-08-16-million-row-campaign.md`](findings/2026-08-16-million-row-campaign.md).
+later failures are not artifacts of corrupted or missing state.
 
 ## Scaling into a torture campaign
 
@@ -235,24 +238,6 @@ the complete generated SQL file in memory even though result snapshots are
 bounded. Treat its reported process working set as an upper bound on the
 combined harness/FSDB cost until generation hashing and statement scanning are
 streamed or FSDB is isolated in a measured child process.
-
-## Current priorities after the first heavy campaign
-
-1. Replace or augment list-backed table storage so append, lookup, and ordered
-   scans do not require large transient copies and sorts.
-2. Turn statement-local primary/unique/FK hash sets into maintained engine
-   indexes, then benchmark small and large INSERT batch shapes independently.
-3. Generalize the qualified-integer equality hash join to other compatible
-   equality types and expose enough plan evidence to prove which path ran.
-4. Stream generated-SQL hashing/scanning and sample resident memory over time,
-   ideally with FSDB in a separate process so harness and engine allocations
-   are distinguishable.
-5. Expand matched negative-oracle coverage beyond syntax, plus connection churn,
-   cancellation, and snapshot-rotation campaigns. The first prepared-transaction and
-   concurrent-session lane is implemented and recorded in
-   [`findings/2026-08-16-concurrency-campaign.md`](findings/2026-08-16-concurrency-campaign.md),
-   but it covers one deterministic transfer shape rather than the whole MySQL
-   compatibility contract.
 
 ## Acceptance checkpoints
 

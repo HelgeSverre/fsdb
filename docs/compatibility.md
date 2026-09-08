@@ -26,6 +26,12 @@ concurrent two-table commits and verifies acknowledged, ambiguous, atomic, and
 snapshot-restart outcomes (`torture/scripts/run.sh durability --workers 16
 --operations 500 --restarts 20`).
 
+The multi-database lane runs the prepared-transaction workload across several
+independent databases on one fsdb process. It compares every database with a
+MySQL outcome, checks for cross-database state bleed, and records concurrent
+wall-clock scaling against a separate single-database fsdb baseline
+(`torture/scripts/run.sh multidb`).
+
 The ordered DML battery covers `REPLACE` values, `REPLACE ... SELECT`, and
 `REPLACE ... SET` in both client affected-row modes. It includes unchanged
 replacements, conflicts spanning separate unique keys, same-statement key
@@ -433,9 +439,8 @@ status, table maintenance, FLUSH, KILL, and explicit table locks.
 
 ### Deliberate limits
 
-The complete ledger lives in [GAPS.md](../GAPS.md). A local implementation
-ceiling also carries a `ponytail:` marker when its upgrade path is concrete.
-Notable deliberate limits include:
+The complete ledger lives in [GAPS.md](../GAPS.md). Notable deliberate limits
+include:
 
 - Pluggable authentication, proxy identity selection, and password
   history/reuse/current policy are absent.

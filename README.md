@@ -641,10 +641,11 @@ store.
 
 ### Consume committed changes
 
-`Db.onCommit` is a multi-subscriber change feed over the same physical events
-used by persistence. Inserts contain stored rows after defaults, coercion, and
+`Db.onCommit` is a multi-subscriber change feed derived from the ordered
+persistence events. Inserts contain stored rows after defaults, coercion, and
 auto-increment assignment; updates contain `(before, after)` pairs; deletes
-contain removed rows. Explicit transactions arrive as one
+contain removed rows. The durable stream's internal row identities are not
+part of this public callback shape. Explicit transactions arrive as one
 `TransactionCommitted` event. Failed statements and rollbacks emit nothing.
 
 ```fsharp

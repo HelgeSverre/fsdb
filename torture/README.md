@@ -33,6 +33,8 @@ they are understood and minimized.
 - A durability lane runs fsdb as a child process, kills it during concurrent
   commits, and verifies repeated checkpoint rotation, WAL-tail recovery, and
   graceful snapshots independently of MySQL.
+- A multi-database lane checks independent transaction outcomes, state
+  isolation, and publication scaling on one fsdb process.
 - Generated artifacts stay under `artifacts/`, which is ignored.
 
 ## Quick start
@@ -92,6 +94,21 @@ detection, rebased replacement, and subsequent lock reuse.
 Database creation and deletion also run alongside live catalog reads and
 transactions on an anchor table. The final committed value and absence of
 worker errors protect catalog publication from corrupting unrelated traffic.
+
+### Cross-database concurrency
+
+Run the same prepared-transaction workload across independent databases on one
+fsdb process:
+
+```bash
+./scripts/run.sh multidb --seed 101 --databases 4 --workers 8 \
+  --operations 100 --accounts 32 --hot-accounts 4
+```
+
+Each database is compared with its own MySQL run and must conserve balances and
+transaction ledgers independently. A separate single-database fsdb run supplies
+the scaling baseline; `--scaling-factor` sets the largest accepted fraction of
+the serially projected runtime.
 
 ### Crash recovery
 

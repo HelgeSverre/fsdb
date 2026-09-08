@@ -21,13 +21,15 @@ Prerequisites and isolation rules:
 
 - Put MySQL 8.4's `mysql`, `mysqld`, and `mysqladmin` on `PATH`. The recipes
   start `mysqld` directly rather than using a Homebrew service.
-- The primary MySQL process uses port 3316 and the disposable
-  `benchmarks/mysql-data` directory. `bench-durable` also starts a process on
-  port 3317 with
+- The primary MySQL process uses the disposable `benchmarks/mysql-data`
+  directory. `bench-durable` also starts a no-fsync process under
+  `benchmarks/mysql-data-nofsync` with
   `--skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0`
-  under `benchmarks/mysql-data-nofsync`.
-- Port 3307 must be free — the recipe refuses to run if anything answers
-  there, because benchmarking against a shared server corrupts both runs.
+  applied.
+- The default ports are 3307 for fsdb, 3316 for MySQL, and 3317 for the
+  no-fsync MySQL target. Override them with `FSDB_BENCH_PORT`,
+  `FSDB_BENCH_MYSQL_PORT`, and `FSDB_BENCH_MYSQL_NOFSYNC_PORT`. The recipes
+  refuse to share the selected fsdb port with another listener.
 - Keep other heavy workloads off the machine. Two consecutive runs should
   agree on `PointSelectByPk` within roughly 20%; otherwise, discard the run.
 
@@ -55,9 +57,9 @@ The default suite measures in-memory fsdb without a WAL or `fsync`.
 - in-memory fsdb against MySQL configured without commit-time `fsync`.
 
 WAL-backed fsdb uses a plain `fsync` per commit. `Persistence.attach` avoids
-.NET's `FileStream.Flush(true)`, which would issue macOS `F_FULLFSYNC` and add
-roughly 5 ms on the reference machine. A write result is meaningful only when
-both engines pay, or both skip, the same durability cost.
+.NET's `FileStream.Flush(true)`, which would issue macOS `F_FULLFSYNC`. A write
+result is meaningful only when both engines pay, or both skip, the same
+durability cost.
 
 ### Concurrent load
 
@@ -97,16 +99,16 @@ One operation runs per invocation. BenchmarkDotNet controls warmup, outliers,
 and statistics. Its allocation column measures the benchmark client process,
 including MySqlConnector, but not either database server.
 
-On the reference machine, a loopback `SELECT 1` through MySqlConnector costs
-roughly 0.26 ms. Sub-millisecond cases therefore include a substantial fixed
-wire and client cost.
+Sub-millisecond cases include a substantial fixed wire and MySqlConnector
+cost. Use the point-query cases in the same result artifact as that run's
+loopback baseline.
 
 ## Results history
 
 Each run lands in `results/<git-sha>.md` with a provenance header
 (sha, date, OS, .NET, server mode). Representative snapshots, medians:
 
-| Workload | f1b15ab (initial) | a90dfae (indexed) | f4ba12a (streaming) | MySQL 8.4 |
+| Workload | f1b15ab (baseline) | a90dfae (indexed) | f4ba12a (streaming) | MySQL 8.4 |
 |---|---:|---:|---:|---:|
 | Point SELECT by PK | 1.32 ms | 103 µs | 111 µs | 38 µs |
 | Prepared point SELECT | 22.9 ms* | 90 µs | 101 µs | 32 µs |
@@ -219,7 +221,7 @@ statement overhead visible in the broad load matrix.
 
 ### Full-text search
 
-The initial post-index [10k-article](results/8e904fd-fulltext-index.md) and
+The post-index [10k-article](results/8e904fd-fulltext-index.md) and
 [100k-article](results/8e904fd-fulltext-index-scale.md) comparisons, followed
 by the [posting-candidate comparison](results/ef4b4ab-fulltext-postings.md), cover
 natural, boolean, accent-aware, and boolean-prefix queries. Against the

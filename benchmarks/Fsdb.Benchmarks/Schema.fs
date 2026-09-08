@@ -47,8 +47,6 @@ let connectionString (target: string) =
 let userConnectionString (target: string) (user: string) (password: string) =
     $"Server=127.0.0.1;Port={portFor target};User={user};Password={password};AllowPublicKeyRetrieval=true;SslMode=none;Pooling=false;Database=fsdb_bench;"
 
-// fsdb doesn't support semicolon-batched multi-statement commands, so every
-// DDL/DML step here is its own round trip rather than one joined CommandText.
 let private exec (conn: MySqlConnection) (sql: string) =
     use cmd = conn.CreateCommand()
     cmd.CommandText <- sql
