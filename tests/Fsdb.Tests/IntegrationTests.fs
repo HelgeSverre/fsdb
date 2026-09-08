@@ -879,23 +879,23 @@ let tests =
 
                       do!
                           query
-                              "CREATE TABLE checked_auto_load (id INT AUTO_INCREMENT PRIMARY KEY, generated_id INT AS (id * 2) STORED, CHECK (generated_id < 1))"
+                              "CREATE TABLE checked_auto_load (id INT AUTO_INCREMENT PRIMARY KEY, source INT, generated_value INT AS (source * 2) STORED, CHECK (generated_value < 1))"
                           |> Async.Ignore
 
                       let! _ = readPacketAsync stream
 
-                      let rejectPostAllocation modifier filename =
+                      let rejectTransformedRow modifier filename =
                           async {
                               do!
                                   query
                                       (sprintf
-                                          "LOAD DATA LOCAL INFILE '%s' %sINTO TABLE checked_auto_load (@discard) SET id = NULL"
+                                          "LOAD DATA LOCAL INFILE '%s' %sINTO TABLE checked_auto_load (@discard) SET id = NULL, source = 1"
                                           filename
                                           modifier)
                                   |> Async.Ignore
 
                               let! request = readPacketAsync stream
-                              Expect.equal request.Value.Payload.[0] 0xfbuy "post-allocation LOCAL request"
+                              Expect.equal request.Value.Payload.[0] 0xfbuy "transformed-row LOCAL request"
                               do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "ignored\n" } |> Async.Ignore
                               do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
                               let! rejected = readPacketAsync stream
@@ -906,14 +906,14 @@ let tests =
                                   ok.ReadLenEncInt() |> ignore
                                   ok.ReadLenEncInt() |> ignore
                                   ok.ReadInt16LE() |> ignore
-                                  Expect.equal (ok.ReadInt16LE()) 1 "post-allocation CHECK is reported as a warning"
+                                  Expect.equal (ok.ReadInt16LE()) 1 "post-transformation CHECK is reported as a warning"
                               else
-                                  Expect.equal rejected.Value.Payload.[0] 0xffuy "post-allocation CHECK rejects REPLACE LOAD"
+                                  Expect.equal rejected.Value.Payload.[0] 0xffuy "post-transformation CHECK rejects REPLACE LOAD"
                                   Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 3819 "CHECK error code"
                           }
 
-                      do! rejectPostAllocation "" "checked-insert.tsv"
-                      do! rejectPostAllocation "REPLACE " "checked-replace.tsv"
+                      do! rejectTransformedRow "" "checked-insert.tsv"
+                      do! rejectTransformedRow "REPLACE " "checked-replace.tsv"
 
                       match Fsdb.Storage.scanList store "fsdb" "checked_auto_load" with
                       | Ok(_, rows) -> Expect.isEmpty rows "failed LOAD candidates are not stored"

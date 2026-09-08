@@ -8799,7 +8799,7 @@ let tests =
                   "virtual generated column as primary key"
                   "ALTER TABLE generated_alter ADD PRIMARY KEY (b)"
 
-          testCase "stored functions cannot hide DirectOnly extension calls from stored expressions"
+          testCase "stored functions cannot hide DirectOnly extension calls from generated expressions"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store

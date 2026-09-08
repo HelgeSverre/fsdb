@@ -15775,7 +15775,12 @@ let private checkColumnReferences (expression: Expr) : (string option * string) 
         expression
     |> List.rev
 
-let private validateGeneratedDefinitions (registry: Registry) (columns: ColumnDef list) : QueryResult option =
+let private validateGeneratedDefinitions (registry: Registry) database (columns: ColumnDef list) : QueryResult option =
+    let functionExists name =
+        Functions.lookup name registry |> Option.isSome
+        || (not (name.Contains '.')
+            && Functions.lookup (database + "." + name) registry |> Option.isSome)
+
     let disallowedFunction column expression =
         Expression.tryPick
             (fun node ->
@@ -15784,7 +15789,7 @@ let private validateGeneratedDefinitions (registry: Registry) (columns: ColumnDe
                 | FuncCall(name, _) ->
                     let key = name.ToUpperInvariant()
 
-                    if Functions.lookup key registry |> Option.isNone then
+                    if not (functionExists key) then
                         Some(
                             Err(
                                 3763,
@@ -15831,8 +15836,8 @@ let private validateGeneratedDefinitions (registry: Registry) (columns: ColumnDe
                             Some(Err(3107, "Generated column can refer only to generated columns defined prior to it."))
                         | _ -> None)))
 
-let private validateGeneratedDefinitionsForStorage registry columns =
-    match validateGeneratedDefinitions registry columns with
+let private validateGeneratedDefinitionsForStorage registry database columns =
+    match validateGeneratedDefinitions registry database columns with
     | None -> Ok()
     | Some(Err(code, message)) -> Error(ExpressionError(code, message))
     | Some _ -> Error(ExpressionError(1105, "Invalid generated column definition"))
@@ -18056,7 +18061,7 @@ let rec executeAs
             | None ->
                 let error =
                     [ rejectUnsafeGeneratedExpressions registry table.Columns
-                      validateGeneratedDefinitions registry table.Columns
+                      validateGeneratedDefinitions registry db table.Columns
                       rejectUnsafePartitionExpression registry table.Partitioning
                       validateFunctionalDefaults registry table.Columns |> validationErrorOption id
                       validateIndexExpressions registry table.Columns table.Indexes |> validationErrorOption storageErr ]
@@ -18427,7 +18432,7 @@ let rec executeAs
                 |> Result.bind (fun () -> retargetAlterObjects ())
                 |> Result.bind (fun () -> scan snapshot db finalTable |> Result.map fst)
                 |> Result.bind (fun columns ->
-                    validateGeneratedDefinitionsForStorage registry columns
+                    validateGeneratedDefinitionsForStorage registry db columns
                     |> Result.bind (fun () -> recomputeGeneratedColumns snapshot registry dbName db finalTable columns)
                     |> Result.bind (fun () -> validateFunctionalDefaultsForStorage registry columns)
                     |> Result.bind (fun () ->
