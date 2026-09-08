@@ -374,7 +374,10 @@ idle waits, transaction conflict waits, and recursive CTEs. Session-scoped
 `wait_timeout`, `net_read_timeout`, `innodb_lock_wait_timeout`, and
 `cte_max_recursion_depth` are honoured. `max_points_in_geometry` is GLOBAL and
 SESSION scoped; it bounds new opaque buffer strategies without invalidating
-ones created under an earlier value. Process-wide `max_connections` and
+ones created under an earlier value. Its
+`/*+ SET_VAR(max_points_in_geometry=...) */` optimizer hint applies the same
+bound to one statement—including prepared execution—without changing the
+persistent session value. Process-wide `max_connections` and
 `max_allowed_packet` reject a session-scoped `SET`. An idle command wait uses
 `wait_timeout`; after the first packet byte arrives, every pause in ordinary,
 TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.

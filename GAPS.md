@@ -157,7 +157,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Advanced spatial behavior | round-buffer resolutions that do not divide evenly into quadrants, mixed round resolutions, the `SET_VAR(max_points_in_geometry=...)` statement hint, and geographic SRS semantics; the GLOBAL/SESSION ceiling and common planar strategies work | low |
+| Advanced spatial behavior | round-buffer resolutions that do not divide evenly into quadrants, mixed round resolutions, and geographic SRS semantics; the GLOBAL/SESSION ceiling, its `SET_VAR` statement override, and common planar strategies work | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets and `SYSTEM`,
 but named zones remain unavailable without MySQL's optional time-zone tables.
@@ -197,7 +197,7 @@ metadata paths. Virtual generated values are recomputed when queried.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes, arbitrary round-buffer resolutions, geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays, default buffers, and square, flat-end, miter-join, and quadrant-compatible round strategies work, but the internal augmented interval tree is not an R-tree | low | subset |
+| Spatial indexes and operations | R-tree indexes, arbitrary round-buffer resolutions, geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays, default buffers, and square, flat-end, miter-join, quadrant-compatible round strategies, and the geometry-point `SET_VAR` ceiling work, but the internal augmented interval tree is not an R-tree | low | subset |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes

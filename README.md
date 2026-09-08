@@ -143,6 +143,10 @@ The following MySQL-shaped settings also accept `SET GLOBAL`:
 - server behavior: `cte_max_recursion_depth`, `default_password_lifetime`,
   `default_week_format`, `max_points_in_geometry`, and `time_zone`.
 
+`max_points_in_geometry` is also eligible for MySQL's statement-scoped
+`/*+ SET_VAR(max_points_in_geometry=...) */` optimizer hint. The override is
+visible inside the hinted statement and disappears when that statement ends.
+
 `max_load_data_bytes` and the `wal_*` settings are configuration-only fsdb
 limits rather than MySQL system variables. See the
 [compatibility guide](docs/compatibility.md) for detailed behavior and
