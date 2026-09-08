@@ -127,8 +127,28 @@ type private CountingStream(inner: IO.Stream, metrics: TransportMetrics, progres
     override _.Seek(offset, origin) = inner.Seek(offset, origin)
     override _.SetLength value = inner.SetLength value
 
-// COM_* command byte values handled here.
+// MySQL assigns these bytes during the command phase.
 // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_command_phase.html
+type private CommandByte =
+    | Quit = 0x01uy
+    | InitDatabase = 0x02uy
+    | Query = 0x03uy
+    | FieldList = 0x04uy
+    | Statistics = 0x09uy
+    | ProcessInfo = 0x0auy
+    | ProcessKill = 0x0cuy
+    | Debug = 0x0duy
+    | Ping = 0x0euy
+    | ChangeUser = 0x11uy
+    | StatementPrepare = 0x16uy
+    | StatementExecute = 0x17uy
+    | StatementSendLongData = 0x18uy
+    | StatementClose = 0x19uy
+    | StatementReset = 0x1auy
+    | SetOption = 0x1buy
+    | StatementFetch = 0x1cuy
+    | ResetConnection = 0x1fuy
+
 type private Command =
     | Quit
     | InitDb of database: string
@@ -172,37 +192,38 @@ let private parseCommand (capabilities: uint32) (payload: byte[]) : Command opti
     if payload.Length = 0 then
         None
     else
+        let commandByte = payload.[0]
         let rest () = Encoding.UTF8.GetString(payload, 1, payload.Length - 1)
         let sql () = payload.[1..] |> decodeSqlBytes
         let restBytes () = payload.[1..]
 
         try
             Some(
-                match payload.[0] with
-                | 0x01uy -> Quit
-                | 0x02uy -> InitDb(rest ())
-                | 0x03uy -> Query(sql ())
-                | 0x04uy -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
-                | 0x09uy -> Statistics
-                | 0x0auy -> ProcessInfo
-                | 0x0cuy -> ProcessKill(int64 (Reader(restBytes ()).ReadInt32LE()))
-                | 0x0duy -> Debug
-                | 0x0euy -> Ping
-                | 0x11uy -> ChangeUser(parseChangeUserRequest capabilities (restBytes ()))
-                | 0x16uy -> StmtPrepare(sql ())
-                | 0x17uy -> StmtExecute(restBytes ())
-                | 0x18uy -> StmtSendLongData(restBytes ())
-                | 0x19uy -> StmtClose(Reader(restBytes ()).ReadInt32LE())
-                | 0x1auy -> StmtReset(Reader(restBytes ()).ReadInt32LE())
-                | 0x1buy -> SetOption(Reader(restBytes ()).ReadInt16LE())
-                | 0x1cuy ->
+                match LanguagePrimitives.EnumOfValue<byte, CommandByte> commandByte with
+                | CommandByte.Quit -> Quit
+                | CommandByte.InitDatabase -> InitDb(rest ())
+                | CommandByte.Query -> Query(sql ())
+                | CommandByte.FieldList -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
+                | CommandByte.Statistics -> Statistics
+                | CommandByte.ProcessInfo -> ProcessInfo
+                | CommandByte.ProcessKill -> ProcessKill(int64 (Reader(restBytes ()).ReadInt32LE()))
+                | CommandByte.Debug -> Debug
+                | CommandByte.Ping -> Ping
+                | CommandByte.ChangeUser -> ChangeUser(parseChangeUserRequest capabilities (restBytes ()))
+                | CommandByte.StatementPrepare -> StmtPrepare(sql ())
+                | CommandByte.StatementExecute -> StmtExecute(restBytes ())
+                | CommandByte.StatementSendLongData -> StmtSendLongData(restBytes ())
+                | CommandByte.StatementClose -> StmtClose(Reader(restBytes ()).ReadInt32LE())
+                | CommandByte.StatementReset -> StmtReset(Reader(restBytes ()).ReadInt32LE())
+                | CommandByte.SetOption -> SetOption(Reader(restBytes ()).ReadInt16LE())
+                | CommandByte.StatementFetch ->
                     let reader = Reader(restBytes ())
                     StmtFetch(reader.ReadInt32LE(), reader.ReadUInt32LE())
-                | 0x1fuy -> ResetConnection
-                | b -> Unsupported b
+                | CommandByte.ResetConnection -> ResetConnection
+                | _ -> Unsupported commandByte
             )
         with _ ->
-            Some(Malformed payload.[0])
+            Some(Malformed commandByte)
 
 let private commandStatus = function
     | InitDb _ -> Some InformationSchema.StatusCommand.changeDatabase
