@@ -204,6 +204,11 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountConjunctiveScan() =
+        this.Query "SELECT COUNT(*) FROM users WHERE scan_age >= 30 AND scan_age < 40"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CountSelectiveIndexedEquality() =
         this.Query "SELECT COUNT(*) FROM users WHERE age = 30"
 

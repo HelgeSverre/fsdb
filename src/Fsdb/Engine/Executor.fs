@@ -4380,6 +4380,30 @@ let private informationSchemaRequiresProcess (tableName: string) =
     tableName.StartsWith("INNODB_", System.StringComparison.OrdinalIgnoreCase)
     && not (tableName.Equals("INNODB_FT_DEFAULT_STOPWORD", System.StringComparison.OrdinalIgnoreCase))
 
+let private evalLogicalAnd left evaluateRight =
+    left
+    |> Result.bind (fun value ->
+        match truthy value with
+        | Some false -> Ok(VInt 0L)
+        | Some true ->
+            evaluateRight ()
+            |> Result.map (fun right -> truthy right |> Option.map boolToValue |> Option.defaultValue VNull)
+        | None ->
+            evaluateRight ()
+            |> Result.map (fun right -> if truthy right = Some false then VInt 0L else VNull))
+
+let private evalLogicalOr left evaluateRight =
+    left
+    |> Result.bind (fun value ->
+        match truthy value with
+        | Some true -> Ok(VInt 1L)
+        | Some false ->
+            evaluateRight ()
+            |> Result.map (fun right -> truthy right |> Option.map boolToValue |> Option.defaultValue VNull)
+        | None ->
+            evaluateRight ()
+            |> Result.map (fun right -> if truthy right = Some true then VInt 1L else VNull))
+
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
 
@@ -4446,24 +4470,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), a, (Row _ as b)) ->
         evalRowOperand ctx a
         |> Result.bind (fun left -> evalRowOperand ctx b |> Result.bind (rowComparisonResult ctx op left))
-    | BinOp(And, a, b) ->
-        eval a
-        |> Result.bind (fun left ->
-            match truthy left with
-            | Some false -> Ok(VInt 0L)
-            | Some true -> eval b |> Result.map (fun right -> truthy right |> Option.map boolToValue |> Option.defaultValue VNull)
-            | None ->
-                eval b
-                |> Result.map (fun right -> if truthy right = Some false then VInt 0L else VNull))
-    | BinOp(Or, a, b) ->
-        eval a
-        |> Result.bind (fun left ->
-            match truthy left with
-            | Some true -> Ok(VInt 1L)
-            | Some false -> eval b |> Result.map (fun right -> truthy right |> Option.map boolToValue |> Option.defaultValue VNull)
-            | None ->
-                eval b
-                |> Result.map (fun right -> if truthy right = Some true then VInt 1L else VNull))
+    | BinOp(And, a, b) -> evalLogicalAnd (eval a) (fun () -> eval b)
+    | BinOp(Or, a, b) -> evalLogicalOr (eval a) (fun () -> eval b)
     | BinOp(op, a, b) ->
         // Arithmetic can leave the `BIGINT UNSIGNED` domain, which MySQL
         // refuses with 1690 rather than answering in a wider type. That
@@ -6531,36 +6539,47 @@ and private prepareWhereMatches
     (ctxFor: Value[] -> EvalContext)
     (where: Expr option)
     : Value[] -> Result<bool, EvalError> =
-    let fallback = whereMatches ctxFor where
     let context = { ctxFor [||] with Clause = WhereClause }
+    let evaluate expression row = evalExpr { ctxFor row with Clause = WhereClause } expression
 
     let directComparison op columnExpression literalExpression columnOnLeft =
         match tryDirectColumnForExpr context columnExpression, literalExpression with
         | Some(index, column), Lit _ ->
-            evalExpr context literalExpression
-            |> Result.map (fun literal (row: Value[]) ->
-                let stored = row.[index]
+            match evalExpr context literalExpression with
+            | Error error -> Some(fun _ -> Error error)
+            | Ok literal ->
+                Some(fun (row: Value[]) ->
+                    let stored = row.[index]
 
-                (if columnOnLeft then
-                     comparisonResultWithNulls context columnExpression (Some column) stored literalExpression None op literal
-                 else
-                     comparisonResultWithNulls context literalExpression None literal columnExpression (Some column) op stored)
-                |> Result.map (truthy >> (=) (Some true)))
-            |> Some
+                    if columnOnLeft then
+                        comparisonResultWithNulls context columnExpression (Some column) stored literalExpression None op literal
+                    else
+                        comparisonResultWithNulls context literalExpression None literal columnExpression (Some column) op stored)
         | _ -> None
 
-    let prepared =
-        if not (storedValuesMatchReadValues context.Store) then
-            Ok fallback
-        else
-            match where with
-            | Some(BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), column, (Lit _ as literal))) ->
-                directComparison op column literal true |> Option.defaultValue (Ok fallback)
-            | Some(BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (Lit _ as literal), column)) ->
-                directComparison op column literal false |> Option.defaultValue (Ok fallback)
-            | _ -> Ok fallback
+    let rec prepare expression =
+        match expression with
+        | BinOp(And, left, right) ->
+            let evaluateLeft = prepare left
+            let evaluateRight = prepare right
+            fun row -> evalLogicalAnd (evaluateLeft row) (fun () -> evaluateRight row)
+        | BinOp(Or, left, right) ->
+            let evaluateLeft = prepare left
+            let evaluateRight = prepare right
+            fun row -> evalLogicalOr (evaluateLeft row) (fun () -> evaluateRight row)
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), column, (Lit _ as literal)) ->
+            directComparison op column literal true |> Option.defaultWith (fun () -> evaluate expression)
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (Lit _ as literal), column) ->
+            directComparison op column literal false |> Option.defaultWith (fun () -> evaluate expression)
+        | _ -> evaluate expression
 
-    fun row -> prepared |> Result.bind (fun predicate -> predicate row)
+    match where with
+    | None -> fun _ -> Ok true
+    | Some expression when storedValuesMatchReadValues context.Store ->
+        let prepared = prepare expression
+        fun row -> prepared row |> Result.map (truthy >> (=) (Some true))
+    | Some expression ->
+        fun row -> evaluate expression row |> Result.map (truthy >> (=) (Some true))
 
 /// `NATURAL JOIN`'s name set: every column name the two sides share,
 /// matched case-insensitively (MySQL matches `c1(X)` against `c2(x)`), in

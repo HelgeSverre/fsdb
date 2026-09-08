@@ -5442,6 +5442,16 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "a literal-left comparison keeps its operand direction"
                     | other -> failtestf "expected a literal-left result, got %A" other
 
+                    match runDefault store "SELECT id FROM scanned WHERE status = 1 AND name <> 'A' ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "conjunctions retain both prepared comparisons"
+                    | other -> failtestf "expected a conjunctive comparison result, got %A" other
+
+                    match runDefault store "SELECT id FROM scanned WHERE nullable = 1 OR name = 'a' ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "disjunctions retain three-valued truth"
+                    | other -> failtestf "expected a three-valued disjunction result, got %A" other
+
                 testCase "scan-shaped mutations preserve direct comparison semantics"
                 <| fun _ ->
                     let store = newStore ()
