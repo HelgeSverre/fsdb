@@ -7460,9 +7460,9 @@ let tests =
                             values.Head)
 
                     let store = newStore ()
-                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY, outer_key INT NOT NULL)" |> ignore
                     runDefault store "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, KEY ix_orders_user (user_id))" |> ignore
-                    runDefault store ("INSERT INTO users VALUES " + ([ 1..50 ] |> List.map (sprintf "(%d)") |> String.concat ",")) |> ignore
+                    runDefault store ("INSERT INTO users VALUES " + ([ 1..50 ] |> List.map (fun id -> sprintf "(%d,%d)" id id) |> String.concat ",")) |> ignore
 
                     [ 1..1000 ]
                     |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 50) + 1))
@@ -7497,6 +7497,54 @@ let tests =
                         "WITH candidates AS (SELECT id, user_id FROM orders)"
                         "candidates candidate"
                         "candidate.user_id = users.id + 0"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT users.outer_key, (SELECT COUNT(*) FROM orders candidate "
+                             + "WHERE candidate.user_id = outer_key AND TOUCH(candidate.id) = candidate.id) "
+                             + "FROM users ORDER BY users.outer_key")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows.Length 50 "every outer row is retained"
+                        Expect.isTrue (rows |> List.forall (fun row -> row.[1] = Some "20")) "a bare missing inner name resolves outward"
+                    | other -> failtestf "expected bare correlated counts, got %A" other
+
+                    Expect.isLessThan calls 2000 "a bare outer name uses the same indexed candidates"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT users.outer_key, (SELECT COUNT(*) FROM orders candidate "
+                             + "WHERE candidate.user_id = outer_key + 0 AND TOUCH(candidate.id) = candidate.id) "
+                             + "FROM users ORDER BY users.outer_key")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows.Length 50 "every expression-bound outer row is retained"
+                        Expect.isTrue (rows |> List.forall (fun row -> row.[1] = Some "20")) "the bare outer expression retains its values"
+                    | other -> failtestf "expected bare expression counts, got %A" other
+
+                    Expect.isLessThan calls 2000 "a stable bare outer expression uses indexed candidates"
+
+                    match
+                        runDefault
+                            store
+                            ("SELECT owners.user_id, (SELECT COUNT(*) FROM orders candidate "
+                             + "WHERE candidate.user_id = user_id) "
+                             + "FROM (SELECT id AS user_id FROM users) owners WHERE owners.user_id <= 2")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            (rows |> List.map (fun row -> row.[1]))
+                            [ Some "1000"; Some "1000" ]
+                            "an inner column continues to shadow a same-named outer column"
+                    | other -> failtestf "expected shadowed inner counts, got %A" other
 
                     runDefault store "CREATE TABLE text_orders (lookup_key VARCHAR(10), KEY ix_lookup (lookup_key))" |> ignore
                     runDefault store "INSERT INTO text_orders VALUES ('1')" |> ignore
@@ -7868,6 +7916,21 @@ let tests =
                     | other -> failtestf "expected a NULL range bound to match no rows, got %A" other
 
                     Expect.equal calls 0 "a NULL range bound resolves without reading the source"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT maximum, (SELECT COUNT(*) FROM (SELECT id, user_id, observed FROM orders) c "
+                             + "WHERE c.user_id < maximum AND c.observed = c.id) FROM "
+                             + "(SELECT 5 AS maximum) thresholds")
+                    with
+                    | ResultSet(_, [ [ Some "5"; Some "80" ] ]) -> ()
+                    | other -> failtestf "expected a bare correlated range count, got %A" other
+
+                    Expect.isLessThan calls 200 "a bare outer range bound resolves only indexed candidates"
 
                     let mutable effects = 0
 
