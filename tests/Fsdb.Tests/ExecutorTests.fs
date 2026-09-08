@@ -6656,6 +6656,56 @@ let tests =
                     | Err(1062, _) -> ()
                     | other -> failtestf "expected binary space trimming to enforce uniqueness, got %A" other
 
+                testCase "REVERSE and character-length indexes maintain and narrow their transformed keys"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE tokens (id INT PRIMARY KEY, value VARCHAR(40) COLLATE utf8mb4_bin, UNIQUE INDEX uq_reverse ((REVERSE(value))), INDEX ix_chars ((CHARACTER_LENGTH(value))))")
+                        (Affected 0UL)
+                        "create transformed indexes"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO tokens VALUES (1, 'a😀b'), (2, 'xx'), (3, ' four ')")
+                        (Affected 3UL)
+                        "seed transformed keys"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM tokens WHERE REVERSE(value) = 'b😀a'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "reverse key lookup"
+
+                    let reversePlan =
+                        runDefault store "EXPLAIN SELECT id FROM tokens WHERE REVERSE(value) = 'b😀a'"
+                        |> explainRow
+
+                    Expect.equal reversePlan.AccessType (Some "const") "unique reverse access"
+                    Expect.equal reversePlan.Key (Some "uq_reverse") "reverse key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM tokens WHERE CHAR_LENGTH(value) = 2")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "character-length alias lookup"
+
+                    let lengthPlan =
+                        runDefault store "EXPLAIN SELECT id FROM tokens WHERE CHAR_LENGTH(value) = 2"
+                        |> explainRow
+
+                    Expect.equal lengthPlan.AccessType (Some "ref") "character-length access"
+                    Expect.equal lengthPlan.Key (Some "ix_chars") "character-length key"
+
+                    Expect.equal
+                        (runDefault store "UPDATE tokens SET value = 'yyy' WHERE CHARACTER_LENGTH(value) = 2")
+                        (Affected 1UL)
+                        "update through character-length alias"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM tokens WHERE CHAR_LENGTH(value) = 3")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "updated length key"
+
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->
                     let store = newStore ()
@@ -9677,6 +9727,12 @@ let tests =
                     expectRow
                         "SELECT TRIM(BOTH 'xy' FROM 'xyxyhelloxyxy'), TRIM(LEADING 'xy' FROM 'xyxyhelloxy'), TRIM(TRAILING 'xy' FROM 'xyhelloxyxy'), TRIM('xy' FROM 'xyhelloxy'), TRIM(BOTH '' FROM '  x  '), TRIM(LEADING FROM '  x  '), TRIM(FROM '  x  ')"
                         [ Some "hello"; Some "helloxy"; Some "xyhello"; Some "hello"; Some "  x  "; Some "x  "; Some "x" ]
+
+                testCase "default trims remove ASCII spaces and REVERSE preserves Unicode scalars"
+                <| fun _ ->
+                    expectRow
+                        "SELECT HEX(TRIM(_utf8mb4' a ')), HEX(LTRIM(_utf8mb4' a ')), HEX(RTRIM(_utf8mb4' a ')), REVERSE('a😀b')"
+                        [ Some "C2A061C2A0"; Some "C2A061C2A0"; Some "C2A061C2A0"; Some "b😀a" ]
 
                 testCase "time arithmetic handles datetime, signed time, fractions, and saturation"
                 <| fun _ ->
