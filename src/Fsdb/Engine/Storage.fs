@@ -982,58 +982,57 @@ let private withDatabasePublishing
     (eventsOf: 'a -> CommitEvent list)
     (f: Database -> Result<Database * 'a, StorageError>)
     : Result<'a, StorageError> =
-    captureIndexExpressionError (fun () ->
-        match store.Databases.TryGetValue dbName with
-        | false, _ -> Error(NoSuchDatabase dbName)
-        | true, slot ->
-            // The database cell is also its mutation lock. Different databases
-            // use different cells, while writers within one database publish
-            // their immutable replacement maps atomically.
-            let published =
-                lock slot (fun () ->
-                    let attached =
-                        match store.Databases.TryGetValue dbName with
-                        | true, current -> obj.ReferenceEquals(current, slot)
-                        | false, _ -> false
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> Error(NoSuchDatabase dbName)
+    | true, slot ->
+        // The database cell is also its mutation lock. Different databases
+        // use different cells, while writers within one database publish
+        // their immutable replacement maps atomically.
+        let published =
+            lock slot (fun () ->
+                let attached =
+                    match store.Databases.TryGetValue dbName with
+                    | true, current -> obj.ReferenceEquals(current, slot)
+                    | false, _ -> false
 
-                    if not attached then
-                        Error(NoSuchDatabase dbName)
-                    else
-                        let original = slot.Value
+                if not attached then
+                    Error(NoSuchDatabase dbName)
+                else
+                    let original = slot.Value
 
-                        match f original with
-                        | Error e -> Error e
-                        | Ok(db', result) ->
-                            let current = slot.Value
+                    match captureIndexExpressionError (fun () -> f original) with
+                    | Error e -> Error e
+                    | Ok(db', result) ->
+                        let current = slot.Value
 
-                            slot.Value <-
-                                if LanguagePrimitives.PhysicalEquality original current then
-                                    db'
-                                else
-                                    // Trigger bodies may re-enter this slot while the outer
-                                    // statement still owns its immutable starting root.
-                                    let keys =
-                                        Set.union
-                                            (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
-                                            (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                        slot.Value <-
+                            if LanguagePrimitives.PhysicalEquality original current then
+                                db'
+                            else
+                                // Trigger bodies may re-enter this slot while the outer
+                                // statement still owns its immutable starting root.
+                                let keys =
+                                    Set.union
+                                        (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                                        (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
 
-                                    keys
-                                    |> Set.fold
-                                        (fun published key ->
-                                            match Map.tryFind key original, Map.tryFind key db' with
-                                            | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
-                                            | _, Some after -> Map.add key after published
-                                            | Some _, None -> Map.remove key published
-                                            | None, None -> published)
-                                        current
+                                keys
+                                |> Set.fold
+                                    (fun published key ->
+                                        match Map.tryFind key original, Map.tryFind key db' with
+                                        | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
+                                        | _, Some after -> Map.add key after published
+                                        | Some _, None -> Map.remove key published
+                                        | None, None -> published)
+                                    current
 
-                            Ok(result, prepareResultEvents store eventsOf result))
+                        Ok(result, prepareResultEvents store eventsOf result))
 
-            match published with
-            | Error error -> Error error
-            | Ok(result, acknowledge) ->
-                acknowledge ()
-                Ok result)
+        match published with
+        | Error error -> Error error
+        | Ok(result, acknowledge) ->
+            acknowledge ()
+            Ok result
 
 let private withDatabase store dbName f =
     withDatabasePublishing store dbName (fun _ -> []) f
@@ -1099,7 +1098,7 @@ let private withReferentialCatalogPublishing
                             match tryCatalogDatabase dbName currentCatalog with
                             | None -> Error(NoSuchDatabase dbName)
                             | Some database ->
-                                operation currentCatalog database
+                                captureIndexExpressionError (fun () -> operation currentCatalog database)
                                 |> Result.map (fun (updatedCatalog, result) ->
                                     for name, slot in slots do
                                         slot.Value <- Map.find name updatedCatalog
@@ -1112,7 +1111,7 @@ let private withReferentialCatalogPublishing
                 acknowledge ()
                 Ok result
 
-    captureIndexExpressionError (fun () -> withReferentialSchemaLock access store publish)
+    withReferentialSchemaLock access store publish
 
 /// Holds the named database cells in lexical order while `action` prepares
 /// and publishes a schema change. DML already uses these cells for its short
