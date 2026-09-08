@@ -379,10 +379,8 @@ let validateSetting (name: string) (value: string) : Result<unit, string> =
     validatedSetting name value |> Result.map ignore
 
 /// Sets one knob by its MySQL system-variable name, accepting `-` for `_`
-/// the way my.cnf does. An unknown name, an unparseable value, or one
-/// outside the accepted range is an `Error` the caller is expected to
-/// surface and exit on — never a silent no-op, because a typo'd knob that
-/// quietly does nothing is a production surprise found months later.
+/// the way my.cnf does. Invalid names and values are errors so configuration
+/// mistakes cannot silently leave a limit at its default.
 let applySetting (name: string) (value: string) : Result<unit, string> =
     validatedSetting name value
     |> Result.map (fun (knob, value) -> knob.Set value)
