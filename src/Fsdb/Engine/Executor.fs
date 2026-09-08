@@ -7817,8 +7817,8 @@ and private applyMutationJoin
     | FromLateral _ ->
         Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | FromJsonTable _ ->
-        // ponytail: Multi-table writes through JSON_TABLE require each emitted
-        // row to retain the writable identity of its physical source row.
+        // ponytail: Read-only JSON_TABLE join sources need a mutation-specific
+        // lateral join that preserves existing physical target identities.
         Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | source ->
         let resolved =

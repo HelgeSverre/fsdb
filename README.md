@@ -355,9 +355,9 @@ and column comments, while `information_schema.COLUMNS` exposes
 
 The open compatibility ledger, including complex updatable views and
 replication, lives in [GAPS.md](GAPS.md). The
-[compatibility guide](docs/compatibility.md) describes the validation method,
-and intentional local compromises carry `ponytail:` markers near the relevant
-code.
+[compatibility guide](docs/compatibility.md) describes the validation method.
+Bounded implementation ceilings may also carry a `ponytail:` marker beside
+the relevant code when the upgrade path is concrete.
 
 ## Persistence format
 

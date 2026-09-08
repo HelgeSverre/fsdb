@@ -413,7 +413,9 @@ status, table maintenance, FLUSH, KILL, and explicit table locks.
 
 ### Deliberate limits
 
-Deliberate divergences (each marked `ponytail:` at its code site):
+The complete ledger lives in [GAPS.md](../GAPS.md). A local implementation
+ceiling also carries a `ponytail:` marker when its upgrade path is concrete.
+Notable deliberate limits include:
 
 - Pluggable authentication, proxy identity selection, and password
   history/reuse/current policy are absent.
