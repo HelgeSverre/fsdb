@@ -35,6 +35,7 @@ type ServerBenchmarks() =
     let mutable insertCounter = 0
     let halfAgeList = [ 18..47 ] |> List.map string |> String.concat ","
     let allAgeList = [ 18..77 ] |> List.map string |> String.concat ","
+    let firstHundredIds = [ 1..100 ] |> List.map string |> String.concat ","
 
     // Draw from the seeded id range so every read hits a real row.
     let randomUserId () = rng.Next(1, Schema.userCount + 1)
@@ -487,6 +488,13 @@ type ServerBenchmarks() =
         this.Query(
             "SELECT owners.outer_key, (SELECT COUNT(*) FROM orders o WHERE o.user_id = outer_key) "
             + "FROM (SELECT id AS outer_key FROM users) owners WHERE owners.outer_key <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
+    member this.ProjectedLiteralIn() =
+        this.Query(
+            $"SELECT owners.outer_key FROM (SELECT id AS outer_key FROM users) owners WHERE outer_key IN ({firstHundredIds})"
         )
 
     [<Benchmark>]

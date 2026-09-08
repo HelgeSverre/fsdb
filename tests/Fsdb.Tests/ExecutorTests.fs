@@ -7764,7 +7764,8 @@ let tests =
                         (run
                             store
                             registry
-                            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, observed INT AS (TOUCH(id)) VIRTUAL, KEY ix_user (user_id))")
+                        ("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, observed INT AS (TOUCH(id)) VIRTUAL, "
+                         + "KEY ix_user (user_id), KEY ix_id_user (id, user_id))"))
                         (Affected 0UL)
                         "created generated-column source"
 
@@ -7930,6 +7931,50 @@ let tests =
                         "WITH candidates AS (SELECT id, user_id, observed FROM orders WHERE id <= 500)"
                         "candidates candidate"
                         "candidate.user_id = 2"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT candidate.id FROM (SELECT id, user_id, observed FROM orders) candidate "
+                             + "WHERE candidate.user_id IN (1, 2, 2, NULL) AND candidate.observed = candidate.id")
+                    with
+                    | ResultSet(_, rows) -> Expect.equal rows.Length 40 "scalar membership retains its projected rows"
+                    | other -> failtestf "expected projected scalar membership rows, got %A" other
+
+                    Expect.isLessThan calls 100 "scalar projected membership resolves only indexed candidates"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("WITH candidates AS (SELECT id, user_id, observed FROM orders) "
+                             + "SELECT candidate.id FROM candidates candidate "
+                             + "WHERE candidate.user_id IN (1, 2, 2, NULL) AND candidate.observed = candidate.id")
+                    with
+                    | ResultSet(_, rows) -> Expect.equal rows.Length 40 "CTE membership retains its projected rows"
+                    | other -> failtestf "expected projected CTE membership rows, got %A" other
+
+                    Expect.isLessThan calls 100 "CTE membership resolves only indexed candidates"
+
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT candidate.id FROM (SELECT id, user_id, observed FROM orders) candidate "
+                             + "WHERE (candidate.id, candidate.user_id) IN ((1, 1), (52, 2), (52, 2), (999, NULL)) "
+                             + "AND candidate.observed = candidate.id ORDER BY candidate.id")
+                    with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "52" ] ]) -> ()
+                    | other -> failtestf "expected projected composite membership rows, got %A" other
+
+                    Expect.isLessThan calls 10 "composite projected membership resolves only indexed candidates"
 
                     calls <- 0
 

@@ -9031,7 +9031,7 @@ and private storedIndexedColumnFor (registry: Registry) (tref: TableRef) express
     indexedColumnFor tref expression
     |> Option.filter (snd >> transformUsesStoredSemantics registry)
 
-and private literalInProbes (registry: Registry) (tref: TableRef) (whereExpr: Expr option) : LiteralInProbe list =
+and private literalInProbesWith indexedColumn (whereExpr: Expr option) : LiteralInProbe list =
     whereExpr
     |> optionalConjuncts
     |> List.choose (function
@@ -9051,7 +9051,7 @@ and private literalInProbes (registry: Registry) (tref: TableRef) (whereExpr: Ex
 
             let columns =
                 indexedExpressions
-                |> List.map (storedIndexedColumnFor registry tref)
+                |> List.map indexedColumn
 
             let values =
                 candidateExpressions
@@ -9066,6 +9066,9 @@ and private literalInProbes (registry: Registry) (tref: TableRef) (whereExpr: Ex
                     { Columns = columns |> List.choose id
                       Values = values |> List.map (List.choose id) }
         | _ -> None)
+
+and private literalInProbes (registry: Registry) (tref: TableRef) =
+    literalInProbesWith (storedIndexedColumnFor registry tref)
 
 and private tryLiteralRangePredicate columnName boundValue expression : RangeLookupBounds option =
     let lower name value inclusive =
@@ -9721,6 +9724,36 @@ and private tryProjectedPhysicalEqualityRows
             || isUsefulEqualityCardinality projection.PhysicalTable.RowsArray.Count rows.Length)
         |> Option.bind (fun (_, rows) -> projectPhysicalLookupRows store registry dbName projection rows))
 
+and private tryProjectedPhysicalLiteralInRows store registry dbName (projection: PhysicalProjection) (probe: LiteralInProbe) =
+    probe.Columns
+    |> List.map fst
+    |> List.map (tryPhysicalProjectionColumn projection)
+    |> tryAllSome
+    |> Option.bind (fun sourceColumns ->
+        let table = projection.PhysicalTable
+        let sourceNames = sourceColumns |> List.map _.Name
+
+        Storage.tryEqualityIndexForColumns table sourceNames
+        |> Option.bind (fun index ->
+            let values =
+                probe.Values
+                |> List.filter (List.contains VNull >> not)
+                |> List.distinct
+
+            values
+            |> List.map (fun tuple ->
+                orderedEqualityValues table index sourceNames tuple
+                |> Option.bind (Storage.tryEqualityRowIdsForIndex store table index))
+            |> tryAllSome
+            |> Option.bind (fun rowIdSets ->
+                let rowIds = Set.unionMany rowIdSets
+
+                if isUsefulEqualityCardinality table.RowsArray.Count rowIds.Count then
+                    Storage.rowsForRowIds table rowIds
+                    |> projectPhysicalLookupRows store registry dbName projection
+                else
+                    None)))
+
 and private tryProjectedPhysicalRangeRows
     store
     registry
@@ -9788,11 +9821,20 @@ and private tryProjectedPhysicalLiteralLookup
         |> Option.filter (fun projection -> not projection.Steps.IsEmpty)
         |> Option.bind (fun projection ->
             let probeSource = correlatedProbeSource (fromItemQualifier source) projection.OutputColumns
+            let projectedColumn expression =
+                tryCorrelatedInnerColumn probeSource expression
+                |> Option.map (fun column -> column, None)
 
-            whereExpr
-            |> optionalConjuncts
-            |> List.tryPick (tryEqualityPredicate (tryCorrelatedInnerColumn probeSource) literalValue)
-            |> Option.bind (tryProjectedPhysicalEqualityRows CostedRead store registry dbName projection)
+            let equality =
+                whereExpr
+                |> optionalConjuncts
+                |> List.tryPick (tryEqualityPredicate (tryCorrelatedInnerColumn probeSource) literalValue)
+                |> Option.bind (tryProjectedPhysicalEqualityRows CostedRead store registry dbName projection)
+
+            equality
+            |> Option.orElseWith (fun () ->
+                literalInProbesWith projectedColumn whereExpr
+                |> List.tryPick (tryProjectedPhysicalLiteralInRows store registry dbName projection))
             |> Option.orElseWith (fun () ->
                 collectRangeBounds (tryCorrelatedInnerColumn probeSource) literalValue whereExpr
                 |> List.tryPick (tryProjectedPhysicalRangeRows store registry dbName projection)))
