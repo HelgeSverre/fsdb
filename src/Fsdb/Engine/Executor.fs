@@ -9161,7 +9161,7 @@ and private indexedColumnFor (tref: TableRef) =
 
 and private storedIndexedColumnFor (registry: Registry) (tref: TableRef) expression =
     indexedColumnFor tref expression
-    |> Option.filter (snd >> transformUsesStoredSemantics registry)
+    |> Option.filter (snd >> transformUsesStoredSemantics registry expression)
 
 and private literalInProbesWith indexedColumn (whereExpr: Expr option) : LiteralInProbe list =
     let candidateTuple indexedExpressions candidate =
@@ -10177,11 +10177,13 @@ and private resolveOrderAliasValue name outputColumns =
     | [ _, value ] -> Ok(Some value)
     | _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
 
-and private transformUsesStoredSemantics (registry: Registry) = function
+and private transformUsesStoredSemantics (registry: Registry) expression = function
     | None -> true
     | Some transform ->
-        FunctionalIndex.tryBuiltinName transform
-        |> Option.exists (fun name -> Functions.isUnmodifiedBuiltinScalar name registry)
+        match expression with
+        | FuncCall(name, _) when FunctionalIndex.tryBuiltin name = Some transform ->
+            Functions.isUnmodifiedBuiltinScalar name registry
+        | _ -> false
 
 and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -10224,7 +10226,7 @@ and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: Selec
         let expression, projectionReference = resolveProjectionReference expression
 
         match directColumn projectionReference expression with
-        | Some(column, transform) when transformUsesStoredSemantics registry transform ->
+        | Some(column, transform) when transformUsesStoredSemantics registry expression transform ->
             Ok
                 { Column = column
                   Transform = transform
@@ -11361,7 +11363,7 @@ and private groupByIndexTerms (registry: Registry) (table: Table) (tref: TableRe
         groupExprs
         |> traverse (fun expression ->
             match indexedColumnFor tref expression with
-            | Some(column, transform) when transformUsesStoredSemantics registry transform ->
+            | Some(column, transform) when transformUsesStoredSemantics registry expression transform ->
                 Ok
                     { Column = column
                       Transform = transform

@@ -2487,6 +2487,10 @@ let tests =
                     "INSERT INTO lookup_upper VALUES (1, 'Reference'), (2, 'REFERENCE')"
                     "CREATE TABLE lookup_trim (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, UNIQUE INDEX ix_trim_name ((TRIM(name))))"
                     "INSERT INTO lookup_trim VALUES (1, ' Reference '), (2, 'Other')"
+                    "CREATE TABLE lookup_reverse (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, UNIQUE INDEX ix_reverse_name ((REVERSE(name))))"
+                    "INSERT INTO lookup_reverse VALUES (1, 'a😀b'), (2, 'Other')"
+                    "CREATE TABLE lookup_chars (id INT PRIMARY KEY, name VARCHAR(20), INDEX ix_name_chars ((CHAR_LENGTH(name))))"
+                    "INSERT INTO lookup_chars VALUES (1, 'a😀b'), (2, 'Other')"
                     "CREATE TABLE lookup_composite (id INT PRIMARY KEY, tenant_id INT, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_tenant_upper (tenant_id, (UPPER(name))))"
                     "INSERT INTO lookup_composite VALUES (1, 1, 'zeta'), (2, 1, 'Alpha'), (3, 2, 'beta')" ]
                   |> List.fold run session
@@ -2535,8 +2539,20 @@ let tests =
               | Err(1062, _) -> ()
               | other -> failtestf "expected the recovered trimmed unique key to reject a duplicate, got %A" other
 
+              match handle (Fsdb.Session.create 7 reloaded) "SELECT id FROM lookup_reverse WHERE REVERSE(name) = 'b😀a'" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered reverse bucket returns its row"
+              | other -> failtestf "expected recovered reverse lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 8 reloaded) "INSERT INTO lookup_reverse VALUES (3, 'a😀b')" |> snd with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected the recovered reverse unique key to reject a duplicate, got %A" other
+
+              match handle (Fsdb.Session.create 9 reloaded) "SELECT id FROM lookup_chars WHERE CHARACTER_LENGTH(name) = 3" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered character-length bucket returns its row"
+              | other -> failtestf "expected recovered character-length lookup rows, got %A" other
+
               let recoveredOrderPlan =
-                  handle (Fsdb.Session.create 7 reloaded) "EXPLAIN SELECT id FROM lookup_upper ORDER BY UPPER(name)"
+                  handle (Fsdb.Session.create 10 reloaded) "EXPLAIN SELECT id FROM lookup_upper ORDER BY UPPER(name)"
                   |> snd
                   |> TestSupport.Sql.explainRow
 
@@ -2545,7 +2561,7 @@ let tests =
 
               let recoveredCompositePlan =
                   handle
-                      (Fsdb.Session.create 8 reloaded)
+                      (Fsdb.Session.create 11 reloaded)
                       "EXPLAIN SELECT id FROM lookup_composite WHERE tenant_id = 1 ORDER BY UPPER(name)"
                   |> snd
                   |> TestSupport.Sql.explainRow

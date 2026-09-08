@@ -4196,25 +4196,38 @@ let private equalityKeyGroup (index: EqualityIndex) =
       Directions = List.replicate index.ColumnIndices.Length Asc
       Visible = true }
 
+type private ProbeNormalizer = IndexTransform option -> (Value -> Value option) -> Value -> Value option
+
+let private tryNormalizedProbeValues
+    (store: Store)
+    (table: Table)
+    (index: EqualityIndex)
+    (normalize: ProbeNormalizer)
+    (values: Value list) =
+    if index.ColumnIndices.Length <> values.Length then
+        None
+    else
+        List.zip3 index.ColumnIndices index.Transforms values
+        |> traverse (fun (columnIndex, transform, value) ->
+            match normalize transform (exactProbeValue store table columnIndex) value with
+            | Some exact -> Ok(columnIndex, exact)
+            | None -> Error())
+        |> Result.toOption
+
+let private makeProbeRow (table: Table) (values: (int * Value) list) =
+    let row = Array.create table.Columns.Length VNull
+    values |> List.iter (fun (columnIndex, value) -> row.[columnIndex] <- value)
+    row
+
 let internal tryEqualityProbeKeyForIndex
     (store: Store)
     (table: Table)
     (index: EqualityIndex)
     (values: Value list)
     : string option =
-    if index.ColumnIndices.Length <> values.Length then
-        None
-    else
-        List.zip index.ColumnIndices values
-        |> traverse (fun (columnIndex, value) ->
-            match exactProbeValue store table columnIndex value with
-            | Some exact -> Ok(columnIndex, exact)
-            | None -> Error())
-        |> Result.toOption
-        |> Option.map (fun exactValues ->
-            let probeRow = Array.create table.Columns.Length VNull
-            exactValues |> List.iter (fun (columnIndex, value) -> probeRow.[columnIndex] <- value)
-            encodeIndexKey table.Columns (equalityKeyGroup index) probeRow)
+    values
+    |> tryNormalizedProbeValues store table index FunctionalIndex.tryNormalizeProbe
+    |> Option.map (makeProbeRow table >> encodeIndexKey table.Columns (equalityKeyGroup index))
 
 let private equalityLookupRowIds
     (store: Store)
@@ -4223,38 +4236,35 @@ let private equalityLookupRowIds
     (probeValues: EqualityProbeValues)
     (values: Value list)
     : Set<RowId> option =
-    if index.ColumnIndices.Length <> values.Length then
-        None
-    else
-        List.zip index.ColumnIndices values
-        |> traverse (fun (columnIndex, value) ->
-            match exactProbeValue store table columnIndex value with
-            | Some exact -> Ok(columnIndex, exact)
-            | None -> Error())
-        |> Result.toOption
-        |> Option.map (fun exactValues ->
-            let probeRow = Array.create table.Columns.Length VNull
-            exactValues |> List.iter (fun (columnIndex, value) -> probeRow.[columnIndex] <- value)
+    let normalize transform normalizeStored value =
+        match probeValues with
+        | ProjectedValues -> FunctionalIndex.tryNormalizeProbe transform normalizeStored value
+        | StoredValues -> normalizeStored value
 
-            if exactValues |> List.exists (snd >> (=) VNull) then
-                Set.empty
-            elif index.Unique then
-                (match probeValues with
-                 | ProjectedValues -> encodeConstraintKey table.Columns index.ColumnIndices probeRow
-                 | StoredValues -> encodeUniqueKey table.Columns (equalityKeyGroup index) probeRow)
-                |> Option.bind (fun key -> table.UniqueIndex |> Map.tryFind index.Name |> Option.bind (Map.tryFind key))
-                |> Option.map Set.singleton
-                |> Option.defaultValue Set.empty
-            else
-                let key =
-                    match probeValues with
-                    | ProjectedValues -> encodeEqualityKey table.Columns index.ColumnIndices probeRow
-                    | StoredValues -> encodeIndexKey table.Columns (equalityKeyGroup index) probeRow
+    values
+    |> tryNormalizedProbeValues store table index normalize
+    |> Option.map (fun exactValues ->
+        let probeRow = makeProbeRow table exactValues
 
-                table.SecondaryIndex
-                |> Map.tryFind index.Name
-                |> Option.bind (Map.tryFind key)
-                |> Option.defaultValue Set.empty)
+        if exactValues |> List.exists (snd >> (=) VNull) then
+            Set.empty
+        elif index.Unique then
+            (match probeValues with
+             | ProjectedValues -> encodeConstraintKey table.Columns index.ColumnIndices probeRow
+             | StoredValues -> encodeUniqueKey table.Columns (equalityKeyGroup index) probeRow)
+            |> Option.bind (fun key -> table.UniqueIndex |> Map.tryFind index.Name |> Option.bind (Map.tryFind key))
+            |> Option.map Set.singleton
+            |> Option.defaultValue Set.empty
+        else
+            let key =
+                match probeValues with
+                | ProjectedValues -> encodeEqualityKey table.Columns index.ColumnIndices probeRow
+                | StoredValues -> encodeIndexKey table.Columns (equalityKeyGroup index) probeRow
+
+            table.SecondaryIndex
+            |> Map.tryFind index.Name
+            |> Option.bind (Map.tryFind key)
+            |> Option.defaultValue Set.empty)
 
 let internal rowsForRowIds (table: Table) (rowIds: Set<RowId>) =
     rowIds
@@ -5358,7 +5368,11 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
             | Some definition
                 when column.Transform
                      |> Option.exists (fun transform -> FunctionalIndex.supportsColumnType transform definition.Type) ->
-                fullLength definition |> Option.defaultValue 0 |> Ok
+                column.Transform
+                |> Option.bind FunctionalIndex.fixedKeyLength
+                |> Option.orElseWith (fun () -> fullLength definition)
+                |> Option.defaultValue 0
+                |> Ok
             | Some _ when column.Transform |> Option.exists FunctionalIndex.isBuiltin ->
                 Error(ExpressionError(3757, "Cannot create a functional index on this expression."))
             | Some definition ->

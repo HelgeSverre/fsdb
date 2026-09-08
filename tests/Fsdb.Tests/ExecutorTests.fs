@@ -6684,6 +6684,13 @@ let tests =
                     Expect.equal reversePlan.AccessType (Some "const") "unique reverse access"
                     Expect.equal reversePlan.Key (Some "uq_reverse") "reverse key"
 
+                    let reverseOrderPlan =
+                        runDefault store "EXPLAIN SELECT id FROM tokens ORDER BY REVERSE(value) LIMIT 1"
+                        |> explainRow
+
+                    Expect.equal reverseOrderPlan.AccessType (Some "index") "reverse order streams from the key"
+                    Expect.equal reverseOrderPlan.Key (Some "uq_reverse") "reverse ordering key"
+
                     Expect.equal
                         (runDefault store "SELECT id FROM tokens WHERE CHAR_LENGTH(value) = 2")
                         (ResultSet([ "id" ], [ [ Some "2" ] ]))
@@ -6702,9 +6709,38 @@ let tests =
                         "update through character-length alias"
 
                     Expect.equal
-                        (runDefault store "SELECT id FROM tokens WHERE CHAR_LENGTH(value) = 3")
-                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        (runDefault store "SELECT id FROM tokens WHERE CHAR_LENGTH(value) = 3 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
                         "updated length key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM tokens WHERE CHAR_LENGTH(value) = '3' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "non-numeric probe spelling falls back without losing rows"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM tokens WHERE CHAR_LENGTH(value) = 9.223372036854776E18")
+                        (ResultSet([ "id" ], []))
+                        "an out-of-range floating probe falls back without overflowing"
+
+                    let overridden =
+                        builtins
+                        |> registerScalar "CHARACTER_LENGTH" (fun _ -> VInt 99L)
+
+                    Expect.equal
+                        (run store overridden "SELECT id FROM tokens WHERE CHARACTER_LENGTH(value) = 99 ORDER BY id")
+                        (ResultSet(
+                            [ "id" ],
+                            [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
+                        ))
+                        "an alias override bypasses the stored transform"
+
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM tokens WHERE CHARACTER_LENGTH(value) = 99"
+                        |> explainRow
+
+                    Expect.equal overriddenPlan.AccessType (Some "ALL") "an alias override reports a scan"
+                    Expect.equal overriddenPlan.Key None "an alias override does not claim the functional index"
 
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->

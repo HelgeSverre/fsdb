@@ -14,6 +14,7 @@ open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open NJsonSchema
 open NJsonSchema.Validation
+open Fsdb.Sql
 open Fsdb.Value
 open Fsdb.Temporal
 
@@ -337,16 +338,7 @@ let private lengthFn: Scalar =
 let private charLengthFn: Scalar =
     function
     | [ VNull ] -> VNull
-    | [ v ] ->
-        let s = v |> toText |> Option.defaultValue ""
-        let mutable n = 0
-        let mutable i = 0
-
-        while i < s.Length do
-            i <- i + (if Char.IsHighSurrogate s.[i] && i + 1 < s.Length && Char.IsLowSurrogate s.[i + 1] then 2 else 1)
-            n <- n + 1
-
-        VInt(int64 n)
+    | [ value ] -> VInt(FunctionalIndex.characterLength value)
     | _ -> VNull
 
 let private bitLengthFn: Scalar =
@@ -5821,17 +5813,17 @@ let private registerStringBuiltins registry =
     |> registerTextScalar "POSITION" everyArgument locateFn
     |> registerStringScalar "REPLACE" everyArgument (InheritArgument 0) replaceFn
     |> registerStringScalar "INSERT" everyArgument (InheritArgument 0) insertStringFn
-    |> registerStringScalar "TRIM" firstArgument (InheritArgument 0) (textMap (trimRaw true true) (fun s -> s.Trim()))
+    |> registerStringScalar "TRIM" firstArgument (InheritArgument 0) (textMap (trimRaw true true) (fun s -> s.Trim(' ')))
     |> registerStringScalar "TRIM_BOTH" everyArgument (InheritArgument 1) (trimSubstring true true)
     |> registerStringScalar "TRIM_LEADING" everyArgument (InheritArgument 1) (trimSubstring true false)
     |> registerStringScalar "TRIM_TRAILING" everyArgument (InheritArgument 1) (trimSubstring false true)
-    |> registerStringScalar "LTRIM" firstArgument (InheritArgument 0) (textMap (trimRaw true false) (fun s -> s.TrimStart()))
-    |> registerStringScalar "RTRIM" firstArgument (InheritArgument 0) (textMap (trimRaw false true) (fun s -> s.TrimEnd()))
+    |> registerStringScalar "LTRIM" firstArgument (InheritArgument 0) (textMap (trimRaw true false) (fun s -> s.TrimStart(' ')))
+    |> registerStringScalar "RTRIM" firstArgument (InheritArgument 0) (textMap (trimRaw false true) (fun s -> s.TrimEnd(' ')))
     |> registerStringScalar "LPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (padFn true)
     |> registerStringScalar "RPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (padFn false)
     |> registerStringScalar "LEFT" firstArgument (InheritArgument 0) leftFn
     |> registerStringScalar "RIGHT" firstArgument (InheritArgument 0) rightFn
-    |> registerStringScalar "REVERSE" firstArgument (InheritArgument 0) (textMap (Array.rev >> VBytes) (fun s -> String(Array.rev (s.ToCharArray()))))
+    |> registerStringScalar "REVERSE" firstArgument (InheritArgument 0) (textMap (Array.rev >> VBytes) FunctionalIndex.reverseText)
     |> registerStringScalar "REPEAT" firstArgument (InheritArgument 0) repeatFn
     |> registerScalar "SPACE" spaceFn
     |> registerTextScalar "ASCII" firstArgument asciiFn

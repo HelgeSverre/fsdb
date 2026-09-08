@@ -647,6 +647,8 @@ let tests =
               run store "CREATE UNIQUE INDEX ix_lower_name ON users ((LOWER(name)))" |> ignore
               run store "CREATE INDEX ix_upper_email ON users ((UPPER(email)))" |> ignore
               run store "CREATE INDEX ix_trim_name ON users ((TRIM(name)))" |> ignore
+              run store "CREATE INDEX ix_reverse_name ON users ((REVERSE(name)))" |> ignore
+              run store "CREATE INDEX ix_name_chars ON users ((CHARACTER_LENGTH(name)))" |> ignore
 
               match
                   run
@@ -672,12 +674,26 @@ let tests =
               | ResultSet(_, [ [ None; Some "trim(`name`)" ] ]) -> ()
               | other -> failtestf "expected trimmed index expression metadata, got %A" other
 
+              match
+                  run
+                      store
+                      "SELECT index_name, column_name, expression FROM information_schema.statistics WHERE table_schema = 'fsdb' AND table_name = 'users' AND index_name IN ('ix_reverse_name', 'ix_name_chars') ORDER BY index_name"
+              with
+              | ResultSet(
+                  _,
+                  [ [ Some "ix_name_chars"; None; Some "char_length(`name`)" ]
+                    [ Some "ix_reverse_name"; None; Some "reverse(`name`)" ] ]
+                ) -> ()
+              | other -> failtestf "expected canonical string-transform index metadata, got %A" other
+
               let session = Fsdb.Session.create 1 store
 
               match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE users" |> snd with
               | ResultSet(_, [ [ _; Some ddl ] ]) ->
                   Expect.stringContains ddl "UNIQUE KEY `ix_lower_name` ((lower(`name`)))" "lowercase functional key DDL"
                   Expect.stringContains ddl "KEY `ix_upper_email` ((upper(`email`)))" "uppercase functional key DDL"
+                  Expect.stringContains ddl "KEY `ix_reverse_name` ((reverse(`name`)))" "reverse functional key DDL"
+                  Expect.stringContains ddl "KEY `ix_name_chars` ((char_length(`name`)))" "character-length functional key DDL"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
               match Fsdb.QueryHandler.handle session "SHOW INDEX FROM users WHERE key_name = 'ix_lower_name'" |> snd with

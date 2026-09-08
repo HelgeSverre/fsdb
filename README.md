@@ -264,8 +264,9 @@ different access pattern:
   fixed-prefix slice. Simple covered groups derive counts and grouping-key
   `MIN` or `MAX` values from adjacent keys without resolving rows. This path
   also supports `LIMIT` and `OFFSET`. Composite keys may contain
-  `LOWER(column)`, `UPPER(column)`, or `TRIM(column)` parts. Other expression
-  orderings and full-value ordering through a prefix key still sort.
+  built-in functional parts: `LOWER`/`LCASE`, `UPPER`/`UCASE`, `TRIM`,
+  `REVERSE`, and `CHAR_LENGTH`/`CHARACTER_LENGTH`. Other expression orderings
+  and full-value ordering through a prefix key still sort.
 
 - **Spatial access.** Planar `SPATIAL` and `RTREE` declarations maintain
   immutable minimum-bounding-rectangle entries. They narrow direct

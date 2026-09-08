@@ -367,6 +367,8 @@ and IndexTransform =
     | Lowercase
     | Uppercase
     | Trimmed
+    | Reversed
+    | CharacterLength
     | Expression of Expr
 
 and IndexColumn =

@@ -2347,6 +2347,18 @@ let tests =
                     | CreateIndex("ix_trim", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Trimmed; Direction = Asc } ], false, BTree, true) -> ()
                     | other -> failtestf "expected a trimmed functional key part, got %A" other
 
+                    match parseOk "CREATE INDEX ix_reverse ON t ((REVERSE(external_id)))" with
+                    | CreateIndex("ix_reverse", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Reversed; Direction = Asc } ], false, BTree, true) -> ()
+                    | other -> failtestf "expected a reversed functional key part, got %A" other
+
+                    match parseOk "CREATE INDEX ix_chars ON t ((CHARACTER_LENGTH(external_id)))" with
+                    | CreateIndex("ix_chars", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some CharacterLength; Direction = Asc } ], false, BTree, true) -> ()
+                    | other -> failtestf "expected a character-length functional key part, got %A" other
+
+                    match parseOk "CREATE INDEX ix_lcase ON t ((LCASE(external_id)))" with
+                    | CreateIndex("ix_lcase", "t", [ { Name = "external_id"; PrefixLength = None; Transform = Some Lowercase; Direction = Asc } ], false, BTree, true) -> ()
+                    | other -> failtestf "expected LCASE to normalize to the lowercase transform, got %A" other
+
                     match
                         parseOk
                             "CREATE TABLE companies (name VARCHAR(255), rating BIGINT, firm_name VARCHAR(255), firm_id BIGINT, client_of BIGINT, INDEX company_name_index USING btree (name), INDEX company_expression_index ((CASE WHEN rating > 0 THEN lower(name) END) DESC), INDEX full_name_index ((CONCAT_WS(firm_name, name, _utf8mb4' '))), INDEX company_disabled_index (firm_id, client_of) INVISIBLE)"
