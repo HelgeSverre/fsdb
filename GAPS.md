@@ -187,7 +187,9 @@ Temporal values cover DATE, YEAR, and microsecond-precision DATETIME,
 TIMESTAMP, and signed TIME durations. Fractional values round half-up unless
 `TIME_TRUNCATE_FRACTIONAL` applies, and SQL modes control zero-date acceptance.
 TIMESTAMP values are stored as UTC instants and converted at the session
-`time_zone` boundary; DATETIME values retain their wall-clock fields.
+`time_zone` boundary; DATETIME values retain their wall-clock fields. Range
+validation happens after conversion, including MySQL's reserved epoch zero and
+2038 upper boundary.
 
 JSON, functional defaults, virtual generated columns, normalized comments,
 and OGC WKB geometry values also persist through the regular value and wire
