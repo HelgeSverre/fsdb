@@ -1414,6 +1414,12 @@ let tests =
 
               let root = Fsdb.Session.create 1 store
               let root, _ = handle root "CREATE USER 'target'@'localhost'"
+              let root, secured =
+                  handle
+                      root
+                      "CREATE USER 'secured'@'%' REQUIRE SUBJECT '/CN=client' ISSUER '/CN=authority' CIPHER 'TLS_AES_256_GCM_SHA384'"
+
+              Expect.equal secured (Affected 0UL) "specific TLS account created"
               let _, granted = handle root "GRANT PROXY ON 'target'@'localhost' TO 'alice'@'%' WITH GRANT OPTION"
               Expect.equal granted (Affected 0UL) "proxy grant"
               snapshotNow dir store
@@ -1423,9 +1429,20 @@ let tests =
               let users =
                   rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1]) |> List.sortBy string
 
-              Expect.equal users [ VString "alice"; VString "root"; VString "target" ] "account rows survive"
+              Expect.equal
+                  users
+                  [ VString "alice"; VString "root"; VString "secured"; VString "target" ]
+                  "account rows survive"
 
-              match handle (Fsdb.Session.create 2 reloaded) "SHOW GRANTS FOR 'alice'@'%'" |> snd with
+              match handle (Fsdb.Session.create 2 reloaded) "SHOW CREATE USER 'secured'@'%'" |> snd with
+              | ResultSet(_, [ [ Some ddl ] ]) ->
+                  Expect.stringContains
+                      ddl
+                      "REQUIRE SUBJECT '/CN=client' ISSUER '/CN=authority' CIPHER 'TLS_AES_256_GCM_SHA384'"
+                      "specific TLS attributes survive"
+              | other -> failtestf "expected persisted TLS account, got %A" other
+
+              match handle (Fsdb.Session.create 3 reloaded) "SHOW GRANTS FOR 'alice'@'%'" |> snd with
               | ResultSet(_, rows) ->
                   Expect.contains
                       (rows |> List.map (List.head >> Option.get))
