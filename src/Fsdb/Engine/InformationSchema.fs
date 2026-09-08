@@ -623,10 +623,11 @@ let private effectivePrefixLength (table: Table) (keyColumn: IndexColumn) =
 
 let private indexExpression (keyColumn: IndexColumn) =
     match keyColumn.Transform with
-    | Some Lowercase -> Some(sprintf "lower(`%s`)" (keyColumn.Name.Replace("`", "``")))
-    | Some Uppercase -> Some(sprintf "upper(`%s`)" (keyColumn.Name.Replace("`", "``")))
-    | Some Trimmed -> Some(sprintf "trim(`%s`)" (keyColumn.Name.Replace("`", "``")))
     | Some(Expression expression) -> Some(exprToSql expression)
+    | Some transform ->
+        FunctionalIndex.tryBuiltinName transform
+        |> Option.map (fun name ->
+            sprintf "%s(`%s`)" (name.ToLowerInvariant()) (keyColumn.Name.Replace("`", "``")))
     | None -> None
 
 let private indexDirectionText (keyColumn: IndexColumn) =

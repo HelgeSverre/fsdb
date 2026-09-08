@@ -4730,12 +4730,18 @@ let validateRegexpArity (name: string) arguments =
     | _ -> ()
 
 let regexpFunction (name: string) (collation: Collation.Collation) : Scalar option =
-    match name.ToUpperInvariant() with
-    | "REGEXP_LIKE" -> Some(fun arguments -> validateRegexpArity name arguments; regexpLikeFn collation arguments)
-    | "REGEXP_INSTR" -> Some(fun arguments -> validateRegexpArity name arguments; regexpInstrFn collation arguments)
-    | "REGEXP_SUBSTR" -> Some(fun arguments -> validateRegexpArity name arguments; regexpSubstrFn collation arguments)
-    | "REGEXP_REPLACE" -> Some(fun arguments -> validateRegexpArity name arguments; regexpReplaceFn collation arguments)
-    | _ -> None
+    let implementation =
+        match name.ToUpperInvariant() with
+        | "REGEXP_LIKE" -> Some(regexpLikeFn collation)
+        | "REGEXP_INSTR" -> Some(regexpInstrFn collation)
+        | "REGEXP_SUBSTR" -> Some(regexpSubstrFn collation)
+        | "REGEXP_REPLACE" -> Some(regexpReplaceFn collation)
+        | _ -> None
+
+    implementation
+    |> Option.map (fun invoke arguments ->
+        validateRegexpArity name arguments
+        invoke arguments)
 
 let private requiredRegexpFunction name =
     regexpFunction name Collation.defaultCollation

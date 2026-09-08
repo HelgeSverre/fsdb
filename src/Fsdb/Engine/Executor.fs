@@ -9147,20 +9147,16 @@ and private pointLookupEqualities (registry: Registry) (tref: TableRef) (whereEx
 and private indexedColumnFor (tref: TableRef) =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
-    let caseTransform (name: string) =
-        if name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase) then Some Lowercase
-        elif name.Equals("UPPER", System.StringComparison.OrdinalIgnoreCase) then Some Uppercase
-        elif name.Equals("TRIM", System.StringComparison.OrdinalIgnoreCase) then Some Trimmed
-        else None
-
     function
     | Col name -> Some(name, None)
     | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
         Some(name, None)
-    | FuncCall(name, [ Col column ]) -> caseTransform name |> Option.map (fun transform -> column, Some transform)
+    | FuncCall(name, [ Col column ]) ->
+        FunctionalIndex.tryBuiltin name
+        |> Option.map (fun transform -> column, Some transform)
     | FuncCall(name, [ QualifiedCol(qualifier, column) ])
         when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
-        caseTransform name |> Option.map (fun transform -> column, Some transform)
+        FunctionalIndex.tryBuiltin name |> Option.map (fun transform -> column, Some transform)
     | _ -> None
 
 and private storedIndexedColumnFor (registry: Registry) (tref: TableRef) expression =
@@ -10183,10 +10179,9 @@ and private resolveOrderAliasValue name outputColumns =
 
 and private transformUsesStoredSemantics (registry: Registry) = function
     | None -> true
-    | Some Lowercase -> Functions.isUnmodifiedBuiltinScalar "LOWER" registry
-    | Some Uppercase -> Functions.isUnmodifiedBuiltinScalar "UPPER" registry
-    | Some Trimmed -> Functions.isUnmodifiedBuiltinScalar "TRIM" registry
-    | Some(Expression _) -> false
+    | Some transform ->
+        FunctionalIndex.tryBuiltinName transform
+        |> Option.exists (fun name -> Functions.isUnmodifiedBuiltinScalar name registry)
 
 and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table

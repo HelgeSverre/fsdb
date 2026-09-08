@@ -13,6 +13,7 @@ open System.Collections.Generic
 open System.Globalization
 open FParsec
 open Fsdb.Ast
+open Fsdb.Sql
 open Fsdb.Value
 open Fsdb.Temporal
 
@@ -2457,9 +2458,9 @@ let private indexedColumn: Parser<IndexColumn, unit> =
               Transform = Some(Expression expression)
               Direction = direction }
 
-    attempt (caseColumn "LOWER" Lowercase)
-    <|> attempt (caseColumn "UPPER" Uppercase)
-    <|> attempt (caseColumn "TRIM" Trimmed)
+    (FunctionalIndex.builtins
+     |> List.map (fun (name, transform) -> attempt (caseColumn name transform))
+     |> choice)
     <|> attempt expressionColumn
     <|> storedColumn
 
