@@ -101,50 +101,7 @@ let private dataTypeName (ty: ColumnType) : string =
 /// (`int unsigned`, `varchar(255)`, `enum('a','b')`, ...), the same text
 /// Laravel's `getColumns()`/`SHOW CREATE TABLE` echo back.
 let columnTypeText (ty: ColumnType) : string =
-    let quotedList vs = vs |> List.map (sprintf "'%s'") |> String.concat ","
-    let unsigned u = if u then " unsigned" else ""
-
-    match ty with
-    | TTinyInt u -> "tinyint" + unsigned u
-    // MySQL spells BOOLEAN back as the `tinyint(1)` it is a synonym for.
-    | TBool -> "tinyint(1)"
-    | TSmallInt u -> "smallint" + unsigned u
-    | TMediumInt u -> "mediumint" + unsigned u
-    | TInt u -> "int" + unsigned u
-    | TBigInt u -> "bigint" + unsigned u
-    | TBit width -> sprintf "bit(%d)" width
-    | TChar n -> sprintf "char(%d)" n
-    | TVarchar n -> sprintf "varchar(%d)" n
-    | TTinyText -> "tinytext"
-    | TText -> "text"
-    | TMediumText -> "mediumtext"
-    | TLongText -> "longtext"
-    | TBinary n -> sprintf "binary(%d)" n
-    | TVarBinary n -> sprintf "varbinary(%d)" n
-    | TTinyBlob -> "tinyblob"
-    | TBlob -> "blob"
-    | TMediumBlob -> "mediumblob"
-    | TLongBlob -> "longblob"
-    | TEnum vs -> sprintf "enum(%s)" (quotedList vs)
-    | TSet vs -> sprintf "set(%s)" (quotedList vs)
-    | TDecimal(p, s, unsigned) ->
-        sprintf "decimal(%d,%d)%s" p s (if unsigned then " unsigned" else "")
-    | TDouble unsigned -> if unsigned then "double unsigned" else "double"
-    | TFloat unsigned -> if unsigned then "float unsigned" else "float"
-    | TDate -> "date"
-    // `datetime(6)` when fsp > 0, bare `datetime` at fsp 0 — the exact
-    // strings `SHOW COLUMNS`/`information_schema.columns.column_type` report
-    // (MySQL-verified for all three temporal types).
-    | TDateTime fsp -> if fsp > 0 then sprintf "datetime(%d)" fsp else "datetime"
-    | TTimestamp fsp -> if fsp > 0 then sprintf "timestamp(%d)" fsp else "timestamp"
-    | TTime fsp -> if fsp > 0 then sprintf "time(%d)" fsp else "time"
-    | TYear -> "year(4)"
-    | TJson -> "json"
-    | TGeometry GeometryCollection -> "geomcollection"
-    | TGeometry kind -> geometryTypeName kind |> _.ToLowerInvariant()
-    // Always with the dimension — a bare `VECTOR` declaration reports its
-    // implicit 2048, the way MySQL 9 echoes it back.
-    | TVector dim -> sprintf "vector(%d)" dim
+    SqlText.columnType ty
 
 let columnTypeTextOfColumn (column: ColumnDef) : string =
     match column.Type, column.NumericDisplay with
@@ -391,82 +348,7 @@ let private charOctetLength charset (ty: ColumnType) : int64 option =
 /// appear in a generated expression, but must render rather than throw.
 /// Charset introducers on string literals are not retained in the AST.
 let rec exprToSql (e: Expr) : string =
-    let opText =
-        function
-        | And -> "and"
-        | Or -> "or"
-        | Xor -> "xor"
-        | Eq -> "="
-        | Neq -> "<>"
-        | Lt -> "<"
-        | Lte -> "<="
-        | Gt -> ">"
-        | Gte -> ">="
-        | Add -> "+"
-        | Sub -> "-"
-        | SignedSub -> "-"
-        | Mul -> "*"
-        | Div -> "/"
-        | IntDiv -> "DIV"
-        | NullSafeEq -> "<=>"
-
-    let litText (v: Value) =
-        match v with
-        | VNull -> "NULL"
-        | VString s -> "'" + s.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
-        | v -> v |> toText |> Option.defaultValue "NULL"
-
-    match e with
-    | Lit v -> litText v
-    | MatchAgainst(cols, q, _) ->
-        let columnSql column =
-            column.Qualifier
-            |> Option.map (fun qualifier -> sprintf "`%s`.`%s`" qualifier column.Name)
-            |> Option.defaultWith (fun () -> sprintf "`%s`" column.Name)
-
-        sprintf "match (%s) against (%s)" (cols |> List.map columnSql |> String.concat ",") (exprToSql q)
-    | Placeholder _ -> "?"
-    | UserVariable variable -> variable.Sql
-    | SystemVariable(scope, name) -> "@@" + (scope |> Option.map (fun value -> value.ToLowerInvariant() + ".") |> Option.defaultValue "") + name
-    | AssignUserVariable(variable, value) -> sprintf "%s := %s" variable.Sql (exprToSql value)
-    | Col n -> sprintf "`%s`" n
-    | QualifiedCol(t, c) -> sprintf "`%s`.`%s`" t c
-    | Row values -> sprintf "(%s)" (values |> List.map exprToSql |> String.concat ",")
-    | BinOp(op, a, b) -> sprintf "(%s %s %s)" (exprToSql a) (opText op) (exprToSql b)
-    | Not e -> sprintf "(not(%s))" (exprToSql e)
-    | IsNull e -> sprintf "(%s is null)" (exprToSql e)
-    | IsNotNull e -> sprintf "(%s is not null)" (exprToSql e)
-    | IsTrue e -> sprintf "(%s is true)" (exprToSql e)
-    | IsFalse e -> sprintf "(%s is false)" (exprToSql e)
-    | Like(e, p, _, _) -> sprintf "(%s like %s)" (exprToSql e) (exprToSql p)
-    | Regexp(e, p) -> sprintf "(%s regexp %s)" (exprToSql e) (exprToSql p)
-    | In(e, cs) -> sprintf "(%s in (%s))" (exprToSql e) (cs |> List.map exprToSql |> String.concat ",")
-    | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprToSql e) (exprToSql lo) (exprToSql hi)
-    | FuncCall(name, [ Cast(value, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
-        sprintf "weight_string(%s as char(%d))" (exprToSql value) length
-    | FuncCall(name, [ Cast(value, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
-        sprintf "weight_string(%s as binary(%d))" (exprToSql value) length
-    | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToLowerInvariant()) (args |> List.map exprToSql |> String.concat ",")
-    | Distinct e -> sprintf "distinct %s" (exprToSql e)
-    | OrderBy(e, _) -> exprToSql e
-    | Cast(e, TBigInt true) -> sprintf "cast(%s as unsigned)" (exprToSql e)
-    | Cast(e, TBigInt false) -> sprintf "cast(%s as signed)" (exprToSql e)
-    | Cast(e, ty) -> sprintf "cast(%s as %s)" (exprToSql e) (columnTypeText ty)
-    | Collate(e, c) -> sprintf "(%s collate %s)" (exprToSql e) c
-    | Case(subject, whens, elseBranch) ->
-        let subj = subject |> Option.map (exprToSql >> sprintf " %s") |> Option.defaultValue ""
-        let whenText = whens |> List.map (fun (w, t) -> sprintf " when %s then %s" (exprToSql w) (exprToSql t)) |> String.concat ""
-        let elseText = elseBranch |> Option.map (exprToSql >> sprintf " else %s") |> Option.defaultValue ""
-        sprintf "(case%s%s%s end)" subj whenText elseText
-    // Shapes a generated expression can't contain — legal-ish placeholders.
-    | Star q -> (q |> Option.map (sprintf "`%s`.") |> Option.defaultValue "") + "*"
-    | Exists _ -> "exists(...)"
-    | Subquery _
-    | InSubquery _
-    | QuantifiedComparison _ -> "(...)"
-    // A window function can't appear in a generated-column expression at
-    // all (MySQL rejects it at DDL time), so one spelling covers the case.
-    | WindowOver _ -> "window function() over ()"
+    SqlText.expression e
 
 /// The `(N)` suffix MySQL appends to `on update CURRENT_TIMESTAMP` for a
 /// column declared with a nonzero fractional-seconds precision — empty for
