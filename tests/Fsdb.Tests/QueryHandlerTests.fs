@@ -8705,6 +8705,100 @@ let tests =
               | ResultSet(_, [ [ Some "x" ] ]) -> ()
               | other -> failtestf "expected direct SELECT still fine after the backstop fired, got %A" other
 
+          testCase "generated column definitions enforce dependency and key restrictions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let expectError code fragment sql =
+                  match handle session sql |> snd with
+                  | Err(actual, message) when actual = code ->
+                      Expect.stringContains message fragment sql
+                  | other -> failtestf "expected %d for %s, got %A" code sql other
+
+              expectError
+                  3763
+                  "disallowed function: rand"
+                  "CREATE TABLE generated_random (a INT, b DOUBLE AS (RAND()))"
+
+              expectError
+                  3763
+                  "disallowed function: `NOSUCH`"
+                  "CREATE TABLE generated_unknown (a INT, b INT AS (NOSUCH(a)))"
+
+              expectError
+                  1111
+                  "Invalid use of group function"
+                  "CREATE TABLE generated_aggregate (a INT, b INT AS (SUM(a)))"
+
+              expectError
+                  3106
+                  "virtual generated column as primary key"
+                  "CREATE TABLE generated_virtual_pk (a INT, b INT AS (a + 1) VIRTUAL PRIMARY KEY)"
+
+              expectError
+                  3107
+                  "defined prior to it"
+                  "CREATE TABLE generated_forward (a INT, b INT AS (c + 1), c INT AS (a + 1))"
+
+              expectError
+                  3109
+                  "cannot refer to auto-increment column"
+                  "CREATE TABLE generated_auto (id INT AUTO_INCREMENT PRIMARY KEY, b INT AS (id + 1))"
+
+              expectError
+                  3109
+                  "cannot refer to auto-increment column"
+                  "CREATE TABLE generated_qualified_auto (id INT AUTO_INCREMENT PRIMARY KEY, b INT AS (generated_qualified_auto.id + 1))"
+
+              expectError
+                  3107
+                  "defined prior to it"
+                  "CREATE TABLE generated_qualified_forward (a INT, b INT AS (generated_qualified_forward.c + 1), c INT AS (a + 1))"
+
+              let session, ordinaryForward =
+                  handle session "CREATE TABLE generated_plain_forward (b INT AS (c + 1), c INT)"
+
+              Expect.equal ordinaryForward (Affected 0UL) "ordinary forward reference"
+              let session, _ = handle session "INSERT INTO generated_plain_forward (c) VALUES (2)"
+
+              match handle session "SELECT b, c FROM generated_plain_forward" |> snd with
+              | ResultSet(_, [ [ Some "3"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected a computed ordinary forward reference, got %A" other
+
+              let session, backward =
+                  handle
+                      session
+                      "CREATE TABLE generated_backward (a INT, b INT AS (a + 1), c INT AS (b + 1))"
+
+              Expect.equal backward (Affected 0UL) "backward generated reference"
+              let session, _ = handle session "INSERT INTO generated_backward (a) VALUES (4)"
+
+              match handle session "SELECT a, b, c FROM generated_backward" |> snd with
+              | ResultSet(_, [ [ Some "4"; Some "5"; Some "6" ] ]) -> ()
+              | other -> failtestf "expected ordered generated evaluation, got %A" other
+
+              let session, storedPrimary =
+                  handle session "CREATE TABLE generated_stored_pk (a INT, b INT AS (a + 1) STORED PRIMARY KEY)"
+
+              Expect.equal storedPrimary (Affected 0UL) "stored generated primary key"
+              let session, _ = handle session "CREATE TABLE generated_alter (a INT, b INT AS (a + 1))"
+
+              expectError
+                  3107
+                  "defined prior to it"
+                  "ALTER TABLE generated_alter ADD COLUMN c INT AS (d + 1), ADD COLUMN d INT AS (a + 2)"
+
+              expectError
+                  3109
+                  "cannot refer to auto-increment column"
+                  "ALTER TABLE generated_alter ADD COLUMN id INT AUTO_INCREMENT UNIQUE, ADD COLUMN x INT AS (id + 1)"
+
+              expectError
+                  3106
+                  "virtual generated column as primary key"
+                  "ALTER TABLE generated_alter ADD PRIMARY KEY (b)"
+
           testCase "stored functions cannot hide DirectOnly extension calls from stored expressions"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

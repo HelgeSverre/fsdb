@@ -61,17 +61,17 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "insert"
               Expect.equal (rows store "SELECT n FROM t") [ [ Some "11" ] ] "stored row contains the value assigned by the trigger"
 
-          testCase "AUTO_INCREMENT allocation after BEFORE INSERT is regenerated and checked"
+          testCase "BEFORE INSERT changes are regenerated and checked after AUTO_INCREMENT allocation"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               expectOk
-                  (runDefault store "CREATE TABLE checked_insert (id INT AUTO_INCREMENT PRIMARY KEY, generated_id INT AS (id * 2) STORED, CHECK (generated_id < 1))")
+                  (runDefault store "CREATE TABLE checked_insert (id INT AUTO_INCREMENT PRIMARY KEY, source INT, generated_value INT AS (source * 2) STORED, CHECK (generated_value < 1))")
                   "create checked table"
               expectOk
-                  (runDefault store "CREATE TRIGGER clear_id BEFORE INSERT ON checked_insert FOR EACH ROW SET NEW.id = NULL")
+                  (runDefault store "CREATE TRIGGER prepare_row BEFORE INSERT ON checked_insert FOR EACH ROW BEGIN SET NEW.id = NULL; SET NEW.source = 1; END")
                   "create trigger"
 
-              for sql in [ "INSERT INTO checked_insert (id) VALUES (NULL)"; "REPLACE INTO checked_insert (id) VALUES (NULL)" ] do
+              for sql in [ "INSERT INTO checked_insert (id, source) VALUES (NULL, 0)"; "REPLACE INTO checked_insert (id, source) VALUES (NULL, 0)" ] do
                   match runDefault store sql with
                   | Err(3819, _) -> ()
                   | other -> failtestf "expected post-allocation CHECK failure for %s, got %A" sql other

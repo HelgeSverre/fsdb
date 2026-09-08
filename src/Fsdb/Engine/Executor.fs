@@ -14310,19 +14310,8 @@ let private applyOnUpdateTimestamps
 
         newRow
 
-/// Computes every `Generated` column of `row` (`CREATE TABLE ... col AS
-/// (expr)`) fresh from its other columns' current values, leaving every
-/// other column untouched, then validates every enforced CHECK constraint.
-/// INSERT, REPLACE, and UPDATE call this on each final candidate before it
-/// lands, so a unique index or check spanning a generated column (e.g.
-/// Laravel Pulse's `key_hash BINARY(16) AS
-/// (unhex(md5(key)))`) sees its real value at collision-detection time
-/// instead of a not-yet-computed NULL. Left-to-right column order lets one
-/// generated column reference an earlier one in the same row.
-/// MySQL's DDL-time restriction errors (3102 nondeterministic fn,
-/// 3106 VIRTUAL as PK, 3107 forward reference, 3109 auto_increment ref)
-/// ponytail: CREATE/ALTER does not yet reject generated-column restrictions
-/// 3102/3106/3107/3109; validate them before persisting the definition.
+/// Applies every enforced CHECK constraint after generated columns have been
+/// computed, so constraints observe the candidate row that would be stored.
 let private validateCheckRow
     (store: Store)
     (registry: Registry)
@@ -14405,22 +14394,6 @@ let private recomputeGeneratedColumns
     else
         updateRows store db table None (fun _ -> Ok true) (computeGeneratedRow store registry db table columns)
         |> Result.map ignore
-
-/// Threads the generated-column backfill onto an ALTER result, re-scanning
-/// the table for its post-ALTER column definitions.
-let private withGeneratedRecomputed
-    (store: Store)
-    (registry: Registry)
-    (dbName: string)
-    (db: string)
-    (table: string)
-    (result: Result<'a, StorageError>)
-    : Result<'a, StorageError> =
-    result
-    |> Result.bind (fun r ->
-        match scan store db table with
-        | Ok(cols, _) -> recomputeGeneratedColumns store registry dbName db table cols |> Result.map (fun () -> r)
-        | Error _ -> Ok r)
 
 let private rewriteExprWith = Expression.rewrite
 
@@ -15794,6 +15767,64 @@ let private checkColumnReferences (expression: Expr) : (string option * string) 
         []
         expression
     |> List.rev
+
+let private validateGeneratedDefinitions (registry: Registry) (columns: ColumnDef list) : QueryResult option =
+    let disallowedFunction column expression =
+        Expression.tryPick
+            (fun node ->
+                match node with
+                | FuncCall _ when isAggregateCall registry node -> Some(Err(1111, "Invalid use of group function"))
+                | FuncCall(name, _) when Functions.lookup name registry |> Option.isNone ->
+                    Some(
+                        Err(
+                            3763,
+                            sprintf
+                                "Expression of generated column '%s' contains a disallowed function: `%s`."
+                                column
+                                name
+                        )
+                    )
+                | FuncCall(name, _) when statementVariantFunctions.Contains(name.ToUpperInvariant()) ->
+                    match registry.Extensions |> Map.tryFind (name.ToUpperInvariant()) with
+                    | Some _ -> None
+                    | None ->
+                        Some(
+                            Err(
+                                3763,
+                                sprintf
+                                    "Expression of generated column '%s' contains a disallowed function: %s."
+                                    column
+                                    (name.ToLowerInvariant())
+                            )
+                        )
+                | _ -> None)
+            expression
+
+    columns
+    |> List.indexed
+    |> List.tryPick (fun (columnIndex, column) ->
+        column.Generated
+        |> Option.bind (fun (expression, kind) ->
+            if kind = Virtual && column.PrimaryKey then
+                Some(Err(3106, "'Defining a virtual generated column as primary key' is not supported for generated columns."))
+            else
+                match disallowedFunction column.Name expression with
+                | Some error -> Some error
+                | None ->
+                    checkColumnReferences expression
+                    |> List.tryPick (fun (_, name) ->
+                        match resolveColumn columns name with
+                        | Ok referencedIndex when columns.[referencedIndex].AutoIncrement ->
+                            Some(Err(3109, sprintf "Generated column '%s' cannot refer to auto-increment column." column.Name))
+                        | Ok referencedIndex when referencedIndex >= columnIndex && columns.[referencedIndex].Generated.IsSome ->
+                            Some(Err(3107, "Generated column can refer only to generated columns defined prior to it."))
+                        | _ -> None)))
+
+let private validateGeneratedDefinitionsForStorage registry columns =
+    match validateGeneratedDefinitions registry columns with
+    | None -> Ok()
+    | Some(Err(code, message)) -> Error(ExpressionError(code, message))
+    | Some _ -> Error(ExpressionError(1105, "Invalid generated column definition"))
 
 let private nondeterministicCheckFunctions =
     set
@@ -18017,6 +18048,7 @@ let rec executeAs
                       rejectQuantifiedComparisonsInGenerated table.Columns
                       rejectSubqueriesInGenerated table.Columns
                       rejectSessionVariablesInGenerated table.Columns
+                      validateGeneratedDefinitions registry table.Columns
                       rejectUnsafePartitionExpression registry table.Partitioning
                       validateFunctionalDefaults registry table.Columns |> validationErrorOption id
                       validateIndexExpressions registry table.Columns table.Indexes |> validationErrorOption storageErr ]
@@ -18254,9 +18286,7 @@ let rec executeAs
                     match partitionTruncation with
                     | Some(TruncatePartitions selected) -> truncateHashPartitions snapshot registry db table selected
                     | _ when physicalActions.IsEmpty -> scan snapshot db table |> Result.map ignore
-                    | _ ->
-                        alterTable snapshot db table physicalActions
-                        |> withGeneratedRecomputed snapshot registry dbName db table)
+                    | _ -> alterTable snapshot db table physicalActions)
 
             let fillAddedFunctionalDefaults () =
                 let names =
@@ -18392,7 +18422,9 @@ let rec executeAs
                 |> Result.bind (fun () -> retargetAlterObjects ())
                 |> Result.bind (fun () -> scan snapshot db finalTable |> Result.map fst)
                 |> Result.bind (fun columns ->
-                    validateFunctionalDefaultsForStorage registry columns
+                    validateGeneratedDefinitionsForStorage registry columns
+                    |> Result.bind (fun () -> recomputeGeneratedColumns snapshot registry dbName db finalTable columns)
+                    |> Result.bind (fun () -> validateFunctionalDefaultsForStorage registry columns)
                     |> Result.bind (fun () ->
                         snapshot.Catalog
                         |> Map.tryFind db
