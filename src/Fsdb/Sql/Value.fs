@@ -497,6 +497,7 @@ let geometryPointBufferWithSegmentsPlanar segments (distance: float) (geometry: 
         let ring =
             [ 0 .. segments - 1 ]
             |> List.map (fun index ->
+                Limits.checkQueryCancellation index
                 let angle = float index * 2.0 * Math.PI / float segments
                 x + distance * Math.Cos angle, y + distance * Math.Sin angle)
 

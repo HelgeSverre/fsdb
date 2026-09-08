@@ -336,6 +336,7 @@ let private numericSystemVariables =
           "max_allowed_packet"
           "max_connections"
           "max_heap_table_size"
+          "max_points_in_geometry"
           "max_prepared_stmt_count"
           "max_sp_recursion_depth"
           "net_read_timeout"
@@ -657,6 +658,10 @@ let private registryFor (session: Session) : Functions.Registry =
         sessionValue session "default_week_format"
         |> Option.bind tryInt32
         |> Option.defaultValue 0
+    let maxPointsInGeometry =
+        sessionValue session "max_points_in_geometry"
+        |> Option.bind tryInt32
+        |> Option.defaultValue Limits.defaultMaxPointsInGeometry
 
     let loginUser = if session.LoginUser = "" then session.User else session.LoginUser
 
@@ -687,6 +692,9 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "UNIX_TIMESTAMP" (Functions.unixTimestampFn timeZone)
     |> Functions.registerScalar "FROM_UNIXTIME" (Functions.fromUnixTimeFn timeZone timeLocale)
     |> Functions.registerScalar "WEEK" (Functions.weekFn defaultWeekFormat)
+    |> Functions.registerScalar
+        "ST_BUFFER_STRATEGY"
+        (Functions.geometryBufferStrategyFn maxPointsInGeometry)
     |> Functions.registerScalar "DATABASE" database
     |> Functions.registerScalar "SCHEMA" database
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
@@ -1169,6 +1177,20 @@ let private normalizeRoutineRecursionDepth =
     | VUInt value -> bounded (string value) value
     | _ -> Error(Err(1232, "Incorrect argument type to variable 'max_sp_recursion_depth'"))
 
+let private normalizeGeometryPointLimit =
+    let bounded value =
+        value
+        |> max (int64 Limits.minPointsInGeometry)
+        |> min (int64 Limits.maxPointsInGeometryLimit)
+        |> int
+        |> Ok
+
+    function
+    | VInt value -> bounded value
+    | VUInt value when value > uint64 Int64.MaxValue -> Ok Limits.maxPointsInGeometryLimit
+    | VUInt value -> bounded (int64 value)
+    | _ -> Error(Err(1232, "Incorrect argument type to variable 'max_points_in_geometry'"))
+
 let private applyConnectionEncoding (session: Session) charset (collation: Collation.Collation option) =
     markRoutineVariables connectionVariableNames
     setConnectionCharset session.Store charset
@@ -1328,6 +1350,13 @@ let private parseSetFragment
                     let resolved =
                         if name = "max_sp_recursion_depth" && not usesDefault then
                             resolveUserSetRhs session userVariables sql rhs
+                        elif name = "max_points_in_geometry" && not usesDefault then
+                            match rhs.Trim().ToUpperInvariant() with
+                            | "TRUE" -> Ok(VInt 1L, userVariables)
+                            | "FALSE" -> Ok(VInt 0L, userVariables)
+                            | "ON"
+                            | "OFF" -> Ok(VString(rhs.Trim()), userVariables)
+                            | _ -> resolveUserSetRhs session userVariables sql rhs
                         else
                             resolveSystemSetRhs session userVariables sql rhs
 
@@ -1344,6 +1373,17 @@ let private parseSetFragment
                                 |> Option.defaultValue 0
 
                         Ok(SetRoutineRecursionDepthAction(depth, isGlobal, None), sideEffects)
+                    | Ok(_, sideEffects) when usesDefault && name = "max_points_in_geometry" ->
+                        let limit =
+                            if isGlobal then
+                                Limits.defaultMaxPointsInGeometry
+                            else
+                                Session.tryGlobalVariable session.Store name
+                                |> Option.flatten
+                                |> Option.bind tryInt32
+                                |> Option.defaultValue Limits.defaultMaxPointsInGeometry
+
+                        Ok(SetVarAction(name, Some(string limit), isGlobal), sideEffects)
                     | Ok(_, sideEffects)
                         when usesDefault
                              && (name = "activate_all_roles_on_login"
@@ -1385,6 +1425,9 @@ let private parseSetFragment
                         normalizeRoutineRecursionDepth value
                         |> Result.map (fun (depth, warning) ->
                             SetRoutineRecursionDepthAction(depth, isGlobal, warning), sideEffects)
+                    | Ok(value, sideEffects) when name = "max_points_in_geometry" ->
+                        normalizeGeometryPointLimit value
+                        |> Result.map (fun limit -> SetVarAction(name, Some(string limit), isGlobal), sideEffects)
                     | Ok(value, sideEffects) when name = "sql_mode" ->
                         match toText value with
                         | Some value -> sqlModeAction value sideEffects

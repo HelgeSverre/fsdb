@@ -147,12 +147,14 @@ let tests =
                         ""
                         "[mysqld]"
                         "max-connections = 9" // my.cnf accepts dashes for underscores
+                        "max-points-in-geometry = 32"
                         "[server]"
                         "max_allowed_packet = 16M" ]
 
                   match applyLines "test.cnf" lines with
                   | Ok() ->
                       Expect.equal maxConnections 9 "[mysqld] applied, with the dash spelling accepted"
+                      Expect.equal maxPointsInGeometry 32 "the spatial point ceiling is configurable"
                       Expect.equal waitTimeoutSeconds 42 "[mysqld-8.4] applied"
                       Expect.equal maxAllowedPacket (16 * 1024 * 1024) "[server] applied too, as mysqld reads it"
                   | Error e -> failtestf "expected the file to apply, got %s" e)
@@ -561,6 +563,90 @@ let tests =
               match handle original "SELECT @@GLOBAL.max_sp_recursion_depth" |> snd with
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected GLOBAL DEFAULT to restore zero, got %A" other
+
+          testCase "max_points_in_geometry scopes the buffer strategy ceiling"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let store = Fsdb.Storage.create ()
+                  let original = create 1 store
+
+                  match handle original "SELECT @@GLOBAL.max_points_in_geometry, @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "65536"; Some "65536" ] ]) -> ()
+                  | other -> failtestf "expected the compiled geometry limits, got %A" other
+
+                  let original, setGlobal = handle original "SET GLOBAL max_points_in_geometry = 65537"
+                  Expect.equal setGlobal (Affected 0UL) "the global ceiling is writable"
+
+                  match handle original "SELECT @@GLOBAL.max_points_in_geometry, @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "65537"; Some "65536" ] ]) -> ()
+                  | other -> failtestf "expected GLOBAL SET to leave the current session unchanged, got %A" other
+
+                  let inherited = create 2 store
+
+                  match handle inherited "SELECT @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "65537" ] ]) -> ()
+                  | other -> failtestf "expected a new session to inherit the global ceiling, got %A" other
+
+                  let inherited, saved =
+                      handle inherited "SET @strategy = ST_Buffer_Strategy('point_circle', 65537)"
+
+                  Expect.equal saved (Affected 0UL) "a strategy at the inherited ceiling is accepted"
+
+                  let inherited, clampedLow = handle inherited "SET SESSION max_points_in_geometry = 2"
+                  Expect.equal clampedLow (Affected 0UL) "values below the floor are accepted and clamped"
+                  Expect.isEmpty inherited.Diagnostics "the clamp is silent"
+
+                  match handle inherited "SELECT @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "3" ] ]) -> ()
+                  | other -> failtestf "expected the minimum geometry ceiling, got %A" other
+
+                  match handle inherited "SELECT ST_Buffer_Strategy('point_circle', 4)" |> snd with
+                  | Err(3134, message) -> Expect.stringContains message "(3)" "the active ceiling is reported"
+                  | other -> failtestf "expected the lowered strategy ceiling to apply, got %A" other
+
+                  match
+                      handle
+                          inherited
+                          "SELECT ST_IsEmpty(ST_Buffer(ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'), 1, @strategy))"
+                      |> snd
+                  with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected an existing opaque strategy to survive a lower ceiling, got %A" other
+
+                  let inherited, clampedHigh = handle inherited "SET SESSION max_points_in_geometry = 1048577"
+                  Expect.equal clampedHigh (Affected 0UL) "values above the ceiling are accepted and clamped"
+                  Expect.isEmpty inherited.Diagnostics "the high clamp is silent"
+
+                  match handle inherited "SELECT @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "1048576" ] ]) -> ()
+                  | other -> failtestf "expected the maximum geometry ceiling, got %A" other
+
+                  let inherited, booleanLimit = handle inherited "SET SESSION max_points_in_geometry = TRUE"
+                  Expect.equal booleanLimit (Affected 0UL) "TRUE follows MySQL's integer-variable coercion"
+
+                  match handle inherited "SELECT @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "3" ] ]) -> ()
+                  | other -> failtestf "expected TRUE to clamp to the minimum, got %A" other
+
+                  for invalid in [ "'4'"; "1.5"; "NULL"; "b'100'"; "ON" ] do
+                      match handle inherited ("SET SESSION max_points_in_geometry = " + invalid) |> snd with
+                      | Err(1232, message) ->
+                          Expect.stringContains message "max_points_in_geometry" "the variable is named"
+                      | other -> failtestf "expected %s to be rejected, got %A" invalid other
+
+                  let inherited, resetSession = handle inherited "SET SESSION max_points_in_geometry = DEFAULT"
+                  Expect.equal resetSession (Affected 0UL) "SESSION DEFAULT inherits GLOBAL"
+
+                  match handle inherited "SELECT @@SESSION.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "65537" ] ]) -> ()
+                  | other -> failtestf "expected the session to inherit the current global ceiling, got %A" other
+
+                  let original, resetGlobal = handle original "SET GLOBAL max_points_in_geometry = DEFAULT"
+                  Expect.equal resetGlobal (Affected 0UL) "GLOBAL DEFAULT restores the compiled value"
+
+                  match handle original "SELECT @@GLOBAL.max_points_in_geometry" |> snd with
+                  | ResultSet(_, [ [ Some "65536" ] ]) -> ()
+                  | other -> failtestf "expected the compiled global ceiling after DEFAULT, got %A" other)
 
           // `max_allowed_packet` is what the wire actually enforces
           // (`Packet.readPacketAsync`), so a client that reads the variable

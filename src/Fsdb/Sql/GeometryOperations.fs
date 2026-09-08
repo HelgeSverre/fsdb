@@ -30,7 +30,6 @@ type internal BufferError =
     | UnsupportedRoundResolution
     | OperationFailed of detail: string
 
-let internal maxBufferPointsPerCircle = 65_536
 let private defaultPointsPerCircle = 32.0
 let private strategyCodeLength = sizeof<int32>
 let private encodedStrategyLength = strategyCodeLength + sizeof<double>
@@ -59,7 +58,10 @@ let internal tryDecodeBufferStrategy (bytes: byte[]) =
         let points =
             BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(strategyCodeLength, sizeof<double>))
             |> BitConverter.Int64BitsToDouble
-        let validPoints = Double.IsFinite points && points > 0.0 && points <= float maxBufferPointsPerCircle
+        let validPoints =
+            Double.IsFinite points
+            && points > 0.0
+            && points <= float Limits.maxPointsInGeometryLimit
 
         match code with
         | 1 when validPoints -> Some(BufferStrategy.EndRound points)

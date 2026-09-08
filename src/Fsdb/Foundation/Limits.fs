@@ -133,6 +133,11 @@ let mutable defaultPasswordLifetimeDays = 0
 /// Mode inherited by WEEK(date) when its optional second argument is absent.
 let mutable defaultWeekFormat = 0
 
+let defaultMaxPointsInGeometry = 65_536
+let minPointsInGeometry = 3
+let maxPointsInGeometryLimit = 1_048_576
+let mutable maxPointsInGeometry = defaultMaxPointsInGeometry
+
 /// Idle timeout waiting for the next command packet.
 let mutable waitTimeoutSeconds = 28800
 
@@ -237,6 +242,12 @@ let private knobs =
         Max = 7L
         Set = fun v -> defaultWeekFormat <- int v
         Get = fun () -> int64 defaultWeekFormat
+        Reportable = true }
+      { Name = "max_points_in_geometry"
+        Min = int64 minPointsInGeometry
+        Max = int64 maxPointsInGeometryLimit
+        Set = fun value -> maxPointsInGeometry <- int value
+        Get = fun () -> int64 maxPointsInGeometry
         Reportable = true }
       { Name = "wait_timeout"
         Min = 1L

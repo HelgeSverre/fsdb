@@ -5551,7 +5551,7 @@ let private geometryOverlayFn functionName operation =
         | Ok result -> VGeometry result
         | Error detail -> geometryError functionName detail)
 
-let private geometryBufferStrategyFn: Scalar =
+let internal geometryBufferStrategyFn maxPointsPerCircle : Scalar =
     let wrongArguments () = raise (SqlError(1210, "Incorrect arguments to st_buffer_strategy"))
 
     let checkedPoints value =
@@ -5560,13 +5560,13 @@ let private geometryBufferStrategyFn: Scalar =
         if not (Double.IsFinite points) || points <= 0.0 then
             wrongArguments ()
 
-        if points > float GeometryOperations.maxBufferPointsPerCircle then
+        if points > float maxPointsPerCircle then
             raise (
                 SqlError(
                     3134,
                     sprintf
                         "Parameter points_per_circle exceeds the maximum number of points in a geometry (%d) in function st_buffer_strategy."
-                        GeometryOperations.maxBufferPointsPerCircle
+                        maxPointsPerCircle
                 )
             )
 
@@ -5760,7 +5760,10 @@ let private registerSpatialBuiltins registry =
         (geometryPredicateFn "ST_DISJOINT" (fun first second -> geometryIntersectsPlanar first second |> Option.map not))
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
     |> registerScalarResult "ST_BUFFER" binaryResult geometryBufferFn
-    |> registerScalarResult "ST_BUFFER_STRATEGY" binaryResult geometryBufferStrategyFn
+    |> registerScalarResult
+        "ST_BUFFER_STRATEGY"
+        binaryResult
+        (geometryBufferStrategyFn Limits.defaultMaxPointsInGeometry)
     |> registerScalarResult "ST_INTERSECTION" binaryResult (geometryOverlayFn "ST_INTERSECTION" OverlayKind.Intersection)
     |> registerScalarResult "ST_UNION" binaryResult (geometryOverlayFn "ST_UNION" OverlayKind.Union)
     |> registerScalarResult "ST_DIFFERENCE" binaryResult (geometryOverlayFn "ST_DIFFERENCE" OverlayKind.Difference)
