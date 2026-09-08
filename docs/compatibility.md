@@ -120,6 +120,24 @@ with `REQUIRE X509` also require a client certificate that chains to a
 configured client CA. When extended key usage is present, it must permit client
 authentication.
 
+Account-specific transport attributes use the same `CREATE USER` and `ALTER
+USER` grammar as MySQL:
+
+```sql
+CREATE USER 'service'@'10.%'
+  REQUIRE SUBJECT '/CN=service-client'
+          ISSUER '/CN=application-ca'
+          CIPHER 'TLS_AES_256_GCM_SHA384';
+```
+
+`SUBJECT`, `ISSUER`, and `CIPHER` can appear in any order, with an optional
+`AND` between attributes. Repeating an attribute is rejected. Subject and
+issuer policies require a client certificate that first passes CA validation;
+their slash-form names and the negotiated cipher are then compared exactly.
+The same values persist in `mysql.user` and appear in `SHOW CREATE USER`.
+`COM_CHANGE_USER` retains the established connection's TLS identity when it
+authenticates the replacement account.
+
 ## Bulk wire commands
 
 `CLIENT_MULTI_STATEMENTS` and `CLIENT_MULTI_RESULTS` permit semicolon-separated
@@ -387,17 +405,20 @@ remain independently configurable. A client that negotiates
 `wait_timeout`.
 
 `SET GLOBAL` updates the live limits used by later accepts, packet reads,
-idle waits, transaction conflict waits, and recursive CTEs. Session-scoped
+transaction conflict waits, and recursive CTEs. Session-scoped
 `wait_timeout`, `net_read_timeout`, `innodb_lock_wait_timeout`, and
-`cte_max_recursion_depth` are honoured. `max_points_in_geometry` is GLOBAL and
-SESSION scoped; it bounds new opaque buffer strategies without invalidating
-ones created under an earlier value. Its
-`/*+ SET_VAR(max_points_in_geometry=...) */` optimizer hint applies the same
-bound to one statement—including prepared execution—without changing the
-persistent session value. Process-wide `max_connections` and
-`max_allowed_packet` reject a session-scoped `SET`. An idle command wait uses
-`wait_timeout`; after the first packet byte arrives, every pause in ordinary,
-TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.
+`cte_max_recursion_depth` are honoured. Process-wide `max_connections` and
+`max_allowed_packet` reject a session-scoped `SET`.
+
+`max_points_in_geometry` is GLOBAL and SESSION scoped. It bounds newly created
+buffer strategies without invalidating values created under an earlier limit.
+The `/*+ SET_VAR(max_points_in_geometry=...) */` hint applies the same bound to
+one statement, including prepared execution, without changing the session
+value.
+
+An idle connection uses `wait_timeout`. Once the first packet byte arrives,
+every pause in ordinary, TLS, compressed, and LOCAL INFILE traffic uses
+`net_read_timeout`.
 
 `COMMIT` and `ROLLBACK` honor `AND [NO] CHAIN`, `[NO] RELEASE`, and the
 session or global `completion_type` default. `RELEASE` sends the command reply

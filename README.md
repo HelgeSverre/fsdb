@@ -44,8 +44,9 @@ account is `root` with all privileges and no password. Authentication uses
 matching MySQL.
 
 Manage accounts and grants with `CREATE USER`, `GRANT`, and `SET PASSWORD`.
-Account locks, TLS requirements, explicit password expiry, per-account resource
-limits, and JSON attributes and comments are enforced.
+Account locks, password expiry, resource limits, and JSON attributes or
+comments are enforced. TLS policy can require encryption, a CA-validated
+client certificate, or exact certificate subject, issuer, and cipher values.
 
 First queries:
 
@@ -265,22 +266,24 @@ different access pattern:
   Compatible scalar literal lists are normalized once per statement, so that
   fallback does not repeat the entire list comparison for every row.
 
-- **Ordering and grouping.** Compatible `ORDER BY` and `GROUP BY` operations
-  stream a left prefix of a composite index, or a suffix whose preceding keys
-  are fixed by literal equalities. Numeric and binary prefixes can seek their
-  matching slice, as can text collations whose SQL equality classes match
-  their full ordering, such as `utf8mb4_0900_bin` and
-  `utf8mb4_0900_as_cs`. Case- or accent-folded and PAD SPACE text prefixes
-  retain the scan/sort path because equal values can occupy separate suffix
-  runs. Compatible literal bounds on the next suffix key further narrow the
-  fixed-prefix slice. Simple covered groups derive counts and grouping-key
-  `MIN` or `MAX` values from adjacent keys without resolving rows. This path
-  also supports `LIMIT` and `OFFSET`. Composite keys may contain
-  built-in functional parts: `LOWER`/`LCASE`, `UPPER`/`UCASE`, `TRIM`,
-  `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`, `LENGTH`/`OCTET_LENGTH`, and
-  `BIT_LENGTH`, plus `ABS` for numeric and text/binary columns. Text and binary
-  values follow MySQL's leading-double conversion and diagnostics. Other
-  expression orderings and full-value ordering through a prefix key still sort.
+- **Ordering.** Compatible `ORDER BY` operations stream a left index prefix, or
+  a suffix whose earlier keys are fixed by literal equalities. Literal bounds
+  on the next key narrow that slice further, and `LIMIT` or `OFFSET` can stop
+  it early. Numeric, binary, `utf8mb4_0900_bin`, and
+  `utf8mb4_0900_as_cs` prefixes support this path. Case- or accent-folded and
+  PAD SPACE text prefixes retain the scan/sort path because equal values can
+  occupy separate suffix runs.
+
+- **Grouping.** Compatible `GROUP BY` prefixes use the same ordered stream.
+  Covered groups can derive counts and grouping-key `MIN` or `MAX` values from
+  adjacent keys without resolving rows.
+
+- **Functional keys.** Composite indexes may contain `LOWER`/`LCASE`,
+  `UPPER`/`UCASE`, `TRIM`, `REVERSE`, `CHAR_LENGTH`/`CHARACTER_LENGTH`,
+  `LENGTH`/`OCTET_LENGTH`, `BIT_LENGTH`, or numeric/text/binary `ABS` parts.
+  Text and binary values use MySQL's leading-number conversion and diagnostics.
+  Other expression orderings and full-value ordering through a prefix key
+  still sort.
 
 - **Spatial access.** Planar `SPATIAL` and `RTREE` declarations maintain
   immutable minimum-bounding-rectangle entries. They narrow direct
@@ -739,8 +742,8 @@ let db =
 
 The logger is process-global. The TLS server certificate must be an
 `X509Certificate2` that contains its private key. Client certificate
-authorities are public certificates used to validate accounts marked
-`REQUIRE X509`.
+authorities validate accounts marked `REQUIRE X509` and accounts whose policy
+names an exact certificate `SUBJECT` or `ISSUER`.
 
 ### Included examples
 

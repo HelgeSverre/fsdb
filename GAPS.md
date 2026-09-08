@@ -93,7 +93,6 @@ refuses it through the prepared-statement protocol.
 | HASH partitions | Definitions and logical maintenance use the shared row store; physical pruning and `REORGANIZE PARTITION` renames remain absent | low | divergence/refusal |
 | Administration and replication | Replication source, binlog purge/reset, plugin/component installation, instance, and tablespace statements are unsupported | low | refusal |
 | EXPLAIN | JSON/TREE expose the logical plan without MySQL's cost model; ANALYZE reports aggregate rather than per-iterator observations | low | divergence |
-| Account policy | Authentication-plugin selection, issuer/subject/cipher requirements, and password history/reuse/current policy are unsupported | medium | refusal |
 
 ### SELECT-level syntax gaps
 
@@ -157,7 +156,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Advanced spatial behavior | geographic SRS semantics; planar buffers support independent point, join, and end strategies at arbitrary positive resolutions | low |
+| Geographic spatial behavior | geographic SRS axis, ordering, and distance semantics | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets and `SYSTEM`,
 but named zones remain unavailable without MySQL's optional time-zone tables.
@@ -455,7 +454,8 @@ binary rows with microsecond temporal precision. Packet framing handles values
 larger than one protocol packet.
 
 Transport supports zlib, Zstandard, TLS 1.2 and 1.3, optional server and client
-CA certificates, and secure-transport enforcement. Packet, connection, and
+CA certificates, secure-transport enforcement, and per-account SSL, X509,
+subject, issuer, or cipher requirements. Packet, connection, and
 prepared-statement limits are enforced and advertised honestly. Mid-query
 disconnects cancel evaluation through `Server.watchForDisconnect`.
 `COM_SET_OPTION` toggles multi-statement handling for negotiated clients.
@@ -486,8 +486,9 @@ the statement.
 
 The account catalog follows MySQL 8.4's `mysql.user` column order and includes a
 root bootstrap account. Passwords use double-SHA1 hashes with constant-time
-comparison. Account DDL covers locks, TLS requirements, password expiry,
-resource limits, and mergeable JSON attributes or comments.
+comparison. Account DDL covers locks, password expiry, resource limits,
+mergeable JSON attributes or comments, and transport policy from `REQUIRE SSL`
+through exact X509 subject, issuer, and cipher attributes.
 
 Static and dynamic grants apply at global, database, table, and column scope.
 Grant option is checked at the target level, unknown privileges fail closed,
