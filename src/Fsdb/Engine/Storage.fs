@@ -258,11 +258,8 @@ let primaryKeyColumns (table: Table) =
 /// Table names are case-insensitive, keyed by their lowercased form.
 type Database = Map<string, Table>
 
-/// Database names, as given, to a `Database`. Only ever materialized as a
-/// whole `Map` for callers that genuinely need a point-in-time view spanning
-/// every database at once (`Store.Catalog`, see its doc) — the live mutable
-/// state backing it is sharded per database (`Store.Databases`), not one
-/// value of this type.
+/// A point-in-time cross-database view. Live mutable state is sharded per
+/// database rather than stored in one `Catalog` value.
 type Catalog = Map<string, Database>
 
 /// One committed change to the catalog, for a physical WAL. Data changes
@@ -1264,27 +1261,14 @@ let resolveAssignableColumn (columns: ColumnDef list) (tableName: string) (name:
         else
             Ok i)
 
-/// Ambient per-thread cancellation for the query currently executing on
-/// this thread — armed by the connection loop's disconnect watcher
-/// (`Server.withCancellationWatch`) right before dispatching a statement and
-/// cleared right after. Engine folds and bounded SQL functions share the
-/// token, so a client that vanishes mid-query can unwind synchronous work
-/// instead of computing into a closed connection.
+/// Ambient cancellation shared by engine folds and bounded SQL functions.
 let queryCancellation = Limits.queryCancellation
 
-/// How often a row-pipeline fold checks `queryCancellation` — a modulo and
-/// an occasional `IsCancellationRequested` read, cheap enough against a
-/// row's own `evalExpr` cost to be unmeasurable, frequent enough that a
-/// killed client's query unwinds within a few hundred rows rather than
-/// running to completion.
+/// Bounds disconnect latency without checking cancellation for every cell.
 let cancellationCheckInterval = Limits.cancellationCheckInterval
 
 /// Applies `f` to each element, short-circuiting on the first `Error` —
-/// generalized over any error type (not just `StorageError`) and public, so
-/// `Executor` reuses this tail-recursive traversal instead of keeping its
-/// own non-tail-recursive copy. The single choke point every row-pipeline
-/// fold in `Executor` (WHERE, projection, grouping, window functions,
-/// mutation joins) routes through — see `queryCancellation`.
+/// with periodic query-cancellation checks shared by engine row pipelines.
 let traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
     let token = queryCancellation.Value
 
@@ -1301,17 +1285,8 @@ let traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
 
     loop 0 [] xs
 
-/// `List.fold` with `traverse`'s periodic `queryCancellation` check — for
-/// the mutation folds (`updateRows`, `upsertRows`) whose per-row `step` can
-/// call an arbitrarily slow registered function (`SET ocr_text = ocr(pdf)`):
-/// without it a killed client's batch write only unwinds by the *accident*
-/// that each row's `coerceRow`/`processRow` happens to route through
-/// `traverse` (whose check fires on its first element) — this fold owns its
-/// own check instead of leaning on that. Throwing mid-fold is safe — both
-/// folds accumulate into statement-local state (`updateRows`'s builder,
-/// upsert's working copy) that is only committed when the fold completes,
-/// so cancellation stays all-or-nothing. (`deleteRows` needs nothing: its
-/// row scan already routes through `traverse`.)
+/// A mutation fold with independent cancellation checks. The accumulated
+/// state stays private until completion, so interruption remains atomic.
 let foldWithCancellation (step: 'acc -> 'a -> 'acc) (init: 'acc) (xs: 'a list) : 'acc =
     let token = queryCancellation.Value
 
@@ -4046,10 +4021,7 @@ let private parentUniqueIndex (parent: Table) (refIdxs: int list) : Map<string, 
         else
             None)
 
-/// A per-statement FK parent-key membership test, either a live `HashSet`
-/// that a self-FK extends row by row (`Mutable`) or a snapshot of the
-/// parent's own `UniqueIndex` reused as-is (`Fixed`) — `insertCore`'s
-/// `foreignKeyLookups` picks whichever fits per FK; see its doc.
+/// A self-FK extends `Mutable` row by row; `Fixed` reuses a parent index.
 type private ParentKeySource =
     | Mutable of HashSet<string>
     | Fixed of Map<string, RowId>

@@ -1333,9 +1333,8 @@ let private funcCallAtom: Parser<Expr, unit> =
 /// `ORDER BY`/`SEPARATOR` into the general call-argument grammar, since it's
 /// the one built-in whose argument list isn't just a comma-separated
 /// expression list. Each `ORDER BY` key becomes an `OrderBy` marker in the
-/// trailing argument list (see its doc) so `Ast.FuncCall` doesn't need its
-/// own order-key vocabulary just for this one call; `Executor.evalAggregate`
-/// picks the markers back out.
+/// trailing argument list so `Ast.FuncCall` doesn't need a separate order-key
+/// vocabulary; `Executor.evalAggregate` extracts the markers.
 let private groupConcatAtom: Parser<Expr, unit> =
     attempt (functionKeyword "GROUP_CONCAT")
     >>. (opt (keyword "DISTINCT") .>>. expr)
@@ -3491,8 +3490,7 @@ let private derivedTable: Parser<FromItem, unit> =
     |>> fun (selectOrUnion, alias) -> FromSubquery(selectOrUnion, alias)
 
 /// `LATERAL (SELECT ...) [AS] alias` — same grammar as `derivedTable`, one
-/// `LATERAL` keyword ahead of it, landing on the correlated `FromLateral`
-/// case instead (see its doc).
+/// `LATERAL` keyword ahead of it, producing the correlated `FromLateral` case.
 let private lateralTable: Parser<FromItem, unit> =
     attempt (keyword "LATERAL" >>. derivedTable)
     |>> function
@@ -3837,8 +3835,7 @@ selectQueryRef.Value <-
 selectWithCtesRef.Value <-
     selectQuery |>> expressionSelect
 
-/// A single `SELECT`, or a `UNION`-chained sequence of them
-/// (`selectOrUnionBranches`, shared with `derivedTable` — see its doc). Each
+/// A single `SELECT`, or a `UNION`-chained sequence of them. Each
 /// branch is a full `selectStmtRecord` (so it can itself carry a trailing
 /// `ORDER BY`/`LIMIT`/lock clause), and a genuine union-level clause
 /// (`unionTailClause`) is tried once at least one `UNION` branch parsed —

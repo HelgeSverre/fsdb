@@ -6410,11 +6410,8 @@ and private resolveFromSubquery
     | FromTable _
     | FromJsonTable _ -> resolveFromItem store registry dbName item
     | FromSubquery(body, _alias)
-    // A LATERAL body resolved *without* a left row is only ever the column
-    // metadata probe `applyLateralJoin` runs when the left side is empty
-    // (see its doc); its correlated references evaluate against the outer
-    // context there, which is `None` here, so a column that only a left row
-    // could supply resolves to NULL rather than erroring.
+    // The empty-left metadata probe has no outer row, so correlated values
+    // resolve to NULL rather than failing column discovery.
     | FromLateral(body, _alias) ->
         let result, metadata, typedRows =
             match body with
@@ -15407,9 +15404,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")
 
-/// A top-level `SELECT`'s resultset plus its per-column MySQL wire types —
-/// `QueryHandler.executeStatement`'s type-preserving entry point into
-/// `runSelectStmt`, which can't be `public` itself (see the doc there).
+/// A top-level `SELECT`'s resultset plus its per-column MySQL wire types.
 /// `outer` is always `None` for a top-level statement, so this needs no
 /// `EvalContext` in its own signature. SQL_CALC_FOUND_ROWS executes the
 /// unbounded query once and slices that result afterward, so expressions
