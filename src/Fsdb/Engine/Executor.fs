@@ -103,6 +103,10 @@ type private CorrelatedProbeSource =
     { Qualifier: string
       ColumnNames: Set<string> }
 
+type private RecursiveBranchPlan =
+    | GeneralRecursiveBranch of SelectStmt
+    | RowLocalRecursiveBranch of needsCteScope: bool * run: (Value[] list -> Result<Value[] list, QueryResult>)
+
 type private EqualityAccessPlan =
     { KeyName: string
       ColumnIndices: int list
@@ -8450,23 +8454,6 @@ and private materializeCte
                     expressions
                     columns
 
-        let conformRows (columns: ColumnDef list) rows =
-            let coercions = columns |> List.map (Storage.prepareStoredValueCoercion store) |> Array.ofList
-
-            rows
-            |> List.indexed
-            |> traverse (fun (rowIndex, row: Value[]) ->
-                if row.Length <> coercions.Length then
-                    Error(Err(1222, "The used SELECT statements have a different number of columns"))
-                else
-                    Diagnostics.withRowNumber (rowIndex + 1) (fun () ->
-                        row
-                        |> traverseArrayIndexed (fun index value ->
-                            coercions.[index] value
-                            |> Result.mapError (fun error ->
-                                let code, message = Storage.toMySqlError error
-                                Err(code, message)))))
-
         resolveFromSubquery store registry dbName (FromSubquery(PlainSelect anchor, cte.CteName)) outer
         |> Result.bind (fun (anchorColumns, anchorRows) ->
             anchorColumns
@@ -8487,31 +8474,38 @@ and private materializeCte
             let cteKey = cte.CteName.ToLowerInvariant()
             let recursiveOrigins = List.replicate columns.Length None
             let recursionLimit = cteRecursionDepth.Value |> Option.defaultValue Limits.cteMaxRecursionDepth
-            let preparedBranches =
-                recursiveBranches
-                |> traverse (fun (_, select) ->
-                    prepareRecursiveBranch store registry dbName cte.CteName columns outer select
-                    |> Result.map (fun prepared -> select, prepared))
-            let mutable working = anchorRows
-            let mutable passes = 0
-            let mutable failure = None
+            let coercions = columns |> List.map (Storage.prepareStoredValueCoercion store) |> Array.ofList
 
-            try
-                match preparedBranches with
-                | Error error -> failure <- Some error
-                | Ok preparedBranches ->
+            let conformRows rows =
+                rows
+                |> List.indexed
+                |> traverse (fun (rowIndex, row: Value[]) ->
+                    if row.Length <> coercions.Length then
+                        Error(Err(1222, "The used SELECT statements have a different number of columns"))
+                    else
+                        Diagnostics.withRowNumber (rowIndex + 1) (fun () ->
+                            row
+                            |> traverseArrayIndexed (fun index value ->
+                                coercions.[index] value
+                                |> Result.mapError (fun error ->
+                                    let code, message = Storage.toMySqlError error
+                                    Err(code, message)))))
+
+            recursiveBranches
+            |> traverse (snd >> prepareRecursiveBranch store registry dbName cte.CteName columns outer)
+            |> Result.bind (fun preparedBranches ->
+                try
                     let needsScopeBinding =
                         preparedBranches
-                        |> List.exists (fun (select, prepared) ->
-                            prepared.IsNone
-                            || ((select.Projections |> List.map fst) @ (select.Where |> Option.toList))
-                               |> List.exists (Expression.collectSubqueries >> List.isEmpty >> not))
+                        |> List.exists (function
+                            | GeneralRecursiveBranch _ -> true
+                            | RowLocalRecursiveBranch(needsCteScope, _) -> needsCteScope)
 
                     let runBranches iterationRows =
-                        let runBranch (select, prepared) =
-                            match prepared with
-                            | Some run -> run iterationRows
-                            | None ->
+                        let runBranch =
+                            function
+                            | RowLocalRecursiveBranch(_, run) -> run iterationRows
+                            | GeneralRecursiveBranch select ->
                                 match runSelectStmt store registry dbName select outer with
                                 | Err(code, message), _, _ -> Error(Err(code, message))
                                 | _, _, typedRows -> Ok typedRows
@@ -8520,20 +8514,19 @@ and private materializeCte
                         | [ branch ] -> runBranch branch
                         | branches -> branches |> traverse runBranch |> Result.map List.concat
 
-                    while failure.IsNone && not working.IsEmpty do
-                        if recursionLimit <> 0L && int64 passes >= recursionLimit then
-                            failure <-
-                                Some(
-                                    Err(
-                                        3636,
-                                        sprintf
-                                            "Recursive query aborted after %d iterations. Try increasing @@cte_max_recursion_depth to a larger value."
-                                            (recursionLimit + 1L)
-                                    )
+                    let rec expand passes working =
+                        match working with
+                        | [] -> Ok(columns, List.ofSeq accumulated)
+                        | _ when recursionLimit <> 0L && int64 passes >= recursionLimit ->
+                            Error(
+                                Err(
+                                    3636,
+                                    sprintf
+                                        "Recursive query aborted after %d iterations. Try increasing @@cte_max_recursion_depth to a larger value."
+                                        (recursionLimit + 1L)
                                 )
-                        else
-                            let iterationRows = working
-
+                            )
+                        | iterationRows ->
                             if needsScopeBinding then
                                 cteScope.Value <-
                                     saved
@@ -8545,8 +8538,8 @@ and private materializeCte
                                           StatementStable = false
                                           PhysicalProjection = None }
 
-                            match runBranches iterationRows |> Result.bind (conformRows columns) with
-                            | Error err -> failure <- Some err
+                            match runBranches iterationRows |> Result.bind conformRows with
+                            | Error error -> Error error
                             | Ok freshRows ->
                                 let fresh =
                                     match seen with
@@ -8554,17 +8547,12 @@ and private materializeCte
                                     | Some seen -> freshRows |> List.filter (key >> seen.Add)
 
                                 accumulated.AddRange fresh
-                                working <- fresh
-                                passes <- passes + 1
-            finally
-                cteScope.Value <- saved
+                                expand (passes + 1) fresh
 
-            match failure with
-            | Some err -> Error err
-            | None -> Ok(columns, List.ofSeq accumulated))
+                    expand 0 anchorRows
+                finally
+                    cteScope.Value <- saved))
 
-/// Prepares invariant row-local work once instead of rebuilding the complete
-/// SELECT pipeline for every recursive pass.
 and private prepareRecursiveBranch
     (store: Store)
     (registry: Registry)
@@ -8573,21 +8561,19 @@ and private prepareRecursiveBranch
     (columns: ColumnDef list)
     (outer: EvalContext option)
     (select: SelectStmt)
-    : Result<(Value[] list -> Result<Value[] list, QueryResult>) option, QueryResult> =
-    let expressions =
-        (select.Projections |> List.map fst)
-        @ (select.Where |> Option.toList)
+    : Result<RecursiveBranchPlan, QueryResult> =
+    let projectionExpressions = select.Projections |> List.map fst
+    let expressions = projectionExpressions @ (select.Where |> Option.toList)
 
-    let readsRecursiveRows =
+    let hasDirectRecursiveSource =
         match select.From with
         | Some(FromTable table) ->
             table.Database.IsNone
             && equalsIgnoreCase table.Table cteName
         | _ -> false
 
-    let rowLocal =
-        readsRecursiveRows
-        && select.Joins.IsEmpty
+    let hasSimpleRowShape =
+        select.Joins.IsEmpty
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
         && select.OrderBy.IsEmpty
@@ -8600,21 +8586,28 @@ and private prepareRecursiveBranch
         && not select.Distinct
         && not select.CalculateFoundRows
         && not select.Rollup
-        && expressions |> List.forall (containsAggregate registry >> not)
-        && expressions |> List.forall (collectWindowFuncs >> List.isEmpty)
-        && expressions |> List.forall (collectMatchAgainst >> List.isEmpty)
 
-    if not rowLocal then
-        Ok None
+    let requiresGeneralEvaluation expression =
+        containsAggregate registry expression
+        || not (collectWindowFuncs expression).IsEmpty
+        || not (collectMatchAgainst expression).IsEmpty
+
+    let canPrepareRowLocal =
+        hasDirectRecursiveSource
+        && hasSimpleRowShape
+        && not (expressions |> List.exists requiresGeneralEvaluation)
+
+    if not canPrepareRowLocal then
+        Ok(GeneralRecursiveBranch select)
     else
         let qualifier = select.From |> Option.map fromItemQualifier |> Option.defaultValue cteName
         let ctxFor = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier qualifier columns) outer
         let matches = prepareWhereMatches ctxFor select.Where
         let scalarProjections =
-            if select.Projections |> List.forall (fst >> function Star _ -> false | _ -> true) then
-                select.Projections |> List.map fst |> List.toArray |> Some
-            else
+            if projectionExpressions |> List.exists (function Star _ -> true | _ -> false) then
                 None
+            else
+                projectionExpressions |> List.toArray |> Some
 
         let project row =
             let context = ctxFor row
@@ -8636,14 +8629,21 @@ and private prepareRecursiveBranch
                         |> Result.bind (fun _ -> project probe)))) with
         | Error(code, message) -> Error(Err(code, message))
         | Ok _ ->
-            Some(fun rows ->
-                rows
-                |> traverse (fun row ->
-                    matches row
-                    |> Result.bind (fun keep ->
-                        if keep then project row |> Result.map Some else Ok None))
-                |> Result.map (List.choose id)
-                |> Result.mapError (fun (code, message) -> Err(code, message)))
+            let needsCteScope =
+                expressions
+                |> List.exists (Expression.collectSubqueries >> List.isEmpty >> not)
+
+            RowLocalRecursiveBranch(
+                needsCteScope,
+                fun rows ->
+                    rows
+                    |> traverse (fun row ->
+                        matches row
+                        |> Result.bind (fun keep ->
+                            if keep then project row |> Result.map Some else Ok None))
+                    |> Result.map (List.choose id)
+                    |> Result.mapError (fun (code, message) -> Err(code, message))
+            )
             |> Ok
 
 and private compatibleSemiJoinColumns (left: ColumnDef) (right: ColumnDef) =
