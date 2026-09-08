@@ -8179,6 +8179,65 @@ let tests =
                         "WITH projected(candidate_id, tenant_key, bucket_key) AS (SELECT id, tenant_id, bucket FROM candidates)"
                         "(SELECT candidate_id AS id, tenant_key AS tenant_id, bucket_key AS bucket FROM projected) c"
 
+                testCase "correlated and literal equalities share a composite probe"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE outer_rows (id INT PRIMARY KEY, tenant_id INT)" |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE candidates (id INT PRIMARY KEY, tenant_id INT, status VARCHAR(10), KEY ix_tenant_status (tenant_id, status))"
+                    |> ignore
+
+                    [ 1..50 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 10) + 1))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO outer_rows VALUES " + rows)
+                    |> ignore
+
+                    [ 1..1000 ]
+                    |> List.map (fun id ->
+                        let tenant = ((id - 1) % 10) + 1
+                        let status = if ((id - 1) / 10) % 2 = 0 then "active" else "archived"
+                        sprintf "(%d,%d,'%s')" id tenant status)
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO candidates VALUES " + rows)
+                    |> ignore
+
+                    let assertCompositeProbe prefix source =
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "%s SELECT o.id, (SELECT COUNT(*) FROM %s WHERE c.tenant_id = o.tenant_id AND TOUCH(c.id) = c.id AND c.status = 'active') FROM outer_rows o ORDER BY o.id"
+                                    prefix
+                                    source)
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal rows.Length 50 "every outer row is retained"
+                            Expect.isTrue (rows |> List.forall (fun row -> row.[1] = Some "50")) "each tenant has fifty active rows"
+                        | other -> failtestf "expected mixed composite counts, got %A" other
+
+                        Expect.isLessThan calls 3000 "the literal and outer key narrow one composite bucket"
+
+                    assertCompositeProbe "" "candidates c"
+                    assertCompositeProbe "" "(SELECT id, tenant_id, status FROM candidates) c"
+
+                    assertCompositeProbe
+                        "WITH projected AS (SELECT id, tenant_id, status FROM candidates)"
+                        "projected c"
+
                 testCase "an unindexed correlated equality materializes keyed candidates once"
                 <| fun _ ->
                     let mutable calls = 0

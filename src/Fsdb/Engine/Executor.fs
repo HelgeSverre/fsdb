@@ -9777,12 +9777,23 @@ and private tryEqualityPredicate columnName boundValue = function
 and private tryCorrelatedEqualityPredicate source context =
     tryEqualityPredicate (tryCorrelatedInnerColumn source) (tryCorrelatedOuterValue source context)
 
-and private correlatedEqualityPredicates source (whereExpr: Expr option) (outer: EvalContext option) =
+and private tryLiteralEqualityPredicate source =
+    let literalValue = function
+        | Lit value -> Some value
+        | _ -> None
+
+    tryEqualityPredicate (tryCorrelatedInnerColumn source) literalValue
+
+and private tryCorrelatedProbeEqualityPredicate source context expression =
+    tryCorrelatedEqualityPredicate source context expression
+    |> Option.orElseWith (fun () -> tryLiteralEqualityPredicate source expression)
+
+and private correlatedProbeEqualities source (whereExpr: Expr option) (outer: EvalContext option) =
     outer
     |> Option.map (fun context ->
         whereExpr
         |> optionalConjuncts
-        |> List.choose (tryCorrelatedEqualityPredicate source context))
+        |> List.choose (tryCorrelatedProbeEqualityPredicate source context))
 
 and private correlatedRangeBounds source (whereExpr: Expr option) (outer: EvalContext option) =
     outer
@@ -9814,7 +9825,7 @@ and private tryCorrelatedEqualityLookup
     physicalFastPathTable store dbName tref
     |> Option.filter (fun table -> storedRowsMatchReadRows store table.Columns)
     |> Option.bind (fun table ->
-        correlatedEqualityPredicates (correlatedProbeSource selfQualifier table.Columns) whereExpr outer
+        correlatedProbeEqualities (correlatedProbeSource selfQualifier table.Columns) whereExpr outer
         |> Option.bind (fun equalities ->
             let tableDb = tref.Database |> Option.defaultValue dbName
 
@@ -10120,7 +10131,7 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
     : (ColumnDef list * Value[] list) option =
     tryPhysicalProjection store registry dbName source
     |> Option.bind (fun projection ->
-        correlatedEqualityPredicates (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns) whereExpr outer
+        correlatedProbeEqualities (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns) whereExpr outer
         |> Option.bind (tryProjectedPhysicalEqualitiesRows CandidateNarrowing store registry dbName projection))
 
 and private tryProjectedPhysicalCorrelatedRangeLookup
@@ -10200,7 +10211,7 @@ and private tryMaterializedCorrelatedEqualityLookup
             resolveFromItem store registry dbName source
             |> Result.toOption
             |> Option.bind (fun (columns, rows) ->
-                correlatedEqualityPredicates (correlatedProbeSource qualifier columns) whereExpr (Some context)
+                correlatedProbeEqualities (correlatedProbeSource qualifier columns) whereExpr (Some context)
                 |> Option.bind (fun equalities ->
                     let byColumn = (currentStatementMemo ()).MaterializedCorrelatedEqualities
 
@@ -10239,12 +10250,12 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
 
-and private tryAllCorrelatedEqualityPredicates source whereExpr outer =
+and private tryAllCorrelatedProbeEqualities source whereExpr outer =
     outer
     |> Option.bind (fun context ->
         match optionalConjuncts whereExpr with
         | [] -> None
-        | predicates -> predicates |> List.map (tryCorrelatedEqualityPredicate source context) |> tryAllSome)
+        | predicates -> predicates |> List.map (tryCorrelatedProbeEqualityPredicate source context) |> tryAllSome)
 
 and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (whereExpr: Expr option) : int option =
     let physicalEquality (projection: PhysicalProjection) (column, value) =
@@ -10274,7 +10285,7 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
     |> Option.filter (fun projection -> storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)
     |> Option.filter (fun projection -> projection.Steps |> List.forall (_.Predicate >> Option.isNone))
     |> Option.bind (fun projection ->
-        tryAllCorrelatedEqualityPredicates
+        tryAllCorrelatedProbeEqualities
             (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns)
             whereExpr
             (Some outer)
