@@ -171,6 +171,8 @@ module SyntaxFuzz =
            "SELECT ST_Equals(ST_Intersection(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POLYGON((2 -1,5 -1,5 2,2 2,2 -1))')), ST_GeomFromText('POLYGON((4 2,2 2,2 0,4 0,4 2))'))"
            "spatial_buffer_strategy",
            "SELECT ST_Equals(ST_Buffer(ST_PointFromText('POINT(0 0)'), 2, ST_Buffer_Strategy('point_square')), ST_GeomFromText('POLYGON((-2 -2,2 -2,2 2,-2 2,-2 -2))'))"
+           "spatial_mixed_buffer_strategies",
+           "SELECT ST_IsValid(ST_Buffer(ST_GeomFromText('LINESTRING(0 0,0 2,2 2)'), 1, ST_Buffer_Strategy('end_round',5), ST_Buffer_Strategy('join_round',7)))"
            "spatial_buffer_ceiling", "SET SESSION max_points_in_geometry = 32"
            "spatial_buffer_statement_ceiling",
            "SELECT /*+ SET_VAR(max_points_in_geometry=32) */ HEX(ST_Buffer_Strategy('point_circle', 32))"

@@ -5554,11 +5554,16 @@ let private geometryOverlayFn functionName operation =
 let internal geometryBufferStrategyFn maxPointsPerCircle : Scalar =
     let wrongArguments () = raise (SqlError(1210, "Incorrect arguments to st_buffer_strategy"))
 
-    let checkedPoints value =
-        let points = toDouble value
+    let checkedPositive value =
+        let number = toDouble value
 
-        if not (Double.IsFinite points) || points <= 0.0 then
+        if not (Double.IsFinite number) || number <= 0.0 then
             wrongArguments ()
+
+        number
+
+    let checkedPoints value =
+        let points = checkedPositive value
 
         if points > float maxPointsPerCircle then
             raise (
@@ -5584,13 +5589,11 @@ let internal geometryBufferStrategyFn maxPointsPerCircle : Scalar =
         |> GeometryOperations.encodeBufferStrategy
         |> VBytes
     | [ name; pointsValue ] ->
-        let points = checkedPoints pointsValue
-
         match req name |> _.ToLowerInvariant() with
-        | "end_round" -> BufferStrategy.EndRound points
-        | "join_round" -> BufferStrategy.JoinRound points
-        | "join_miter" -> BufferStrategy.JoinMiter points
-        | "point_circle" -> BufferStrategy.PointCircle points
+        | "end_round" -> BufferStrategy.EndRound(checkedPoints pointsValue)
+        | "join_round" -> BufferStrategy.JoinRound(checkedPoints pointsValue)
+        | "join_miter" -> BufferStrategy.JoinMiter(checkedPositive pointsValue)
+        | "point_circle" -> BufferStrategy.PointCircle(checkedPoints pointsValue)
         | _ -> wrongArguments ()
         |> GeometryOperations.encodeBufferStrategy
         |> VBytes
@@ -5645,8 +5648,6 @@ let private geometryBufferFn: Scalar =
                         | Ok buffer -> VGeometry buffer
                         | Error BufferError.InvalidStrategy
                         | Error(BufferError.OperationFailed _) -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))
-                        | Error BufferError.UnsupportedRoundResolution ->
-                            raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER round strategies whose resolution is not divisible by four'"))
     | _ -> nativeParameterCountError "st_buffer"
 
 let private geometryPredicateFn functionName predicate =

@@ -456,6 +456,10 @@ let tests =
                               | Fsdb.Functions.SqlError(3134, _) -> ()
                               | error -> failtestf "expected points ceiling error 3134, got %A" error)
 
+                          match strategy "join_miter" [ VInt 1_000_000L ] with
+                          | VBytes _ -> ()
+                          | value -> failtestf "expected an unrestricted miter limit, got %A" value
+
                       testCase "shape point and line buffers"
                       <| fun _ ->
                           let geometry text = call "ST_GeomFromText" [ VString text ]
@@ -547,18 +551,139 @@ let tests =
                                     strategy "end_flat" []
                                     strategy "end_round" [ VInt 32L ] ])
 
-                          Expect.throwsC
-                              (fun () ->
-                                  call
-                                      "ST_Buffer"
-                                      [ geometry "LINESTRING(0 0,0 2,2 2)"
-                                        VInt 1L
-                                        strategy "end_flat" []
-                                        strategy "join_round" [ VInt 10L ] ]
-                                  |> ignore)
-                              (function
-                              | Fsdb.Functions.SqlError(1235, _) -> ()
-                              | error -> failtestf "expected unsupported-resolution error 1235, got %A" error) ]
+                          let expectBuffer expected arguments message =
+                              let actual = call "ST_Buffer" arguments
+                              let expected = geometry expected
+
+                              let ringVertices ring = ring |> List.take (ring.Length - 1)
+
+                              let rec shapeVertices = function
+                                  | GPolygon rings -> rings |> List.collect ringVertices
+                                  | GMultiPolygon polygons -> polygons |> List.collect (List.collect ringVertices)
+                                  | GGeometryCollection geometries -> geometries |> List.collect (_.Shape >> shapeVertices)
+                                  | shape -> failtestf "expected an areal buffer for %s, got %A" message shape
+
+                              let vertices = function
+                                  | VGeometry value -> shapeVertices value.Shape |> List.distinct
+                                  | value -> failtestf "expected a geometry for %s, got %A" message value
+
+                              let actualVertices = vertices actual
+                              let expectedVertices = vertices expected
+                              Expect.equal
+                                  actualVertices.Length
+                                  expectedVertices.Length
+                                  (sprintf "%s vertex count: %A" message (call "ST_AsText" [ actual ]))
+
+                              expectedVertices
+                              |> List.iter (fun (expectedX, expectedY) ->
+                                  let present =
+                                      actualVertices
+                                      |> List.exists (fun (actualX, actualY) ->
+                                          abs (actualX - expectedX) < 1e-12 && abs (actualY - expectedY) < 1e-12)
+
+                                  Expect.isTrue present (sprintf "%s includes (%g, %g)" message expectedX expectedY))
+
+                          expectBuffer
+                              "POLYGON((0 1,-0.5877852522924732 0.8090169943749473,-0.9510565162951535 -0.3090169943749475,0 -1,2 -1,2.5877852522924734 -0.8090169943749475,2.9510565162951536 0.3090169943749474,2 1,0 1))"
+                              [ geometry "LINESTRING(0 0,2 0)"
+                                VInt 1L
+                                strategy "end_round" [ VInt 5L ] ]
+                              "odd round-end resolution"
+
+                          expectBuffer
+                              "POLYGON((0 1,-0.5877852522924732 0.8090169943749473,-0.9510565162951535 -0.3090169943749475,0 -1,2 -1,2.5877852522924734 -0.8090169943749475,2.9510565162951536 0.3090169943749474,2 1,0 1))"
+                              [ geometry "LINESTRING(0 0,0 0,2 0,2 0)"
+                                VInt 1L
+                                strategy "end_round" [ VInt 5L ] ]
+                              "repeated line vertices"
+
+                          match
+                              call
+                                  "ST_Buffer"
+                                  [ geometry "LINESTRING(0 0,0 0)"
+                                    VInt 1L
+                                    strategy "end_round" [ VInt 5L ] ]
+                          with
+                          | VGeometry { Shape = GPolygon [ ring ] } ->
+                              Expect.equal ring.Length 33 "a collapsed line uses MySQL's default circular buffer"
+                          | value -> failtestf "expected a collapsed-line polygon, got %A" value
+
+                          expectBuffer
+                              "POLYGON((1 1,2 1,2 3,0 3,-0.7071067811865475 2.7071067811865475,-1 2,-1 0,1 0,1 1))"
+                              [ geometry "LINESTRING(0 0,0 2,2 2)"
+                                VInt 1L
+                                strategy "end_flat" []
+                                strategy "join_round" [ VInt 5L ] ]
+                              "round-join resolution"
+
+                          expectBuffer
+                              "POLYGON((1 1,2 1,2.5877852522924734 1.1909830056250525,2.9510565162951536 2.3090169943749475,2 3,0 3,-0.7071067811865475 2.7071067811865475,-1 2,-1 0,-0.8090169943749473 -0.5877852522924732,0.30901699437494745 -0.9510565162951535,1 0,1 1))"
+                              [ geometry "LINESTRING(0 0,0 2,2 2)"
+                                VInt 1L
+                                strategy "end_round" [ VInt 5L ]
+                                strategy "join_round" [ VInt 7L ] ]
+                              "independent end and join resolutions"
+
+                          expectBuffer
+                              "POLYGON((-1 0,-0.7071067811865475 -0.7071067811865476,0 -1,4 -1,4.707106781186548 -0.7071067811865475,5 0,5 4,4.707106781186548 4.707106781186548,4 5,0 5,-0.7071067811865475 4.707106781186548,-1 4,-1 0))"
+                              [ geometry "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                                VInt 1L
+                                strategy "join_round" [ VDouble 5.5 ] ]
+                              "fractional polygon resolution is truncated"
+
+                          expectBuffer
+                              "POLYGON((5 1,5 3.5857864376269046,3.7071067811865475 2.2928932188134525,3 2,2.2928932188134525 2.2928932188134525,1 3.585786437626905,1 1,5 1))"
+                              [ geometry "POLYGON((0 0,6 0,6 6,3 3,0 6,0 0))"
+                                VInt -1L
+                                strategy "join_round" [ VInt 5L ] ]
+                              "negative polygon buffer"
+
+                          expectBuffer
+                              "POLYGON((-1 0,-0.7071067811865475 -0.7071067811865476,0 -1,8 -1,8.707106781186548 -0.7071067811865475,9 0,9 8,8.707106781186548 8.707106781186548,8 9,0 9,-0.7071067811865475 8.707106781186548,-1 8,-1 0),(3 3,3 5,5 5,5 3,3 3))"
+                              [ geometry "POLYGON((0 0,8 0,8 8,0 8,0 0),(2 2,2 6,6 6,6 2,2 2))"
+                                VInt 1L
+                                strategy "join_round" [ VInt 5L ] ]
+                              "polygon holes"
+
+                          expectBuffer
+                              "MULTIPOLYGON(((1 0,0.30901699437494723 0.9510565162951536,-0.8090169943749475 0.587785252292473,-0.8090169943749473 -0.5877852522924732,0.30901699437494745 -0.9510565162951535,1 0)),((4 1,3.566116260882442 0.900968867902419,3.0250720878181765 0.22252093395631428,3.2181685175319705 -0.6234898018587336,4 -1,6 -1,6.433883739117558 -0.9009688679024191,6.9749279121818235 -0.2225209339563144,6.7818314824680295 0.6234898018587335,6 1,4 1)))"
+                              [ geometry "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(4 0,6 0))"
+                                VInt 1L
+                                strategy "point_circle" [ VInt 5L ]
+                                strategy "end_round" [ VInt 7L ]
+                                strategy "join_round" [ VInt 9L ] ]
+                              "mixed collection strategies"
+
+                          expectBuffer
+                              "POLYGON((1 0.07999999999999985,1.1950371902099892 0.09950371902099893,0.9950371902099893 2.099503719020999,-0.49813701880159744 11.98758526924799,-1 2,-1 0,-0.8049875621120892 0,-0.7950371902099893 -0.09950371902099893,0.20000000000000007 0,1 0,1 0.07999999999999985))"
+                              [ geometry "LINESTRING(0 0,0 2,0.2 0)"
+                                VInt 1L
+                                strategy "end_flat" []
+                                strategy "join_miter" [ VInt 10L ] ]
+                              "miter limit is applied"
+
+                          let shallowMiter =
+                              [ geometry "LINESTRING(0 0,0 2,0.2 0)"
+                                VInt 1L
+                                strategy "end_flat" []
+                                strategy "join_miter" [ VDouble 0.5 ] ]
+
+                          let unitMiter =
+                              [ geometry "LINESTRING(0 0,0 2,0.2 0)"
+                                VInt 1L
+                                strategy "end_flat" []
+                                strategy "join_miter" [ VInt 1L ] ]
+
+                          let shallow = call "ST_Buffer" shallowMiter
+                          let unit = call "ST_Buffer" unitMiter
+
+                          Expect.equal
+                              shallow
+                              unit
+                              (sprintf
+                                  "miter limits below one clamp to one: %A versus %A"
+                                  (call "ST_AsText" [ shallow ])
+                                  (call "ST_AsText" [ unit ])) ]
 
                 testCase "planar intersections reject nonzero and mismatched SRIDs"
                 <| fun _ ->
