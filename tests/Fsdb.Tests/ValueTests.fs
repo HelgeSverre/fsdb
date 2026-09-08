@@ -701,7 +701,28 @@ let tests =
                               (sprintf
                                   "miter limits below one clamp to one: %A versus %A"
                                   (call "ST_AsText" [ shallow ])
-                                  (call "ST_AsText" [ unit ])) ]
+                                  (call "ST_AsText" [ unit ]))
+
+                      testCase "accept arbitrary independent round resolutions"
+                      <| fun _ ->
+                          let geometry = call "ST_GeomFromText" [ VString "LINESTRING(0 0,0 2,2 2)" ]
+                          let strategy name points = call "ST_Buffer_Strategy" [ VString name; VInt points ]
+                          let resolutions = [ 1L; 3L; 5L; 6L; 7L; 10L; 31L; 33L ]
+
+                          List.allPairs resolutions resolutions
+                          |> List.iter (fun (endResolution, joinResolution) ->
+                              let buffer =
+                                  call
+                                      "ST_Buffer"
+                                      [ geometry
+                                        VInt 1L
+                                        strategy "end_round" endResolution
+                                        strategy "join_round" joinResolution ]
+
+                              Expect.equal
+                                  (call "ST_IsValid" [ buffer ])
+                                  (VInt 1L)
+                                  (sprintf "valid end=%d join=%d buffer" endResolution joinResolution)) ]
 
                 testCase "planar intersections reject nonzero and mismatched SRIDs"
                 <| fun _ ->
