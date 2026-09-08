@@ -7790,8 +7790,8 @@ and private applyMutationJoin
     | FromLateral _ ->
         Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | FromJsonTable _ ->
-        // ponytail: preserve physical source identities through JSON_TABLE
-        // before allowing it in multi-table mutations.
+        // ponytail: Multi-table writes through JSON_TABLE require each emitted
+        // row to retain the writable identity of its physical source row.
         Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | source ->
         let resolved =
@@ -18460,7 +18460,8 @@ let rec executeAs
     | RenameTable pairs ->
         // Each database group publishes one catalog root and WAL event while
         // preserving the requested rename order.
-        // ponytail: move tables between catalogs for cross-database renames.
+        // ponytail: Cross-database renames require coordinated removal and
+        // insertion across the source and destination database roots.
         let groups =
             pairs
             |> List.map (fun (oldName, newName) ->
