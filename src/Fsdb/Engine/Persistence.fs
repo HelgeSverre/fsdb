@@ -24,7 +24,8 @@ let private dynamicPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x36uy |]
 let private proxyPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x37uy |] // "FSN7"
 let private spatialReferenceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x38uy |] // "FSN8"
 let private preparedXaSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x39uy |] // "FSN9"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x41uy |] // "FSNA" (format 10)
+let private taggedIndexSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x41uy |] // "FSNA" (format 10)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x42uy |] // "FSNB" (format 11)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -35,7 +36,8 @@ type private SnapshotFormat =
       ProxyPrivileges: bool
       SpatialReferences: bool
       PreparedXas: bool
-      TaggedIndexColumns: bool }
+      TaggedIndexColumns: bool
+      StableRowIds: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -46,7 +48,8 @@ let private legacySnapshotFormat =
       ProxyPrivileges = false
       SpatialReferences = false
       PreparedXas = false
-      TaggedIndexColumns = false }
+      TaggedIndexColumns = false
+      StableRowIds = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -72,8 +75,11 @@ let private spatialReferenceSnapshotFormat =
 let private preparedXaSnapshotFormat =
     { spatialReferenceSnapshotFormat with PreparedXas = true }
 
-let private currentSnapshotFormat =
+let private taggedIndexSnapshotFormat =
     { preparedXaSnapshotFormat with TaggedIndexColumns = true }
+
+let private currentSnapshotFormat =
+    { taggedIndexSnapshotFormat with StableRowIds = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -82,6 +88,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = taggedIndexSnapshotMagic then
+        Some taggedIndexSnapshotFormat
     elif header = preparedXaSnapshotMagic then
         Some preparedXaSnapshotFormat
     elif header = spatialReferenceSnapshotMagic then
@@ -1364,6 +1372,7 @@ let private encodeTableMeta (format: SnapshotFormat) (w: Writer) (t: Table) : un
     if format.Partitions then encodePartitioning w t.Partitioning
     w.WriteInt64LE t.CreateTime.Ticks
     w.WriteInt64LE t.NextAutoId
+    if format.StableRowIds then w.WriteInt32LE t.RowsArray.NextRowId
     w.WriteInt32LE t.RowsArray.Length
 
 /// Writes the catalog straight to `s`, flushing the `Writer` every chunk so a
@@ -1403,7 +1412,10 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                 writeStr w tableKey
                 encodeTableMeta currentSnapshotFormat w table
 
-                for row in table.RowsArray do
+                for rowId, row in table.RowsArray.Indexed do
+                    if currentSnapshotFormat.StableRowIds then
+                        w.WriteInt32LE(RowId.value rowId)
+
                     encodeRowBin w row
 
                     if w.Count >= (1 <<< 20) then
@@ -1446,7 +1458,15 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let partitioning = if format.Partitions then decodePartitioning r else None
     let createTime = DateTime(r.ReadInt64LE())
     let nextAutoId = r.ReadInt64LE()
-    let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
+    let nextRowId = if format.StableRowIds then Some(r.ReadInt32LE()) else None
+    let rowCount = r.ReadInt32LE()
+
+    let rows =
+        match nextRowId with
+        | Some next ->
+            List.init rowCount (fun _ -> RowId.create (r.ReadInt32LE()), decodeRowBin r)
+            |> RowStore.restore next
+        | None -> List.init rowCount (fun _ -> decodeRowBin r) |> RowStore.ofSeq
 
     reindexTable
         { OriginalName = originalName
@@ -1458,7 +1478,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
           TableComment = tableComment
           Partitioning = partitioning
           CreateTime = createTime
-          RowsArray = RowStore.ofSeq rows
+          RowsArray = rows
           NextAutoId = nextAutoId
           UniqueIndex = Map.empty
           SecondaryIndex = Map.empty

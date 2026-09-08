@@ -102,6 +102,7 @@ type RowStore<'T> internal (
     member _.Length = liveCount
     member _.IsEmpty = liveCount = 0
     member _.TombstoneCount = slots.Count - liveCount
+    member internal _.NextRowId = nextRowId
 
     member private _.DrainBuilder(builder: RowStoreBuilder<'T>) =
         let count, nextRowId, positions, slots, layoutIdentity = builder.Drain()
@@ -237,6 +238,29 @@ type RowStore<'T> internal (
         let count, nextRowId, positions, slots, layoutIdentity = builder.Drain()
         RowStore<'T>(count, nextRowId, positions, slots, layoutIdentity)
 
+    static member internal Restore(nextRowId: int, items: seq<RowId * 'T>) =
+        if nextRowId < 0 then
+            invalidArg (nameof nextRowId) "The next row identity cannot be negative."
+
+        let slots = PagedVectorBuilder<RowSlot<'T> option>(0, Map.empty)
+        let mutable positions = Map.empty
+        let mutable count = 0
+
+        for rowId, item in items do
+            let value = RowId.value rowId
+
+            if value < 0 || value >= nextRowId then
+                invalidArg (nameof items) "A restored row identity must precede the next identity."
+
+            if Map.containsKey rowId positions then
+                invalidArg (nameof items) "Restored row identities must be unique."
+
+            positions <- Map.add rowId slots.Count positions
+            slots.Add(Some(rowId, item))
+            count <- count + 1
+
+        RowStore<'T>(count, nextRowId, positions, slots.DrainToImmutable(), obj ())
+
 type RowStoreBuilder<'T> with
     member this.DrainToImmutable() =
         let count, nextRowId, positions, slots, layoutIdentity = this.Drain()
@@ -246,6 +270,7 @@ type RowStoreBuilder<'T> with
 module RowStore =
     let empty<'T> : RowStore<'T> = RowStore<'T>.Empty
     let ofSeq (items: seq<'T>) = RowStore<'T>.OfSeq items
+    let internal restore nextRowId items = RowStore<'T>.Restore(nextRowId, items)
 
     let map mapping (rows: RowStore<'T>) =
         let builder = rows.ToBuilder()

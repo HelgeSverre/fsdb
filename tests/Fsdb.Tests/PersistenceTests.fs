@@ -140,6 +140,20 @@ let private legacySnapshot (table: string) =
     snapshot.WriteUInt32LE(crc32 payload)
     snapshot.ToArray()
 
+let private taggedIndexSnapshot (database: string) =
+    let payload = Writer()
+    payload.WriteInt32LE 1
+    payload.WriteLenEncString database
+    payload.WriteInt32LE 0
+    payload.WriteInt32LE 0
+    let payload = payload.ToArray()
+    let snapshot = Writer()
+    snapshot.WriteBytes [| 0x46uy; 0x53uy; 0x4Euy; 0x41uy |]
+    snapshot.WriteBytes payload
+    snapshot.WriteInt64LE(int64 payload.Length)
+    snapshot.WriteUInt32LE(crc32 payload)
+    snapshot.ToArray()
+
 let private columnCommentSnapshot (table: string) (comment: string) =
     let payload = Writer()
     payload.WriteInt32LE 1
@@ -1006,6 +1020,27 @@ let tests =
               insertRows store defaultDatabase "reused" None [ [ VInt 1L ] ] |> ignore
 
               Expect.equal (rowsOf (load dir) defaultDatabase "reused") [ [| VInt 1L |] ] "the reused key survives recovery"
+
+          testCase "snapshots preserve stable row identities across tombstones"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = create ()
+              createTable store defaultDatabase "stable" [ mkCol "value" (TInt false) ] [] [] None None |> ignore
+              insertRows store defaultDatabase "stable" None [ [ VInt 10L ]; [ VInt 20L ]; [ VInt 30L ] ] |> ignore
+              deleteRows store defaultDatabase "stable" (fun row -> Ok(row.[0] = VInt 20L)) |> ignore
+
+              let rowIds (catalog: Catalog) =
+                  catalog.[defaultDatabase].["stable"].RowsArray.Indexed
+                  |> Seq.map (fst >> Fsdb.RowId.value)
+                  |> List.ofSeq
+
+              Expect.equal (rowIds store.Catalog) [ 0; 2 ] "the live table retains the deleted identity gap"
+              snapshotNow dir store
+
+              let recovered = load dir
+              Expect.equal (rowIds recovered.Catalog) [ 0; 2 ] "the snapshot retains live row identities"
+              insertRows recovered defaultDatabase "stable" None [ [ VInt 40L ] ] |> ignore
+              Expect.equal (rowIds recovered.Catalog) [ 0; 2; 3 ] "new rows continue after the persisted identity"
 
           testCase "WAL replay preserves REPLACE candidate order and optimized updates"
           <| fun _ ->
@@ -2066,6 +2101,14 @@ let tests =
                       Expect.equal column.Comment "" (table + " has no historical column comment")
                       Expect.equal reloaded.Catalog.[defaultDatabase].[normalizeTableName table].TableComment "" (table + " has no historical table comment")
                   | other -> failtestf "expected legacy table '%s' to load, got %A" table other
+
+          testCase "FSNA snapshots remain readable after stable row identities"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              File.WriteAllBytes(snapshotPath dir, taggedIndexSnapshot "from_fsna")
+
+              let recovered = load dir
+              Expect.isTrue (Map.containsKey "from_fsna" recovered.Catalog) "the previous snapshot format is retained"
 
           testCase "column-comment snapshots load with an empty table comment"
           <| fun _ ->
