@@ -176,11 +176,17 @@ let private tryNtsParameters configuration =
 
     let quadrants = relevantRoundSegments |> List.map (fun segments -> segments / 4, segments % 4)
 
-    match configuration.Join, quadrants |> List.map fst |> List.distinct, quadrants |> List.forall (snd >> (=) 0) with
-    | BufferStrategy.JoinMiter _, _, _ -> None
-    | _, _ :: _ :: _, _
-    | _, _, false -> None
-    | _, values, true ->
+    match
+        configuration.HasPoint && (configuration.HasLine || configuration.HasArea),
+        configuration.Join,
+        quadrants |> List.map fst |> List.distinct,
+        quadrants |> List.forall (snd >> (=) 0)
+    with
+    | true, _, _, _ -> None
+    | _, BufferStrategy.JoinMiter _, _, _ -> None
+    | _, _, _ :: _ :: _, _
+    | _, _, _, false -> None
+    | _, _, values, true ->
         let parameters = BufferParameters()
         parameters.QuadrantSegments <- values |> List.tryHead |> Option.defaultValue 8
 

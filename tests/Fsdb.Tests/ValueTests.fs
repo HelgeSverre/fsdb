@@ -457,7 +457,17 @@ let tests =
                               | error -> failtestf "expected points ceiling error 3134, got %A" error)
 
                           match strategy "join_miter" [ VInt 1_000_000L ] with
-                          | VBytes _ -> ()
+                          | VBytes _ as miter ->
+                              match
+                                  call
+                                      "ST_Buffer"
+                                      [ call "ST_GeomFromText" [ VString "LINESTRING(0 0,0 2,2 2)" ]
+                                        VInt 1L
+                                        strategy "end_flat" []
+                                        miter ]
+                              with
+                              | VGeometry _ -> ()
+                              | value -> failtestf "expected a mitered polygon, got %A" value
                           | value -> failtestf "expected an unrestricted miter limit, got %A" value
 
                       testCase "shape point and line buffers"
@@ -653,6 +663,14 @@ let tests =
                                 strategy "end_round" [ VInt 7L ]
                                 strategy "join_round" [ VInt 9L ] ]
                               "mixed collection strategies"
+
+                          expectBuffer
+                              "MULTIPOLYGON(((-1 -1,1 -1,1 1,-1 1,-1 -1)),((4 1,4 -1,6 -1,6 1,4 1)))"
+                              [ geometry "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(4 0,6 0))"
+                                VInt 1L
+                                strategy "point_square" []
+                                strategy "end_flat" [] ]
+                              "point and line strategies remain independent"
 
                           expectBuffer
                               "POLYGON((1 0.07999999999999985,1.1950371902099892 0.09950371902099893,0.9950371902099893 2.099503719020999,-0.49813701880159744 11.98758526924799,-1 2,-1 0,-0.8049875621120892 0,-0.7950371902099893 -0.09950371902099893,0.20000000000000007 0,1 0,1 0.07999999999999985))"
