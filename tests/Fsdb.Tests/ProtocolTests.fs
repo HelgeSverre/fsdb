@@ -5,6 +5,7 @@ open Expecto
 open Fsdb.Ast
 open Fsdb.Binary
 open Fsdb.ColumnWire
+open Fsdb.Compression
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value
@@ -314,6 +315,30 @@ let tests =
                   (serverCapabilities false &&& ClientZstdCompressionAlgorithm)
                   ClientZstdCompressionAlgorithm
                   "clients can negotiate CLIENT_ZSTD_COMPRESSION_ALGORITHM"
+
+          testCase "compression policy narrows handshake capabilities and rejects an unavailable fallback"
+          <| fun _ ->
+              let policy value =
+                  ConnectionPolicy.tryParse value
+                  |> Option.defaultWith (fun () -> failtestf "expected %A to be a valid policy" value)
+
+              let zstdOnly = policy "zstd"
+              let zstdCapabilities = serverCapabilitiesFor zstdOnly false
+              Expect.isFalse (hasCapability ClientCompress zstdCapabilities) "zlib is not offered"
+              Expect.isTrue (hasCapability ClientZstdCompressionAlgorithm zstdCapabilities) "Zstandard is offered"
+
+              Expect.equal
+                  (negotiatedCompressionFor zstdOnly 0u None)
+                  (Error(3922, "Invalid compression algorithm 'uncompressed'."))
+                  "an uncompressed client has no permitted fallback"
+
+              let uncompressedOnly = policy "uncompressed"
+              let uncompressedCapabilities = serverCapabilitiesFor uncompressedOnly false
+              Expect.isFalse (hasCapability ClientCompress uncompressedCapabilities) "zlib stays disabled"
+              Expect.isFalse
+                  (hasCapability ClientZstdCompressionAlgorithm uncompressedCapabilities)
+                  "Zstandard stays disabled"
+              Expect.equal (negotiatedCompressionFor uncompressedOnly 0u None) (Ok None) "plain transport is permitted"
 
           testCase "compression negotiation follows MySQL priority and level bounds"
           <| fun _ ->

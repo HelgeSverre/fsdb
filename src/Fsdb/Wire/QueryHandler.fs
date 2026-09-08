@@ -268,8 +268,7 @@ let private readOnlySystemVariables =
     Set.ofList
         [ "ft_query_expansion_limit"
           "innodb_ft_max_token_size"
-          "innodb_ft_min_token_size"
-          "protocol_compression_algorithms" ]
+          "innodb_ft_min_token_size" ]
 
 let private globalOnlyVariables =
     Set.union
@@ -1333,7 +1332,8 @@ let private parseSetFragment
                         when usesDefault
                              && (name = "activate_all_roles_on_login"
                                  || name = "event_scheduler"
-                                 || name = "mandatory_roles") ->
+                                 || name = "mandatory_roles"
+                                 || name = "protocol_compression_algorithms") ->
                         Ok(SetVarAction(name, Session.defaultVariables.[name], isGlobal), sideEffects)
                     | Ok(_, sideEffects)
                         when usesDefault
@@ -1489,6 +1489,14 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetRoutineRecursionDepthAction(_, true, _) when not (hasSessionGlobalPrivilege session "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
+    | SetVarAction("protocol_compression_algorithms", Some value, true)
+        when Compression.ConnectionPolicy.tryParse value |> Option.isNone ->
+        Error(
+            Err(
+                1231,
+                sprintf "Variable 'protocol_compression_algorithms' can't be set to the value of '%s'" value
+            )
+        )
     | SetVarAction(name, _, true) when readOnlySystemVariables.Contains name ->
         Error(Err(1238, sprintf "Variable '%s' is a read only variable" name))
     | SetVarAction("session_track_system_variables", Some value, _)

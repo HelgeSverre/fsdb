@@ -5,6 +5,7 @@ module Fsdb.Protocol
 open System
 open System.Text
 open Fsdb.Binary
+open Fsdb.Compression
 open Fsdb.Packet
 open Fsdb.Value
 open Fsdb.Temporal
@@ -108,12 +109,11 @@ let internal hasCapability capability capabilities =
 
 /// What this server offers during the handshake. Effective per-connection
 /// capabilities are this AND-ed with whatever the client requests.
-let ServerCapabilities =
+let private baseServerCapabilities =
     ClientLongPassword
     ||| ClientFoundRows
     ||| ClientLongFlag
     ||| ClientConnectWithDb
-    ||| ClientCompress
     ||| ClientProtocol41
     ||| ClientInteractive
     ||| ClientSecureConnection
@@ -124,13 +124,26 @@ let ServerCapabilities =
     ||| ClientCanHandleExpiredPasswords
     ||| ClientSessionTrack
     ||| ClientDeprecateEof
-    ||| ClientZstdCompressionAlgorithm
+
+let private compressionCapabilities policy =
+    (if ConnectionPolicy.permits PermittedAlgorithm.Zlib policy then ClientCompress else 0u)
+    ||| (if ConnectionPolicy.permits PermittedAlgorithm.Zstandard policy then
+             ClientZstdCompressionAlgorithm
+         else
+             0u)
+
+let ServerCapabilities =
+    baseServerCapabilities ||| compressionCapabilities ConnectionPolicy.all
 
 /// Adds capabilities enabled by the current transport and server settings.
-let serverCapabilities (tlsEnabled: bool) =
-    ServerCapabilities
+let internal serverCapabilitiesFor (policy: ConnectionPolicy) (tlsEnabled: bool) =
+    baseServerCapabilities
+    ||| compressionCapabilities policy
     ||| (if tlsEnabled then ClientSsl else 0u)
     ||| (if Limits.localInfile then ClientLocalFiles else 0u)
+
+let serverCapabilities (tlsEnabled: bool) =
+    serverCapabilitiesFor ConnectionPolicy.all tlsEnabled
 
 let ServerVersion = "8.4.0-fsdb"
 
@@ -299,7 +312,7 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
       Database = database
       ZstdCompressionLevel = zstdCompressionLevel }
 
-let negotiatedCompression capabilities zstdCompressionLevel =
+let internal negotiatedCompressionFor policy capabilities zstdCompressionLevel =
     if hasCapability ClientCompress capabilities then
         Ok(Some Compression.Algorithm.Zlib)
     elif hasCapability ClientZstdCompressionAlgorithm capabilities then
@@ -307,8 +320,13 @@ let negotiatedCompression capabilities zstdCompressionLevel =
         | Some level when level >= 1 && level <= 22 ->
             Ok(Some(Compression.Algorithm.Zstandard(min level Limits.maxZstdCompressionLevel)))
         | _ -> Error(3923, "Invalid zstd compression level for algorithm 'zstd'.")
-    else
+    elif ConnectionPolicy.permits PermittedAlgorithm.Uncompressed policy then
         Ok None
+    else
+        Error(3922, "Invalid compression algorithm 'uncompressed'.")
+
+let negotiatedCompression capabilities zstdCompressionLevel =
+    negotiatedCompressionFor ConnectionPolicy.all capabilities zstdCompressionLevel
 
 /// Parses the COM_CHANGE_USER payload after its command byte. Optional
 /// fields follow the capabilities negotiated during the initial handshake.

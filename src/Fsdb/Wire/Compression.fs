@@ -13,6 +13,43 @@ type Algorithm =
     | Zlib
     | Zstandard of level: int
 
+[<RequireQualifiedAccess>]
+type internal PermittedAlgorithm =
+    | Zlib
+    | Zstandard
+    | Uncompressed
+
+type internal ConnectionPolicy = private ConnectionPolicy of Set<PermittedAlgorithm>
+
+module internal ConnectionPolicy =
+    let all =
+        ConnectionPolicy(
+            set
+                [ PermittedAlgorithm.Zlib
+                  PermittedAlgorithm.Zstandard
+                  PermittedAlgorithm.Uncompressed ]
+        )
+
+    let tryParse (value: string) =
+        let parse (name: string) =
+            match name with
+            | name when name.Equals("zlib", StringComparison.OrdinalIgnoreCase) -> Some PermittedAlgorithm.Zlib
+            | name when name.Equals("zstd", StringComparison.OrdinalIgnoreCase) -> Some PermittedAlgorithm.Zstandard
+            | name when name.Equals("uncompressed", StringComparison.OrdinalIgnoreCase) ->
+                Some PermittedAlgorithm.Uncompressed
+            | _ -> None
+
+        let names = value.Split ','
+        let algorithms = names |> Array.choose parse
+
+        if algorithms.Length > 0 && algorithms.Length = names.Length then
+            Some(ConnectionPolicy(Set.ofArray algorithms))
+        else
+            None
+
+    let permits algorithm (ConnectionPolicy algorithms) =
+        Set.contains algorithm algorithms
+
 module Algorithm =
     let name = function
         | Algorithm.Zlib -> "zlib"

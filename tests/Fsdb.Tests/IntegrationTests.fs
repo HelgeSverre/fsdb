@@ -407,6 +407,54 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "dynamic compression policy applies to new handshakes"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  let! controlClient, controlStream = connectRaw server.Port
+                  use controlClient = controlClient
+                  let setPolicy =
+                      Array.append
+                          [| 0x03uy |]
+                          (Text.Encoding.UTF8.GetBytes "SET GLOBAL protocol_compression_algorithms = 'zstd'")
+
+                  do! writePacketAsync controlStream { SeqId = 0uy; Payload = setPolicy } |> Async.Ignore
+                  let! changed = readPacketAsync controlStream
+                  Expect.equal changed.Value.Payload.[0] 0uy "the policy changes over an existing session"
+
+                  use client = new Net.Sockets.TcpClient()
+                  do! client.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                  let stream = client.GetStream()
+                  let! greeting = readPacketAsync stream
+                  let reader = Reader(greeting.Value.Payload)
+                  reader.ReadByte() |> ignore
+                  reader.ReadNullTerminatedString() |> ignore
+                  reader.ReadInt32LE() |> ignore
+                  reader.ReadBytes 8 |> ignore
+                  reader.ReadByte() |> ignore
+                  let lower = uint32 (uint16 (reader.ReadInt16LE()))
+                  reader.ReadByte() |> ignore
+                  reader.ReadInt16LE() |> ignore
+                  let upper = uint32 (uint16 (reader.ReadInt16LE())) <<< 16
+                  let capabilities = lower ||| upper
+                  Expect.isFalse (hasCapability ClientCompress capabilities) "zlib is removed from the greeting"
+                  Expect.isTrue
+                      (hasCapability ClientZstdCompressionAlgorithm capabilities)
+                      "Zstandard remains in the greeting"
+
+                  let response = passwordlessHandshakeResponse ClientProtocol41 "root"
+                  do!
+                      writePacketAsync stream { SeqId = greeting.Value.SeqId + 1uy; Payload = response }
+                      |> Async.Ignore
+
+                  let! rejected = readPacketAsync stream
+                  let error = Reader(rejected.Value.Payload)
+                  Expect.equal (error.ReadByte()) 0xffuy "the incompatible connection is rejected"
+                  Expect.equal (error.ReadInt16LE()) 3922 "the rejection identifies the unavailable fallback"
+              }
+              |> Async.RunSynchronously
+
           testCase "CLIENT_MULTI_STATEMENTS returns sequenced results"
           <| fun _ ->
               async {

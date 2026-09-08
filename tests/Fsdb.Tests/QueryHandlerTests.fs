@@ -5935,7 +5935,7 @@ let tests =
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected connection-only compression status to be absent globally, got %A" other
 
-          testCase "compression algorithm variable is global and read only"
+          testCase "compression algorithm variable is global and dynamic"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
@@ -5947,9 +5947,30 @@ let tests =
               | Err(1238, _) -> ()
               | other -> failtestf "expected a global-only variable error, got %A" other
 
-              match handle session "SET GLOBAL protocol_compression_algorithms = 'zstd'" |> snd with
-              | Err(1238, _) -> ()
-              | other -> failtestf "expected the static setting to be read only, got %A" other
+              let session, changed =
+                  handle session "SET GLOBAL protocol_compression_algorithms = 'ZSTD,zlib,zlib'"
+
+              Expect.equal changed (Affected 0UL) "the global policy changes"
+
+              match handle session "SELECT @@global.protocol_compression_algorithms" |> snd with
+              | ResultSet(_, [ [ Some "ZSTD,zlib,zlib" ] ]) -> ()
+              | other -> failtestf "expected the assigned policy spelling and order, got %A" other
+
+              for value in [ ""; "bogus"; "zstd, uncompressed" ] do
+                  match handle session (sprintf "SET GLOBAL protocol_compression_algorithms = '%s'" value) |> snd with
+                  | Err(1231, _) -> ()
+                  | other -> failtestf "expected invalid policy %A to return 1231, got %A" value other
+
+              match handle session "SELECT @@global.protocol_compression_algorithms" |> snd with
+              | ResultSet(_, [ [ Some "ZSTD,zlib,zlib" ] ]) -> ()
+              | other -> failtestf "expected invalid assignments to preserve the policy, got %A" other
+
+              let session, reset = handle session "SET GLOBAL protocol_compression_algorithms = DEFAULT"
+              Expect.equal reset (Affected 0UL) "DEFAULT restores the server policy"
+
+              match handle session "SELECT @@global.protocol_compression_algorithms" |> snd with
+              | ResultSet(_, [ [ Some "zlib,zstd,uncompressed" ] ]) -> ()
+              | other -> failtestf "expected the default policy after reset, got %A" other
 
           TestSupport.processGlobalCase
               "SHOW SESSION/GLOBAL VARIABLES match like the bare form; GLOBAL reads the store scope"

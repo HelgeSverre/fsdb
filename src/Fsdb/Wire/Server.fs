@@ -1237,7 +1237,13 @@ let private handleConnection
         let mutable tlsVersion: string option = None
         let mutable tlsCipher: string option = None
         let mutable clientCertificateValidated = false
-        let offeredCapabilities = serverCapabilities options.Certificate.IsSome
+        let compressionPolicy =
+            Session.tryGlobalVariable store "protocol_compression_algorithms"
+            |> Option.flatten
+            |> Option.bind ConnectionPolicy.tryParse
+            |> Option.defaultValue ConnectionPolicy.all
+
+        let offeredCapabilities = serverCapabilitiesFor compressionPolicy options.Certificate.IsSome
 
         let closeTls () =
             tlsStream
@@ -1355,7 +1361,8 @@ let private handleConnection
                     | _ -> clientHost |> Option.defaultValue "unknown"
                 // Effective capabilities: never claim something the client didn't ask for.
                 capabilities <- resp.Capabilities &&& offeredCapabilities
-                let compressionResult = negotiatedCompression capabilities resp.ZstdCompressionLevel
+                let compressionResult =
+                    negotiatedCompressionFor compressionPolicy capabilities resp.ZstdCompressionLevel
 
                 let compression =
                     match compressionResult with
