@@ -6843,6 +6843,99 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an alias override reports a scan"
                     Expect.equal overriddenPlan.Key None "an alias override does not claim the byte-length index"
 
+                testCase "ABS indexes preserve numeric values and fail atomically at BIGINT_MIN"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE magnitudes (id INT PRIMARY KEY, signed_value BIGINT, unsigned_value BIGINT UNSIGNED, exact_value DECIMAL(20,4), approximate_value DOUBLE, UNIQUE INDEX uq_abs_signed ((ABS(signed_value))), INDEX ix_abs_unsigned ((ABS(unsigned_value))), INDEX ix_abs_exact ((ABS(exact_value))), INDEX ix_abs_approx ((ABS(approximate_value))))")
+                        (Affected 0UL)
+                        "create ABS indexes"
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "INSERT INTO magnitudes VALUES (1, -5, 18446744073709551615, -12.3400, -2.5), (2, -7, 1, 1.5000, 3.25)")
+                        (Affected 2UL)
+                        "seed numeric domains"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM magnitudes WHERE ABS(signed_value) = 5")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "signed equality lookup"
+
+                    let equalityPlan =
+                        runDefault store "EXPLAIN SELECT id FROM magnitudes WHERE ABS(signed_value) = 5"
+                        |> explainRow
+
+                    Expect.equal equalityPlan.AccessType (Some "const") "unique ABS access"
+                    Expect.equal equalityPlan.Key (Some "uq_abs_signed") "ABS key"
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "SELECT id FROM magnitudes WHERE ABS(unsigned_value) = 18446744073709551615 AND ABS(exact_value) = 12.3400 AND ABS(approximate_value) = 2.5")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "unsigned, decimal, and double values retain their domains"
+
+                    Expect.equal
+                        (runDefault store "UPDATE magnitudes SET signed_value = -9 WHERE ABS(signed_value) = 7")
+                        (Affected 1UL)
+                        "update through ABS key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM magnitudes WHERE ABS(signed_value) IN (5, 9) ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "literal IN reuses ABS buckets"
+
+                    match runDefault store "INSERT INTO magnitudes VALUES (3, 5, 2, 2, 2)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected transformed uniqueness, got %A" other
+
+                    match runDefault store "SELECT ABS(CAST(-9223372036854775808 AS SIGNED))" with
+                    | Err(1690, message) -> Expect.stringContains message "BIGINT value is out of range" "scalar overflow"
+                    | other -> failtestf "expected ABS(BIGINT_MIN) to fail with 1690, got %A" other
+
+                    match runDefault store "INSERT INTO magnitudes VALUES (4, -9223372036854775808, 3, 3, 3)" with
+                    | Err(1690, message) -> Expect.stringContains message "abs(`signed_value`)" "indexed write overflow"
+                    | other -> failtestf "expected indexed BIGINT_MIN to fail with 1690, got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT COUNT(*) FROM magnitudes")
+                        (ResultSet([ "COUNT(*)" ], [ [ Some "2" ] ]))
+                        "failed writes publish nothing"
+
+                    runDefault store "CREATE TABLE existing_magnitude (value BIGINT)" |> ignore
+                    runDefault store "INSERT INTO existing_magnitude VALUES (-9223372036854775808)" |> ignore
+
+                    match runDefault store "CREATE INDEX ix_existing_abs ON existing_magnitude ((ABS(value)))" with
+                    | Err(1690, message) -> Expect.stringContains message "abs(`value`)" "index build overflow"
+                    | other -> failtestf "expected index creation over BIGINT_MIN to fail with 1690, got %A" other
+
+                    Expect.equal
+                        (runDefault store "SHOW INDEX FROM existing_magnitude")
+                        (ResultSet(
+                            [ "Table"; "Non_unique"; "Key_name"; "Seq_in_index"; "Column_name"; "Collation"; "Cardinality"; "Sub_part"; "Packed"; "Null"; "Index_type"; "Comment"; "Index_comment"; "Visible"; "Expression" ],
+                            []
+                        ))
+                        "failed index creation publishes no metadata"
+
+                    let overridden = builtins |> registerScalar "ABS" (fun _ -> VInt 99L)
+
+                    Expect.equal
+                        (run store overridden "SELECT id FROM magnitudes WHERE ABS(signed_value) = 99 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "an ABS override bypasses the stored transform"
+
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM magnitudes WHERE ABS(signed_value) = 99"
+                        |> explainRow
+
+                    Expect.equal overriddenPlan.AccessType (Some "ALL") "an ABS override reports a scan"
+                    Expect.equal overriddenPlan.Key None "an ABS override does not claim the functional index"
+
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->
                     let store = newStore ()
