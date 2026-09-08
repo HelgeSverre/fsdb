@@ -1,10 +1,9 @@
-/// Host-qualified accounts, mysql_native_password, and privilege policy.
+/// Host-qualified accounts, credentials, and privilege policy.
 module Fsdb.Auth
 
 open System
 open System.Collections.Generic
 open System.Net
-open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
 open Fsdb.Collections
@@ -14,37 +13,18 @@ open Fsdb.Storage
 open Fsdb.Sql
 open Fsdb.Engine
 
-let private sha1 (bytes: byte[]) : byte[] = SHA1.HashData bytes
-
-/// The stored mysql_native_password hash for a plaintext password:
-/// `'*' + uppercase hex SHA1(SHA1(password))` — what `IDENTIFIED BY` writes
-/// into `mysql.user.authentication_string`.
-let nativePasswordHash (password: string) : string =
-    "*" + Convert.ToHexString(sha1 (sha1 (Text.Encoding.UTF8.GetBytes password)))
+let nativePasswordHash = Authentication.nativePasswordHash
 
 let private storedHashForPassword password =
     if password = "" then "" else nativePasswordHash password
 
-let private passwordHashesEqual (left: string) (right: string) =
-    let left = Text.Encoding.ASCII.GetBytes left
-    let right = Text.Encoding.ASCII.GetBytes right
-    left.Length = right.Length && CryptographicOperations.FixedTimeEquals(left, right)
+let private passwordHashesEqual = Authentication.passwordHashesEqual
 
 /// Verifies a client's mysql_native_password challenge answer.
 /// The client sends `SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw)))` (20
 /// bytes); XORing with `SHA1(scramble + stage2)` recovers `SHA1(pw)`, whose
 /// SHA1 must equal the stored `stage2 = SHA1(SHA1(pw))`.
-let verifyNative (storedHash: string) (scramble: byte[]) (response: byte[]) : bool =
-    if response.Length <> SHA1.HashSizeInBytes then
-        false
-    else
-        try
-            let stage2 = Convert.FromHexString(storedHash.TrimStart '*')
-            let mask = sha1 (Array.append scramble stage2)
-            let stage1 = Array.map2 (^^^) response mask
-            CryptographicOperations.FixedTimeEquals(sha1 stage1, stage2)
-        with _ ->
-            false
+let verifyNative = Authentication.verifyNative
 
 type Account =
     { Name: string

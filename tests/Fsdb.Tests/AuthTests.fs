@@ -4,6 +4,7 @@ open System
 open System.Security.Cryptography
 open Expecto
 open Fsdb.Auth
+open Fsdb.Authentication
 
 /// A client's mysql_native_password answer, computed the way a real client
 /// does: SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw))).
@@ -35,6 +36,32 @@ let tests =
               Expect.isFalse (verifyNative stored scramble [||]) "empty response fails"
               Expect.isFalse (verifyNative stored scramble (Array.zeroCreate 20)) "garbage fails"
               Expect.isFalse (verifyNative "*NOTHEX" scramble (clientResponse "s3cret" scramble)) "junk stored hash fails closed"
+
+          testCase "caching SHA-2 password hashes match MySQL's storage transform"
+          <| fun _ ->
+              let salt = Convert.FromHexString "26322B382D661A2A2E015D2A04255D4029510236"
+              let stored = cachingSha2PasswordHashWithSalt salt "secret"
+
+              Expect.equal
+                  stored
+                  "$A$005$&2+8-f\u001a*.\u0001]*\u0004%]@)Q\u000268vnEsNq.VFgCmbHt.xFon3w1zu4OeFuaejxz.iuym1/"
+                  "known MySQL 8.4 hash vector"
+
+              Expect.isTrue (verifyPassword CachingSha2Password stored "secret") "matching plaintext verifies"
+              Expect.isFalse (verifyPassword CachingSha2Password stored "wrong") "different plaintext fails"
+              Expect.isFalse (verifyPassword CachingSha2Password "$A$005$malformed" "secret") "malformed hashes fail closed"
+
+          testCase "caching SHA-2 fast responses use the cached double digest"
+          <| fun _ ->
+              let password = "s3cret"
+              let scramble = Array.init 20 (fun index -> byte (index + 1))
+              let stage1 = SHA256.HashData(Text.Encoding.UTF8.GetBytes password)
+              let known = SHA256.HashData stage1
+              let mask = SHA256.HashData(Array.append known scramble)
+              let response = Array.map2 (^^^) stage1 mask
+
+              Expect.isTrue (verifyCachingResponse known scramble response) "matching response verifies"
+              Expect.isFalse (verifyCachingResponse known scramble (Array.zeroCreate 32)) "garbage fails"
 
           testCase "tryUserRow finds the bootstrap root and reports its empty stored hash"
           <| fun _ ->
