@@ -3765,17 +3765,16 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             session, Err(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" session.User session.AccountHost dbName)
     | ShowVariables isGlobal -> session, handleShowVariables session isGlobal sql
     | ShowStatus isGlobal ->
+        let connectionStatus: InformationSchema.ConnectionStatus =
+            { CompressionAlgorithm = session.Compression |> Option.map Compression.Algorithm.name
+              CompressionLevel = session.Compression |> Option.map Compression.Algorithm.level |> Option.defaultValue 0
+              BytesReceived = session.TransportMetrics.BytesReceived
+              BytesSent = session.TransportMetrics.BytesSent
+              SslCipher = session.TlsCipher
+              SslVersion = session.TlsVersion }
+
         session,
-        InformationSchema.showStatus
-            isGlobal
-            session.StatusCounters
-            (session.Compression |> Option.map Compression.Algorithm.name)
-            (session.Compression |> Option.map Compression.Algorithm.level |> Option.defaultValue 0)
-            session.TransportMetrics.BytesReceived
-            session.TransportMetrics.BytesSent
-            session.TlsCipher
-            session.TlsVersion
-            (statusFilter sql)
+        InformationSchema.showStatus isGlobal session.StatusCounters connectionStatus (statusFilter sql)
         |> showResult
     | ShowEngines -> session, InformationSchema.showEngines () |> showResult
     | ShowEngineInnodbStatus ->

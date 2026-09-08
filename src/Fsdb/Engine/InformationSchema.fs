@@ -4160,32 +4160,30 @@ let showProcesslist (full: bool) : ShowResult =
 
     Ok([ "Id"; "User"; "Host"; "db"; "Command"; "Time"; "State"; "Info" ], rows)
 
-let showStatus
-    (isGlobal: bool)
-    (sessionCounters: StatusCounters)
-    (compressionAlgorithm: string option)
-    (compressionLevel: int)
-    (bytesReceived: int64)
-    (bytesSent: int64)
-    (sslCipher: string option)
-    (sslVersion: string option)
-    (likeOpt: string option)
-    : ShowResult =
+type ConnectionStatus =
+    { CompressionAlgorithm: string option
+      CompressionLevel: int
+      BytesReceived: int64
+      BytesSent: int64
+      SslCipher: string option
+      SslVersion: string option }
+
+let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) (connection: ConnectionStatus) (likeOpt: string option) : ShowResult =
     let statusCounters = if isGlobal then processStatusCounters else sessionCounters
 
     let compressionRows =
         if isGlobal then
             []
         else
-            [ "Compression", if compressionAlgorithm.IsSome then "ON" else "OFF"
-              "Compression_algorithm", compressionAlgorithm |> Option.defaultValue "uncompressed"
-              "Compression_level", string compressionLevel ]
+            [ "Compression", if connection.CompressionAlgorithm.IsSome then "ON" else "OFF"
+              "Compression_algorithm", connection.CompressionAlgorithm |> Option.defaultValue "uncompressed"
+              "Compression_level", string connection.CompressionLevel ]
 
     let rows =
-        [ "Bytes_received", string bytesReceived
-          "Bytes_sent", string bytesSent
-          "Ssl_cipher", sslCipher |> Option.defaultValue ""
-          "Ssl_version", sslVersion |> Option.defaultValue ""
+        [ "Bytes_received", string connection.BytesReceived
+          "Bytes_sent", string connection.BytesSent
+          "Ssl_cipher", connection.SslCipher |> Option.defaultValue ""
+          "Ssl_version", connection.SslVersion |> Option.defaultValue ""
           "Questions", string statusCounters.Questions
           "Threads_connected", string (connectedThreads ())
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
