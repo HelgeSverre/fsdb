@@ -56,17 +56,19 @@ let private selfSignedCertificate () =
     request.CertificateExtensions.Add(X509BasicConstraintsExtension(false, false, 0, false))
     request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1.0), DateTimeOffset.UtcNow.AddDays(1.0))
 
-let private certificateAuthority () =
+let private certificateAuthorityWithSubject (subject: string) =
     use key = RSA.Create 2048
-    let request = CertificateRequest("CN=fsdb test CA", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+    let request = CertificateRequest(subject, key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
     request.CertificateExtensions.Add(X509BasicConstraintsExtension(true, false, 0, true))
     request.CertificateExtensions.Add(X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true))
     request.CertificateExtensions.Add(X509SubjectKeyIdentifierExtension(request.PublicKey, false))
     request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1.0), DateTimeOffset.UtcNow.AddDays(1.0))
 
-let private clientCertificate (issuer: X509Certificate2) =
+let private certificateAuthority () = certificateAuthorityWithSubject "CN=fsdb test CA"
+
+let private clientCertificateWithSubject (subject: string) (issuer: X509Certificate2) =
     use key = RSA.Create 2048
-    let request = CertificateRequest("CN=fsdb client", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+    let request = CertificateRequest(subject, key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
     request.CertificateExtensions.Add(X509BasicConstraintsExtension(false, false, 0, true))
     request.CertificateExtensions.Add(X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true))
     let usages = OidCollection()
@@ -78,6 +80,9 @@ let private clientCertificate (issuer: X509Certificate2) =
         request.Create(issuer, DateTimeOffset.UtcNow.AddHours(-1.0), DateTimeOffset.UtcNow.AddHours(12.0), serialNumber)
 
     certificate.CopyWithPrivateKey key
+
+let private clientCertificate (issuer: X509Certificate2) =
+    clientCertificateWithSubject "CN=fsdb client" issuer
 
 let private connectTlsWithProtocols protocols (port: int) (certificate: X509Certificate2 option) =
     async {
@@ -1407,8 +1412,9 @@ let tests =
                   let store = Fsdb.Storage.create ()
                   let root = Fsdb.Session.create 1 store
                   use serverCertificate = selfSignedCertificate ()
-                  use authority = certificateAuthority ()
-                  use certificate = clientCertificate authority
+                  use authority = certificateAuthorityWithSubject "CN=fsdb test CA, O=fsdb, C=NO"
+                  use certificate =
+                      clientCertificateWithSubject "CN=fsdb client, OU=database, O=fsdb, C=NO" authority
 
                   let options =
                       Fsdb.ServerOptions.defaults
@@ -1431,7 +1437,7 @@ let tests =
 
                   let sql =
                       sprintf
-                          "CREATE USER 'specific_tls'@'%%' REQUIRE SUBJECT '/CN=fsdb client' ISSUER '/CN=fsdb test CA' CIPHER '%s'"
+                          "CREATE USER 'specific_tls'@'%%' REQUIRE SUBJECT '/C=NO/O=fsdb/OU=database/CN=fsdb client' ISSUER '/C=NO/O=fsdb/CN=fsdb test CA' CIPHER '%s'"
                           cipher
 
                   let _, created = Fsdb.QueryHandler.handle root sql
