@@ -69,71 +69,6 @@ let private literal =
     | VString value -> "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
     | value -> value |> toText |> Option.defaultValue "NULL"
 
-let rec expression =
-    function
-    | Lit value -> literal value
-    | MatchAgainst(columns, query, _) ->
-        let columnText column =
-            column.Qualifier
-            |> Option.map (fun qualifier -> sprintf "`%s`.`%s`" qualifier column.Name)
-            |> Option.defaultWith (fun () -> sprintf "`%s`" column.Name)
-
-        sprintf
-            "match (%s) against (%s)"
-            (columns |> List.map columnText |> String.concat ",")
-            (expression query)
-    | Placeholder _ -> "?"
-    | UserVariable variable -> variable.Sql
-    | SystemVariable(scope, name) ->
-        "@@"
-        + (scope |> Option.map (fun value -> value.ToLowerInvariant() + ".") |> Option.defaultValue "")
-        + name
-    | AssignUserVariable(variable, value) -> sprintf "%s := %s" variable.Sql (expression value)
-    | Col name -> sprintf "`%s`" name
-    | QualifiedCol(table, column) -> sprintf "`%s`.`%s`" table column
-    | Row values -> sprintf "(%s)" (values |> List.map expression |> String.concat ",")
-    | BinOp(operator, left, right) ->
-        sprintf "(%s %s %s)" (expression left) (operatorText operator) (expression right)
-    | Not value -> sprintf "(not(%s))" (expression value)
-    | IsNull value -> sprintf "(%s is null)" (expression value)
-    | IsNotNull value -> sprintf "(%s is not null)" (expression value)
-    | IsTrue value -> sprintf "(%s is true)" (expression value)
-    | IsFalse value -> sprintf "(%s is false)" (expression value)
-    | Like(value, pattern, _, _) -> sprintf "(%s like %s)" (expression value) (expression pattern)
-    | Regexp(value, pattern) -> sprintf "(%s regexp %s)" (expression value) (expression pattern)
-    | In(value, candidates) ->
-        sprintf "(%s in (%s))" (expression value) (candidates |> List.map expression |> String.concat ",")
-    | Between(value, lower, upper) ->
-        sprintf "(%s between %s and %s)" (expression value) (expression lower) (expression upper)
-    | FuncCall(name, [ Cast(value, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
-        sprintf "weight_string(%s as char(%d))" (expression value) length
-    | FuncCall(name, [ Cast(value, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
-        sprintf "weight_string(%s as binary(%d))" (expression value) length
-    | FuncCall(name, arguments) ->
-        sprintf "%s(%s)" (name.ToLowerInvariant()) (arguments |> List.map expression |> String.concat ",")
-    | Distinct value -> sprintf "distinct %s" (expression value)
-    | OrderBy(value, _) -> expression value
-    | Cast(value, TBigInt true) -> sprintf "cast(%s as unsigned)" (expression value)
-    | Cast(value, TBigInt false) -> sprintf "cast(%s as signed)" (expression value)
-    | Cast(value, target) -> sprintf "cast(%s as %s)" (expression value) (columnType target)
-    | Collate(value, collation) -> sprintf "(%s collate %s)" (expression value) collation
-    | Case(subject, branches, fallback) ->
-        let subjectText = subject |> Option.map (expression >> sprintf " %s") |> Option.defaultValue ""
-
-        let branchText =
-            branches
-            |> List.map (fun (condition, result) -> sprintf " when %s then %s" (expression condition) (expression result))
-            |> String.concat ""
-
-        let fallbackText = fallback |> Option.map (expression >> sprintf " else %s") |> Option.defaultValue ""
-        sprintf "(case%s%s%s end)" subjectText branchText fallbackText
-    | Star qualifier -> (qualifier |> Option.map (sprintf "`%s`.") |> Option.defaultValue "") + "*"
-    | Exists _ -> "exists(...)"
-    | Subquery _
-    | InSubquery _
-    | QuantifiedComparison _ -> "(...)"
-    | WindowOver _ -> "window function() over ()"
-
 type ViewRenderOptions =
     { DefaultSchema: string
       IncludeSchema: bool
@@ -471,8 +406,16 @@ and private renderSelect (options: ViewRenderOptions) (parentContext: ViewContex
                 let provisionalColumns =
                     if cte.CteColumns.IsEmpty then
                         match cte.Body with
-                        | PlainSelect body -> body.Projections |> List.map (fun (expr, alias) -> alias |> Option.defaultValue (expressionName expr (expression expr)))
-                        | UnionSelect(first, _, _, _, _) -> first.Projections |> List.map (fun (expr, alias) -> alias |> Option.defaultValue (expressionName expr (expression expr)))
+                        | PlainSelect body ->
+                            body.Projections
+                            |> List.map (fun (expr, alias) ->
+                                alias
+                                |> Option.defaultValue (expressionName expr (renderViewExpression options context expr)))
+                        | UnionSelect(first, _, _, _, _) ->
+                            first.Projections
+                            |> List.map (fun (expr, alias) ->
+                                alias
+                                |> Option.defaultValue (expressionName expr (renderViewExpression options context expr)))
                     else
                         cte.CteColumns
 
@@ -624,15 +567,26 @@ and private renderSelectOrUnion (options: ViewRenderOptions) (context: ViewConte
         + renderLimit options orderContext limit offset,
         outputNames
 
+let private emptyContext =
+    { Sources = []
+      OuterSources = []
+      Ctes = [] }
+
+let expression expr =
+    renderViewExpression
+        { DefaultSchema = ""
+          IncludeSchema = false
+          RelationColumns = fun _ _ -> None }
+        emptyContext
+        expr
+
 let viewDefinition options =
     function
-    | Select select -> renderSelect options { Sources = []; OuterSources = []; Ctes = [] } select |> fst |> Some
+    | Select select -> renderSelect options emptyContext select |> fst |> Some
     | Union(first, rest, orderBy, limit, offset) ->
         renderSelectOrUnion
             options
-            { Sources = []
-              OuterSources = []
-              Ctes = [] }
+            emptyContext
             (UnionSelect(first, rest, orderBy, limit, offset))
         |> fst
         |> Some
