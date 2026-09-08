@@ -589,6 +589,7 @@ type private UpdatableView =
       Expressions: Map<string, Expr>
       OrderedColumns: string list
       Predicate: Expr option
+      OrderBy: OrderKey list
       CheckPredicates: Map<ViewTargetKey, Expr>
       Insertable: bool
       InsertableTargets: Set<string * string * string>
@@ -699,6 +700,29 @@ let private isStoredView store defaultDatabase qualifiedName =
     let database, view = splitQualified defaultDatabase qualifiedName
     tryStoredView store database view |> Option.isSome
 
+let private projectionExpressionsNamed (projections: Projection list) name =
+    projections
+    |> List.choose (function
+        | expression, Some alias when alias.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> Some expression
+        | _ -> None)
+
+let private tryProjectionExpressionNamed projections name =
+    projectionExpressionsNamed projections name |> List.tryExactlyOne
+
+let private tryProjectionAtPosition (projections: Projection list) =
+    function
+    | Lit(VInt position) when position >= 1L && position <= int64 System.Int32.MaxValue ->
+        projections |> List.tryItem (int position - 1) |> Option.map fst
+    | _ -> None
+
+let private resolveOrderPosition (projections: Projection list) (expression: Expr) =
+    tryProjectionAtPosition projections expression |> Option.defaultValue expression
+
+let private resolveViewOrderExpression projections expression =
+    match resolveOrderPosition projections expression with
+    | Col name as column -> tryProjectionExpressionNamed projections name |> Option.defaultValue column
+    | resolved -> resolved
+
 let private updatableViewOfSelect (store: Store) (view: StoredView) (select: SelectStmt) : UpdatableView option =
     let combine left right =
         match left, right with
@@ -716,7 +740,6 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
         && select.Windows.IsEmpty
         && select.Ctes.IsEmpty
         && select.Having.IsNone
-        && select.OrderBy.IsEmpty
         && select.Limit.IsNone
         && select.Offset.IsNone
         && select.Locking.IsEmpty
@@ -969,6 +992,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                         expandedProjections
                         |> List.map (projectedColumn rewriteSource directTarget)
 
+                    let ownOrderBy =
+                        select.OrderBy
+                        |> List.map (fun (expression, direction) ->
+                            rewriteSource (resolveViewOrderExpression expandedProjections expression), direction)
+
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
                     let rejectsNestedCheckOption =
@@ -1065,6 +1093,11 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Expressions = expressions
                               OrderedColumns = outputNames
                               Predicate = predicate
+                              OrderBy =
+                                if ownOrderBy.IsEmpty then
+                                    underlying |> Option.map _.OrderBy |> Option.defaultValue []
+                                else
+                                    ownOrderBy
                               CheckPredicates =
                                 match underlying with
                                 | Some nested when not nested.UpdateJoins.IsEmpty -> nested.CheckPredicates
@@ -1092,6 +1125,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                      && (select.Joins |> List.forall (fun join -> join.Kind = InnerJoin))
                      && (select.Joins |> List.forall (fun join -> match join.Table with FromTable _ -> true | _ -> false))
                      && hasWritableShape select
+                     && select.OrderBy.IsEmpty
                      && view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase) ->
                 let tableRefs =
                     source
@@ -1351,6 +1385,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
                               Expressions = expressions
                               OrderedColumns = outputNames
                               Predicate = predicate
+                              OrderBy = []
                               CheckPredicates = checkPredicates
                               Insertable = not insertableTargets.IsEmpty
                               InsertableTargets = insertableTargets
@@ -8283,7 +8318,11 @@ and private tryMergeDirectView
                                         Where = predicate
                                         GroupBy = select.GroupBy |> List.map rewriteOuter
                                         Having = select.Having |> Option.map rewriteOuter
-                                        OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> rewriteOuter expression, direction) }
+                                        OrderBy =
+                                            if select.OrderBy.IsEmpty then
+                                                direct.OrderBy
+                                            else
+                                                select.OrderBy |> List.map (fun (expression, direction) -> rewriteOuter expression, direction) }
                             )
                 | _ -> Ok None
             | _ -> Ok None
@@ -10135,15 +10174,6 @@ and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: Table
     tryRangeAccess QualifiedColumn store dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
 
-and private projectionExpressionsNamed (projections: Projection list) name =
-    projections
-    |> List.choose (function
-        | expression, Some alias when alias.Equals(name, System.StringComparison.OrdinalIgnoreCase) -> Some expression
-        | _ -> None)
-
-and private tryProjectionExpressionNamed projections name =
-    projectionExpressionsNamed projections name |> List.tryExactlyOne
-
 and private resolveOrderAliasValue name outputColumns =
     match outputColumns |> List.filter (fst >> fun candidate -> equalsIgnoreCase candidate name) with
     | [] -> Ok None
@@ -11225,12 +11255,6 @@ and private rewriteAggregates
     | Subquery _
     | InSubquery _ -> Ok expr
 
-and private tryProjectionAtPosition (projections: Projection list) =
-    function
-    | Lit(VInt position) when position >= 1L && position <= int64 System.Int32.MaxValue ->
-        projections |> List.tryItem (int position - 1) |> Option.map fst
-    | _ -> None
-
 /// GROUP BY resolves source columns before projection aliases.
 and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr) : Expr =
     tryProjectionAtPosition projections expr
@@ -11305,9 +11329,6 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Exists _
     | Subquery _
     | InSubquery _ -> Ok expr
-
-and private resolveOrderPosition (projections: Projection list) (expr: Expr) : Expr =
-    tryProjectionAtPosition projections expr |> Option.defaultValue expr
 
 /// ORDER BY uses MySQL's projection-alias-first name resolution.
 and private resolveOrderKey
@@ -19395,7 +19416,11 @@ let rec executeAs
                                         Column = target.Column
                                         Value = rewrite assignment.Value })
                             Where = combineViewPredicate view.Predicate (updateStmt.Where |> Option.map rewrite)
-                            OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+                            OrderBy =
+                                if updateStmt.OrderBy.IsEmpty then
+                                    view.OrderBy
+                                else
+                                    updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                             Limit = updateStmt.Limit |> Option.map rewrite }
 
                     let target = assignments |> List.head |> snd
@@ -19807,7 +19832,11 @@ let rec executeAs
                     From = view.UpdateFrom
                     Targets = [ view.UpdateFrom.Alias |> Option.defaultValue view.Table ]
                     Where = combineViewPredicate view.Predicate (deleteStmt.Where |> Option.map rewrite)
-                    OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+                    OrderBy =
+                        if deleteStmt.OrderBy.IsEmpty then
+                            view.OrderBy
+                        else
+                            deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
             let target = view.Targets |> Map.values |> Seq.head

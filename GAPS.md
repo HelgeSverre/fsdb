@@ -305,8 +305,10 @@ WAL and snapshots and appear in `SHOW CREATE VIEW` and `I_S.VIEWS`.
 Single-table and nested views accept updates and deletes through direct columns,
 including predicates over computed projections. Insertable views also accept
 the supported INSERT, REPLACE, and ODKU forms with required, repeated, exposed,
-and privilege checks. `LOCAL` and `CASCADED CHECK OPTION` predicates persist and
-compose through nested views.
+and privilege checks. A saved `ORDER BY` retains updateability, inherits through
+direct nesting, and supplies the order for limited updates and deletes unless
+the outer statement overrides it. `LOCAL` and `CASCADED CHECK OPTION` predicates
+persist and compose through nested views.
 
 Uncorrelated scalar projection subqueries preserve updateability but not
 insertability, dependent projection subqueries refuse writes, and subqueries
@@ -350,7 +352,7 @@ trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | single-table, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; one mergeable component updates or inserts at a time | medium | refusal |
+| Updatable-view breadth | nested write targets with distinct definer/security contexts and additional expression shapes where MySQL deems individual columns writable | single-table views, inherited or overriding `ORDER BY`, same-identity nested joins, outer view layers, and aggregate/UNION read-only join components compose writable targets; one mergeable component updates or inserts at a time | medium | refusal |
 | View algorithm strategy | MERGE and TEMPTABLE select distinct execution strategies | declarations and ALTER retain the effective algorithm, incompatible MERGE shapes become UNDEFINED with warning 1354, and TEMPTABLE views are non-updatable; MERGE and UNDEFINED still share fsdb's shape-driven planner | low | divergence |
 | VIEW_DEFINITION rendering | fully-qualified canonical expression text | SHOW CREATE VIEW renders the stored declaration envelope, but its SELECT body and I_S.VIEWS.VIEW_DEFINITION retain the user's original text | low | divergence |
 

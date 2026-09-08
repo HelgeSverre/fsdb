@@ -523,10 +523,19 @@ let tests =
                   (run store "CREATE VIEW inherited_order AS SELECT id, n, note FROM ordered_rows")
                   "create inheriting view"
 
+              expectOk
+                  (run store "CREATE VIEW insertable_order AS SELECT id, n, note FROM order_rows ORDER BY n DESC")
+                  "create insertable ordered view"
+
               Expect.equal
                   (rows store "SELECT table_name, is_updatable FROM information_schema.views WHERE table_name IN ('inherited_order', 'ordered_rows') ORDER BY table_name")
                   [ [ Some "inherited_order"; Some "YES" ]; [ Some "ordered_rows"; Some "YES" ] ]
                   "ordering does not make a view read-only"
+
+              Expect.equal
+                  (rows store "SELECT id FROM inherited_order")
+                  [ [ Some "2" ]; [ Some "3" ]; [ Some "1" ] ]
+                  "the nested view inherits its default read order"
 
               expectOk (run store "UPDATE ordered_rows SET note = 'view-order' LIMIT 1") "use the view order"
               expectOk (run store "UPDATE ordered_rows SET note = 'outer-order' ORDER BY id ASC LIMIT 1") "override the view order"
@@ -542,11 +551,13 @@ let tests =
                     [ Some "3"; Some "nested-order" ] ]
                   "limited updates choose the same rows as MySQL"
 
+              expectOk (run store "INSERT INTO insertable_order VALUES (4, 5, 'inserted')") "insert through ordered view"
+
               expectOk (run store "DELETE FROM inherited_order WHERE id <> 2 LIMIT 1") "use inherited order for delete"
 
               Expect.equal
                   (rows store "SELECT id FROM order_rows ORDER BY id")
-                  [ [ Some "1" ]; [ Some "2" ] ]
+                  [ [ Some "1" ]; [ Some "2" ]; [ Some "4" ] ]
                   "limited delete chooses the highest remaining row"
 
           testCase "a grouped view rejects UPDATE"

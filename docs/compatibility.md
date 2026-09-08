@@ -163,11 +163,13 @@ fsdb supports stored queries broadly and a narrow writable subset:
 ### Writable views
 
 Single-table views and nested views over that shape accept `UPDATE` and
-`DELETE`, including predicates over computed projections. Direct physical
-inner-join views accept `UPDATE` against one component table and `INSERT` with
-an explicit column list against one insertable component. Outer joins,
-join-view `DELETE`/`REPLACE`, and one statement that writes multiple component
-tables are refused with MySQL's corresponding errors.
+`DELETE`, including predicates over computed projections. A view's `ORDER BY`
+guides limited updates and deletes, survives direct nesting, and yields to an
+explicit outer `ORDER BY`. Direct physical inner-join views accept `UPDATE`
+against one component table and `INSERT` with an explicit column list against
+one insertable component. Outer joins, join-view `DELETE`/`REPLACE`, and one
+statement that writes multiple component tables are refused with MySQL's
+corresponding errors.
 
 Only direct column projections are assignable; computed columns return 1348.
 A component is insertable only when each selected projection for that
