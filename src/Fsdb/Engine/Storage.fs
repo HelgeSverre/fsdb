@@ -5301,17 +5301,18 @@ let private geometryColumn (columns: ColumnDef list) name =
     |> List.tryFind (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
     |> Option.filter (fun column -> match column.Type with TGeometry _ -> true | _ -> false)
 
-let private normalizeGeometryIndexes (columns: ColumnDef list) (indexes: IndexDef list) =
-    indexes
-    |> List.map (fun index ->
-        if
-            index.Kind = BTree
-            && not index.Unique
-            && (index.Columns |> List.exists (geometryColumn columns >> Option.isSome))
-        then
-            { index with Kind = SpatialIndex }
-        else
-            index)
+let private normalizeGeometryIndex (columns: ColumnDef list) (index: IndexDef) =
+    if
+        index.Kind = BTree
+        && not index.Unique
+        && (index.Columns |> List.exists (geometryColumn columns >> Option.isSome))
+    then
+        { index with Kind = SpatialIndex }
+    else
+        index
+
+let private normalizeGeometryIndexes (columns: ColumnDef list) =
+    List.map (normalizeGeometryIndex columns)
 
 let private checkGeometryKeyColumns (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
     let isGeometry (column: ColumnDef) =
@@ -5996,7 +5997,7 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         | ModifyColumn(column, position) -> ModifyColumn({ column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment }, position)
         | ChangeColumn(name, column, position) -> ChangeColumn(name, { column with Comment = normalizeBoundedUtf8mb3Text 1024 column.Comment }, position)
         | SetTableComment comment -> SetTableComment(normalizeBoundedUtf8mb3Text 2048 comment)
-        | AddIndex index -> AddIndex(normalizeGeometryIndexes table.Columns [ index ] |> List.head)
+        | AddIndex index -> AddIndex(normalizeGeometryIndex table.Columns index)
         | action -> action
 
     let strict = mode.Strict

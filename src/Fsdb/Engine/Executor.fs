@@ -2768,7 +2768,7 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
                         | Ok(Select viewSelect) ->
                             let columns = selectProjectionColumns store view.Schema viewSelect
 
-                            if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
+                            if view.Columns.IsEmpty || not (sameLength view.Columns columns) then
                                 columns
                             else
                                 List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
@@ -2783,10 +2783,8 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
     | FromLateral(PlainSelect body, _) -> selectProjectionColumns store dbName body
     | FromSubquery(UnionSelect(first, rest, _, _, _), _)
     | FromLateral(UnionSelect(first, rest, _, _, _), _) ->
-        let branches = first :: (rest |> List.map snd)
-        let columns = branches |> List.map (selectProjectionColumns store dbName)
-
-        if columns |> List.forall (fun branch -> sameLength branch columns.Head) then
+        match first :: (rest |> List.map snd) |> List.map (selectProjectionColumns store dbName) with
+        | firstColumns :: _ as columns when columns |> List.forall (sameLength firstColumns) ->
             columns
             |> List.transpose
             |> List.map (fun candidates ->
@@ -2802,10 +2800,8 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
                         |> function
                             | [] -> None
                             | first :: rest -> Some((rest |> List.fold strictestUnionCollation first).Name)
-
                     Some { first with Collation = collation })
-        else
-            []
+        | _ -> []
     | FromJsonTable _ -> []
 
 and private selectProjectionColumns (store: Store) (dbName: string) (select: SelectStmt) : ColumnDef option list =
@@ -6174,34 +6170,32 @@ and private selectColumnFsps
 /// Synthetic column metadata for a `JSON_TABLE(...)`'s COLUMNS clause —
 /// every column nullable (empty/error yields NULL, the only mode this
 /// subset supports), `FOR ORDINALITY` an unsigned INT like MySQL's.
+and private jsonTableColumnDef name columnType =
+    { Name = name
+      Type = columnType
+      NumericDisplay = None
+      Nullable = true
+      Default = None
+      AutoIncrement = false
+      PrimaryKey = false
+      Unique = false
+      Generated = None
+      Comment = ""
+      Collation = None
+      Charset = None
+      OnUpdateCurrentTimestamp = false
+      Srid = None }
+
 and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list =
     columns
-    |> List.map (fun c ->
-        let def name ty =
-            [ { Name = name
-                Type = ty
-                NumericDisplay = None
-                Nullable = true
-                Default = None
-                AutoIncrement = false
-                PrimaryKey = false
-                Unique = false
-                Generated = None
-                Comment = ""
-                Collation = None
-                Charset = None
-                OnUpdateCurrentTimestamp = false
-                Srid = None } ]
-
-        match c with
-        | ForOrdinality name -> def name (TInt true)
-        | PathColumn(name, ty, _, _, _) -> def name ty
-        | ExistsColumn(name, ty, _) -> def name ty
+    |> List.collect (function
+        | ForOrdinality name -> [ jsonTableColumnDef name (TInt true) ]
+        | PathColumn(name, ty, _, _, _) -> [ jsonTableColumnDef name ty ]
+        | ExistsColumn(name, ty, _) -> [ jsonTableColumnDef name ty ]
         // A NESTED PATH contributes its children's columns, not one of its
         // own, flattened in declaration order — the same order
         // `jsonTableRows` emits cells in.
         | NestedColumns(_, nested) -> jsonTableColumnDefs nested)
-    |> List.collect id
 
 and private validateJsonTableAllocationBounds (columns: JsonTableColumn list) : Result<ColumnDef list, QueryResult> =
     let definitions = jsonTableColumnDefs columns
@@ -6233,7 +6227,7 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
     // under an INT column takes the ON ERROR branch, while a matched JSON
     // *null* is simply NULL and takes neither branch).
     let coerce (ty: ColumnType) (raw: Value) : Result<Value, unit> =
-        match Storage.coerceValue true (jsonTableColumnDefs [ PathColumn("JSON_TABLE", ty, "", JsonNull, JsonNull) ] |> List.head) raw with
+        match Storage.coerceValue true (jsonTableColumnDef "JSON_TABLE" ty) raw with
         | Ok v -> Ok v
         | Error _ -> Error()
 
