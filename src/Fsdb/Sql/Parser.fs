@@ -2024,22 +2024,30 @@ opp.AddOperator(InfixOperator("*", ws, 6, Associativity.Left, (fun a b -> BinOp(
 opp.AddOperator(InfixOperator("/", ws, 6, Associativity.Left, (fun a b -> BinOp(Div, a, b))))
 opp.AddOperator(InfixOperator("%", ws, 6, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
 
-// `DIV` is a keyword operator, not punctuation, so it needs the same
-// word-boundary guard `keyword` uses (`nextCharSatisfiesNot isIdentChar`) —
-// without it, a column named `div_price` would parse as the operator `DIV`
-// followed by a stray `_price` term. `OperatorPrecedenceParser.InfixOperator`
-// matches its operator string case-sensitively with no case-insensitive
-// option, so the common all-caps and all-lowercase spellings are registered.
-// ponytail: replace the OPP keyword bridge to accept mixed-case `Div`/`Mod`.
-let private divKeywordBoundary: Parser<unit, unit> = nextCharSatisfiesNot isIdentChar >>. ws
-opp.AddOperator(InfixOperator("DIV", divKeywordBoundary, 6, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
-opp.AddOperator(InfixOperator("div", divKeywordBoundary, 6, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
-// `a MOD b` is the word spelling of `a % b`, with the same precedence and
-// the same word-boundary/casing caveats as `DIV` above. `MOD(a, b)` still
-// parses as a function call: the term parser consumes the `(` form before
-// the operator parser ever looks for an infix keyword.
-opp.AddOperator(InfixOperator("MOD", divKeywordBoundary, 6, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
-opp.AddOperator(InfixOperator("mod", divKeywordBoundary, 6, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
+let private keywordCaseVariants word =
+    word
+    |> Seq.fold
+        (fun prefixes character ->
+            prefixes
+            |> List.collect (fun prefix ->
+                [ prefix + string (Char.ToUpperInvariant character)
+                  prefix + string (Char.ToLowerInvariant character) ]))
+        [ "" ]
+    |> List.distinct
+
+let private addKeywordOperator word projection =
+    let boundary: Parser<unit, unit> = nextCharSatisfiesNot isIdentChar >>. ws
+
+    keywordCaseVariants word
+    |> List.iter (fun spelling ->
+        opp.AddOperator(InfixOperator(spelling, boundary, 6, Associativity.Left, projection)))
+
+// FParsec's operator parser matches spelling case-sensitively. Registering
+// the finite variants keeps keyword operators case-insensitive without a
+// per-query rewriting pass; the boundary preserves identifiers such as
+// `div_price`, and the term parser still claims `MOD(...)` as a call.
+addKeywordOperator "DIV" (fun left right -> BinOp(IntDiv, left, right))
+addKeywordOperator "MOD" (fun left right -> FuncCall("MOD", [ left; right ]))
 /// Unary minus. On a *literal* the sign is part of the literal, the way
 /// MySQL's own lexer reads it — `-9223372036854775808` is BIGINT's signed
 /// minimum and `-18446744073709551615` an exact DECIMAL, where the general

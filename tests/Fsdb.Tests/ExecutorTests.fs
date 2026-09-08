@@ -9618,8 +9618,8 @@ let tests =
                 testCase "MOD is an infix keyword operator binding as tightly as %"
                 <| fun _ ->
                     expectRow
-                        "SELECT 7 MOD 3 a, -7 MOD 3 b, 7 MOD 0 c, 1 + 2 MOD 2 d, 7 mod 3 e, MOD(7, 3) f"
-                        [ Some "1"; Some "-1"; None; Some "1"; Some "1"; Some "1" ]
+                        "SELECT 7 MOD 3 a, -7 MOD 3 b, 7 MOD 0 c, 1 + 2 MOD 2 d, 7 mod 3 e, MOD(7, 3) f, 7 mOd 3 g, 7 MoD 3 h"
+                        [ Some "1"; Some "-1"; None; Some "1"; Some "1"; Some "1"; Some "1"; Some "1" ]
 
                 testCase "a column whose name starts with MOD is not the MOD operator"
                 <| fun _ ->

@@ -621,15 +621,12 @@ let tests =
 
                 testCase "DIV parses as integer division, case-insensitively, at the same precedence as * / %"
                 <| fun _ ->
-                    Expect.equal
-                        (parseOk "SELECT a DIV 2")
-                        (mkSelect([ BinOp(IntDiv, col "a", Lit(VInt 2L)), None ], None, None, [], None, None))
-                        "uppercase DIV"
-
-                    Expect.equal
-                        (parseOk "SELECT a div 2")
-                        (mkSelect([ BinOp(IntDiv, col "a", Lit(VInt 2L)), None ], None, None, [], None, None))
-                        "lowercase div"
+                    [ "DIV"; "DIv"; "DiV"; "Div"; "dIV"; "dIv"; "diV"; "div" ]
+                    |> List.iter (fun spelling ->
+                        Expect.equal
+                            (parseOk (sprintf "SELECT a %s 2" spelling))
+                            (mkSelect([ BinOp(IntDiv, col "a", Lit(VInt 2L)), None ], None, None, [], None, None))
+                            (sprintf "%s spelling" spelling))
 
                 testCase "DIV only matches on a word boundary, not the prefix of an identifier like div_price"
                 <| fun _ ->
