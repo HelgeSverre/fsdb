@@ -592,6 +592,7 @@ let private decodeColumnDef (format: SnapshotFormat) (r: #IReader) : ColumnDef =
 
 let private lowercaseIndexColumnPrefix = "\u0000L:"
 let private uppercaseIndexColumnPrefix = "\u0000U:"
+let private trimmedIndexColumnPrefix = "\u0000T:"
 let private expressionIndexColumnPrefix = "\u0000E:"
 let private descendingIndexColumnPrefix = "\u0000D:"
 let private literalIndexColumnPrefix = "\u0000N:"
@@ -612,6 +613,7 @@ let private encodeIndexColumn (format: SnapshotFormat) column =
         match column.Transform, column.PrefixLength with
         | Some Lowercase, _ -> lowercaseIndexColumnPrefix + column.Name
         | Some Uppercase, _ -> uppercaseIndexColumnPrefix + column.Name
+        | Some Trimmed, _ -> trimmedIndexColumnPrefix + column.Name
         | Some(Expression expression), _ ->
             let expressionBytes = Writer()
             encodeExpr expressionBytes expression
@@ -645,6 +647,7 @@ let private decodeIndexColumn (format: SnapshotFormat) (columnNames: Set<string>
         | Prefixed literalIndexColumnPrefix name when format.TaggedIndexColumns -> column direction name None None
         | Prefixed lowercaseIndexColumnPrefix name -> column direction name None (Some Lowercase)
         | Prefixed uppercaseIndexColumnPrefix name -> column direction name None (Some Uppercase)
+        | Prefixed trimmedIndexColumnPrefix name -> column direction name None (Some Trimmed)
         | Prefixed expressionIndexColumnPrefix expression ->
             try
                 let expression = expression |> Convert.FromBase64String |> Reader |> decodeExpr

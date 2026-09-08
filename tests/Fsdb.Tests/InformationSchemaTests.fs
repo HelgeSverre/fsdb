@@ -646,6 +646,7 @@ let tests =
               let store = setup ()
               run store "CREATE UNIQUE INDEX ix_lower_name ON users ((LOWER(name)))" |> ignore
               run store "CREATE INDEX ix_upper_email ON users ((UPPER(email)))" |> ignore
+              run store "CREATE INDEX ix_trim_name ON users ((TRIM(name)))" |> ignore
 
               match
                   run
@@ -662,6 +663,14 @@ let tests =
               with
               | ResultSet(_, [ [ None; Some "upper(`email`)" ] ]) -> ()
               | other -> failtestf "expected uppercase index expression metadata, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT column_name, expression FROM information_schema.statistics WHERE table_schema = 'fsdb' AND table_name = 'users' AND index_name = 'ix_trim_name'"
+              with
+              | ResultSet(_, [ [ None; Some "trim(`name`)" ] ]) -> ()
+              | other -> failtestf "expected trimmed index expression metadata, got %A" other
 
               let session = Fsdb.Session.create 1 store
 

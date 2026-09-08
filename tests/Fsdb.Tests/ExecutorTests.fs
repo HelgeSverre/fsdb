@@ -6624,6 +6624,38 @@ let tests =
                         (ResultSet([ "id" ], []))
                         "updates maintain the transformed bucket"
 
+                    let overridden =
+                        builtins
+                        |> registerScalar "TRIM" (fun _ -> VString "MATCH")
+
+                    Expect.equal
+                        (run store overridden "SELECT id FROM labels WHERE TRIM(name) = 'MATCH' ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "a scalar override bypasses the stored transform"
+
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM labels WHERE TRIM(name) = 'MATCH'"
+                        |> explainRow
+
+                    Expect.equal overriddenPlan.AccessType (Some "ALL") "an override reports a scan"
+                    Expect.equal overriddenPlan.Key None "an override does not claim the functional index"
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE binary_labels (id INT PRIMARY KEY, name VARBINARY(8), UNIQUE INDEX uq_binary_trim ((TRIM(name))))")
+                        (Affected 0UL)
+                        "create binary functional index"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO binary_labels VALUES (1, X'206120')")
+                        (Affected 1UL)
+                        "seed binary label"
+
+                    match runDefault store "INSERT INTO binary_labels VALUES (2, X'61')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected binary space trimming to enforce uniqueness, got %A" other
+
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->
                     let store = newStore ()

@@ -2155,7 +2155,8 @@ let private supportsOrderedAccess group =
         |> List.forall (function
             | None
             | Some Lowercase
-            | Some Uppercase -> true
+            | Some Uppercase
+            | Some Trimmed -> true
             | Some(Expression _) -> false)
 
     group.PrefixLengths |> List.forall Option.isNone && supportedKey
@@ -2337,11 +2338,28 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
     else
         Some(encodeEqualityKey columns indices row)
 
+let private trimBinarySpaces (bytes: byte[]) =
+    let mutable first = 0
+    let mutable afterLast = bytes.Length
+
+    while first < afterLast && bytes.[first] = 0x20uy do
+        first <- first + 1
+
+    while afterLast > first && bytes.[afterLast - 1] = 0x20uy do
+        afterLast <- afterLast - 1
+
+    if first = 0 && afterLast = bytes.Length then
+        bytes
+    else
+        Array.sub bytes first (afterLast - first)
+
 let private projectIndexValue prefixLength transform value =
     let transformed =
         match transform, value with
         | Some Lowercase, VString text -> VString(text.ToLowerInvariant())
         | Some Uppercase, VString text -> VString(text.ToUpperInvariant())
+        | Some Trimmed, VString text -> VString(text.Trim(' '))
+        | Some Trimmed, VBytes bytes -> VBytes(trimBinarySpaces bytes)
         | _ -> value
 
     match prefixLength, transformed with
@@ -5365,10 +5383,15 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
         | _ ->
             match columns |> List.tryFind (fun definition -> String.Equals(definition.Name, column.Name, StringComparison.OrdinalIgnoreCase)) with
             | None -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column.Name))
-            | Some definition when column.Transform = Some Lowercase || column.Transform = Some Uppercase ->
+            | Some definition
+                when column.Transform = Some Lowercase
+                     || column.Transform = Some Uppercase
+                     || column.Transform = Some Trimmed ->
                 match definition.Type with
                 | TChar _
-                | TVarchar _ -> fullLength definition |> Option.defaultValue 0 |> Ok
+                | TVarchar _
+                | TBinary _
+                | TVarBinary _ -> fullLength definition |> Option.defaultValue 0 |> Ok
                 | _ -> Error(ExpressionError(3757, "Cannot create a functional index on this expression."))
             | Some definition ->
                 match column.PrefixLength, fullLength definition with

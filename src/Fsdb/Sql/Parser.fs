@@ -2459,6 +2459,7 @@ let private indexedColumn: Parser<IndexColumn, unit> =
 
     attempt (caseColumn "LOWER" Lowercase)
     <|> attempt (caseColumn "UPPER" Uppercase)
+    <|> attempt (caseColumn "TRIM" Trimmed)
     <|> attempt expressionColumn
     <|> storedColumn
 

@@ -9150,6 +9150,7 @@ and private indexedColumnFor (tref: TableRef) =
     let caseTransform (name: string) =
         if name.Equals("LOWER", System.StringComparison.OrdinalIgnoreCase) then Some Lowercase
         elif name.Equals("UPPER", System.StringComparison.OrdinalIgnoreCase) then Some Uppercase
+        elif name.Equals("TRIM", System.StringComparison.OrdinalIgnoreCase) then Some Trimmed
         else None
 
     function
@@ -10184,6 +10185,7 @@ and private transformUsesStoredSemantics (registry: Registry) = function
     | None -> true
     | Some Lowercase -> Functions.isUnmodifiedBuiltinScalar "LOWER" registry
     | Some Uppercase -> Functions.isUnmodifiedBuiltinScalar "UPPER" registry
+    | Some Trimmed -> Functions.isUnmodifiedBuiltinScalar "TRIM" registry
     | Some(Expression _) -> false
 
 and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =

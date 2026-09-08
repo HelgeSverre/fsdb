@@ -2485,6 +2485,8 @@ let tests =
                     "INSERT INTO lookup_names VALUES (1, 'Reference'), (2, 'REFERENCE')"
                     "CREATE TABLE lookup_upper (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_upper_name ((UPPER(name))))"
                     "INSERT INTO lookup_upper VALUES (1, 'Reference'), (2, 'REFERENCE')"
+                    "CREATE TABLE lookup_trim (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, UNIQUE INDEX ix_trim_name ((TRIM(name))))"
+                    "INSERT INTO lookup_trim VALUES (1, ' Reference '), (2, 'Other')"
                     "CREATE TABLE lookup_composite (id INT PRIMARY KEY, tenant_id INT, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_tenant_upper (tenant_id, (UPPER(name))))"
                     "INSERT INTO lookup_composite VALUES (1, 1, 'zeta'), (2, 1, 'Alpha'), (3, 2, 'beta')" ]
                   |> List.fold run session
@@ -2525,8 +2527,16 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "the recovered uppercase bucket returns both rows"
               | other -> failtestf "expected recovered uppercase lookup rows, got %A" other
 
+              match handle (Fsdb.Session.create 5 reloaded) "SELECT id FROM lookup_trim WHERE TRIM(name) = 'Reference'" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "the recovered trimmed bucket returns its row"
+              | other -> failtestf "expected recovered trimmed lookup rows, got %A" other
+
+              match handle (Fsdb.Session.create 6 reloaded) "INSERT INTO lookup_trim VALUES (3, 'Reference')" |> snd with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected the recovered trimmed unique key to reject a duplicate, got %A" other
+
               let recoveredOrderPlan =
-                  handle (Fsdb.Session.create 5 reloaded) "EXPLAIN SELECT id FROM lookup_upper ORDER BY UPPER(name)"
+                  handle (Fsdb.Session.create 7 reloaded) "EXPLAIN SELECT id FROM lookup_upper ORDER BY UPPER(name)"
                   |> snd
                   |> TestSupport.Sql.explainRow
 
@@ -2535,7 +2545,7 @@ let tests =
 
               let recoveredCompositePlan =
                   handle
-                      (Fsdb.Session.create 6 reloaded)
+                      (Fsdb.Session.create 8 reloaded)
                       "EXPLAIN SELECT id FROM lookup_composite WHERE tenant_id = 1 ORDER BY UPPER(name)"
                   |> snd
                   |> TestSupport.Sql.explainRow

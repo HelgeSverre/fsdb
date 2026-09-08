@@ -366,6 +366,7 @@ and MatchMode =
 and IndexTransform =
     | Lowercase
     | Uppercase
+    | Trimmed
     | Expression of Expr
 
 and IndexColumn =
