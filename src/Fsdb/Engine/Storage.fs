@@ -6801,6 +6801,17 @@ let private resolveInsertColumns (table: Table) (columns: string list option) : 
     | None -> Ok [ 0 .. table.Columns.Length - 1 ]
     | Some names -> names |> traverse (resolveAssignableColumn table.Columns table.OriginalName)
 
+let private alignInsertValues
+    (columns: ColumnDef list)
+    (indices: int list)
+    (values: Value list)
+    : Result<Value option list, StorageError> =
+    if sameLength indices values then
+        let supplied = List.zip indices values |> Map.ofList
+        columns |> List.mapi (fun index _ -> Map.tryFind index supplied) |> Ok
+    else
+        Error(ColumnCountMismatch(List.length indices, List.length values))
+
 type internal PreparedInsertCandidate =
     { Values: Value[]
       NextAutoId: int64
@@ -6833,16 +6844,13 @@ let private prepareInsertCandidateCore
     | Some table ->
         resolveInsertColumns table columns
         |> Result.bind (fun indices ->
-            if values.Length <> indices.Length then
-                Error(ColumnCountMismatch(indices.Length, values.Length))
-            else
+            alignInsertValues table.Columns indices values
+            |> Result.bind (fun raw ->
                 let mode = temporalCoercionMode store
                 let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
                 let reservationCount = generatedAutoValueCount mode generateAutoOnZero table indices deferred [ values ]
                 let firstReserved, reservedNext =
                     reserveAutoIncrementRange store dbName tableName table.NextAutoId reservationCount
-                let supplied = List.zip indices values |> Map.ofList
-                let raw = table.Columns |> List.mapi (fun index _ -> Map.tryFind index supplied)
 
                 processRow
                     mode
@@ -6875,7 +6883,7 @@ let private prepareInsertCandidateCore
 
                             { Values = candidate
                               NextAutoId = nextAutoId
-                              AssignedAutoId = assignedAutoId }))))
+                              AssignedAutoId = assignedAutoId })))))
 
 let internal prepareInsertCandidate store dbName tableName columns values prepare =
     prepareInsertCandidateCore store dbName tableName columns values Set.empty prepare Ok
@@ -7001,17 +7009,11 @@ let private insertCore
             && not (foreignKeyLookups |> Map.containsKey foreignKey.Name))
 
     let rows = table.RowsArray.ToBuilder()
-    let expectedColumnCount = idxs.Length
-
     let step rowNumber stateResult (rowValues: Value list) =
         stateResult
         |> Result.bind (fun state ->
-            if rowValues.Length <> expectedColumnCount then
-                Error(ColumnCountMismatch(expectedColumnCount, rowValues.Length))
-            else
-                let provided = List.zip idxs rowValues |> Map.ofList
-                let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
-
+            alignInsertValues table.Columns idxs rowValues
+            |> Result.bind (fun rawRow ->
                 let rowResult =
                     processRow mode generateAutoOnZero state.NextAutoId rawRow table.Columns deferred
                     |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
@@ -7110,7 +7112,7 @@ let private insertCore
                             SecondaryOrder = secondaryOrder }
                 | Error error when ignoreErrors ->
                     Ok { state with IgnoredErrorsRev = error :: state.IgnoredErrorsRev }
-                | Error e -> Error e)
+                | Error e -> Error e))
 
     rowsIn
     |> List.indexed
@@ -7728,8 +7730,6 @@ and private upsertRowsInTable
                     let secondaryGroups = secondaryKeyGroups table
 
                     let rows = table.RowsArray.ToBuilder()
-                    let expectedColumnCount = idxs.Length
-
                     // The running index (seeded from `table.UniqueIndex`,
                     // rekeyed after every matched/inserted candidate) finds
                     // the one row (if any) sharing a key with `candidate` in
@@ -7743,12 +7743,8 @@ and private upsertRowsInTable
                     let step stateResult (ordinal, rowValues: Value list) =
                         stateResult
                         |> Result.bind (fun state ->
-                                if rowValues.Length <> expectedColumnCount then
-                                    Error(ColumnCountMismatch(expectedColumnCount, rowValues.Length))
-                                else
-                                    let provided = List.zip idxs rowValues |> Map.ofList
-                                    let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
-
+                            alignInsertValues table.Columns idxs rowValues
+                            |> Result.bind (fun rawRow ->
                                     processRow
                                         mode
                                         generateAutoOnZero
@@ -7870,7 +7866,7 @@ and private upsertRowsInTable
                                                         InsertedRev = candidate :: state.InsertedRev
                                                         UniqueIndex = uniqueIndex
                                                         SecondaryIndex = secondaryIndex
-                                                        SecondaryOrder = secondaryOrder }))))
+                                                        SecondaryOrder = secondaryOrder })))))
 
                     rowsIn
                     |> List.indexed
@@ -8120,12 +8116,8 @@ let private replaceRowsCore
                                              events) ->
                             let table = tryCatalogTable address catalog |> Option.get
 
-                            if List.length rowValues <> List.length idxs then
-                                Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
-                            else
-                                let provided = List.zip idxs rowValues |> Map.ofList
-                                let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
-
+                            alignInsertValues table.Columns idxs rowValues
+                            |> Result.bind (fun rawRow ->
                                 processRow
                                     mode
                                     generateAutoOnZero
@@ -8250,7 +8242,7 @@ let private replaceRowsCore
                                                     lastExplicit',
                                                     affected + weight,
                                                     candidate :: inserted,
-                                                    events @ commitEvents removed blanked writeEvent))))))
+                                                    events @ commitEvents removed blanked writeEvent)))))))
 
                     rowsIn
                     |> List.indexed
