@@ -14,6 +14,7 @@ open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open NJsonSchema
 open NJsonSchema.Validation
+open Fsdb.Ast
 open Fsdb.Sql
 open Fsdb.Value
 open Fsdb.Temporal
@@ -277,6 +278,11 @@ let private textMap rawMap (f: string -> string) : Scalar =
         | None -> value |> toText |> Option.defaultValue "" |> f |> VString
     | _ -> VNull
 
+let private functionalIndexScalar transform: Scalar =
+    function
+    | [ value ] -> FunctionalIndex.projectValue (Some transform) value
+    | _ -> VNull
+
 /// True if any argument is NULL — the common case for multi-arg string/math
 /// functions where MySQL's whole result is NULL if any input is.
 let private anyNull (args: Value list) : bool =
@@ -331,14 +337,6 @@ let private lengthFn: Scalar =
         match tryRawBytes value with
         | Some bytes -> VInt(int64 bytes.Length)
         | None -> value |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetByteCount |> int64 |> VInt
-    | _ -> VNull
-
-/// `CHAR_LENGTH` counts Unicode code points, not UTF-16 units — a surrogate
-/// pair (an astral character) is one character, not two.
-let private charLengthFn: Scalar =
-    function
-    | [ VNull ] -> VNull
-    | [ value ] -> VInt(FunctionalIndex.characterLength value)
     | _ -> VNull
 
 let private bitLengthFn: Scalar =
@@ -5741,6 +5739,17 @@ let private firstArgument index = index = 0
 let private arguments positions index = Set.contains index positions
 let private argumentsAfter position index = index > position
 
+let private registerFunctionalString transform registry =
+    FunctionalIndex.names transform
+    |> List.fold
+        (fun registry name ->
+            registerStringScalar name firstArgument (InheritArgument 0) (functionalIndexScalar transform) registry)
+        registry
+
+let private registerFunctionalText transform registry =
+    FunctionalIndex.names transform
+    |> List.fold (fun registry name -> registerTextScalar name firstArgument (functionalIndexScalar transform) registry) registry
+
 let private registerTemporalBuiltins registry =
     registry
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
@@ -5813,7 +5822,7 @@ let private registerStringBuiltins registry =
     |> registerTextScalar "POSITION" everyArgument locateFn
     |> registerStringScalar "REPLACE" everyArgument (InheritArgument 0) replaceFn
     |> registerStringScalar "INSERT" everyArgument (InheritArgument 0) insertStringFn
-    |> registerStringScalar "TRIM" firstArgument (InheritArgument 0) (textMap (trimRaw true true) (fun s -> s.Trim(' ')))
+    |> registerFunctionalString Trimmed
     |> registerStringScalar "TRIM_BOTH" everyArgument (InheritArgument 1) (trimSubstring true true)
     |> registerStringScalar "TRIM_LEADING" everyArgument (InheritArgument 1) (trimSubstring true false)
     |> registerStringScalar "TRIM_TRAILING" everyArgument (InheritArgument 1) (trimSubstring false true)
@@ -5823,7 +5832,7 @@ let private registerStringBuiltins registry =
     |> registerStringScalar "RPAD" (arguments (set [ 0; 2 ])) (InheritArgument 0) (padFn false)
     |> registerStringScalar "LEFT" firstArgument (InheritArgument 0) leftFn
     |> registerStringScalar "RIGHT" firstArgument (InheritArgument 0) rightFn
-    |> registerStringScalar "REVERSE" firstArgument (InheritArgument 0) (textMap (Array.rev >> VBytes) FunctionalIndex.reverseText)
+    |> registerFunctionalString Reversed
     |> registerStringScalar "REPEAT" firstArgument (InheritArgument 0) repeatFn
     |> registerScalar "SPACE" spaceFn
     |> registerTextScalar "ASCII" firstArgument asciiFn
@@ -5950,15 +5959,12 @@ let builtins: Registry =
     |> registerScalar "NOW" nowFn
     |> registerScalar "CURRENT_TIMESTAMP" nowFn
     |> registerStringScalar "CONCAT" everyArgument (CombineArguments everyArgument) concatFn
-    |> registerStringScalar "UPPER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
-    |> registerStringScalar "UCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToUpperInvariant()))
-    |> registerStringScalar "LOWER" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
-    |> registerStringScalar "LCASE" firstArgument (InheritArgument 0) (textMap VBytes (fun s -> s.ToLowerInvariant()))
+    |> registerFunctionalString Uppercase
+    |> registerFunctionalString Lowercase
     |> registerByteTextScalar "LENGTH" firstArgument lengthFn
     |> registerByteTextScalar "OCTET_LENGTH" firstArgument lengthFn
     |> registerByteTextScalar "BIT_LENGTH" firstArgument bitLengthFn
-    |> registerTextScalar "CHAR_LENGTH" firstArgument charLengthFn
-    |> registerTextScalar "CHARACTER_LENGTH" firstArgument charLengthFn
+    |> registerFunctionalText CharacterLength
     |> registerScalarResult "COALESCE" (CombineArguments everyArgument) coalesceFn
     |> registerScalarResult "IFNULL" (CombineArguments everyArgument) ifNullFn
     |> registerScalarResult "IF" (CombineArguments (arguments (set [ 1; 2 ]))) ifFn

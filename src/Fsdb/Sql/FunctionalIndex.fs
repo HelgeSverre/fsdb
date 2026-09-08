@@ -29,11 +29,19 @@ let private definitions =
         Aliases = [ "CHARACTER_LENGTH" ]
         Transform = CharacterLength } ]
 
+let private namesOf definition =
+    definition.CanonicalName :: definition.Aliases
+
+let names transform =
+    definitions
+    |> List.tryFind (fun definition -> definition.Transform = transform)
+    |> Option.map namesOf
+    |> Option.defaultValue []
+
 let builtins =
     definitions
     |> List.collect (fun definition ->
-        definition.CanonicalName :: definition.Aliases
-        |> List.map (fun name -> name, definition.Transform))
+        namesOf definition |> List.map (fun name -> name, definition.Transform))
 
 let tryBuiltin (name: string) =
     builtins
@@ -95,10 +103,10 @@ let reverseText (text: string) =
 let private runeLength (text: string) =
     text.EnumerateRunes() |> Seq.length |> int64
 
-let characterLength =
-    function
-    | VBytes bytes -> int64 bytes.Length
-    | value -> value |> toText |> Option.map runeLength |> Option.defaultValue 0L
+let characterLength value =
+    match tryRawBytes value with
+    | Some bytes -> int64 bytes.Length
+    | None -> value |> toText |> Option.map runeLength |> Option.defaultValue 0L
 
 let private tryExactInt64 =
     function
@@ -122,14 +130,17 @@ let tryNormalizeProbe transform normalizeStored value =
     | Some CharacterLength -> tryExactInt64 value |> Option.map VInt
     | _ -> normalizeStored value
 
+let private mapTextOrBytes mapText mapBytes value =
+    match tryRawBytes value with
+    | Some bytes -> VBytes(mapBytes bytes)
+    | None -> value |> toText |> Option.defaultValue "" |> mapText |> VString
+
 let projectValue transform value =
     match transform, value with
-    | Some Lowercase, VString text -> VString(text.ToLowerInvariant())
-    | Some Uppercase, VString text -> VString(text.ToUpperInvariant())
-    | Some Trimmed, VString text -> VString(text.Trim(' '))
-    | Some Trimmed, VBytes bytes -> VBytes(trimBinarySpaces bytes)
-    | Some Reversed, VString text -> VString(reverseText text)
-    | Some Reversed, VBytes bytes -> VBytes(Array.rev bytes)
-    | Some CharacterLength, VNull -> VNull
+    | Some _, VNull -> VNull
+    | Some Lowercase, value -> mapTextOrBytes _.ToLowerInvariant() id value
+    | Some Uppercase, value -> mapTextOrBytes _.ToUpperInvariant() id value
+    | Some Trimmed, value -> mapTextOrBytes _.Trim(' ') trimBinarySpaces value
+    | Some Reversed, value -> mapTextOrBytes reverseText Array.rev value
     | Some CharacterLength, value -> VInt(characterLength value)
     | _ -> value

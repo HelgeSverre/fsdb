@@ -1966,11 +1966,12 @@ let tests =
                           let source = String.replicate 1_000_000 "a"
                           Expect.equal (call "INSERT" [ VString source; VInt 0L; VInt 1L; VString "b" ]) (VString source) "an invalid position returns the source"
 
-                      testCase "TRIM/LTRIM/RTRIM strip whitespace"
+                      testCase "TRIM/LTRIM/RTRIM strip ASCII spaces"
                       <| fun _ ->
                           Expect.equal (call "TRIM" [ VString "  hi  " ]) (VString "hi") "trim"
                           Expect.equal (call "LTRIM" [ VString "  hi  " ]) (VString "hi  ") "ltrim"
                           Expect.equal (call "RTRIM" [ VString "  hi  " ]) (VString "  hi") "rtrim"
+                          Expect.equal (call "TRIM" [ VString "\u00a0hi\u00a0" ]) (VString "\u00a0hi\u00a0") "non-breaking spaces remain"
 
                       testCase "LPAD/RPAD pad to length with a repeating pad string"
                       <| fun _ ->
@@ -2018,6 +2019,7 @@ let tests =
                           Expect.equal (call "OCTET_LENGTH" [ VString "é" ]) (VInt 2L) "octet length is the byte-length synonym"
                           Expect.equal (call "CHAR_LENGTH" [ VString "é" ]) (VInt 1L) "e-acute is 1 code point"
                           Expect.equal (call "CHAR_LENGTH" [ VString "\U0001F600" ]) (VInt 1L) "an astral emoji is 1 code point despite being a UTF-16 surrogate pair"
+                          Expect.equal (call "CHAR_LENGTH" [ VBit(64, 0x8000000000000000UL) ]) (VInt 8L) "BIT values retain their raw byte width"
 
                       testCase "MD5/SHA1 produce lowercase hex digests of the known length"
                       <| fun _ ->
