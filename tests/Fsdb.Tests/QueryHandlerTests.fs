@@ -5928,7 +5928,7 @@ let tests =
 
               let uncompressed = { session with Compression = None }
               expectStatus uncompressed "Compression" "OFF"
-              expectStatus uncompressed "Compression_algorithm" ""
+              expectStatus uncompressed "Compression_algorithm" "uncompressed"
               expectStatus uncompressed "Compression_level" "0"
 
               match handle session "SHOW GLOBAL STATUS LIKE 'Compression_algorithm'" |> snd with

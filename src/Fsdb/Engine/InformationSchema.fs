@@ -4178,7 +4178,7 @@ let showStatus
             []
         else
             [ "Compression", if compressionAlgorithm.IsSome then "ON" else "OFF"
-              "Compression_algorithm", compressionAlgorithm |> Option.defaultValue ""
+              "Compression_algorithm", compressionAlgorithm |> Option.defaultValue "uncompressed"
               "Compression_level", string compressionLevel ]
 
     let rows =
