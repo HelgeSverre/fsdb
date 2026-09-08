@@ -347,6 +347,7 @@ set from the standard server option files or an explicit `--defaults-file`:
 - `max_allowed_packet` and `max_connections`;
 - `wait_timeout`, `interactive_timeout`, and `net_read_timeout`;
 - `innodb_lock_wait_timeout` and `cte_max_recursion_depth`;
+- `max_points_in_geometry` for `ST_Buffer_Strategy` construction;
 - fsdb's WAL rotation thresholds.
 
 The option-file parser follows MySQL's format rather than a generic ini
@@ -371,7 +372,9 @@ remain independently configurable. A client that negotiates
 `SET GLOBAL` updates the live limits used by later accepts, packet reads,
 idle waits, transaction conflict waits, and recursive CTEs. Session-scoped
 `wait_timeout`, `net_read_timeout`, `innodb_lock_wait_timeout`, and
-`cte_max_recursion_depth` are honoured; process-wide `max_connections` and
+`cte_max_recursion_depth` are honoured. `max_points_in_geometry` is GLOBAL and
+SESSION scoped; it bounds new opaque buffer strategies without invalidating
+ones created under an earlier value. Process-wide `max_connections` and
 `max_allowed_packet` reject a session-scoped `SET`. An idle command wait uses
 `wait_timeout`; after the first packet byte arrives, every pause in ordinary,
 TLS, compressed, and LOCAL INFILE traffic uses `net_read_timeout`.

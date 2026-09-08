@@ -157,7 +157,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Advanced spatial behavior | round-buffer resolutions that do not divide evenly into quadrants, mixed round resolutions, the mutable `max_points_in_geometry` ceiling, and geographic SRS semantics; planar overlays, default buffers, point-square, flat-end, miter-join, and compatible round strategies work | low |
+| Advanced spatial behavior | round-buffer resolutions that do not divide evenly into quadrants, mixed round resolutions, the `SET_VAR(max_points_in_geometry=...)` statement hint, and geographic SRS semantics; the GLOBAL/SESSION ceiling and common planar strategies work | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets and `SYSTEM`,
 but named zones remain unavailable without MySQL's optional time-zone tables.

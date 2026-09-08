@@ -116,6 +116,7 @@ max_prepared_stmt_count  = 16382
 max_allowed_packet       = 64M
 default_password_lifetime = 0
 default_week_format       = 0
+max_points_in_geometry   = 65536
 local_infile             = OFF
 max_load_data_bytes      = 64M
 wait_timeout             = 600
@@ -140,7 +141,7 @@ The following MySQL-shaped settings also accept `SET GLOBAL`:
 - timeouts: `wait_timeout`, `interactive_timeout`, `net_read_timeout`,
   `net_write_timeout`, and `innodb_lock_wait_timeout`;
 - server behavior: `cte_max_recursion_depth`, `default_password_lifetime`,
-  `default_week_format`, and `time_zone`.
+  `default_week_format`, `max_points_in_geometry`, and `time_zone`.
 
 `max_load_data_bytes` and the `wal_*` settings are configuration-only fsdb
 limits rather than MySQL system variables. See the
