@@ -5957,17 +5957,18 @@ let private resolvePosition (columnsExcludingSelf: ColumnDef list) (fallback: in
     | PositionFirst -> Ok 0
     | PositionAfter col -> resolveColumn columnsExcludingSelf col |> Result.map (fun idx -> idx + 1)
 
+let private formatDuplicateKeyValue indices (row: Value[]) =
+    indices
+    |> List.map (fun index -> row.[index] |> toText |> Option.defaultValue "NULL")
+    |> String.concat "-"
+
 let private tryDuplicateConstraintValue (columns: ColumnDef list) (indices: int list) (rows: Value[] seq) =
     let rec loop seen remaining =
         match remaining with
         | [] -> None
         | row :: rest ->
             match encodeConstraintKey columns indices row with
-            | Some key when Set.contains key seen ->
-                indices
-                |> List.map (fun index -> row.[index] |> toText |> Option.defaultValue "NULL")
-                |> String.concat "-"
-                |> Some
+            | Some key when Set.contains key seen -> formatDuplicateKeyValue indices row |> Some
             | Some key -> loop (Set.add key seen) rest
             | None -> loop seen rest
 
@@ -5979,11 +5980,7 @@ let private tryDuplicateUniqueValue (columns: ColumnDef list) (group: IndexKeyGr
         | [] -> None
         | row :: rest ->
             match encodeUniqueKey columns group row with
-            | Some key when Set.contains key seen ->
-                group.Indices
-                |> List.map (fun index -> row.[index] |> toText |> Option.defaultValue "NULL")
-                |> String.concat "-"
-                |> Some
+            | Some key when Set.contains key seen -> formatDuplicateKeyValue group.Indices row |> Some
             | Some key -> loop (Set.add key seen) rest
             | None -> loop seen rest
 
@@ -6978,12 +6975,7 @@ let private insertCore
                                     |> List.tryPick (fun group ->
                                         match encodeUniqueKey table.Columns group candidate with
                                         | Some key when Map.find group.Name state.UniqueIndex |> Map.containsKey key ->
-                                            let value =
-                                                group.Indices
-                                                |> List.map (fun index -> candidate.[index] |> toText |> Option.defaultValue "NULL")
-                                                |> String.concat "-"
-
-                                            Some(DuplicateKey(group.Name, value))
+                                            Some(DuplicateKey(group.Name, formatDuplicateKeyValue group.Indices candidate))
                                         | _ -> None)
 
                                 match uniqueCollision with
@@ -7204,12 +7196,7 @@ let internal insertPreparedCandidate
                             Map.tryFind group.Name table.UniqueIndex
                             |> Option.bind (Map.tryFind key)
                             |> Option.map (fun _ ->
-                                let value =
-                                    group.Indices
-                                    |> List.map (fun index -> prepared.Values.[index] |> toText |> Option.defaultValue "NULL")
-                                    |> String.concat "-"
-
-                                DuplicateKey(group.Name, value))))
+                                DuplicateKey(group.Name, formatDuplicateKeyValue group.Indices prepared.Values))))
 
                 match collision with
                 | Some error -> Error error
@@ -7712,12 +7699,7 @@ and private upsertRowsInTable
                                                             | Some key ->
                                                                 match Map.tryFind key (Map.find group.Name state.UniqueIndex) with
                                                                 | Some otherPos when otherPos <> pos ->
-                                                                    let value =
-                                                                        group.Indices
-                                                                        |> List.map (fun i -> applied.[i] |> toText |> Option.defaultValue "NULL")
-                                                                        |> String.concat "-"
-
-                                                                    Some(DuplicateKey(group.Name, value))
+                                                                    Some(DuplicateKey(group.Name, formatDuplicateKeyValue group.Indices applied))
                                                                 | _ -> None
                                                             | None -> None)
 
@@ -8876,8 +8858,7 @@ let updateRows
                                                     | Some k ->
                                                         match Map.tryFind k (Map.find group.Name index) with
                                                         | Some otherRowId when otherRowId <> rowId ->
-                                                            let value = group.Indices |> List.map (fun i -> newRow.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
-                                                            Some(DuplicateKey(group.Name, value))
+                                                            Some(DuplicateKey(group.Name, formatDuplicateKeyValue group.Indices newRow))
                                                         | _ -> None
                                                     | None -> None)
 
