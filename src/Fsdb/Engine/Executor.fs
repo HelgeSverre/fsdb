@@ -17476,9 +17476,19 @@ let rec executeAs
                           VisibilityPredicate = visibilityPredicate })
                     execute
 
+    let executeWithMutationCtes ctes statement =
+        let mutable resultIds = ids
+
+        let result =
+            withCteQueryResult store registry dbName ctes (fun () ->
+                let updatedIds, queryResult = executeAs store registry dbName ids foundRows currentAccount statement
+                resultIds <- updatedIds
+                queryResult)
+
+        resultIds, result
+
     match stmt with
     | Update update when not update.Ctes.IsEmpty ->
-        let mutable nextIds = ids
         let expressions =
             (update.Assignments |> List.map _.Value)
             @ Option.toList update.Where
@@ -17486,28 +17496,15 @@ let rec executeAs
             @ Option.toList update.Limit
         let ctes = referencedMutationCtes update.Ctes update.Joins expressions
 
-        let result =
-            withCteQueryResult store registry dbName ctes (fun () ->
-                let ids, result = executeAs store registry dbName ids foundRows currentAccount (Update { update with Ctes = [] })
-                nextIds <- ids
-                result)
-
-        nextIds, result
+        executeWithMutationCtes ctes (Update { update with Ctes = [] })
     | Delete delete when not delete.Ctes.IsEmpty ->
-        let mutable nextIds = ids
         let expressions =
             Option.toList delete.Where
             @ (delete.OrderBy |> List.map fst)
             @ Option.toList delete.Limit
         let ctes = referencedMutationCtes delete.Ctes delete.Joins expressions
 
-        let result =
-            withCteQueryResult store registry dbName ctes (fun () ->
-                let ids, result = executeAs store registry dbName ids foundRows currentAccount (Delete { delete with Ctes = [] })
-                nextIds <- ids
-                result)
-
-        nextIds, result
+        executeWithMutationCtes ctes (Delete { delete with Ctes = [] })
     | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
 
     | CreateDatabase(name, ifNotExists, _) ->
