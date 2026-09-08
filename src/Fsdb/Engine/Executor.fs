@@ -8941,7 +8941,11 @@ and private runUnlockedSelectStmt
                   match tryIndexedLookup store registry dbName tref select.Where with
                   | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                   | None ->
-                    match tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer with
+                    let projectedLookup =
+                        tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
+                        |> Option.orElseWith (fun () -> tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where)
+
+                    match projectedLookup with
                     | Some(columns, rows) -> runArbitrary columns rows None select
                     | None ->
                         match trySpatialLookup BareOrQualifiedColumn store dbName tref select.Where with
@@ -8978,7 +8982,11 @@ and private runUnlockedSelectStmt
             | Error e -> e, [], []
             | Ok(columns, rows) -> runArbitrary columns rows None select
         | _ ->
-            match tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer with
+            let projectedLookup =
+                tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
+                |> Option.orElseWith (fun () -> tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where)
+
+            match projectedLookup with
             | Some(columns, rows) -> runArbitrary columns rows None select
             | None ->
                 match resolveFromItem store registry dbName fromItem with
@@ -9443,18 +9451,21 @@ and private tryCorrelatedOuterValue source context expression =
     |> Option.filter (fun scope -> isStatementStableExpr context.Store context.Registry context.DbName scope expression)
     |> Option.bind (fun _ -> evalExpr context expression |> Result.toOption)
 
-and private tryCorrelatedEqualityPredicate source context = function
+and private tryEqualityPredicate columnName boundValue = function
     | BinOp(Eq, left, right) ->
         Option.map2
             (fun column value -> column, value)
-            (tryCorrelatedInnerColumn source left)
-            (tryCorrelatedOuterValue source context right)
+            (columnName left)
+            (boundValue right)
         |> Option.orElseWith (fun () ->
             Option.map2
                 (fun column value -> column, value)
-                (tryCorrelatedInnerColumn source right)
-                (tryCorrelatedOuterValue source context left))
+                (columnName right)
+                (boundValue left))
     | _ -> None
+
+and private tryCorrelatedEqualityPredicate source context =
+    tryEqualityPredicate (tryCorrelatedInnerColumn source) (tryCorrelatedOuterValue source context)
 
 and private correlatedEqualityPredicates source (whereExpr: Expr option) (outer: EvalContext option) =
     outer
@@ -9681,6 +9692,56 @@ and private projectPhysicalRows
     |> fun prepared -> projection.Steps |> List.fold applyStep prepared
     |> Result.map List.ofSeq
 
+and private projectPhysicalLookupRows
+    store
+    registry
+    dbName
+    (projection: PhysicalProjection)
+    (rows: (RowId * Value[]) list)
+    =
+    rows
+    |> List.map snd
+    |> projectPhysicalRows store registry dbName projection
+    |> Result.toOption
+    |> Option.map (fun projectedRows -> projection.OutputColumns, projectedRows)
+
+and private tryProjectedPhysicalEqualityRows
+    policy
+    store
+    registry
+    dbName
+    (projection: PhysicalProjection)
+    ((column, value): string * Value)
+    =
+    tryPhysicalProjectionColumn projection column
+    |> Option.bind (fun sourceColumn ->
+        Storage.tryEqualityLookupInTable store projection.PhysicalTable sourceColumn.Name value
+        |> Option.filter (fun (_, rows) ->
+            policy = CandidateNarrowing
+            || isUsefulEqualityCardinality projection.PhysicalTable.RowsArray.Count rows.Length)
+        |> Option.bind (fun (_, rows) -> projectPhysicalLookupRows store registry dbName projection rows))
+
+and private tryProjectedPhysicalRangeRows
+    store
+    registry
+    dbName
+    (projection: PhysicalProjection)
+    (bounds: RangeLookupBounds)
+    =
+    tryPhysicalProjectionColumn projection bounds.Column
+    |> Option.bind (fun sourceColumn ->
+        let isNullBound = function
+            | Some(VNull, _) -> true
+            | _ -> false
+
+        if isNullBound bounds.Lower || isNullBound bounds.Upper then
+            Some(projection.OutputColumns, [])
+        else
+            Storage.trySecondaryRangeLookupInTable store projection.PhysicalTable sourceColumn.Name bounds.Lower bounds.Upper
+            |> Option.filter (fun lookup ->
+                QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
+            |> Option.bind (fun lookup -> projectPhysicalLookupRows store registry dbName projection lookup.RangeRows.Value))
+
 and private tryProjectedPhysicalCorrelatedEqualityLookup
     (store: Store)
     (registry: Registry)
@@ -9694,16 +9755,7 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
         correlatedEqualityPredicates (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns) whereExpr outer
         |> Option.bind (fun equalities ->
             equalities
-            |> List.tryPick (fun (column, value) ->
-                tryPhysicalProjectionColumn projection column
-                |> Option.bind (fun sourceColumn ->
-                    Storage.tryEqualityLookupInTable store projection.PhysicalTable sourceColumn.Name value
-                    |> Option.bind (fun (_, rows) ->
-                        rows
-                        |> List.map snd
-                        |> projectPhysicalRows store registry dbName projection
-                        |> Result.toOption
-                        |> Option.map (fun projectedRows -> projection.OutputColumns, projectedRows))))))
+            |> List.tryPick (tryProjectedPhysicalEqualityRows CandidateNarrowing store registry dbName projection)))
 
 and private tryProjectedPhysicalCorrelatedRangeLookup
     (store: Store)
@@ -9716,25 +9768,34 @@ and private tryProjectedPhysicalCorrelatedRangeLookup
     tryPhysicalProjection store registry dbName source
     |> Option.bind (fun projection ->
         correlatedRangeBounds (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns) whereExpr outer
-        |> List.tryPick (fun bounds ->
-            tryPhysicalProjectionColumn projection bounds.Column
-            |> Option.bind (fun sourceColumn ->
-                let isNullBound = function
-                    | Some(VNull, _) -> true
-                    | _ -> false
+        |> List.tryPick (tryProjectedPhysicalRangeRows store registry dbName projection))
 
-                if isNullBound bounds.Lower || isNullBound bounds.Upper then
-                    Some(projection.OutputColumns, [])
-                else
-                    Storage.trySecondaryRangeLookupInTable store projection.PhysicalTable sourceColumn.Name bounds.Lower bounds.Upper
-                    |> Option.filter (fun lookup ->
-                        QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange)
-                    |> Option.bind (fun lookup ->
-                        lookup.RangeRows.Value
-                        |> List.map snd
-                        |> projectPhysicalRows store registry dbName projection
-                        |> Result.toOption
-                        |> Option.map (fun projectedRows -> projection.OutputColumns, projectedRows)))))
+and private tryProjectedPhysicalLiteralLookup
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (source: FromItem)
+    (whereExpr: Expr option)
+    : (ColumnDef list * Value[] list) option =
+    let literalValue = function
+        | Lit value -> Some value
+        | _ -> None
+
+    if not (storedValuesMatchReadValues store) then
+        None
+    else
+        tryPhysicalProjection store registry dbName source
+        |> Option.filter (fun projection -> not projection.Steps.IsEmpty)
+        |> Option.bind (fun projection ->
+            let probeSource = correlatedProbeSource (fromItemQualifier source) projection.OutputColumns
+
+            whereExpr
+            |> optionalConjuncts
+            |> List.tryPick (tryEqualityPredicate (tryCorrelatedInnerColumn probeSource) literalValue)
+            |> Option.bind (tryProjectedPhysicalEqualityRows CostedRead store registry dbName projection)
+            |> Option.orElseWith (fun () ->
+                collectRangeBounds (tryCorrelatedInnerColumn probeSource) literalValue whereExpr
+                |> List.tryPick (tryProjectedPhysicalRangeRows store registry dbName projection)))
 
 and private tryMaterializedCorrelatedEqualityLookup
     (store: Store)
@@ -9757,28 +9818,30 @@ and private tryMaterializedCorrelatedEqualityLookup
     if not eligible then
         None
     else
-        let qualifier = fromItemQualifier source
+        outer
+        |> Option.bind (fun context ->
+            let qualifier = fromItemQualifier source
 
-        resolveFromItem store registry dbName source
-        |> Result.toOption
-        |> Option.bind (fun (columns, rows) ->
-            correlatedEqualityPredicates (correlatedProbeSource qualifier columns) whereExpr outer
-            |> Option.bind (fun equalities ->
-                let byColumn = (currentStatementMemo ()).MaterializedCorrelatedEqualities
+            resolveFromItem store registry dbName source
+            |> Result.toOption
+            |> Option.bind (fun (columns, rows) ->
+                correlatedEqualityPredicates (correlatedProbeSource qualifier columns) whereExpr (Some context)
+                |> Option.bind (fun equalities ->
+                    let byColumn = (currentStatementMemo ()).MaterializedCorrelatedEqualities
 
-                let sourceLookups =
-                    getMemoized byColumn source (fun () ->
-                        Dictionary<string, MaterializedEqualityLookup option>(System.StringComparer.OrdinalIgnoreCase))
+                    let sourceLookups =
+                        getMemoized byColumn source (fun () ->
+                            Dictionary<string, MaterializedEqualityLookup option>(System.StringComparer.OrdinalIgnoreCase))
 
-                equalities
-                |> List.tryPick (fun (column, value) ->
-                    let lookup =
-                        getMemoized sourceLookups column (fun () -> materializedEqualityLookup store columns rows column)
+                    equalities
+                    |> List.tryPick (fun (column, value) ->
+                        let lookup =
+                            getMemoized sourceLookups column (fun () -> materializedEqualityLookup store columns rows column)
 
-                    lookup
-                    |> Option.bind (fun lookup ->
-                        lookup.FindRows value
-                        |> Option.map (fun rows -> lookup.Columns, rows)))))
+                        lookup
+                        |> Option.bind (fun lookup ->
+                            lookup.FindRows value
+                            |> Option.map (fun rows -> lookup.Columns, rows))))))
 
 and private tryCorrelatedSourceLookup
     (store: Store)

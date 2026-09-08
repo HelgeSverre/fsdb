@@ -7886,6 +7886,51 @@ let tests =
                         "c.user_id > users.id"
                         "users.id >= 46"
 
+                    let assertProjectedLiteral expectedCount maxCalls prefix source predicate =
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                (prefix
+                                 + (if prefix = "" then "" else " ")
+                                 + "SELECT candidate.id FROM "
+                                 + source
+                                 + " WHERE "
+                                 + predicate
+                                 + " AND candidate.observed = candidate.id")
+                        with
+                        | ResultSet(_, rows) -> Expect.equal rows.Length expectedCount "the projected predicate retains matching rows"
+                        | other -> failtestf "expected projected rows, got %A" other
+
+                        Expect.isLessThan calls maxCalls "the projected predicate resolves only indexed candidates"
+
+                    assertProjectedLiteral 20 100 "" "(SELECT id, user_id, observed FROM orders) candidate" "candidate.user_id = 2"
+                    assertProjectedLiteral 40 150 "" "(SELECT id, user_id, observed FROM orders) candidate" "candidate.user_id < 3"
+                    assertProjectedLiteral 10 100 "" "(SELECT id, user_id, observed FROM orders WHERE id <= 500) candidate" "candidate.user_id = 2"
+
+                    assertProjectedLiteral
+                        20
+                        100
+                        "WITH candidates AS (SELECT id, user_id, observed FROM orders)"
+                        "candidates candidate"
+                        "candidate.user_id = 2"
+
+                    assertProjectedLiteral
+                        40
+                        150
+                        "WITH candidates AS (SELECT id, user_id, observed FROM orders)"
+                        "candidates candidate"
+                        "candidate.user_id < 3"
+
+                    assertProjectedLiteral
+                        10
+                        100
+                        "WITH candidates AS (SELECT id, user_id, observed FROM orders WHERE id <= 500)"
+                        "candidates candidate"
+                        "candidate.user_id = 2"
+
                     calls <- 0
 
                     match
