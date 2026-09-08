@@ -5,6 +5,51 @@ open System
 open System.Globalization
 open System.Text.RegularExpressions
 
+type SqlTimeZone =
+    | SystemTimeZone
+    | FixedOffset of minutes: int
+
+/// Parses the session/CONVERT_TZ forms available without MySQL's optional
+/// named-zone tables. Numeric offsets use MySQL's asymmetric range from
+/// -13:59 through +14:00.
+let trySqlTimeZone (value: string) : SqlTimeZone option =
+    let text = value.Trim()
+
+    if text.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase) then
+        Some SystemTimeZone
+    else
+        let sign, body =
+            if text.StartsWith "+" then 1, text.Substring 1
+            elif text.StartsWith "-" then -1, text.Substring 1
+            else 0, text
+
+        match sign, body.Split ':' with
+        | 0, _ -> None
+        | _, [| hoursText; minutesText |] ->
+            match
+                Int32.TryParse(hoursText, NumberStyles.None, CultureInfo.InvariantCulture),
+                Int32.TryParse(minutesText, NumberStyles.None, CultureInfo.InvariantCulture)
+            with
+            | (true, hours), (true, minutes) when minutes < 60 ->
+                let offset = sign * (hours * 60 + minutes)
+                if offset >= -839 && offset <= 840 then Some(FixedOffset offset) else None
+            | _ -> None
+        | _ -> None
+
+let sqlTimeZoneText = function
+    | SystemTimeZone -> "SYSTEM"
+    | FixedOffset minutes -> sprintf "%c%02d:%02d" (if minutes < 0 then '-' else '+') (abs minutes / 60) (abs minutes % 60)
+
+let sqlTimeZoneToUtc zone (value: DateTime) =
+    match zone with
+    | FixedOffset minutes -> value.AddMinutes(float -minutes)
+    | SystemTimeZone -> TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(value, DateTimeKind.Unspecified), TimeZoneInfo.Local)
+
+let sqlTimeZoneFromUtc zone (value: DateTime) =
+    match zone with
+    | FixedOffset minutes -> value.AddMinutes(float minutes)
+    | SystemTimeZone -> TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(value, DateTimeKind.Utc), TimeZoneInfo.Local)
+
 type TimeValue =
     private
     | TimeValue of ticks: int64
