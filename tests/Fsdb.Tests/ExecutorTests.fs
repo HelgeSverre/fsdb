@@ -6742,6 +6742,76 @@ let tests =
                     Expect.equal overriddenPlan.AccessType (Some "ALL") "an alias override reports a scan"
                     Expect.equal overriddenPlan.Key None "an alias override does not claim the functional index"
 
+                testCase "byte-length indexes maintain and narrow their transformed keys"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE measured (id INT PRIMARY KEY, value VARCHAR(40) COLLATE utf8mb4_bin, bits BIT(64), UNIQUE INDEX uq_octets ((OCTET_LENGTH(value))), INDEX ix_bits ((BIT_LENGTH(value))), INDEX ix_bit_width ((LENGTH(bits))))")
+                        (Affected 0UL)
+                        "create byte-length indexes"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO measured VALUES (1, 'é', b'1'), (2, 'abc', b'10'), (3, NULL, NULL)")
+                        (Affected 3UL)
+                        "seed byte-length keys"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM measured WHERE LENGTH(value) = 2")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "LENGTH uses the OCTET_LENGTH key"
+
+                    let lengthPlan =
+                        runDefault store "EXPLAIN SELECT id FROM measured WHERE LENGTH(value) = 2"
+                        |> explainRow
+
+                    Expect.equal lengthPlan.AccessType (Some "const") "unique byte-length access"
+                    Expect.equal lengthPlan.Key (Some "uq_octets") "byte-length key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM measured WHERE BIT_LENGTH(value) = 24")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "bit-length lookup"
+
+                    let bitLengthPlan =
+                        runDefault store "EXPLAIN SELECT id FROM measured WHERE BIT_LENGTH(value) = 24"
+                        |> explainRow
+
+                    Expect.equal bitLengthPlan.AccessType (Some "ref") "bit-length access"
+                    Expect.equal bitLengthPlan.Key (Some "ix_bits") "bit-length key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM measured WHERE OCTET_LENGTH(bits) = 8 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "BIT values use their raw byte width"
+
+                    Expect.equal
+                        (runDefault store "UPDATE measured SET value = 'four' WHERE BIT_LENGTH(value) = 24")
+                        (Affected 1UL)
+                        "update through bit-length key"
+
+                    match runDefault store "INSERT INTO measured VALUES (4, 'zz', b'11')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected byte-length uniqueness, got %A" other
+
+                    let overridden =
+                        builtins
+                        |> registerScalar "OCTET_LENGTH" (fun _ -> VInt 99L)
+
+                    Expect.equal
+                        (run store overridden "SELECT id FROM measured WHERE OCTET_LENGTH(value) = 99 ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]))
+                        "an alias override bypasses the stored byte-length transform"
+
+                    let overriddenPlan =
+                        run store overridden "EXPLAIN SELECT id FROM measured WHERE OCTET_LENGTH(value) = 99"
+                        |> explainRow
+
+                    Expect.equal overriddenPlan.AccessType (Some "ALL") "an alias override reports a scan"
+                    Expect.equal overriddenPlan.Key None "an alias override does not claim the byte-length index"
+
                 testCase "case-folding expression indexes stream matching orders"
                 <| fun _ ->
                     let store = newStore ()
