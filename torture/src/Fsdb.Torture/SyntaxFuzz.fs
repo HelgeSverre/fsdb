@@ -160,6 +160,10 @@ module SyntaxFuzz =
            sprintf
                "CREATE USER 'syntax_secure_%s'@'%%' REQUIRE SSL WITH MAX_QUERIES_PER_HOUR 60 PASSWORD EXPIRE INTERVAL 180 DAY"
                suffix
+           "account_tls_attributes",
+           sprintf
+               "CREATE USER 'syntax_tls_%s'@'%%' REQUIRE SUBJECT '/CN=syntax client' ISSUER '/CN=syntax authority' CIPHER 'TLS_AES_256_GCM_SHA384'"
+               suffix
            "read_uncommitted", "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
            "partition_selection", "SELECT id FROM syntax_partitioned PARTITION (p0) ORDER BY id"
            "partition_growth", "ALTER TABLE syntax_partitioned ADD PARTITION PARTITIONS 1"
@@ -256,6 +260,7 @@ module SyntaxFuzz =
         | "proxy_grant" -> Some "REVOKE PROXY ON 'syntax_proxy_target'@'%' FROM 'syntax_dynamic'@'%'"
         | "locked_user" -> Some(sprintf "DROP USER IF EXISTS 'syntax_user_%s'@'%%', 'syntax_user_%s'@''" suffix suffix)
         | "account_requirements" -> Some(sprintf "DROP USER IF EXISTS 'syntax_secure_%s'@'%%', 'syntax_secure_%s'@''" suffix suffix)
+        | "account_tls_attributes" -> Some(sprintf "DROP USER IF EXISTS 'syntax_tls_%s'@'%%', 'syntax_tls_%s'@''" suffix suffix)
         | _ -> None
 
     let private cleanupStatements candidate =
