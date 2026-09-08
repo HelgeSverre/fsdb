@@ -2127,16 +2127,36 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 let warningCode = if month > 12 || day > 31 then 1265 else 1264
                 zeroDateFallback warningCode
 
+            let timestampRangeResult value =
+                match col.Type, value with
+                | TTimestamp _, VTimestamp utc when not (isMySqlTimestampInstant utc) ->
+                    if strict then
+                        Error(
+                            ExpressionError(
+                                1292,
+                                sprintf
+                                    "Incorrect datetime value: '%s' for column '%s' at row %d"
+                                    (v |> toText |> Option.defaultValue "0000-00-00 00:00:00")
+                                    col.Name
+                                    (Diagnostics.currentRowNumber ())
+                            )
+                        )
+                    else
+                        zeroDateFallback 1264
+                | _ -> Ok value
+
             let tryAdjust value =
                 try
-                    Ok(adjust value)
+                    adjust value |> timestampRangeResult
                 with :? ArgumentException ->
                     temporalFallback ()
 
             match v with
             | VTimestamp utc ->
                 match col.Type with
-                | TTimestamp _ -> Ok(VTimestamp(adjustDateTimeToFsp mode fsp utc))
+                | TTimestamp _ ->
+                    VTimestamp(adjustDateTimeToFsp mode fsp utc)
+                    |> timestampRangeResult
                 | _ ->
                     try
                         sqlTimeZoneFromUtc mode.TimeZone utc |> tryAdjust

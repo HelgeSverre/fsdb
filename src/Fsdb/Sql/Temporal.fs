@@ -52,6 +52,14 @@ let sqlTimeZoneFromUtc zone (value: DateTime) =
         TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(value, DateTimeKind.Utc), TimeZoneInfo.Local)
         |> fun local -> DateTime.SpecifyKind(local, DateTimeKind.Unspecified)
 
+let internal mysqlTimestampMinimumUtc = DateTime(1970, 1, 1, 0, 0, 1, DateTimeKind.Utc)
+
+let internal mysqlTimestampMaximumUtc =
+    DateTime(2038, 1, 19, 3, 14, 7, DateTimeKind.Utc).AddTicks(TimeSpan.TicksPerSecond - 10L)
+
+let internal isMySqlTimestampInstant (value: DateTime) =
+    value >= mysqlTimestampMinimumUtc && value <= mysqlTimestampMaximumUtc
+
 type TimeValue =
     private
     | TimeValue of ticks: int64

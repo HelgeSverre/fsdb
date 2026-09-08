@@ -2019,6 +2019,70 @@ let tests =
                   | other -> failtestf "expected UTC rendering of the shifted insert, got %A" other
               | _, other -> failtestf "expected TIMESTAMP-only zone conversion, got %A" other
 
+          testCase "TIMESTAMP enforces its UTC range after session-zone conversion"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE timestamp_bounds (label_name VARCHAR(20), stamp TIMESTAMP(6))"
+              let session, _ = handle session "SET time_zone = '+00:00'"
+
+              let session, result =
+                  handle
+                      session
+                      "INSERT INTO timestamp_bounds VALUES ('minimum', '1970-01-01 00:00:01'), ('maximum', '2038-01-19 03:14:07.999999')"
+
+              Expect.equal result (Affected 2UL) "both UTC endpoints are accepted"
+
+              match handle session "INSERT INTO timestamp_bounds VALUES ('zero', '1970-01-01 00:00:00')" |> snd with
+              | Err(1292, "Incorrect datetime value: '1970-01-01 00:00:00' for column 'stamp' at row 1") -> ()
+              | other -> failtestf "expected the reserved epoch zero to fail, got %A" other
+
+              match handle session "INSERT INTO timestamp_bounds VALUES ('above', '2038-01-19 03:14:08')" |> snd with
+              | Err(1292, "Incorrect datetime value: '2038-01-19 03:14:08' for column 'stamp' at row 1") -> ()
+              | other -> failtestf "expected the upper overflow to fail, got %A" other
+
+              match
+                  handle
+                      session
+                      "INSERT INTO timestamp_bounds VALUES ('atomic-valid', '1970-01-01 00:00:01'), ('atomic-invalid', '2038-01-19 03:14:08')"
+                  |> snd
+              with
+              | Err(1292, "Incorrect datetime value: '2038-01-19 03:14:08' for column 'stamp' at row 2") -> ()
+              | other -> failtestf "expected the multi-row error to identify row two, got %A" other
+
+              match handle session "SELECT COUNT(*) FROM timestamp_bounds WHERE label_name LIKE 'atomic-%'" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected the failed multi-row insert to remain atomic, got %A" other
+
+              let session, _ = handle session "SET sql_mode = ''"
+
+              let session, result =
+                  handle
+                      session
+                      "INSERT INTO timestamp_bounds VALUES ('below', '1969-12-31 23:59:59.999999'), ('above-lax', '2038-01-19 03:14:08')"
+
+              Expect.equal result (Affected 2UL) "non-strict writes store zero timestamps"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ Some "Warning"; Some "1264"; Some first ]; [ Some "Warning"; Some "1264"; Some second ] ]) ->
+                  Expect.stringContains first "column 'stamp' at row 1" "first warning identifies its row"
+                  Expect.stringContains second "column 'stamp' at row 2" "second warning identifies its row"
+              | other -> failtestf "expected one range warning per invalid row, got %A" other
+
+              match handle session "SELECT stamp FROM timestamp_bounds WHERE label_name IN ('below', 'above-lax') ORDER BY label_name" |> snd with
+              | ResultSet(_, [ [ Some "0000-00-00 00:00:00.000000" ]; [ Some "0000-00-00 00:00:00.000000" ] ]) -> ()
+              | other -> failtestf "expected non-strict overflow values to become zero timestamps, got %A" other
+
+              let session, _ = handle session "SET sql_mode = 'STRICT_TRANS_TABLES'"
+              let session, _ = handle session "SET time_zone = '+05:30'"
+
+              match handle session "INSERT INTO timestamp_bounds VALUES ('shifted-minimum', '1970-01-01 05:30:01')" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the shifted UTC minimum to succeed, got %A" other
+
+              match handle session "INSERT INTO timestamp_bounds VALUES ('shifted-zero', '1970-01-01 05:30:00')" |> snd with
+              | Err(1292, "Incorrect datetime value: '1970-01-01 05:30:00' for column 'stamp' at row 1") -> ()
+              | other -> failtestf "expected range validation after offset conversion, got %A" other
+
           testCase "collation_connection drives LIKE, DISTINCT, and GROUP BY over literals"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
