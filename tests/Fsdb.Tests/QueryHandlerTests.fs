@@ -930,7 +930,11 @@ let tests =
                   + "ST_Contains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POINT(2 2)')), "
                   + "ST_Within(ST_GeomFromText('POINT(2 2)'), ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))')), "
                   + "ST_Touches(ST_GeomFromText('POINT(0 2)'), ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))')), "
-                  + "ST_Contains(ST_Buffer(ST_GeomFromText('POINT(0 0)'), 1), ST_GeomFromText('POINT(0 0)'))"
+                  + "ST_Contains(ST_Buffer(ST_GeomFromText('POINT(0 0)'), 1), ST_GeomFromText('POINT(0 0)')), "
+                  + "ST_Equals(ST_Intersection(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), "
+                  + "ST_GeomFromText('POLYGON((2 -1,5 -1,5 2,2 2,2 -1))')), "
+                  + "ST_GeomFromText('POLYGON((4 2,2 2,2 0,4 0,4 2))')), "
+                  + "ST_Contains(ST_Buffer(ST_GeomFromText('LINESTRING(0 0,2 0)'), 1), ST_GeomFromText('POINT(1 0)'))"
 
               match
                   handle
@@ -938,7 +942,22 @@ let tests =
                       statement
                   |> snd
               with
-              | ResultSet(_, [ [ Some "3"; Some "POLYGON((1 3,2 3,2 4,1 4,1 3))"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
+              | ResultSet(_, [ row ]) ->
+                  Expect.sequenceEqual
+                      row
+                      [ Some "3"
+                        Some "POLYGON((1 3,2 3,2 4,1 4,1 3))"
+                        Some "1"
+                        Some "1"
+                        Some "1"
+                        Some "1"
+                        Some "1"
+                        Some "1"
+                        Some "1"
+                        Some "1"
+                        Some "1"
+                        Some "1" ]
+                      "composed results"
               | other -> failtestf "expected planar geometry result, got %A" other
 
           testCase "planar geometry functions retain result metadata without rows"
@@ -952,13 +971,28 @@ let tests =
                   + "ST_Equals(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 0)')), "
                   + "ST_ConvexHull(ST_GeomFromText('MULTIPOINT((0 0),(1 0),(0 1))')), "
                   + "ST_Buffer(ST_GeomFromText('POINT(0 0)'), 1), "
+                  + "ST_Intersection(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 0)')), "
+                  + "ST_Union(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(1 1)')), "
+                  + "ST_Difference(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(1 1)')), "
+                  + "ST_SymDifference(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(1 1)')), "
                   + "ST_IsValid(ST_GeomFromText('POINT(0 0)')) LIMIT 0"
 
               match handle session statement with
               | session, ResultSet(_, []) ->
                   Expect.equal
                       (session.LastResultColumnMetadata |> List.map _.TypeId)
-                      [ TypeGeometry; TypeDouble; TypeLongLong; TypeLongLong; TypeLongLong; TypeGeometry; TypeGeometry; TypeLongLong ]
+                      [ TypeGeometry
+                        TypeDouble
+                        TypeLongLong
+                        TypeLongLong
+                        TypeLongLong
+                        TypeGeometry
+                        TypeGeometry
+                        TypeGeometry
+                        TypeGeometry
+                        TypeGeometry
+                        TypeGeometry
+                        TypeLongLong ]
                       "function metadata"
               | _, other -> failtestf "expected empty resultset, got %A" other
 

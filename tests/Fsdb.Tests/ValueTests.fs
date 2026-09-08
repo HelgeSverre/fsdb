@@ -375,11 +375,62 @@ let tests =
                         | Fsdb.Functions.SqlError(1210, _) -> ()
                         | error -> failtestf "expected overflowing coordinates to be rejected, got %A" error)
 
+                testCase "planar overlays and buffers cover non-point geometry"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+
+                    let expectGeometry expected name actual =
+                        Expect.equal
+                            (call "ST_Equals" [ actual; geometry expected ])
+                            (VInt 1L)
+                            name
+
+                    let first = geometry "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    let second = geometry "POLYGON((2 -1,5 -1,5 2,2 2,2 -1))"
+
+                    Expect.equal (call "ST_Intersection" [ VNull; second ]) VNull "NULL overlay"
+
+                    call "ST_Intersection" [ first; second ]
+                    |> expectGeometry "POLYGON((4 2,2 2,2 0,4 0,4 2))" "intersection"
+
+                    call "ST_Union" [ first; second ]
+                    |> expectGeometry "POLYGON((4 2,4 4,0 4,0 0,2 0,2 -1,5 -1,5 2,4 2))" "union"
+
+                    call "ST_Difference" [ first; second ]
+                    |> expectGeometry "POLYGON((4 2,4 4,0 4,0 0,2 0,2 2,4 2))" "difference"
+
+                    call "ST_SymDifference" [ first; second ]
+                    |> expectGeometry
+                        "MULTIPOLYGON(((2 0,2 2,4 2,4 4,0 4,0 0,2 0)),((2 0,2 -1,5 -1,5 2,4 2,4 0,2 0)))"
+                        "symmetric difference"
+
+                    let empty = geometry "GEOMETRYCOLLECTION EMPTY"
+                    call "ST_Union" [ empty; first ]
+                    |> expectGeometry "POLYGON((0 0,4 0,4 4,0 4,0 0))" "empty union"
+
+                    Expect.equal
+                        (call "ST_AsText" [ call "ST_Intersection" [ geometry "POINT(0 0)"; geometry "POINT(1 1)" ] ])
+                        (VString "GEOMETRYCOLLECTION EMPTY")
+                        "disjoint intersection"
+
+                    let line = geometry "LINESTRING(0 0,2 0)"
+                    let lineBuffer = call "ST_Buffer" [ line; VInt 1L ]
+                    Expect.equal (call "ST_Contains" [ lineBuffer; geometry "POINT(1 0)" ]) (VInt 1L) "line buffer"
+                    Expect.equal (call "ST_Buffer" [ line; VInt 0L ]) line "zero distance preserves a line"
+
+                    call "ST_Buffer" [ first; VInt -1L ]
+                    |> expectGeometry "POLYGON((3 1,3 3,1 3,1 1,3 1))" "negative polygon buffer"
+
+                    Expect.equal
+                        (call "ST_AsText" [ call "ST_Buffer" [ first; VInt -3L ] ])
+                        (VString "GEOMETRYCOLLECTION EMPTY")
+                        "an exhausted negative buffer is empty"
+
                     Expect.throwsC
-                        (fun () -> call "ST_Buffer" [ geometry "LINESTRING(0 0,1 1)"; VInt 1L ] |> ignore)
+                        (fun () -> call "ST_Buffer" [ line; VInt -1L ] |> ignore)
                         (function
-                        | Fsdb.Functions.SqlError(1235, _) -> ()
-                        | error -> failtestf "expected bounded point-only support, got %A" error)
+                        | Fsdb.Functions.SqlError(1210, _) -> ()
+                        | error -> failtestf "expected negative line buffer error 1210, got %A" error)
 
                 testCase "planar intersections reject nonzero and mismatched SRIDs"
                 <| fun _ ->
@@ -401,6 +452,9 @@ let tests =
                     expectError 3033 (fun () -> call "ST_Equals" [ planar; geographic ])
                     expectError 1235 (fun () -> call "ST_Equals" [ geographic; geographic ])
                     expectError 1235 (fun () -> call "ST_ConvexHull" [ geographic ])
+                    expectError 3033 (fun () -> call "ST_Intersection" [ planar; geographic ])
+                    expectError 1235 (fun () -> call "ST_Union" [ geographic; geographic ])
+                    expectError 1235 (fun () -> call "ST_Buffer" [ geographic; VInt 1L ])
 
                 testCase "envelopes and MBR predicates preserve planar bounds"
                 <| fun _ ->

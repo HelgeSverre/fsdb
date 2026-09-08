@@ -25,6 +25,7 @@
     <Compile Include="Sql/Temporal.fs" />
     <Compile Include="Sql/TemporalLocale.fs" />
     <Compile Include="Sql/Value.fs" />
+    <Compile Include="Sql/GeometryOperations.fs" />
     <Compile Include="Sql/Privileges.fs" />
     <Compile Include="Sql/FullText.fs" />
     <Compile Include="Sql/Ast.fs" />
@@ -70,6 +71,7 @@
   <ItemGroup>
     <PackageReference Include="Argu" Version="6.2.5" />
     <PackageReference Include="FParsec" Version="1.1.1" />
+    <PackageReference Include="NetTopologySuite" Version="2.6.0" />
     <PackageReference Include="NJsonSchema" Version="11.6.1" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
   </ItemGroup>

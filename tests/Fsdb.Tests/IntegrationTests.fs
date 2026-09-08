@@ -3464,7 +3464,7 @@ let tests =
 
                   let! overloads =
                       prepare
-                          "SELECT JSON_VALID(?), JSON_UNQUOTE(?), JSON_OVERLAPS(?,?), JSON_SET(?, '$.a', ?), HOUR(?), FROM_DAYS(?), WEEK(?,?), FORMAT(?,?), SUBSTRING(?,?,?), ST_BUFFER(?,?), ST_SRID(?,?)"
+                          "SELECT JSON_VALID(?), JSON_UNQUOTE(?), JSON_OVERLAPS(?,?), JSON_SET(?, '$.a', ?), HOUR(?), FROM_DAYS(?), WEEK(?,?), FORMAT(?,?), SUBSTRING(?,?,?), ST_BUFFER(?,?), ST_SRID(?,?), ST_INTERSECTION(?,?)"
 
                   Expect.sequenceEqual
                       (overloads |> List.map (fun definition -> definition.CharacterSet, definition.Metadata))
@@ -3486,7 +3486,9 @@ let tests =
                         63, parameterMetadataOfType(TGeometry Geometry)
                         63, parameterMetadataOfType(TDouble false)
                         63, parameterMetadataOfType(TGeometry Geometry)
-                        63, parameterMetadataOfType(TBigInt false) ]
+                        63, parameterMetadataOfType(TBigInt false)
+                        63, parameterMetadataOfType(TGeometry Geometry)
+                        63, parameterMetadataOfType(TGeometry Geometry) ]
                       "overloaded functions retain distinct document, text, and position types"
 
                   let! specialized =

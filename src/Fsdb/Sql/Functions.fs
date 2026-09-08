@@ -18,6 +18,7 @@ open Fsdb.Ast
 open Fsdb.Sql
 open Fsdb.Value
 open Fsdb.Temporal
+open Fsdb.GeometryOperations
 
 /// A scalar function: its already-evaluated arguments in, one `Value` out.
 type Scalar = Value list -> Value
@@ -5544,6 +5545,12 @@ let private geometryConvexHullFn: Scalar =
     | [ value ] -> geometryArgument "ST_CONVEXHULL" value |> requirePlanar "ST_CONVEXHULL" |> geometryConvexHullPlanar |> VGeometry
     | _ -> nativeParameterCountError "st_convexhull"
 
+let private geometryOverlayFn functionName operation =
+    binaryGeometryFn functionName (fun first second ->
+        match GeometryOperations.overlay operation first second with
+        | Ok result -> VGeometry result
+        | Error detail -> geometryError functionName detail)
+
 let private geometryBufferFn: Scalar =
     function
     | [ VNull; _ ]
@@ -5551,14 +5558,24 @@ let private geometryBufferFn: Scalar =
     | [ value; distanceValue ] ->
         let geometry = geometryArgument "ST_BUFFER" value |> requirePlanar "ST_BUFFER"
         let distance = toDouble distanceValue
+        let kind = geometryKind geometry.Shape
 
-        if distance < 0.0 || not (Double.IsFinite distance) then
+        if not (Double.IsFinite distance) then
             raise (SqlError(1210, "Incorrect arguments to st_buffer"))
 
-        match geometryPointBufferPlanar distance geometry with
-        | Some buffer -> VGeometry buffer
-        | None when geometry.Shape |> geometryKind = Point -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))
-        | None -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER for non-point geometries'"))
+        if distance = 0.0 then
+            VGeometry geometry
+        elif distance < 0.0 && kind <> Polygon && kind <> MultiPolygon then
+            raise (SqlError(1210, "Incorrect arguments to st_buffer"))
+        else
+            let buffered =
+                match geometryPointBufferPlanar distance geometry with
+                | Some pointBuffer -> Ok pointBuffer
+                | None -> GeometryOperations.buffer distance geometry
+
+            match buffered with
+            | Ok buffer -> VGeometry buffer
+            | Error _ -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))
     | [ _; _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER strategies'"))
     | _ -> nativeParameterCountError "st_buffer"
 
@@ -5673,6 +5690,10 @@ let private registerSpatialBuiltins registry =
         (geometryPredicateFn "ST_DISJOINT" (fun first second -> geometryIntersectsPlanar first second |> Option.map not))
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
     |> registerScalarResult "ST_BUFFER" binaryResult geometryBufferFn
+    |> registerScalarResult "ST_INTERSECTION" binaryResult (geometryOverlayFn "ST_INTERSECTION" Intersection)
+    |> registerScalarResult "ST_UNION" binaryResult (geometryOverlayFn "ST_UNION" Union)
+    |> registerScalarResult "ST_DIFFERENCE" binaryResult (geometryOverlayFn "ST_DIFFERENCE" Difference)
+    |> registerScalarResult "ST_SYMDIFFERENCE" binaryResult (geometryOverlayFn "ST_SYMDIFFERENCE" SymmetricDifference)
     |> registerScalarResult "ST_CONVEXHULL" binaryResult geometryConvexHullFn
     |> registerScalarResult "ST_ENVELOPE" binaryResult geometryEnvelopeFn
     |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)

@@ -1194,6 +1194,13 @@ module ScenarioProbes =
                "interval_arithmetic_varieties",
                "SELECT id, event_date + INTERVAL 1 MONTH AS plus_month, event_at - INTERVAL '1:30' HOUR_MINUTE AS minus_ninety_minutes, DATE_ADD(event_date, INTERVAL '2-3' YEAR_MONTH) AS plus_two_years_three_months, TIMESTAMPADD(QUARTER, 1, event_at) AS plus_quarter, TIMESTAMPDIFF(DAY, event_date, DATE '2030-01-01') AS days_to_2030 FROM scalar_matrix WHERE id <= 12 ORDER BY id"
 
+               // Planar operations are compared by topology because valid WKT
+               // may start at a different vertex or use the opposite ring order.
+               "spatial_overlay_topology",
+               "SELECT ST_Equals(ST_Intersection(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POLYGON((2 -1,5 -1,5 2,2 2,2 -1))')), ST_GeomFromText('POLYGON((4 2,2 2,2 0,4 0,4 2))')) AS intersection_matches, ST_Equals(ST_Difference(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POLYGON((2 -1,5 -1,5 2,2 2,2 -1))')), ST_GeomFromText('POLYGON((4 2,4 4,0 4,0 0,2 0,2 2,4 2))')) AS difference_matches"
+               "spatial_default_buffers",
+               "SELECT ST_Contains(ST_Buffer(ST_GeomFromText('LINESTRING(0 0,2 0)'), 1), ST_GeomFromText('POINT(1 0)')) AS line_contains_center, ST_Equals(ST_Buffer(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), -1), ST_GeomFromText('POLYGON((3 1,3 3,1 3,1 1,3 1))')) AS inset_matches"
+
                // ORDER BY over generated-column-style expressions.
                "expression_order_by_generated_style",
                "SELECT id, fixed_code, exact_value FROM scalar_matrix WHERE id <= 40 ORDER BY ABS(exact_value) DESC, CHAR_LENGTH(REGEXP_REPLACE(fixed_code, '[^0-9]', '')) , id LIMIT 10" |]
