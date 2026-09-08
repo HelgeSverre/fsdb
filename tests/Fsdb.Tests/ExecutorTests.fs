@@ -6794,6 +6794,20 @@ let tests =
                     Expect.equal bitLengthPlan.AccessType (Some "ref") "bit-length access"
                     Expect.equal bitLengthPlan.Key (Some "ix_bits") "bit-length key"
 
+                    let bitLengthOrderPlan =
+                        runDefault store "EXPLAIN SELECT id FROM measured ORDER BY BIT_LENGTH(value) LIMIT 1"
+                        |> explainRow
+
+                    Expect.equal bitLengthOrderPlan.AccessType (Some "index") "bit-length order streams from the key"
+                    Expect.equal bitLengthOrderPlan.Key (Some "ix_bits") "bit-length ordering key"
+
+                    let bitLengthGroupPlan =
+                        runDefault store "EXPLAIN SELECT BIT_LENGTH(value), COUNT(*) FROM measured GROUP BY BIT_LENGTH(value)"
+                        |> explainRow
+
+                    Expect.equal bitLengthGroupPlan.AccessType (Some "index") "bit-length groups stream from the key"
+                    Expect.equal bitLengthGroupPlan.Key (Some "ix_bits") "bit-length grouping key"
+
                     Expect.equal
                         (runDefault store "SELECT id FROM measured WHERE OCTET_LENGTH(bits) = 8 ORDER BY id")
                         (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
@@ -6803,6 +6817,11 @@ let tests =
                         (runDefault store "UPDATE measured SET value = 'four' WHERE BIT_LENGTH(value) = 24")
                         (Affected 1UL)
                         "update through bit-length key"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM measured WHERE LENGTH(value) IN (2, 4) ORDER BY id")
+                        (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ]))
+                        "literal IN reuses byte-length buckets"
 
                     match runDefault store "INSERT INTO measured VALUES (4, 'zz', 'zz', b'11')" with
                     | Err(1062, _) -> ()
