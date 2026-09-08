@@ -2288,13 +2288,13 @@ let private fullTextDocument (indices: int list) (row: Value[]) =
 /// as Value.compare; every other same-typed value uses an exact encoding.
 /// NULL has its own key; `encodeConstraintKey` omits it for MySQL UNIQUE
 /// semantics.
-let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string =
+let private encodeEqualityValues (columns: ColumnDef list) (indices: int list) (values: Value list) : string =
     let collationOf index =
         columns.[index].Collation
         |> Collation.findOrDefault
 
-    let encode (index: int) =
-        match row.[index] with
+    let encode (index: int) value =
+        match value with
         | VNull -> "N"
         | VInt value -> "I" + string value
         // Same "I" prefix as `VInt`: a `BIGINT UNSIGNED` key and a signed
@@ -2316,14 +2316,18 @@ let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row
         | VDateTime value -> "V" + string value.Ticks
         | VTime value -> "H" + string (timeTicks value)
         | VZeroDate _
-        | VZeroDateTime _ -> toWire row.[index]
+        | VZeroDateTime _ -> toWire value
         | VJson value -> "J" + value.TrimEnd(' ').ToUpperInvariant()
         | VGeometry value -> "G" + Convert.ToHexString(geometryToMySqlBinary value)
 
-    indices
-        |> List.map encode
+    List.map2 encode indices values
         |> List.map (fun value -> string value.Length + ":" + value)
         |> String.concat ""
+
+let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string =
+    indices
+    |> List.map (fun index -> row.[index])
+    |> encodeEqualityValues columns indices
 
 let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string option =
     if indices |> List.exists (fun index -> row.[index] = VNull) then
@@ -2344,27 +2348,18 @@ let private projectIndexValue (column: ColumnDef) prefixLength transform value =
     | Some length, VBytes bytes -> VBytes(Array.truncate length bytes)
     | _ -> transformed
 
-let private projectIndexRow (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) =
-    let projected = Array.copy row
-
-    List.zip3 group.Indices group.PrefixLengths group.Transforms
-    |> List.iter (fun (index, prefixLength, transform) ->
-        projected.[index] <- projectIndexValue columns.[index] prefixLength transform projected.[index])
-
-    projected
-
 let private indexValues (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) =
-    if indexesWholeColumns group then
-        group.Indices |> List.map (fun index -> row.[index])
-    else
-        let projected = projectIndexRow columns group row
-        group.Indices |> List.map (fun index -> projected.[index])
+    List.map3
+        (fun index prefixLength transform ->
+            projectIndexValue columns.[index] prefixLength transform row.[index])
+        group.Indices
+        group.PrefixLengths
+        group.Transforms
 
 let private encodeIndexKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string =
-    if indexesWholeColumns group then
-        encodeEqualityKey columns group.Indices row
-    else
-        encodeEqualityKey columns group.Indices (projectIndexRow columns group row)
+    row
+    |> indexValues columns group
+    |> encodeEqualityValues columns group.Indices
 
 let private encodeUniqueKey (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) : string option =
     if group.Indices |> List.exists (fun index -> row.[index] = VNull) then
