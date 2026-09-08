@@ -78,7 +78,10 @@ just install      # publishes to ~/.local/bin/fsdb, then: fsdb --help
 ```
 USAGE: fsdb [--help] [--port <port>] [--listen <address>] [--data-dir <path>]
             [--defaults-file <path>] [--ssl-cert <path>] [--ssl-key <path>]
-            [--ssl-ca <path>]
+            [--ssl-ca <path>] [--caching-sha2-password-private-key-path <path>]
+            [--caching-sha2-password-public-key-path <path>]
+            [--sha256-password-private-key-path <path>]
+            [--sha256-password-public-key-path <path>]
             [--require-secure-transport] [--version]
 
 OPTIONS:
@@ -93,6 +96,15 @@ OPTIONS:
     --ssl-cert <path>     PEM server certificate for TLS
     --ssl-key <path>      PEM private key for TLS
     --ssl-ca <path>       PEM certificate authorities trusted for TLS clients
+    --caching-sha2-password-private-key-path <path>
+                          PEM private key for caching SHA-2 authentication
+    --caching-sha2-password-public-key-path <path>
+                          matching PEM public key for caching SHA-2
+                          authentication
+    --sha256-password-private-key-path <path>
+                          PEM private key for SHA-256 authentication
+    --sha256-password-public-key-path <path>
+                          matching PEM public key for SHA-256 authentication
     --require-secure-transport
                           reject plaintext MySQL sessions
     --version             print the fsdb version and exit
@@ -136,6 +148,10 @@ ssl-cert                 = /etc/fsdb/server-cert.pem
 ssl-key                  = /etc/fsdb/server-key.pem
 ssl-ca                   = /etc/fsdb/client-ca.pem
 require-secure-transport = ON
+caching-sha2-password-private-key-path = /etc/fsdb/private-key.pem
+caching-sha2-password-public-key-path  = /etc/fsdb/public-key.pem
+sha256-password-private-key-path       = /etc/fsdb/private-key.pem
+sha256-password-public-key-path        = /etc/fsdb/public-key.pem
 ```
 
 Option-file settings become process-wide defaults at startup. The standard
@@ -177,16 +193,20 @@ binding to a non-loopback address:
 New accounts use MySQL 8.4's `caching_sha2_password` by default. The server
 supports its full and cached exchanges: passwords travel inside TLS when the
 connection is encrypted, while plaintext TCP clients can request the server's
-process-local RSA public key. Clients that disable public-key retrieval should
-use TLS.
+RSA public key. By default that key is generated for the process. The
+`caching_sha2_password_*_key_path` options select a persistent PEM pair instead;
+embedding hosts can call `Db.withAuthenticationRsaKey` with an already-loaded
+private key. Clients that disable public-key retrieval should use TLS.
 
 `CREATE USER` and `ALTER USER` also accept explicit
-`mysql_native_password` credentials for older clients. That plugin is retained
-for compatibility rather than used as the default.
+`sha256_password` and `mysql_native_password` credentials for older clients.
+Both plugins are retained for compatibility rather than used as the default;
+`sha256_password` uses its matching `sha256_password_*_key_path` pair for
+plaintext RSA exchange.
 
 The WAL and snapshots detect torn or accidentally corrupt data, not malicious
-changes by a local writer. Treat the data directory and TLS private key as
-trusted server state.
+changes by a local writer. Treat the data directory and every TLS or
+authentication private key as trusted server state.
 
 ## How it works
 

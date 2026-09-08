@@ -111,6 +111,13 @@ listener. The same `ssl-cert`, `ssl-key`, `ssl-ca`, and
 file. `ssl-ca` requests client certificates and validates them against every
 CA certificate in the PEM file.
 
+Plaintext full authentication uses a process-local RSA key unless matching
+`caching-sha2-password-private-key-path` and
+`caching-sha2-password-public-key-path` settings are supplied. The equivalent
+`sha256-password-*` pair configures the deprecated SHA-256 plugin. Embedding
+hosts can provide either private key through `Db.withAuthenticationRsaKey`;
+fsdb derives and serves its public half.
+
 `--require-secure-transport` rejects plaintext handshakes with 3159.
 Embedding hosts supply already-loaded `X509Certificate2` values through
 `Db.withTlsCertificate` and `Db.withClientCertificateAuthority`;
@@ -441,9 +448,10 @@ remain empty.
 persist through the WAL and snapshot path. New passwords use MySQL 8.4's
 `caching_sha2_password` storage transform. The wire server performs cached and
 full authentication, sending the full password through TLS or accepting the
-plugin's RSA-OAEP exchange on plaintext TCP. Explicit
-`mysql_native_password` accounts remain available and negotiate through an
-authentication switch when necessary.
+plugin's RSA-OAEP exchange on plaintext TCP. Explicit `sha256_password`
+accounts use MySQL's `$5$` SHA-256-crypt storage and full TLS or RSA exchange.
+`mysql_native_password` accounts remain available; either explicit plugin
+negotiates through an authentication switch when necessary.
 
 Account locks, TLS requirements, password lifetimes, JSON attributes and
 comments, the expired-password reset sandbox, and resource limits are

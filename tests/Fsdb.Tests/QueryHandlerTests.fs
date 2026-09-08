@@ -7674,6 +7674,7 @@ let tests =
               | ResultSet([ "Name"; "Status"; "Type"; "Library"; "License" ], rows) ->
                   let names = rows |> List.choose List.head
                   Expect.contains names "caching_sha2_password" "modern authentication plugin"
+                  Expect.contains names "sha256_password" "deprecated SHA-256 authentication plugin"
                   Expect.contains names "mysql_native_password" "legacy authentication plugin"
               | other -> failtestf "unexpected SHOW PLUGINS result: %A" other
 
@@ -7686,6 +7687,7 @@ let tests =
               | ResultSet(_, rows) ->
                   let names = rows |> List.choose List.head
                   Expect.contains names "caching_sha2_password" "caching plugin metadata"
+                  Expect.contains names "sha256_password" "SHA-256 plugin metadata"
                   Expect.contains names "mysql_native_password" "native plugin metadata"
               | other -> failtestf "unexpected information_schema.PLUGINS result: %A" other
 

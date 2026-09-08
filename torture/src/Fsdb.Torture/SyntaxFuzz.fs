@@ -184,6 +184,14 @@ module SyntaxFuzz =
            sprintf
                "CREATE USER 'syntax_sha2_hash_%s'@'%%' IDENTIFIED WITH caching_sha2_password AS '$A$005$abcdefghijklmnopqrstltGH7WP6BeJcDPwwlMdP4WaLY.f6.aTZGQXE5aAMc58'"
                suffix
+           "account_sha256",
+           sprintf "CREATE USER 'syntax_sha256_%s'@'%%' IDENTIFIED WITH sha256_password BY 'secret'" suffix
+           "account_sha256_empty",
+           sprintf "CREATE USER 'syntax_sha256_empty_%s'@'%%' IDENTIFIED WITH sha256_password" suffix
+           "account_sha256_hash",
+           sprintf
+               "CREATE USER 'syntax_sha256_hash_%s'@'%%' IDENTIFIED WITH sha256_password AS '$5$abcdefghijklmnopqrst$Yy1cVJ5jT.fk4HyAGlowRhOkI55As4SAesbspXHQvFD'"
+               suffix
            "read_uncommitted", "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
            "partition_selection", "SELECT id FROM syntax_partitioned PARTITION (p0) ORDER BY id"
            "partition_growth", "ALTER TABLE syntax_partitioned ADD PARTITION PARTITIONS 1"
