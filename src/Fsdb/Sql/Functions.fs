@@ -3249,66 +3249,94 @@ let private substringFn: Scalar =
             | Some start -> VString(text.Substring(start, min takeLen (text.Length - start)))
     | _ -> VNull
 
-/// Character-by-character substring search using the engine's default
-/// collation's `CharEquals`, so accent/case sensitivity follows the
-/// collation (e.g. `_bin`/`_cs` don't fold, `_ai_ci` also ignores accents).
-/// ponytail: Per-column behavior requires carrying the operand's collation
-/// through the scalar-function signature.
-let private collationIndexOf (str: string) (sub: string) (startIdx: int) : int =
-    if sub = "" then
-        startIdx
+let private integerArgument value =
+    let number = toDouble value
+
+    if Double.IsNaN number then 0L
+    elif number >= float System.Int64.MaxValue then System.Int64.MaxValue
+    elif number <= float System.Int64.MinValue then System.Int64.MinValue
+    else int64 number
+
+let private utf16OffsetAfterRunes (text: string) (startOffset: int) (runes: int64) =
+    let mutable offset = startOffset
+    let mutable remaining = runes
+
+    while offset < text.Length && remaining > 0L do
+        let rune = Rune.GetRuneAt(text, offset)
+        offset <- offset + rune.Utf16SequenceLength
+        remaining <- remaining - 1L
+
+    offset, remaining = 0L
+
+let private emptyNeedleOffset (collation: Collation.Collation) (str: string) (utf16Offset: int) =
+    let charset =
+        match collation.Name.IndexOf '_' with
+        | -1 -> collation.Name
+        | index -> collation.Name[..index - 1]
+
+    // MySQL exposes the charset byte offset for an empty needle even though
+    // nonempty searches report Unicode character positions.
+    if utf16Offset = 0 then
+        1L
     else
-        let charEquals = Collation.defaultCollation.CharEquals
-        let maxStart = str.Length - sub.Length
-        let mutable result = -1
-        let mutable i = startIdx
+        Charset.encode charset str[..utf16Offset - 1] |> Array.length |> int64 |> (+) 1L
 
-        while result < 0 && i <= maxStart do
-            let mutable matched = true
-            let mutable j = 0
-
-            while matched && j < sub.Length do
-                if not (charEquals str.[i + j] sub.[j]) then matched <- false
-                j <- j + 1
-
-            if matched then result <- i
-            i <- i + 1
-
-        result
-
-let private locateAt (str: string) (sub: string) (startIdx: int) : Value =
-    if startIdx > str.Length || startIdx < 0 then
+let private locateAt (collation: Collation.Collation) (str: string) (sub: string) (position: int64) : Value =
+    if position < 1L then
         VInt 0L
     else
-        VInt(int64 (collationIndexOf str sub startIdx + 1))
+        let startOffset, positionExists = utf16OffsetAfterRunes str 0 (position - 1L)
 
-let private binaryLocateAt (str: string) (sub: string) (startIdx: int) : Value =
-    if startIdx > str.Length || startIdx < 0 then
-        VInt 0L
-    else
-        VInt(int64 (str.IndexOf(sub, startIdx, StringComparison.Ordinal) + 1))
-
-let private locateFn: Scalar =
-    function
-    | [ sub; str ] when not (anyNull [ sub; str ]) ->
-        if hasRawBytes [ sub; str ] then binaryLocateAt (binaryText str) (binaryText sub) 0 else locateAt (req str) (req sub) 0
-    // A start position below 1 is invalid and yields 0, not a search from
-    // the beginning: LOCATE('l', 'Hello', 0) = 0 in MySQL.
-    | [ sub; str; posV ] when not (anyNull [ sub; str; posV ]) ->
-        let pos = int (toDouble posV)
-        if pos < 1 then
+        if not positionExists then
             VInt 0L
-        elif hasRawBytes [ sub; str ] then
-            binaryLocateAt (binaryText str) (binaryText sub) (pos - 1)
+        elif sub = "" then
+            VInt(emptyNeedleOffset collation str startOffset)
         else
-            locateAt (req str) (req sub) (pos - 1)
-    | _ -> VNull
+            let mutable offset = startOffset
+            let mutable scalarPosition = position
+            let mutable result = 0L
 
-let private instrFn: Scalar =
-    function
-    | [ str; sub ] when not (anyNull [ str; sub ]) ->
-        if hasRawBytes [ str; sub ] then binaryLocateAt (binaryText str) (binaryText sub) 0 else locateAt (req str) (req sub) 0
-    | _ -> VNull
+            while result = 0L && offset < str.Length do
+                if collation.IsSubstringPrefix (str.Substring offset) sub then
+                    result <- scalarPosition
+                else
+                    offset <- offset + (Rune.GetRuneAt(str, offset)).Utf16SequenceLength
+                    scalarPosition <- scalarPosition + 1L
+
+            VInt result
+
+let private binaryLocateAt (str: string) (sub: string) (position: int64) : Value =
+    let startIndex = position - 1L
+
+    if position < 1L || startIndex > int64 str.Length then
+        VInt 0L
+    else
+        VInt(int64 (str.IndexOf(sub, int startIndex, StringComparison.Ordinal) + 1))
+
+let private locateWith (collation: Collation.Collation) (sub: Value) (str: Value) position =
+    match tryRawBytes str with
+    | Some _ -> binaryLocateAt (binaryText str) (binaryText sub) position
+    | None -> locateAt collation (req str) (req sub) position
+
+let internal substringSearchFunction (name: string) (collation: Collation.Collation) : Scalar =
+    match name.ToUpperInvariant() with
+    | "LOCATE"
+    | "POSITION" ->
+        function
+        | [ sub; str ] when not (anyNull [ sub; str ]) -> locateWith collation sub str 1L
+        | [ sub; str; position ] when not (anyNull [ sub; str; position ]) -> locateWith collation sub str (integerArgument position)
+        | [ _; _ ]
+        | [ _; _; _ ] -> VNull
+        | _ -> nativeParameterCountError name
+    | "INSTR" ->
+        function
+        | [ str; sub ] when not (anyNull [ str; sub ]) -> locateWith collation sub str 1L
+        | [ _; _ ] -> VNull
+        | _ -> nativeParameterCountError name
+    | _ -> invalidArg (nameof name) (sprintf "Unsupported substring-search function: %s" name)
+
+let private locateFn = substringSearchFunction "LOCATE" Collation.defaultCollation
+let private instrFn = substringSearchFunction "INSTR" Collation.defaultCollation
 
 let private replaceFn: Scalar =
     function
@@ -3324,14 +3352,6 @@ let private replaceFn: Scalar =
 let private insertStringFn: Scalar =
     function
     | [ source; position; length; replacement ] when not (anyNull [ source; position; length; replacement ]) ->
-        let integerArgument value =
-            let number = toDouble value
-
-            if Double.IsNaN number then 0L
-            elif number >= float System.Int64.MaxValue then System.Int64.MaxValue
-            elif number <= float System.Int64.MinValue then System.Int64.MinValue
-            else int64 number
-
         let position = integerArgument position
         let length = integerArgument length
 
@@ -3358,26 +3378,14 @@ let private insertStringFn: Scalar =
                     VBytes result
         | None ->
             let text = req source
-
-            let utf16OffsetAtRune (startOffset: int) (runes: int64) =
-                let mutable offset = startOffset
-                let mutable remaining = runes
-
-                while offset < text.Length && remaining > 0L do
-                    let rune = Rune.GetRuneAt(text, offset)
-                    offset <- offset + rune.Utf16SequenceLength
-                    remaining <- remaining - 1L
-
-                offset, remaining = 0L
-
-            let start, positionExists = utf16OffsetAtRune 0 (position - 1L)
+            let start, positionExists = utf16OffsetAfterRunes text 0 (position - 1L)
 
             if position < 1L || not positionExists || start = text.Length then
                 source
             else
                 let finish =
                     if length < 0L then text.Length
-                    else utf16OffsetAtRune start length |> fst
+                    else utf16OffsetAfterRunes text start length |> fst
 
                 let inserted = req replacement
                 let resultLength =

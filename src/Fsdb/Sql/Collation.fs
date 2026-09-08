@@ -52,6 +52,10 @@ type Collation =
       /// equality. Full-text wildcard terms use this because canonical sort
       /// keys do not preserve textual prefix boundaries.
       IsPrefix: string -> string -> bool
+      /// `LOCATE`/`INSTR` prefix matching. MySQL applies case and linguistic
+      /// expansion rules here, but keeps accents significant even for an
+      /// accent-insensitive collation.
+      IsSubstringPrefix: string -> string -> bool
       /// PAD SPACE: trailing spaces are insignificant — `Equals` trims,
       /// and LIKE trims both subject and pattern ends before matching.
       PadSpace: bool
@@ -104,6 +108,16 @@ let private countTrailingSpaces (s: string) : int =
 
     n
 
+let private substringExpansions =
+    [ "ß", "ss"
+      "ẞ", "SS"
+      "æ", "ae"
+      "Æ", "AE"
+      "œ", "oe"
+      "Œ", "OE"
+      "ĳ", "ij"
+      "Ĳ", "IJ" ]
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
@@ -138,6 +152,20 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             value
 
     let primaryText (s: string) = trim s |> foldText
+    let substringFold =
+        if spec.Fold.HasFlag CompareOptions.IgnoreCase then
+            CompareOptions.IgnoreCase
+        else
+            CompareOptions.None
+
+    let substringText (value: string) =
+        let expanded =
+            if name = "utf8mb4_general_ci" then
+                value
+            else
+                substringExpansions |> List.fold (fun text (source, target) -> text.Replace(source, target)) value
+
+        expanded.Normalize(NormalizationForm.FormD)
 
     let binaryWeight (s: string) =
         if name = "utf8mb3_bin" || name = "utf8mb4_bin" then
@@ -212,6 +240,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             binaryPrefix
         else
             fun value prefix -> ci.IsPrefix(foldText value, foldText prefix, spec.Fold)
+      IsSubstringPrefix =
+        if spec.ByteOrder then
+            binaryPrefix
+        else
+            fun value prefix -> ci.IsPrefix(substringText value, substringText prefix, substringFold)
       PadSpace = spec.PadSpace
       EqualityIsOrderEquivalence =
         not spec.PadSpace

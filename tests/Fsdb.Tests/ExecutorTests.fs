@@ -165,6 +165,41 @@ let tests =
                     | ResultSet(_, [ [ Some "2"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected POSITION offsets 2 and 0, got %A" other
 
+                testCase "substring searches use haystack collation and character positions"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE substring_collations (ci VARCHAR(40) COLLATE utf8mb4_0900_ai_ci, bin VARCHAR(40) COLLATE utf8mb4_bin)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO substring_collations VALUES ('aéstraße', 'aéstraße')" |> ignore
+
+                    let query =
+                        [ "LOCATE('A', ci)"
+                          "LOCATE('A', bin)"
+                          "INSTR(ci, 'E')"
+                          "POSITION(('SS') IN (ci))"
+                          "LOCATE('ß', 'strasse' COLLATE utf8mb4_0900_ai_ci)"
+                          "LOCATE('e', 'é' COLLATE utf8mb4_general_ci)"
+                          "LOCATE('ss', 'ß' COLLATE utf8mb4_general_ci)"
+                          "LOCATE('b', 'a😀b')"
+                          "LOCATE('b', 'a😀b', 3)"
+                          "LOCATE('', 'a😀b', 3)"
+                          "LOCATE(X'61', 'Aa')"
+                          "LOCATE('a', X'4161')" ]
+                        |> String.concat ", "
+                        |> sprintf "SELECT %s FROM substring_collations"
+
+                    let expected =
+                        [ "1"; "0"; "8"; "7"; "5"; "0"; "0"; "3"; "3"; "6"; "1"; "2" ]
+                        |> List.map Some
+
+                    match runDefault store query with
+                    | ResultSet(_, [ row ]) -> Expect.equal row expected "search results"
+                    | other -> failtestf "expected one row of collation-aware scalar offsets, got %A" other
+
                 testCase "binary-introduced hexadecimal literals retain their bytes"
                 <| fun _ ->
                     match runDefault (newStore ()) "SELECT HEX(_binaryX'01A03D')" with

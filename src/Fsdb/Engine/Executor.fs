@@ -4445,6 +4445,33 @@ let private evalLogicalOr left evaluateRight =
             evaluateRight ()
             |> Result.map (fun right -> if truthy right = Some true then VInt 1L else VNull))
 
+let private prepareScalarArguments ctx name expressions values =
+    List.zip expressions values
+    |> List.mapi (fun index (expression, value) ->
+        let value =
+            if Functions.isTextArgument name index ctx.Registry then
+                displayValueForText ctx expression value
+            else
+                value
+
+        match value with
+        | VString text when Functions.isByteArgument name index ctx.Registry ->
+            VBytes(Charset.encode (sourceCharset ctx expression) text)
+        | _ -> value)
+
+let private substringSearchHaystack (name: string) (arguments: Expr list) =
+    match name.ToUpperInvariant(), arguments with
+    | ("LOCATE" | "POSITION"), _ :: haystack :: _ -> Some haystack
+    | "INSTR", haystack :: _ -> Some haystack
+    | _ -> None
+
+let private isSubstringSearchFunction (name: string) =
+    match name.ToUpperInvariant() with
+    | "LOCATE"
+    | "POSITION"
+    | "INSTR" -> true
+    | _ -> false
+
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
 
@@ -4962,6 +4989,18 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
              && Functions.isUnmodifiedBuiltinScalar unquoteName ctx.Registry
              && Functions.isUnmodifiedBuiltinScalar extractName ctx.Registry ->
         arguments |> traverse eval |> Result.map Functions.jsonExtractUnquotedFn
+    | FuncCall(name, arguments)
+        when isSubstringSearchFunction name && Functions.isUnmodifiedBuiltinScalar name ctx.Registry ->
+        let collation =
+            substringSearchHaystack name arguments
+            |> Option.map (keyCollation ctx)
+            |> Option.defaultValue ctx.Store.ExecutionSettings.ConnectionCollation
+
+        let search = Functions.substringSearchFunction name collation
+
+        arguments
+        |> traverse eval
+        |> Result.map (prepareScalarArguments ctx name arguments >> search)
     | FuncCall(name, subjectExpr :: patternExpr :: rest)
         when name.Equals("REGEXP_LIKE", System.StringComparison.OrdinalIgnoreCase)
              || name.Equals("REGEXP_INSTR", System.StringComparison.OrdinalIgnoreCase)
@@ -5008,19 +5047,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 |> traverse eval
                 |> Result.bind (fun values ->
                     try
-                        let values =
-                            List.zip args values
-                            |> List.mapi (fun index (expression, value) ->
-                                let value =
-                                    if Functions.isTextArgument name index ctx.Registry then
-                                        displayValueForText ctx expression value
-                                    else
-                                        value
-
-                                match value with
-                                | VString text when Functions.isByteArgument name index ctx.Registry ->
-                                    VBytes(Charset.encode (sourceCharset ctx expression) text)
-                                | _ -> value)
+                        let values = prepareScalarArguments ctx name args values
 
                         let invoke () =
                             let value = fn values
