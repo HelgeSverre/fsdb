@@ -5404,7 +5404,45 @@ let tests =
 
           testList
               "Equality-index lookup paths"
-              [ testCase "scan-shaped mutations preserve direct comparison semantics"
+              [ testCase "scan-shaped reads preserve direct comparison semantics"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE scanned (id INT, name VARCHAR(10) COLLATE utf8mb4_bin, status ENUM('open','closed'), nullable INT)"
+                    |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO scanned VALUES (1,'a','open',NULL),(2,'A','closed',1),(3,'b','open',NULL)"
+                    |> ignore
+
+                    match runDefault store "SELECT id FROM scanned WHERE name = 'A'" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ] ] "binary collation stays case-sensitive"
+                    | other -> failtestf "expected a binary comparison result, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) FROM scanned WHERE status = 1" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ] ] "ENUM comparisons use declaration ordinals"
+                    | other -> failtestf "expected an ENUM count, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM scanned WHERE nullable <=> NULL ORDER BY id"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1" ]; [ Some "3"; Some "2" ] ]
+                            "window input retains null-safe equality"
+                    | other -> failtestf "expected null-safe window input, got %A" other
+
+                    match runDefault store "SELECT id FROM scanned WHERE 2 < id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "a literal-left comparison keeps its operand direction"
+                    | other -> failtestf "expected a literal-left result, got %A" other
+
+                testCase "scan-shaped mutations preserve direct comparison semantics"
                 <| fun _ ->
                     let store = newStore ()
 

@@ -5317,14 +5317,16 @@ and private tryCorrelatedCount (outer: EvalContext) (select: SelectStmt) : Resul
                         (singleQualifier qualifier columns)
                         (Some outer)
 
-                withMetadataProbe (fun () -> whereMatches context select.Where (probeRow columns))
+                let matches = prepareWhereMatches context select.Where
+
+                withMetadataProbe (fun () -> matches (probeRow columns))
                 |> Result.bind (fun _ ->
                     rows
                     |> List.fold
                         (fun countResult row ->
                             countResult
                             |> Result.bind (fun count ->
-                                whereMatches context select.Where row
+                                matches row
                                 |> Result.map (fun matches -> if matches then count + 1L else count)))
                         (Ok 0L)
                     |> Result.map VInt))
@@ -6525,10 +6527,10 @@ and private whereMatches (ctxFor: Value[] -> EvalContext) (where: Expr option) (
     | None -> Ok true
     | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
-and private prepareMutationPredicate
+and private prepareWhereMatches
     (ctxFor: Value[] -> EvalContext)
     (where: Expr option)
-    : Result<Value[] -> Result<bool, EvalError>, EvalError> =
+    : Value[] -> Result<bool, EvalError> =
     let fallback = whereMatches ctxFor where
     let context = { ctxFor [||] with Clause = WhereClause }
 
@@ -6547,15 +6549,18 @@ and private prepareMutationPredicate
             |> Some
         | _ -> None
 
-    if not (storedValuesMatchReadValues context.Store) then
-        Ok fallback
-    else
-        match where with
-        | Some(BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), column, (Lit _ as literal))) ->
-            directComparison op column literal true |> Option.defaultValue (Ok fallback)
-        | Some(BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (Lit _ as literal), column)) ->
-            directComparison op column literal false |> Option.defaultValue (Ok fallback)
-        | _ -> Ok fallback
+    let prepared =
+        if not (storedValuesMatchReadValues context.Store) then
+            Ok fallback
+        else
+            match where with
+            | Some(BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), column, (Lit _ as literal))) ->
+                directComparison op column literal true |> Option.defaultValue (Ok fallback)
+            | Some(BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (Lit _ as literal), column)) ->
+                directComparison op column literal false |> Option.defaultValue (Ok fallback)
+            | _ -> Ok fallback
+
+    fun row -> prepared |> Result.bind (fun predicate -> predicate row)
 
 /// `NATURAL JOIN`'s name set: every column name the two sides share,
 /// matched case-insensitively (MySQL matches `c1(X)` against `c2(x)`), in
@@ -7229,9 +7234,11 @@ and private filterSourceRows
             (singleQualifier qualifier columns)
             outer
 
+    let matches = prepareWhereMatches context (Some predicate)
+
     rows
     |> traverseSeq (fun row ->
-        whereMatches context (Some predicate) row
+        matches row
         |> Result.map (fun matches -> if matches then Some row else None))
     |> Result.mapError Err
     |> Result.map (fun filtered -> filtered :> Value[] seq)
@@ -11662,7 +11669,7 @@ and private runGroupedSelect
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
-    let matches = whereMatches ctxFor select.Where
+    let matches = prepareWhereMatches ctxFor select.Where
 
     let representativeOf (groupRows: Value[] list) : Value[] = groupRows |> List.tryHead |> Option.defaultValue (probeRow columns)
 
@@ -12133,7 +12140,7 @@ and private runWindowedSelect
 
     let columnIndex = columnIndexOf columns
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
-    let matches = whereMatches ctxFor select.Where
+    let matches = prepareWhereMatches ctxFor select.Where
 
     match rows |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
     | Error(code, message) -> Err(code, message), [], []
@@ -13684,8 +13691,10 @@ and private runSelect
     // where `HAVING` actually needs a group's aggregated results (see the
     // `containsAggregate`/`GroupBy.IsEmpty` routing above) — so it's just
     // ANDed onto the same per-row `matches` check here.
+    let matchesWhere = prepareWhereMatches ctxFor whereExpr
+
     let matches (row: Value[]) : Result<bool, EvalError> =
-        whereMatches ctxFor whereExpr row
+        matchesWhere row
         |> Result.bind (fun keep ->
             if not keep then
                 Ok false
@@ -19192,8 +19201,8 @@ let rec executeAs
 
                 let preparedPredicate =
                     match fullTextPlan with
-                    | None -> prepareMutationPredicate ctxFor updateStmt.Where
-                    | Some _ -> Ok(whereMatches ctxFor updateStmt.Where)
+                    | None -> prepareWhereMatches ctxFor updateStmt.Where
+                    | Some _ -> whereMatches ctxFor updateStmt.Where
 
                 let check row =
                     match fullTextPlan with
@@ -19201,10 +19210,7 @@ let rec executeAs
                         match fullTextRowIds.TryGetValue row with
                         | true, rowId -> whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
                         | false, _ -> Ok false
-                    | None ->
-                        match preparedPredicate with
-                        | Ok predicate -> predicate row
-                        | Error error -> Error error
+                    | None -> preparedPredicate row
 
                 let probePredicate =
                     fullTextPlan
@@ -19604,8 +19610,8 @@ let rec executeAs
 
             let preparedPredicate =
                 match fullTextPlan with
-                | None -> prepareMutationPredicate ctxFor deleteStmt.Where
-                | Some _ -> Ok(whereMatches ctxFor deleteStmt.Where)
+                | None -> prepareWhereMatches ctxFor deleteStmt.Where
+                | Some _ -> whereMatches ctxFor deleteStmt.Where
 
             let check row =
                 match fullTextPlan with
@@ -19613,10 +19619,7 @@ let rec executeAs
                     match fullTextRowIds.TryGetValue row with
                     | true, rowId -> whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
                     | false, _ -> Ok false
-                | None ->
-                    match preparedPredicate with
-                    | Ok predicate -> predicate row
-                    | Error error -> Error error
+                | None -> preparedPredicate row
 
             let probePredicate =
                 fullTextPlan
