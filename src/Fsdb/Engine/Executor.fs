@@ -2700,6 +2700,12 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
         | ("ST_ASWKB" | "ST_ASBINARY" | "ASBINARY"), _ ->
             Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        | "ST_BUFFER_STRATEGY", _ ->
+            Some
+                { Value.columnMetadata TypeVarString with
+                    ColumnLength = 16u
+                    Decimals = 31uy
+                    Flags = BinaryFlag }
         | ("ST_ENVELOPE" | "ST_CONVEXHULL" | "ST_BUFFER" | "ST_INTERSECTION" | "ST_UNION" | "ST_DIFFERENCE" | "ST_SYMDIFFERENCE"), _ ->
             geometry
         | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY" | "ST_ISVALID"), _ -> simple TypeLongLong

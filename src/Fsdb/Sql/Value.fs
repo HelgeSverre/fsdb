@@ -48,6 +48,17 @@ let geometryKind = function
     | GMultiPolygon _ -> MultiPolygon
     | GGeometryCollection _ -> GeometryCollection
 
+let rec geometrySupportsNegativeBuffer = function
+    | GPolygon _
+    | GMultiPolygon _ -> true
+    | GGeometryCollection geometries ->
+        geometries
+        |> List.forall (fun geometry ->
+            match geometry.Shape with
+            | GEmpty -> true
+            | shape -> geometrySupportsNegativeBuffer shape)
+    | _ -> false
+
 let geometryTypeCode = function
     | Point -> 1
     | LineString -> 2
@@ -478,19 +489,40 @@ let geometryEnvelope (geometry: Geometry) : Geometry =
 
     { geometry with Shape = shape }
 
-let geometryPointBufferPlanar (distance: float) (geometry: Geometry) : Geometry option =
+let geometryPointBufferWithSegmentsPlanar segments (distance: float) (geometry: Geometry) : Geometry option =
     match geometry.Shape with
-    | _ when distance < 0.0 || not (Double.IsFinite distance) -> None
+    | _ when segments < 3 || distance < 0.0 || not (Double.IsFinite distance) -> None
     | GPoint(x, y) when distance = 0.0 -> Some geometry
     | GPoint(x, y) ->
         let ring =
-            [ 0 .. 31 ]
+            [ 0 .. segments - 1 ]
             |> List.map (fun index ->
-                let angle = float index * Math.PI / 16.0
+                let angle = float index * 2.0 * Math.PI / float segments
                 x + distance * Math.Cos angle, y + distance * Math.Sin angle)
 
         if ring |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y) then
             Some { geometry with Shape = GPolygon [ ring @ [ List.head ring ] ] }
+        else
+            None
+    | _ -> None
+
+let geometryPointBufferPlanar distance geometry =
+    geometryPointBufferWithSegmentsPlanar 32 distance geometry
+
+let geometryPointSquareBufferPlanar (distance: float) (geometry: Geometry) : Geometry option =
+    match geometry.Shape with
+    | _ when distance < 0.0 || not (Double.IsFinite distance) -> None
+    | GPoint _ when distance = 0.0 -> Some geometry
+    | GPoint(x, y) ->
+        let ring =
+            [ (x - distance, y - distance)
+              (x + distance, y - distance)
+              (x + distance, y + distance)
+              (x - distance, y + distance)
+              (x - distance, y - distance) ]
+
+        if ring |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y) then
+            Some { geometry with Shape = GPolygon [ ring ] }
         else
             None
     | _ -> None

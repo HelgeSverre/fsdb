@@ -934,7 +934,9 @@ let tests =
                   + "ST_Equals(ST_Intersection(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), "
                   + "ST_GeomFromText('POLYGON((2 -1,5 -1,5 2,2 2,2 -1))')), "
                   + "ST_GeomFromText('POLYGON((4 2,2 2,2 0,4 0,4 2))')), "
-                  + "ST_Contains(ST_Buffer(ST_GeomFromText('LINESTRING(0 0,2 0)'), 1), ST_GeomFromText('POINT(1 0)'))"
+                  + "ST_Contains(ST_Buffer(ST_GeomFromText('LINESTRING(0 0,2 0)'), 1), ST_GeomFromText('POINT(1 0)')), "
+                  + "ST_Equals(ST_Buffer(ST_GeomFromText('POINT(0 0)'), 2, ST_Buffer_Strategy('point_square')), "
+                  + "ST_GeomFromText('POLYGON((-2 -2,2 -2,2 2,-2 2,-2 -2))'))"
 
               match
                   handle
@@ -947,6 +949,7 @@ let tests =
                       row
                       [ Some "3"
                         Some "POLYGON((1 3,2 3,2 4,1 4,1 3))"
+                        Some "1"
                         Some "1"
                         Some "1"
                         Some "1"
@@ -975,6 +978,7 @@ let tests =
                   + "ST_Union(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(1 1)')), "
                   + "ST_Difference(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(1 1)')), "
                   + "ST_SymDifference(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(1 1)')), "
+                  + "ST_Buffer_Strategy('point_square'), "
                   + "ST_IsValid(ST_GeomFromText('POINT(0 0)')) LIMIT 0"
 
               match handle session statement with
@@ -992,9 +996,21 @@ let tests =
                         TypeGeometry
                         TypeGeometry
                         TypeGeometry
+                        TypeVarString
                         TypeLongLong ]
                       "function metadata"
               | _, other -> failtestf "expected empty resultset, got %A" other
+
+              match handle session "SELECT ST_Buffer_Strategy('point_square') LIMIT 0" with
+              | strategySession, ResultSet(_, []) ->
+                  match strategySession.LastResultColumnMetadata with
+                  | [ metadata ] ->
+                      Expect.equal metadata.TypeId TypeVarString "strategy wire type"
+                      Expect.equal metadata.ColumnLength 16u "strategy wire length"
+                      Expect.equal metadata.Decimals 31uy "strategy decimals"
+                      Expect.equal metadata.Flags BinaryFlag "strategy flags"
+                  | metadata -> failtestf "expected one strategy descriptor, got %A" metadata
+              | _, other -> failtestf "expected empty strategy resultset, got %A" other
 
           // A resultset's types are read off the row `Value`s, which know
           // nothing about how the column was declared. Where a projection

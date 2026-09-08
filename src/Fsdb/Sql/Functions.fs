@@ -5551,32 +5551,102 @@ let private geometryOverlayFn functionName operation =
         | Ok result -> VGeometry result
         | Error detail -> geometryError functionName detail)
 
-let private geometryBufferFn: Scalar =
+let private geometryBufferStrategyFn: Scalar =
+    let wrongArguments () = raise (SqlError(1210, "Incorrect arguments to st_buffer_strategy"))
+
+    let checkedPoints value =
+        let points = toDouble value
+
+        if not (Double.IsFinite points) || points <= 0.0 then
+            wrongArguments ()
+
+        if points > float GeometryOperations.maxBufferPointsPerCircle then
+            raise (
+                SqlError(
+                    3134,
+                    sprintf
+                        "Parameter points_per_circle exceeds the maximum number of points in a geometry (%d) in function st_buffer_strategy."
+                        GeometryOperations.maxBufferPointsPerCircle
+                )
+            )
+
+        points
+
     function
+    | [ VNull ]
     | [ VNull; _ ]
     | [ _; VNull ] -> VNull
-    | [ value; distanceValue ] ->
-        let geometry = geometryArgument "ST_BUFFER" value |> requirePlanar "ST_BUFFER"
-        let distance = toDouble distanceValue
-        let kind = geometryKind geometry.Shape
+    | [ name ] ->
+        match req name |> _.ToLowerInvariant() with
+        | "end_flat" -> BufferStrategy.EndFlat
+        | "point_square" -> BufferStrategy.PointSquare
+        | _ -> wrongArguments ()
+        |> GeometryOperations.encodeBufferStrategy
+        |> VBytes
+    | [ name; pointsValue ] ->
+        let points = checkedPoints pointsValue
 
-        if not (Double.IsFinite distance) then
-            raise (SqlError(1210, "Incorrect arguments to st_buffer"))
+        match req name |> _.ToLowerInvariant() with
+        | "end_round" -> BufferStrategy.EndRound points
+        | "join_round" -> BufferStrategy.JoinRound points
+        | "join_miter" -> BufferStrategy.JoinMiter points
+        | "point_circle" -> BufferStrategy.PointCircle points
+        | _ -> wrongArguments ()
+        |> GeometryOperations.encodeBufferStrategy
+        |> VBytes
+    | _ -> nativeParameterCountError "st_buffer_strategy"
 
-        if distance = 0.0 then
-            VGeometry geometry
-        elif distance < 0.0 && kind <> Polygon && kind <> MultiPolygon then
-            raise (SqlError(1210, "Incorrect arguments to st_buffer"))
-        else
-            let buffered =
-                match geometryPointBufferPlanar distance geometry with
-                | Some pointBuffer -> Ok pointBuffer
-                | None -> GeometryOperations.buffer distance geometry
+let private geometryBufferFn: Scalar =
+    function
+    | args when args.Length < 2 || args.Length > 5 -> nativeParameterCountError "st_buffer"
+    | value :: distanceValue :: strategyValues ->
+        match value, distanceValue with
+        | VNull, _
+        | _, VNull -> VNull
+        | _ ->
+            let geometry = geometryArgument "ST_BUFFER" value |> requirePlanar "ST_BUFFER"
+            let distance = toDouble distanceValue
+            let kind = geometryKind geometry.Shape
 
-            match buffered with
-            | Ok buffer -> VGeometry buffer
-            | Error _ -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))
-    | [ _; _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER strategies'"))
+            if not (Double.IsFinite distance) then
+                raise (SqlError(1210, "Incorrect arguments to st_buffer"))
+
+            if strategyValues |> List.exists (function VNull -> true | _ -> false) then
+                VNull
+            elif distance = 0.0 then
+                VGeometry geometry
+            else
+                let strategies =
+                    strategyValues
+                    |> List.map (function
+                        | VBytes bytes ->
+                            match GeometryOperations.tryDecodeBufferStrategy bytes with
+                            | Some strategy -> strategy
+                            | None -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))
+                        | _ -> raise (SqlError(1210, "Incorrect arguments to st_buffer")))
+
+                match geometry.Shape with
+                | GEmpty -> VGeometry geometry
+                | shape when distance < 0.0 && not (geometrySupportsNegativeBuffer shape) ->
+                    raise (SqlError(1210, "Incorrect arguments to st_buffer"))
+                | _ ->
+                    let pointBuffer =
+                        match kind, strategies with
+                        | Point, [] -> geometryPointBufferPlanar distance geometry
+                        | Point, [ BufferStrategy.PointCircle points ] ->
+                            geometryPointBufferWithSegmentsPlanar (max 3 (int points)) distance geometry
+                        | Point, [ BufferStrategy.PointSquare ] -> geometryPointSquareBufferPlanar distance geometry
+                        | _ -> None
+
+                    match pointBuffer with
+                    | Some buffer -> VGeometry buffer
+                    | None ->
+                        match GeometryOperations.buffer strategies distance geometry with
+                        | Ok buffer -> VGeometry buffer
+                        | Error BufferError.InvalidStrategy
+                        | Error(BufferError.OperationFailed _) -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))
+                        | Error BufferError.UnsupportedRoundResolution ->
+                            raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER round strategies whose resolution is not divisible by four'"))
     | _ -> nativeParameterCountError "st_buffer"
 
 let private geometryPredicateFn functionName predicate =
@@ -5690,6 +5760,7 @@ let private registerSpatialBuiltins registry =
         (geometryPredicateFn "ST_DISJOINT" (fun first second -> geometryIntersectsPlanar first second |> Option.map not))
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
     |> registerScalarResult "ST_BUFFER" binaryResult geometryBufferFn
+    |> registerScalarResult "ST_BUFFER_STRATEGY" binaryResult geometryBufferStrategyFn
     |> registerScalarResult "ST_INTERSECTION" binaryResult (geometryOverlayFn "ST_INTERSECTION" Intersection)
     |> registerScalarResult "ST_UNION" binaryResult (geometryOverlayFn "ST_UNION" Union)
     |> registerScalarResult "ST_DIFFERENCE" binaryResult (geometryOverlayFn "ST_DIFFERENCE" Difference)

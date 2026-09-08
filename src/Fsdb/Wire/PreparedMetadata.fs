@@ -91,6 +91,8 @@ let private functionParameterMetadata (registry: Registry) (name: string) index 
         Some signedInteger
     | None when name = "SHA2" && index = 1 ->
         Some signedInteger
+    | None when name = "ST_BUFFER_STRATEGY" ->
+        Some(if index = 0 then generic else floatingPoint)
     | None when Set.contains name jsonMutationFunctions && index % 2 = 0 ->
         Some json
     | None when Set.contains name jsonFirstArgument && index = 0 ->
@@ -101,6 +103,8 @@ let private functionParameterMetadata (registry: Registry) (name: string) index 
         Some geometry
     | None when name = "ST_BUFFER" && index = 1 ->
         Some floatingPoint
+    | None when name = "ST_BUFFER" && index > 1 ->
+        Some binary
     | None when name = "ST_SRID" && index = 1 ->
         Some signedInteger
     | None when Set.contains name wkbConstructors && index = 0 ->
