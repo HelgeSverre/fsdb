@@ -122,8 +122,9 @@ Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
 tests reuse typed sets and can narrow a directly indexed outer table.
 Compatible direct-column scalar literal lists use the same statement-scoped
-membership representation. Correlated forms preserve MySQL NULL and
-multi-column error semantics.
+membership representation. Correlated equality probes use single or composite
+keys through pass-through derived tables and CTEs; correlated forms preserve
+MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,

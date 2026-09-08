@@ -392,6 +392,14 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedDerivedCompositeEquality() =
+        this.Query(
+            "SELECT o.id, (SELECT COUNT(*) FROM (SELECT id, user_id, status FROM orders) c "
+            + "WHERE c.user_id = o.user_id AND c.status = o.status) FROM orders o WHERE o.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedCteEquality() =
         this.Query(
             "WITH candidates AS (SELECT id, user_id FROM orders) "

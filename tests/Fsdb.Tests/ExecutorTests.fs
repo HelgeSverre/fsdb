@@ -8120,6 +8120,65 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected the binary outer collation to remain authoritative, got %A" other
 
+                testCase "correlated derived sources use composite equality indexes"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            List.exactlyOne values)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE outer_pairs (tenant_id INT, bucket INT)" |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE candidates (id INT PRIMARY KEY, tenant_id INT, bucket INT, KEY ix_pair (tenant_id, bucket))"
+                    |> ignore
+
+                    [ 1..50 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" (((id - 1) % 10) + 1) (((id - 1) / 10) + 1))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO outer_pairs VALUES " + rows)
+                    |> ignore
+
+                    [ 1..1000 ]
+                    |> List.map (fun id ->
+                        let pair = (id - 1) % 50
+                        sprintf "(%d,%d,%d)" id ((pair % 10) + 1) ((pair / 10) + 1))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO candidates VALUES " + rows)
+                    |> ignore
+
+                    let assertCompositeProbe prefix source =
+                        calls <- 0
+
+                        match
+                            run
+                                store
+                                registry
+                                (sprintf
+                                    "%s SELECT o.tenant_id, o.bucket, (SELECT COUNT(*) FROM %s WHERE c.tenant_id = o.tenant_id AND c.bucket = o.bucket AND TOUCH(c.id) = c.id) FROM outer_pairs o ORDER BY o.tenant_id, o.bucket"
+                                    prefix
+                                    source)
+                        with
+                        | ResultSet(_, rows) ->
+                            Expect.equal rows.Length 50 "every outer composite key is retained"
+                            Expect.isTrue (rows |> List.forall (fun row -> row.[2] = Some "20")) "each pair has twenty candidates"
+                        | other -> failtestf "expected correlated composite counts, got %A" other
+
+                        Expect.isLessThan calls 2000 "only composite-index candidates reach the residual predicate"
+
+                    assertCompositeProbe
+                        ""
+                        "(SELECT id, tenant_id, bucket FROM candidates) c"
+
+                    assertCompositeProbe
+                        "WITH projected(candidate_id, tenant_key, bucket_key) AS (SELECT id, tenant_id, bucket FROM candidates)"
+                        "(SELECT candidate_id AS id, tenant_key AS tenant_id, bucket_key AS bucket FROM projected) c"
+
                 testCase "an unindexed correlated equality materializes keyed candidates once"
                 <| fun _ ->
                     let mutable calls = 0

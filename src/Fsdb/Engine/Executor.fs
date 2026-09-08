@@ -9968,6 +9968,33 @@ and private tryProjectedPhysicalEqualityRows
             || isUsefulEqualityCardinality projection.PhysicalTable.RowsArray.Count rows.Length)
         |> Option.bind (fun (_, rows) -> projectPhysicalLookupRows store registry dbName projection rows))
 
+and private tryProjectedPhysicalEqualitiesRows
+    policy
+    store
+    registry
+    dbName
+    (projection: PhysicalProjection)
+    (equalities: (string * Value) list)
+    =
+    let composite =
+        equalities
+        |> List.map (fun (column, value) ->
+            tryPhysicalProjectionColumn projection column
+            |> Option.map (fun sourceColumn -> sourceColumn.Name, value))
+        |> tryAllSome
+        |> Option.filter (fun physicalEqualities -> physicalEqualities.Length > 1)
+        |> Option.bind (Storage.tryCompositeEqualityLookupInTable store projection.PhysicalTable)
+        |> Option.filter (fun lookup ->
+            policy = CandidateNarrowing
+            || isUsefulEqualityCardinality lookup.TableRowCount lookup.LookupRowIds.Count)
+        |> Option.bind (fun lookup ->
+            projectPhysicalLookupRows store registry dbName projection lookup.LookupRows.Value)
+
+    composite
+    |> Option.orElseWith (fun () ->
+        equalities
+        |> List.tryPick (tryProjectedPhysicalEqualityRows policy store registry dbName projection))
+
 and private tryProjectedPhysicalLiteralInRows store registry dbName (projection: PhysicalProjection) (probe: LiteralInProbe) =
     probe.Columns
     |> List.map fst
@@ -10030,9 +10057,7 @@ and private tryProjectedPhysicalCorrelatedEqualityLookup
     tryPhysicalProjection store registry dbName source
     |> Option.bind (fun projection ->
         correlatedEqualityPredicates (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns) whereExpr outer
-        |> Option.bind (fun equalities ->
-            equalities
-            |> List.tryPick (tryProjectedPhysicalEqualityRows CandidateNarrowing store registry dbName projection)))
+        |> Option.bind (tryProjectedPhysicalEqualitiesRows CandidateNarrowing store registry dbName projection))
 
 and private tryProjectedPhysicalCorrelatedRangeLookup
     (store: Store)
