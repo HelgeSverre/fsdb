@@ -26,27 +26,27 @@ let tests =
                   Expect.equal rows [ [ Some "widget"; Some "5" ]; [ Some "gadget"; Some "9" ] ] "each row joined to itself"
               | other -> failtestf "expected a joined resultset, got %A" other
 
-          testCase "inner joins choose the smallest ready indexed source unless STRAIGHT_JOIN pins order"
+          testCase "inner joins reorder around unambiguous bare columns unless STRAIGHT_JOIN pins order"
           <| fun _ ->
               let store = newStore ()
-              runDefault store "CREATE TABLE base_rows (id INT PRIMARY KEY)" |> ignore
-              runDefault store "CREATE TABLE large_rows (id INT PRIMARY KEY, base_id INT, INDEX ix_large_base (base_id))" |> ignore
+              runDefault store "CREATE TABLE base_rows (id INT PRIMARY KEY, marker INT)" |> ignore
+              runDefault store "CREATE TABLE large_rows (id INT PRIMARY KEY, base_id INT, future_key INT, INDEX ix_large_base (base_id))" |> ignore
               runDefault store "CREATE TABLE small_rows (id INT PRIMARY KEY, base_id INT, INDEX ix_small_base (base_id))" |> ignore
-              runDefault store "INSERT INTO base_rows VALUES (1), (2)" |> ignore
+              runDefault store "INSERT INTO base_rows VALUES (1, 7), (2, 8)" |> ignore
 
               [ 1..100 ]
-              |> List.map (fun id -> sprintf "(%d, %d)" id (if id = 1 then 1 else 2))
+              |> List.map (fun id -> sprintf "(%d, %d, %d)" id (if id = 1 then 7 else 8) id)
               |> String.concat ","
               |> sprintf "INSERT INTO large_rows VALUES %s"
               |> runDefault store
               |> ignore
 
-              runDefault store "INSERT INTO small_rows VALUES (1, 1)" |> ignore
+              runDefault store "INSERT INTO small_rows VALUES (1, 7)" |> ignore
 
               let sql =
-                  "SELECT base_rows.id FROM base_rows "
-                  + "JOIN large_rows ON large_rows.base_id = base_rows.id "
-                  + "JOIN small_rows ON small_rows.base_id = base_rows.id"
+                  "SELECT marker FROM base_rows "
+                  + "JOIN large_rows ON large_rows.base_id = marker "
+                  + "JOIN small_rows ON small_rows.base_id = marker"
 
               let explainedTables query =
                   runDefault store ("EXPLAIN " + query)
@@ -63,8 +63,28 @@ let tests =
                   [ "base_rows"; "large_rows"; "small_rows" ]
                   "STRAIGHT_JOIN preserves source order"
 
+              Expect.equal
+                  (explainedTables (sql.Replace("SELECT marker", "SELECT *")))
+                  [ "base_rows"; "large_rows"; "small_rows" ]
+                  "an unqualified star preserves result-column order"
+
+              Expect.equal
+                  (explainedTables (sql.Replace("SELECT marker", "SELECT base_rows.id AS chosen") + " ORDER BY chosen"))
+                  [ "base_rows"; "large_rows"; "small_rows" ]
+                  "a projection alias is not mistaken for a source column"
+
+              match
+                  runDefault
+                      store
+                      ("SELECT base_rows.id FROM base_rows "
+                       + "JOIN small_rows ON small_rows.base_id = future_key "
+                       + "JOIN large_rows ON large_rows.base_id = base_rows.marker")
+              with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected a forward bare reference to remain out of scope, got %A" other
+
               match runDefault store (sql + " ORDER BY base_rows.id") with
-              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "reordering preserves join results"
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "7" ] ] "reordering preserves the bare-column result"
               | other -> failtestf "expected joined rows, got %A" other
 
           testCase "a qualified base-table range narrows before joining"

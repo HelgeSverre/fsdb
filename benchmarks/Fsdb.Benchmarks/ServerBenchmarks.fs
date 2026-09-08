@@ -364,6 +364,16 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.ReorderedBareColumnJoin() =
+        this.Query(
+            "SELECT u.id, total, title "
+            + "FROM users u JOIN orders o ON o.user_id = u.id "
+            + "JOIN articles a ON a.id = u.id "
+            + "WHERE u.id <= 100 LIMIT 50"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.LowCardinalityIndexedJoin() =
         this.Query "SELECT COUNT(*) FROM users u JOIN users v ON v.age = u.age WHERE u.id <= 100"
 

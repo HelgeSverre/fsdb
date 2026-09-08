@@ -7247,44 +7247,106 @@ and private qualifiedReferences expression =
 and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) : Join list =
     let qualifier (source: FromItem) = fromItemQualifier source |> _.ToLowerInvariant()
 
+    let tableFor = function
+        | FromTable tableRef ->
+            tryPhysicalTableRef store dbName tableRef
+            |> Result.toOption
+            |> Option.flatten
+        | _ -> None
+
+    let physicalSources =
+        select.From
+        |> Option.map (fun source -> source :: (select.Joins |> List.map _.Table))
+        |> Option.bind (fun sources ->
+            sources
+            |> List.map (fun source -> tableFor source |> Option.map (fun table -> qualifier source, table))
+            |> tryAllSome)
+
+    let tryBareOwner sources name =
+        sources
+        |> List.choose (fun (sourceQualifier, table: Table) ->
+            if
+                table.Columns
+                |> List.exists (fun column -> column.Name.Equals(name, System.StringComparison.OrdinalIgnoreCase))
+            then
+                Some sourceQualifier
+            else
+                None)
+        |> List.tryExactlyOne
+
+    let tryOwnedColumn sources = function
+        | Col name -> tryBareOwner sources name |> Option.map (fun sourceQualifier -> sourceQualifier, name)
+        | QualifiedCol(sourceQualifier, name) -> Some(sourceQualifier.ToLowerInvariant(), name)
+        | _ -> None
+
+    let trySourceReferences sources expression =
+        if
+            Expression.exists
+                (function
+                | Star None -> true
+                | _ -> false)
+                expression
+        then
+            None
+        else
+            Expression.collect (function Col name -> Some name | _ -> None) expression
+            |> List.map (tryBareOwner sources)
+            |> tryAllSome
+            |> Option.map (Set.ofList >> Set.union (qualifiedReferences expression))
+
+    let referencesFollowWrittenScope sources =
+        let rec validate bound = function
+            | [] -> true
+            | join :: remaining ->
+                match trySourceReferences sources join.On with
+                | Some references
+                    when references
+                         |> Set.forall (fun name -> name = qualifier join.Table || bound |> Set.contains name) ->
+                    validate (Set.add (qualifier join.Table) bound) remaining
+                | _ -> false
+
+        select.From
+        |> Option.exists (fun source -> validate (Set.singleton (qualifier source)) select.Joins)
+
     let eligible =
         not select.StraightJoin
-        && selectJoinExpressions select |> List.forall (hasUnqualifiedReference >> not)
         && select.Joins
            |> List.forall (fun join ->
                join.Kind = InnerJoin
                && join.Using.IsEmpty
                && match join.Table with FromTable _ -> true | _ -> false)
+        && physicalSources
+           |> Option.exists (fun sources ->
+               referencesFollowWrittenScope sources
+               && selectJoinExpressions select
+                  |> List.forall (trySourceReferences sources >> Option.isSome))
 
-    match select.From, eligible with
-    | Some(FromTable baseTable), true ->
+    match select.From, physicalSources, eligible with
+    | Some(FromTable baseTable), Some sources, true ->
         let baseQualifier = baseTable.Alias |> Option.defaultValue baseTable.Table |> _.ToLowerInvariant()
 
-        let tableFor (join: Join) =
-            match join.Table with
-            | FromTable tableRef ->
-                tryPhysicalTableRef store dbName tableRef
-                |> Result.toOption
-                |> Option.flatten
-            | _ -> None
+        let tableForJoin (join: Join) =
+            tableFor join.Table
 
         let indexedByBoundColumn bound (join: Join) =
             let candidate = qualifier join.Table
 
             conjuncts join.On
             |> List.exists (function
-                | BinOp(Eq, QualifiedCol(leftQualifier, leftColumn), QualifiedCol(rightQualifier, rightColumn)) ->
-                    let leftQualifier = leftQualifier.ToLowerInvariant()
-                    let rightQualifier = rightQualifier.ToLowerInvariant()
-
+                | BinOp(Eq, left, right) ->
                     let candidateColumn =
-                        if leftQualifier = candidate && bound |> Set.contains rightQualifier then Some leftColumn
-                        elif rightQualifier = candidate && bound |> Set.contains leftQualifier then Some rightColumn
-                        else None
+                        match tryOwnedColumn sources left, tryOwnedColumn sources right with
+                        | Some(leftQualifier, leftColumn), Some(rightQualifier, _)
+                            when leftQualifier = candidate && bound |> Set.contains rightQualifier ->
+                            Some leftColumn
+                        | Some(leftQualifier, _), Some(rightQualifier, rightColumn)
+                            when rightQualifier = candidate && bound |> Set.contains leftQualifier ->
+                            Some rightColumn
+                        | _ -> None
 
                     candidateColumn
                     |> Option.bind (fun column ->
-                        tableFor join
+                        tableForJoin join
                         |> Option.bind (fun table -> Storage.tryEqualityIndexForColumns table [ column ]))
                     |> Option.isSome
                 | _ -> false)
@@ -7297,8 +7359,10 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
                     remaining
                     |> List.indexed
                     |> List.filter (fun (_, join) ->
-                        qualifiedReferences join.On
-                        |> Set.forall (fun name -> name = qualifier join.Table || bound |> Set.contains name))
+                        trySourceReferences sources join.On
+                        |> Option.exists (fun references ->
+                            references
+                            |> Set.forall (fun name -> name = qualifier join.Table || bound |> Set.contains name)))
 
                 match ready with
                 | [] -> select.Joins
@@ -7306,7 +7370,7 @@ and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) :
                     let index, next =
                         ready
                         |> List.minBy (fun (originalIndex, join) ->
-                            let rowCount = tableFor join |> Option.map (_.RowsArray.Count) |> Option.defaultValue System.Int32.MaxValue
+                            let rowCount = tableForJoin join |> Option.map (_.RowsArray.Count) |> Option.defaultValue System.Int32.MaxValue
                             (if indexedByBoundColumn bound join then 0 else 1), rowCount, originalIndex)
 
                     let remaining = remaining |> List.mapi (fun i join -> i, join) |> List.choose (fun (i, join) -> if i = index then None else Some join)
