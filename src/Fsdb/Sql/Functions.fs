@@ -302,6 +302,9 @@ let private anyNull (args: Value list) : bool =
 /// ruled NULL out, so every call site isn't re-deriving the same default.
 let private req (v: Value) : string = v |> toText |> Option.defaultValue ""
 
+let private nativeParameterCountError (name: string) : 'a =
+    raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
+
 /// A value as the 64-bit pattern MySQL's bit-oriented functions (BIN, OCT,
 /// CONV, HEX) read it as: those treat their argument as `BIGINT UNSIGNED`,
 /// so `BIN(-1)` is 64 ones. `toDouble` can't be the route for the top half
@@ -3580,9 +3583,6 @@ let private aesConfiguration (value: string) : AesConfiguration =
 let private aesBytes (value: Value) : byte[] =
     tryRawBytes value |> Option.defaultWith (fun () -> Encoding.UTF8.GetBytes(req value))
 
-let private aesParameterCountError (name: string) : 'a =
-    raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
-
 let private aesKdfOptionError maxLength : 'a =
     raise (SqlError(3238, sprintf "KDF option size is invalid, please provide valid size < %d bytes and not NULL" maxLength))
 
@@ -3664,7 +3664,7 @@ let private deriveAesKey (functionName: string) (keyLength: int) (keyMaterial: b
             finally
                 CryptographicOperations.ZeroMemory saltBytes
         | "hkdf", _
-        | "pbkdf2_hmac", _ -> aesParameterCountError functionName
+        | "pbkdf2_hmac", _ -> nativeParameterCountError functionName
         | _ -> raise (SqlError(3235, "KDF method name is not valid. Please use hkdf or pbkdf2_hmac method name"))
     finally
         CryptographicOperations.ZeroMemory kdf
@@ -3917,7 +3917,7 @@ let private aesArguments (functionName: string) (configuration: AesConfiguration
         let reportedFunctionName = if requiresInitializationVector then functionName.ToLowerInvariant() else functionName
 
         if rest.Length > 4 || (requiresInitializationVector && rest.IsEmpty) then
-            aesParameterCountError reportedFunctionName
+            nativeParameterCountError reportedFunctionName
 
         if not requiresInitializationVector && rest.Length = 1 then
             Diagnostics.warning 1618 "<IV> option ignored"
@@ -3960,7 +3960,7 @@ let private aesArguments (functionName: string) (configuration: AesConfiguration
                 raise (SqlError(1153, sprintf "Input to %s exceeds the work limit for the selected block_encryption_mode" reportedFunctionName))
 
             Some(input, derivedKey, initializationVector)
-    | _ -> aesParameterCountError functionName
+    | _ -> nativeParameterCountError functionName
 
 /// Builds an AES function bound to one session's `block_encryption_mode`.
 let aesEncrypt (blockEncryptionMode: string) : Scalar =
@@ -5416,6 +5416,17 @@ let private requireSamePlanarSrid (functionName: string) (first: Geometry) (seco
     requirePlanar functionName first |> ignore
     first, second
 
+let private binaryGeometryFn functionName operation: Scalar =
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ first; second ] ->
+        let first, second =
+            requireSamePlanarSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
+
+        operation first second
+    | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
+
 let private geometryFromTextFn requiredKind functionName: Scalar =
     function
     | [ VNull ]
@@ -5434,7 +5445,7 @@ let private geometryFromTextFn requiredKind functionName: Scalar =
         | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
         | Some _ -> geometryError functionName (sprintf "%s is not a %s" (req value) (geometryTypeName requiredKind))
         | None -> geometryError functionName (sprintf "'%s'" (req value))
-    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+    | _ -> nativeParameterCountError functionName
 
 let private geometryFromWkbFn requiredKind functionName: Scalar =
     function
@@ -5456,19 +5467,19 @@ let private geometryFromWkbFn requiredKind functionName: Scalar =
         | None -> geometryError functionName "invalid WKB"
     | [ _ ]
     | [ _; _ ] -> geometryError functionName "a binary WKB argument is required"
-    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+    | _ -> nativeParameterCountError functionName
 
 let private geometryToTextFn functionName: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] -> geometryArgument functionName value |> geometryToText |> VString
-    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+    | _ -> nativeParameterCountError functionName
 
 let private geometryToWkbFn functionName: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] -> geometryArgument functionName value |> geometryToWkb |> VBytes
-    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+    | _ -> nativeParameterCountError functionName
 
 let private geometryTypeFn: Scalar =
     function
@@ -5477,7 +5488,7 @@ let private geometryTypeFn: Scalar =
         match geometryArgument "ST_GEOMETRYTYPE" value |> _.Shape |> geometryKind with
         | GeometryCollection -> VString "GEOMCOLLECTION"
         | kind -> VString(geometryTypeName kind)
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_geometrytype'"))
+    | _ -> nativeParameterCountError "st_geometrytype"
 
 let private geometryDimensionFn: Scalar =
     let rec dimension = function
@@ -5496,7 +5507,7 @@ let private geometryDimensionFn: Scalar =
         match (geometryArgument "ST_DIMENSION" value).Shape with
         | GEmpty -> VNull
         | shape -> VInt(int64 (dimension shape))
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_dimension'"))
+    | _ -> nativeParameterCountError "st_dimension"
 
 let private geometryIsEmptyFn: Scalar =
     function
@@ -5505,7 +5516,7 @@ let private geometryIsEmptyFn: Scalar =
         match geometryArgument "ST_ISEMPTY" value with
         | { Shape = GEmpty } -> VInt 1L
         | _ -> VInt 0L
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_isempty'"))
+    | _ -> nativeParameterCountError "st_isempty"
 
 let private geometryIsValidFn: Scalar =
     function
@@ -5513,7 +5524,7 @@ let private geometryIsValidFn: Scalar =
     | [ value ] ->
         let geometry = geometryArgument "ST_ISVALID" value |> requirePlanar "ST_ISVALID"
         VInt(if geometryIsValidPlanar geometry then 1L else 0L)
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_isvalid'"))
+    | _ -> nativeParameterCountError "st_isvalid"
 
 let private pointCoordinateFn functionName select: Scalar =
     function
@@ -5522,35 +5533,30 @@ let private pointCoordinateFn functionName select: Scalar =
         match (geometryArgument functionName value).Shape with
         | GPoint(x, y) -> VDouble(select x y)
         | _ -> geometryError functionName "a Point argument is required"
-    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+    | _ -> nativeParameterCountError functionName
 
 let private geometrySridFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] -> geometryArgument "ST_SRID" value |> fun geometry -> VInt(int64 geometry.Srid)
     | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_srid'"))
+    | _ -> nativeParameterCountError "st_srid"
 
-let private geometryDistanceFn: Scalar =
-    function
-    | [ VNull; _ ]
-    | [ _; VNull ] -> VNull
-    | [ first; second ] ->
-        let first, second = requireSamePlanarSrid "ST_DISTANCE" (geometryArgument "ST_DISTANCE" first) (geometryArgument "ST_DISTANCE" second)
-        geometryDistancePlanar first second |> Option.map VDouble |> Option.defaultValue VNull
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_distance'"))
+let private geometryDistanceFn =
+    binaryGeometryFn "ST_DISTANCE" (fun first second ->
+        geometryDistancePlanar first second |> Option.map VDouble |> Option.defaultValue VNull)
 
 let private geometryEnvelopeFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] -> geometryArgument "ST_ENVELOPE" value |> requirePlanar "ST_ENVELOPE" |> geometryEnvelope |> VGeometry
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_envelope'"))
+    | _ -> nativeParameterCountError "st_envelope"
 
 let private geometryConvexHullFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] -> geometryArgument "ST_CONVEXHULL" value |> requirePlanar "ST_CONVEXHULL" |> geometryConvexHullPlanar |> VGeometry
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_convexhull'"))
+    | _ -> nativeParameterCountError "st_convexhull"
 
 let private geometryBufferFn: Scalar =
     function
@@ -5568,31 +5574,13 @@ let private geometryBufferFn: Scalar =
         | None when geometry.Shape |> geometryKind = Point -> raise (SqlError(1210, "Incorrect arguments to st_buffer"))
         | None -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER for non-point geometries'"))
     | [ _; _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_BUFFER strategies'"))
-    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_buffer'"))
+    | _ -> nativeParameterCountError "st_buffer"
 
-let private geometryRelationFn functionName project: Scalar =
-    function
-    | [ VNull; _ ]
-    | [ _; VNull ] -> VNull
-    | [ first; second ] ->
-        let first, second = requireSamePlanarSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
-
-        geometryIntersectsPlanar first second
-        |> Option.map (project >> fun value -> VInt(if value then 1L else 0L))
-        |> Option.defaultValue VNull
-    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" (functionName.ToLowerInvariant())))
-
-let private geometryPredicateFn functionName predicate: Scalar =
-    function
-    | [ VNull; _ ]
-    | [ _; VNull ] -> VNull
-    | [ first; second ] ->
-        let first, second = requireSamePlanarSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
-
+let private geometryPredicateFn functionName predicate =
+    binaryGeometryFn functionName (fun first second ->
         predicate first second
         |> Option.map (fun value -> VInt(if value then 1L else 0L))
-        |> Option.defaultValue VNull
-    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" (functionName.ToLowerInvariant())))
+        |> Option.defaultValue VNull)
 
 let private mbrContains first second =
     match geometryBounds first, geometryBounds second with
@@ -5618,18 +5606,12 @@ let private mbrIntersects first second =
         && second.MinY <= first.MaxY
     | _ -> false
 
-let private mbrPredicateFn functionName predicate: Scalar =
-    function
-    | [ VNull; _ ]
-    | [ _; VNull ] -> VNull
-    | [ first; second ] ->
-        let first, second = requireSamePlanarSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
-
+let private mbrPredicateFn functionName predicate =
+    binaryGeometryFn functionName (fun first second ->
         match geometryBounds first, geometryBounds second with
         | None, _
         | _, None -> VNull
-        | Some _, Some _ -> VInt(if predicate first second then 1L else 0L)
-    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" (functionName.ToLowerInvariant())))
+        | Some _, Some _ -> VInt(if predicate first second then 1L else 0L))
 
 let private registerJsonBuiltins registry =
     registry
@@ -5699,8 +5681,10 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_EQUALS" (geometryPredicateFn "ST_EQUALS" geometryEqualsPlanar)
     |> registerScalar "ST_CONTAINS" (geometryPredicateFn "ST_CONTAINS" geometryContainsPlanar)
     |> registerScalar "ST_WITHIN" (geometryPredicateFn "ST_WITHIN" (fun first second -> geometryContainsPlanar second first))
-    |> registerScalar "ST_INTERSECTS" (geometryRelationFn "ST_INTERSECTS" id)
-    |> registerScalar "ST_DISJOINT" (geometryRelationFn "ST_DISJOINT" not)
+    |> registerScalar "ST_INTERSECTS" (geometryPredicateFn "ST_INTERSECTS" geometryIntersectsPlanar)
+    |> registerScalar
+        "ST_DISJOINT"
+        (geometryPredicateFn "ST_DISJOINT" (fun first second -> geometryIntersectsPlanar first second |> Option.map not))
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
     |> registerScalarResult "ST_BUFFER" binaryResult geometryBufferFn
     |> registerScalarResult "ST_CONVEXHULL" binaryResult geometryConvexHullFn
