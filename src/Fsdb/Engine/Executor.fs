@@ -16191,6 +16191,61 @@ let private removeStoredChecks (store: Store) (dbName: string) (tableName: strin
             && System.String.Equals(check.Table, tableName, System.StringComparison.OrdinalIgnoreCase))
         |> Ok)
 
+let private sameObjectName left right =
+    System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+
+let private retargetStoredTableObjects store sourceDb sourceTable targetDb targetTable =
+    let retargetTriggers =
+        updateRows
+            store
+            "mysql"
+            "triggers"
+            None
+            (fun row ->
+                row
+                |> SystemCatalog.Trigger.tryRead
+                |> Option.exists (fun trigger -> sameObjectName trigger.Schema sourceDb && sameObjectName trigger.Table sourceTable)
+                |> Ok)
+            (fun row -> row |> SystemCatalog.Trigger.withTable (normalizeTableName targetTable) |> Ok)
+        |> Result.map ignore
+
+    let retargetChecks =
+        updateRows
+            store
+            "mysql"
+            "check_constraints"
+            None
+            (fun row ->
+                Ok(
+                    checkRowSatisfies
+                        (fun check -> sameObjectName check.Schema sourceDb && sameObjectName check.Table sourceTable)
+                        row
+                ))
+            (fun row ->
+                match SystemCatalog.Check.tryRead row with
+                | Some check ->
+                    let oldKey = normalizeTableName sourceTable
+
+                    let updated =
+                        row
+                        |> SystemCatalog.Check.withSchema targetDb
+                        |> SystemCatalog.Check.withTable targetTable
+
+                    if check.GeneratedName then
+                        let suffix =
+                            if check.Name.StartsWith(oldKey + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
+                                check.Name.Substring(oldKey.Length)
+                            else
+                                "_chk_1"
+
+                        updated |> SystemCatalog.Check.withName (targetTable + suffix) |> Ok
+                    else
+                        Ok updated
+                | None -> Ok row)
+        |> Result.map ignore
+
+    retargetTriggers |> Result.bind (fun () -> retargetChecks)
+
 let private validateCheckForeignKeys
     (store: Store)
     (dbName: string)
@@ -18276,17 +18331,23 @@ let rec executeAs
             let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
-            let finalTable =
+            let renameTarget =
                 actions
                 |> List.choose (function
                     | RenameTo name -> Some name
                     | _ -> None)
                 |> List.tryLast
-                |> Option.defaultValue table
+
+            let finalDb, finalTable =
+                renameTarget
+                |> Option.map (splitQualified db)
+                |> Option.defaultValue (db, table)
+
+            let crossesDatabases = not (sameObjectName db finalDb)
 
             let physicalActions =
                 actions
-                |> List.filter (function
+                |> List.choose (function
                     | AddCheck _
                     | DropCheck _
                     | SetCheckEnforced _
@@ -18294,8 +18355,10 @@ let rec executeAs
                     | SetAlterAlgorithm _
                     | SetAlterLock _
                     | SetRowFormat _
-                    | TruncatePartitions _ -> false
-                    | _ -> true)
+                    | TruncatePartitions _ -> None
+                    | RenameTo _ when crossesDatabases -> None
+                    | RenameTo _ -> Some(RenameTo finalTable)
+                    | action -> Some action)
 
             let partitionTruncation =
                 actions
@@ -18303,7 +18366,7 @@ let rec executeAs
                     | TruncatePartitions _ -> true
                     | _ -> false)
 
-            let equal left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+            let equal = sameObjectName
 
             let originalCheckNames =
                 storedChecks snapshot db table
@@ -18388,6 +18451,11 @@ let rec executeAs
                     | Some(TruncatePartitions selected) -> truncateHashPartitions snapshot registry db table selected
                     | _ when physicalActions.IsEmpty -> scan snapshot db table |> Result.map ignore
                     | _ -> alterTable snapshot db table physicalActions)
+                |> Result.bind (fun () ->
+                    if crossesDatabases then
+                        renameTables snapshot db [ table, finalDb + "." + finalTable ]
+                    else
+                        Ok())
 
             let fillAddedFunctionalDefaults () =
                 let names =
@@ -18399,7 +18467,7 @@ let rec executeAs
                 if names.IsEmpty then
                     Ok()
                 else
-                    scan snapshot db finalTable
+                    scan snapshot finalDb finalTable
                     |> Result.bind (fun (columns, _) ->
                         names
                         |> traverse (resolveColumn columns)
@@ -18408,63 +18476,22 @@ let rec executeAs
 
                             updateRows
                                 snapshot
-                                db
+                                finalDb
                                 finalTable
                                 None
                                 (fun _ -> Ok true)
                                 (fun row ->
-                                    evaluateFunctionalDefaults snapshot db finalTable columns omitted row)))
+                                    evaluateFunctionalDefaults snapshot finalDb finalTable columns omitted row)))
                     |> Result.map ignore
 
             let retargetAlterObjects () =
-                if equal table finalTable then
+                if equal db finalDb && equal table finalTable then
                     Ok()
                 else
-                    let retargetChecks =
-                        updateRows
-                            snapshot
-                            "mysql"
-                            "check_constraints"
-                            None
-                            (fun row -> Ok(checkRowSatisfies (fun entry -> equal entry.Schema db && equal entry.Table table) row))
-                            (fun row ->
-                                let updated = SystemCatalog.Check.withTable finalTable row
-
-                                match SystemCatalog.Check.tryRead row with
-                                | Some check when check.GeneratedName ->
-                                    let oldKey = normalizeTableName table
-                                    let suffix =
-                                        if check.Name.StartsWith(oldKey + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
-                                            check.Name.Substring(oldKey.Length)
-                                        else
-                                            "_chk_1"
-
-                                    updated |> SystemCatalog.Check.withName (finalTable + suffix) |> Ok
-                                | _ -> Ok updated)
-                        |> Result.map ignore
-
-                    let retargetTriggers =
-                        updateRows
-                            snapshot
-                            "mysql"
-                            "triggers"
-                            None
-                            (fun row ->
-                                row
-                                |> SystemCatalog.Trigger.tryRead
-                                |> Option.exists (fun trigger ->
-                                    equal trigger.Schema db && equal trigger.Table (normalizeTableName table))
-                                |> Ok)
-                            (fun row ->
-                                row
-                                |> SystemCatalog.Trigger.withTable (normalizeTableName finalTable)
-                                |> Ok)
-                        |> Result.map ignore
-
-                    retargetChecks |> Result.bind (fun () -> retargetTriggers)
+                    retargetStoredTableObjects snapshot db table finalDb finalTable
 
             let validateExistingDefinitions columns =
-                storedChecks snapshot db finalTable
+                storedChecks snapshot finalDb finalTable
                 |> traverse (fun check ->
                     match Parser.parseExpression check.Clause with
                     | Result.Error _ -> Error(ExpressionError(3812, sprintf "Check constraint '%s' is invalid." check.Name))
@@ -18479,21 +18506,21 @@ let rec executeAs
                 |> Result.map ignore
 
             let validateRows columns =
-                scan snapshot db finalTable
+                scan snapshot finalDb finalTable
                 |> Result.bind (fun (_, rows) ->
                     rows
                     |> List.ofSeq
-                    |> traverse (validateCheckRow snapshot registry db finalTable columns)
+                    |> traverse (validateCheckRow snapshot registry finalDb finalTable columns)
                     |> Result.map ignore)
 
             let applyCheckAction columns action =
                 match action with
                 | AddCheck definition ->
-                    storeCheckDefinitions snapshot registry db finalTable columns [ definition ]
+                    storeCheckDefinitions snapshot registry finalDb finalTable columns [ definition ]
                     |> Result.bind (fun () -> if definition.Enforced then validateRows columns else Ok())
                 | DropCheck name ->
                     deleteRows snapshot "mysql" "check_constraints" (fun row ->
-                        Ok(checkRowSatisfies (fun entry -> equal entry.Schema db && equal entry.Table finalTable && equal entry.Name name) row))
+                        Ok(checkRowSatisfies (fun entry -> equal entry.Schema finalDb && equal entry.Table finalTable && equal entry.Name name) row))
                     |> Result.bind (fun removed ->
                         if removed = 0 && not (originalCheckNames.Contains(name.ToLowerInvariant())) then
                             Error(ExpressionError(1091, sprintf "Can't DROP '%s'; check that column/key exists" name))
@@ -18506,10 +18533,10 @@ let rec executeAs
                         "check_constraints"
                         None
                         (fun row ->
-                            Ok(checkRowSatisfies (fun entry -> equal entry.Schema db && equal entry.Table finalTable && equal entry.Name name) row))
+                            Ok(checkRowSatisfies (fun entry -> equal entry.Schema finalDb && equal entry.Table finalTable && equal entry.Name name) row))
                         (SystemCatalog.Check.withEnforced enforced >> Ok)
                     |> Result.bind (fun changed ->
-                        if changed = 0 && not (storedChecks snapshot db finalTable |> List.exists (fun check -> equal check.Name name)) then
+                        if changed = 0 && not (storedChecks snapshot finalDb finalTable |> List.exists (fun check -> equal check.Name name)) then
                             Error(ExpressionError(1091, sprintf "Check constraint '%s' is not found." name))
                         elif enforced then
                             validateRows columns
@@ -18521,25 +18548,19 @@ let rec executeAs
                 alterPhysical
                 |> Result.bind (fun () -> fillAddedFunctionalDefaults ())
                 |> Result.bind (fun () -> retargetAlterObjects ())
-                |> Result.bind (fun () -> scan snapshot db finalTable |> Result.map fst)
+                |> Result.bind (fun () -> scan snapshot finalDb finalTable |> Result.map fst)
                 |> Result.bind (fun columns ->
-                    validateGeneratedDefinitionsForStorage registry db columns
-                    |> Result.bind (fun () -> recomputeGeneratedColumns snapshot registry dbName db finalTable columns)
+                    validateGeneratedDefinitionsForStorage registry finalDb columns
+                    |> Result.bind (fun () -> recomputeGeneratedColumns snapshot registry dbName finalDb finalTable columns)
                     |> Result.bind (fun () -> validateFunctionalDefaultsForStorage registry columns)
                     |> Result.bind (fun () ->
-                        snapshot.Catalog
-                        |> Map.tryFind db
-                        |> Option.bind (Map.tryFind (normalizeTableName finalTable))
-                        |> Option.map (fun storedTable -> validateIndexExpressions registry columns storedTable.Indexes)
-                        |> Option.defaultValue (Error(NoSuchTable finalTable)))
+                        tableSnapshot snapshot finalDb finalTable
+                        |> Result.bind (fun storedTable -> validateIndexExpressions registry columns storedTable.Indexes))
                     |> Result.bind (fun () -> validateExistingDefinitions columns)
                     |> Result.bind (fun () -> actions |> List.fold (fun state action -> state |> Result.bind (fun () -> applyCheckAction columns action)) (Ok()))
                     |> Result.bind (fun () ->
-                        snapshot.Catalog
-                        |> Map.tryFind db
-                        |> Option.bind (Map.tryFind (normalizeTableName finalTable))
-                        |> Option.map (fun storedTable -> validateCheckForeignKeys snapshot db finalTable storedTable.ForeignKeys)
-                        |> Option.defaultValue (Error(NoSuchTable finalTable))))
+                        tableSnapshot snapshot finalDb finalTable
+                        |> Result.bind (fun storedTable -> validateCheckForeignKeys snapshot finalDb finalTable storedTable.ForeignKeys)))
 
             match altered with
             | Ok() ->
@@ -18552,57 +18573,8 @@ let rec executeAs
         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
         Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
 
-        let sameName left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
-
-        let retargetTableObjects sourceDb sourceTable targetDb targetTable =
-            let retargetTriggers =
-                updateRows
-                    snapshot
-                    "mysql"
-                    "triggers"
-                    None
-                    (fun row ->
-                        row
-                        |> SystemCatalog.Trigger.tryRead
-                        |> Option.exists (fun trigger -> sameName trigger.Schema sourceDb && sameName trigger.Table sourceTable)
-                        |> Ok)
-                    (fun row -> row |> SystemCatalog.Trigger.withTable (normalizeTableName targetTable) |> Ok)
-                |> Result.map ignore
-
-            let retargetChecks =
-                updateRows
-                    snapshot
-                    "mysql"
-                    "check_constraints"
-                    None
-                    (fun row -> Ok(checkRowSatisfies (fun check -> sameName check.Schema sourceDb && sameName check.Table sourceTable) row))
-                    (fun row ->
-                        match SystemCatalog.Check.tryRead row with
-                        | Some check ->
-                            let oldKey = normalizeTableName sourceTable
-
-                            let updated =
-                                row
-                                |> SystemCatalog.Check.withSchema targetDb
-                                |> SystemCatalog.Check.withTable targetTable
-
-                            if check.GeneratedName then
-                                let suffix =
-                                    if check.Name.StartsWith(oldKey + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
-                                        check.Name.Substring(oldKey.Length)
-                                    else
-                                        "_chk_1"
-
-                                updated |> SystemCatalog.Check.withName (targetTable + suffix) |> Ok
-                            else
-                                Ok updated
-                        | None -> Ok row)
-                |> Result.map ignore
-
-            retargetTriggers |> Result.bind (fun () -> retargetChecks)
-
         let renameView sourceDb sourceView targetDb targetView =
-            if not (sameName sourceDb targetDb) then
+            if not (sameObjectName sourceDb targetDb) then
                 Error(ExpressionError(1450, sprintf "Changing schema from '%s' to '%s' is not allowed." sourceDb targetDb))
             elif scan snapshot targetDb targetView |> Result.isOk || tryStoredView snapshot targetDb targetView |> Option.isSome then
                 Error(TableExists targetView)
@@ -18615,7 +18587,7 @@ let rec executeAs
                     (fun row ->
                         row
                         |> SystemCatalog.View.tryRead
-                        |> Option.exists (fun view -> sameName view.Schema sourceDb && sameName view.Name sourceView)
+                        |> Option.exists (fun view -> sameObjectName view.Schema sourceDb && sameObjectName view.Name sourceView)
                         |> Ok)
                     (fun row -> row |> SystemCatalog.View.withName targetView |> Ok)
                 |> Result.map ignore
@@ -18628,7 +18600,7 @@ let rec executeAs
             | Some _ -> renameView sourceDb sourceTable targetDb targetTable
             | None ->
                 renameTables snapshot dbName [ sourceName, targetName ]
-                |> Result.bind (fun () -> retargetTableObjects sourceDb sourceTable targetDb targetTable)
+                |> Result.bind (fun () -> retargetStoredTableObjects snapshot sourceDb sourceTable targetDb targetTable)
 
         match pairs |> List.fold (fun state pair -> state |> Result.bind (fun () -> renameOne pair)) (Ok()) with
         | Ok() ->

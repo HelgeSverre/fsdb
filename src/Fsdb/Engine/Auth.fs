@@ -2674,8 +2674,21 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         let target = split table
         let foreignKeys = actions |> List.choose (function AddForeignKey foreignKey -> Some foreignKey | _ -> None)
         let truncatesPartitions = actions |> List.exists (function TruncatePartitions _ -> true | _ -> false)
+        let renameTarget =
+            actions
+            |> List.choose (function RenameTo name -> Some(splitQualified (fst target) name) | _ -> None)
+            |> List.tryLast
+
+        let renamePrivileges =
+            renameTarget
+            |> Option.map (fun destination ->
+                onTables "DROP" [ target ]
+                @ onTables "CREATE" [ destination ]
+                @ onTables "INSERT" [ destination ])
+            |> Option.defaultValue []
 
         onTables "ALTER" [ target ]
+        @ renamePrivileges
         @ onTables "REFERENCES" (referencedTables (fst target) foreignKeys)
         @ if truncatesPartitions then onTables "DROP" [ target ] else []
     | RenameTable pairs ->

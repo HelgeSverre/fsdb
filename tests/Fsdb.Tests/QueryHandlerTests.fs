@@ -9182,6 +9182,53 @@ let tests =
               | Err(1146, _) -> ()
               | other -> failtestf "expected no partially-created destination, got %A" other
 
+          testCase "ALTER TABLE combines schema changes with a cross-database rename"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let apply session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+
+              let session = apply session "CREATE DATABASE alter_source"
+              let session = apply session "CREATE DATABASE alter_target"
+              let session = apply session "CREATE TABLE alter_source.items (id INT AUTO_INCREMENT PRIMARY KEY, n INT, CHECK (n > 0))"
+              let session = apply session "INSERT INTO alter_source.items (n) VALUES (1)"
+
+              let session =
+                  apply
+                      session
+                      "ALTER TABLE alter_source.items ADD COLUMN label VARCHAR(10) DEFAULT 'kept', RENAME TO alter_target.moved_items"
+
+              let session = apply session "INSERT INTO alter_target.moved_items (n) VALUES (2)"
+
+              match handle session "SELECT id, n, label FROM alter_target.moved_items ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1"; Some "kept" ]; [ Some "2"; Some "2"; Some "kept" ] ]) -> ()
+              | other -> failtestf "expected the altered table and its AUTO_INCREMENT state in the target database, got %A" other
+
+              match handle session "SHOW CREATE TABLE alter_target.moved_items" |> snd with
+              | ResultSet(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "CONSTRAINT `moved_items_chk_1`" "generated CHECK name follows the ALTER rename"
+              | other -> failtestf "expected metadata for the moved table, got %A" other
+
+              match handle session "SELECT * FROM alter_source.items" |> snd with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected the ALTER source name to be absent, got %A" other
+
+              let session = apply session "CREATE TABLE alter_source.triggered (n INT)"
+              let session = apply session "USE alter_source"
+              let session = apply session "CREATE TRIGGER triggered_bi BEFORE INSERT ON triggered FOR EACH ROW SET NEW.n = NEW.n + 1"
+
+              match handle session "ALTER TABLE alter_source.triggered ADD COLUMN label INT, RENAME TO alter_target.triggered" |> snd with
+              | Err(1435, "Trigger in wrong schema") -> ()
+              | other -> failtestf "expected the triggered ALTER rename to fail atomically, got %A" other
+
+              match handle session "SHOW COLUMNS FROM alter_source.triggered LIKE 'label'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected the failed ALTER not to add its column, got %A" other
+
           testCase "cross-database rename enforces trigger and view schema boundaries"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

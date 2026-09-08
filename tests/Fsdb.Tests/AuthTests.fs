@@ -269,6 +269,12 @@ let tests =
               Expect.contains rename ("CREATE", OnTable("target_db", "new_name")) "destination creation"
               Expect.contains rename ("INSERT", OnTable("target_db", "new_name")) "destination population"
 
+              let alterRename = requirements "ALTER TABLE source_db.old_name RENAME TO target_db.new_name"
+              Expect.contains alterRename ("ALTER", OnTable("source_db", "old_name")) "ALTER source alteration"
+              Expect.contains alterRename ("DROP", OnTable("source_db", "old_name")) "ALTER source removal"
+              Expect.contains alterRename ("CREATE", OnTable("target_db", "new_name")) "ALTER destination creation"
+              Expect.contains alterRename ("INSERT", OnTable("target_db", "new_name")) "ALTER destination population"
+
           testCase "ON DUPLICATE KEY UPDATE requires UPDATE on the target table"
           <| fun _ ->
               for sql in

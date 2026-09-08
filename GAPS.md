@@ -59,10 +59,11 @@ appear within set-operation branches.
 
 DDL covers databases, tables, indexes, views, triggers, users, grants,
 `CREATE TABLE ... AS SELECT`, temporary tables, `TRUNCATE`, and `RENAME TABLE`.
-Multi-pair renames resolve from left to right and publish atomically. Base tables
-may move between databases; their data, generated constraint names, and foreign
-key relationships move with them. As in MySQL, a triggered table and a view
-cannot cross a database boundary.
+Multi-pair `RENAME TABLE` statements resolve from left to right and publish
+atomically. `ALTER TABLE ... RENAME` can combine a database move with other
+schema changes. Base tables retain their data, generated constraint names, and
+foreign key relationships. As in MySQL, a triggered table and a view cannot
+cross a database boundary.
 `EXPLAIN` supports traditional, JSON, and ANALYZE forms. Transaction control,
 `SET`, `SHOW`, `USE`, `KILL`, and `DESCRIBE` are text-probed before the grammar
 by `QueryHandler.dispatch`.

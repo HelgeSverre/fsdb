@@ -2150,6 +2150,7 @@ let tests =
                     Expect.equal (parseOk "ALTER TABLE t RENAME TO u") (AlterTable("t", [ RenameTo "u" ])) "rename to"
                     Expect.equal (parseOk "ALTER TABLE t RENAME AS u") (AlterTable("t", [ RenameTo "u" ])) "rename as"
                     Expect.equal (parseOk "ALTER TABLE t RENAME u") (AlterTable("t", [ RenameTo "u" ])) "bare rename"
+                    Expect.equal (parseOk "ALTER TABLE source.t RENAME TO archive.u") (AlterTable("source.t", [ RenameTo "archive.u" ])) "qualified rename"
 
                 testCase "RENAME COLUMN a TO b"
                 <| fun _ ->

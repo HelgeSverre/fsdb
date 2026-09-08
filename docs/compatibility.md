@@ -133,7 +133,8 @@ Server-side `LOAD DATA INFILE` remains unsupported.
 `RENAME TABLE` evaluates its pairs from left to right and publishes the whole
 statement atomically. This permits swaps through an intermediate name and
 ensures a later missing source or occupied target leaves every earlier object
-unchanged.
+unchanged. `ALTER TABLE ... RENAME` uses the same move path and may combine the
+rename with other supported alterations.
 
 Base tables may move between databases. Rows, AUTO_INCREMENT state, generated
 check and foreign-key names, outgoing references, and incoming references move

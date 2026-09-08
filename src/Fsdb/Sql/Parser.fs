@@ -3001,7 +3001,7 @@ let private setIndexVisibilityAction: Parser<AlterAction, unit> =
     |>> SetIndexVisibility
 
 let private renameToAction: Parser<AlterAction, unit> =
-    attempt (keyword "RENAME" >>. opt (keyword "TO" <|> keyword "AS") >>. identifier) |>> RenameTo
+    attempt (keyword "RENAME" >>. opt (keyword "TO" <|> keyword "AS") >>. qualifiedTableName) |>> RenameTo
 
 let private setAutoIncrementAction: Parser<AlterAction, unit> =
     attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> SetAutoIncrement

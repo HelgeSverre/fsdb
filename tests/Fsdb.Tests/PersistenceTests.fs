@@ -2773,10 +2773,14 @@ let tests =
               let session = run session "CREATE DATABASE archive"
               let session = run session "CREATE TABLE movable (id INT PRIMARY KEY, label VARCHAR(20))"
               let session = run session "INSERT INTO movable VALUES (1, 'kept')"
-              let _ = run session "RENAME TABLE fsdb.movable TO archive.moved"
+              let session = run session "RENAME TABLE fsdb.movable TO archive.moved"
+              let session = run session "CREATE TABLE alter_movable (id INT PRIMARY KEY)"
+              let session = run session "INSERT INTO alter_movable VALUES (2)"
+              let _ = run session "ALTER TABLE alter_movable ADD COLUMN label VARCHAR(20) DEFAULT 'altered', RENAME TO archive.alter_moved"
 
               let reloaded = load dir
               Expect.equal (rowsOf reloaded "archive" "moved") [ [| VInt 1L; VString "kept" |] ] "WAL replay keeps the moved table"
+              Expect.equal (rowsOf reloaded "archive" "alter_moved") [ [| VInt 2L; VString "altered" |] ] "WAL replay keeps the altered move"
 
               match scan reloaded defaultDatabase "movable" with
               | Error(NoSuchTable _) -> ()
@@ -2785,6 +2789,7 @@ let tests =
               snapshotNow dir reloaded
               let snapshotted = load dir
               Expect.equal (rowsOf snapshotted "archive" "moved") [ [| VInt 1L; VString "kept" |] ] "the snapshot keeps the moved table"
+              Expect.equal (rowsOf snapshotted "archive" "alter_moved") [ [| VInt 2L; VString "altered" |] ] "the snapshot keeps the altered move"
 
           testCase "a GENERATED column using CASE/LIKE ESCAPE/IN/BETWEEN/row comparison/CAST/CONCAT survives a restart and still computes correctly"
           <| fun _ ->
