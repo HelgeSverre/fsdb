@@ -1298,10 +1298,13 @@ let tests =
                   handle session "CREATE USER legacy IDENTIFIED WITH mysql_native_password BY 'old-secret'"
               let session, imported =
                   handle session (sprintf "CREATE USER imported IDENTIFIED WITH caching_sha2_password AS '%s'" stored)
+              let session, sha256 =
+                  handle session "CREATE USER deprecated_sha IDENTIFIED WITH sha256_password BY 'sha-secret'"
 
               Expect.equal modern (Affected 0UL) "default plugin account"
               Expect.equal legacy (Affected 0UL) "explicit legacy account"
               Expect.equal imported (Affected 0UL) "pre-hashed account"
+              Expect.equal sha256 (Affected 0UL) "SHA-256 account"
 
               let storedAccount name expectedPlugin password =
                   match Fsdb.Auth.tryUserRow store name with
@@ -1316,6 +1319,11 @@ let tests =
               storedAccount "modern" Fsdb.Authentication.CachingSha2Password "secret"
               storedAccount "legacy" Fsdb.Authentication.MysqlNativePassword "old-secret"
               storedAccount "imported" Fsdb.Authentication.CachingSha2Password "imported"
+              storedAccount "deprecated_sha" Fsdb.Authentication.Sha256Password "sha-secret"
+
+              let session, changedSha = handle session "SET PASSWORD FOR deprecated_sha = 'changed-sha'"
+              Expect.equal changedSha (Affected 0UL) "SET PASSWORD preserves SHA-256"
+              storedAccount "deprecated_sha" Fsdb.Authentication.Sha256Password "changed-sha"
 
               let session, changed = handle session "SET PASSWORD FOR legacy = 'new-secret'"
               Expect.equal changed (Affected 0UL) "SET PASSWORD preserves the account plugin"

@@ -2870,6 +2870,17 @@ let private plugins =
         Author = "fsdb"
         Description = "Native MySQL authentication"
         License = "GPL"
+        LoadOption = "ON" }
+      { Name = "sha256_password"
+        Version = "1.1"
+        Status = "ACTIVE"
+        PluginType = "AUTHENTICATION"
+        TypeVersion = "2.1"
+        Library = None
+        LibraryVersion = None
+        Author = "fsdb"
+        Description = "SHA-256 authentication"
+        License = "GPL"
         LoadOption = "ON" } ]
 
 let private pluginsRows =

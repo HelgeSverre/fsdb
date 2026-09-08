@@ -2149,6 +2149,44 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "SHA-256 accounts authenticate over the RSA password exchange"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  let session = create 1 store
+
+                  match handle session "CREATE USER sha_user IDENTIFIED WITH sha256_password BY 'secret'" |> snd with
+                  | Affected 0UL -> ()
+                  | other -> failtestf "expected SHA-256 account creation, got %A" other
+
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  let connectionString =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=sha_user;Password=secret;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                          server.Port
+
+                  use connection = new MySqlConnector.MySqlConnection(connectionString)
+                  do! connection.OpenAsync() |> Async.AwaitTask
+
+                  use command = connection.CreateCommand()
+                  command.CommandText <- "SELECT CURRENT_USER()"
+                  let! current = command.ExecuteScalarAsync() |> Async.AwaitTask
+                  Expect.equal (string current) "sha_user@%" "the deprecated built-in plugin remains wire-compatible"
+
+                  use certificate = selfSignedCertificate ()
+                  let options = Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withCertificate certificate
+                  use tlsServer = TestSupport.ServerFixture.startWithOptions options store Fsdb.Functions.empty
+                  let tlsConnectionString =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=sha_user;Password=secret;SslMode=Required;Pooling=false"
+                          tlsServer.Port
+
+                  use tlsConnection = new MySqlConnector.MySqlConnection(tlsConnectionString)
+                  do! tlsConnection.OpenAsync() |> Async.AwaitTask
+                  Expect.equal tlsConnection.State Data.ConnectionState.Open "TLS carries the clear password exchange"
+              }
+              |> Async.RunSynchronously
+
           // mysql CLI sends `SHOW WARNINGS LIMIT n` and mysqli's
           // `mysqli_report`/error-checking idiom sends `SHOW COUNT(*)
           // WARNINGS` — both routinely enough that either one dying with a

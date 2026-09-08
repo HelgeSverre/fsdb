@@ -8,16 +8,20 @@ open System.Text
 type Plugin =
     | MysqlNativePassword
     | CachingSha2Password
+    | Sha256Password
 
 let name = function
     | MysqlNativePassword -> "mysql_native_password"
     | CachingSha2Password -> "caching_sha2_password"
+    | Sha256Password -> "sha256_password"
 
 let tryParse = function
     | value when String.Equals(value, name MysqlNativePassword, StringComparison.OrdinalIgnoreCase) ->
         Some MysqlNativePassword
     | value when String.Equals(value, name CachingSha2Password, StringComparison.OrdinalIgnoreCase) ->
         Some CachingSha2Password
+    | value when String.Equals(value, name Sha256Password, StringComparison.OrdinalIgnoreCase) ->
+        Some Sha256Password
     | _ -> None
 
 let defaultPlugin = CachingSha2Password
@@ -97,15 +101,17 @@ let private sha256Crypt (password: byte[]) (salt: byte[]) rounds =
         String.concat "" blocks + tail
 
 let private cachingPrefix = "$A$"
+let private sha256Prefix = "$5$"
 let private cachingSaltLength = 20
 let private cachingDigestLength = 43
 let private cachingDefaultRounds = 5000
-let private cachingMaximumPasswordBytes = 256
+let private sha2MaximumPasswordBytes = 256
 
 let acceptsPassword plugin (password: string) =
     match plugin with
     | MysqlNativePassword -> true
-    | CachingSha2Password -> utf8.GetByteCount password <= cachingMaximumPasswordBytes
+    | CachingSha2Password
+    | Sha256Password -> utf8.GetByteCount password <= sha2MaximumPasswordBytes
 
 let cachingSha2PasswordHashWithSalt (salt: byte[]) (password: string) =
     if salt.Length <> cachingSaltLength then
@@ -124,6 +130,28 @@ let private randomCachingSalt () =
     salt
     |> Array.map (fun value -> byte cryptAlphabet.[int value &&& 0x3f])
 
+let private randomSha256Salt () =
+    let salt = Array.zeroCreate<byte> cachingSaltLength
+    RandomNumberGenerator.Fill salt
+
+    salt
+    |> Array.map (fun value ->
+        let ascii = value &&& 0x7fuy
+        if ascii = 0uy || ascii = byte '$' then ascii + 1uy else ascii)
+
+let sha256PasswordHashWithSalt (salt: byte[]) (password: string) =
+    if salt.Length <> cachingSaltLength then
+        invalidArg (nameof salt) "sha256_password requires a 20-byte salt"
+
+    if salt |> Array.exists (fun value -> value = 0uy || value = byte '$' || value > 0x7fuy) then
+        invalidArg (nameof salt) "sha256_password requires a non-NUL 7-bit salt without '$'"
+
+    if not (acceptsPassword Sha256Password password) then
+        invalidArg (nameof password) "sha256_password accepts at most 256 password bytes"
+
+    let saltText = Encoding.ASCII.GetString salt
+    sha256Prefix + saltText + "$" + sha256Crypt (utf8.GetBytes password) salt cachingDefaultRounds
+
 let passwordHash plugin (password: string) =
     if not (acceptsPassword plugin password) then
         invalidArg (nameof password) "the password is too long for the authentication plugin"
@@ -133,6 +161,7 @@ let passwordHash plugin (password: string) =
         match plugin with
         | MysqlNativePassword -> nativePasswordHash password
         | CachingSha2Password -> cachingSha2PasswordHashWithSalt (randomCachingSalt ()) password
+        | Sha256Password -> sha256PasswordHashWithSalt (randomSha256Salt ()) password
 
 let internal passwordHashesEqual (left: string) (right: string) =
     let left = Encoding.ASCII.GetBytes left
@@ -154,6 +183,30 @@ let private tryCachingParts (storedHash: string) =
             Some(salt, min (iterationBlocks * 1000) 4095000, digest)
         | _ -> None
 
+let private sha256HashLimit = 80
+
+let private hasSha256StorageShape (storedHash: string) =
+    storedHash.StartsWith sha256Prefix && storedHash.Length < sha256HashLimit
+
+let pluginForStoredHash (storedHash: string) =
+    if storedHash.StartsWith cachingPrefix then
+        CachingSha2Password
+    elif storedHash.StartsWith sha256Prefix then
+        Sha256Password
+    else
+        MysqlNativePassword
+
+let private trySha256Salt (storedHash: string) =
+    if not (hasSha256StorageShape storedHash) then
+        None
+    else
+        let separator = storedHash.IndexOf('$', sha256Prefix.Length)
+
+        if separator - sha256Prefix.Length <> cachingSaltLength then
+            None
+        else
+            Some(Encoding.ASCII.GetBytes(storedHash.Substring(sha256Prefix.Length, cachingSaltLength)))
+
 let isValidHash plugin storedHash =
     storedHash = ""
     || match plugin with
@@ -165,6 +218,7 @@ let isValidHash plugin storedHash =
                with _ ->
                    false)
        | CachingSha2Password -> tryCachingParts storedHash |> Option.isSome
+       | Sha256Password -> hasSha256StorageShape storedHash
 
 let verifyPassword plugin storedHash password =
     if not (acceptsPassword plugin password) then
@@ -178,6 +232,10 @@ let verifyPassword plugin storedHash password =
             match tryCachingParts storedHash with
             | Some(salt, rounds, digest) ->
                 passwordHashesEqual digest (sha256Crypt (utf8.GetBytes password) salt rounds)
+            | None -> false
+        | Sha256Password ->
+            match trySha256Salt storedHash with
+            | Some salt -> passwordHashesEqual storedHash (sha256PasswordHashWithSalt salt password)
             | None -> false
 
 let verifyNative (storedHash: string) (scramble: byte[]) (response: byte[]) =

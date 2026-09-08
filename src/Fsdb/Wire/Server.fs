@@ -1175,6 +1175,30 @@ let private tryDecryptPassword (authData: byte[]) (encrypted: byte[]) =
     with :? CryptographicException ->
         None
 
+let private receiveFullPassword
+    (client: TcpClient)
+    (stream: IO.Stream)
+    (authData: byte[])
+    (transportSecurity: Auth.TransportSecurity)
+    (publicKeyRequest: byte)
+    (nextSeq: byte)
+    (response: byte[])
+    : Async<(string option * byte) option> =
+    async {
+        if transportSecurity.Encrypted then
+            return Some(tryPasswordBytes response, nextSeq)
+        elif response = [| publicKeyRequest |] then
+            let publicKey = rsaAuthenticationKeys.Value.PublicKey
+            do! writePacketAsync stream { SeqId = nextSeq; Payload = authMoreData publicKey } |> Async.Ignore
+
+            match! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream with
+            | Some encrypted ->
+                return Some(tryDecryptPassword authData encrypted.Payload, encrypted.SeqId + 1uy)
+            | None -> return None
+        else
+            return Some(tryDecryptPassword authData response, nextSeq)
+    }
+
 let private authenticateAccount
     (client: TcpClient)
     (stream: IO.Stream)
@@ -1273,7 +1297,11 @@ let private authenticateAccount
                 let stored = Auth.storedPasswordHash cols row
 
                 if stored = "" then
-                    if authResponse.Length = 0 then
+                    let emptyPassword =
+                        authResponse.Length = 0
+                        || (plugin = Authentication.Sha256Password && authResponse = [| 0uy |])
+
+                    if emptyPassword then
                         return! accept authSeq selected cols row
                     else
                         return! deny authSeq true
@@ -1303,22 +1331,14 @@ let private authenticateAccount
                             | None -> return None
                             | Some fullResponse ->
                                 let! passwordAndSeq =
-                                    async {
-                                        if transportSecurity.Encrypted then
-                                            return Some(tryPasswordBytes fullResponse.Payload, fullResponse.SeqId + 1uy)
-                                        elif fullResponse.Payload = [| 0x02uy |] then
-                                            let! encryptedSeq =
-                                                writePacketAsync stream
-                                                    { SeqId = fullResponse.SeqId + 1uy
-                                                      Payload = authMoreData rsaAuthenticationKeys.Value.PublicKey }
-
-                                            match! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream with
-                                            | Some encrypted ->
-                                                return Some(tryDecryptPassword authData encrypted.Payload, encrypted.SeqId + 1uy)
-                                            | None -> return None
-                                        else
-                                            return Some(tryDecryptPassword authData fullResponse.Payload, fullResponse.SeqId + 1uy)
-                                    }
+                                    receiveFullPassword
+                                        client
+                                        stream
+                                        authData
+                                        transportSecurity
+                                        0x02uy
+                                        (fullResponse.SeqId + 1uy)
+                                        fullResponse.Payload
 
                                 match passwordAndSeq with
                                 | Some(Some password, nextSeq)
@@ -1327,6 +1347,22 @@ let private authenticateAccount
                                     return! accept nextSeq selected cols row
                                 | Some(password, nextSeq) -> return! deny nextSeq password.IsSome
                                 | None -> return None
+                    | Authentication.Sha256Password ->
+                        let! passwordAndSeq =
+                            receiveFullPassword
+                                client
+                                stream
+                                authData
+                                transportSecurity
+                                0x01uy
+                                authSeq
+                                authResponse
+
+                        match passwordAndSeq with
+                        | Some(Some password, nextSeq) when Authentication.verifyPassword plugin stored password ->
+                            return! accept nextSeq selected cols row
+                        | Some(password, nextSeq) -> return! deny nextSeq password.IsSome
+                        | None -> return None
     }
 
 let internal accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =

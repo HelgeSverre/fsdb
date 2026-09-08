@@ -3357,6 +3357,17 @@ let tests =
                         "legacy plugin remains expressible"
 
                     Expect.equal
+                        (parseOk "CREATE USER deprecated_sha IDENTIFIED WITH sha256_password BY 'secret'")
+                        (CreateUser(
+                            [ "deprecated_sha",
+                              "%",
+                              Some(credential "sha256_password" (PlaintextPassword "secret")) ],
+                            false,
+                            AccountOptions.empty
+                        ))
+                        "SHA-256 plugin remains expressible"
+
+                    Expect.equal
                         (parseOk "CREATE USER passwordless IDENTIFIED WITH caching_sha2_password")
                         (CreateUser(
                             [ "passwordless",

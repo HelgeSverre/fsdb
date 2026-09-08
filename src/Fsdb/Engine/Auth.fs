@@ -1258,10 +1258,7 @@ let private alterUserInStore
                                        | NoCredential -> false
                                        | PlaintextPassword plaintext ->
                                            let historyPlugin =
-                                               if entry.Hash.StartsWith "$A$" then
-                                                   Authentication.CachingSha2Password
-                                               else
-                                                   Authentication.MysqlNativePassword
+                                               Authentication.pluginForStoredHash entry.Hash
 
                                            Authentication.verifyPassword historyPlugin entry.Hash plaintext
                                        | StoredAuthenticationString _ -> passwordHashesEqual entry.Hash newHash))

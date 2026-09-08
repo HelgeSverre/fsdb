@@ -63,11 +63,29 @@ let tests =
               Expect.isTrue (verifyCachingResponse known scramble response) "matching response verifies"
               Expect.isFalse (verifyCachingResponse known scramble (Array.zeroCreate 32)) "garbage fails"
 
+          testCase "SHA-256 password hashes match MySQL's storage transform"
+          <| fun _ ->
+              let salt = Text.Encoding.ASCII.GetBytes "abcdefghijklmnopqrst"
+              let stored = sha256PasswordHashWithSalt salt "secret"
+
+              Expect.equal
+                  stored
+                  "$5$abcdefghijklmnopqrst$Yy1cVJ5jT.fk4HyAGlowRhOkI55As4SAesbspXHQvFD"
+                  "known MySQL 8.4 hash vector"
+
+              Expect.isTrue (verifyPassword Sha256Password stored "secret") "matching plaintext verifies"
+              Expect.isFalse (verifyPassword Sha256Password stored "wrong") "different plaintext fails"
+              Expect.isTrue (isValidHash Sha256Password "$5$x$y") "MySQL accepts a loosely shaped imported hash"
+              Expect.isFalse (verifyPassword Sha256Password "$5$x$y" "secret") "a corrupt salt fails closed at login"
+              Expect.isFalse (isValidHash Sha256Password "$6$abcdefghijklmnopqrst$digest") "the algorithm marker is checked"
+
           testCase "caching SHA-2 bounds plaintext before its repeated digest work"
           <| fun _ ->
               Expect.isTrue (acceptsPassword CachingSha2Password (String.replicate 256 "a")) "256 bytes"
               Expect.isFalse (acceptsPassword CachingSha2Password (String.replicate 257 "a")) "257 bytes"
               Expect.isFalse (acceptsPassword CachingSha2Password (String.replicate 65 "💥")) "UTF-8 byte length"
+              Expect.isTrue (acceptsPassword Sha256Password (String.replicate 256 "a")) "SHA-256 uses the same byte ceiling"
+              Expect.isFalse (acceptsPassword Sha256Password (String.replicate 257 "a")) "SHA-256 rejects oversized input"
 
           testCase "tryUserRow finds the bootstrap root and reports its empty stored hash"
           <| fun _ ->
