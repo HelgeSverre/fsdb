@@ -15707,6 +15707,13 @@ let private rejectSessionVariablesInGenerated =
                 sprintf "Default value expression of column '%s' cannot refer user or system variables." column
             ))
 
+let private rejectUnsafeGeneratedExpressions registry columns =
+    [ rejectDirectOnlyGenerated registry columns
+      rejectQuantifiedComparisonsInGenerated columns
+      rejectSubqueriesInGenerated columns
+      rejectSessionVariablesInGenerated columns ]
+    |> List.tryPick id
+
 let private effectfulDdlFunctions = set [ "BENCHMARK"; "SLEEP" ]
 
 let private containsEffectfulDdlFunction =
@@ -15774,20 +15781,20 @@ let private validateGeneratedDefinitions (registry: Registry) (columns: ColumnDe
             (fun node ->
                 match node with
                 | FuncCall _ when isAggregateCall registry node -> Some(Err(1111, "Invalid use of group function"))
-                | FuncCall(name, _) when Functions.lookup name registry |> Option.isNone ->
-                    Some(
-                        Err(
-                            3763,
-                            sprintf
-                                "Expression of generated column '%s' contains a disallowed function: `%s`."
-                                column
-                                name
+                | FuncCall(name, _) ->
+                    let key = name.ToUpperInvariant()
+
+                    if Functions.lookup key registry |> Option.isNone then
+                        Some(
+                            Err(
+                                3763,
+                                sprintf
+                                    "Expression of generated column '%s' contains a disallowed function: `%s`."
+                                    column
+                                    name
+                            )
                         )
-                    )
-                | FuncCall(name, _) when statementVariantFunctions.Contains(name.ToUpperInvariant()) ->
-                    match registry.Extensions |> Map.tryFind (name.ToUpperInvariant()) with
-                    | Some _ -> None
-                    | None ->
+                    elif statementVariantFunctions.Contains key && not (registry.Extensions.ContainsKey key) then
                         Some(
                             Err(
                                 3763,
@@ -15797,12 +15804,16 @@ let private validateGeneratedDefinitions (registry: Registry) (columns: ColumnDe
                                     (name.ToLowerInvariant())
                             )
                         )
+                    else
+                        None
                 | _ -> None)
             expression
 
-    columns
-    |> List.indexed
-    |> List.tryPick (fun (columnIndex, column) ->
+    let indexedColumns = List.toArray columns
+
+    indexedColumns
+    |> Array.indexed
+    |> Array.tryPick (fun (columnIndex, column) ->
         column.Generated
         |> Option.bind (fun (expression, kind) ->
             if kind = Virtual && column.PrimaryKey then
@@ -15814,9 +15825,9 @@ let private validateGeneratedDefinitions (registry: Registry) (columns: ColumnDe
                     checkColumnReferences expression
                     |> List.tryPick (fun (_, name) ->
                         match resolveColumn columns name with
-                        | Ok referencedIndex when columns.[referencedIndex].AutoIncrement ->
+                        | Ok referencedIndex when indexedColumns.[referencedIndex].AutoIncrement ->
                             Some(Err(3109, sprintf "Generated column '%s' cannot refer to auto-increment column." column.Name))
-                        | Ok referencedIndex when referencedIndex >= columnIndex && columns.[referencedIndex].Generated.IsSome ->
+                        | Ok referencedIndex when referencedIndex >= columnIndex && indexedColumns.[referencedIndex].Generated.IsSome ->
                             Some(Err(3107, "Generated column can refer only to generated columns defined prior to it."))
                         | _ -> None)))
 
@@ -18044,10 +18055,7 @@ let rec executeAs
             | Some _ -> ids, storageErr (TableExists name)
             | None ->
                 let error =
-                    [ rejectDirectOnlyGenerated registry table.Columns
-                      rejectQuantifiedComparisonsInGenerated table.Columns
-                      rejectSubqueriesInGenerated table.Columns
-                      rejectSessionVariablesInGenerated table.Columns
+                    [ rejectUnsafeGeneratedExpressions registry table.Columns
                       validateGeneratedDefinitions registry table.Columns
                       rejectUnsafePartitionExpression registry table.Partitioning
                       validateFunctionalDefaults registry table.Columns |> validationErrorOption id
@@ -18162,10 +18170,7 @@ let rec executeAs
         let error =
             [ executionOptionError
               engineError
-              rejectDirectOnlyGenerated registry addedColumns
-              rejectQuantifiedComparisonsInGenerated addedColumns
-              rejectSubqueriesInGenerated addedColumns
-              rejectSessionVariablesInGenerated addedColumns
+              rejectUnsafeGeneratedExpressions registry addedColumns
               rejectUnsafeFunctionalDefaults registry addedColumns ]
             |> List.tryPick id
 
