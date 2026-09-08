@@ -116,7 +116,8 @@ Plaintext full authentication uses a process-local RSA key unless matching
 `caching-sha2-password-public-key-path` settings are supplied. The equivalent
 `sha256-password-*` pair configures the deprecated SHA-256 plugin. Embedding
 hosts can provide either private key through `Db.withAuthenticationRsaKey`;
-fsdb derives and serves its public half.
+fsdb derives and serves its public half. `SHOW STATUS` exposes the active keys
+as `Caching_sha2_password_rsa_public_key` and `Rsa_public_key`.
 
 `--require-secure-transport` rejects plaintext handshakes with 3159.
 Embedding hosts supply already-loaded `X509Certificate2` values through

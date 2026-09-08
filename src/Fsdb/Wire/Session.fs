@@ -365,6 +365,7 @@ type Session =
       StatusCounters: Fsdb.InformationSchema.StatusCounters
       TlsVersion: string option
       TlsCipher: string option
+      AuthenticationRsaPublicKeys: Map<Authentication.Plugin, string>
       CloseAfterReply: bool
       TransportMetrics: TransportMetrics }
 
@@ -421,6 +422,7 @@ let create (connectionId: int) (store: Store) : Session =
       StatusCounters = Fsdb.InformationSchema.createStatusCounters ()
       TlsVersion = None
       TlsCipher = None
+      AuthenticationRsaPublicKeys = Map.empty
       CloseAfterReply = false
       TransportMetrics =
         { BytesReceived = 0L

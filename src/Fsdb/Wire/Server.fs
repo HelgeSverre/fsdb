@@ -1151,6 +1151,11 @@ let private defaultRsaAuthenticationKey =
         rsa.KeySize <- 2048
         Authentication.rsaKeyPair rsa
 
+let private rsaKeyFor configured plugin =
+    configured
+    |> Map.tryFind plugin
+    |> Option.defaultWith (fun () -> defaultRsaAuthenticationKey.Value)
+
 let private tryPasswordBytes (bytes: byte[]) =
     if bytes.Length = 0 || bytes.[bytes.Length - 1] <> 0uy then
         None
@@ -1247,11 +1252,6 @@ let private authenticateAccount
                 |> Option.exists (fun clientPlugin ->
                     String.Equals(clientPlugin, Authentication.name plugin, StringComparison.OrdinalIgnoreCase)))
 
-        let rsaKeyFor plugin =
-            authenticationRsaKeys
-            |> Map.tryFind plugin
-            |> Option.defaultWith (fun () -> defaultRsaAuthenticationKey.Value)
-
         let! accountReady =
             async {
                 match selected with
@@ -1334,7 +1334,7 @@ let private authenticateAccount
                                     receiveFullPassword
                                         client
                                         stream
-                                        (rsaKeyFor plugin)
+                                        (rsaKeyFor authenticationRsaKeys plugin)
                                         authData
                                         transportSecurity
                                         0x02uy
@@ -1353,7 +1353,7 @@ let private authenticateAccount
                             receiveFullPassword
                                 client
                                 stream
-                                (rsaKeyFor plugin)
+                                (rsaKeyFor authenticationRsaKeys plugin)
                                 authData
                                 transportSecurity
                                 0x01uy
@@ -1660,6 +1660,13 @@ let private handleConnection
 
                 let passwordExpired = authOkSeq |> Option.exists (fun (_, _, expired) -> expired)
 
+                let authenticationRsaPublicKeys =
+                    [ Authentication.CachingSha2Password; Authentication.Sha256Password ]
+                    |> List.map (fun plugin ->
+                        let key = rsaKeyFor options.AuthenticationRsaKeys plugin
+                        plugin, Encoding.ASCII.GetString key.PublicKeyBytes)
+                    |> Map.ofList
+
                 let createSessionFor (account: Auth.Account) loginUser passwordExpired database =
                     { Session.create connectionId store with
                         User = account.Name
@@ -1675,6 +1682,7 @@ let private handleConnection
                         MultiStatementsEnabled = hasCapability ClientMultiStatements capabilities
                         TlsVersion = tlsVersion
                         TlsCipher = tlsCipher
+                        AuthenticationRsaPublicKeys = authenticationRsaPublicKeys
                         TransportMetrics = metrics }
 
                 let session = createSessionFor selectedAccount resp.Username passwordExpired resp.Database

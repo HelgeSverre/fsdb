@@ -4093,7 +4093,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
               BytesReceived = session.TransportMetrics.BytesReceived
               BytesSent = session.TransportMetrics.BytesSent
               SslCipher = session.TlsCipher
-              SslVersion = session.TlsVersion }
+              SslVersion = session.TlsVersion
+              AuthenticationRsaPublicKeys = session.AuthenticationRsaPublicKeys }
 
         session,
         InformationSchema.showStatus isGlobal session.StatusCounters connectionStatus (statusFilter sql)

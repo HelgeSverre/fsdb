@@ -4191,7 +4191,8 @@ type ConnectionStatus =
       BytesReceived: int64
       BytesSent: int64
       SslCipher: string option
-      SslVersion: string option }
+      SslVersion: string option
+      AuthenticationRsaPublicKeys: Map<Authentication.Plugin, string> }
 
 let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) (connection: ConnectionStatus) (likeOpt: string option) : ShowResult =
     let statusCounters = if isGlobal then processStatusCounters else sessionCounters
@@ -4209,6 +4210,14 @@ let showStatus (isGlobal: bool) (sessionCounters: StatusCounters) (connection: C
           "Bytes_sent", string connection.BytesSent
           "Ssl_cipher", connection.SslCipher |> Option.defaultValue ""
           "Ssl_version", connection.SslVersion |> Option.defaultValue ""
+          "Caching_sha2_password_rsa_public_key",
+          connection.AuthenticationRsaPublicKeys
+          |> Map.tryFind Authentication.CachingSha2Password
+          |> Option.defaultValue ""
+          "Rsa_public_key",
+          connection.AuthenticationRsaPublicKeys
+          |> Map.tryFind Authentication.Sha256Password
+          |> Option.defaultValue ""
           "Questions", string statusCounters.Questions
           "Threads_connected", string (connectedThreads ())
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
