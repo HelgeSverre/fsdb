@@ -35,7 +35,7 @@ findings recorded under `torture/findings/`.
 |---|---|---|
 | [SQL statements](#1-sql-statements-and-parser) | Application-facing DML and DDL are broad | Replication and administrative SQL |
 | [Query execution](#2-query-execution) | Common index, join, subquery, ordering, and grouping paths have dedicated plans | General cost-based planning and broader correlated forms |
-| [Built-in functions](#3-built-in-functions) | Broad scalar, aggregate, JSON, temporal, and planar geometry coverage | Geographic SRS semantics and arbitrary round-buffer resolutions |
+| [Built-in functions](#3-built-in-functions) | Broad scalar, aggregate, JSON, temporal, and planar geometry coverage | Geographic SRS semantics |
 | [Data types](#4-data-types-and-values) | Common scalar, temporal, JSON, and OGC geometry values | Binary JSON representation |
 | [Constraints and indexes](#5-constraints-and-indexes) | Constraints and common equality, range, ordering, grouping, join, and spatial probes | Arbitrary expression ordering and broader grouping paths |
 | [Charsets and collations](#6-charsets-and-collations) | ICU-backed charset and collation registry | Exact MySQL UCA weight tables |
@@ -157,7 +157,7 @@ or locking retain the general SELECT pipeline.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Advanced spatial behavior | round-buffer resolutions that do not divide evenly into quadrants, mixed round resolutions, and geographic SRS semantics; the GLOBAL/SESSION ceiling, its `SET_VAR` statement override, and common planar strategies work | low |
+| Advanced spatial behavior | geographic SRS semantics; planar buffers support independent point, join, and end strategies at arbitrary positive resolutions | low |
 
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets and `SYSTEM`,
 but named zones remain unavailable without MySQL's optional time-zone tables.
@@ -197,7 +197,7 @@ metadata paths. Virtual generated values are recomputed when queried.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes, arbitrary round-buffer resolutions, geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays, default buffers, and square, flat-end, miter-join, quadrant-compatible round strategies, and the geometry-point `SET_VAR` ceiling work, but the internal augmented interval tree is not an R-tree | low | subset |
+| Spatial indexes and operations | R-tree indexes and geographic SRS axis rules | maintained immutable MBR indexes narrow direct `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates for SRID 0; planar overlays and independently configurable square/circle point, flat/round end, and miter/round join buffer strategies work, but the internal augmented interval tree is not an R-tree | low | subset |
 | JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
@@ -592,9 +592,9 @@ implementation effort:
    handlers, SIGNAL/RESIGNAL, branches, labeled loops, cursors, and sequential
    data-changing statements.
 
-4. Geographic SRS behavior and arbitrary or mixed round-buffer resolutions.
-   Planar spatial indexes, overlays, default and common configurable buffers,
-   topology predicates, equality, and convex hull are covered.
+4. Geographic SRS behavior. Planar spatial indexes, overlays, independently
+   configurable buffers, topology predicates, equality, and convex hull are
+   covered.
 
 5. Replication, logging, broad engine counters, and the remaining metadata
    tail. Core command counters are live; replication remains architectural.

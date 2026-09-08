@@ -55,7 +55,7 @@ candidate value.
 The scalar-expression battery covers numeric, string, network, temporal, JSON,
 row-value, subquery, and aggregate edge behavior. Spatial comparisons use
 topology rather than WKT vertex order and exercise relations, overlays, signed
-default buffers, and supported buffer strategies.
+default buffers, and independently configured point, join, and end strategies.
 
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and
