@@ -104,6 +104,94 @@ let tests =
                     "'VALUES function' is deprecated and will be removed in a future release. Please use an alias (INSERT INTO ... VALUES (...) AS alias) and replace VALUES(col) in the ON DUPLICATE KEY UPDATE clause with alias.col instead" ]
                   "VALUES warnings do not require a duplicate row"
 
+          testCase "text ABS indexes report conversion conditions without partial writes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, created =
+                  handle
+                      session
+                      "CREATE TABLE measured_text (id INT PRIMARY KEY, value VARCHAR(40), INDEX ix_abs_value ((ABS(value))))"
+
+              Expect.equal created (Affected 0UL) "text ABS index"
+
+              let session, inserted =
+                  handle session "INSERT INTO measured_text VALUES (1, '12'), (2, ' -3.5 '), (3, '1e2')"
+
+              Expect.equal inserted (Affected 3UL) "valid numeric text"
+
+              let session, rejected = handle session "INSERT INTO measured_text VALUES (4, '12x'), (5, '5')"
+
+              match rejected with
+              | Err(3751, message) -> Expect.stringContains message "ix_abs_value" "strict functional-index error"
+              | other -> failtestf "expected strict text conversion to fail, got %A" other
+
+              match handle session "SELECT COUNT(*) FROM measured_text" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected the failed batch to remain atomic, got %A" other
+
+              let session, _ = handle session "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+              let session, inserted = handle session "INSERT INTO measured_text VALUES (4, '12x'), (5, 'abc'), (6, '')"
+              Expect.equal inserted (Affected 3UL) "permissive conversion retains rows"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 3751, "Data truncated for functional index 'ix_abs_value' at row 1"
+                    3751, "Data truncated for functional index 'ix_abs_value' at row 2" ]
+                  "functional-index warnings"
+
+              let session, selected = handle session "SELECT id FROM measured_text WHERE ABS(value) = 12"
+              Expect.equal selected (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "4" ] ])) "text ABS lookup"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292; 1292 ] "scalar residual warnings"
+
+              let session, _ = handle session "SET sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'"
+              let session, inserted = handle session "INSERT IGNORE INTO measured_text VALUES (7, 'oops'), (8, '8')"
+              Expect.equal inserted (Affected 2UL) "IGNORE downgrades the index conversion"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 3751 ] "IGNORE warning"
+
+              let session, rejected = handle session "UPDATE measured_text SET value = 'broken' WHERE id = 1"
+
+              match rejected with
+              | Err(3751, _) -> ()
+              | other -> failtestf "expected strict indexed update to fail, got %A" other
+
+              match handle session "SELECT value FROM measured_text WHERE id = 1" |> snd with
+              | ResultSet(_, [ [ Some "12" ] ]) -> ()
+              | other -> failtestf "expected the failed update to preserve its row, got %A" other
+
+              let session, updated = handle session "UPDATE IGNORE measured_text SET value = 'broken' WHERE id = 1"
+              Expect.equal updated (Affected 1UL) "UPDATE IGNORE retains the coerced functional value"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 3751 ] "UPDATE IGNORE warning"
+
+              let session, repaired = handle session "UPDATE measured_text SET value = '7' WHERE id = 7"
+              Expect.equal repaired (Affected 1UL) "strict writes can repair a previously truncated key"
+              Expect.isEmpty session.Diagnostics "removing the old key does not repeat its conversion warning"
+
+              let session, _ = handle session "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+              let session, _ = handle session "CREATE TABLE indexed_later (id INT PRIMARY KEY, value VARCHAR(40))"
+              let session, _ = handle session "INSERT INTO indexed_later VALUES (1, '12x'), (2, 'abc'), (3, '')"
+              let session, indexed = handle session "CREATE INDEX ix_abs_later ON indexed_later ((ABS(value)))"
+              Expect.equal indexed (Affected 0UL) "permissive index build"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 3751; 3751 ] "existing-row conversion warnings"
+
+              let session, _ = handle session "SET sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'"
+              let session, _ = handle session "CREATE TABLE strict_index_build (id INT PRIMARY KEY, value VARBINARY(40))"
+              let session, _ = handle session "INSERT INTO strict_index_build VALUES (1, X'313278')"
+              let session, rejected = handle session "CREATE INDEX ix_abs_binary ON strict_index_build ((ABS(value)))"
+
+              match rejected with
+              | Err(3751, _) -> ()
+              | other -> failtestf "expected the strict binary index build to fail, got %A" other
+
+              match
+                  handle
+                      session
+                      "SELECT index_name FROM information_schema.statistics WHERE table_schema = 'fsdb' AND table_name = 'strict_index_build' AND index_name = 'ix_abs_binary'"
+                  |> snd
+              with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected the failed binary index build to remain unpublished, got %A" other
+
           testCase "deprecated utf8 charsets report once per spelling"
           <| fun _ ->
               let aliasWarning =

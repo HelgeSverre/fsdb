@@ -19570,7 +19570,10 @@ let rec executeAs
                                         Ok candidate
                             | Error error -> Error error
 
-                        match updateRows targetStore db table (Some targetRows) predicate updater with
+                        match
+                            Storage.withPermissiveIndexExpressions updateStmt.Ignore (fun () ->
+                                updateRows targetStore db table (Some targetRows) predicate updater)
+                        with
                         | Ok changed ->
                             match fireTriggers targetStore db table After TriggerUpdate afterTriggers (List.ofSeq changedRows) with
                             | Some error -> ids, error
@@ -19798,7 +19801,10 @@ let rec executeAs
                                                         changedRows.Add(Some(Array.copy row), Some candidate)
                                                         Ok candidate)
 
-                                        match updateRows snapshot tdb tname None predicate updater with
+                                        match
+                                            Storage.withPermissiveIndexExpressions updateStmt.Ignore (fun () ->
+                                                updateRows snapshot tdb tname None predicate updater)
+                                        with
                                         | Error error -> Error error
                                         | Ok changed ->
                                             triggerStorageResult (

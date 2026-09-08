@@ -282,7 +282,13 @@ let private functionalIndexScalar transform: Scalar =
     function
     | [ value ] ->
         try
-            FunctionalIndex.projectValue (Some transform) value
+            let projected, truncated =
+                FunctionalIndex.projectValueWithStatus Text.Encoding.UTF8.GetBytes (Some transform) value
+
+            truncated
+            |> Option.iter (fun text -> Diagnostics.warning 1292 (sprintf "Truncated incorrect DOUBLE value: '%s'" text))
+
+            projected
         with Value.SignedOutOfRange ->
             raise (Diagnostics.EvaluationError(1690, "BIGINT value is out of range"))
     | _ -> VNull

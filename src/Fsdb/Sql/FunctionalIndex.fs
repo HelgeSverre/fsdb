@@ -95,7 +95,19 @@ let supportsColumnType transform columnType =
         | TFloat _
         | TDouble _
         | TDecimal _
-        | TYear -> true
+        | TYear
+        | TChar _
+        | TVarchar _
+        | TTinyText
+        | TText
+        | TMediumText
+        | TLongText
+        | TBinary _
+        | TVarBinary _
+        | TTinyBlob
+        | TBlob
+        | TMediumBlob
+        | TLongBlob -> true
         | _ -> false
     | Expression _ -> false
 
@@ -172,24 +184,31 @@ let private mapTextOrBytes mapText mapBytes value =
     | Some bytes -> VBytes(mapBytes bytes)
     | None -> value |> toText |> Option.defaultValue "" |> mapText |> VString
 
-let projectValueWith encodeText transform value =
+let projectValueWithStatus encodeText transform value =
     match transform, value with
-    | Some _, VNull -> VNull
-    | Some Lowercase, value -> mapTextOrBytes _.ToLowerInvariant() id value
-    | Some Uppercase, value -> mapTextOrBytes _.ToUpperInvariant() id value
-    | Some Trimmed, value -> mapTextOrBytes _.Trim(' ') trimBinarySpaces value
-    | Some Reversed, value -> mapTextOrBytes reverseText Array.rev value
-    | Some CharacterLength, value -> VInt(characterLength value)
-    | Some ByteLength, value -> VInt(byteLengthWith encodeText value)
-    | Some BitLength, value -> VInt(byteLengthWith encodeText value * 8L)
+    | Some _, VNull -> VNull, None
+    | Some Lowercase, value -> mapTextOrBytes _.ToLowerInvariant() id value, None
+    | Some Uppercase, value -> mapTextOrBytes _.ToUpperInvariant() id value, None
+    | Some Trimmed, value -> mapTextOrBytes _.Trim(' ') trimBinarySpaces value, None
+    | Some Reversed, value -> mapTextOrBytes reverseText Array.rev value, None
+    | Some CharacterLength, value -> VInt(characterLength value), None
+    | Some ByteLength, value -> VInt(byteLengthWith encodeText value), None
+    | Some BitLength, value -> VInt(byteLengthWith encodeText value * 8L), None
     | Some AbsoluteValue, VInt Int64.MinValue -> raise SignedOutOfRange
-    | Some AbsoluteValue, VInt value -> VInt(abs value)
-    | Some AbsoluteValue, VUInt value -> VUInt value
-    | Some AbsoluteValue, VBit(_, value) -> VUInt value
-    | Some AbsoluteValue, VDouble value -> VDouble(abs value)
-    | Some AbsoluteValue, VDecimal value -> VDecimal(abs value)
-    | Some AbsoluteValue, value -> VDouble(abs (toDouble value))
-    | _ -> value
+    | Some AbsoluteValue, VInt value -> VInt(abs value), None
+    | Some AbsoluteValue, VUInt value -> VUInt value, None
+    | Some AbsoluteValue, VBit(_, value) -> VUInt value, None
+    | Some AbsoluteValue, VDouble value -> VDouble(abs value), None
+    | Some AbsoluteValue, VDecimal value -> VDecimal(abs value), None
+    | Some AbsoluteValue, ((VString _ | VBytes _) as value) ->
+        let text = value |> toText |> Option.defaultValue ""
+        let number, truncated = leadingDouble text
+        VDouble(abs number), (if truncated then Some text else None)
+    | Some AbsoluteValue, value -> VDouble(abs (toDouble value)), None
+    | _ -> value, None
+
+let projectValueWith encodeText transform value =
+    projectValueWithStatus encodeText transform value |> fst
 
 let projectValue transform value =
     projectValueWith Text.Encoding.UTF8.GetBytes transform value

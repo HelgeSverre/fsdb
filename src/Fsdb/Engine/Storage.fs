@@ -26,6 +26,18 @@ exception LockNowait of dbName: string
 exception DeadlockVictim of dbName: string
 exception IndexExpressionError of code: int * message: string
 
+type private IndexExpressionDiagnostics =
+    | Silent = 0
+    | Warn = 1
+    | Fail = 2
+
+let private indexExpressionDiagnostics = AsyncLocal<IndexExpressionDiagnostics>()
+let private reportedIndexExpressions = AsyncLocal<Dictionary<Value[], HashSet<string>> option>()
+let private permissiveIndexExpressions = AsyncLocal<bool>()
+
+let internal withPermissiveIndexExpressions permissive operation =
+    DynamicScope.withValue permissiveIndexExpressions permissive operation
+
 /// Storage-layer failures, mapped to MySQL error codes by `toMySqlError`.
 /// `ExpressionError` carries an already-formed MySQL (code, message) pair
 /// through from `Executor`'s row-level expression evaluation (e.g. an
@@ -470,6 +482,22 @@ type Store =
                 this.Databases.[dbName] <- ref db
 
 let setCatalog (store: Store) (catalog: Catalog) : unit = store.Catalog <- catalog
+
+let private withIndexExpressionDiagnostics (store: Store) operation =
+    let behavior =
+        if store.ExecutionSettings.SqlMode.Strict && not permissiveIndexExpressions.Value then
+            IndexExpressionDiagnostics.Fail
+        else
+            IndexExpressionDiagnostics.Warn
+
+    DynamicScope.withValue indexExpressionDiagnostics behavior (fun () ->
+        DynamicScope.withValue
+            reportedIndexExpressions
+            (Some(Dictionary<Value[], HashSet<string>>(HashIdentity.Reference)))
+            operation)
+
+let private withoutIndexExpressionDiagnostics operation =
+    DynamicScope.withValue indexExpressionDiagnostics IndexExpressionDiagnostics.Silent operation
 
 // The mysql bootstrap requires reindexTable, so create is defined below it.
 
@@ -1000,7 +1028,7 @@ let private withDatabasePublishing
                 else
                     let original = slot.Value
 
-                    match captureIndexExpressionError (fun () -> f original) with
+                    match captureIndexExpressionError (fun () -> withIndexExpressionDiagnostics store (fun () -> f original)) with
                     | Error e -> Error e
                     | Ok(db', result) ->
                         let current = slot.Value
@@ -1098,7 +1126,8 @@ let private withReferentialCatalogPublishing
                             match tryCatalogDatabase dbName currentCatalog with
                             | None -> Error(NoSuchDatabase dbName)
                             | Some database ->
-                                captureIndexExpressionError (fun () -> operation currentCatalog database)
+                                captureIndexExpressionError (fun () ->
+                                    withIndexExpressionDiagnostics store (fun () -> operation currentCatalog database))
                                 |> Result.map (fun (updatedCatalog, result) ->
                                     for name, slot in slots do
                                         slot.Value <- Map.find name updatedCatalog
@@ -2342,15 +2371,15 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
     else
         Some(encodeEqualityKey columns indices row)
 
-let private projectIndexValue (column: ColumnDef) prefixLength transform value =
+let private projectIndexValue indexName row (column: ColumnDef) prefixLength transform value =
     let encodeText =
         column.Charset
         |> Option.map Charset.encode
         |> Option.defaultValue Encoding.UTF8.GetBytes
 
-    let transformed =
+    let transformed, truncated =
         try
-            FunctionalIndex.projectValueWith encodeText transform value
+            FunctionalIndex.projectValueWithStatus encodeText transform value
         with SignedOutOfRange ->
             let expression =
                 transform
@@ -2360,6 +2389,26 @@ let private projectIndexValue (column: ColumnDef) prefixLength transform value =
 
             raise (IndexExpressionError(1690, sprintf "BIGINT value is out of range in '%s'" expression))
 
+    truncated
+    |> Option.iter (fun _ ->
+        let rowNumber = Diagnostics.currentRowNumber ()
+        let shouldReport =
+            match row, reportedIndexExpressions.Value with
+            | Some values, Some reports ->
+                match reports.TryGetValue values with
+                | true, indexes -> indexes.Add indexName
+                | false, _ ->
+                    reports.[values] <- HashSet([ indexName ])
+                    true
+            | _ -> true
+
+        let message = sprintf "Data truncated for functional index '%s' at row %d" indexName rowNumber
+
+        match indexExpressionDiagnostics.Value with
+        | IndexExpressionDiagnostics.Fail -> raise (IndexExpressionError(3751, message))
+        | IndexExpressionDiagnostics.Warn when shouldReport -> Diagnostics.warning 3751 message
+        | _ -> ())
+
     match prefixLength, transformed with
     | Some length, VString text -> VString(truncateRunes length text |> Option.defaultValue text)
     | Some length, VBytes bytes -> VBytes(Array.truncate length bytes)
@@ -2368,7 +2417,7 @@ let private projectIndexValue (column: ColumnDef) prefixLength transform value =
 let private indexValues (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) =
     List.map3
         (fun index prefixLength transform ->
-            projectIndexValue columns.[index] prefixLength transform row.[index])
+            projectIndexValue group.Name (Some row) columns.[index] prefixLength transform row.[index])
         group.Indices
         group.PrefixLengths
         group.Transforms
@@ -2569,7 +2618,7 @@ let reindexTable (table: Table) : Table =
     { table with
         UniqueIndex = rebuildUniqueIndex table
         SecondaryIndex = rebuildSecondaryIndex table
-        SecondaryOrder = rebuildSecondaryOrder table
+        SecondaryOrder = withoutIndexExpressionDiagnostics (fun () -> rebuildSecondaryOrder table)
         FullTextIndexes = rebuildFullTextIndexes table
         SpatialIndexes = rebuildSpatialIndexes table }
 
@@ -2601,7 +2650,8 @@ let private reindexRow
     let rowKeyUnchanged keyOf =
         match removed, added with
         | Some(removedId, before), Some(addedId, after) ->
-            removedId = addedId && keyOf before = keyOf after
+            removedId = addedId
+            && withoutIndexExpressionDiagnostics (fun () -> keyOf before) = keyOf after
         | _ -> false
 
     let updateUniqueGroup (keyGroup: IndexKeyGroup) group =
@@ -2612,7 +2662,7 @@ let private reindexRow
                 removed
                 |> Option.fold
                     (fun entries (_, row) ->
-                        encodeUniqueKey columns keyGroup row
+                        withoutIndexExpressionDiagnostics (fun () -> encodeUniqueKey columns keyGroup row)
                         |> Option.fold (fun current key -> Map.remove key current) entries)
                     group
 
@@ -2628,7 +2678,7 @@ let private reindexRow
         |> List.fold (fun indexes keyGroup -> updateNamedGroup keyGroup.Name (updateUniqueGroup keyGroup) indexes) uniqueIndex
 
     let removeSecondaryRow (keyGroup: IndexKeyGroup) buckets (rowId, row) =
-        let key = encodeIndexKey columns keyGroup row
+        let key = withoutIndexExpressionDiagnostics (fun () -> encodeIndexKey columns keyGroup row)
 
         match Map.tryFind key buckets with
         | None -> buckets
@@ -2677,9 +2727,10 @@ let private reindexRow
                 entries
 
     let secondaryOrder =
-        uniqueGroups @ secondaryGroups
-        |> List.filter usesSecondaryOrder
-        |> List.fold (fun indexes keyGroup -> updateNamedGroup keyGroup.Name (updateOrderedGroup keyGroup) indexes) secondaryOrder
+        withoutIndexExpressionDiagnostics (fun () ->
+            uniqueGroups @ secondaryGroups
+            |> List.filter usesSecondaryOrder
+            |> List.fold (fun indexes keyGroup -> updateNamedGroup keyGroup.Name (updateOrderedGroup keyGroup) indexes) secondaryOrder)
 
     uniqueIndex, secondaryIndex, secondaryOrder
 
@@ -3640,7 +3691,7 @@ let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexe
     { table with
         UniqueIndex = rebuildUniqueIndex table
         SecondaryIndex = rebuildSecondaryIndex table
-        SecondaryOrder = rebuildSecondaryOrder table
+        SecondaryOrder = withoutIndexExpressionDiagnostics (fun () -> rebuildSecondaryOrder table)
         FullTextIndexes = rebuildFullTextIndexes table
         SpatialIndexes = rebuildSpatialIndexes table }
 
@@ -3914,7 +3965,7 @@ let ensureMysqlSchema (store: Store) : unit =
                         { updated with
                             UniqueIndex = rebuildUniqueIndex updated
                             SecondaryIndex = rebuildSecondaryIndex updated
-                            SecondaryOrder = rebuildSecondaryOrder updated
+                            SecondaryOrder = withoutIndexExpressionDiagnostics (fun () -> rebuildSecondaryOrder updated)
                             FullTextIndexes = rebuildFullTextIndexes updated
                             SpatialIndexes = rebuildSpatialIndexes updated }
                         dbRef.Value
@@ -3943,7 +3994,7 @@ let private withBootstrapRows rows table =
     { updated with
         UniqueIndex = rebuildUniqueIndex updated
         SecondaryIndex = rebuildSecondaryIndex updated
-        SecondaryOrder = rebuildSecondaryOrder updated
+        SecondaryOrder = withoutIndexExpressionDiagnostics (fun () -> rebuildSecondaryOrder updated)
         FullTextIndexes = rebuildFullTextIndexes updated
         SpatialIndexes = rebuildSpatialIndexes updated }
 
@@ -4054,7 +4105,8 @@ let private tableAt (store: Store) (dbName: string) (tableName: string) : Table 
     tableSnapshot store dbName tableName |> Result.toOption
 
 type HandlerIndexRows =
-    { Columns: ColumnDef list
+    { Name: string
+      Columns: ColumnDef list
       ColumnIndices: int list
       PrefixLengths: int option list
       Transforms: IndexTransform option list
@@ -4070,7 +4122,8 @@ let tryHandlerIndexRows (table: Table) (indexName: string) : HandlerIndexRows op
         table.SecondaryOrder
         |> Map.tryFind group.Name
         |> Option.map (fun entries ->
-            { Columns = table.Columns
+            { Name = group.Name
+              Columns = table.Columns
               ColumnIndices = group.Indices
               PrefixLengths = group.PrefixLengths
               Transforms = group.Transforms
@@ -4096,7 +4149,7 @@ let coerceHandlerIndexValues
         |> List.zip values
         |> traverse (fun (value, (columnIndex, prefixLength, transform)) ->
             Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) index.Columns.[columnIndex] value)
-            |> Result.map (projectIndexValue index.Columns.[columnIndex] prefixLength transform))
+            |> Result.map (projectIndexValue index.Name None index.Columns.[columnIndex] prefixLength transform))
 
 let compareHandlerIndexValues (index: HandlerIndexRows) (left: Value list) (right: Value list) : int =
     let count = min left.Length right.Length
@@ -4581,7 +4634,7 @@ let private trySecondaryOrderSliceInTable
             | Some(VNull, _) -> None
             | Some(value, inclusive) ->
                 exactProbeValue store table index value
-                |> Option.map (projectIndexValue table.Columns.[index] group.PrefixLength group.Transform)
+                |> Option.map (projectIndexValue group.Group.Name None table.Columns.[index] group.PrefixLength group.Transform)
                 |> Option.map (fun value -> Some(value, inclusive))
 
         match normalizeBound lower, normalizeBound upper with
@@ -4851,7 +4904,7 @@ let private tryOrderedIndexLookupWithPrefix
                     | [], _, _, _ -> Some []
                     | value :: rest, index :: indices, prefixLength :: lengths, transform :: remainingTransforms ->
                         exactProbeValue store table index value
-                        |> Option.map (projectIndexValue table.Columns.[index] prefixLength transform)
+                        |> Option.map (projectIndexValue group.Name None table.Columns.[index] prefixLength transform)
                         |> Option.bind (fun normalized ->
                             normalizePrefix rest indices lengths remainingTransforms
                             |> Option.map (fun normalizedRest -> normalized :: normalizedRest))
@@ -4872,6 +4925,8 @@ let private tryOrderedIndexLookupWithPrefix
                             exactProbeValue store table indices.[position] value
                             |> Option.map
                                 (projectIndexValue
+                                    group.Name
+                                    None
                                     table.Columns.[indices.[position]]
                                     group.PrefixLengths.[position]
                                     group.Transforms.[position])
@@ -7142,11 +7197,14 @@ let private insertRowsPreparedCore
                             finish
                         |> Result.map (fun (database, result) -> setCatalogDatabase dbName database catalog, result))))
 
-    captureIndexExpressionError (fun () ->
-        match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
-        | Some targets when not targets.Keys.IsEmpty ->
-            withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
-        | _ -> publish ())
+    let insert () =
+        captureIndexExpressionError (fun () ->
+            match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
+            | Some targets when not targets.Keys.IsEmpty ->
+                withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
+            | _ -> publish ())
+
+    withPermissiveIndexExpressions ignoreErrors insert
 
 let insertRows
     (store: Store)
@@ -7282,7 +7340,10 @@ let internal insertPreparedRowsWithOrdinal
             | Ok candidate ->
                 acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
 
-                match insertPreparedCandidate store dbName tableName candidate with
+                match
+                    withPermissiveIndexExpressions ignoreErrors (fun () ->
+                        insertPreparedCandidate store dbName tableName candidate)
+                with
                 | Error error when ignoreErrors -> Ok(firstGenerated, lastExplicit, affected, inserted, error :: ignored)
                 | Error error -> Error error
                 | Ok outcome ->
@@ -8903,7 +8964,7 @@ let updateRows
                 let updated = publishRows table { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
                 setCatalogTable address updated cascadeCatalog, (List.rev changesRev, cascaded, catalog)))
 
-    let result =
+    let publish () =
         match candidates, catalogHasQualifiedForeignKeys store.Catalog with
         | None, _ -> withReferentialCatalogPublishing store dbName SharedAccess eventsOf (apply None)
         | Some rows, true ->
@@ -8940,6 +9001,8 @@ let updateRows
                     |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result)
 
                 withPointUpdateDatabase store dbName tableName rowIds eventsOf operation)
+
+    let result = captureIndexExpressionError (fun () -> withIndexExpressionDiagnostics store publish)
 
     match result with
     | Ok(changes, _, _) -> Ok changes.Length

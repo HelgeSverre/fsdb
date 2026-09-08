@@ -1489,15 +1489,20 @@ let mysqlTypeOf (v: Value) : byte = (mysqlMetadataOf v).TypeId
 let private leadingNumeric =
     Regex(@"^\s*[-+]?(\d+\.\d*|\.\d+|\d+)([eE][-+]?\d+)?")
 
-let private parseLeadingNumeric (s: string) : float =
+let leadingDouble (s: string) : float * bool =
     let m = leadingNumeric.Match s
+    let hasTrailingText = m.Success && not (String.IsNullOrWhiteSpace(s.Substring m.Length))
 
     if m.Success then
         match Double.TryParse(m.Value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
-        | true, d -> d
-        | false, _ -> 0.0
+        | true, d when Double.IsPositiveInfinity d -> Double.MaxValue, true
+        | true, d when Double.IsNegativeInfinity d -> -Double.MaxValue, true
+        | true, d -> d, hasTrailingText
+        | false, _ -> 0.0, true
     else
-        0.0
+        0.0, not (String.IsNullOrWhiteSpace s)
+
+let private parseLeadingNumeric s = leadingDouble s |> fst
 
 let private compareDecimalString (value: decimal) (text: string) =
     let matched = leadingNumeric.Match text
