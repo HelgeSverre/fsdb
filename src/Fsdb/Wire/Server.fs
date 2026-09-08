@@ -1135,20 +1135,46 @@ let private withCancellationWatch (client: TcpClient) (entry: InformationSchema.
 let private connectionCounter = ref 0L
 let private activeConnectionCounter = ref 0
 
-/// The AuthSwitchRequest packet payload: asks the client to answer the same
-/// 20-byte scramble with mysql_native_password (sent when it responded with
-/// a different plugin, or with nothing, and the account needs verification).
-let private authSwitchPayload (authData: byte[]) : byte[] =
+let private authSwitchPayload plugin (authData: byte[]) =
     let w = Writer()
     w.WriteByte 0xFEuy
-    w.WriteNullTerminatedString "mysql_native_password"
+    w.WriteNullTerminatedString(Authentication.name plugin)
     w.WriteBytes authData
     w.WriteByte 0uy
     w.ToArray()
 
-/// Authenticates a wire response against `mysql.user`. `forceAuthSwitch`
-/// starts a fresh challenge before account lookup so COM_CHANGE_USER does
-/// not reveal account existence or reuse the connection's first scramble.
+let private authMoreData data = Array.append [| 0x01uy |] data
+
+type private RsaAuthenticationKeys =
+    { PrivateKey: RSA
+      PublicKey: byte[] }
+
+let private rsaAuthenticationKeys =
+    lazy
+        let rsa = RSA.Create()
+        rsa.KeySize <- 2048
+
+        { PrivateKey = rsa
+          PublicKey = Encoding.ASCII.GetBytes(rsa.ExportSubjectPublicKeyInfoPem()) }
+
+let private tryPasswordBytes (bytes: byte[]) =
+    if bytes.Length = 0 || bytes.[bytes.Length - 1] <> 0uy then
+        None
+    else
+        try
+            Some(UTF8Encoding(false, true).GetString(bytes, 0, bytes.Length - 1))
+        with :? DecoderFallbackException ->
+            None
+
+let private tryDecryptPassword (authData: byte[]) (encrypted: byte[]) =
+    try
+        let keys = rsaAuthenticationKeys.Value
+        let clear = lock keys.PrivateKey (fun () -> keys.PrivateKey.Decrypt(encrypted, RSAEncryptionPadding.OaepSHA1))
+        let password = Array.mapi (fun index value -> value ^^^ authData.[index % authData.Length]) clear
+        tryPasswordBytes password
+    with :? CryptographicException ->
+        None
+
 let private authenticateAccount
     (client: TcpClient)
     (stream: IO.Stream)
@@ -1190,10 +1216,48 @@ let private authenticateAccount
                     return Some(seqId, selected, expired)
             }
 
+        let selected = clientHost |> Option.bind (Auth.resolveAccount store resp.Username)
+        let plugin =
+            selected
+            |> Option.map (fun (_, cols, row) -> Auth.storedAuthenticationPlugin cols row)
+            |> Option.defaultValue Authentication.defaultPlugin
+
+        let clientUsesPlugin =
+            not (hasCapability ClientPluginAuth capabilities)
+            || (resp.ClientPlugin
+                |> Option.exists (fun clientPlugin ->
+                    String.Equals(clientPlugin, Authentication.name plugin, StringComparison.OrdinalIgnoreCase)))
+
+        let! accountReady =
+            async {
+                match selected with
+                | Some(_, cols, row) when Auth.isAccountLocked cols row ->
+                    let message =
+                        sprintf
+                            "Access denied for user '%s'@'%s'. Account is locked."
+                            resp.Username
+                            (clientHost |> Option.defaultValue "unknown")
+
+                    do!
+                        writePacketAsync stream { SeqId = firstSeq; Payload = errPayload capabilities 3118 message }
+                        |> Async.Ignore
+
+                    return false
+                | Some(_, cols, row) when not (Auth.transportSatisfiesAccount transportSecurity cols row) ->
+                    do! deny firstSeq (resp.AuthResponse.Length > 0) |> Async.Ignore
+                    return false
+                | _ -> return true
+            }
+
         let! offered =
-            if forceAuthSwitch then
+            if not accountReady then
+                async { return None }
+            elif forceAuthSwitch || not clientUsesPlugin then
                 async {
-                    do! writePacketAsync stream { SeqId = firstSeq; Payload = authSwitchPayload authData } |> Async.Ignore
+                    do!
+                        writePacketAsync stream { SeqId = firstSeq; Payload = authSwitchPayload plugin authData }
+                        |> Async.Ignore
+
                     let! response = readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream
                     return response |> Option.map (fun response -> response.SeqId + 1uy, response.Payload)
                 }
@@ -1203,25 +1267,8 @@ let private authenticateAccount
         match offered with
         | None -> return None
         | Some(authSeq, authResponse) ->
-            match clientHost |> Option.bind (Auth.resolveAccount store resp.Username) with
+            match selected with
             | None -> return! deny authSeq (authResponse.Length > 0)
-            | Some(_, cols, row) when Auth.isAccountLocked cols row ->
-                let message =
-                    sprintf
-                        "Access denied for user '%s'@'%s'. Account is locked."
-                        resp.Username
-                        (clientHost |> Option.defaultValue "unknown")
-
-                do! writePacketAsync stream { SeqId = authSeq; Payload = errPayload capabilities 3118 message } |> Async.Ignore
-                return None
-            | Some(_, cols, row) when
-                not (
-                    Auth.transportSatisfiesAccount
-                        transportSecurity
-                        cols
-                        row
-                ) ->
-                return! deny authSeq (authResponse.Length > 0)
             | Some(selected, cols, row) ->
                 let stored = Auth.storedPasswordHash cols row
 
@@ -1230,18 +1277,56 @@ let private authenticateAccount
                         return! accept authSeq selected cols row
                     else
                         return! deny authSeq true
-                elif Auth.verifyNative stored authData authResponse then
-                    return! accept authSeq selected cols row
-                elif forceAuthSwitch || resp.ClientPlugin = Some "mysql_native_password" then
-                    return! deny authSeq (authResponse.Length > 0)
                 else
-                    do! writePacketAsync stream { SeqId = authSeq; Payload = authSwitchPayload authData } |> Async.Ignore
+                    match plugin with
+                    | Authentication.MysqlNativePassword ->
+                        if Auth.verifyNative stored authData authResponse then
+                            return! accept authSeq selected cols row
+                        else
+                            return! deny authSeq (authResponse.Length > 0)
+                    | Authentication.CachingSha2Password ->
+                        match Auth.tryCachedPasswordDigest store selected stored with
+                        | Some digest when Authentication.verifyCachingResponse digest authData authResponse ->
+                            let! okSeq =
+                                writePacketAsync stream
+                                    { SeqId = authSeq
+                                      Payload = authMoreData [| 0x03uy |] }
 
-                    match! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream with
-                    | None -> return None
-                    | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
-                        return! accept (switchResp.SeqId + 1uy) selected cols row
-                    | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
+                            return! accept okSeq selected cols row
+                        | _ ->
+                            let! clientSeq =
+                                writePacketAsync stream
+                                    { SeqId = authSeq
+                                      Payload = authMoreData [| 0x04uy |] }
+
+                            match! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream with
+                            | None -> return None
+                            | Some fullResponse ->
+                                let! passwordAndSeq =
+                                    async {
+                                        if transportSecurity.Encrypted then
+                                            return Some(tryPasswordBytes fullResponse.Payload, fullResponse.SeqId + 1uy)
+                                        elif fullResponse.Payload = [| 0x02uy |] then
+                                            let! encryptedSeq =
+                                                writePacketAsync stream
+                                                    { SeqId = fullResponse.SeqId + 1uy
+                                                      Payload = authMoreData rsaAuthenticationKeys.Value.PublicKey }
+
+                                            match! readPacketWithTimeoutSeconds Limits.connectTimeoutSeconds client stream with
+                                            | Some encrypted ->
+                                                return Some(tryDecryptPassword authData encrypted.Payload, encrypted.SeqId + 1uy)
+                                            | None -> return None
+                                        else
+                                            return Some(tryDecryptPassword authData fullResponse.Payload, fullResponse.SeqId + 1uy)
+                                    }
+
+                                match passwordAndSeq with
+                                | Some(Some password, nextSeq)
+                                    when Authentication.verifyPassword plugin stored password ->
+                                    Auth.cachePasswordDigest store selected stored password
+                                    return! accept nextSeq selected cols row
+                                | Some(password, nextSeq) -> return! deny nextSeq password.IsSome
+                                | None -> return None
     }
 
 let internal accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =

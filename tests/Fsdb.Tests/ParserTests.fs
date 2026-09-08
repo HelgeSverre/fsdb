@@ -3240,7 +3240,16 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE USER 'bob'@'%' IDENTIFIED BY 's3cret'")
-                        (CreateUser([ "bob", "%", Some "s3cret" ], false, AccountOptions.empty))
+                        (CreateUser(
+                            [ "bob",
+                              "%",
+                              Some
+                                  { Plugin = None
+                                    Credential = PlaintextPassword "s3cret"
+                                    CurrentPassword = None } ],
+                            false,
+                            AccountOptions.empty
+                        ))
                         "quoted with password"
 
                     Expect.equal
@@ -3250,7 +3259,17 @@ let tests =
 
                     Expect.equal
                         (parseOk "CREATE USER 'a'@'localhost', 'b'@'%' IDENTIFIED BY 'pw'")
-                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false, AccountOptions.empty))
+                        (CreateUser(
+                            [ "a", "localhost", None
+                              "b",
+                              "%",
+                              Some
+                                  { Plugin = None
+                                    Credential = PlaintextPassword "pw"
+                                    CurrentPassword = None } ],
+                            false,
+                            AccountOptions.empty
+                        ))
                         "per-account password in a list"
 
                     Expect.equal
@@ -3296,6 +3315,57 @@ let tests =
                     Expect.isError
                         (parse "CREATE USER duplicate_tls REQUIRE SUBJECT '/CN=one' AND SUBJECT '/CN=two'")
                         "a TLS attribute cannot be repeated"
+
+                testCase "CREATE and ALTER USER retain authentication plugin clauses"
+                <| fun _ ->
+                    let credential plugin input =
+                        { Plugin = Some plugin
+                          Credential = input
+                          CurrentPassword = None }
+
+                    Expect.equal
+                        (parseOk "CREATE USER modern IDENTIFIED WITH caching_sha2_password BY 'secret'")
+                        (CreateUser(
+                            [ "modern",
+                              "%",
+                              Some(credential "caching_sha2_password" (PlaintextPassword "secret")) ],
+                            false,
+                            AccountOptions.empty
+                        ))
+                        "plaintext plugin credential"
+
+                    Expect.equal
+                        (parseOk "ALTER USER modern IDENTIFIED WITH caching_sha2_password AS '$A$005$stored'")
+                        (AlterUser(
+                            "modern",
+                            "%",
+                            Some(credential "caching_sha2_password" (StoredAuthenticationString "$A$005$stored")),
+                            false,
+                            AccountOptions.empty
+                        ))
+                        "stored authentication string"
+
+                    Expect.equal
+                        (parseOk "CREATE USER legacy IDENTIFIED WITH mysql_native_password BY 'secret'")
+                        (CreateUser(
+                            [ "legacy",
+                              "%",
+                              Some(credential "mysql_native_password" (PlaintextPassword "secret")) ],
+                            false,
+                            AccountOptions.empty
+                        ))
+                        "legacy plugin remains expressible"
+
+                    Expect.equal
+                        (parseOk "CREATE USER passwordless IDENTIFIED WITH caching_sha2_password")
+                        (CreateUser(
+                            [ "passwordless",
+                              "%",
+                              Some(credential "caching_sha2_password" NoCredential) ],
+                            false,
+                            AccountOptions.empty
+                        ))
+                        "a plugin may be selected without a credential"
 
                 testCase "CREATE and ALTER USER parse resource and password-expiry options"
                 <| fun _ ->
@@ -3497,7 +3567,10 @@ let tests =
                         (AlterUser(
                             "bob",
                             "%",
-                            Some { NewPassword = "newpw"; CurrentPassword = None },
+                            Some
+                                { Plugin = None
+                                  Credential = PlaintextPassword "newpw"
+                                  CurrentPassword = None },
                             false,
                             AccountOptions.empty
                         ))

@@ -3785,7 +3785,8 @@ let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe
         |> Option.map (fun password ->
             SetPassword(
                 None,
-                { NewPassword = password
+                { Plugin = None
+                  Credential = PlaintextPassword password
                   CurrentPassword = tryCapture 2 matched |> Option.bind (fun _ -> passwordCapture parserOptions matched 2) }
             ))
     | RegexMatch setPasswordRe matched, _ ->
@@ -3793,7 +3794,8 @@ let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe
         |> Option.map (fun password ->
             SetPassword(
                 tryCapture 1 matched,
-                { NewPassword = password
+                { Plugin = None
+                  Credential = PlaintextPassword password
                   CurrentPassword = tryCapture 3 matched |> Option.bind (fun _ -> passwordCapture parserOptions matched 3) }
             ))
     | _, RegexMatch setDefaultRoleStatement _ -> Some SetDefaultRoleStatement

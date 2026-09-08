@@ -187,9 +187,9 @@ type SessionStateChange =
     | TransactionStateChanged of state: string
 
 /// Builds the initial HandshakeV10 payload. `authPluginData` must be 20
-/// bytes — the mysql_native_password scramble `Server.authenticateHandshake`
+/// bytes — the authentication scramble `Server.authenticateAccount`
 /// verifies the client's response against when the account has a stored
-/// password (an account with no password accepts anything, see `Auth`).
+/// password (an account with no password accepts only an empty response).
 let buildHandshakeV10WithCapabilities (capabilities: uint32) (connectionId: int) (authPluginData: byte[]) : byte[] =
     let w = Writer()
     w.WriteByte 10uy // protocol version
@@ -205,7 +205,7 @@ let buildHandshakeV10WithCapabilities (capabilities: uint32) (connectionId: int)
     w.WriteBytes(Array.zeroCreate<byte> 10) // reserved
     w.WriteBytes authPluginData.[8..19] // auth-plugin-data-part-2 (12 bytes)
     w.WriteByte 0uy // null terminator for auth-plugin-data-part-2
-    w.WriteNullTerminatedString "mysql_native_password"
+    w.WriteNullTerminatedString "caching_sha2_password"
     w.ToArray()
 
 /// Builds a HandshakeV10 payload without TLS negotiation.
@@ -216,13 +216,13 @@ type HandshakeResponse =
     { Capabilities: uint32
       Username: string
       /// The client's answer to the auth challenge — for
-      /// mysql_native_password, `SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw)))`
+      /// The response defined by `ClientPlugin`.
       /// (20 bytes), or empty for an empty password. Verified by `Server`
       /// only when the account has a stored password hash.
       AuthResponse: byte[]
       /// The auth plugin the client answered with (CLIENT_PLUGIN_AUTH) —
       /// `Server` sends an AuthSwitchRequest when this isn't
-      /// mysql_native_password and the account needs verification.
+      /// Authentication plugin named by the client.
       ClientPlugin: string option
       Database: string option
       ZstdCompressionLevel: int option }

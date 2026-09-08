@@ -1583,9 +1583,10 @@ let tests =
 
               match Fsdb.Auth.tryUserRow reloaded "alice" with
               | Some(cols, row) ->
-                  Expect.equal
-                      (Fsdb.Auth.storedPasswordHash cols row)
-                      (Fsdb.Auth.nativePasswordHash "pw2")
+                  let plugin = Fsdb.Auth.storedAuthenticationPlugin cols row
+                  Expect.equal plugin Fsdb.Authentication.CachingSha2Password "replayed plugin"
+                  Expect.isTrue
+                      (Fsdb.Authentication.verifyPassword plugin (Fsdb.Auth.storedPasswordHash cols row) "pw2")
                       "replayed alice with her updated hash"
                   Expect.equal (Fsdb.Auth.accountTlsRequirement cols row) RequireSsl "replayed TLS requirement"
                   Expect.isTrue (Fsdb.Auth.isAccountLocked cols row) "replayed account lock"
@@ -1612,9 +1613,9 @@ let tests =
 
               match Fsdb.Auth.tryUserRowForAccount reloaded (Fsdb.Auth.account "alice" "localhost") with
               | Some(cols, row) ->
-                  Expect.equal
-                      (Fsdb.Auth.storedPasswordHash cols row)
-                      (Fsdb.Auth.nativePasswordHash "local")
+                  let plugin = Fsdb.Auth.storedAuthenticationPlugin cols row
+                  Expect.isTrue
+                      (Fsdb.Authentication.verifyPassword plugin (Fsdb.Auth.storedPasswordHash cols row) "local")
                       "replayed localhost account separately"
               | None -> failtest "expected localhost alice to survive the reload"
 

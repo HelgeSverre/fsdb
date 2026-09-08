@@ -3865,7 +3865,7 @@ let private rootUserRow: Value[] =
         match c.Name with
         | "Host" -> VString "%"
         | "User" -> VString "root"
-        | "plugin" -> VString "mysql_native_password"
+        | "plugin" -> VString "caching_sha2_password"
         | "authentication_string" -> VString ""
         | n when n.EndsWith "_priv" -> VString "Y"
         | _ ->

@@ -18,6 +18,7 @@
     <Compile Include="Foundation/Limits.fs" />
     <Compile Include="Foundation/ServerOptions.fs" />
     <Compile Include="Foundation/Binary.fs" />
+    <Compile Include="Engine/Authentication.fs" />
     <Compile Include="Sql/SingleByteCharset.fs" />
     <Compile Include="Sql/Charset.fs" />
     <Compile Include="Sql/Collation.fs" />
@@ -46,7 +47,6 @@
     <Compile Include="Engine/SpatialIndex.fs" />
     <Compile Include="Engine/Storage.fs" />
     <Compile Include="Engine/TransactionRegistry.fs" />
-    <Compile Include="Engine/Authentication.fs" />
     <Compile Include="Engine/Auth.fs" />
     <Compile Include="Engine/TableLocks.fs" />
     <Compile Include="Engine/Persistence.fs" />

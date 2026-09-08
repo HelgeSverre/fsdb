@@ -2,6 +2,7 @@
 module Fsdb.Auth
 
 open System
+open System.Collections.Concurrent
 open System.Collections.Generic
 open System.Net
 open System.Text.Json
@@ -14,9 +15,6 @@ open Fsdb.Sql
 open Fsdb.Engine
 
 let nativePasswordHash = Authentication.nativePasswordHash
-
-let private storedHashForPassword password =
-    if password = "" then "" else nativePasswordHash password
 
 let private passwordHashesEqual = Authentication.passwordHashesEqual
 
@@ -53,6 +51,32 @@ let internal tryParseAccount (identity: string) =
 /// Whether two account names identify the same host-qualified account.
 let sameAccount left right =
     left.Name = right.Name && String.Equals(left.Host, right.Host, StringComparison.OrdinalIgnoreCase)
+
+type private CachedPassword =
+    { StoredHash: string
+      Digest: byte[] }
+
+let private passwordCacheByStore =
+    System.Runtime.CompilerServices.ConditionalWeakTable<obj, ConcurrentDictionary<string, CachedPassword>>()
+
+let private passwordCache store =
+    passwordCacheByStore.GetValue(store.CommitLock, fun _ -> ConcurrentDictionary(StringComparer.Ordinal))
+
+let private passwordCacheKey account =
+    account.Name + "\u0000" + account.Host.ToLowerInvariant()
+
+let tryCachedPasswordDigest store account storedHash =
+    match (passwordCache store).TryGetValue(passwordCacheKey account) with
+    | true, cached when passwordHashesEqual cached.StoredHash storedHash -> Some(Array.copy cached.Digest)
+    | _ -> None
+
+let cachePasswordDigest store account storedHash password =
+    (passwordCache store).[passwordCacheKey account] <-
+        { StoredHash = storedHash
+          Digest = Authentication.cachingFastDigest password }
+
+let invalidateCachedPassword store account =
+    (passwordCache store).TryRemove(passwordCacheKey account) |> ignore
 
 let private mandatoryRolesByStore =
     System.Runtime.CompilerServices.ConditionalWeakTable<obj, Account list ref>()
@@ -267,6 +291,27 @@ let private userColumnUInt32 (cols: ColumnDef list) (row: Value[]) (name: string
 
 /// The stored password hash for a user row — `""` means no password is set.
 let storedPasswordHash (cols: ColumnDef list) (row: Value[]) : string = userColumnText cols row "authentication_string"
+
+let storedAuthenticationPlugin (cols: ColumnDef list) (row: Value[]) =
+    userColumnText cols row "plugin"
+    |> Authentication.tryParse
+    |> Option.defaultValue Authentication.MysqlNativePassword
+
+let private requestedPlugin fallback (change: PasswordChange) =
+    match change.Plugin with
+    | None -> Ok fallback
+    | Some name ->
+        match Authentication.tryParse name with
+        | Some plugin -> Ok plugin
+        | None -> Error(1524, sprintf "Plugin '%s' is not loaded" name)
+
+let private credentialHash plugin = function
+    | NoCredential -> Ok ""
+    | PlaintextPassword password when Authentication.acceptsPassword plugin password ->
+        Ok(Authentication.passwordHash plugin password)
+    | PlaintextPassword _ -> Error(1396, "Operation CREATE/ALTER USER failed because the password is too long")
+    | StoredAuthenticationString stored when Authentication.isValidHash plugin stored -> Ok stored
+    | StoredAuthenticationString _ -> Error(1827, "The password hash doesn't have the expected format.")
 
 let accountTlsRequirement (cols: ColumnDef list) (row: Value[]) =
     match (userColumnText cols row "ssl_type").ToUpperInvariant() with
@@ -700,7 +745,7 @@ let private createUserWithOptionsInStore
     (store: Store)
     (name: string)
     (host: string)
-    (password: string option)
+    (authentication: PasswordChange option)
     (options: AccountOptions)
     : Result<unit, int * string> =
     let wanted = account name host
@@ -708,9 +753,21 @@ let private createUserWithOptionsInStore
     if (tryUserRowForAccount store wanted).IsSome then
         operationFailed "CREATE USER" name host
     else
-        createAccountAttributeValue options.Attribute
-        |> Result.bind (fun attributes ->
-            let hash = password |> Option.map storedHashForPassword |> Option.defaultValue ""
+        let pluginResult =
+            authentication
+            |> Option.map (requestedPlugin Authentication.defaultPlugin)
+            |> Option.defaultValue (Ok Authentication.defaultPlugin)
+
+        pluginResult
+        |> Result.bind (fun plugin ->
+            authentication
+            |> Option.map (fun change -> credentialHash plugin change.Credential)
+            |> Option.defaultValue (Ok "")
+            |> Result.map (fun hash -> plugin, hash))
+        |> Result.bind (fun (plugin, hash) ->
+            createAccountAttributeValue options.Attribute
+            |> Result.map (fun attributes -> plugin, hash, attributes))
+        |> Result.bind (fun (plugin, hash, attributes) ->
             let expired, lifetime = initialPasswordExpiration options.PasswordExpiration
             let tlsRequirement = options.TlsRequirement |> Option.defaultValue RequireNone
             let tlsAttributes = tlsAttributeValues tlsRequirement
@@ -740,7 +797,7 @@ let private createUserWithOptionsInStore
             let values =
                 [ VString wanted.Host
                   VString name
-                  VString "mysql_native_password"
+                  VString(Authentication.name plugin)
                   VString hash
                   VString(sslType tlsRequirement)
                   blobText tlsAttributes.Cipher
@@ -782,7 +839,26 @@ let createUserWithOptions
     : Result<unit, int * string> =
     let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
 
-    createUserWithOptionsInStore snapshot name host password options
+    let authentication =
+        password
+        |> Option.map (fun value ->
+            { Plugin = None
+              Credential = PlaintextPassword value
+              CurrentPassword = None })
+
+    createUserWithOptionsInStore snapshot name host authentication options
+    |> Result.map (fun () -> commitCatalogInto store baseCatalog snapshot)
+
+let createUserWithAuthentication
+    (store: Store)
+    (name: string)
+    (host: string)
+    (authentication: PasswordChange option)
+    (options: AccountOptions)
+    : Result<unit, int * string> =
+    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+
+    createUserWithOptionsInStore snapshot name host authentication options
     |> Result.map (fun () -> commitCatalogInto store baseCatalog snapshot)
 
 let createUserWithTlsRequirement
@@ -1094,7 +1170,13 @@ let private validateCurrentPassword actor wanted columns row replacement policy 
         match replacement with
         | None when policy.RequireCurrent ->
             Error(3892, "Current password needs to be specified in the REPLACE clause in order to change it.")
-        | Some current when not (passwordHashesEqual (storedHashForPassword current) (storedPasswordHash columns row)) ->
+        | Some current when
+            not (
+                Authentication.verifyPassword
+                    (storedAuthenticationPlugin columns row)
+                    (storedPasswordHash columns row)
+                    current
+            ) ->
             Error(3891, "Incorrect current password. Specify the correct password which has to be replaced.")
         | _ -> Ok()
     elif replacement.IsSome then
@@ -1122,19 +1204,28 @@ let private alterUserInStore
 
         let policy = effectivePasswordPolicy cols row |> fun current -> policyWithOptions current options
 
+        let existingPlugin = storedAuthenticationPlugin cols row
+
         let passwordCheck =
             match password with
             | None -> Ok()
             | Some change -> validateCurrentPassword actor wanted cols row change.CurrentPassword policy
 
         passwordCheck
-        |> Result.bind (fun () -> attributeChange)
-        |> Result.bind (fun attributeChange ->
+        |> Result.bind (fun () ->
+            password
+            |> Option.map (fun change ->
+                requestedPlugin existingPlugin change
+                |> Result.bind (fun plugin -> credentialHash plugin change.Credential |> Result.map (fun hash -> plugin, hash)))
+            |> Option.defaultValue (Ok(existingPlugin, storedPasswordHash cols row)))
+        |> Result.bind (fun credential -> attributeChange |> Result.map (fun attribute -> credential, attribute))
+        |> Result.bind (fun ((plugin, newHash), attributeChange) ->
             let baseChanges =
                 match password with
                 | None -> accountOptionChanges options
-                | Some change ->
-                    [ "authentication_string", VString(storedHashForPassword change.NewPassword)
+                | Some _ ->
+                    [ "plugin", VString(Authentication.name plugin)
+                      "authentication_string", VString newHash
                       "password_expired", VString "N"
                       "password_last_changed", VDateTime(Functions.truncateToSecond DateTime.Now) ]
                     @ accountOptionChanges options
@@ -1152,7 +1243,6 @@ let private alterUserInStore
                 match password with
                 | None -> Ok()
                 | Some change ->
-                    let newHash = storedHashForPassword change.NewPassword
                     let now = DateTime.UtcNow
 
                     passwordHistoryEntries store wanted
@@ -1162,7 +1252,19 @@ let private alterUserInStore
                         if
                             newHash <> ""
                             && (active
-                                |> List.exists (fun (entry, keep) -> keep && passwordHashesEqual entry.Hash newHash))
+                                |> List.exists (fun (entry, keep) ->
+                                    keep
+                                    && match change.Credential with
+                                       | NoCredential -> false
+                                       | PlaintextPassword plaintext ->
+                                           let historyPlugin =
+                                               if entry.Hash.StartsWith "$A$" then
+                                                   Authentication.CachingSha2Password
+                                               else
+                                                   Authentication.MysqlNativePassword
+
+                                           Authentication.verifyPassword historyPlugin entry.Hash plaintext
+                                       | StoredAuthenticationString _ -> passwordHashesEqual entry.Hash newHash))
                         then
                             Error(
                                 3638,
@@ -1208,7 +1310,8 @@ let setPassword (store: Store) (name: string) (host: string) (password: string) 
         store
         (account "root" "%")
         (account name host)
-        { NewPassword = password
+        { Plugin = None
+          Credential = PlaintextPassword password
           CurrentPassword = None }
 
 let setAccountLocked (store: Store) (name: string) (host: string) (locked: bool) : Result<unit, int * string> =
@@ -3353,22 +3456,21 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
     match tryUserRowForAccount store wanted with
     | None -> Error(1396, sprintf "Operation SHOW CREATE USER failed for '%s'@'%s'" wanted.Name wanted.Host)
     | Some(cols, row) ->
+        let quoteText (value: string) = "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
         let name = wanted.Name
         let host = userColumnText cols row "Host"
         let plugin = userColumnText cols row "plugin"
         let hash = userColumnText cols row "authentication_string"
         let accountState = if isAccountLocked cols row then "LOCK" else "UNLOCK"
         let tlsRequirement =
-            let quoteTlsText (value: string) = "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
-
             match accountTlsRequirement cols row with
             | RequireNone -> "NONE"
             | RequireSsl -> "SSL"
             | RequireX509 -> "X509"
             | RequireSpecified attributes ->
-                [ attributes.Subject |> Option.map (fun value -> "SUBJECT " + quoteTlsText value)
-                  attributes.Issuer |> Option.map (fun value -> "ISSUER " + quoteTlsText value)
-                  attributes.Cipher |> Option.map (fun value -> "CIPHER " + quoteTlsText value) ]
+                [ attributes.Subject |> Option.map (fun value -> "SUBJECT " + quoteText value)
+                  attributes.Issuer |> Option.map (fun value -> "ISSUER " + quoteText value)
+                  attributes.Cipher |> Option.map (fun value -> "CIPHER " + quoteText value) ]
                 |> List.choose id
                 |> String.concat " "
         let limits = accountLimits cols row
@@ -3410,15 +3512,15 @@ let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string 
         let attributes =
             match accountAttributeText cols row with
             | None -> ""
-            | Some json -> sprintf " ATTRIBUTE '%s'" (json.Replace("\\", "\\\\").Replace("'", "\\'"))
+            | Some json -> " ATTRIBUTE " + quoteText json
 
         Ok(
             sprintf "CREATE USER for %s@%s" name host,
             sprintf
-                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE %s%s %s ACCOUNT %s %s %s %s%s"
+                "CREATE USER %s IDENTIFIED WITH %s AS %s REQUIRE %s%s %s ACCOUNT %s %s %s %s%s"
                 account
-                plugin
-                hash
+                (quoteText plugin)
+                (quoteText hash)
                 tlsRequirement
                 resources
                 passwordExpiration

@@ -4093,9 +4093,25 @@ let private userRef: Parser<string * string, unit> =
 let private passwordLiteral: Parser<string, unit> =
     stringLit |>> (function VString value -> value | _ -> "")
 
-let private identifiedBy: Parser<string, unit> =
-    keyword "IDENTIFIED" >>. keyword "BY"
-    >>. passwordLiteral
+let private identified: Parser<PasswordChange, unit> =
+    let plaintext plugin =
+        keyword "BY" >>. passwordLiteral
+        |>> fun password ->
+            { Plugin = plugin
+              Credential = PlaintextPassword password
+              CurrentPassword = None }
+
+    let credential =
+        (keyword "BY" >>. passwordLiteral |>> PlaintextPassword)
+        <|> (keyword "AS" >>. passwordLiteral |>> StoredAuthenticationString)
+
+    keyword "IDENTIFIED"
+    >>. ((keyword "WITH" >>. identOrString .>>. opt credential
+         |>> fun (plugin, credential) ->
+             { Plugin = Some plugin
+               Credential = credential |> Option.defaultValue NoCredential
+               CurrentPassword = None })
+        <|> plaintext None)
 
 type private AccountTlsAttribute =
     | TlsCipher of string
@@ -4345,11 +4361,11 @@ let private dropServerStmt: Parser<Statement, unit> =
 let private createUserStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
-     .>>. sepBy1 (userRef .>>. opt identifiedBy) (sym ",")
+     .>>. sepBy1 (userRef .>>. opt identified) (sym ",")
      .>>. accountOptions)
     |>> fun ((ifNotExists, users), options) ->
         CreateUser(
-            users |> List.map (fun ((n, h), pw) -> n, h, pw),
+            users |> List.map (fun ((n, h), authentication) -> n, h, authentication),
             ifNotExists,
             options
         )
@@ -4369,14 +4385,12 @@ let private alterUserStmt: Parser<Statement, unit> =
     (keyword "ALTER" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. userRef
-     .>>. opt (identifiedBy .>>. opt (keyword "REPLACE" >>. passwordLiteral))
+     .>>. opt (identified .>>. opt (keyword "REPLACE" >>. passwordLiteral))
      .>>. accountOptions)
     >>= fun (((ifExists, (name, host)), passwordAndCurrent), options) ->
         let password =
             passwordAndCurrent
-            |> Option.map (fun (newPassword, currentPassword) ->
-                { NewPassword = newPassword
-                  CurrentPassword = currentPassword })
+            |> Option.map (fun (change, currentPassword) -> { change with CurrentPassword = currentPassword })
 
         if password.IsSome || hasAccountOptions options then
             preturn (AlterUser(name, host, password, ifExists, options))

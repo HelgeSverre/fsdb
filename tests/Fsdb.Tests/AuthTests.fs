@@ -63,6 +63,12 @@ let tests =
               Expect.isTrue (verifyCachingResponse known scramble response) "matching response verifies"
               Expect.isFalse (verifyCachingResponse known scramble (Array.zeroCreate 32)) "garbage fails"
 
+          testCase "caching SHA-2 bounds plaintext before its repeated digest work"
+          <| fun _ ->
+              Expect.isTrue (acceptsPassword CachingSha2Password (String.replicate 256 "a")) "256 bytes"
+              Expect.isFalse (acceptsPassword CachingSha2Password (String.replicate 257 "a")) "257 bytes"
+              Expect.isFalse (acceptsPassword CachingSha2Password (String.replicate 65 "💥")) "UTF-8 byte length"
+
           testCase "tryUserRow finds the bootstrap root and reports its empty stored hash"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

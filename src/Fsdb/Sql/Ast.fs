@@ -797,8 +797,14 @@ type CurrentPasswordPolicy =
     | RequireCurrentPassword
     | CurrentPasswordOptional
 
+type CredentialInput =
+    | NoCredential
+    | PlaintextPassword of string
+    | StoredAuthenticationString of string
+
 type PasswordChange =
-    { NewPassword: string
+    { Plugin: string option
+      Credential: CredentialInput
       CurrentPassword: string option }
 
 type AccountAttribute =
@@ -957,10 +963,10 @@ type Statement =
     | Update of UpdateStmt
     | Delete of DeleteStmt
     | Truncate of table: string
-    /// `CREATE USER [IF NOT EXISTS] 'name'@'host' [IDENTIFIED BY 'pw'], ...`
+    /// `CREATE USER [IF NOT EXISTS] 'name'@'host' [IDENTIFIED ...], ...`
     /// with account requirements shared by every account in the statement.
     | CreateUser of
-        users: (string * string * string option) list *
+        users: (string * string * PasswordChange option) list *
         ifNotExists: bool *
         options: AccountOptions
     /// `DROP USER [IF EXISTS] 'name'@'host', ...`

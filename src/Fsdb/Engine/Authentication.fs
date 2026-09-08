@@ -100,10 +100,19 @@ let private cachingPrefix = "$A$"
 let private cachingSaltLength = 20
 let private cachingDigestLength = 43
 let private cachingDefaultRounds = 5000
+let private cachingMaximumPasswordBytes = 256
+
+let acceptsPassword plugin (password: string) =
+    match plugin with
+    | MysqlNativePassword -> true
+    | CachingSha2Password -> utf8.GetByteCount password <= cachingMaximumPasswordBytes
 
 let cachingSha2PasswordHashWithSalt (salt: byte[]) (password: string) =
     if salt.Length <> cachingSaltLength then
         invalidArg (nameof salt) "caching_sha2_password requires a 20-byte salt"
+
+    if not (acceptsPassword CachingSha2Password password) then
+        invalidArg (nameof password) "caching_sha2_password accepts at most 256 password bytes"
 
     let saltText = Encoding.ASCII.GetString salt
     cachingPrefix + "005$" + saltText + sha256Crypt (utf8.GetBytes password) salt cachingDefaultRounds
@@ -113,12 +122,12 @@ let private randomCachingSalt () =
     RandomNumberGenerator.Fill salt
 
     salt
-    |> Array.map (fun value ->
-        let value = value &&& 0x7fuy
-        if value = 0uy || value = byte '$' then value + 1uy else value)
+    |> Array.map (fun value -> byte cryptAlphabet.[int value &&& 0x3f])
 
 let passwordHash plugin (password: string) =
-    if password = "" then
+    if not (acceptsPassword plugin password) then
+        invalidArg (nameof password) "the password is too long for the authentication plugin"
+    elif password = "" then
         ""
     else
         match plugin with
@@ -131,7 +140,11 @@ let internal passwordHashesEqual (left: string) (right: string) =
     left.Length = right.Length && CryptographicOperations.FixedTimeEquals(left, right)
 
 let private tryCachingParts (storedHash: string) =
-    if storedHash.Length <> 7 + cachingSaltLength + cachingDigestLength || not (storedHash.StartsWith cachingPrefix) then
+    if
+        storedHash.Length <> 7 + cachingSaltLength + cachingDigestLength
+        || not (storedHash.StartsWith cachingPrefix)
+        || storedHash.[6] <> '$'
+    then
         None
     else
         match Int32.TryParse(storedHash.Substring(3, 3), Globalization.NumberStyles.HexNumber, null) with
@@ -154,7 +167,9 @@ let isValidHash plugin storedHash =
        | CachingSha2Password -> tryCachingParts storedHash |> Option.isSome
 
 let verifyPassword plugin storedHash password =
-    if storedHash = "" then
+    if not (acceptsPassword plugin password) then
+        false
+    elif storedHash = "" then
         password = ""
     else
         match plugin with

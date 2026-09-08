@@ -28,6 +28,10 @@ let private passwordlessHandshakeResponseWithZstdLevel
     writer.WriteBytes(Array.zeroCreate<byte> 23)
     writer.WriteNullTerminatedString username
     writer.WriteByte 0uy
+
+    if capabilities &&& ClientPluginAuth <> 0u then
+        writer.WriteNullTerminatedString "caching_sha2_password"
+
     zstdCompressionLevel |> Option.iter (byte >> writer.WriteByte)
     writer.ToArray()
 
@@ -38,6 +42,57 @@ let private nativePasswordResponse (password: string) (scramble: byte[]) =
     let stage1 = SHA1.HashData(Text.Encoding.UTF8.GetBytes password)
     let mask = SHA1.HashData(Array.append scramble (SHA1.HashData stage1))
     Array.map2 (^^^) stage1 mask
+
+let private cachingPasswordResponse (password: string) (scramble: byte[]) =
+    let stage1 = SHA256.HashData(Text.Encoding.UTF8.GetBytes password)
+    let stage2 = SHA256.HashData stage1
+    let mask = SHA256.HashData(Array.append stage2 scramble)
+    Array.map2 (^^^) stage1 mask
+
+let private handshakeResponseWithAuth (capabilities: uint32) (username: string) (authResponse: byte[]) (plugin: string) =
+    let writer = Writer()
+    writer.WriteInt32LE(int capabilities)
+    writer.WriteInt32LE 16777216
+    writer.WriteByte 45uy
+    writer.WriteBytes(Array.zeroCreate<byte> 23)
+    writer.WriteNullTerminatedString username
+    writer.WriteByte(byte authResponse.Length)
+    writer.WriteBytes authResponse
+    writer.WriteNullTerminatedString plugin
+    writer.ToArray()
+
+let private readHandshake (stream: IO.Stream) =
+    async {
+        let! packet = readPacketAsync stream
+        let packet = packet |> Option.defaultWith (fun () -> failtest "the server sends its greeting")
+        let reader = Reader(packet.Payload)
+        reader.ReadByte() |> ignore
+        reader.ReadNullTerminatedString() |> ignore
+        reader.ReadInt32LE() |> ignore
+        let first = reader.ReadBytes 8
+        reader.ReadByte() |> ignore
+        reader.ReadInt16LE() |> ignore
+        reader.ReadByte() |> ignore
+        reader.ReadInt16LE() |> ignore
+        reader.ReadInt16LE() |> ignore
+        reader.ReadByte() |> ignore
+        reader.ReadBytes 10 |> ignore
+        let scramble = Array.append first (reader.ReadBytes 12)
+        reader.ReadByte() |> ignore
+        let plugin = reader.ReadNullTerminatedString()
+        return packet.SeqId, scramble, plugin
+    }
+
+let private createNativeUser store name host password =
+    Fsdb.Auth.createUserWithAuthentication
+        store
+        name
+        host
+        (Some
+            { Plugin = Some "mysql_native_password"
+              Credential = PlaintextPassword password
+              CurrentPassword = None })
+        AccountOptions.empty
 
 let private changeUserPayload (username: string) (authResponse: byte[]) (database: string) characterSet plugin =
     let writer = Writer()
@@ -132,21 +187,7 @@ let private connectRawAsWithCapabilitiesAndScramble
         do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
         let stream = client.GetStream()
 
-        let! handshake = readPacketAsync stream
-        let handshakeSeq = handshake.Value.SeqId
-        let reader = Reader(handshake.Value.Payload)
-        reader.ReadByte() |> ignore
-        reader.ReadNullTerminatedString() |> ignore
-        reader.ReadInt32LE() |> ignore
-        let authPart1 = reader.ReadBytes 8
-        reader.ReadByte() |> ignore
-        reader.ReadInt16LE() |> ignore
-        reader.ReadByte() |> ignore
-        reader.ReadInt16LE() |> ignore
-        reader.ReadInt16LE() |> ignore
-        reader.ReadByte() |> ignore
-        reader.ReadBytes 10 |> ignore
-        let scramble = Array.append authPart1 (reader.ReadBytes 12)
+        let! handshakeSeq, scramble, _ = readHandshake stream
 
         let helloResponse = passwordlessHandshakeResponse capabilities username
 
@@ -1273,7 +1314,8 @@ let tests =
               async {
                   let store = Fsdb.Storage.create ()
                   let root = Fsdb.Session.create 1 store
-                  let _, created = Fsdb.QueryHandler.handle root "CREATE USER 'secure_user'@'%' REQUIRE SSL"
+                  let _, created =
+                      Fsdb.QueryHandler.handle root "CREATE USER 'secure_user'@'%' IDENTIFIED BY 'secret' REQUIRE SSL"
                   Expect.equal created (Affected 0UL) "secure account created"
 
                   use certificate = selfSignedCertificate ()
@@ -1300,7 +1342,7 @@ let tests =
                   Expect.equal (Reader(rejected.Payload.[1..]).ReadInt16LE()) 1045 "plaintext account denial"
 
                   let connectionString =
-                      sprintf "Server=127.0.0.1;Port=%d;User ID=secure_user;Password=;SslMode=Required;Pooling=false" port
+                      sprintf "Server=127.0.0.1;Port=%d;User ID=secure_user;Password=secret;SslMode=Required;Pooling=false" port
 
                   use connection = new MySqlConnector.MySqlConnection(connectionString)
                   do! connection.OpenAsync() |> Async.AwaitTask
@@ -2063,6 +2105,47 @@ let tests =
 
                   do! root.CloseAsync() |> Async.AwaitTask
                   do! conn5.CloseAsync() |> Async.AwaitTask
+              }
+              |> Async.RunSynchronously
+
+          testCase "caching SHA-2 reuses a verified password digest on later connections"
+          <| fun _ ->
+              async {
+                  let store = Fsdb.Storage.create ()
+                  Fsdb.Auth.createUser store "cached" "%" (Some "secret")
+                  |> Result.mapError snd
+                  |> Result.defaultWith failtest
+
+                  use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
+                  let connectionString =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=cached;Password=secret;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                          server.Port
+
+                  use first = new MySqlConnector.MySqlConnection(connectionString)
+                  do! first.OpenAsync() |> Async.AwaitTask
+                  do! first.CloseAsync() |> Async.AwaitTask
+
+                  use client = new Net.Sockets.TcpClient()
+                  do! client.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                  let stream = client.GetStream()
+                  let! handshakeSeq, scramble, plugin = readHandshake stream
+                  Expect.equal plugin "caching_sha2_password" "server default plugin"
+
+                  let capabilities = ClientProtocol41 ||| ClientSecureConnection ||| ClientPluginAuth
+                  let response = cachingPasswordResponse "secret" scramble
+
+                  do!
+                      writePacketAsync
+                          stream
+                          { SeqId = handshakeSeq + 1uy
+                            Payload = handshakeResponseWithAuth capabilities "cached" response plugin }
+                      |> Async.Ignore
+
+                  let! fast = readPacketAsync stream
+                  Expect.equal fast.Value.Payload [| 0x01uy; 0x03uy |] "fast-auth success marker"
+                  let! accepted = readPacketAsync stream
+                  Expect.equal accepted.Value.Payload.[0] 0uy "OK follows fast authentication"
               }
               |> Async.RunSynchronously
 
@@ -4383,7 +4466,7 @@ let tests =
                   | Ok() -> ()
                   | Error error -> failtestf "create database failed: %A" error
 
-                  Fsdb.Auth.createUser store "changed" "localhost" (Some "secret")
+                  createNativeUser store "changed" "localhost" "secret"
                   |> Result.mapError snd
                   |> Result.defaultWith failtest
 
@@ -4507,7 +4590,7 @@ let tests =
               async {
                   let store = Fsdb.Storage.create ()
 
-                  Fsdb.Auth.createUser store "legacy_change" "localhost" (Some "secret")
+                  createNativeUser store "legacy_change" "localhost" "secret"
                   |> Result.mapError snd
                   |> Result.defaultWith failtest
 

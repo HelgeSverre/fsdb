@@ -18968,8 +18968,8 @@ let rec executeAs
                     ids, Affected 0UL
 
     | CreateUser(users, ifNotExists, options) ->
-        let createOne (name, host, password) =
-            match Auth.createUserWithOptions store name host password options with
+        let createOne (name, host, authentication) =
+            match Auth.createUserWithAuthentication store name host authentication options with
             | Error(1396, _) when ifNotExists ->
                 noteAuthorizationExists name host
                 Ok()

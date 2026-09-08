@@ -10,6 +10,14 @@ open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
+let private expectStoredPassword password columns row message =
+    let plugin = Fsdb.Auth.storedAuthenticationPlugin columns row
+    Expect.equal plugin Fsdb.Authentication.CachingSha2Password "modern default plugin"
+
+    Expect.isTrue
+        (Fsdb.Authentication.verifyPassword plugin (Fsdb.Auth.storedPasswordHash columns row) password)
+        message
+
 let tests =
     testList
         "Accounts and privileges"
@@ -115,7 +123,7 @@ let tests =
               let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT User, Host, plugin, Select_priv FROM mysql.user" |> snd with
-              | ResultSet(_, [ [ Some "root"; Some "%"; Some "mysql_native_password"; Some "Y" ] ]) -> ()
+              | ResultSet(_, [ [ Some "root"; Some "%"; Some "caching_sha2_password"; Some "Y" ] ]) -> ()
               | other -> failtestf "expected the root row, got %A" other
 
               match handle session "SELECT 1 FROM mysql.user LIMIT 1" |> snd with
@@ -132,11 +140,7 @@ let tests =
               | other -> failtestf "expected CREATE USER to succeed, got %A" other
 
               match Fsdb.Auth.tryUserRow store "bob" with
-              | Some(cols, row) ->
-                  Expect.equal
-                      (Fsdb.Auth.storedPasswordHash cols row)
-                      (Fsdb.Auth.nativePasswordHash "s3cret")
-                      "hash landed in authentication_string"
+              | Some(cols, row) -> expectStoredPassword "s3cret" cols row "hash landed in authentication_string"
               | None -> failtest "expected bob to exist"
 
               match handle session "CREATE USER bob" |> snd with
@@ -169,10 +173,7 @@ let tests =
               | Affected 0UL ->
                   match Fsdb.Auth.tryUserRow store "carol" with
                   | Some(cols, row) ->
-                      Expect.equal
-                          (Fsdb.Auth.storedPasswordHash cols row)
-                          (Fsdb.Auth.nativePasswordHash "second")
-                          "SET PASSWORD FOR overwrote ALTER USER's hash"
+                      expectStoredPassword "second" cols row "SET PASSWORD FOR overwrote ALTER USER's hash"
                   | None -> failtest "carol vanished"
               | other -> failtestf "expected SET PASSWORD FOR to succeed, got %A" other
 
@@ -180,11 +181,7 @@ let tests =
               match handle session "SET PASSWORD = 'rootpw'" |> snd with
               | Affected 0UL ->
                   match Fsdb.Auth.tryUserRow store "root" with
-                  | Some(cols, row) ->
-                      Expect.equal
-                          (Fsdb.Auth.storedPasswordHash cols row)
-                          (Fsdb.Auth.nativePasswordHash "rootpw")
-                          "session user's hash set"
+                  | Some(cols, row) -> expectStoredPassword "rootpw" cols row "session user's hash set"
                   | None -> failtest "root vanished"
               | other -> failtestf "expected SET PASSWORD to succeed, got %A" other
 
@@ -238,10 +235,7 @@ let tests =
 
               match Fsdb.Auth.tryUserRow store "policy_user" with
               | Some(columns, row) ->
-                  Expect.equal
-                      (Fsdb.Auth.storedPasswordHash columns row)
-                      (Fsdb.Auth.nativePasswordHash "gamma")
-                      "a rejected reuse leaves the current hash unchanged"
+                  expectStoredPassword "gamma" columns row "a rejected reuse leaves the current hash unchanged"
               | None -> failtest "expected policy account"
 
               match handle root "SET PASSWORD FOR policy_user = 'delta' REPLACE 'gamma'" |> snd with
@@ -278,19 +272,11 @@ let tests =
               | other -> failtestf "expected host-qualified SET PASSWORD to succeed, got %A" other
 
               match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account "alice" "localhost") with
-              | Some(columns, row) ->
-                  Expect.equal
-                      (Fsdb.Auth.storedPasswordHash columns row)
-                      (Fsdb.Auth.nativePasswordHash "changed")
-                      "localhost password changes"
+              | Some(columns, row) -> expectStoredPassword "changed" columns row "localhost password changes"
               | None -> failtest "localhost account exists"
 
               match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account "alice" "%") with
-              | Some(columns, row) ->
-                  Expect.equal
-                      (Fsdb.Auth.storedPasswordHash columns row)
-                      (Fsdb.Auth.nativePasswordHash "broad")
-                      "percent password remains"
+              | Some(columns, row) -> expectStoredPassword "broad" columns row "percent password remains"
               | None -> failtest "percent account exists"
 
               match handle session "SHOW GRANTS FOR alice@localhost" |> snd with
@@ -319,10 +305,7 @@ let tests =
 
               match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account "policy account" "%") with
               | Some(columns, row) ->
-                  Expect.equal
-                      (Fsdb.Auth.storedPasswordHash columns row)
-                      (Fsdb.Auth.nativePasswordHash "e'f")
-                      "SQL string literals are decoded before hashing"
+                  expectStoredPassword "e'f" columns row "SQL string literals are decoded before hashing"
               | None -> failtest "expected quoted account"
 
           testCase "RENAME USER moves the account and its grants"
@@ -360,8 +343,8 @@ let tests =
               match handle session "SHOW CREATE USER 'show_user'@'%'" |> snd with
               | ResultSet([ column ], [ [ Some ddl ] ]) ->
                   Expect.equal column "CREATE USER for show_user@%" "column label"
-                  Expect.stringContains ddl "CREATE USER `show_user`@`%` IDENTIFIED WITH 'mysql_native_password'" "account and plugin"
-                  Expect.stringContains ddl (Fsdb.Auth.nativePasswordHash "secret") "stored password hash"
+                  Expect.stringContains ddl "CREATE USER `show_user`@`%` IDENTIFIED WITH 'caching_sha2_password'" "account and plugin"
+                  Expect.stringContains ddl "$A$005$" "stored password hash"
                   Expect.stringContains ddl "ACCOUNT UNLOCK" "account state"
               | other -> failtestf "expected SHOW CREATE USER row, got %A" other
 
@@ -1299,13 +1282,52 @@ let tests =
               match handle mallory "SET PASSWORD = 'mine'" |> snd with
               | Affected 0UL ->
                   match Fsdb.Auth.tryUserRow store "mallory" with
-                  | Some(cols, row) ->
-                      Expect.equal
-                          (Fsdb.Auth.storedPasswordHash cols row)
-                          (Fsdb.Auth.nativePasswordHash "mine")
-                          "own password change works without privileges"
+                  | Some(cols, row) -> expectStoredPassword "mine" cols row "own password change works without privileges"
                   | None -> failtest "mallory vanished"
               | other -> failtestf "expected own-password SET PASSWORD to succeed, got %A" other
+
+          testCase "account DDL selects, preserves, and validates authentication plugins"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let safeSalt = Text.Encoding.ASCII.GetBytes "abcdefghijklmnopqrst"
+              let stored = Fsdb.Authentication.cachingSha2PasswordHashWithSalt safeSalt "imported"
+
+              let session, modern = handle session "CREATE USER modern IDENTIFIED BY 'secret'"
+              let session, legacy =
+                  handle session "CREATE USER legacy IDENTIFIED WITH mysql_native_password BY 'old-secret'"
+              let session, imported =
+                  handle session (sprintf "CREATE USER imported IDENTIFIED WITH caching_sha2_password AS '%s'" stored)
+
+              Expect.equal modern (Affected 0UL) "default plugin account"
+              Expect.equal legacy (Affected 0UL) "explicit legacy account"
+              Expect.equal imported (Affected 0UL) "pre-hashed account"
+
+              let storedAccount name expectedPlugin password =
+                  match Fsdb.Auth.tryUserRow store name with
+                  | Some(columns, row) ->
+                      let plugin = Fsdb.Auth.storedAuthenticationPlugin columns row
+                      Expect.equal plugin expectedPlugin "stored plugin"
+                      Expect.isTrue
+                          (Fsdb.Authentication.verifyPassword plugin (Fsdb.Auth.storedPasswordHash columns row) password)
+                          "stored credential"
+                  | None -> failtestf "expected %s account" name
+
+              storedAccount "modern" Fsdb.Authentication.CachingSha2Password "secret"
+              storedAccount "legacy" Fsdb.Authentication.MysqlNativePassword "old-secret"
+              storedAccount "imported" Fsdb.Authentication.CachingSha2Password "imported"
+
+              let session, changed = handle session "SET PASSWORD FOR legacy = 'new-secret'"
+              Expect.equal changed (Affected 0UL) "SET PASSWORD preserves the account plugin"
+              storedAccount "legacy" Fsdb.Authentication.MysqlNativePassword "new-secret"
+
+              match handle session "CREATE USER absent IDENTIFIED WITH no_such_plugin BY 'secret'" |> snd with
+              | Err(1524, message) -> Expect.stringContains message "no_such_plugin" "unknown plugin"
+              | other -> failtestf "expected unknown-plugin error, got %A" other
+
+              match handle session "ALTER USER modern IDENTIFIED WITH caching_sha2_password AS 'bad'" |> snd with
+              | Err(1827, _) -> ()
+              | other -> failtestf "expected malformed-hash error, got %A" other
 
           testCase "self-service ALTER USER changes only the password"
           <| fun _ ->

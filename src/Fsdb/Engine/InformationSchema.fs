@@ -2849,7 +2849,18 @@ type private PluginDescriptor =
       LoadOption: string }
 
 let private plugins =
-    [ { Name = "mysql_native_password"
+    [ { Name = "caching_sha2_password"
+        Version = "1.0"
+        Status = "ACTIVE"
+        PluginType = "AUTHENTICATION"
+        TypeVersion = "2.1"
+        Library = None
+        LibraryVersion = None
+        Author = "fsdb"
+        Description = "Caching SHA-2 authentication"
+        License = "GPL"
+        LoadOption = "ON" }
+      { Name = "mysql_native_password"
         Version = "1.1"
         Status = "ACTIVE"
         PluginType = "AUTHENTICATION"
