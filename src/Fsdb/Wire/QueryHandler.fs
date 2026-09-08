@@ -7,6 +7,7 @@ open System.Diagnostics
 open System.Runtime.CompilerServices
 open System.Text
 open System.Text.RegularExpressions
+open Fsdb.Collections
 open Fsdb.Engine
 open Fsdb.Value
 open Fsdb.Ast
@@ -4481,7 +4482,7 @@ let preparedMetadata
             let columns = Executor.statementColumns store registry schema statement |> Option.defaultValue []
             let origins =
                 Executor.statementColumnOrigins store schema statement
-                |> Option.filter (fun values -> values.Length = columns.Length)
+                |> Option.filter (fun values -> sameLength values columns)
                 |> Option.defaultValue (List.replicate columns.Length None)
 
             let resultColumns =

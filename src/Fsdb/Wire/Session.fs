@@ -5,6 +5,7 @@ open System
 open System.Collections.Concurrent
 open System.Runtime.CompilerServices
 open Fsdb.Ast
+open Fsdb.Collections
 open Fsdb.Diagnostics
 open Fsdb.Protocol
 open Fsdb.Storage
@@ -147,7 +148,7 @@ let tryParseMandatoryRoles (value: string) =
 
                         if name = "" || host = "" then None else Some(Fsdb.Auth.account name host))
 
-                if roles |> List.forall Option.isSome then roles |> List.choose id |> Some else None
+                roles |> tryAllSome
 
 /// Applies a global override without changing the issuing session.
 let setGlobalVariable (store: Store) (name: string) (value: string option) : unit =

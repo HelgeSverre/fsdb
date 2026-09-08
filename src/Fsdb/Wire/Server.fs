@@ -10,6 +10,7 @@ open System.Net.Security
 open System.Security.Authentication
 open System.Text
 open System.Threading
+open Fsdb.Collections
 open Fsdb.Binary
 open Fsdb.Compression
 open Fsdb.Functions
@@ -259,7 +260,7 @@ let sendPayloads (stream: IO.Stream) (startSeq: byte) (payloads: byte[] list) : 
 /// Untyped probe results fall back only when the supplied arity is unusable.
 let private resultMetadata columns rows metadata =
     let metadata =
-        if List.length metadata = List.length columns then
+        if sameLength metadata columns then
             metadata
         else
             List.replicate (List.length columns) (Value.columnMetadata TypeVarString)

@@ -10,6 +10,7 @@ open System.Collections.Immutable
 open System.Globalization
 open System.Text
 open System.Threading
+open Fsdb.Collections
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Temporal
@@ -4446,7 +4447,7 @@ let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : Equal
     |> Result.toOption
     |> Option.bind (fun requested ->
         let matches (_, (group: IndexKeyGroup)) =
-            group.Indices.Length = requested.Length
+            sameLength group.Indices requested
             && Set.ofList group.Indices = Set.ofList requested
             && group.Transforms |> List.forall Option.isNone
 
@@ -5491,7 +5492,7 @@ let private validateForeignKeyDefinition
 
     let missingChild = foreignKey.Columns |> List.tryFind (fun name -> findColumn name childColumns |> Option.isNone)
 
-    match missingChild, List.length foreignKey.Columns = List.length foreignKey.RefColumns, nonNullableChild with
+    match missingChild, sameLength foreignKey.Columns foreignKey.RefColumns, nonNullableChild with
     | Some column, _, _ -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column))
     | None, false, _ -> invalidDefinition ()
     | None, true, Some column when setNull foreignKey.OnDelete || setNull foreignKey.OnUpdate ->
@@ -5536,7 +5537,8 @@ let private validateForeignKeyDefinition
                 )
             | None when not store.ForeignKeyChecks -> Ok()
             | None ->
-                let sameColumns left right = List.forall2 equal left right
+                let sameColumns left right =
+                    sameLength left right && List.forall2 equal left right
 
                 let primary =
                     parentIndexes
@@ -5554,8 +5556,7 @@ let private validateForeignKeyDefinition
                           |> List.map _.Columns
                       yield! parentColumns |> List.filter _.Unique |> List.map (fun column -> [ column.Name ]) ]
 
-                if uniqueKeys
-                   |> List.exists (fun columns -> List.length columns = List.length foreignKey.RefColumns && sameColumns columns foreignKey.RefColumns) then
+                if uniqueKeys |> List.exists (fun columns -> sameColumns columns foreignKey.RefColumns) then
                     Ok()
                 else
                     Error(
@@ -8341,7 +8342,7 @@ let private validateCatalogForeignKeys (baseCatalog: Catalog) (catalog: Catalog)
                             foreignKey.Columns |> traverse (resolveColumn table.Columns),
                             foreignKey.RefColumns |> traverse (resolveColumn parent.Columns)
                         with
-                        | Ok childIndices, Ok parentIndices when childIndices.Length = parentIndices.Length ->
+                        | Ok childIndices, Ok parentIndices when sameLength childIndices parentIndices ->
                             for row in table.RowsArray do
                                 let childKey = childIndices |> List.map (fun index -> row.[index])
 

@@ -6,6 +6,7 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open Fsdb.Ast
+open Fsdb.Collections
 open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Functions
@@ -48,15 +49,6 @@ let private nestedSubqueryResultsError = 1105, "Multiple resultsets are not vali
 
 let private equalsIgnoreCase (left: string) (right: string) =
     System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
-
-let private tryAllSome values =
-    let rec collect resolved =
-        function
-        | [] -> Some(List.rev resolved)
-        | Some value :: rest -> collect (value :: resolved) rest
-        | None :: _ -> None
-
-    collect [] values
 
 /// An expression-evaluation failure: a MySQL error code and message, the
 /// same shape `Storage.toMySqlError` produces, so both error sources funnel
@@ -734,7 +726,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
             |> List.forall (fun column -> Set.contains (column.Name.ToLowerInvariant()) columns)
 
     let namesMatchProjections (outputNames: string list) (projections: (string * Expr * ViewColumnTarget option) list) =
-        outputNames.Length = projections.Length
+        sameLength outputNames projections
         && (outputNames |> List.map _.ToLowerInvariant() |> Set.ofList).Count = outputNames.Length
 
     let hasWritableProjection (projections: (string * Expr * ViewColumnTarget option) list) =
@@ -2243,7 +2235,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         let inferred = expressions |> List.map (fun expression -> expression, metadataOfExpr ctx expression)
         let metadata = inferred |> List.choose snd
         let notNull =
-            metadata.Length = expressions.Length
+            sameLength metadata expressions
             && (metadata |> List.forall (fun item -> item.Flags &&& NotNullFlag <> 0us))
 
         let isText item =
@@ -2794,7 +2786,7 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
         let branches = first :: (rest |> List.map snd)
         let columns = branches |> List.map (selectProjectionColumns store dbName)
 
-        if columns |> List.forall (fun branch -> branch.Length = columns.Head.Length) then
+        if columns |> List.forall (fun branch -> sameLength branch columns.Head) then
             columns
             |> List.transpose
             |> List.map (fun candidates ->
@@ -2876,7 +2868,7 @@ let rec private outputColumnOrigins
         | FromJsonTable(_, _, _, alias) -> alias
 
     let alignOrigins columns origins =
-        if List.length columns = List.length origins then
+        if sameLength columns origins then
             origins
         else
             List.replicate columns.Length None
@@ -3021,7 +3013,7 @@ let private outputColumnWireOverridesFor
 
     let origins = outputColumnOrigins ctx.Store ctx.DbName ctx.Qualifiers select
 
-    if origins.Length = overrides.Length then
+    if sameLength origins overrides then
         List.map2
             (fun origin metadata ->
                 metadata
@@ -3050,7 +3042,7 @@ let private outputColumnWireOverrides ctx columns select =
     outputColumnWireOverridesFor false ctx columns select
 
 let private applyWireOverrides (overrides: ColumnMetadata option list) (types: ColumnMetadata list) : ColumnMetadata list =
-    if List.length overrides = List.length types then
+    if sameLength overrides types then
         List.map2 (fun ov ty -> defaultArg ov ty) overrides types
     else
         types
@@ -3099,7 +3091,7 @@ let private renderOutputValue format value =
     | _ -> text
 
 let private renderOutputCols (formats: OutputColumnFormat list) (outputCols: (string * Value) list) : string option list =
-    if List.length formats = List.length outputCols then
+    if sameLength formats outputCols then
         List.map2 (fun format (_, value) -> renderOutputValue format value) formats outputCols
     else
         outputCols |> List.map (snd >> Value.toText)
@@ -4131,7 +4123,7 @@ let private subqueryRowOperand (select: SelectStmt) (columns: ColumnDef option l
     let expressions =
         match select.Projections, columns with
         | [ (Star _, _) ], columns -> List.replicate columns.Length (Lit VNull)
-        | projections, columns when projections.Length = columns.Length ->
+        | projections, columns when sameLength projections columns ->
             projections
             |> List.map fst
             |> List.map (function
@@ -4174,7 +4166,7 @@ let private rowComparisonResult
     let rec compareRows comparisonOp left right =
         match left, right with
         | RowScalar _, RowScalar _ -> scalarComparison left right comparisonOp
-        | RowValues leftValues, RowValues rightValues when leftValues.Length = rightValues.Length ->
+        | RowValues leftValues, RowValues rightValues when sameLength leftValues rightValues ->
             let pairs = List.zip leftValues rightValues
 
             let rec equal sawNull pairs =
@@ -4658,7 +4650,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                             |> subqueryRowOperand select subquery.ProjectionColumns
 
                         match right with
-                        | RowValues rightValues when leftValues.Length = membership.Domains.Length && rightValues.Length = leftValues.Length ->
+                        | RowValues rightValues
+                            when sameLength leftValues membership.Domains
+                                 && sameLength rightValues leftValues ->
                             let rec keys found domains left right =
                                 match domains, left, right with
                                 | [], [], [] -> Some(List.rev found)
@@ -5580,7 +5574,7 @@ and private describeQueryColumns
     let renameColumns (names: string list) (columns: ViewColumnDescriptor list) =
         if names.IsEmpty then
             Some columns
-        elif names.Length = columns.Length then
+        elif sameLength names columns then
             List.map2
                 (fun (descriptor: ViewColumnDescriptor) name ->
                     { descriptor with Column = { descriptor.Column with Name = name } })
@@ -6085,7 +6079,10 @@ and private deriveColumns
         else TText
 
     let metadata =
-        if metadata.Length = names.Length then metadata else names |> List.map (fun _ -> columnMetadata TypeVarString)
+        if sameLength metadata names then
+            metadata
+        else
+            names |> List.map (fun _ -> columnMetadata TypeVarString)
 
     List.map3
         (fun n (col: Collation.Collation) columnMetadata ->
@@ -6169,19 +6166,11 @@ and private selectColumnFsps
     let ctx = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
     let fsps = outputColumnFsps ctx columns select.Projections
 
-    if List.length fsps = List.length names then
+    if sameLength fsps names then
         fsps
     else
         names |> List.map (fun _ -> None)
 
-/// Resolves one `FromItem` — a real/virtual table via `resolveTableRef`, or
-/// a derived table by running its subquery (uncorrelated: a plain derived
-/// table can't see the outer query's columns, only `LATERAL` ones could,
-/// which this engine doesn't support) and using its typed rows directly
-/// (`runSelectStmt`'s third component — see its doc) under synthetic
-/// `deriveColumns` column metadata, so e.g. `SELECT MAX(y.n) FROM (SELECT n
-/// FROM t) y` still compares `y.n` numerically instead of falling back to a
-/// lexicographic `VString` comparison.
 /// Synthetic column metadata for a `JSON_TABLE(...)`'s COLUMNS clause —
 /// every column nullable (empty/error yields NULL, the only mode this
 /// subset supports), `FOR ORDINALITY` an unsigned INT like MySQL's.
@@ -6379,6 +6368,8 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
                 |> traverse id
                 |> Result.map (List.collect id >> List.map (List.toArray))
 
+/// Resolves physical and virtual tables or materializes a derived source
+/// while preserving its typed column metadata.
 and private resolveFromItem (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
     | FromTable tableRef -> resolveTableRef store registry dbName tableRef
@@ -6459,7 +6450,7 @@ and private resolveFromSubquery
                 | UnionSelect _ -> []
 
             let columns =
-                if sourceColumns.Length = derivedColumns.Length then
+                if sameLength sourceColumns derivedColumns then
                     List.map2
                         (fun derived source ->
                             source
@@ -7296,11 +7287,11 @@ and private alignPreparedRows
             | _ -> false)
 
     match hasVirtual, table with
-    | true, Some table when columns.Length = table.Columns.Length ->
+    | true, Some table when sameLength columns table.Columns ->
         let prepared = List.ofSeq rows
         let stored = List.ofSeq table.RowsArray
 
-        if prepared.Length = stored.Length then
+        if sameLength prepared stored then
             let byStored = Dictionary<Value[], Value[]>(HashIdentity.Reference)
             List.iter2 (fun source target -> byStored.[source] <- target) stored prepared
 
@@ -7479,8 +7470,12 @@ and private applyResolvedJoin
                 |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
                 |> Result.map (List.forall (fun v -> truthy v = Some true))
 
-            let rightIndexTable = physicalTable |> Option.filter (fun table -> table.Columns.Length = joinColumns.Length)
-            let leftIndexTable = leftPhysicalTable |> Option.filter (fun table -> table.Columns.Length = combinedColumnsSoFar.Length)
+            let rightIndexTable =
+                physicalTable |> Option.filter (fun table -> sameLength table.Columns joinColumns)
+
+            let leftIndexTable =
+                leftPhysicalTable
+                |> Option.filter (fun table -> sameLength table.Columns combinedColumnsSoFar)
             let candidateIndexedJoinProbe = tryIndexedJoinProbe store join combinedColumnsSoFar joinColumns rightIndexTable equiKeys
             let preservedRightProbe =
                 tryIndexedPreservedRightProbe store join combinedColumnsSoFar joinColumns leftIndexTable equiKeys
@@ -8371,7 +8366,7 @@ and private withCteScope
                               OriginalTable = ""
                               OriginalName = "" })
 
-            if origins.Length = columns.Length then origins else List.replicate columns.Length None
+            if sameLength origins columns then origins else List.replicate columns.Length None
 
         try
             let rec bind (remaining: CommonTableExpr list) =
@@ -8565,7 +8560,7 @@ and private compatibleSemiJoinColumns (left: ColumnDef) (right: ColumnDef) =
     left.Type = right.Type && sameTextDomain
 
 and private orderedEqualityValues (table: Table) (index: Storage.EqualityIndex) (columnNames: string list) (values: Value list) =
-    if columnNames.Length <> values.Length then
+    if not (sameLength columnNames values) then
         None
     else
         columnNames
@@ -8574,7 +8569,7 @@ and private orderedEqualityValues (table: Table) (index: Storage.EqualityIndex) 
         |> Option.bind (fun requested ->
             let byColumn = List.zip requested values |> Map.ofList
             let ordered = index.ColumnIndices |> List.choose (fun columnIndex -> Map.tryFind columnIndex byColumn)
-            if ordered.Length = index.ColumnIndices.Length then Some ordered else None)
+            if sameLength ordered index.ColumnIndices then Some ordered else None)
 
 and private tryIndexedSemiJoin
     (store: Store)
@@ -8604,7 +8599,7 @@ and private tryIndexedSemiJoin
                     | value -> [ value ]
 
                 let columns = expressions |> List.choose directColumn
-                if columns.Length = expressions.Length then Some(columns, subquery) else None
+                if sameLength columns expressions then Some(columns, subquery) else None
             | _ -> None
 
         select.Where
@@ -8626,7 +8621,7 @@ and private tryIndexedSemiJoin
                 let rightColumns = selectProjectionColumns store dbName subquery
 
                 let compatible =
-                    outerColumns.Length = rightColumns.Length
+                    sameLength outerColumns rightColumns
                     && List.forall2
                         (fun left right -> Option.map2 compatibleSemiJoinColumns left right |> Option.defaultValue false)
                         outerColumns
@@ -9032,6 +9027,19 @@ and private storedIndexedColumnFor (registry: Registry) (tref: TableRef) express
     |> Option.filter (snd >> transformUsesStoredSemantics registry)
 
 and private literalInProbesWith indexedColumn (whereExpr: Expr option) : LiteralInProbe list =
+    let candidateTuple indexedExpressions candidate =
+        match indexedExpressions, candidate with
+        | [ _ ], expression -> Some [ expression ]
+        | _ :: _ :: _, Row expressions when sameLength expressions indexedExpressions -> Some expressions
+        | _ -> None
+
+    let literalTuple expressions =
+        expressions
+        |> List.map (function
+            | Lit value -> Some value
+            | _ -> None)
+        |> tryAllSome
+
     whereExpr
     |> optionalConjuncts
     |> List.choose (function
@@ -9041,30 +9049,14 @@ and private literalInProbesWith indexedColumn (whereExpr: Expr option) : Literal
                 | Row expressions -> expressions
                 | expression -> [ expression ]
 
-            let candidateExpressions =
-                candidates
-                |> List.map (fun candidate ->
-                    match indexedExpressions, candidate with
-                    | [ _ ], expression -> [ expression ]
-                    | _ :: _ :: _, Row expressions -> expressions
-                    | _ -> [])
-
-            let columns =
-                indexedExpressions
-                |> List.map indexedColumn
+            let columns = indexedExpressions |> List.map indexedColumn |> tryAllSome
 
             let values =
-                candidateExpressions
-                |> List.map (List.map (function Lit value -> Some value | _ -> None))
+                candidates
+                |> List.map (candidateTuple indexedExpressions >> Option.bind literalTuple)
+                |> tryAllSome
 
-            match columns with
-            | _ when columns |> List.exists Option.isNone -> None
-            | _ when candidateExpressions |> List.exists (fun expressions -> expressions.Length <> indexedExpressions.Length) -> None
-            | _ when values |> List.collect id |> List.exists Option.isNone -> None
-            | _ ->
-                Some
-                    { Columns = columns |> List.choose id
-                      Values = values |> List.map (List.choose id) }
+            Option.map2 (fun columns values -> { Columns = columns; Values = values }) columns values
         | _ -> None)
 
 and private literalInProbes (registry: Registry) (tref: TableRef) =
@@ -9343,9 +9335,7 @@ and private tryLiteralInAccessInTableWith
 
                         collect 0 [] values
                         |> Option.map (fun rowIdSets ->
-                            rowIdSets
-                            |> List.fold Set.union Set.empty
-                            |> equalityAccessPlan table index))))
+                            rowIdSets |> Set.unionMany |> equalityAccessPlan table index))))
 
 and private tryLiteralInAccessWith
     (policy: IndexAccessPolicy)
@@ -11631,7 +11621,7 @@ and private validateOnlyFullGroupBy
                         |> List.tryFindIndex (fun column -> equalsIgnoreCase column.Name name)
                         |> Option.map (fun position -> offset + position, sourceColumns.[position]))
 
-                if keyColumns.Length = index.Columns.Length && keyColumns |> List.forall (snd >> _.Nullable >> not) then
+                if sameLength keyColumns index.Columns && keyColumns |> List.forall (snd >> _.Nullable >> not) then
                     Some(keyColumns |> List.map fst, [ offset .. offset + sourceColumns.Length - 1 ])
                 else
                     None))

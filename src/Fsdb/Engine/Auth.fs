@@ -7,6 +7,7 @@ open System.Net
 open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Nodes
+open Fsdb.Collections
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
@@ -3171,7 +3172,7 @@ let columnPrivilegesForAccountWithRoles store wanted activeRoles db table column
 /// A privilege list rendered MySQL-style: every static privilege → `ALL
 /// PRIVILEGES`, none → `USAGE`, otherwise the names in column order.
 let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string =
-    if List.length granted = List.length all then "ALL PRIVILEGES"
+    if sameLength granted all then "ALL PRIVILEGES"
     elif granted.IsEmpty then "USAGE"
     else granted |> List.map (fun d -> d.Sql) |> String.concat ", "
 
