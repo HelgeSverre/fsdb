@@ -8145,6 +8145,12 @@ let tests =
               | Err(3572, _) -> ()
               | other -> failtestf "expected the second source to reject NOWAIT, got %A" other
 
+              let contenderTransaction = contender.Tx |> Option.get
+              Expect.equal
+                  (Fsdb.Storage.transactionLockClaimCount contenderTransaction.Snapshot)
+                  0UL
+                  "the failed statement retains no recoverable lock claims"
+
               let observer, _ = handle (create 4 store) "BEGIN"
 
               match handle observer "SELECT id FROM lock_first FOR UPDATE NOWAIT" |> snd with

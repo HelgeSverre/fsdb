@@ -410,9 +410,9 @@ The `wal_group_commit_queue_capacity` option controls producer backpressure.
 ### Snapshots
 
 `snapshot.fsdb` stores the catalog as a self-delimiting binary tree: databases,
-tables, stable row identities, then row values. It uses the same tagged value
-format as the WAL and reads earlier snapshot versions that did not retain row
-identities.
+tables, stable row identities, then row values. Prepared XA branches also retain
+the logical row and key claims needed to rebuild their locks after restart. The
+reader accepts earlier snapshot versions that lack either form of identity.
 
 A checkpoint is written to `snapshot.fsdb.new`, durably flushed, and renamed
 into place. On startup, a valid `.new` file wins; a torn one falls back to the

@@ -300,6 +300,14 @@ type RowUpdate =
 
 type RowRemoval = { RowId: RowId; Row: Value[] }
 
+[<StructuralEquality; StructuralComparison>]
+type TransactionLockClaim =
+    // Stripe instances are process-local; the logical target is what a
+    // prepared XA branch can preserve and map back onto fresh stripes.
+    | SharedRowLock of database: string * table: string * rowId: RowId
+    | ExclusiveRowLock of database: string * table: string * rowId: RowId
+    | ExclusiveKeyLock of database: string * table: string * key: string
+
 type CommitEvent =
     | RowsInserted of db: string * table: string * rows: Value[] list
     /// Retained for WAL records written before stable row identities were persisted.
@@ -312,7 +320,7 @@ type CommitEvent =
     | SchemaChanged of db: string * Statement
     | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
     | TransactionCommitted of CommitEvent list
-    | XaPrepared of xid: Xa.Xid * validateWholeSnapshot: bool * events: CommitEvent list
+    | XaPrepared of xid: Xa.Xid * validateWholeSnapshot: bool * lockClaims: TransactionLockClaim list * events: CommitEvent list
     | XaCommitted of xid: Xa.Xid * events: CommitEvent list
     | XaRolledBack of xid: Xa.Xid
 
@@ -369,6 +377,7 @@ type DynamicWriteRebase =
 type TransactionLockContext =
     { Owner: int64
       HeldStripes: Collections.Generic.HashSet<RowLockStripe>
+      LockClaims: Collections.Generic.HashSet<TransactionLockClaim>
       mutable RollbackWork: int64
       mutable DeadlockVictim: bool
       mutable DynamicWriteRebase: DynamicWriteRebase option }
@@ -394,6 +403,7 @@ type PreparedXa =
     { BaseCatalog: Catalog
       Catalog: Catalog
       Events: CommitEvent list
+      LockClaims: TransactionLockClaim list
       ValidateWholeSnapshot: bool
       TransactionLocks: TransactionLockContext option }
 
@@ -567,7 +577,7 @@ let rec private eventRollbackWork = function
     | RowsUpdated(_, _, changes) -> int64 changes.Length
     | RowsUpdatedById(_, _, changes) -> int64 changes.Length
     | TransactionCommitted events
-    | XaPrepared(_, _, events)
+    | XaPrepared(_, _, _, events)
     | XaCommitted(_, events) -> events |> List.sumBy eventRollbackWork
     | AutoIncrementAdvanced _
     | SchemaChanged _
@@ -612,8 +622,8 @@ let rec private observerEvent = function
         RowsUpdated(db, table, changes |> List.map (fun change -> change.Before, change.After))
     | RowsDeletedById(db, table, rows) -> RowsDeleted(db, table, rows |> List.map _.Row)
     | TransactionCommitted events -> TransactionCommitted(List.map observerEvent events)
-    | XaPrepared(xid, validateWholeSnapshot, events) ->
-        XaPrepared(xid, validateWholeSnapshot, List.map observerEvent events)
+    | XaPrepared(xid, validateWholeSnapshot, lockClaims, events) ->
+        XaPrepared(xid, validateWholeSnapshot, lockClaims, List.map observerEvent events)
     | XaCommitted(xid, events) -> XaCommitted(xid, List.map observerEvent events)
     | event -> event
 
@@ -689,6 +699,7 @@ let beginTransactionSnapshotWithBase (store: Store) : Catalog * Store =
 let private createTransactionLockContext owner =
     { Owner = owner
       HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
+      LockClaims = Collections.Generic.HashSet<TransactionLockClaim>()
       RollbackWork = 0L
       DeadlockVictim = false
       DynamicWriteRebase = None }
@@ -731,6 +742,11 @@ let transactionId (store: Store) =
 let transactionLockStructCount (store: Store) =
     store.TransactionLocks
     |> Option.map (fun context -> lock context.HeldStripes (fun () -> uint64 context.HeldStripes.Count))
+    |> Option.defaultValue 0UL
+
+let transactionLockClaimCount (store: Store) =
+    store.TransactionLocks
+    |> Option.map (fun context -> lock context.LockClaims (fun () -> uint64 context.LockClaims.Count))
     |> Option.defaultValue 0UL
 
 let restoreTransactionRollbackWork (store: Store) work =
@@ -800,6 +816,7 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
     | Some context ->
         let rollbackWork = Threading.Interlocked.Read(&context.RollbackWork)
         let held = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
+        let lockClaims = lock context.LockClaims (fun () -> context.LockClaims |> Set.ofSeq)
         let modes = Dictionary<RowLockStripe, bool * bool>(HashIdentity.Reference)
 
         for stripe in held do
@@ -813,6 +830,9 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
             body ()
         with _ ->
             Threading.Interlocked.Exchange(&context.RollbackWork, rollbackWork) |> ignore
+            lock context.LockClaims (fun () ->
+                context.LockClaims.RemoveWhere(fun claim -> not (Set.contains claim lockClaims))
+                |> ignore)
             let current =
                 lock context.HeldStripes (fun () ->
                     context.HeldStripes
@@ -3176,6 +3196,16 @@ let private withWriteLocksFor
             createTransactionLockContext (store.NextLockOwnerId()),
             true
 
+    let lockClaims =
+        [ yield!
+              rowIds
+              |> List.map (fun rowId -> ExclusiveRowLock(dbName.ToLowerInvariant(), normalizeTableName tableName, rowId))
+          yield!
+              keys
+              |> List.map (fun key -> ExclusiveKeyLock(dbName.ToLowerInvariant(), normalizeTableName tableName, key)) ]
+
+    let addedClaims = ResizeArray<TransactionLockClaim>()
+
     let deadline = DateTime.UtcNow + timeout
     let claimed = ResizeArray<RowLockStripe>()
 
@@ -3189,8 +3219,18 @@ let private withWriteLocksFor
                 if newlyHeld then
                     claimed.Add stripe)
 
+            if not releaseAfter then
+                lock context.LockClaims (fun () ->
+                    for claim in lockClaims do
+                        if context.LockClaims.Add claim then
+                            addedClaims.Add claim)
+
             body ()
         with _ ->
+            lock context.LockClaims (fun () ->
+                for claim in addedClaims do
+                    context.LockClaims.Remove claim |> ignore)
+
             if not releaseAfter then
                 releaseLockStripes context claimed
 
@@ -3279,17 +3319,29 @@ let acquireTransactionReadTargets
         let claimed = ResizeArray<RowLockStripe>()
 
         try
-            rowIds
-            |> List.groupBy stripeIndex
-            |> List.sortBy fst
-            |> List.collect (fun (index, rows) ->
-                let stripe = rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ()))
-                let acquired, newlyHeld = acquireStripe deadline store.LockWaits dbName context mode waitPolicy stripe
+            let acquiredRows =
+                rowIds
+                |> List.groupBy stripeIndex
+                |> List.sortBy fst
+                |> List.collect (fun (index, rows) ->
+                    let stripe = rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ()))
+                    let acquired, newlyHeld = acquireStripe deadline store.LockWaits dbName context mode waitPolicy stripe
 
-                if newlyHeld then
-                    claimed.Add stripe
+                    if newlyHeld then
+                        claimed.Add stripe
 
-                if acquired then rows else [])
+                    if acquired then rows else [])
+
+            lock context.LockClaims (fun () ->
+                for rowId in acquiredRows do
+                    let claim =
+                        match strength with
+                        | ShareLock -> SharedRowLock(dbName.ToLowerInvariant(), normalizeTableName tableName, rowId)
+                        | UpdateLock -> ExclusiveRowLock(dbName.ToLowerInvariant(), normalizeTableName tableName, rowId)
+
+                    context.LockClaims.Add claim |> ignore)
+
+            acquiredRows
         with _ ->
             releaseLockStripes context claimed
             reraise ()
@@ -8934,17 +8986,23 @@ let prepareXa
     (baseCatalog: Catalog)
     (snapshot: Store)
     : bool =
+    let lockClaims =
+        snapshot.TransactionLocks
+        |> Option.map (fun context -> lock context.LockClaims (fun () -> context.LockClaims |> Seq.sort |> List.ofSeq))
+        |> Option.defaultValue []
+
     let prepared =
         { BaseCatalog = baseCatalog
           Catalog = snapshot.Catalog
           Events = transactionEvents snapshot
+          LockClaims = lockClaims
           ValidateWholeSnapshot = validateWholeSnapshot
           TransactionLocks = snapshot.TransactionLocks }
 
     lock store.PreparedXas (fun () ->
         if store.PreparedXas.TryAdd(xid, prepared) then
             try
-                persistXaControl store (XaPrepared(xid, validateWholeSnapshot, prepared.Events))
+                persistXaControl store (XaPrepared(xid, validateWholeSnapshot, lockClaims, prepared.Events))
                 true
             with error ->
                 store.PreparedXas.TryRemove xid |> ignore
@@ -8957,6 +9015,66 @@ let preparedXas (store: Store) : (Xa.Xid * PreparedXa) list =
         store.PreparedXas
         |> Seq.map (fun entry -> entry.Key, entry.Value)
         |> List.ofSeq)
+
+/// Maps durable logical claims onto this process's lock stripes before the
+/// recovered store becomes visible to sessions.
+let internal restorePreparedXaLocks (store: Store) : unit =
+    lock store.PreparedXas (fun () ->
+        let branches =
+            store.PreparedXas
+            |> Seq.map (fun entry -> entry.Key, entry.Value)
+            |> List.ofSeq
+
+        for xid, prepared in branches do
+            if prepared.TransactionLocks.IsNone && not prepared.LockClaims.IsEmpty then
+                let snapshot = beginTransactionContext store
+
+                try
+                    prepared.LockClaims
+                    |> List.groupBy (function
+                        | SharedRowLock(database, table, _)
+                        | ExclusiveRowLock(database, table, _)
+                        | ExclusiveKeyLock(database, table, _) -> database, table)
+                    |> List.iter (fun ((database, table), claims) ->
+                        let sharedRowIds =
+                            claims
+                            |> List.choose (function
+                                | SharedRowLock(_, _, rowId) -> Some rowId
+                                | ExclusiveRowLock _
+                                | ExclusiveKeyLock _ -> None)
+
+                        let rowIds =
+                            claims
+                            |> List.choose (function
+                                | ExclusiveRowLock(_, _, rowId) -> Some rowId
+                                | SharedRowLock _
+                                | ExclusiveKeyLock _ -> None)
+
+                        let keys =
+                            claims
+                            |> List.choose (function
+                                | ExclusiveKeyLock(_, _, key) -> Some key
+                                | SharedRowLock _
+                                | ExclusiveRowLock _ -> None)
+
+                        acquireTransactionReadTargets
+                            TimeSpan.Zero
+                            snapshot
+                            database
+                            table
+                            ShareLock
+                            WaitForLocks
+                            sharedRowIds
+                        |> ignore
+
+                        acquireTransactionWriteTargets TimeSpan.Zero snapshot database table rowIds keys)
+
+                    store.PreparedXas.[xid] <-
+                        { prepared with
+                            TransactionLocks = snapshot.TransactionLocks }
+                with error ->
+                    releaseTransactionLocks snapshot
+                    raise error)
 
 let commitPreparedXaWithTimeout (timeout: TimeSpan) (store: Store) (xid: Xa.Xid) : bool =
     lock store.PreparedXas (fun () ->

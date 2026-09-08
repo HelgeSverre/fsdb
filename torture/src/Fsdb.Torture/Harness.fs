@@ -191,6 +191,11 @@ module Tooling =
 module CommitEvents =
     let private rowHash (row: Value array) = row |> Array.map Fsdb.Value.toWire |> Json.serialize |> Hashing.text
 
+    let private lockClaimText = function
+        | SharedRowLock(database, table, rowId) -> sprintf "shared-row:%s:%s:%A" database table rowId
+        | ExclusiveRowLock(database, table, rowId) -> sprintf "exclusive-row:%s:%s:%A" database table rowId
+        | ExclusiveKeyLock(database, table, key) -> sprintf "exclusive-key:%s:%s:%s" database table key
+
     let rec summarize =
         function
         | RowsInserted(db, table, rows) ->
@@ -212,11 +217,13 @@ module CommitEvents =
             sprintf "schema_changed db=%s statement=%s create_time=%s" db (AstKind.ofStatement statement) (createTime.ToString("O", CultureInfo.InvariantCulture))
         | TransactionCommitted events ->
             sprintf "transaction_committed count=%d hash=%s" events.Length (events |> Seq.map summarize |> Hashing.combine)
-        | XaPrepared(xid, validateWholeSnapshot, events) ->
+        | XaPrepared(xid, validateWholeSnapshot, lockClaims, events) ->
             sprintf
-                "xa_prepared format=%u snapshot=%b count=%d hash=%s"
+                "xa_prepared format=%u snapshot=%b locks=%d lock_hash=%s count=%d hash=%s"
                 xid.FormatId
                 validateWholeSnapshot
+                lockClaims.Length
+                (lockClaims |> Seq.map lockClaimText |> Seq.sort |> Hashing.combine)
                 events.Length
                 (events |> Seq.map summarize |> Hashing.combine)
         | XaCommitted(xid, events) ->

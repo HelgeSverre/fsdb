@@ -25,7 +25,8 @@ let private proxyPrivilegeSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x37uy |] /
 let private spatialReferenceSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x38uy |] // "FSN8"
 let private preparedXaSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x39uy |] // "FSN9"
 let private taggedIndexSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x41uy |] // "FSNA" (format 10)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x42uy |] // "FSNB" (format 11)
+let private stableRowIdSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x42uy |] // "FSNB" (format 11)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x43uy |] // "FSNC" (format 12)
 
 type private SnapshotFormat =
     { ColumnComments: bool
@@ -37,7 +38,8 @@ type private SnapshotFormat =
       SpatialReferences: bool
       PreparedXas: bool
       TaggedIndexColumns: bool
-      StableRowIds: bool }
+      StableRowIds: bool
+      PreparedXaLocks: bool }
 
 let private legacySnapshotFormat =
     { ColumnComments = false
@@ -49,7 +51,8 @@ let private legacySnapshotFormat =
       SpatialReferences = false
       PreparedXas = false
       TaggedIndexColumns = false
-      StableRowIds = false }
+      StableRowIds = false
+      PreparedXaLocks = false }
 
 let private columnCommentSnapshotFormat =
     { legacySnapshotFormat with ColumnComments = true }
@@ -78,8 +81,11 @@ let private preparedXaSnapshotFormat =
 let private taggedIndexSnapshotFormat =
     { preparedXaSnapshotFormat with TaggedIndexColumns = true }
 
-let private currentSnapshotFormat =
+let private stableRowIdSnapshotFormat =
     { taggedIndexSnapshotFormat with StableRowIds = true }
+
+let private currentSnapshotFormat =
+    { stableRowIdSnapshotFormat with PreparedXaLocks = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -88,6 +94,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = stableRowIdSnapshotMagic then
+        Some stableRowIdSnapshotFormat
     elif header = taggedIndexSnapshotMagic then
         Some taggedIndexSnapshotFormat
     elif header = preparedXaSnapshotMagic then
@@ -1004,6 +1012,7 @@ let private KindSchemaChangedV7 = 0x15uy
 let private KindSchemaChangedAtV7 = 0x16uy
 let private KindRowsUpdatedById = 0x17uy
 let private KindRowsDeletedById = 0x18uy
+let private KindXaPreparedWithLocks = 0x19uy
 
 let private encodeXid (w: Writer) (xid: Xa.Xid) =
     w.WriteUInt32LE xid.FormatId
@@ -1028,6 +1037,37 @@ let private decodeXid (r: #IReader) : Xa.Xid =
     { GlobalId = globalId
       BranchQualifier = r.ReadBytes branchLength |> List.ofArray
       FormatId = formatId }
+
+let private encodeTransactionLockClaim (w: Writer) = function
+    | SharedRowLock(database, table, rowId) ->
+        w.WriteByte 0x01uy
+        writeStr w database
+        writeStr w table
+        w.WriteInt32LE(RowId.value rowId)
+    | ExclusiveRowLock(database, table, rowId) ->
+        w.WriteByte 0x02uy
+        writeStr w database
+        writeStr w table
+        w.WriteInt32LE(RowId.value rowId)
+    | ExclusiveKeyLock(database, table, key) ->
+        w.WriteByte 0x03uy
+        writeStr w database
+        writeStr w table
+        writeStr w key
+
+let private decodeTransactionLockClaim (r: #IReader) =
+    match r.ReadByte() with
+    | 0x01uy -> SharedRowLock(readStr r, readStr r, RowId.create (r.ReadInt32LE()))
+    | 0x02uy -> ExclusiveRowLock(readStr r, readStr r, RowId.create (r.ReadInt32LE()))
+    | 0x03uy -> ExclusiveKeyLock(readStr r, readStr r, readStr r)
+    | tag -> failwithf "Persistence: unknown XA transaction-lock claim 0x%02x" tag
+
+let private encodeTransactionLockClaims (w: Writer) claims =
+    w.WriteInt32LE(List.length claims)
+    claims |> List.iter (encodeTransactionLockClaim w)
+
+let private decodeTransactionLockClaims (r: #IReader) =
+    List.init (r.ReadInt32LE()) (fun _ -> decodeTransactionLockClaim r)
 
 let private encodeRowBin (w: Writer) (row: Value[]) : unit =
     w.WriteInt32LE row.Length
@@ -1104,10 +1144,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
 
         for e in events do
             encodeEvent w e
-    | XaPrepared(xid, validateWholeSnapshot, events) ->
-        w.WriteByte KindXaPrepared
+    | XaPrepared(xid, validateWholeSnapshot, lockClaims, events) ->
+        w.WriteByte KindXaPreparedWithLocks
         encodeXid w xid
         writeBool w validateWholeSnapshot
+        encodeTransactionLockClaims w lockClaims
         w.WriteInt32LE events.Length
 
         for event in events do
@@ -1226,7 +1267,13 @@ let rec private decodeEventAt
         let xid = decodeXid r
         let validateWholeSnapshot = readBool r
         let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
-        XaPrepared(xid, validateWholeSnapshot, events)
+        XaPrepared(xid, validateWholeSnapshot, [], events)
+    | k when k = KindXaPreparedWithLocks ->
+        let xid = decodeXid r
+        let validateWholeSnapshot = readBool r
+        let lockClaims = decodeTransactionLockClaims r
+        let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r)
+        XaPrepared(xid, validateWholeSnapshot, lockClaims, events)
     | k when k = KindXaCommitted ->
         let xid = decodeXid r
         XaCommitted(xid, List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt columnsForTable legacyFormat v3Format (depth + 1) r))
@@ -1348,7 +1395,7 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
         | Truncate name -> setTableCreateTimeForReplay store db name createTime (Log.diagnostic "fsdb: WAL replay warning: %s")
         | _ -> Log.diagnostic "fsdb: WAL replay warning (SchemaChangedAt): unexpected statement %A" stmt
     | TransactionCommitted events -> events |> List.iter (applyEventAt (depth + 1) store)
-    | XaPrepared(xid, validateWholeSnapshot, events) ->
+    | XaPrepared(xid, validateWholeSnapshot, lockClaims, events) ->
         let baseCatalog = store.Catalog
         let snapshot = beginTransactionSnapshotFromCatalog store baseCatalog
         events |> List.iter (applyEventAt (depth + 1) snapshot)
@@ -1357,6 +1404,7 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
             { BaseCatalog = baseCatalog
               Catalog = snapshot.Catalog
               Events = events
+              LockClaims = lockClaims
               ValidateWholeSnapshot = validateWholeSnapshot
               TransactionLocks = None }
     | XaCommitted(xid, events) ->
@@ -1479,6 +1527,7 @@ let private writeStore (s: FileStream) (store: Store) : unit =
     for xid, branch in prepared do
         encodeXid w xid
         writeBool w branch.ValidateWholeSnapshot
+        encodeTransactionLockClaims w branch.LockClaims
         writeCatalogPayload branch.BaseCatalog
         w.WriteInt32LE branch.Events.Length
 
@@ -1609,6 +1658,7 @@ let private decodeSnapshot (format: SnapshotFormat) (r: #IReader) =
             [ for _ in 1 .. r.ReadInt32LE() do
                   let xid = decodeXid r
                   let validateWholeSnapshot = readBool r
+                  let lockClaims = if format.PreparedXaLocks then decodeTransactionLockClaims r else []
                   let baseCatalog = decodeCatalog format r
                   let events = List.init (r.ReadInt32LE()) (fun _ -> decodeEvent baseCatalog r)
                   let branchStore = Storage.create ()
@@ -1621,6 +1671,7 @@ let private decodeSnapshot (format: SnapshotFormat) (r: #IReader) =
                       { BaseCatalog = baseCatalog
                         Catalog = branchStore.Catalog
                         Events = events
+                        LockClaims = lockClaims
                         ValidateWholeSnapshot = validateWholeSnapshot
                         TransactionLocks = None } ]
         else
@@ -1762,6 +1813,7 @@ let load (dataDir: string) : Store =
             use fs = new FileStream(walPath, FileMode.Open, FileAccess.Write)
             fs.SetLength goodOffset
 
+    restorePreparedXaLocks store
     store
 
 /// Appends ordered WAL batches and acknowledges each commit after their shared fsync.

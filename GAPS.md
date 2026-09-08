@@ -264,15 +264,16 @@ equal-cost cycles choose the newest participant.
 
 XA branches use the same private snapshots and conflict validation. Prepared
 branches detach from their sessions, survive WAL recovery, remain invisible
-until completion, and defer snapshot truncation until every prepared branch
-has resolved.
+until completion, and retain their shared row, exclusive row, and unique-key
+claims after restart. Snapshot truncation waits until every prepared branch has
+resolved.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed UPDATE/DELETE paths coordinate row stripes; insert, upsert, and replacement candidates are prepared once, then claim supplied, generated, or defaulted unique keys and refresh existing duplicate rows before publication, including SELECT sources; AUTO_INCREMENT identities are reserved across transaction snapshots; keyless inserts, full-scan, CTE, and multi-table writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; qualified foreign keys deliberately serialize catalog-wide referential actions, and recorded campaigns show CPU saturation limiting higher worker counts | medium | partial |
-| XA recovery details | recovered branches retain InnoDB locks and `XA RECOVER` requires `XA_RECOVER_ADMIN` | live prepared branches retain row/key ownership and `XA_RECOVER_ADMIN` is enforced through `mysql.global_grants`; after restart, overlapping completion returns 1205 through optimistic validation instead of waiting on reconstructed locks; use `CONVERT XID` for byte-exact non-ASCII identifiers because the unconverted result still crosses the string result carrier | low | divergence |
+| XA recovery result encoding | unconverted `XA RECOVER` returns binary identifier data | `XA_RECOVER_ADMIN` is enforced through `mysql.global_grants`; use `CONVERT XID` for byte-exact non-ASCII identifiers because the unconverted result still crosses the string result carrier | low | divergence |
 
 ## 8. Persistence and durability
 
@@ -292,11 +293,12 @@ readable.
 
 Group commit, ordered checkpoint barriers, lock-step rotation, shutdown
 rotation, decode-depth limits, generated-expression codecs, and durable XA
-records share the same persistence path. Checkpoint rotation waits for prepared
-XA branches so their recovery base remains in the WAL. The durability campaign
-forces repeated automatic rotations, appends a WAL-only commit, crashes the
-server, and verifies the recovered transaction sets before and after a graceful
-snapshot restart.
+records share the same persistence path. XA records retain logical lock claims
+so startup can rebuild their row/key ownership. Checkpoint rotation waits for
+prepared XA branches so their recovery base remains in the WAL. The durability
+campaign forces repeated automatic rotations, appends a WAL-only commit,
+crashes the server, and verifies the recovered transaction sets before and
+after a graceful snapshot restart.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|

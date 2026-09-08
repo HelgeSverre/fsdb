@@ -205,6 +205,22 @@ let private legacyCreateTableWalRecord (table: string) =
     record.WriteBytes payload
     record.ToArray()
 
+let private legacyXaPreparedWalRecord () =
+    let payload = Writer()
+    payload.WriteByte 0x0Fuy
+    payload.WriteUInt32LE 7u
+    payload.WriteInt32LE 3
+    payload.WriteBytes [| byte 'o'; byte 'l'; byte 'd' |]
+    payload.WriteInt32LE 0
+    payload.WriteByte 0uy
+    payload.WriteInt32LE 0
+    let payload = payload.ToArray()
+    let record = Writer()
+    record.WriteInt32LE payload.Length
+    record.WriteUInt32LE(crc32 payload)
+    record.WriteBytes payload
+    record.ToArray()
+
 let private v3CreateTableWalRecord (table: string) (tableComment: string option) =
     let payload = Writer()
     payload.WriteByte 0x0Auy
@@ -519,7 +535,36 @@ let tests =
               | ResultSet(_, [ [ Some "0" ] ]) -> ()
               | other -> failtestf "expected prepared rows to remain invisible, got %A" other
 
+              let insertTargets value =
+                  tryInsertLockTargets checkpointedAgain defaultDatabase "xa_durable" None [ [ Some(VInt value) ] ]
+                  |> Option.defaultWith (fun () -> failtest "expected a primary-key lock target")
+
+              let competing = beginTransactionContext checkpointedAgain
+              let target = insertTargets 1L
+
+              Expect.throwsT<LockWaitTimeout>
+                  (fun () ->
+                      acquireTransactionWriteTargets
+                          TimeSpan.Zero
+                          competing
+                          defaultDatabase
+                          "xa_durable"
+                          target.RowIds
+                          target.Keys)
+                  "the recovered prepared branch retains its primary-key lock"
+
               let recoverySession = run recoverySession "XA COMMIT 'durable', 'commit', 42"
+              let released = insertTargets 1L
+
+              acquireTransactionWriteTargets
+                  TimeSpan.Zero
+                  competing
+                  defaultDatabase
+                  "xa_durable"
+                  released.RowIds
+                  released.Keys
+
+              releaseTransactionLocks competing
               let committed = load dir
 
               match rowsOf committed defaultDatabase "xa_durable" with
@@ -529,13 +574,65 @@ let tests =
               attach dir committed
               let rollbackSession = Fsdb.Session.create 3 committed
               let rollbackSession = run rollbackSession "XA START 'durable', 'rollback'"
+              let rollbackSession = run rollbackSession "UPDATE xa_durable SET id = id WHERE id = 1"
               let rollbackSession = run rollbackSession "INSERT INTO xa_durable VALUES (2)"
               let rollbackSession = run rollbackSession "XA END 'durable', 'rollback'"
               let _ = run rollbackSession "XA PREPARE 'durable', 'rollback'"
               let recoveredRollback = load dir
               attach dir recoveredRollback
+
+              let rollbackTargets =
+                  tryInsertLockTargets recoveredRollback defaultDatabase "xa_durable" None [ [ Some(VInt 2L) ] ]
+                  |> Option.defaultWith (fun () -> failtest "expected the WAL-recovered primary-key lock target")
+
+              let updateTargets =
+                  tryInsertLockTargets recoveredRollback defaultDatabase "xa_durable" None [ [ Some(VInt 1L) ] ]
+                  |> Option.defaultWith (fun () -> failtest "expected the WAL-recovered row lock target")
+
+              let rollbackCompetitor = beginTransactionContext recoveredRollback
+
+              Expect.throwsT<LockWaitTimeout>
+                  (fun () ->
+                      acquireTransactionWriteTargets
+                          TimeSpan.Zero
+                          rollbackCompetitor
+                          defaultDatabase
+                          "xa_durable"
+                          rollbackTargets.RowIds
+                          rollbackTargets.Keys)
+                  "the WAL-recovered branch retains its primary-key lock"
+
+              Expect.throwsT<LockWaitTimeout>
+                  (fun () ->
+                      acquireTransactionWriteTargets
+                          TimeSpan.Zero
+                          rollbackCompetitor
+                          defaultDatabase
+                          "xa_durable"
+                          updateTargets.RowIds
+                          [])
+                  "the WAL-recovered branch retains its row lock"
+
               let rollbackRecovery = Fsdb.Session.create 4 recoveredRollback
               let _ = run rollbackRecovery "XA ROLLBACK 'durable', 'rollback'"
+
+              acquireTransactionWriteTargets
+                  TimeSpan.Zero
+                  rollbackCompetitor
+                  defaultDatabase
+                  "xa_durable"
+                  rollbackTargets.RowIds
+                  rollbackTargets.Keys
+
+              acquireTransactionWriteTargets
+                  TimeSpan.Zero
+                  rollbackCompetitor
+                  defaultDatabase
+                  "xa_durable"
+                  updateTargets.RowIds
+                  []
+
+              releaseTransactionLocks rollbackCompetitor
 
               match rowsOf (load dir) defaultDatabase "xa_durable" with
               | [ [| VInt 1L |] ] -> ()
@@ -545,12 +642,59 @@ let tests =
               attach dir emptyStore
               let emptySession = Fsdb.Session.create 5 emptyStore
               let emptySession = run emptySession "XA START 'durable-empty'"
+              let emptySession = run emptySession "SELECT id FROM xa_durable WHERE id = 1 FOR SHARE"
               let emptySession = run emptySession "XA END 'durable-empty'"
               let _ = run emptySession "XA PREPARE 'durable-empty'"
               let recoveredEmpty = load dir
               attach dir recoveredEmpty
+
+              let sharedRowId =
+                  match tryUniqueLookup recoveredEmpty defaultDatabase "xa_durable" "id" (VInt 1L) with
+                  | Some(_, [ rowId, _ ]) -> rowId
+                  | other -> failtestf "expected the row locked by the recovered branch, got %A" other
+
+              let sharedCompetitor = beginTransactionContext recoveredEmpty
+
+              acquireTransactionReadTargets
+                  TimeSpan.Zero
+                  sharedCompetitor
+                  defaultDatabase
+                  "xa_durable"
+                  ShareLock
+                  WaitForLocks
+                  [ sharedRowId ]
+              |> ignore
+
+              Expect.throwsT<LockNowait>
+                  (fun () ->
+                      acquireTransactionReadTargets
+                          TimeSpan.Zero
+                          sharedCompetitor
+                          defaultDatabase
+                          "xa_durable"
+                          UpdateLock
+                          NoWait
+                          [ sharedRowId ]
+                      |> ignore)
+                  "the WAL-recovered shared lock rejects an exclusive claim"
+
+              releaseTransactionLocks sharedCompetitor
               let emptyRecovery = Fsdb.Session.create 6 recoveredEmpty
               let _ = run emptyRecovery "XA COMMIT 'durable-empty'"
+
+              let releasedReader = beginTransactionContext recoveredEmpty
+
+              acquireTransactionReadTargets
+                  TimeSpan.Zero
+                  releasedReader
+                  defaultDatabase
+                  "xa_durable"
+                  UpdateLock
+                  NoWait
+                  [ sharedRowId ]
+              |> ignore
+
+              releaseTransactionLocks releasedReader
 
               match handle (Fsdb.Session.create 7 (load dir)) "XA RECOVER" |> snd with
               | ResultSet(_, []) -> ()
@@ -1037,8 +1181,12 @@ let tests =
               Expect.equal (rowIds store.Catalog) [ 0; 2 ] "the live table retains the deleted identity gap"
               snapshotNow dir store
 
+              let previousFormat = File.ReadAllBytes(snapshotPath dir)
+              previousFormat.[3] <- 0x42uy
+              File.WriteAllBytes(snapshotPath dir, previousFormat)
+
               let recovered = load dir
-              Expect.equal (rowIds recovered.Catalog) [ 0; 2 ] "the snapshot retains live row identities"
+              Expect.equal (rowIds recovered.Catalog) [ 0; 2 ] "the FSNB snapshot retains live row identities"
               insertRows recovered defaultDatabase "stable" None [ [ VInt 40L ] ] |> ignore
               Expect.equal (rowIds recovered.Catalog) [ 0; 2; 3 ] "new rows continue after the persisted identity"
 
@@ -2199,6 +2347,18 @@ let tests =
 
               let recovered = load dir
               Expect.isTrue (Map.containsKey "from_fsna" recovered.Catalog) "the previous snapshot format is retained"
+
+          testCase "XA WAL records from before lock claims remain readable"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              File.WriteAllBytes(walPath dir, legacyXaPreparedWalRecord ())
+
+              match preparedXas (load dir) with
+              | [ xid, branch ] ->
+                  Expect.equal xid.FormatId 7u "the legacy XID survives"
+                  Expect.equal xid.GlobalId [ byte 'o'; byte 'l'; byte 'd' ] "the legacy global id survives"
+                  Expect.isEmpty branch.LockClaims "legacy prepared records did not carry lock claims"
+              | other -> failtestf "expected one legacy prepared branch, got %A" other
 
           testCase "column-comment snapshots load with an empty table comment"
           <| fun _ ->
