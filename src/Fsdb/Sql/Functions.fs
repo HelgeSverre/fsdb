@@ -465,12 +465,14 @@ let roundDateTimeToFsp (fsp: int) (dt: DateTime) : DateTime =
 /// on a larger fsp, but a scalar has no error channel, so this caps rather
 /// than throwing a raw exception. `Executor.fspOfExpr` renders these at N
 /// digits so an `NOW(3)` shows exactly three, not `toText`'s full six.
-let private nowFn: Scalar =
+let internal currentTimestampFn (zone: SqlTimeZone) : Scalar =
     function
     | [ n ] when not (anyNull [ n ]) ->
         let fsp = toDouble n |> int |> max 0 |> min 6
-        VDateTime(roundDateTimeToFsp fsp DateTime.Now)
-    | _ -> VDateTime(truncateToSecond DateTime.Now)
+        VDateTime(roundDateTimeToFsp fsp (sqlTimeZoneFromUtc zone DateTime.UtcNow))
+    | _ -> VDateTime(truncateToSecond (sqlTimeZoneFromUtc zone DateTime.UtcNow))
+
+let private nowFn = currentTimestampFn SystemTimeZone
 
 // JSON columns reach scalar functions as `VString`, while JSON constructors
 // return `VJson`; both carry raw JSON text and therefore share one parser.
@@ -2647,19 +2649,21 @@ let private yearWeekFn: Scalar =
         asDateOnly v |> Option.map (yearWeekOf (int (toDouble m)) >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
-let private curDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.Now)
+let internal currentDateFn (zone: SqlTimeZone) : Scalar =
+    fun _ -> VDate(DateOnly.FromDateTime(sqlTimeZoneFromUtc zone DateTime.UtcNow))
 
-let private currentTimeFn (clock: unit -> DateTime) : Scalar =
+let internal currentTimeFn (zone: SqlTimeZone) : Scalar =
     function
     | [ precision ] when not (anyNull [ precision ]) ->
         let fsp = toDouble precision |> int |> max 0 |> min 6
-        VTime(timeValueOrClamp (roundTimeTicksToFsp fsp ((clock ()).TimeOfDay.Ticks)))
-    | _ -> VTime(timeValueOrClamp (truncateToSecond (clock ())).TimeOfDay.Ticks)
+        VTime(timeValueOrClamp (roundTimeTicksToFsp fsp ((sqlTimeZoneFromUtc zone DateTime.UtcNow).TimeOfDay.Ticks)))
+    | _ -> VTime(timeValueOrClamp (truncateToSecond (sqlTimeZoneFromUtc zone DateTime.UtcNow)).TimeOfDay.Ticks)
 
-let private curTimeFn = currentTimeFn (fun () -> DateTime.Now)
+let private curDateFn = currentDateFn SystemTimeZone
+let private curTimeFn = currentTimeFn SystemTimeZone
 let private utcDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.UtcNow)
-let private utcTimeFn = currentTimeFn (fun () -> DateTime.UtcNow)
-let private utcTimestampFn: Scalar = fun _ -> VDateTime(truncateToSecond DateTime.UtcNow)
+let private utcTimeFn = currentTimeFn (FixedOffset 0)
+let private utcTimestampFn = currentTimestampFn (FixedOffset 0)
 
 let private tryTimeTicks (value: Value) =
     match value with
@@ -2885,30 +2889,34 @@ let private fromDaysFn: Scalar =
 
 let private unixEpoch = DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
 
-// The 0-arg form has to agree with `nowFn`/`curDateFn`/`curTimeFn`'s clock
-// (`DateTime.Now`, local time) rather than UTC — this engine doesn't model
-// timezones at all, so `UNIX_TIMESTAMP()` and `UNIX_TIMESTAMP(NOW())`
-// (and `FROM_UNIXTIME(UNIX_TIMESTAMP())` vs. `NOW()`) would otherwise
-// disagree by the host's UTC offset, and the disagreement would change
-// with the host's timezone.
-let private unixTimestampFn: Scalar =
+let internal unixTimestampFn (zone: SqlTimeZone) : Scalar =
     function
-    | [] -> VInt(int64 (DateTime.Now - unixEpoch).TotalSeconds)
-    | [ v ] when not (anyNull [ v ]) -> tryDateTimeValue v |> Option.map (fun dt -> VInt(int64 (dt - unixEpoch).TotalSeconds)) |> Option.defaultValue VNull
+    | [] -> VInt(int64 (DateTime.UtcNow - unixEpoch).TotalSeconds)
+    | [ v ] when not (anyNull [ v ]) ->
+        tryDateTimeValue v
+        |> Option.bind (fun dateTime ->
+            try
+                Some(sqlTimeZoneToUtc zone dateTime)
+            with _ ->
+                None)
+        |> Option.map (fun utc ->
+            let seconds = decimal (utc - unixEpoch).Ticks / decimal TimeSpan.TicksPerSecond
+            if seconds = Decimal.Truncate seconds then VInt(int64 seconds) else VDecimal seconds)
+        |> Option.defaultValue VNull
     | _ -> VNull
 
-let private fromUnixSeconds (ts: Value) : DateTime option =
+let private fromUnixSeconds (zone: SqlTimeZone) (ts: Value) : DateTime option =
     let secs = toDouble ts
     if Double.IsNaN secs || abs secs > 3.2e11 then
         None // MySQL's FROM_UNIXTIME range tops out near year 3001; NULL past it
     else
-        try Some(unixEpoch.AddSeconds secs) with :? ArgumentOutOfRangeException -> None
+        try Some(sqlTimeZoneFromUtc zone (unixEpoch.AddSeconds secs)) with :? ArgumentOutOfRangeException -> None
 
-let internal fromUnixTimeFn (locale: TemporalLocale.Names) : Scalar =
+let internal fromUnixTimeFn (zone: SqlTimeZone) (locale: TemporalLocale.Names) : Scalar =
     function
-    | [ ts ] when not (anyNull [ ts ]) -> fromUnixSeconds ts |> Option.map VDateTime |> Option.defaultValue VNull
+    | [ ts ] when not (anyNull [ ts ]) -> fromUnixSeconds zone ts |> Option.map VDateTime |> Option.defaultValue VNull
     | [ ts; f ] when not (anyNull [ ts; f ]) ->
-        match toText f, fromUnixSeconds ts with
+        match toText f, fromUnixSeconds zone ts with
         | Some fmt, Some dt ->
             formatDate locale (partsOfDateTime dt) fmt
             |> Option.map VString
@@ -5732,8 +5740,8 @@ let private registerTemporalBuiltins registry =
     |> registerScalar "PERIOD_DIFF" periodDiffFn
     |> registerScalar "FROM_DAYS" fromDaysFn
     |> registerScalar "TO_DAYS" toDaysFn
-    |> registerScalar "UNIX_TIMESTAMP" unixTimestampFn
-    |> registerScalar "FROM_UNIXTIME" (fromUnixTimeFn defaultTimeLocale)
+    |> registerScalar "UNIX_TIMESTAMP" (unixTimestampFn SystemTimeZone)
+    |> registerScalar "FROM_UNIXTIME" (fromUnixTimeFn SystemTimeZone defaultTimeLocale)
     |> registerScalar "TIMESTAMPDIFF" timestampDiffFn
     |> registerScalar "EXTRACT" extractFn
     |> registerScalar "LAST_DAY" lastDayFn

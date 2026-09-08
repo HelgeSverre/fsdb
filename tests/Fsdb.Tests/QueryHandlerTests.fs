@@ -1941,6 +1941,37 @@ let tests =
               | Err(1582, "Incorrect parameter count in the call to native function 'DATE_FORMAT'") -> ()
               | other -> failtestf "expected DATE_FORMAT to validate its arity, got %A" other
 
+          testCase "time_zone drives session-local temporal functions"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let second = create 2 store
+              let first, result = handle first "SET time_zone = '+05:30'"
+
+              Expect.equal result (Affected 0UL) "a valid fixed offset is accepted"
+
+              match
+                  handle
+                      first
+                      "SELECT @@time_zone, FROM_UNIXTIME(0), UNIX_TIMESTAMP('2024-01-01 00:00:00'), TIMEDIFF(NOW(), UTC_TIMESTAMP())"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "+05:30"; Some "1970-01-01 05:30:00"; Some "1704047400"; Some offset ] ]) ->
+                  Expect.isTrue (offset = "05:30:00" || offset = "05:29:59" || offset = "05:30:01") "current functions use the same fixed offset"
+              | other -> failtestf "expected fixed-offset temporal results, got %A" other
+
+              match handle second "SELECT @@time_zone, FROM_UNIXTIME(0)" |> snd with
+              | ResultSet(_, [ [ Some "SYSTEM"; Some _ ] ]) -> ()
+              | other -> failtestf "expected the other session to retain SYSTEM, got %A" other
+
+              match handle first "SET time_zone = '+14:01'" |> snd with
+              | Err(1298, "Unknown or incorrect time zone: '+14:01'") -> ()
+              | other -> failtestf "expected 1298 for an invalid offset, got %A" other
+
+              match handle first "SET time_zone = 'UTC'" |> snd with
+              | Err(1298, "Unknown or incorrect time zone: 'UTC'") -> ()
+              | other -> failtestf "expected unloaded named zones to be refused, got %A" other
+
           testCase "collation_connection drives LIKE, DISTINCT, and GROUP BY over literals"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

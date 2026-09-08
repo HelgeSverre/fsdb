@@ -648,6 +648,10 @@ let private registryFor (session: Session) : Functions.Registry =
         sessionValue session "lc_time_names"
         |> Option.bind Functions.tryTimeLocale
         |> Option.defaultValue Functions.defaultTimeLocale
+    let timeZone =
+        sessionValue session "time_zone"
+        |> Option.bind Temporal.trySqlTimeZone
+        |> Option.defaultValue Temporal.SystemTimeZone
     let defaultWeekFormat =
         sessionValue session "default_week_format"
         |> Option.bind tryInt32
@@ -669,7 +673,17 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "DATE_FORMAT" (Functions.dateFormatFn timeLocale)
     |> Functions.registerScalar "DAYNAME" (Functions.dayNameFn timeLocale)
     |> Functions.registerScalar "MONTHNAME" (Functions.monthNameFn timeLocale)
-    |> Functions.registerScalar "FROM_UNIXTIME" (Functions.fromUnixTimeFn timeLocale)
+    |> Functions.registerScalar "NOW" (Functions.currentTimestampFn timeZone)
+    |> Functions.registerScalar "CURRENT_TIMESTAMP" (Functions.currentTimestampFn timeZone)
+    |> Functions.registerScalar "LOCALTIME" (Functions.currentTimestampFn timeZone)
+    |> Functions.registerScalar "LOCALTIMESTAMP" (Functions.currentTimestampFn timeZone)
+    |> Functions.registerScalar "SYSDATE" (Functions.currentTimestampFn timeZone)
+    |> Functions.registerScalar "CURDATE" (Functions.currentDateFn timeZone)
+    |> Functions.registerScalar "CURRENT_DATE" (Functions.currentDateFn timeZone)
+    |> Functions.registerScalar "CURTIME" (Functions.currentTimeFn timeZone)
+    |> Functions.registerScalar "CURRENT_TIME" (Functions.currentTimeFn timeZone)
+    |> Functions.registerScalar "UNIX_TIMESTAMP" (Functions.unixTimestampFn timeZone)
+    |> Functions.registerScalar "FROM_UNIXTIME" (Functions.fromUnixTimeFn timeZone timeLocale)
     |> Functions.registerScalar "WEEK" (Functions.weekFn defaultWeekFormat)
     |> Functions.registerScalar "DATABASE" database
     |> Functions.registerScalar "SCHEMA" database
@@ -1382,6 +1396,10 @@ let private parseSetFragment
                         match Functions.tryTimeLocale value with
                         | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
                         | None -> Error(Err(1649, sprintf "Unknown locale: '%s'" value))
+                    | Ok(VString value, sideEffects) when name = "time_zone" ->
+                        match Temporal.trySqlTimeZone value with
+                        | Some zone -> Ok(SetVarAction(name, Some(Temporal.sqlTimeZoneText zone), isGlobal), sideEffects)
+                        | None -> Error(Err(1298, sprintf "Unknown or incorrect time zone: '%s'" value))
                     | Ok(value, sideEffects) when name = "event_scheduler" || name = "activate_all_roles_on_login" ->
                         normalizeOnOff name value
                         |> Result.map (fun value -> SetVarAction(name, Some value, isGlobal), sideEffects)
