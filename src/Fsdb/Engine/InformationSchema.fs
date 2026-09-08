@@ -57,6 +57,43 @@ let private viewCatalogEntries (catalog: Catalog) : SystemCatalog.View.Entry lis
         |> List.ofSeq)
     |> Option.defaultValue []
 
+let private storedViewColumns (serialized: string) =
+    try
+        match JsonSerializer.Deserialize<string[]>(serialized) with
+        | null -> []
+        | columns -> List.ofArray columns
+    with :? JsonException ->
+        []
+
+let private tryCatalogDatabase name (catalog: Catalog) =
+    catalog
+    |> Map.toSeq
+    |> Seq.tryPick (fun (candidate, database) -> if eqI candidate name then Some database else None)
+
+let private relationColumns (catalog: Catalog) schema name =
+    let tableColumns =
+        catalog
+        |> tryCatalogDatabase schema
+        |> Option.bind (fun database -> database |> Map.tryFind (Storage.normalizeTableName name))
+        |> Option.map (fun table -> table.Columns |> List.map _.Name)
+
+    tableColumns
+    |> Option.orElseWith (fun () ->
+        viewCatalogEntries catalog
+        |> List.tryFind (fun view -> eqI view.Schema schema && eqI view.Name name)
+        |> Option.map (_.ColumnNames >> storedViewColumns))
+
+let private canonicalViewDefinition catalog schema includeSchema definition =
+    match Parser.parseViewDefinition definition with
+    | Error _ -> definition
+    | Ok parsed ->
+        SqlText.viewDefinition
+            { DefaultSchema = schema
+              IncludeSchema = includeSchema
+              RelationColumns = relationColumns catalog }
+            parsed.Statement
+        |> Option.defaultValue definition
+
 /// MySQL's `information_schema.columns.data_type` — the bare type name,
 /// no length/unsigned/precision.
 let private dataTypeName (ty: ColumnType) : string =
@@ -1483,7 +1520,7 @@ let private isUpdatableView (catalog: Catalog) (schema: string) (definition: str
 let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
-        [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs view.CheckOption; vs (if isUpdatableView catalog view.Schema view.Definition then "YES" else "NO"); vs view.Definer
+        [| vs "def"; vs view.Schema; vs view.Name; vs (canonicalViewDefinition catalog view.Schema true view.Definition); vs view.CheckOption; vs (if isUpdatableView catalog view.Schema view.Definition then "YES" else "NO"); vs view.Definer
            vs view.SecurityType; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
 
 let private viewTableUsageColumns =
@@ -3861,14 +3898,6 @@ let private quotedDefiner (definer: string) =
     let account = Auth.tryParseAccount definer |> Option.defaultValue (Auth.account "" "%")
     sprintf "%s@%s" (backtick account.Name) (backtick account.Host)
 
-let private storedViewColumns (serialized: string) =
-    try
-        match JsonSerializer.Deserialize<string[]>(serialized) with
-        | null -> []
-        | columns -> List.ofArray columns
-    with :? JsonException ->
-        []
-
 let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : ShowResult =
     viewCatalogEntries catalog
     |> List.tryFind (fun view ->
@@ -3891,6 +3920,8 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
                 | names -> sprintf " (%s)" (names |> List.map backtick |> String.concat ", ")
 
             let ddl =
+                let definition = canonicalViewDefinition catalog view.Schema false view.Definition
+
                 sprintf
                     "CREATE ALGORITHM=%s DEFINER=%s SQL SECURITY %s VIEW %s%s AS %s%s"
                     view.Algorithm
@@ -3898,7 +3929,7 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
                     security
                     (backtick view.Name)
                     columns
-                    view.Definition
+                    definition
                     checkOption
 
             Ok(

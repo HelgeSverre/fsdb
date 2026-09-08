@@ -1062,6 +1062,48 @@ let tests =
                   Expect.stringContains ddl "VIEW `quoted``view` (`quoted``column`) AS" "quoted identifiers"
               | other -> failtestf "expected quoted SHOW CREATE VIEW row, got %A" other
 
+          testCase "view definitions use canonical qualified SQL"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(20))") "create users"
+              expectOk (run store "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total DECIMAL(10,2))") "create orders"
+
+              expectOk
+                  (run
+                      store
+                      "CREATE VIEW joined AS SELECT u.id AS uid, o.total FROM users u JOIN orders o ON o.user_id = u.id WHERE o.total >= 10.50")
+                  "create joined view"
+
+              expectOk
+                  (run
+                      store
+                      "CREATE VIEW combined AS WITH c AS (SELECT id FROM users WHERE id > 0) SELECT id AS n FROM c UNION ALL SELECT user_id FROM orders ORDER BY n LIMIT 5")
+                  "create CTE union view"
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "joined" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) ->
+                  Expect.stringEnds
+                      ddl
+                      "AS select `u`.`id` AS `uid`,`o`.`total` AS `total` from (`users` `u` join `orders` `o` on((`o`.`user_id` = `u`.`id`))) where (`o`.`total` >= 10.50)"
+                      "SHOW CREATE uses schema-relative canonical SQL"
+              | other -> failtestf "expected canonical SHOW CREATE VIEW row, got %A" other
+
+              Expect.equal
+                  (rows
+                      store
+                      "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'fsdb' AND TABLE_NAME = 'joined'")
+                  [ [ Some
+                          "select `u`.`id` AS `uid`,`o`.`total` AS `total` from (`fsdb`.`users` `u` join `fsdb`.`orders` `o` on((`o`.`user_id` = `u`.`id`))) where (`o`.`total` >= 10.50)" ] ]
+                  "information_schema qualifies physical tables"
+
+              Expect.equal
+                  (rows
+                      store
+                      "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'fsdb' AND TABLE_NAME = 'combined'")
+                  [ [ Some
+                          "with `c` as (select `fsdb`.`users`.`id` AS `id` from `fsdb`.`users` where (`fsdb`.`users`.`id` > 0)) select `c`.`id` AS `n` from `c` union all select `fsdb`.`orders`.`user_id` AS `user_id` from `fsdb`.`orders` order by `n` limit 5" ] ]
+                  "CTE names remain local while their physical sources are qualified"
+
           testCase "view projections retain introspection metadata without evaluating rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
