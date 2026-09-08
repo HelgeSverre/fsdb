@@ -1683,13 +1683,19 @@ let private flushTableListPattern =
 let private flushTablesRe =
     Regex(
         sprintf
-            @"^FLUSH\s+(?:(?:NO_WRITE_TO_BINLOG|LOCAL)\s+)?TABLES(?:\s+%s(?:\s+(?:WITH\s+READ\s+LOCK|FOR\s+EXPORT))?)?\s*;?$"
+            @"^FLUSH\s+(?:(?:NO_WRITE_TO_BINLOG|LOCAL)\s+)?TABLES(?:\s+WITH\s+READ\s+LOCK|\s+%s(?:\s+(?:WITH\s+READ\s+LOCK|FOR\s+EXPORT))?)?\s*;?$"
             flushTableListPattern,
         RegexOptions.IgnoreCase
     )
 
 let private flushTableLocksRe =
     Regex(@"\s+(?:WITH\s+READ\s+LOCK|FOR\s+EXPORT)\s*;?$", RegexOptions.IgnoreCase)
+
+let private globalFlushReadLockRe =
+    Regex(
+        @"^FLUSH\s+(?:(?:NO_WRITE_TO_BINLOG|LOCAL)\s+)?TABLES\s+WITH\s+READ\s+LOCK\s*;?$",
+        RegexOptions.IgnoreCase
+    )
 
 let private flushOptimizerCostsRe = Regex(@"^FLUSH\s+OPTIMIZER_COSTS\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe =
@@ -2252,6 +2258,7 @@ let closeSession (session: Session) : unit =
     releaseAllAdvisoryLocks session |> ignore
     rollbackSession session |> ignore
     TableLocks.releaseExplicit session.Store session.ConnectionId
+    TableLocks.releaseGlobalRead session.Store session.ConnectionId
     InformationSchema.releaseStatusCounters session.StatusCounters
 
 let private savepointNotFound (name: string) : QueryResult =
@@ -2736,6 +2743,29 @@ let private executeWithStatementAccess session accesses execute =
     | Ok result -> result
     | Error(code, message) -> session, Err(code, message)
 
+let private executeWithTemporaryStatementAccess session accesses execute =
+    match
+        TableLocks.withTemporaryStatementAccess
+            (lockWaitTimeout session)
+            session.Store
+            session.ConnectionId
+            accesses
+            execute
+    with
+    | Ok result -> result
+    | Error(code, message) -> session, Err(code, message)
+
+let private executeWithGlobalWriteAccess session execute =
+    match
+        TableLocks.withGlobalWriteAccess
+            (lockWaitTimeout session)
+            session.Store
+            session.ConnectionId
+            execute
+    with
+    | Ok result -> result
+    | Error(code, message) -> session, Err(code, message)
+
 type private StatementLockBoundary =
     | AcquireStatementLock
     | StatementLockHeld
@@ -3111,7 +3141,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
         elif usesTemporary && xaAssociation session |> Option.isSome then
             session, Err(4091, "XA: Temporary tables cannot be accessed inside XA transactions when xa_detach_on_prepare=ON")
         elif usesTemporary then
-            executeWithStatementAccess session (statementAccesses ()) (fun () ->
+            executeWithTemporaryStatementAccess session (statementAccesses ()) (fun () ->
                 executeWithTemporaryCatalog action session stmt)
         elif causesImplicitCommit stmt && xaAssociation session |> Option.isSome then
             let state = xaAssociation session |> Option.map (snd >> xaStateName) |> Option.defaultValue "NON-EXISTING"
@@ -3122,7 +3152,7 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
             let session = commitSession session
             TableLocks.releaseExplicit session.Store session.ConnectionId
 
-            let execute () =
+            let executeWithDatabaseLocks () =
                 if changesCatalogMembership stmt then
                     executeParsedCore session stmt
                 else
@@ -3134,8 +3164,9 @@ let private executeParsedWithTemporaryAction (action: TemporaryAction option) (s
 
             match stmt with
             | CreateTableAs(name, _, _, _) ->
-                DynamicScope.withValue creatingTable (Some(splitQualified dbName name |> snd)) execute
-            | _ -> execute ()
+                executeWithGlobalWriteAccess session (fun () ->
+                    DynamicScope.withValue creatingTable (Some(splitQualified dbName name |> snd)) executeWithDatabaseLocks)
+            | _ -> executeWithGlobalWriteAccess session executeWithDatabaseLocks
         else
             let session =
                 if session.Tx.IsNone && autocommitDisabled session && startsTransaction stmt then
@@ -3616,6 +3647,16 @@ let private acquireFlushTableLocks session sql =
         match TableLocks.flushAccesses session.Store session.TemporaryCatalog database requested with
         | Error(code, message) -> session, Err(code, message)
         | Ok accesses -> acquireResolvedTableAccesses session accesses
+
+let private acquireGlobalFlushReadLock session =
+    match
+        TableLocks.acquireGlobalRead
+            (lockWaitTimeout session)
+            session.Store
+            session.ConnectionId
+    with
+    | Ok() -> session, Affected 0UL
+    | Error(code, message) -> session, Err(code, message)
 
 let private resolveCompletionDirective defaultValue = function
     | UseCompletionDefault -> defaultValue
@@ -4357,6 +4398,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Error(code, message) -> session, Err(code, message)
         | Ok() when flushTableLocksRe.IsMatch sql && TableLocks.holdsExplicit session.Store session.ConnectionId ->
             session, Err(1192, "Can't execute the given command because you have active locked tables or an active transaction")
+        | Ok() when globalFlushReadLockRe.IsMatch sql -> acquireGlobalFlushReadLock session
         | Ok() when flushTableLocksRe.IsMatch sql -> acquireFlushTableLocks session sql
         | Ok() -> session, Affected 0UL
     | FlushOptimizerCosts ->
@@ -4382,6 +4424,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                     session
 
             TableLocks.releaseExplicit session.Store session.ConnectionId
+            TableLocks.releaseGlobalRead session.Store session.ConnectionId
             Session.endTransactionTracking session, Affected 0UL
 let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
     Fsdb.Sql.Expression.rewriteStatement

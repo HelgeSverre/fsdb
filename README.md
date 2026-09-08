@@ -237,7 +237,9 @@ compatible table ownership only while they execute, so explicit locks also
 coordinate with sessions that never issue `LOCK TABLES`.
 
 Named `FLUSH TABLES ... WITH READ LOCK` and `FOR EXPORT` use the same read-lock
-lifecycle.
+lifecycle. The global `FLUSH TABLES WITH READ LOCK` form lets reads and
+temporary-table writes continue while permanent writes wait for `UNLOCK
+TABLES` or disconnect.
 
 #### Indexes and joins
 

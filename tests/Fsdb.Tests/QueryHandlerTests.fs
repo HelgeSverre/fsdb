@@ -2997,6 +2997,84 @@ let tests =
               | Err(1146, _) -> ()
               | other -> failtestf "expected temporary tables to stay outside FLUSH locking, got %A" other
 
+          testCase "global FLUSH read locks block permanent writes and survive transaction start"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE global_flush_target (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO global_flush_target VALUES (1, 10)"
+              let holder, locked = handle (create 2 store) "FLUSH TABLES WITH READ LOCK"
+              Expect.equal locked (Affected 0UL) "global read lock acquired"
+
+              match handle holder "UPDATE global_flush_target SET n=11 WHERE id=1" |> snd with
+              | Err(1223, _) -> ()
+              | other -> failtestf "expected the lock owner to reject permanent writes, got %A" other
+
+              match handle holder "CREATE TABLE global_flush_blocked (id INT)" |> snd with
+              | Err(1223, _) -> ()
+              | other -> failtestf "expected the lock owner to reject permanent DDL, got %A" other
+
+              let holder, createdTemporary = handle holder "CREATE TEMPORARY TABLE global_flush_local (id INT)"
+              Expect.equal createdTemporary (Affected 0UL) "temporary DDL remains available"
+              let holder, insertedTemporary = handle holder "INSERT INTO global_flush_local VALUES (1)"
+              Expect.equal insertedTemporary (Affected 1UL) "temporary writes remain available"
+
+              match handle (create 3 store) "SELECT n FROM global_flush_target" |> snd with
+              | ResultSet(_, [ [ Some "10" ] ]) -> ()
+              | other -> failtestf "expected concurrent reads to remain available, got %A" other
+
+              let waitingWrite =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 4 store) "UPDATE global_flush_target SET n=11 WHERE id=1")
+
+              let waitingDdl =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 5 store) "CREATE TABLE global_flush_created_later (id INT)")
+
+              Expect.isFalse (waitingWrite.Wait(TimeSpan.FromMilliseconds 100.0)) "a permanent write waits"
+              Expect.isFalse (waitingDdl.Wait(TimeSpan.FromMilliseconds 100.0)) "permanent DDL waits"
+
+              let holder, begun = handle holder "START TRANSACTION"
+              Expect.equal begun (Affected 0UL) "transaction started"
+              Expect.isSome holder.Tx "the transaction is active"
+              Expect.isFalse (waitingWrite.IsCompleted) "starting a transaction retains the global lock"
+
+              let holder, unlocked = handle holder "UNLOCK TABLES"
+              Expect.equal unlocked (Affected 0UL) "global read lock released"
+              Expect.isSome holder.Tx "unlocking a global read lock does not commit"
+              Expect.isTrue (waitingWrite.Wait(TimeSpan.FromSeconds 2.0)) "the writer continues after unlock"
+              Expect.isTrue (waitingDdl.Wait(TimeSpan.FromSeconds 2.0)) "DDL continues after unlock"
+
+              match waitingWrite.Result |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the waiting write to succeed, got %A" other
+
+              match waitingDdl.Result |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the waiting DDL to succeed, got %A" other
+
+              handle holder "ROLLBACK" |> ignore
+
+          testCase "closing a session releases its global FLUSH read lock"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE abandoned_global_flush (id INT PRIMARY KEY)"
+              let holder, locked = handle (create 2 store) "FLUSH TABLES WITH READ LOCK"
+              Expect.equal locked (Affected 0UL) "global read lock acquired"
+
+              let waiting =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      handle (create 3 store) "INSERT INTO abandoned_global_flush VALUES (1)")
+
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 100.0)) "the global read lock blocks the writer"
+              closeSession holder
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 2.0)) "disconnect releases the global read lock"
+
+              match waiting.Result |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the waiting insert to succeed, got %A" other
+
           testCase "permanent DDL releases explicit table locks"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -7369,8 +7447,7 @@ let tests =
                   | other -> failtestf "unexpected %s result: %A" sql other
 
               for sql in
-                  [ "FLUSH TABLES WITH READ LOCK"
-                    "FLUSH TABLES visible,"
+                  [ "FLUSH TABLES visible,"
                     "FLUSH TABLES visible trailing" ] do
                   match handle session sql |> snd with
                   | Err(1064, _) -> ()
