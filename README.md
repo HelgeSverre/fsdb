@@ -357,8 +357,9 @@ different access pattern:
 
 - **Joins.** Equi-joins choose between one hash build and repeated index
   probes. Physical inner, left, and right joins can probe an index when rows
-  already in scope bind its complete key, including `USING` and `NATURAL JOIN`.
-  Full-result inner and left joins avoid repeated broad probes; queries that
+  already in scope bind its complete key or an ordered composite-key prefix,
+  including `USING` and `NATURAL JOIN`. Full-result inner and left joins use
+  the observed candidate counts to avoid repeated broad probes; queries that
   may stop at `LIMIT` retain the lazy index path.
 
 Equality buckets and ordered entries remain separate derived structures. That

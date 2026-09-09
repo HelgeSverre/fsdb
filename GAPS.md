@@ -136,10 +136,11 @@ The expression grammar includes:
 ## 2. Query execution
 
 Equi-joins use collation-folded hash keys; other joins use lazy nested loops.
-Direct physical inner tables can use single or composite equality probes, and
-join ordering recognizes those access paths. A fully covered key can narrow a
-wider equality join while the remaining conditions stay residual predicates.
-`ORDER BY ... LIMIT` uses a bounded top-N sort.
+Physical join targets can use single-column keys, complete composite keys, or
+ordered composite-key prefixes. Qualified inner-join ordering recognizes those
+access paths. Full-result plans compare the prefix's observed candidate count
+with one hash build, while remaining equality conditions stay residual
+predicates. `ORDER BY ... LIMIT` uses a bounded top-N sort.
 
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
@@ -161,7 +162,7 @@ or locking retain the general SELECT pipeline.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | common composite equality, literal membership, range, join, ordering, and grouping shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
+| Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | common composite equality, literal membership, range, complete-key or left-prefix join, ordering, and grouping shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; outer/lateral joins, ambiguous bare references, and plans needing persisted statistics retain source order or conservative execution | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |

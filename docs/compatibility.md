@@ -32,10 +32,10 @@ important operational detail. This is not a blanket compatibility claim:
 
 ## Validation method
 
-fsdb is validated by migrating and running the test suites of real Laravel
-applications against it without database-specific patches. Where a suite
-diverges from its sqlite baseline, the same test runs against MySQL 8.4. fsdb
-must match MySQL, not sqlite.
+Compatibility evidence comes from focused MySQL-oracle regressions, the
+differential and failure-injection harness, private Laravel application suites,
+and pinned upstream applications. When another backend or an application's own
+assumption differs, MySQL 8.4 decides the expected behavior.
 
 `torture/` supplies the differential and failure-injection layers. Each lane
 has a distinct contract:
@@ -74,6 +74,9 @@ the optimizer-only SELECT modifiers without changing query results.
 
 ## Application gauntlet
 
+Private Laravel suites exercise migrations and application behavior without
+database-specific patches:
+
 | Application | Laravel major | Oracle result |
 |---|---|---|
 | App A | 11 | full parity |
@@ -84,6 +87,12 @@ the optimizer-only SELECT modifiers without changing query results.
 
 The applications are private codebases, identified here only by framework
 version.
+
+The public [application smoke suite](../smoke/README.md) adds pinned Gitea,
+MediaWiki, Drupal, Nextcloud, Shopware, Ghost, Moodle, WordPress, Rails, and
+Magento probes across Go, PHP, Node.js, and Ruby client stacks. Failures are
+classified against the same pinned project on MySQL 8.4 before they become fsdb
+compatibility findings.
 
 ## Implemented surface
 
