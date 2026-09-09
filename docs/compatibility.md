@@ -209,6 +209,13 @@ named suffixes, malformed widths, and out-of-range offsets are rejected or
 coerced according to the active SQL mode. Zero date parts remain invalid when
 an explicit offset is present.
 
+`ALLOW_INVALID_DATES` relaxes full calendar checking for DATE and DATETIME.
+Values such as `2023-02-31` retain their written fields while month and day
+must still be within 1–12 and 1–31. The rule also applies to defaults, casts,
+typed temporal literals, ordinary writes, and prepared string parameters.
+`NO_ZERO_DATE` and `NO_ZERO_IN_DATE` remain separate policies, and TIMESTAMP
+always requires a valid calendar date.
+
 ## Schema moves
 
 `RENAME TABLE` evaluates its pairs from left to right and publishes the whole

@@ -1448,7 +1448,7 @@ let private parseDecimal (s: string) : decimal option =
 /// `'strict' => false` connection config, which sends
 /// `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`), an otherwise-rejected
 /// value coerces to MySQL's non-strict fallback instead: 0 for a numeric
-/// column, NULL for a nullable temporal one.
+/// column and the all-zero value for a temporal column.
 /// NULL always passes through untouched — nullability is checked
 /// separately.
 type TemporalCoercionMode =

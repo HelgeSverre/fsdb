@@ -176,7 +176,7 @@ or locking retain the general SELECT pipeline.
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
-| sql_mode | MySQL 8.4 modes affect parsing and execution | mode names are validated, deduplicated, expanded, and reported in MySQL order; strictness, zero-date modes, ERROR_FOR_DIVISION_BY_ZERO diagnostics, ONLY_FULL_GROUP_BY, NO_ENGINE_SUBSTITUTION, ANSI_QUOTES, IGNORE_SPACE, PIPES_AS_CONCAT, REAL_AS_FLOAT (including ANSI implications), HIGH_NOT_PRECEDENCE, NO_AUTO_VALUE_ON_ZERO, NO_UNSIGNED_SUBTRACTION, NO_BACKSLASH_ESCAPES, TIME_TRUNCATE_FRACTIONAL, and PAD_CHAR_TO_FULL_LENGTH have effect; most other mode bits remain inert | medium | divergence |
+| sql_mode | MySQL 8.4 modes affect parsing and execution | recognized modes are validated, deduplicated, expanded, and reported in MySQL order; every accepted mode has its relevant parser or execution effect except `NO_DIR_IN_CREATE`, which is reporting-only because DATA/INDEX DIRECTORY table options are unsupported | low | divergence |
 
 ## 3. Built-in functions
 
@@ -224,7 +224,9 @@ ENUM, and SET families with per-column charset and collation metadata.
 
 Temporal values cover DATE, YEAR, and microsecond-precision DATETIME,
 TIMESTAMP, and signed TIME durations. Fractional values round half-up unless
-`TIME_TRUNCATE_FRACTIONAL` applies, and SQL modes control zero-date acceptance.
+`TIME_TRUNCATE_FRACTIONAL` applies. SQL modes control zero-date acceptance and
+bounded invalid day-of-month combinations; TIMESTAMP always retains full
+calendar validation.
 
 Numeric offsets appended to DATETIME and TIMESTAMP inputs are converted into
 the session `time_zone`. TIMESTAMP values then retain the UTC instant and
@@ -580,6 +582,11 @@ the previous executor as a control. The follow-up
 [text-prefix cardinality profile](benchmarks/results/a50142b-quick.md) shows the
 fully covered `COUNT(*)` path reading a compatible index bucket directly.
 Collation-changing and coercive comparisons deliberately retain row evaluation.
+
+The [correlated planner baseline](benchmarks/results/b9a6895-quick.md) covers
+nested derived tables, chained CTEs, source filters, and range predicates.
+Equality probes retain a small fixed setup cost; the filtered and range shapes
+already avoid the scan cliff on the recorded corpus.
 
 The engine already avoids several earlier cliffs:
 
