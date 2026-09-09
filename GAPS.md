@@ -146,7 +146,9 @@ Direct single-table equality predicates likewise use complete keys or safe
 left prefixes for reads and mutations. Literal probes and conservative
 row-independent numeric expressions share that path across equality, scalar
 or row-value membership, direct numeric ranges, and `BETWEEN`. Their observed
-candidate count chooses between the index slice and a row-store scan.
+candidate count chooses between the index slice and a row-store scan. When
+several supported access families apply, the narrowest observed candidate set
+is used consistently by reads, mutations, locking reads, and `EXPLAIN`.
 Compatible `ORDER BY` suffixes continue streaming the same composite slice
 rather than sorting the narrowed rows again.
 
@@ -174,7 +176,7 @@ or locking retain the general SELECT pipeline.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, and grouping shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
-| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; safe numeric constants fold into key probes, while general expression folding, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
+| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; competing equality, membership, spatial, and range families choose the smallest observed candidate set, while general expression folding, index merge, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
@@ -607,6 +609,13 @@ The `BETWEEN` pair records the
 [indexed implementation](benchmarks/results/89b9846-quick.md). Inclusive
 literal and safe numeric-expression bounds now use the same range path in
 reads, mutations, correlated probes, and compatible ordered composite suffixes.
+
+The [competing-index baseline](benchmarks/results/cef5118-quick.md) and
+[cardinality-arbitrated follow-up](benchmarks/results/0cc8aee-quick.md) exercise
+an equality bucket and a single-row range that both satisfy one predicate. The
+planner selects the narrower physical family consistently; the recorded short
+run is effectively flat because parsing and wire overhead dominate this small
+candidate difference.
 
 The engine already avoids several earlier cliffs:
 

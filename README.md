@@ -339,7 +339,9 @@ different access pattern:
   or PAD SPACE text prefixes also retain the scan path when SQL-equal spellings
   are not one contiguous ordered slice. Compatible scalar lists are normalized
   once per statement, so a scan fallback does not repeat the entire list
-  comparison for every row.
+  comparison for every row. When equality, membership, spatial, and range
+  predicates offer competing physical paths, the smallest observed candidate
+  set wins. Reads, mutations, locking reads, and `EXPLAIN` share that choice.
 
 - **Ordering.** Compatible `ORDER BY` operations stream a left index prefix, or
   a suffix whose earlier keys are fixed by exact equalities. Literal bounds on
