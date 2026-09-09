@@ -2867,7 +2867,9 @@ let tests =
                     "SET sql_mode = 'NO_ENGINE_SUBSTITUTION'"
                     "INSERT INTO lookup_abs_text VALUES (1, '12x'), (2, 'Other')"
                     "CREATE TABLE lookup_composite (id INT PRIMARY KEY, tenant_id INT, name VARCHAR(20) COLLATE utf8mb4_bin, INDEX ix_tenant_upper (tenant_id, (UPPER(name))))"
-                    "INSERT INTO lookup_composite VALUES (1, 1, 'zeta'), (2, 1, 'Alpha'), (3, 2, 'beta')" ]
+                    "INSERT INTO lookup_composite VALUES (1, 1, 'zeta'), (2, 1, 'Alpha'), (3, 2, 'beta')"
+                    "CREATE TABLE lookup_composed (id INT PRIMARY KEY, name VARCHAR(20) COLLATE utf8mb4_bin, UNIQUE INDEX ix_normalized ((UPPER(TRIM(name)))))"
+                    "INSERT INTO lookup_composed VALUES (1, ' Reference '), (2, 'Other')" ]
                   |> List.fold run session
 
               ignore session
@@ -2967,6 +2969,20 @@ let tests =
 
               Expect.equal recoveredCompositePlan.AccessType (Some "index") "recovery rebuilds composite transformed entries"
               Expect.equal recoveredCompositePlan.Key (Some "ix_tenant_upper") "the recovered composite order reports its key"
+
+              let recoveredComposedPlan =
+                  handle
+                      (Fsdb.Session.create 18 reloaded)
+                      "EXPLAIN SELECT id FROM lookup_composed WHERE UCASE(TRIM(name)) = 'REFERENCE'"
+                  |> snd
+                  |> TestSupport.Sql.explainRow
+
+              Expect.equal recoveredComposedPlan.AccessType (Some "const") "recovery rebuilds composed equality buckets"
+              Expect.equal recoveredComposedPlan.Key (Some "ix_normalized") "the recovered composition reports its key"
+
+              match handle (Fsdb.Session.create 19 reloaded) "INSERT INTO lookup_composed VALUES (3, 'REFERENCE')" |> snd with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected recovered composed uniqueness to reject a duplicate, got %A" other
 
           testCase "every Op tag and every ALTER action survives a WAL round-trip"
           <| fun _ ->
