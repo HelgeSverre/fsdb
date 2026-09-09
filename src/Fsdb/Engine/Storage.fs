@@ -1476,6 +1476,34 @@ let private adjustTicksToFsp (mode: TemporalCoercionMode) (fsp: int) (ticks: int
 let private adjustDateTimeToFsp (mode: TemporalCoercionMode) (fsp: int) (value: DateTime) =
     DateTime(adjustTicksToFsp mode fsp value.Ticks, value.Kind)
 
+let private adjustDateTimeComponentsToFsp (mode: TemporalCoercionMode) (fsp: int) dateTime =
+    let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
+    let microsPerSecond = 1_000_000L
+    let microsPerDay = 86_400L * microsPerSecond
+    let quantum = pown 10L (6 - fsp)
+
+    let total =
+        (int64 hour * 3600L + int64 minute * 60L + int64 second) * microsPerSecond
+        + int64 microseconds
+
+    let adjusted =
+        if mode.TruncateFractional then
+            total / quantum * quantum
+        else
+            (total + quantum / 2L) / quantum * quantum
+
+    if adjusted >= microsPerDay then
+        None
+    else
+        let totalSeconds = adjusted / microsPerSecond
+
+        tryZeroDateTime
+            date
+            (int (totalSeconds / 3600L))
+            (int (totalSeconds % 3600L / 60L))
+            (int (totalSeconds % 60L))
+            (int (adjusted % microsPerSecond))
+
 let private truncateRunes (length: int) (text: string) =
     let runes = text.EnumerateRunes() |> Seq.toArray
 
@@ -2149,7 +2177,10 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
 
             let invalidDateResult dateTime =
                 match col.Type with
-                | TDateTime _ when mode.AllowInvalidDates -> Ok(VZeroDateTime dateTime)
+                | TDateTime _ when mode.AllowInvalidDates ->
+                    adjustDateTimeComponentsToFsp mode fsp dateTime
+                    |> Option.map (VZeroDateTime >> Ok)
+                    |> Option.defaultWith (fun () -> zeroDateFallback 1264)
                 | _ -> zeroDateFallback 1264
 
             let timestampRangeResult value =

@@ -2394,6 +2394,24 @@ let tests =
               | Err(1292, _) -> ()
               | other -> failtestf "expected TIMESTAMP to retain full date validation, got %A" other
 
+              let session, _ = handle session "CREATE TABLE rounded (dt DATETIME(3))"
+              let session, _ = handle session "INSERT INTO rounded VALUES ('2023-04-31 12:34:56.1235')"
+
+              match handle session "SELECT dt FROM rounded" |> snd with
+              | ResultSet(_, [ [ Some "2023-04-31 12:34:56.124" ] ]) -> ()
+              | other -> failtestf "expected declared precision rounding, got %A" other
+
+              match handle session "INSERT INTO rounded VALUES ('2023-04-31 23:59:59.9995')" |> snd with
+              | Err(1292, _) -> ()
+              | other -> failtestf "expected fractional carry across the invalid date boundary to fail, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES,ALLOW_INVALID_DATES,TIME_TRUNCATE_FRACTIONAL'"
+              let session, _ = handle session "INSERT INTO rounded VALUES ('2023-04-31 23:59:59.9995')"
+
+              match handle session "SELECT dt FROM rounded ORDER BY dt DESC LIMIT 1" |> snd with
+              | ResultSet(_, [ [ Some "2023-04-31 23:59:59.999" ] ]) -> ()
+              | other -> failtestf "expected fractional truncation to stay within the written date, got %A" other
+
           testCase "ALLOW_INVALID_DATES applies to typed literals and defaults"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
