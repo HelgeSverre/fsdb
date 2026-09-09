@@ -7753,6 +7753,50 @@ let tests =
                         Expect.equal overriddenPlan.AccessType (Some "ALL") $"an {overriddenName} override reports a scan"
                         Expect.equal overriddenPlan.Key None $"an {overriddenName} override does not claim the composed key"
 
+                testCase "composed functional keys preserve aliases uniqueness and output types"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE labels (id INT PRIMARY KEY, name VARCHAR(30) COLLATE utf8mb4_bin, UNIQUE KEY uq_normalized ((UCASE(TRIM(name)))), KEY ix_reversed_bits ((BIT_LENGTH(REVERSE(name)))))")
+                        (Affected 0UL)
+                        "create composed keys"
+
+                    Expect.equal
+                        (runDefault store "INSERT INTO labels VALUES (1, ' Alpha '), (2, 'é'), (3, NULL)")
+                        (Affected 3UL)
+                        "seed composed keys"
+
+                    match runDefault store "INSERT INTO labels VALUES (4, 'ALPHA')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected normalized values to collide, got %A" other
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM labels WHERE UPPER(TRIM(name)) = 'ALPHA'")
+                        (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                        "canonical aliases share one physical key"
+
+                    let aliasPlan =
+                        runDefault store "EXPLAIN SELECT id FROM labels WHERE UPPER(TRIM(name)) = 'ALPHA'"
+                        |> explainRow
+
+                    Expect.equal aliasPlan.AccessType (Some "const") "the composed unique key is a const lookup"
+                    Expect.equal aliasPlan.Key (Some "uq_normalized") "the alias-normalized key is reported"
+
+                    Expect.equal
+                        (runDefault store "SELECT id FROM labels WHERE BIT_LENGTH(REVERSE(name)) = 16")
+                        (ResultSet([ "id" ], [ [ Some "2" ] ]))
+                        "a terminal length transform keeps numeric lookup semantics"
+
+                    let lengthPlan =
+                        runDefault store "EXPLAIN SELECT id FROM labels ORDER BY BIT_LENGTH(REVERSE(name)) LIMIT 1"
+                        |> explainRow
+
+                    Expect.equal lengthPlan.AccessType (Some "index") "the numeric composition streams its order"
+                    Expect.equal lengthPlan.Key (Some "ix_reversed_bits") "the numeric composition reports its key"
+
                 testCase "a fixed stored prefix exposes a functional ordering suffix"
                 <| fun _ ->
                     let store = newStore ()
