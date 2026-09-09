@@ -78,6 +78,9 @@ paths are also checked for one shared cardinality choice across SELECT, DML,
 locking reads, join-source narrowing, and `EXPLAIN`. Fully covered `OR`
 predicates additionally verify deduplicated equality, membership, range, and
 spatial unions, including a scan fallback when any branch is uncovered.
+Compatible `AND` predicates verify exact candidate intersections for writes
+and locks, plus the read-cost gate that retains a cheaper single-index plan
+when constructing an intersection would cost more than its row reduction.
 
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and

@@ -343,8 +343,11 @@ different access pattern:
   predicates offer competing physical paths, the smallest observed candidate
   set wins. Fully indexable `OR` branches union and deduplicate those candidates;
   if any branch lacks a safe physical superset, the whole disjunction retains
-  the scan path. Reads, mutations, locking reads, and `EXPLAIN` share those
-  choices.
+  the scan path. Compatible `AND` branches can instead intersect candidates.
+  Reads use that extra index only when both inputs are broad and the observed
+  reduction pays for the merge; mutations and locking reads use the exact
+  intersection to avoid touching unrelated rows. `EXPLAIN` reports the same
+  choice made by execution.
 
 - **Ordering.** Compatible `ORDER BY` operations stream a left index prefix, or
   a suffix whose earlier keys are fixed by exact equalities. Literal bounds on
