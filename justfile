@@ -307,6 +307,9 @@ bench-scale:
 _bench-header mode="in-memory fsdb; durable MySQL" users="10000" orders="50000" articles="10000":
     #!/usr/bin/env bash
     set -euo pipefail
+    bench_users="${FSDB_BENCH_USERS:-{{ users }}}"
+    bench_orders="${FSDB_BENCH_ORDERS:-{{ orders }}}"
+    bench_articles="${FSDB_BENCH_ARTICLES:-{{ articles }}}"
     echo "<!--"
     echo "sha: $(git rev-parse --short HEAD)"
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -314,7 +317,7 @@ _bench-header mode="in-memory fsdb; durable MySQL" users="10000" orders="50000" 
     echo "dotnet: $(dotnet --version)"
     echo "mysql: $({{ MYSQL }} --version)"
     echo "targets: {{ mode }}"
-    echo "dataset: {{ users }} users, {{ orders }} orders, {{ articles }} articles"
+    echo "dataset: $bench_users users, $bench_orders orders, $bench_articles articles"
     echo "-->"
     echo
 
