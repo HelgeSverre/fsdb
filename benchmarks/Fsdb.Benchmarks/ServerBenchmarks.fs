@@ -231,6 +231,24 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountIndexedConjunction() =
+        let lower = randomUserId () - 1
+        this.Query $"SELECT COUNT(*) FROM users WHERE age = 30 AND sort_key BETWEEN {lower} AND {lower + 1000}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountSingleIndexConjunction() =
+        let lower = randomUserId () - 1
+        this.Query $"SELECT COUNT(*) FROM users WHERE age = 30 AND sort_key + 0 BETWEEN {lower} AND {lower + 1000}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountConjunctionScan() =
+        let lower = randomUserId () - 1
+        this.Query $"SELECT COUNT(*) FROM users WHERE age + 0 = 30 AND sort_key + 0 BETWEEN {lower} AND {lower + 1000}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CountSelectiveIndexedRange() =
         let lower = randomUserId () - 1
         this.Query $"SELECT COUNT(*) FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 1}"
