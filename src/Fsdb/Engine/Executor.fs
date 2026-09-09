@@ -15278,17 +15278,25 @@ let private combineViewPredicate predicate whereClause =
 /// doesn't belong to any one branch; a from-less `SELECT 1`'s `Table`
 /// doesn't name one) — `None` renders `NULL` the same way every other
 /// resultset cell already does.
+type private ExplainKey =
+    { Names: string list
+      Length: int option }
+
 type private ExplainRow =
     { Id: int option
       SelectType: string
       Table: string option
       Type: string option
-      /// `Some(keyName, keyLen)` when execution reads this table through one
-      /// or more physical indexes.
-      Key: (string * int option) option
+      Key: ExplainKey option
       Ref: string option
       Rows: uint64 option
       Extra: string list }
+
+let private explainKey name length =
+    Some { Names = [ name ]; Length = length }
+
+let private explainKeys names length =
+    Some { Names = names; Length = length }
 
 /// Every subquery `expr` embeds, in encounter order — `EXPLAIN`'s source of
 /// `SUBQUERY`/`DEPENDENT SUBQUERY` rows, one nested block per subquery form
@@ -15582,7 +15590,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some(if hasBounds then "range" else "index")
-                      Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
+                      Key = explainKey plan.KeyName (explainCompositeKeyLen plan.Columns plan.ColumnIndices)
                       Ref = None
                       Rows = Some(uint64 plan.EstimatedRows)
                       Extra = accessExtra }
@@ -15619,7 +15627,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some(if plan.Unique then "const" else "ref")
-                      Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
+                      Key = explainKey plan.KeyName (explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
                       Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
                       Rows = Some(uint64 plan.CandidateRowIds.Count)
                       Extra = if plan.Unique then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
@@ -15629,7 +15637,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "range"
-                      Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
+                      Key = explainKey plan.KeyName (explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
                       Ref = None
                       Rows = Some(uint64 plan.CandidateRowIds.Count)
                       Extra = accessExtra }
@@ -15639,7 +15647,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "range"
-                      Key = Some(plan.SpatialIndexName, Some 34)
+                      Key = explainKey plan.SpatialIndexName (Some 34)
                       Ref = None
                       Rows = Some(uint64 plan.SpatialRows.Length)
                       Extra = accessExtra }
@@ -15650,10 +15658,9 @@ let rec private explainJoinBlock
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "range"
                       Key =
-                        Some(
-                            plan.RangeIndexName,
-                            explainPrefixKeyLen plan.RangeColumns.[plan.RangeColumnIndex] plan.RangePrefixLength
-                        )
+                        explainKey
+                            plan.RangeIndexName
+                            (explainPrefixKeyLen plan.RangeColumns.[plan.RangeColumnIndex] plan.RangePrefixLength)
                       Ref = None
                       Rows = Some(uint64 plan.RangeRowCount)
                       Extra = accessExtra }
@@ -15665,7 +15672,7 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "index_merge"
-                      Key = Some(keyNames, None)
+                      Key = explainKeys plan.KeyNames None
                       Ref = None
                       Rows = Some(uint64 plan.CandidateRowIds.Count)
                       Extra = sprintf "Using union(%s)" keyNames :: accessExtra }
@@ -15705,7 +15712,7 @@ let rec private explainJoinBlock
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                           Type = Some(if plan.Unique then "eq_ref" else "ref")
-                          Key = Some(plan.KeyName, explainIndexKeyLen plan.Table.Columns plan.ColumnIndices plan.PrefixLengths)
+                          Key = explainKey plan.KeyName (explainIndexKeyLen plan.Table.Columns plan.ColumnIndices plan.PrefixLengths)
                           Ref = Some(String.concat "," plan.References)
                           Rows = Some 1UL
                           Extra =
@@ -15824,9 +15831,9 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
           r.Table
           None
           r.Type
-          r.Key |> Option.map fst
-          r.Key |> Option.map fst
-          r.Key |> Option.bind (snd >> Option.map string)
+          r.Key |> Option.map (fun key -> String.concat "," key.Names)
+          r.Key |> Option.map (fun key -> String.concat "," key.Names)
+          r.Key |> Option.bind (fun key -> key.Length |> Option.map string)
           r.Ref
           r.Rows |> Option.map string
           (r.Type |> Option.map (fun _ -> "100.00"))
@@ -15846,17 +15853,14 @@ let private renderExplainJson (rows: ExplainRow list) : QueryResult =
         row.Type |> Option.iter (fun value -> table["access_type"] <- JsonValue.Create(value))
 
         row.Key
-        |> Option.iter (fun (key, length) ->
-            let possibleKeys =
-                if row.Type = Some "index_merge" then
-                    key.Split(',', System.StringSplitOptions.RemoveEmptyEntries)
-                    |> Seq.map (fun name -> JsonValue.Create(name) :> JsonNode)
-                else
-                    Seq.singleton (JsonValue.Create(key) :> JsonNode)
+        |> Option.iter (fun key ->
+            table["possible_keys"] <-
+                key.Names
+                |> Seq.map (fun name -> JsonValue.Create(name) :> JsonNode)
+                |> jsonArray
 
-            table["possible_keys"] <- jsonArray possibleKeys
-            table["key"] <- JsonValue.Create(key)
-            length |> Option.iter (fun value -> table["key_length"] <- JsonValue.Create(string value)))
+            table["key"] <- JsonValue.Create(String.concat "," key.Names)
+            key.Length |> Option.iter (fun value -> table["key_length"] <- JsonValue.Create(string value)))
 
         row.Ref
         |> Option.iter (fun value -> table["ref"] <- jsonArray [ JsonValue.Create(value) ])
