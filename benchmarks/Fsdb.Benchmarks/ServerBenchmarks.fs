@@ -219,6 +219,16 @@ type ServerBenchmarks() =
         this.Query "SELECT COUNT(*) FROM users WHERE scan_age = 30"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountCompositePrefixEquality() =
+        this.Query "SELECT COUNT(*) FROM orders WHERE status = 'paid'"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CountCompositePrefixEqualityScan() =
+        this.Query "SELECT COUNT(*) FROM orders WHERE CONCAT(status, '') = 'paid'"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner", "LiteralIn")>]
     member this.CountHalfIndexedLiteralIn() =
         this.Query $"SELECT COUNT(*) FROM users WHERE age IN ({halfAgeList})"

@@ -4736,12 +4736,10 @@ let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : Equal
         |> List.tryFind matches
         |> Option.map (fun (unique, group) -> equalityIndex unique group))
 
-/// Finds the best complete or leading key covered by bound columns.
-let tryEqualityIndexCoveredByColumns (table: Table) (columnNames: string list) : EqualityIndexMatch option =
+let private equalityIndexesCoveredByColumns (table: Table) (columnNames: string list) =
     columnNames
     |> traverse (resolveColumn table.Columns)
-    |> Result.toOption
-    |> Option.bind (fun requested ->
+    |> Result.map (fun requested ->
         let requested = Set.ofList requested
 
         (uniqueKeyGroups table |> visibleGroups |> List.map (fun group -> true, group))
@@ -4759,9 +4757,30 @@ let tryEqualityIndexCoveredByColumns (table: Table) (columnNames: string list) :
             else
                 Some
                     { Index = equalityIndex unique group
-                      KeyColumnCount = keyColumnCount })
-        |> List.sortBy (fun matched -> not matched.Unique, -matched.KeyColumnCount, not matched.UsesFullKey)
-        |> List.tryHead)
+                      KeyColumnCount = keyColumnCount }))
+    |> Result.defaultValue []
+
+let private bestEqualityIndexMatch (matches: EqualityIndexMatch list) : EqualityIndexMatch option =
+    matches
+    |> List.sortBy (fun matched -> not matched.Unique, -matched.KeyColumnCount, not matched.UsesFullKey)
+    |> List.tryHead
+
+/// Finds the best complete or leading key covered by bound columns.
+let tryEqualityIndexCoveredByColumns (table: Table) (columnNames: string list) : EqualityIndexMatch option =
+    equalityIndexesCoveredByColumns table columnNames
+    |> bestEqualityIndexMatch
+
+let internal tryEqualityIndexCoveredByColumnsStartingWith
+    (table: Table)
+    (columnNames: string list)
+    (leadingColumnName: string)
+    : EqualityIndexMatch option =
+    resolveColumn table.Columns leadingColumnName
+    |> Result.toOption
+    |> Option.bind (fun leadingColumn ->
+        equalityIndexesCoveredByColumns table columnNames
+        |> List.filter (fun matched -> matched.ColumnIndices.Head = leadingColumn)
+        |> bestEqualityIndexMatch)
 
 let tryEqualityLookupForIndex
     (store: Store)

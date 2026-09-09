@@ -5874,6 +5874,21 @@ let tests =
                     let skewed = runDefault store "EXPLAIN SELECT COUNT(*) FROM skewed WHERE bucket = 1" |> explainRow
                     Expect.equal skewed.AccessType (Some "ALL") "an all-row equality bucket uses the table scan"
 
+                    runDefault store "CREATE TABLE composite_skewed (id INT PRIMARY KEY, bucket INT, sequence_no INT, KEY ix_bucket_sequence (bucket, sequence_no))"
+                    |> ignore
+
+                    [ for id in 1..100 -> sprintf "(%d, 1, %d)" id id ]
+                    |> String.concat ", "
+                    |> sprintf "INSERT INTO composite_skewed VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    let broadPrefix = runDefault store "EXPLAIN SELECT id FROM composite_skewed WHERE bucket = 1" |> explainRow
+                    Expect.equal broadPrefix.AccessType (Some "ALL") "a broad composite prefix does not bypass the equality cost decision"
+
+                    let limitedPrefix = runDefault store "EXPLAIN SELECT id FROM composite_skewed WHERE bucket = 1 LIMIT 1" |> explainRow
+                    Expect.equal limitedPrefix.AccessType (Some "index") "a limited prefix can still stop in its ordered slice"
+
                     let empty = runDefault store "EXPLAIN SELECT COUNT(*) FROM skewed WHERE bucket = 2" |> explainRow
                     Expect.equal empty.AccessType (Some "ref") "an empty equality bucket stops at the index"
 
@@ -7271,6 +7286,84 @@ let tests =
 
                     Expect.equal (rows "indexed" "Alphabet") [] "the old prefix bucket loses the row"
                     Expect.equal (rows "indexed" "Gamma") [ [ Some "1" ] ] "the new prefix bucket gains the row"
+
+                testCase "a composite left prefix narrows direct reads and writes"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for table, indexes in
+                        [ "prefix_indexed", ", KEY ix_tenant_code_sequence (tenant_id, code, sequence_no)"
+                          "prefix_scanned", "" ] do
+                        runDefault
+                            store
+                            $"CREATE TABLE {table} (id INT PRIMARY KEY, tenant_id INT, code INT, sequence_no INT, payload INT{indexes})"
+                        |> ignore
+
+                        runDefault
+                            store
+                            $"INSERT INTO {table} VALUES (1, 7, 10, 1, 100), (2, 7, 10, 2, 200), (3, 7, 20, 1, 300), (4, 8, 10, 1, 400), (5, 7, 10, 3, 500), (6, NULL, 10, 1, 600)"
+                        |> ignore
+
+                    let rows table =
+                        match runDefault store $"SELECT id FROM {table} WHERE tenant_id = 7 AND code = 10 ORDER BY id" with
+                        | ResultSet(_, result) -> result
+                        | other -> failtestf "expected prefix rows, got %A" other
+
+                    Expect.equal (rows "prefix_indexed") (rows "prefix_scanned") "the prefix lookup agrees with a scan"
+                    Expect.equal (rows "prefix_indexed") [ [ Some "1" ]; [ Some "2" ]; [ Some "5" ] ] "the leading pair finds its suffix rows"
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT id FROM prefix_indexed WHERE tenant_id = 7 AND code = 10"
+                        |> explainRow
+
+                    Expect.equal plan.AccessType (Some "ref") "the prefix uses equality access"
+                    Expect.equal plan.Key (Some "ix_tenant_code_sequence") "the prefix reports its composite key"
+                    Expect.equal plan.KeyLength (Some "10") "the key length covers both fixed integers"
+                    Expect.equal plan.Reference (Some "const,const") "both leading values are constant probes"
+                    Expect.equal plan.EstimatedRows (Some "3") "the estimate is the exact prefix slice"
+
+                    match
+                        runDefault
+                            store
+                            "SELECT id FROM prefix_indexed WHERE code = 10 AND tenant_id = 7 ORDER BY sequence_no DESC"
+                    with
+                    | ResultSet(_, ordered) ->
+                        Expect.equal
+                            ordered
+                            [ [ Some "5" ]; [ Some "2" ]; [ Some "1" ] ]
+                            "the fixed prefix streams its ordered suffix"
+                    | other -> failtestf "expected prefix-ordered rows, got %A" other
+
+                    let orderedPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM prefix_indexed WHERE code = 10 AND tenant_id = 7 ORDER BY sequence_no DESC"
+                        |> explainRow
+
+                    Expect.equal
+                        orderedPlan.AccessType
+                        (Some "index")
+                        "ordering retains the composite slice instead of sorting equality candidates"
+
+                    Expect.equal orderedPlan.Key (Some "ix_tenant_code_sequence") "the ordered slice uses the same composite key"
+
+                    for table in [ "prefix_indexed"; "prefix_scanned" ] do
+                        Expect.equal
+                            (runDefault store $"UPDATE {table} SET payload = payload + 1 WHERE code = 10 AND tenant_id = 7")
+                            (Affected 3UL)
+                            "the prefix narrows UPDATE candidates"
+
+                        Expect.equal
+                            (runDefault store $"DELETE FROM {table} WHERE tenant_id = 7 AND code = 10 AND sequence_no >= 2")
+                            (Affected 2UL)
+                            "the prefix narrows DELETE candidates"
+
+                    let contents table =
+                        match runDefault store $"SELECT * FROM {table} ORDER BY id" with
+                        | ResultSet(_, result) -> result
+                        | other -> failtestf "expected remaining rows, got %A" other
+
+                    Expect.equal (contents "prefix_indexed") (contents "prefix_scanned") "prefix-driven mutations match scan execution"
 
                 testCase "low-cardinality joins prefer one hash build over repeated index probes"
                 <| fun _ ->

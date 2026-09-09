@@ -125,6 +125,7 @@ type private EqualityAccessPlan =
       PrefixLengths: int option list
       Columns: ColumnDef list
       Unique: bool
+      UsesFullKey: bool
       CandidateRowIds: Set<RowId>
       TableRowCount: int
       Rows: Lazy<(RowId * Value[]) list> }
@@ -135,6 +136,7 @@ let private equalityAccessPlan (table: Table) (index: EqualityIndex) rowIds =
       PrefixLengths = index.PrefixLengths
       Columns = table.Columns
       Unique = index.Unique
+      UsesFullKey = true
       CandidateRowIds = rowIds
       TableRowCount = table.RowsArray.Count
       Rows = lazy (Storage.rowsForRowIds table rowIds) }
@@ -153,6 +155,28 @@ let private acceptsEqualityAccess policy plan =
     match policy with
     | CostedRead -> isUsefulEqualityAccess plan
     | CandidateNarrowing -> true
+
+let private equalityAccessPlanForMatch
+    policy
+    (table: Table)
+    (matched: Storage.EqualityIndexMatch)
+    (lookup: Storage.EqualityIndexMatchLookup)
+    =
+    match policy with
+    | CostedRead when not (isUsefulEqualityCardinality table.RowsArray.Count lookup.CandidateCount) -> None
+    | _ ->
+        let rows = lookup.CandidateRows |> List.ofSeq
+
+        Some
+            { KeyName = matched.Name
+              ColumnIndices = matched.ColumnIndices
+              PrefixLengths = matched.PrefixLengths
+              Columns = table.Columns
+              Unique = matched.Unique
+              UsesFullKey = matched.UsesFullKey
+              CandidateRowIds = rows |> List.map fst |> Set.ofList
+              TableRowCount = table.RowsArray.Count
+              Rows = lazy rows }
 
 type private PointEquality =
     { Column: string
@@ -8908,7 +8932,7 @@ and private compatibleSemiJoinColumns (left: ColumnDef) (right: ColumnDef) =
 
     left.Type = right.Type && sameTextDomain
 
-and private orderedEqualityValues (table: Table) (index: Storage.EqualityIndex) (columnNames: string list) (values: Value list) =
+and private orderedValuesForColumns (table: Table) (columnIndices: int list) (columnNames: string list) (values: Value list) =
     if not (sameLength columnNames values) then
         None
     else
@@ -8917,8 +8941,11 @@ and private orderedEqualityValues (table: Table) (index: Storage.EqualityIndex) 
         |> Result.toOption
         |> Option.bind (fun requested ->
             let byColumn = List.zip requested values |> Map.ofList
-            let ordered = index.ColumnIndices |> List.choose (fun columnIndex -> Map.tryFind columnIndex byColumn)
-            if sameLength ordered index.ColumnIndices then Some ordered else None)
+            let ordered = columnIndices |> List.choose (fun columnIndex -> Map.tryFind columnIndex byColumn)
+            if sameLength ordered columnIndices then Some ordered else None)
+
+and private orderedEqualityValues (table: Table) (index: Storage.EqualityIndex) (columnNames: string list) (values: Value list) =
+    orderedValuesForColumns table index.ColumnIndices columnNames values
 
 and private tryIndexedSemiJoin
     (store: Store)
@@ -9282,31 +9309,46 @@ and private runUnlockedSelectStmt
                 | Error error -> error, [], []
                 | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows None narrowed
                 | Ok None ->
-                  match tryIndexedLookup store registry dbName tref select.Where with
-                  | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
-                  | None ->
-                    let projectedLookup =
-                        tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
-                        |> Option.orElseWith (fun () -> tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where)
+                    let equalityAccess = tryEqualityAccess store registry dbName tref select.Where
 
-                    match projectedLookup with
-                    | Some(columns, rows) -> runArbitrary columns rows None select
+                    let orderedPrefix =
+                        tryEqualityPrefixOrder store registry dbName tref select equalityAccess
+
+                    match orderedPrefix with
+                    | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
                     | None ->
-                        match trySpatialLookup BareOrQualifiedColumn store dbName tref select.Where with
+                        let indexedLookup =
+                            equalityAccess
+                            |> Option.orElseWith (fun () -> tryLiteralInAccess store registry dbName tref select.Where)
+                            |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
+
+                        match indexedLookup with
                         | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                         | None ->
-                            match tryIndexOrder store registry dbName tref select with
-                            | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
-                            | None ->
-                                let resolved =
-                                    tryRangeLookup store dbName tref select.Where
-                                    |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
-                                    |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store registry dbName tref select.Where |> Option.map Ok)
-                                    |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+                            let projectedLookup =
+                                tryCorrelatedSourceLookup store registry dbName fromItem select.Where outer
+                                |> Option.orElseWith (fun () -> tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where)
 
-                                match resolved with
-                                | Error e -> e, [], []
-                                | Ok(columns, rows) -> runArbitrary columns rows None select
+                            match projectedLookup with
+                            | Some(columns, rows) -> runArbitrary columns rows None select
+                            | None ->
+                                match trySpatialLookup BareOrQualifiedColumn store dbName tref select.Where with
+                                | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
+                                | None ->
+                                    match tryIndexOrder store registry dbName tref select with
+                                    | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
+                                    | None ->
+                                        let resolved =
+                                            tryRangeLookup store dbName tref select.Where
+                                            |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
+                                            |> Option.orElseWith (fun () ->
+                                                tryInformationSchemaNarrow store registry dbName tref select.Where
+                                                |> Option.map Ok)
+                                            |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+
+                                        match resolved with
+                                        | Error e -> e, [], []
+                                        | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then
@@ -9557,20 +9599,26 @@ and private tryEqualityAccessInTableWith
             |> List.choose (fun equality ->
                 if equality.Transform.IsNone then Some(equality.Column, equality.Value) else None)
 
-        let composite =
-            Storage.tryCompositeEqualityLookupInTable store table storedEqualities
-            |> Option.map (fun lookup ->
-                { KeyName = lookup.IndexName
-                  ColumnIndices = lookup.ColumnIndices
-                  PrefixLengths = lookup.PrefixLengths
-                  Columns = lookup.LookupColumns
-                  Unique = lookup.Unique
-                  CandidateRowIds = lookup.LookupRowIds
-                  TableRowCount = lookup.TableRowCount
-                  Rows = lookup.LookupRows })
-            |> Option.filter (acceptsEqualityAccess policy)
+        let covered =
+            let columnNames, values = List.unzip storedEqualities
 
-        composite
+            columnNames
+            |> List.tryPick (Storage.tryEqualityIndexCoveredByColumnsStartingWith table columnNames)
+            |> Option.filter (fun matched ->
+                matched.UsesFullKey
+                || matched.ColumnIndices
+                   |> List.forall (fun columnIndex ->
+                       let columnName = table.Columns.[columnIndex].Name
+
+                       storedEqualities
+                       |> List.tryFind (fst >> equalsIgnoreCase columnName)
+                       |> Option.exists (fun (_, value) -> equalityPinsOneStoredKey table columnName value)))
+            |> Option.bind (fun matched ->
+                orderedValuesForColumns table matched.ColumnIndices columnNames values
+                |> Option.bind (Storage.tryEqualityLookupForMatch store table matched)
+                |> Option.bind (equalityAccessPlanForMatch policy table matched))
+
+        covered
         |> Option.orElseWith (fun () ->
             equalities
             |> List.tryPick (fun equality ->
@@ -10488,7 +10536,8 @@ and private tryIndexOrder
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     let canUseIndexOrder =
-        not select.Distinct
+        (not select.OrderBy.IsEmpty || select.Limit.IsSome)
+        && not select.Distinct
         && select.GroupBy.IsEmpty
         && select.Having.IsNone
         && not (select.Projections |> List.exists (fst >> containsAggregate registry))
@@ -10561,6 +10610,18 @@ and private tryIndexOrder
             |> Option.orElseWith (fun () ->
                 tryFixedPrefixIndexOrder store registry dbName tref select.Where orderedColumns
                 |> Option.bind planLookup))
+
+and private tryEqualityPrefixOrder
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (tref: TableRef)
+    (select: SelectStmt)
+    (equalityAccess: EqualityAccessPlan option)
+    : IndexOrderPlan option =
+    equalityAccess
+    |> Option.filter (fun plan -> not plan.UsesFullKey && not select.OrderBy.IsEmpty)
+    |> Option.bind (fun _ -> tryIndexOrder store registry dbName tref select)
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -15196,7 +15257,33 @@ let rec private explainJoinBlock
               Extra = (if idx = tableCount - 1 then extra else []) }
 
     let tryExplainIndexedAccess accessExtra (whereExpr: Expr option) (tref: TableRef) : bool =
+        let tryExplainIndexOrder () =
+            match indexOrderPlan with
+            | None -> false
+            | Some plan ->
+                let boundedColumns =
+                    rangeLookupBounds BareOrQualifiedColumn tref whereExpr
+                    |> List.map (_.Column >> _.ToLowerInvariant())
+                    |> Set.ofList
+
+                let hasBounds =
+                    plan.ColumnIndices
+                    |> List.exists (fun index -> Set.contains (plan.Columns.[index].Name.ToLowerInvariant()) boundedColumns)
+
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                      Type = Some(if hasBounds then "range" else "index")
+                      Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
+                      Ref = None
+                      Rows = Some(uint64 plan.EstimatedRows)
+                      Extra = accessExtra }
+
+                true
+
         match tryEqualityAccess store registry dbName tref whereExpr with
+        | Some plan when not plan.UsesFullKey && indexOrderPlan.IsSome -> tryExplainIndexOrder ()
         | Some plan when plan.Unique && plan.CandidateRowIds.IsEmpty ->
             acc.Add
                 { Id = Some id
@@ -15251,27 +15338,7 @@ let rec private explainJoinBlock
                     true
                 | None ->
                     match indexOrderPlan with
-                    | Some plan ->
-                        let hasBounds =
-                            let boundedColumns =
-                                rangeLookupBounds BareOrQualifiedColumn tref whereExpr
-                                |> List.map (_.Column >> _.ToLowerInvariant())
-                                |> Set.ofList
-
-                            plan.ColumnIndices
-                            |> List.exists (fun index -> Set.contains (plan.Columns.[index].Name.ToLowerInvariant()) boundedColumns)
-
-                        acc.Add
-                            { Id = Some id
-                              SelectType = selectType
-                              Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                              Type = Some(if hasBounds then "range" else "index")
-                              Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
-                              Ref = None
-                              Rows = Some(uint64 plan.EstimatedRows)
-                              Extra = accessExtra }
-
-                        true
+                    | Some _ -> tryExplainIndexOrder ()
                     | None ->
                         tryRangeAccess BareOrQualifiedColumn store dbName tref whereExpr
                         |> Option.map (fun lookup ->
@@ -15396,8 +15463,15 @@ and private explainSelectBlock
         | Some(FromTable tref), [] ->
             match tryGroupIndexOrder store registry dbName tref select with
             | Some plan -> Some plan
-            | None when tryIndexedLookup store registry dbName tref select.Where |> Option.isNone -> tryIndexOrder store registry dbName tref select
-            | None -> None
+            | None ->
+                let equalityAccess = tryEqualityAccess store registry dbName tref select.Where
+
+                match tryEqualityPrefixOrder store registry dbName tref select equalityAccess, equalityAccess with
+                | Some plan, _ -> Some plan
+                | None, Some _ -> None
+                | None, None when tryLiteralInAccess store registry dbName tref select.Where |> Option.isNone ->
+                    tryIndexOrder store registry dbName tref select
+                | None, _ -> None
         | _ -> None
 
     let extra =
