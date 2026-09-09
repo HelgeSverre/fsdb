@@ -8402,6 +8402,39 @@ let tests =
 
               ()
 
+          testCase "locking reads acquire only indexed disjunction candidates"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+
+              let setup, _ =
+                  handle
+                      setup
+                      "CREATE TABLE lock_union (id INT PRIMARY KEY, age INT, sort_key INT, KEY ix_age (age), KEY ix_sort_key (sort_key))"
+
+              let _, _ =
+                  handle setup "INSERT INTO lock_union VALUES (1,30,1),(2,40,90),(3,40,3)"
+
+              let holder, _ = handle (create 2 store) "BEGIN"
+
+              let holder, locked =
+                  handle
+                      holder
+                      "SELECT id FROM lock_union WHERE age = 30 OR sort_key BETWEEN 90 AND 90 FOR UPDATE"
+
+              Expect.equal locked (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) "the union selects both branches"
+
+              let contender, _ = handle (create 3 store) "BEGIN"
+              let contender, free = handle contender "SELECT id FROM lock_union WHERE id = 3 FOR UPDATE NOWAIT"
+              Expect.equal free (ResultSet([ "id" ], [ [ Some "3" ] ])) "an unrelated row remains unlocked"
+
+              match handle contender "SELECT id FROM lock_union WHERE id = 1 FOR UPDATE NOWAIT" |> snd with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected an index-union row to remain locked, got %A" other
+
+              handle holder "ROLLBACK" |> ignore
+              handle contender "ROLLBACK" |> ignore
+
           testCase "locking reads use the current committed row version"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
