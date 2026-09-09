@@ -203,7 +203,9 @@ runs:
   [single-table composite prefixes](results/582cff7-quick.md) and
   [projected correlated prefixes](results/b2b0bca-quick.md), followed by
   [compatible text-prefix cardinality](results/a50142b-quick.md) and the
-  [broader correlated planner baseline](results/b9a6895-quick.md).
+  [broader correlated planner baseline](results/b9a6895-quick.md);
+- numeric constant probes: the [scan baseline](results/baa1b51-quick.md) and
+  [indexed implementation](results/ede0c8e-quick.md).
 
 These reports explain a measured revision pair. They do not replace the live
 compatibility and performance boundaries in [GAPS.md](../GAPS.md).

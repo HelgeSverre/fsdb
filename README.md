@@ -327,9 +327,11 @@ different access pattern:
 - **Equality and ranges.** Primary, unique, and secondary equality maps use
   collation-folded keys. Direct equalities may bind a complete key or a safe
   left prefix of a composite B-tree in single-table reads, updates, and
-  deletes. Scalar and composite-row literal `IN` lists, plus direct literal
-  ranges, use the same maintained indexes where their shape is compatible.
-  `EXPLAIN` reports the corresponding `const`, `ref`, or `range` access.
+  deletes. Literal probes and conservative row-independent numeric expressions
+  use the same lookup path. Scalar and composite-row literal `IN` lists, plus
+  direct literal ranges, also use maintained indexes where their shape is
+  compatible. `EXPLAIN` reports the corresponding `const`, `ref`, or `range`
+  access.
 
   Candidate cardinalities are checked before row resolution, so broad probes
   fall back to a row-store scan instead of building an all-row union. Folded
@@ -339,9 +341,9 @@ different access pattern:
   entire list comparison for every row.
 
 - **Ordering.** Compatible `ORDER BY` operations stream a left index prefix, or
-  a suffix whose earlier keys are fixed by literal equalities. Literal bounds
-  on the next key narrow that slice further, and `LIMIT` or `OFFSET` can stop
-  it early. Numeric, binary, `utf8mb4_0900_bin`, and
+  a suffix whose earlier keys are fixed by exact equalities. Literal bounds on
+  the next key narrow that slice further, and `LIMIT` or `OFFSET` can stop it
+  early. Numeric, binary, `utf8mb4_0900_bin`, and
   `utf8mb4_0900_as_cs` prefixes support this path. Case- or accent-folded and
   PAD SPACE text prefixes retain the scan/sort path because equal values can
   occupy separate suffix runs.

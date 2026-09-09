@@ -143,10 +143,11 @@ with one hash build, while remaining equality conditions stay residual
 predicates. `ORDER BY ... LIMIT` uses a bounded top-N sort.
 
 Direct single-table equality predicates likewise use complete keys or safe
-left prefixes for reads and mutations. Their observed candidate count chooses
-between the index slice and a row-store scan. Compatible `ORDER BY` suffixes
-continue streaming the same composite slice rather than sorting the narrowed
-rows again.
+left prefixes for reads and mutations. Literal probes and conservative
+row-independent numeric expressions share that path. Their observed candidate
+count chooses between the index slice and a row-store scan. Compatible
+`ORDER BY` suffixes continue streaming the same composite slice rather than
+sorting the narrowed rows again.
 
 Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
@@ -172,7 +173,7 @@ or locking retain the general SELECT pipeline.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | common complete-key and safe left-prefix equality, literal membership, range, join, ordering, and grouping shapes use maintained indexes; arbitrary expression ordering and broader grouping still scan or sort | high (scale) | divergence |
-| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; outer/lateral joins, ambiguous bare references, and plans needing persisted statistics retain source order or conservative execution | medium | divergence |
+| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | physical inner joins with qualified or unambiguous bare references and source-local predicates use shape- and cardinality-driven choices; safe numeric constants fold into key probes, while general expression folding, outer/lateral join reordering, ambiguous bare references, and plans needing persisted statistics retain conservative execution | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings and source-local join probes; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer trace rows remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | stable subqueries materialize once and common correlated equality/range shapes probe indexes; variable-bearing, nondeterministic, lateral, JSON_TABLE, and more complex correlated forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
@@ -588,6 +589,13 @@ nested derived tables, chained CTEs, source filters, and range predicates.
 Equality probes retain a small fixed setup cost; the filtered and range shapes
 already avoid the scan cliff on the recorded corpus.
 
+The constant-expression lookup pair records the
+[scan baseline](benchmarks/results/baa1b51-quick.md) and the
+[indexed implementation](benchmarks/results/ede0c8e-quick.md). Safe numeric
+arithmetic and untouched [functional-key built-ins](README.md#indexes-and-joins)
+now use the same physical key path as a literal probe; extension overrides and
+coercive text expressions retain row evaluation.
+
 The engine already avoids several earlier cliffs:
 
 - low-cardinality joins can push safe source-local predicates below fan-out and
@@ -595,8 +603,8 @@ The engine already avoids several earlier cliffs:
 - flat boolean full-text searches score from postings, while required groups
   narrow their candidate set;
 - mutation scans retain matched targets only, and unordered limits stop early;
-- eligible direct column/literal predicates bind comparison metadata once per
-  statement, including leaves inside `AND` and `OR` trees.
+- eligible direct-column predicates bind comparison metadata once per
+  statement, including literals and leaves inside `AND` and `OR` trees.
 
 Shared statement setup, computed scan predicates, phrase/proximity matching,
 and broader join-shaped full-text plans remain input-sensitive. Immutable
@@ -605,7 +613,7 @@ records the open shape rather than copying numbers that go stale.
 
 ## 16. Deliberate divergences (accepted, not targeted for parity)
 
-Documented or ponytail-marked decisions that differ from MySQL intentionally:
+Documented decisions that differ from MySQL intentionally:
 
 - a one-million-row join candidate ceiling;
 - the additive `VECTOR` type and function family forward-ported from MySQL 9;
