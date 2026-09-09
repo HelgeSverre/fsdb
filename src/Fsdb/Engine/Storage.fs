@@ -5797,7 +5797,11 @@ let private checkIndexLengths (columns: ColumnDef list) (indexes: IndexDef list)
                 |> Option.orElseWith (fun () -> fullLength definition)
                 |> Option.defaultValue 0
                 |> Ok
-            | Some _ when transform |> Option.exists FunctionalIndex.isBuiltin ->
+            | Some _
+                when transform
+                     |> Option.exists (function
+                         | Expression _ -> false
+                         | transform -> FunctionalIndex.isBuiltin transform) ->
                 Error(ExpressionError(3757, "Cannot create a functional index on this expression."))
             | Some definition ->
                 match column.PrefixLength, fullLength definition with

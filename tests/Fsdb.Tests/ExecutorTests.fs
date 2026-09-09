@@ -7797,6 +7797,22 @@ let tests =
                     Expect.equal lengthPlan.AccessType (Some "index") "the numeric composition streams its order"
                     Expect.equal lengthPlan.Key (Some "ix_reversed_bits") "the numeric composition reports its key"
 
+                    Expect.equal
+                        (runDefault
+                            store
+                            "CREATE TABLE fallback_keys (id INT PRIMARY KEY, name VARCHAR(30), KEY ix_general ((ABS(LOWER(name)))))")
+                        (Affected 0UL)
+                        "a valid composition outside the physical subset retains its metadata"
+
+                    runDefault store "INSERT INTO fallback_keys VALUES (1, '12x'), (2, '3')" |> ignore
+
+                    let fallbackPlan =
+                        runDefault store "EXPLAIN SELECT id FROM fallback_keys WHERE ABS(LOWER(name)) = 12"
+                        |> explainRow
+
+                    Expect.equal fallbackPlan.AccessType (Some "ALL") "an unsupported composition retains the scan fallback"
+                    Expect.equal fallbackPlan.Key None "an unsupported composition does not claim a physical key"
+
                 testCase "a fixed stored prefix exposes a functional ordering suffix"
                 <| fun _ ->
                     let store = newStore ()
