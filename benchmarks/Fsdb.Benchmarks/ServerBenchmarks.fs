@@ -200,6 +200,18 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, name FROM users WHERE sort_key >= {lower} + 0 AND sort_key < {lower + 1} + 0"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryRange")>]
+    member this.FilterBySecondaryBetween() =
+        let value = randomUserId () - 1
+        this.Query $"SELECT id, name FROM users WHERE sort_key BETWEEN {value} AND {value}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryRange", "Planner")>]
+    member this.FilterByConstantSecondaryBetween() =
+        let value = randomUserId () - 1
+        this.Query $"SELECT id, name FROM users WHERE sort_key BETWEEN {value} + 0 AND {value} + 0"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
     member this.CountSelectiveIndexedRange() =
         let lower = randomUserId () - 1
