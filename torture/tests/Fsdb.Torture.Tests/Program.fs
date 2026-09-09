@@ -524,6 +524,8 @@ let tests =
                           "constant_expression_between"
                           "indexed_disjunction"
                           "nested_indexed_disjunction"
+                          "indexed_conjunction"
+                          "nested_index_merge"
                           "allow_invalid_dates" ] do
                         Expect.contains features feature feature
 

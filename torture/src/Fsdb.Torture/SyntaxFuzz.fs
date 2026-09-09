@@ -79,6 +79,9 @@ module SyntaxFuzz =
            "indexed_disjunction", "SELECT id, n FROM syntax_target WHERE id = 1 OR n BETWEEN 10 AND 10"
            "nested_indexed_disjunction",
            "SELECT id, n FROM syntax_target WHERE id = 99 OR n IN (10, 20) OR (n BETWEEN 30 AND 40 AND label = 'missing')"
+           "indexed_conjunction", "SELECT id, n FROM syntax_target WHERE id = 1 AND n BETWEEN 10 AND 10"
+           "nested_index_merge",
+           "SELECT id, n FROM syntax_target WHERE (id = 1 OR n = 99) AND n BETWEEN 10 AND 20"
            "straight_join",
            "SELECT STRAIGHT_JOIN t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1"
            "correlated_index", "SELECT t.id, (SELECT COUNT(*) FROM syntax_source AS s WHERE s.n = t.n) FROM syntax_target AS t"
