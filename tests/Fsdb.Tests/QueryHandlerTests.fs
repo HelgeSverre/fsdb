@@ -8435,6 +8435,49 @@ let tests =
               handle holder "ROLLBACK" |> ignore
               handle contender "ROLLBACK" |> ignore
 
+          testCase "locking reads acquire only indexed conjunction candidates"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+
+              let setup, _ =
+                  handle
+                      setup
+                      "CREATE TABLE lock_intersection (id INT PRIMARY KEY, age INT, sort_key INT, KEY ix_age (age), KEY ix_sort_key (sort_key))"
+
+              let _, _ =
+                  handle
+                      setup
+                      "INSERT INTO lock_intersection VALUES (1,30,1),(2,30,90),(3,40,90),(4,40,4)"
+
+              let holder, _ = handle (create 2 store) "BEGIN"
+
+              let holder, locked =
+                  handle
+                      holder
+                      "SELECT id FROM lock_intersection WHERE age = 30 AND sort_key BETWEEN 90 AND 90 FOR UPDATE"
+
+              Expect.equal locked (ResultSet([ "id" ], [ [ Some "2" ] ])) "the intersection selects the common row"
+
+              let contender, _ = handle (create 3 store) "BEGIN"
+
+              let contender, firstFree =
+                  handle contender "SELECT id FROM lock_intersection WHERE id = 1 FOR UPDATE NOWAIT"
+
+              Expect.equal firstFree (ResultSet([ "id" ], [ [ Some "1" ] ])) "the equality-only row remains unlocked"
+
+              let contender, secondFree =
+                  handle contender "SELECT id FROM lock_intersection WHERE id = 3 FOR UPDATE NOWAIT"
+
+              Expect.equal secondFree (ResultSet([ "id" ], [ [ Some "3" ] ])) "the range-only row remains unlocked"
+
+              match handle contender "SELECT id FROM lock_intersection WHERE id = 2 FOR UPDATE NOWAIT" |> snd with
+              | Err(3572, _) -> ()
+              | other -> failtestf "expected the intersected row to remain locked, got %A" other
+
+              handle holder "ROLLBACK" |> ignore
+              handle contender "ROLLBACK" |> ignore
+
           testCase "locking reads use the current committed row version"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
