@@ -1622,6 +1622,12 @@ let tests =
                                   """{"valid": false, "reason": "The JSON document location '#' failed requirement 'required' at JSON Schema location '#'", "schema-location": "#", "document-location": "#", "schema-failed-keyword": "required"}""")
                               "required report"
 
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALIDATION_REPORT" [ VString "{\"type\":\"integer\"}"; VString "\"x\"" ])
+                              (VJson
+                                  """{"valid": false, "reason": "The JSON document location '#' failed requirement 'type' at JSON Schema location '#'", "schema-location": "#", "document-location": "#", "schema-failed-keyword": "type"}""")
+                              "root type failure"
+
                       testCase "JSON schema ignores format assertions like MySQL"
                       <| fun _ ->
                           Expect.equal

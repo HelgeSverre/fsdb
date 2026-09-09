@@ -1568,12 +1568,19 @@ let private jsonSchemaValidation functionName schemaValue documentValue =
                 errors
                 |> Seq.tryHead
                 |> Option.map (fun error ->
-                    let documentLocation =
+                    let rawDocumentLocation =
                         if error.Kind = ValidationErrorKind.PropertyRequired then
                             let separator = error.Path.LastIndexOf '/'
                             if separator < 1 then "#" else error.Path.Substring(0, separator)
                         else
                             error.Path
+
+                    let documentLocation =
+                        match rawDocumentLocation.TrimEnd('/') with
+                        | ""
+                        | "#" -> "#"
+                        | location when location.StartsWith("#", StringComparison.Ordinal) -> location
+                        | location -> "#" + location
 
                     { SchemaLocation = schemaLocation schema documentLocation
                       DocumentLocation = documentLocation
@@ -2629,7 +2636,10 @@ let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromTime: TimeVal
     | [ VZeroDate _ ] -> VInt 0L
     | [ VZeroDateTime dateTime ] -> VInt(int64 (fromZero dateTime))
     | [ VTime value ] -> VInt(int64 (fromTime value))
-    | [ value ] when not (anyNull [ value ]) -> tryDateTimeValue value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
+    | [ value ] when not (anyNull [ value ]) ->
+        match value |> toText |> Option.bind tryParseTimeInputTicks |> Option.bind tryTimeValue with
+        | Some time -> VInt(int64 (fromTime time))
+        | None -> tryDateTimeValue value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
 let internal dayNameFn (locale: TemporalLocale.Names) : Scalar =
@@ -4275,8 +4285,21 @@ let private sha2Fn: Scalar =
 
 let private formatFn: Scalar =
     function
-    | [ n; d ] when not (anyNull [ n; d ]) -> VString((toDouble n).ToString("N" + string (max 0 (int (toDouble d))), CultureInfo.InvariantCulture))
-    | _ -> VNull
+    | ([ n; d ] | [ n; d; _ ]) as arguments ->
+        if anyNull arguments then
+            VNull
+        else
+            let culture =
+                match arguments with
+                | [ _; _; locale ] ->
+                    try
+                        CultureInfo(req locale |> fun name -> name.Replace('_', '-'))
+                    with :? CultureNotFoundException ->
+                        CultureInfo.InvariantCulture
+                | _ -> CultureInfo.InvariantCulture
+
+            VString((toDouble n).ToString("N" + string (max 0 (int (toDouble d))), culture))
+    | _ -> nativeParameterCountError "FORMAT"
 
 let private substringIndexFn: Scalar =
     function

@@ -11167,6 +11167,10 @@ let tests =
                           Some "-25"
                           None ]
 
+                    expectRow
+                        "SELECT HOUR('-34:20:30.123456'), MINUTE('-34:20:30.123456'), SECOND('-34:20:30.123456'), MICROSECOND('-34:20:30.123456')"
+                        [ Some "34"; Some "20"; Some "30"; Some "123456" ]
+
                 testCase "time formatting, periods, day numbers, and seeded RAND match MySQL"
                 <| fun _ ->
                     expectRow
@@ -11184,6 +11188,12 @@ let tests =
                           Some "2024-01-01"
                           Some "0.9057697559760601"
                           Some "0.9057697559760601" ]
+
+                testCase "FORMAT accepts MySQL locale names"
+                <| fun _ ->
+                    expectRow
+                        "SELECT FORMAT(1234.5, 2), FORMAT(1234.5, 2, 'en_US'), FORMAT(1234.5, 2, 'de_DE')"
+                        [ Some "1,234.50"; Some "1,234.50"; Some "1.234,50" ]
 
                 testCase "CONV converts both directions across bases 2..36, truncating at the first invalid digit"
                 <| fun _ ->
