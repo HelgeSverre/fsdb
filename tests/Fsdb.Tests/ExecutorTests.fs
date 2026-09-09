@@ -6238,6 +6238,77 @@ let tests =
                         (runDefault store (deleteSql "scanned"))
                         "index-union DELETE matches its scan twin"
 
+                testCase "compatible conjunctions intersect their physical candidates"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE intersected (id INT PRIMARY KEY, age INT, sort_key INT, touched INT, KEY ix_age (age), KEY ix_sort_key (sort_key))"
+                    |> ignore
+
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, age INT, sort_key INT, touched INT)"
+                    |> ignore
+
+                    let values =
+                        [ for id in 1..100 -> sprintf "(%d, %d, %d, 0)" id (if id <= 40 then 30 else 40) id ]
+                        |> String.concat ", "
+
+                    runDefault store $"INSERT INTO intersected VALUES {values}" |> ignore
+                    runDefault store $"INSERT INTO scanned VALUES {values}" |> ignore
+
+                    let predicate = "age = 30 AND sort_key BETWEEN 35 AND 45 AND touched = 0"
+
+                    let rows table =
+                        match runDefault store $"SELECT id FROM {table} WHERE {predicate}" with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected conjunctive rows from %s, got %A" table other
+
+                    Expect.equal
+                        (rows "intersected")
+                        (rows "scanned")
+                        "the candidate intersection retains final predicate semantics"
+
+                    let plan = runDefault store $"EXPLAIN SELECT id FROM intersected WHERE {predicate}" |> explainRow
+                    Expect.equal plan.AccessType (Some "index_merge") "compatible AND leaves use an index intersection"
+                    Expect.equal plan.Key (Some "ix_age,ix_sort_key") "EXPLAIN lists each intersected index"
+                    Expect.equal plan.EstimatedRows (Some "6") "the estimate counts the intersected candidates"
+
+                    runDefault store "CREATE TABLE anchor (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO anchor VALUES (1)" |> ignore
+
+                    let joinedSql =
+                        "SELECT i.id FROM intersected i JOIN anchor a ON a.id = 1 WHERE i.age = 30 AND i.sort_key BETWEEN 35 AND 45 AND i.touched = 0"
+
+                    let joinedPlan =
+                        runDefault store $"EXPLAIN {joinedSql}"
+                        |> explainRows
+                        |> List.find (fun row -> row.Table = Some "i")
+
+                    Expect.equal joinedPlan.AccessType (Some "index_merge") "joined source predicates retain index intersection access"
+
+                    let updateSql table = $"UPDATE {table} SET touched = 1 WHERE {predicate}"
+                    let intersectedUpdate = updateSql "intersected"
+                    let updatePlan = runDefault store $"EXPLAIN {intersectedUpdate}" |> explainRow
+                    Expect.equal updatePlan.AccessType (Some "index_merge") "UPDATE uses the candidate intersection"
+
+                    Expect.equal
+                        (runDefault store intersectedUpdate)
+                        (runDefault store (updateSql "scanned"))
+                        "index-intersection UPDATE matches its scan twin"
+
+                    let deleteSql table =
+                        $"DELETE FROM {table} WHERE age = 30 AND sort_key BETWEEN 35 AND 45 AND touched = 1"
+
+                    let intersectedDelete = deleteSql "intersected"
+                    let deletePlan = runDefault store $"EXPLAIN {intersectedDelete}" |> explainRow
+                    Expect.equal deletePlan.AccessType (Some "index_merge") "DELETE uses the candidate intersection"
+
+                    Expect.equal
+                        (runDefault store intersectedDelete)
+                        (runDefault store (deleteSql "scanned"))
+                        "index-intersection DELETE matches its scan twin"
+
                 testCase "equality planning avoids broad index bucket unions"
                 <| fun _ ->
                     let store = newStore ()
