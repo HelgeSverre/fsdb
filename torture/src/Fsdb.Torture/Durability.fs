@@ -35,7 +35,7 @@ module DurabilityChecks =
         [| for statement in [ "insert"; "update"; "delete"; "replace"; "create_table"; "alter_table"; "create_index"; "create_view"; "create_trigger" ] do
                yield "statement:" + statement, [| "recovery" |]
 
-           for columnType in [ "t_big_int"; "t_int"; "t_varchar" ] do
+           for columnType in TypeMatrix.capabilities do
                yield "column-type:" + columnType, [| "recovery" |] |]
 
     let operation operationId =
@@ -413,7 +413,7 @@ module DurabilityRunner =
             return DurabilityChecks.classifyState possible attempted acknowledged left right
         }
 
-    let private verifySchemaRecovery port timeoutSeconds =
+    let private createDurableSchema port timeoutSeconds =
         task {
             use connection = new MySqlConnection(connectionString port "durability" timeoutSeconds)
             do! connection.OpenAsync()
@@ -423,30 +423,37 @@ module DurabilityRunner =
                   "CREATE INDEX ix_durable_schema_payload ON durable_schema (payload)"
                   "CREATE VIEW durable_schema_view AS SELECT id, payload, revision FROM durable_schema"
                   "CREATE TRIGGER durable_schema_before BEFORE INSERT ON durable_schema FOR EACH ROW SET NEW.payload = UPPER(NEW.payload)"
-                  "INSERT INTO durable_schema (id, payload) VALUES (1, 'survived')" ]
+                  "INSERT INTO durable_schema (id, payload) VALUES (1, 'survived')"
+                  TypeMatrix.createTable "durable_types"
+                  TypeMatrix.insert "durable_types" ]
 
             for statement in statements do
                 let! _ = execute connection timeoutSeconds statement
                 ()
+
+            let! typeRow = Database.query "fsdb" connection timeoutSeconds (TypeMatrix.select "durable_types" "1")
+
+            if not (ProbeOutcome.succeeded typeRow) then
+                failwithf "could not read the durable type matrix: %s" typeRow.Message
+
+            return typeRow.DataSha256
         }
 
-    let private schemaRecovered port timeoutSeconds =
+    let private schemaRecovered port timeoutSeconds expectedTypeHash =
         task {
             use connection = new MySqlConnection(connectionString port "durability" timeoutSeconds)
             do! connection.OpenAsync()
             use command = connection.CreateCommand()
             command.CommandTimeout <- timeoutSeconds
             command.CommandText <-
-                "SELECT v.payload, v.revision, "
+                "SELECT CONCAT(v.payload, ':', v.revision, ':', "
                 + "(SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = 'durability' AND TABLE_NAME = 'durable_schema' AND INDEX_NAME = 'ix_durable_schema_payload'), "
+                + "':', "
                 + "(SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'durability' AND TRIGGER_NAME = 'durable_schema_before') "
-                + "FROM durable_schema_view AS v WHERE v.id = 1"
-            use! reader = command.ExecuteReaderAsync()
-
-            if not (reader.Read()) then
-                return false
-            else
-                return reader.GetString(0) = "SURVIVED" && reader.GetInt32(1) = 1 && reader.GetInt64(2) = 1L && reader.GetInt64(3) = 1L
+                + ") FROM durable_schema_view AS v WHERE v.id = 1"
+            let! schemaState = command.ExecuteScalarAsync()
+            let! typeRow = Database.query "fsdb" connection timeoutSeconds (TypeMatrix.select "durable_types" "1")
+            return string schemaState = "SURVIVED:1:1:1" && ProbeOutcome.succeeded typeRow && typeRow.DataSha256 = expectedTypeHash
         }
 
     let private snapshotPath dataDirectory = Path.Combine(dataDirectory, "snapshot.fsdb")
@@ -595,11 +602,11 @@ module DurabilityRunner =
                     && Set.contains tailOperationId leftBeforeSnapshot
                     && Set.contains tailOperationId rightBeforeSnapshot
 
-                do! verifySchemaRecovery port options.TimeoutSeconds
+                let! expectedTypeHash = createDurableSchema port options.TimeoutSeconds
                 do! stopLive true
                 let! schemaServer = startServer dataDirectory defaultsFile port
                 liveServer <- Some schemaServer
-                let! schemaAfterCrash = schemaRecovered port options.TimeoutSeconds
+                let! schemaAfterCrash = schemaRecovered port options.TimeoutSeconds expectedTypeHash
 
                 do! stopLive false
                 let snapshotWritten = File.Exists(snapshotPath dataDirectory)
@@ -607,7 +614,7 @@ module DurabilityRunner =
                 liveServer <- Some snapshotServer
                 let! afterSnapshot, leftAfterSnapshot, rightAfterSnapshot = observe options port attemptedSet acknowledgedSet
                 let! stateAfterSnapshot = observeState options port allPossible attemptedSet acknowledgedSet
-                let! schemaAfterSnapshot = schemaRecovered port options.TimeoutSeconds
+                let! schemaAfterSnapshot = schemaRecovered port options.TimeoutSeconds expectedTypeHash
                 let snapshotVerified = snapshotWritten && leftBeforeSnapshot = leftAfterSnapshot && rightBeforeSnapshot = rightAfterSnapshot
 
                 use repairedConnection = new MySqlConnection(connectionString port "durability" options.TimeoutSeconds)

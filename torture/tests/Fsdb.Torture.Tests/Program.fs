@@ -729,7 +729,21 @@ let tests =
                     Expect.isTrue
                         (select.Evidence
                          |> Array.exists (fun item -> item.Axis = "prepared-protocol" && item.Source = "compatibility-contract"))
-                        "prepared SELECT contract is visible" ]
+                        "prepared SELECT contract is visible"
+
+                testCase "type matrix contributes prepared and recovery evidence"
+                <| fun _ ->
+                    let manifest: CoverageManifest = Fsdb.Torture.Coverage.create ()
+
+                    let geometry =
+                        manifest.Capabilities
+                        |> Array.find (fun capability -> capability.Id = "column-type:t_geometry")
+
+                    for axis, source in [ "prepared-protocol", "compatibility-contract"; "recovery", "durability" ] do
+                        Expect.isTrue
+                            (geometry.Evidence
+                             |> Array.exists (fun item -> item.Axis = axis && item.Source = source))
+                            (axis + " evidence") ]
 
           testList
               "Wire mutations"
