@@ -125,7 +125,7 @@ let createSchema (conn: MySqlConnection) =
             created_at DATETIME NOT NULL,
             KEY ix_orders_user_id (user_id),
             KEY ix_orders_user_status (user_id, status),
-            KEY ix_orders_status_bucket (status, status_bucket)
+            KEY ix_orders_status_bucket_id (status, status_bucket, id)
         )
         """
 

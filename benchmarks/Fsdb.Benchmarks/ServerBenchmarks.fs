@@ -442,6 +442,15 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CorrelatedDerivedCompositePrefix() =
+        this.Query(
+            "SELECT o.id, (SELECT COUNT(*) FROM (SELECT id, status, status_bucket FROM orders) c "
+            + "WHERE c.status_bucket = o.status_bucket AND c.status = o.status) "
+            + "FROM orders o WHERE o.id <= 100"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedCteEquality() =
         this.Query(
             "WITH candidates AS (SELECT id, user_id FROM orders) "
