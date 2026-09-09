@@ -4389,6 +4389,21 @@ type EqualityIndex =
         index.PrefixLengths |> List.forall Option.isNone
         && index.Transforms |> List.forall Option.isNone
 
+type EqualityIndexMatch =
+    { Index: EqualityIndex
+      KeyColumnCount: int }
+
+    member matched.Name = matched.Index.Name
+    member matched.ColumnIndices = matched.Index.ColumnIndices |> List.take matched.KeyColumnCount
+    member matched.PrefixLengths = matched.Index.PrefixLengths |> List.take matched.KeyColumnCount
+    member matched.Transforms = matched.Index.Transforms |> List.take matched.KeyColumnCount
+    member matched.UsesFullKey = matched.KeyColumnCount = matched.Index.ColumnIndices.Length
+    member matched.Unique = matched.UsesFullKey && matched.Index.Unique
+
+    member matched.UsesWholeStoredValues =
+        matched.PrefixLengths |> List.forall Option.isNone
+        && matched.Transforms |> List.forall Option.isNone
+
 let private equalityIndex unique (group: IndexKeyGroup) =
     { Name = group.Name
       ColumnIndices = group.Indices
@@ -4721,9 +4736,8 @@ let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : Equal
         |> List.tryFind matches
         |> Option.map (fun (unique, group) -> equalityIndex unique group))
 
-/// Finds a complete equality key within a wider set of bound columns,
-/// preferring unique keys and then the longest available key.
-let tryEqualityIndexCoveredByColumns (table: Table) (columnNames: string list) : EqualityIndex option =
+/// Finds the best complete or leading key covered by bound columns.
+let tryEqualityIndexCoveredByColumns (table: Table) (columnNames: string list) : EqualityIndexMatch option =
     columnNames
     |> traverse (resolveColumn table.Columns)
     |> Result.toOption
@@ -4732,12 +4746,22 @@ let tryEqualityIndexCoveredByColumns (table: Table) (columnNames: string list) :
 
         (uniqueKeyGroups table |> visibleGroups |> List.map (fun group -> true, group))
         @ (secondaryKeyGroups table |> visibleGroups |> List.map (fun group -> false, group))
-        |> List.filter (fun (_, group) ->
-            group.Transforms |> List.forall Option.isNone
-            && group.Indices |> List.forall (fun index -> requested.Contains index))
-        |> List.sortBy (fun (unique, group) -> not unique, -group.Indices.Length)
-        |> List.tryHead
-        |> Option.map (fun (unique, group) -> equalityIndex unique group))
+        |> List.choose (fun (unique, group) ->
+            let keyColumnCount =
+                List.zip group.Indices group.Transforms
+                |> List.takeWhile (fun (index, transform) -> transform.IsNone && requested.Contains index)
+                |> List.length
+
+            if keyColumnCount = 0
+               || (keyColumnCount < group.Indices.Length
+                   && not (Map.containsKey group.Name table.SecondaryOrder)) then
+                None
+            else
+                Some
+                    { Index = equalityIndex unique group
+                      KeyColumnCount = keyColumnCount })
+        |> List.sortBy (fun matched -> not matched.Unique, -matched.KeyColumnCount, not matched.UsesFullKey)
+        |> List.tryHead)
 
 let tryEqualityLookupForIndex
     (store: Store)
@@ -4803,6 +4827,75 @@ let private sortedInsertionPoint boundary count compareAt =
             remaining <- step
 
     first
+
+let private orderedPrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry>) prefix =
+    if List.isEmpty prefix then
+        0, entries.Count
+    else
+        let length = prefix.Length
+
+        let comparePrefix (entry: SecondaryOrderEntry) =
+            compareIndexedKeys
+                (List.take length entry.CollationNames)
+                (List.take length entry.Directions)
+                (List.take length entry.Values)
+                prefix
+
+        let insertionIndex boundary =
+            sortedInsertionPoint boundary entries.Count (fun current -> comparePrefix entries.[current])
+
+        insertionIndex FirstEqual, insertionIndex AfterEqual
+
+type EqualityIndexMatchLookup =
+    { CandidateCount: int
+      CandidateRows: (RowId * Value[]) seq }
+
+let internal tryEqualityLookupForMatch
+    (store: Store)
+    (table: Table)
+    (matched: EqualityIndexMatch)
+    (values: Value list)
+    : EqualityIndexMatchLookup option =
+    if matched.UsesFullKey then
+        equalityLookupRows store table matched.Index StoredValues values
+        |> Option.map (fun rows ->
+            { CandidateCount = rows.Length
+              CandidateRows = rows })
+    elif values.Length <> matched.KeyColumnCount then
+        None
+    elif values |> List.contains VNull then
+        Some
+            { CandidateCount = 0
+              CandidateRows = Seq.empty }
+    else
+        List.zip3 matched.ColumnIndices matched.PrefixLengths matched.Transforms
+        |> List.zip values
+        |> traverse (fun (value, (columnIndex, prefixLength, transform)) ->
+            exactProbeValue store table columnIndex value
+            |> Option.map
+                (projectIndexValue
+                    matched.Name
+                    None
+                    table.Columns.[columnIndex]
+                    prefixLength
+                    transform)
+            |> function
+                | Some normalized -> Ok normalized
+                | None -> Error())
+        |> Result.toOption
+        |> Option.bind (fun prefix ->
+            table.SecondaryOrder
+            |> Map.tryFind matched.Name
+            |> Option.map (fun entries ->
+                let first, afterLast = orderedPrefixBounds entries prefix
+                let count = afterLast - first
+
+                { CandidateCount = count
+                  CandidateRows =
+                    Seq.init count (fun offset -> entries.[first + offset])
+                    |> Seq.choose (fun entry ->
+                        table.RowsArray.TryFind entry.RowId
+                        |> Option.map (fun row -> entry.RowId, row)) }))
 
 let private orderedSliceBounds
     direction
@@ -5164,23 +5257,7 @@ let private tryOrderedIndexLookupWithPrefix
 
                 match Map.tryFind group.Name table.SecondaryOrder, normalizedPrefix, normalizeBound lower, normalizeBound upper with
                 | Some(entries: ImmutableSortedSet<SecondaryOrderEntry>), Some prefix, Some lower, Some upper ->
-                    let prefixFirst, prefixAfterLast =
-                        if prefix.IsEmpty then
-                            0, entries.Count
-                        else
-                            let length = prefix.Length
-
-                            let comparePrefix (entry: SecondaryOrderEntry) =
-                                compareIndexedKeys
-                                    (List.take length entry.CollationNames)
-                                    (List.take length entry.Directions)
-                                    (List.take length entry.Values)
-                                    prefix
-
-                            let insertionIndex boundary =
-                                sortedInsertionPoint boundary entries.Count (fun current -> comparePrefix entries.[current])
-
-                            insertionIndex FirstEqual, insertionIndex AfterEqual
+                    let prefixFirst, prefixAfterLast = orderedPrefixBounds entries prefix
 
                     let first, afterLast =
                         if lower.IsNone && upper.IsNone then

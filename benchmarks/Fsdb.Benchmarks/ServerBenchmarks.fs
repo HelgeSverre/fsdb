@@ -397,6 +397,11 @@ type ServerBenchmarks() =
         )
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
+    member this.CompositePrefixJoin() =
+        this.Query "SELECT COUNT(*) FROM orders o JOIN orders c ON c.status = o.status WHERE o.id = 1"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.UncorrelatedInSubquery() =
         this.Query "SELECT u.id, u.name FROM users u WHERE u.id IN (SELECT o.user_id FROM orders o WHERE o.id <= 100)"

@@ -7675,6 +7675,54 @@ let tests =
                         ()
                     | other -> failtestf "expected a composite indexed join plan, got %A" other
 
+                testCase "an indexed INNER JOIN probes a composite left prefix"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE prefix_parent (tenant_id INT, code INT, active INT, PRIMARY KEY (tenant_id, code))" |> ignore
+                    runDefault store "CREATE TABLE prefix_child (id INT PRIMARY KEY, tenant_id INT, code INT, sequence_no INT, active INT, KEY ix_tenant_code_sequence (tenant_id, code, sequence_no))" |> ignore
+                    runDefault store "INSERT INTO prefix_parent VALUES (1, 10, 1), (1, 20, 1), (2, 10, 1)" |> ignore
+                    runDefault store "INSERT INTO prefix_child VALUES (1, 1, 10, 1, 1), (2, 1, 10, 2, 0), (3, 1, 20, 1, 1), (4, 2, 10, 1, 1), (5, 2, 20, 1, 1), (6, NULL, 10, 1, 1)" |> ignore
+
+                    let join =
+                        "FROM prefix_parent p INNER JOIN prefix_child c "
+                        + "ON p.code = c.code AND p.tenant_id = c.tenant_id AND p.active = c.active"
+
+                    match runDefault store $"SELECT p.tenant_id, p.code, c.id {join} ORDER BY c.id" with
+                    | ResultSet(_, [ [ Some "1"; Some "10"; Some "1" ]; [ Some "1"; Some "20"; Some "3" ]; [ Some "2"; Some "10"; Some "4" ] ]) ->
+                        ()
+                    | other -> failtestf "expected composite-prefix join rows, got %A" other
+
+                    match runDefault store $"EXPLAIN SELECT * {join}" with
+                    | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_tenant_code_sequence"; Some "ix_tenant_code_sequence"; Some "10"; Some "p.tenant_id,p.code"; Some "1"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a composite left-prefix join plan, got %A" other
+
+                testCase "a broad composite left-prefix join prefers one hash build"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE broad_parent (id INT PRIMARY KEY, tenant_id INT)" |> ignore
+                    runDefault store "CREATE TABLE broad_child (id INT PRIMARY KEY, tenant_id INT, sequence_no INT, KEY ix_tenant_sequence (tenant_id, sequence_no))" |> ignore
+                    runDefault store "INSERT INTO broad_parent VALUES (1, 7), (2, 7)" |> ignore
+
+                    [ 1..100 ]
+                    |> List.map (fun id -> sprintf "(%d, 7, %d)" id id)
+                    |> String.concat ","
+                    |> sprintf "INSERT INTO broad_child VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    match runDefault store "SELECT COUNT(*) FROM broad_parent p JOIN broad_child c ON c.tenant_id = p.tenant_id" with
+                    | ResultSet(_, [ [ Some "200" ] ]) -> ()
+                    | other -> failtestf "expected the broad-prefix join count, got %A" other
+
+                    let plan =
+                        runDefault store "EXPLAIN SELECT p.id, c.id FROM broad_parent p JOIN broad_child c ON c.tenant_id = p.tenant_id"
+                        |> explainRows
+                        |> List.item 1
+
+                    Expect.equal plan.AccessType (Some "ALL") "a broad prefix yields to one hash build"
+                    Expect.equal plan.Key None "the unused composite index is not reported"
+
                 testCase "a composite PRIMARY KEY (out of the single-column fast path's scope) still returns correct results"
                 <| fun _ ->
                     let store = newStore ()

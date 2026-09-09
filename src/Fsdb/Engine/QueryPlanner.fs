@@ -68,15 +68,18 @@ let estimateUniformEqualityCandidates tableRows distinctKeys probeKeys =
         let numerator = int64 tableRows * int64 selectedKeys
         int ((numerator + int64 distinctKeys - 1L) / int64 distinctKeys)
 
-let chooseJoin leftRows rightRows distinctRightKeys =
+let chooseJoinForCandidateRows leftRows rightRows candidateRows =
     let leftRows = max 0 leftRows
     let rightRows = max 0 rightRows
 
     if rightRows < hashJoinFloor then
         IndexProbe
     else
-        let candidatesPerProbe = estimateUniformEqualityCandidates rightRows distinctRightKeys 1
-        let indexWork = int64 leftRows * (int64 candidatesPerProbe + 1L)
+        let indexWork = int64 leftRows + max 0L candidateRows
         let hashWork = int64 leftRows + int64 rightRows
 
         if indexWork <= hashWork then IndexProbe else HashJoin
+
+let chooseJoin leftRows rightRows distinctRightKeys =
+    let candidatesPerProbe = estimateUniformEqualityCandidates rightRows distinctRightKeys 1
+    chooseJoinForCandidateRows leftRows rightRows (int64 (max 0 leftRows) * int64 candidatesPerProbe)

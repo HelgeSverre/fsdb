@@ -220,7 +220,7 @@ type private IndexedJoinPlan =
 
 type private IndexedJoinProbe =
     { Table: Table
-      Index: EqualityIndex
+      Index: Storage.EqualityIndexMatch
       ProbeIndices: int list }
 
 type private JoinConsumption =
@@ -6863,6 +6863,36 @@ and private tryIndexedJoinProbe
         equiKeys |> List.map (fun (leftIndex, rightIndex) -> rightIndex, leftIndex) |> tryIndexProbe table rightColumns
     | _ -> None
 
+and private chooseIndexedJoinPath
+    (store: Store)
+    (probe: IndexedJoinProbe)
+    (leftRowCount: int)
+    (leftRows: Value[] seq)
+    =
+    let rightRowCount = probe.Table.RowsArray.Count
+
+    if probe.Index.UsesFullKey then
+        QueryPlanner.chooseJoin
+            leftRowCount
+            rightRowCount
+            (Storage.equalityIndexDistinctKeyCount probe.Table probe.Index.Index)
+    else
+        let scanCost = int64 rightRowCount
+        let mutable candidateRows = 0L
+        use rows = leftRows.GetEnumerator()
+
+        while candidateRows <= scanCost && rows.MoveNext() do
+            let probeValues = probe.ProbeIndices |> List.map (fun index -> rows.Current.[index])
+
+            let candidates =
+                Storage.tryEqualityLookupForMatch store probe.Table probe.Index probeValues
+                |> Option.map (fun lookup -> lookup.CandidateCount)
+                |> Option.defaultValue rightRowCount
+
+            candidateRows <- min (scanCost + 1L) (candidateRows + int64 candidates)
+
+        QueryPlanner.chooseJoinForCandidateRows leftRowCount rightRowCount candidateRows
+
 and private innerJoinChainPreservesLeftOrder
     (store: Store)
     (sources: FullTextPhysicalSource list)
@@ -7708,12 +7738,7 @@ and private applyResolvedJoin
                     match consumption with
                     | MayStopEarly -> true
                     | ConsumesAllRows ->
-                        match
-                            QueryPlanner.chooseJoin
-                                leftIndexed.Value.Length
-                                probe.Table.RowsArray.Count
-                                (Storage.equalityIndexDistinctKeyCount probe.Table probe.Index)
-                        with
+                        match chooseIndexedJoinPath store probe leftIndexed.Value.Length (leftIndexed.Value |> Seq.map snd) with
                         | QueryPlanner.IndexProbe -> true
                         | QueryPlanner.HashJoin -> not hashCompatible.Value)
 
@@ -7733,13 +7758,15 @@ and private applyResolvedJoin
                 let leftRowsFor (right: Value[]) =
                     probe.ProbeIndices
                     |> List.map (fun rightIndex -> right.[rightIndex])
-                    |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
-                    |> Option.defaultValue []
-                    |> List.map (fun (rowId, left) -> rowId, readLeft left)
-                    |> List.filter (fun (_, left) ->
+                    |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
+                    |> Option.map _.CandidateRows
+                    |> Option.defaultValue probe.Table.RowsArray.Indexed
+                    |> Seq.map (fun (rowId, left) -> rowId, readLeft left)
+                    |> Seq.filter (fun (_, left) ->
                         match residualHolds (Array.append left rightNullPadding) with
                         | Ok matches -> matches
                         | Error(code, message) -> raise (SqlError(code, message)))
+                    |> List.ofSeq
 
                 let rows =
                     seq {
@@ -7766,8 +7793,8 @@ and private applyResolvedJoin
                 let rightRowsFor (left: Value[]) =
                     probe.ProbeIndices
                     |> List.map (fun leftIndex -> left.[leftIndex])
-                    |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
-                    |> Option.map Seq.ofList
+                    |> Storage.tryEqualityLookupForMatch store probe.Table probe.Index
+                    |> Option.map _.CandidateRows
                     |> Option.defaultValue probe.Table.RowsArray.Indexed
                     |> Seq.map (fun (rowId, right) -> rowId, readRight right)
 
@@ -15097,10 +15124,11 @@ let private indexedJoinExplainPlans
                                 match consumption, leftSources with
                                 | MayStopEarly, _ -> true
                                 | ConsumesAllRows, [ _, _, leftTable ] ->
-                                    (QueryPlanner.chooseJoin
+                                    (chooseIndexedJoinPath
+                                        store
+                                        probe
                                         leftTable.RowsArray.Count
-                                        probe.Table.RowsArray.Count
-                                        (Storage.equalityIndexDistinctKeyCount probe.Table probe.Index)) = QueryPlanner.IndexProbe
+                                        (leftTable.RowsArray.Indexed |> Seq.map snd)) = QueryPlanner.IndexProbe
                                 | ConsumesAllRows, _ -> true)
                             |> Option.map (fun probe ->
                                 joinIndex + 1,
