@@ -82,6 +82,8 @@ module SyntaxFuzz =
            "indexed_conjunction", "SELECT id, n FROM syntax_target WHERE id = 1 AND n BETWEEN 10 AND 10"
            "nested_index_merge",
            "SELECT id, n FROM syntax_target WHERE (id = 1 OR n = 99) AND n BETWEEN 10 AND 20"
+           "composed_functional_index",
+           "SELECT id FROM syntax_target WHERE UCASE(TRIM(label)) = 'SEED' ORDER BY UPPER(TRIM(label))"
            "straight_join",
            "SELECT STRAIGHT_JOIN t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1"
            "correlated_index", "SELECT t.id, (SELECT COUNT(*) FROM syntax_source AS s WHERE s.n = t.n) FROM syntax_target AS t"
@@ -227,6 +229,7 @@ module SyntaxFuzz =
     let private fixtures =
         [| "CREATE TABLE syntax_target (id INT PRIMARY KEY, n INT, label VARCHAR(40), INDEX ix_n (n), INDEX ix_n_label (n, label))"
            "INSERT INTO syntax_target VALUES (1, 10, 'seed')"
+           "CREATE INDEX ix_syntax_normalized ON syntax_target ((UPPER(TRIM(label))))"
            "CREATE TABLE syntax_source (id INT, n INT, label VARCHAR(40), update_label VARCHAR(40), INDEX ix_syntax_source_n (n))"
            "INSERT INTO syntax_source VALUES (1, 11, 'candidate', 'source')"
            "CREATE TABLE syntax_collation (id INT PRIMARY KEY, ci VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, bin VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, cs VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, latin VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_swedish_ci)"
