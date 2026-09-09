@@ -15845,7 +15845,14 @@ let private renderExplainJson (rows: ExplainRow list) : QueryResult =
 
         row.Key
         |> Option.iter (fun (key, length) ->
-            table["possible_keys"] <- jsonArray [ JsonValue.Create(key) ]
+            let possibleKeys =
+                if row.Type = Some "index_merge" then
+                    key.Split(',', System.StringSplitOptions.RemoveEmptyEntries)
+                    |> Seq.map (fun name -> JsonValue.Create(name) :> JsonNode)
+                else
+                    Seq.singleton (JsonValue.Create(key) :> JsonNode)
+
+            table["possible_keys"] <- jsonArray possibleKeys
             table["key"] <- JsonValue.Create(key)
             length |> Option.iter (fun value -> table["key_length"] <- JsonValue.Create(string value)))
 

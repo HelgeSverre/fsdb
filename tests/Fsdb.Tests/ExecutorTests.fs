@@ -6156,6 +6156,21 @@ let tests =
                     Expect.equal plan.Key (Some "ix_age,ix_sort_key") "EXPLAIN lists each contributing index"
                     Expect.equal plan.EstimatedRows (Some "23") "the estimate counts the deduplicated candidate union"
 
+                    match runDefault store $"EXPLAIN FORMAT=JSON SELECT id FROM unioned WHERE {predicate}" with
+                    | ResultSet([ "EXPLAIN" ], [ [ Some json ] ]) ->
+                        use document = JsonDocument.Parse(json)
+
+                        let table =
+                            document.RootElement.GetProperty("query_block").GetProperty("table")
+
+                        let possibleKeys =
+                            table.GetProperty("possible_keys").EnumerateArray()
+                            |> Seq.map _.GetString()
+                            |> Seq.toList
+
+                        Expect.equal possibleKeys [ "ix_age"; "ix_sort_key" ] "JSON keeps contributing keys distinct"
+                    | other -> failtestf "expected an index-union JSON plan, got %A" other
+
                     let overlapping =
                         runDefault store "EXPLAIN SELECT id FROM unioned WHERE age = 30 OR sort_key BETWEEN 10 AND 12"
                         |> explainRow
