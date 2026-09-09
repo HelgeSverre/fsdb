@@ -249,19 +249,24 @@ let private calendarDayIsValid year month day =
     month = 0 || day = 0 || day <= DateTime.DaysInMonth(calendarYear, month)
 
 let tryDateComponents (year: int) (month: int) (day: int) : ZeroDate option =
-    if dateComponentsInRange year month day then Some(ZeroDate(year, month, day)) else None
+    let hasZeroPart = year = 0 || month = 0 || day = 0
+
+    if
+        dateComponentsInRange year month day
+        && ((hasZeroPart && calendarDayIsValid year month day)
+            || (not hasZeroPart && not (calendarDayIsValid year month day)))
+    then
+        Some(ZeroDate(year, month, day))
+    else
+        None
 
 let tryZeroDate (year: int) (month: int) (day: int) : ZeroDate option =
-    if dateComponentsInRange year month day && calendarDayIsValid year month day && (year = 0 || month = 0 || day = 0) then
-        Some(ZeroDate(year, month, day))
-    else
-        None
+    tryDateComponents year month day
+    |> Option.filter (fun _ -> year = 0 || month = 0 || day = 0)
 
 let tryInvalidDate (year: int) (month: int) (day: int) : ZeroDate option =
-    if dateComponentsInRange year month day && year <> 0 && month <> 0 && day <> 0 && not (calendarDayIsValid year month day) then
-        Some(ZeroDate(year, month, day))
-    else
-        None
+    tryDateComponents year month day
+    |> Option.filter (fun _ -> year <> 0 && month <> 0 && day <> 0)
 
 let zeroDateParts (ZeroDate(year, month, day)) = year, month, day
 

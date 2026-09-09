@@ -112,6 +112,7 @@ let tests =
                     Expect.equal (toText (VZeroDate date)) (Some "2023-02-31") "stored fields"
                     Expect.equal (tryNormalizeInvalidDate date) (Some(DateOnly(2023, 3, 3))) "calendar arithmetic basis"
                     Expect.isNone (tryInvalidDate 2023 2 28) "valid dates use DateOnly"
+                    Expect.isNone (tryDateComponents 2023 2 28) "component values exclude DateOnly dates"
                     Expect.isNone (tryInvalidDate 2023 13 1) "month remains bounded"
 
                 testCase "zero datetimes preserve their time component"
