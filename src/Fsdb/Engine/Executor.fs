@@ -10351,26 +10351,66 @@ and private tryCorrelatedSourceLookup
         |> Option.orElseWith (fun () -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer)
     | _ -> tryMaterializedCorrelatedEqualityLookup store registry dbName source whereExpr outer
 
-and private tryAllCorrelatedProbeEqualities source whereExpr outer =
+and private tryCorrelatedCountEqualityPredicate source context =
+    let boundValue expression =
+        tryCorrelatedOuterValue source context expression
+        |> Option.orElseWith (fun () ->
+            match expression with
+            | Lit value -> Some value
+            | _ -> None)
+
+    let bind inner bound =
+        Option.map2
+            (fun column value -> column, bound, value)
+            (tryCorrelatedInnerColumn source inner)
+            (boundValue bound)
+
+    function
+    | BinOp(Eq, left, right) ->
+        bind left right
+        |> Option.orElseWith (fun () -> bind right left)
+    | _ -> None
+
+and private tryAllCorrelatedCountEqualities source whereExpr outer =
     outer
     |> Option.bind (fun context ->
         match optionalConjuncts whereExpr with
         | [] -> None
-        | predicates -> predicates |> List.map (tryCorrelatedProbeEqualityPredicate source context) |> tryAllSome)
+        | predicates -> predicates |> List.map (tryCorrelatedCountEqualityPredicate source context) |> tryAllSome)
 
 and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (whereExpr: Expr option) : int option =
-    let physicalEquality (projection: PhysicalProjection) (column, value) =
+    let physicalEquality (projection: PhysicalProjection) (column, bound, value) =
         tryPhysicalProjectionColumn projection column
-        |> Option.map (fun physicalColumn -> physicalColumn, value)
+        |> Option.map (fun physicalColumn -> physicalColumn, bound, value)
+
+    let comparisonUsesStoredSemantics (column: ColumnDef, bound: Expr, value: Value) =
+        match column.Type, value with
+        | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText), (VString _ | VNull) ->
+            Option.map2
+                (fun (stored: Collation.Collation) (effective: Collation.Collation) ->
+                    stored.Name.Equals(effective.Name, System.StringComparison.OrdinalIgnoreCase))
+                (collationOfColumn outer column)
+                (comparisonCollation
+                    outer
+                    "="
+                    (Col column.Name)
+                    (Some column)
+                    bound
+                    (tryColumnDefForExpr outer bound)
+                 |> Result.toOption)
+            |> Option.defaultValue false
+        | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText), _ -> false
+        | (TEnum _ | TSet _), _ -> false
+        | _ -> true
 
     let countRows (projection: PhysicalProjection) equalities =
-        if equalities |> List.exists (fst >> _.Type >> InformationSchema.isStringy) then
+        if equalities |> List.forall comparisonUsesStoredSemantics |> not then
             None
-        elif equalities |> List.exists (snd >> (=) VNull) then
+        elif equalities |> List.exists (fun (_, _, value) -> value = VNull) then
             Some 0
         else
             equalities
-            |> List.map (fun (column, value) -> column.Name, value)
+            |> List.map (fun (column, _, value) -> column.Name, value)
             |> tryStoredEqualityMatchLookup outer.Store projection.PhysicalTable
             |> Option.map (snd >> _.CandidateCount)
 
@@ -10378,11 +10418,11 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
     |> Option.filter (fun projection -> storedRowsMatchReadRows outer.Store projection.PhysicalTable.Columns)
     |> Option.filter (fun projection -> projection.Steps |> List.forall (_.Predicate >> Option.isNone))
     |> Option.bind (fun projection ->
-        tryAllCorrelatedProbeEqualities
+        tryAllCorrelatedCountEqualities
             (correlatedProbeSource (fromItemQualifier source) projection.OutputColumns)
             whereExpr
             (Some outer)
-        |> Option.filter (tryDuplicateIgnoreCase fst >> Option.isNone)
+        |> Option.filter (tryDuplicateIgnoreCase (fun (column, _, _) -> column) >> Option.isNone)
         |> Option.bind (fun equalities ->
             equalities
             |> List.map (physicalEquality projection)

@@ -8262,6 +8262,46 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected the binary outer collation to remain authoritative, got %A" other
 
+                    run
+                        store
+                        registry
+                        ("CREATE TABLE binary_indexed (id INT PRIMARY KEY, "
+                         + "value VARCHAR(10) COLLATE utf8mb4_0900_bin, "
+                         + "observed INT AS (TOUCH(id)) VIRTUAL, KEY ix_value_id (value, id))")
+                    |> ignore
+
+                    run store registry "INSERT INTO binary_indexed (id, value) VALUES (1, 'A')" |> ignore
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT (SELECT COUNT(*) FROM "
+                             + "(SELECT value, observed FROM binary_indexed) c "
+                             + "WHERE c.value = binary_keys.value) FROM binary_keys")
+                    with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the matching binary prefix count, got %A" other
+
+                    Expect.equal calls 0 "a compatible text prefix count reads index cardinality without resolving rows"
+
+                    run store registry "INSERT INTO binary_indexed (id, value) VALUES (2, '1')" |> ignore
+                    calls <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            ("SELECT (SELECT COUNT(*) FROM "
+                             + "(SELECT value, observed FROM binary_indexed) c "
+                             + "WHERE c.value = users.id) FROM users WHERE id = 1")
+                    with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected numeric coercion to match the text value, got %A" other
+
+                    Expect.isGreaterThan calls 0 "numeric comparison against text falls back to row evaluation"
+
                 testCase "correlated derived sources use composite equality indexes"
                 <| fun _ ->
                     let mutable calls = 0
