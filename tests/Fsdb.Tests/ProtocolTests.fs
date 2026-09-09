@@ -179,6 +179,12 @@ let tests =
               Expect.equal (sqlStateForCode 1071) "42000" "key length"
               Expect.equal (sqlStateForCode 1074) "42000" "column length"
 
+          testCase "cardinality errors carry their standard SQLSTATE classes"
+          <| fun _ ->
+              Expect.equal (sqlStateForCode 1136) "21S01" "insert value count"
+              Expect.equal (sqlStateForCode 1241) "21000" "row operand arity"
+              Expect.equal (sqlStateForCode 1242) "21000" "scalar subquery cardinality"
+
           testCase "ERR payload for an unmapped code falls back to HY000"
           <| fun _ ->
               let payload = errPayload ClientProtocol41 9999 "whatever"

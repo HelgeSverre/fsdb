@@ -26,6 +26,7 @@ type ContractAction =
     | PrepareHandle of handle: string * operation: ContractOperation * sql: string * parameters: obj array
     | InvokeHandle of handle: string
     | CloseHandle of handle: string
+    | AwaitPending of pending: string
 
 type ContractStep =
     { Name: string
@@ -128,7 +129,8 @@ module Contract =
         | Reap _
         | PrepareHandle _
         | InvokeHandle _
-        | CloseHandle _ -> invalidArg (nameof step) "only an ordinary step can be sent"
+        | CloseHandle _
+        | AwaitPending _ -> invalidArg (nameof step) "only an ordinary step can be sent"
 
     let reap name connection pending expectation : ContractStep =
         { Name = name
@@ -154,6 +156,12 @@ module Contract =
           Action = CloseHandle handle
           Expectation = OracleSuccess }
 
+    let awaitPending name pending : ContractStep =
+        { Name = name
+          Connection = "main"
+          Action = AwaitPending pending
+          Expectation = OracleSuccess }
+
 [<RequireQualifiedAccess>]
 module ContractCatalog =
     let private comments =
@@ -162,7 +170,10 @@ module ContractCatalog =
           Steps =
             [| Contract.query "double-dash-without-space" "SELECT 1--1 AS value"
                Contract.query "ordinary-block-comment" "SELECT 1 /* between operands */ + 2 AS value"
+               Contract.query "double-dash-with-space" "SELECT 1-- comment\n AS value"
+               Contract.query "hash-comment" "SELECT 1 # comment\n + 2 AS value"
                Contract.query "executable-version-comment" "SELECT /*!80000 1 + */ 2 AS value"
+               Contract.query "future-version-comment" "SELECT /*!99999 1 + */ 2 AS value"
                Contract.query
                    "comments-through-cte"
                    "WITH /* after WITH */ cte AS (SELECT 1 AS n) SELECT /* projection */ n FROM cte" |]
@@ -192,7 +203,11 @@ module ContractCatalog =
                Contract.preparedQuery
                    "prepared-cte"
                    "WITH selected AS (SELECT id FROM contract_prepared WHERE id = ?) SELECT id FROM selected"
-                   [| box 2 |] |]
+                   [| box 2 |]
+               Contract.preparedQuery
+                   "prepared-comments"
+                   "SELECT /* before */ id FROM contract_prepared WHERE id /* operator */ = /* parameter */ ?"
+                   [| box 1 |] |]
           Cleanup = [| "DROP TABLE IF EXISTS contract_prepared" |]
           Coverage =
             [| "statement:select", [| "prepared-protocol" |]
@@ -233,6 +248,24 @@ module ContractCatalog =
             [| "statement:create_table", [| "text-differential"; "concurrency" |]
                "statement:insert", [| "text-differential"; "concurrency" |] |] }
 
+    let private semanticErrors =
+        { Name = "semantic-error-contracts"
+          Setup =
+            [| "DROP TABLE IF EXISTS contract_errors"
+               "CREATE TABLE contract_errors (id INT PRIMARY KEY, n INT NOT NULL)"
+               "INSERT INTO contract_errors VALUES (1, 10), (2, 20)" |]
+          Steps =
+            [| Contract.execute "duplicate-key" "INSERT INTO contract_errors VALUES (1, 99)" |> Contract.fails 1062 "23000"
+               Contract.query "unknown-column" "SELECT missing FROM contract_errors" |> Contract.fails 1054 "42S22"
+               Contract.execute "wrong-value-count" "INSERT INTO contract_errors VALUES (3)" |> Contract.fails 1136 "21S01"
+               Contract.query "scalar-subquery-cardinality" "SELECT (SELECT id FROM contract_errors)" |> Contract.fails 1242 "21000"
+               Contract.query "row-arity" "SELECT (1, 2) = (1, 2, 3)" |> Contract.fails 1241 "21000"
+               Contract.query "state-unchanged" "SELECT id, n FROM contract_errors ORDER BY id" |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_errors" |]
+          Coverage =
+            [| "statement:insert", [| "error-contract" |]
+               "statement:select", [| "error-contract" |] |] }
+
     let private concurrentSessions =
         { Name = "named-connections-send-reap"
           Setup = [| "DROP TABLE IF EXISTS contract_parallel"; "CREATE TABLE contract_parallel (id INT PRIMARY KEY, n INT NOT NULL)" |]
@@ -249,7 +282,33 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS contract_parallel" |]
           Coverage = [| "statement:insert", [| "concurrency" |] |] }
 
-    let all = [| comments; exactErrors; prepared; preparedInvalidation; implicitCommit; concurrentSessions |]
+    let private contendedSchedule =
+        { Name = "contended-send-reap"
+          Setup = [| "DROP TABLE IF EXISTS contract_lock"; "CREATE TABLE contract_lock (id INT PRIMARY KEY, n INT NOT NULL)"; "INSERT INTO contract_lock VALUES (1, 10)" |]
+          Steps =
+            [| Contract.execute "owner-begin" "START TRANSACTION" |> Contract.on "owner"
+               Contract.execute "owner-locks-row" "UPDATE contract_lock SET n = n + 1 WHERE id = 1" |> Contract.on "owner"
+               Contract.execute "waiter-begin" "START TRANSACTION" |> Contract.on "waiter"
+               Contract.execute "waiter-update" "UPDATE contract_lock SET n = n + 1 WHERE id = 1"
+               |> Contract.on "waiter"
+               |> Contract.send "blocked-update"
+               Contract.awaitPending "waiter-is-blocked" "blocked-update"
+               Contract.execute "owner-commit" "COMMIT" |> Contract.on "owner"
+               Contract.reap "waiter-completes" "waiter" "blocked-update" OracleSuccess
+               Contract.execute "waiter-commit" "COMMIT" |> Contract.on "waiter"
+               Contract.query "serialized-state" "SELECT id, n FROM contract_lock" |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_lock" |]
+          Coverage = [| "statement:update", [| "concurrency" |]; "statement:select", [| "concurrency" |] |] }
+
+    let all =
+        [| comments
+           exactErrors
+           semanticErrors
+           prepared
+           preparedInvalidation
+           implicitCommit
+           concurrentSessions
+           contendedSchedule |]
 
     let coverage = all |> Array.collect _.Coverage
 
@@ -317,6 +376,7 @@ module CompatibilityRunner =
         | PrepareHandle _ -> "prepare"
         | InvokeHandle _ -> "execute-prepared"
         | CloseHandle _ -> "close-prepared"
+        | AwaitPending _ -> "await-pending"
 
     let private actionSql =
         function
@@ -326,6 +386,7 @@ module CompatibilityRunner =
         | Reap _
         | InvokeHandle _
         | CloseHandle _ -> ""
+        | AwaitPending _ -> ""
 
     let private stateQueries =
         [| "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME"
@@ -442,6 +503,18 @@ module CompatibilityRunner =
                             prepared.Remove name |> ignore
                             outcomes.Add(empty target "success")
                         | false, _ -> failwithf "contract %s closes unknown prepared handle %s" case.Name name
+                    | AwaitPending name ->
+                        match pending.TryGetValue name with
+                        | true, operation ->
+                            do! Task.Delay 50
+
+                            if operation.IsCompleted then
+                                outcomes.Add
+                                    { empty target "unexpected_completion" with
+                                        Message = sprintf "operation %s completed before its lock owner released" name }
+                            else
+                                outcomes.Add(empty target "pending")
+                        | false, _ -> failwithf "contract %s awaits unknown operation %s" case.Name name
 
                 for operation in pending.Values do
                     let! _ = operation
@@ -473,6 +546,8 @@ module CompatibilityRunner =
     let private compare expectation (mysql: ContractTargetOutcome) (fsdb: ContractTargetOutcome) =
         if mysql.Status = "sent" && fsdb.Status = "sent" then
             "pass", "operation started on both targets"
+        elif mysql.Status = "pending" && fsdb.Status = "pending" then
+            "pass", "operation remained pending on both targets"
         elif not (expectationMatches expectation mysql) then
             "oracle_contract_drift", sprintf "oracle returned %s/%d/%s: %s" mysql.Status mysql.ErrorCode mysql.SqlState mysql.Message
         elif mysql.Status <> fsdb.Status then

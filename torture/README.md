@@ -206,9 +206,10 @@ database is removed when the lane finishes.
 
 The initial contracts cover comment and precedence boundaries, parser errors,
 typed prepared parameters, prepared-handle invalidation across DDL, implicit
-DDL commit behavior, and independent concurrent writers. Add compact
-regressions here when a behavior spans protocol or session state; keep isolated
-parser or executor regressions in Expecto.
+DDL commit behavior, SQLSTATE-sensitive semantic errors, independent writers,
+and a contended row-lock schedule. Add compact regressions here when a behavior
+spans protocol or session state; keep isolated parser or executor regressions
+in Expecto.
 
 ## Capability coverage
 
