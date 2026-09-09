@@ -143,6 +143,10 @@ module Coverage =
             for capability, axes in WireCorpus.coverage do
                 for axis in axes do
                     yield capability, evidence axis "wire-corpus"
+
+            for capability, axes in DurabilityChecks.coverage do
+                for axis in axes do
+                    yield capability, evidence axis "durability"
         }
         |> Seq.groupBy fst
         |> Seq.map (fun (capability, entries) -> capability, entries |> Seq.map snd |> Seq.toArray)

@@ -547,7 +547,7 @@ module Program =
     let private printDurability (report: DurabilityManifest) directory =
         printfn "%s: %s — %s" report.CaseId report.Classification directory
         printfn
-            "  attempted=%d acknowledged=%d ambiguous=%d recovered=%d crash-restarts=%d automatic-checkpoints=%s wal-tail=%s snapshot=%s"
+            "  attempted=%d acknowledged=%d ambiguous=%d recovered=%d crash-restarts=%d automatic-checkpoints=%s wal-tail=%s snapshot=%s schema=%s torn-tail=%s"
             report.AttemptedOperations
             report.AcknowledgedOperations
             report.AmbiguousOperations
@@ -556,6 +556,8 @@ module Program =
             (if report.AutomaticCheckpointsVerified then "pass" else "fail")
             (if report.WalTailVerified then "pass" else "fail")
             (if report.SnapshotVerified then "pass" else "fail")
+            (if report.SchemaRecoveryVerified then "pass" else "fail")
+            (if report.TornTailRepairVerified then "pass" else "fail")
         printfn "  detail: %s" report.ClassificationDetail
 
         if not report.Passed then

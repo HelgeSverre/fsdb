@@ -17,6 +17,12 @@ type private RunningServer =
 
 [<RequireQualifiedAccess>]
 module DurabilityChecks =
+    type Operation =
+        | Insert
+        | Update
+        | Delete
+        | Replace
+
     type Result =
         { MissingAcknowledged: int64 array
           PartialTransactions: int64 array
@@ -24,6 +30,69 @@ module DurabilityChecks =
           RecoveredOperations: int
           Passed: bool
           Detail: string }
+
+    let coverage =
+        [| for statement in [ "insert"; "update"; "delete"; "replace"; "create_table"; "alter_table"; "create_index"; "create_view"; "create_trigger" ] do
+               yield "statement:" + statement, [| "recovery" |]
+
+           for columnType in [ "t_big_int"; "t_int"; "t_varchar" ] do
+               yield "column-type:" + columnType, [| "recovery" |] |]
+
+    let operation operationId =
+        match operationId % 4L with
+        | 0L -> Insert
+        | 1L -> Update
+        | 2L -> Delete
+        | _ -> Replace
+
+    let private seedPayload operationId = sprintf "seed-%d" operationId
+    let private committedPayload operationId = sprintf "committed-%d" operationId
+
+    let private initialState operationId =
+        match operation operationId with
+        | Insert -> None
+        | Update
+        | Delete
+        | Replace -> Some(seedPayload operationId)
+
+    let private committedState operationId =
+        match operation operationId with
+        | Delete -> None
+        | Insert
+        | Update
+        | Replace -> Some(committedPayload operationId)
+
+    let classifyState
+        (possible: Set<int64>)
+        (attempted: Set<int64>)
+        (acknowledged: Set<int64>)
+        (left: Map<int64, string>)
+        (right: Map<int64, string>)
+        =
+        let mismatches = ResizeArray<string>()
+
+        if left <> right then
+            mismatches.Add "the paired state tables differ"
+
+        for operationId in possible do
+            let actual = Map.tryFind operationId left
+            let expected =
+                if acknowledged.Contains operationId then
+                    [ committedState operationId ]
+                elif attempted.Contains operationId then
+                    [ initialState operationId; committedState operationId ] |> List.distinct
+                else
+                    [ initialState operationId ]
+
+            if not (List.contains actual expected) then
+                mismatches.Add(sprintf "operation %d recovered an invalid state" operationId)
+
+        let unexpected = Set.difference (left.Keys |> Set.ofSeq) possible
+
+        if not unexpected.IsEmpty then
+            mismatches.Add(sprintf "%d state rows have no planned operation" unexpected.Count)
+
+        mismatches.ToArray()
 
     let classify
         (attempted: Set<int64>)
@@ -172,16 +241,42 @@ module DurabilityRunner =
             return! command.ExecuteNonQueryAsync()
         }
 
-    let private setup port timeoutSeconds =
+    let private plannedOperationIds (options: DurabilityOptions) =
+        seq {
+            for worker in 0 .. options.Workers - 1 do
+                for iteration in 0 .. options.OperationsPerWorker - 1 do
+                    yield int64 worker * 1_000_000L + int64 iteration
+        }
+        |> Set.ofSeq
+
+    let private setup (options: DurabilityOptions) port =
         task {
-            use admin = new MySqlConnection(connectionString port "" timeoutSeconds)
+            use admin = new MySqlConnection(connectionString port "" options.TimeoutSeconds)
             do! admin.OpenAsync()
-            let! _ = execute admin timeoutSeconds "CREATE DATABASE IF NOT EXISTS durability"
-            use connection = new MySqlConnection(connectionString port "durability" timeoutSeconds)
+            let! _ = execute admin options.TimeoutSeconds "CREATE DATABASE IF NOT EXISTS durability"
+            use connection = new MySqlConnection(connectionString port "durability" options.TimeoutSeconds)
             do! connection.OpenAsync()
-            let! _ = execute connection timeoutSeconds "CREATE TABLE IF NOT EXISTS durable_left (operation_id BIGINT PRIMARY KEY, worker_id INT NOT NULL, payload VARCHAR(64) NOT NULL)"
-            let! _ = execute connection timeoutSeconds "CREATE TABLE IF NOT EXISTS durable_right (operation_id BIGINT PRIMARY KEY, worker_id INT NOT NULL, payload VARCHAR(64) NOT NULL)"
-            return ()
+            let! _ = execute connection options.TimeoutSeconds "CREATE TABLE IF NOT EXISTS durable_left (operation_id BIGINT PRIMARY KEY, worker_id INT NOT NULL, payload VARCHAR(64) NOT NULL)"
+            let! _ = execute connection options.TimeoutSeconds "CREATE TABLE IF NOT EXISTS durable_right (operation_id BIGINT PRIMARY KEY, worker_id INT NOT NULL, payload VARCHAR(64) NOT NULL)"
+            let! _ = execute connection options.TimeoutSeconds "CREATE TABLE IF NOT EXISTS durable_state_left (operation_id BIGINT PRIMARY KEY, payload VARCHAR(64) NOT NULL)"
+            let! _ = execute connection options.TimeoutSeconds "CREATE TABLE IF NOT EXISTS durable_state_right (operation_id BIGINT PRIMARY KEY, payload VARCHAR(64) NOT NULL)"
+            let possible = plannedOperationIds options
+
+            let seeded =
+                possible
+                |> Set.filter (fun operationId -> DurabilityChecks.operation operationId <> DurabilityChecks.Insert)
+
+            for table in [ "durable_state_left"; "durable_state_right" ] do
+                for chunk in seeded |> Seq.chunkBySize 500 do
+                    let values =
+                        chunk
+                        |> Seq.map (fun operationId -> sprintf "(%d, 'seed-%d')" operationId operationId)
+                        |> String.concat ","
+
+                    let! _ = execute connection options.TimeoutSeconds (sprintf "INSERT INTO %s VALUES %s" table values)
+                    ()
+
+            return possible
         }
 
     let private executeOperation (connection: MySqlConnection) timeoutSeconds worker operationId =
@@ -202,6 +297,30 @@ module DurabilityRunner =
 
             let! _ = insert "durable_left"
             let! _ = insert "durable_right"
+
+            let mutate table =
+                task {
+                    use command = connection.CreateCommand()
+                    command.Transaction <- transaction
+                    command.CommandTimeout <- timeoutSeconds
+                    command.Parameters.AddWithValue("@id", operationId) |> ignore
+                    command.Parameters.AddWithValue("@payload", sprintf "committed-%d" operationId) |> ignore
+
+                    command.CommandText <-
+                        match DurabilityChecks.operation operationId with
+                        | DurabilityChecks.Insert -> sprintf "INSERT INTO %s VALUES (@id, @payload)" table
+                        | DurabilityChecks.Update -> sprintf "UPDATE %s SET payload = @payload WHERE operation_id = @id" table
+                        | DurabilityChecks.Delete -> sprintf "DELETE FROM %s WHERE operation_id = @id" table
+                        | DurabilityChecks.Replace -> sprintf "REPLACE INTO %s VALUES (@id, @payload)" table
+
+                    let! affected = command.ExecuteNonQueryAsync()
+
+                    if affected < 1 then
+                        failwithf "%A operation %d did not affect %s" (DurabilityChecks.operation operationId) operationId table
+                }
+
+            do! mutate "durable_state_left"
+            do! mutate "durable_state_right"
             do! transaction.CommitAsync()
         }
 
@@ -264,11 +383,70 @@ module DurabilityRunner =
             return values
         }
 
+    let private readState port timeoutSeconds table =
+        task {
+            use connection = new MySqlConnection(connectionString port "durability" timeoutSeconds)
+            do! connection.OpenAsync()
+            use command = connection.CreateCommand()
+            command.CommandTimeout <- timeoutSeconds
+            command.CommandText <- sprintf "SELECT operation_id, payload FROM %s ORDER BY operation_id" table
+            use! reader = command.ExecuteReaderAsync()
+            let mutable values = Map.empty
+
+            while! reader.ReadAsync() do
+                values <- Map.add (reader.GetInt64 0) (reader.GetString 1) values
+
+            return values
+        }
+
     let private observe (options: DurabilityOptions) port attempted acknowledged =
         task {
             let! left = readIds port options.TimeoutSeconds "durable_left"
             let! right = readIds port options.TimeoutSeconds "durable_right"
             return DurabilityChecks.classify attempted acknowledged left right, left, right
+        }
+
+    let private observeState (options: DurabilityOptions) port possible attempted acknowledged =
+        task {
+            let! left = readState port options.TimeoutSeconds "durable_state_left"
+            let! right = readState port options.TimeoutSeconds "durable_state_right"
+            return DurabilityChecks.classifyState possible attempted acknowledged left right
+        }
+
+    let private verifySchemaRecovery port timeoutSeconds =
+        task {
+            use connection = new MySqlConnection(connectionString port "durability" timeoutSeconds)
+            do! connection.OpenAsync()
+            let statements =
+                [ "CREATE TABLE durable_schema (id INT PRIMARY KEY, payload VARCHAR(32) NOT NULL)"
+                  "ALTER TABLE durable_schema ADD COLUMN revision INT NOT NULL DEFAULT 1"
+                  "CREATE INDEX ix_durable_schema_payload ON durable_schema (payload)"
+                  "CREATE VIEW durable_schema_view AS SELECT id, payload, revision FROM durable_schema"
+                  "CREATE TRIGGER durable_schema_before BEFORE INSERT ON durable_schema FOR EACH ROW SET NEW.payload = UPPER(NEW.payload)"
+                  "INSERT INTO durable_schema (id, payload) VALUES (1, 'survived')" ]
+
+            for statement in statements do
+                let! _ = execute connection timeoutSeconds statement
+                ()
+        }
+
+    let private schemaRecovered port timeoutSeconds =
+        task {
+            use connection = new MySqlConnection(connectionString port "durability" timeoutSeconds)
+            do! connection.OpenAsync()
+            use command = connection.CreateCommand()
+            command.CommandTimeout <- timeoutSeconds
+            command.CommandText <-
+                "SELECT v.payload, v.revision, "
+                + "(SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = 'durability' AND TABLE_NAME = 'durable_schema' AND INDEX_NAME = 'ix_durable_schema_payload'), "
+                + "(SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'durability' AND TRIGGER_NAME = 'durable_schema_before') "
+                + "FROM durable_schema_view AS v WHERE v.id = 1"
+            use! reader = command.ExecuteReaderAsync()
+
+            if not (reader.Read()) then
+                return false
+            else
+                return reader.GetString(0) = "SURVIVED" && reader.GetInt32(1) = 1 && reader.GetInt64(2) = 1L && reader.GetInt64(3) = 1L
         }
 
     let private snapshotPath dataDirectory = Path.Combine(dataDirectory, "snapshot.fsdb")
@@ -315,7 +493,7 @@ module DurabilityRunner =
             let mutable offset = 0
 
             while afterStamp = beforeStamp && offset <= options.CheckpointEntries do
-                let operationId = 9_000_000_000L + int64 phase * 1_000_000L + int64 offset
+                let operationId = 9_000_000_000L + int64 phase * 1_000_000L + int64 offset * 4L
                 do! executeAcknowledgedOperation options connection -phase operationId attempted acknowledged
                 afterStamp <- snapshotStamp path
                 offset <- offset + 1
@@ -369,7 +547,7 @@ module DurabilityRunner =
                 let port = reservePort ()
                 let! initial = startServer dataDirectory defaultsFile port
                 liveServer <- Some initial
-                do! setup port options.TimeoutSeconds
+                let! possibleOperations = setup options port
 
                 for cycle in 0 .. options.Restarts - 1 do
                     let! workers = runCrashCycle options port cycle attempted acknowledged ambiguous
@@ -410,36 +588,91 @@ module DurabilityRunner =
                 let attemptedSet = attempted.Keys |> Set.ofSeq
                 let acknowledgedSet = acknowledged.Keys |> Set.ofSeq
                 let! recovered, leftBeforeSnapshot, rightBeforeSnapshot = observe options port attemptedSet acknowledgedSet
+                let allPossible = Set.union possibleOperations attemptedSet
+                let! stateBeforeSnapshot = observeState options port allPossible attemptedSet acknowledgedSet
                 let walTailVerified =
                     walTailWritten
                     && Set.contains tailOperationId leftBeforeSnapshot
                     && Set.contains tailOperationId rightBeforeSnapshot
+
+                do! verifySchemaRecovery port options.TimeoutSeconds
+                do! stopLive true
+                let! schemaServer = startServer dataDirectory defaultsFile port
+                liveServer <- Some schemaServer
+                let! schemaAfterCrash = schemaRecovered port options.TimeoutSeconds
 
                 do! stopLive false
                 let snapshotWritten = File.Exists(snapshotPath dataDirectory)
                 let! snapshotServer = startServer dataDirectory defaultsFile port
                 liveServer <- Some snapshotServer
                 let! afterSnapshot, leftAfterSnapshot, rightAfterSnapshot = observe options port attemptedSet acknowledgedSet
+                let! stateAfterSnapshot = observeState options port allPossible attemptedSet acknowledgedSet
+                let! schemaAfterSnapshot = schemaRecovered port options.TimeoutSeconds
                 let snapshotVerified = snapshotWritten && leftBeforeSnapshot = leftAfterSnapshot && rightBeforeSnapshot = rightAfterSnapshot
+
+                use repairedConnection = new MySqlConnection(connectionString port "durability" options.TimeoutSeconds)
+                do! repairedConnection.OpenAsync()
+                let beforeTornId = 9_004_000_000L
+                do! executeAcknowledgedOperation options repairedConnection -4 beforeTornId attempted acknowledged
+                do! repairedConnection.CloseAsync()
+                do! stopLive true
+                let walPath = Path.Combine(dataDirectory, "wal.bin")
+                File.AppendAllBytes(walPath, [| 100uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy |])
+                let! repairedServer = startServer dataDirectory defaultsFile port
+                liveServer <- Some repairedServer
+
+                use afterRepairConnection = new MySqlConnection(connectionString port "durability" options.TimeoutSeconds)
+                do! afterRepairConnection.OpenAsync()
+                let afterTornId = 9_005_000_000L
+                do! executeAcknowledgedOperation options afterRepairConnection -5 afterTornId attempted acknowledged
+                do! afterRepairConnection.CloseAsync()
+                do! stopLive true
+                let! finalServer = startServer dataDirectory defaultsFile port
+                liveServer <- Some finalServer
+                let finalAttempted = attempted.Keys |> Set.ofSeq
+                let finalAcknowledged = acknowledged.Keys |> Set.ofSeq
+                let finalPossible = Set.union possibleOperations finalAttempted
+                let! finalRecovery, finalLeft, finalRight = observe options port finalAttempted finalAcknowledged
+                let! finalState = observeState options port finalPossible finalAttempted finalAcknowledged
+                let tornTailRepairVerified =
+                    [ beforeTornId; afterTornId ]
+                    |> List.forall (fun operationId -> Set.contains operationId finalLeft && Set.contains operationId finalRight)
+
+                let schemaRecoveryVerified = schemaAfterCrash && schemaAfterSnapshot
+                let stateMismatches = Array.concat [ stateBeforeSnapshot; stateAfterSnapshot; finalState ] |> Array.distinct
                 do! stopLive false
-                let passed = checkpointsRotated && walTailVerified && recovered.Passed && afterSnapshot.Passed && snapshotVerified
+                let passed =
+                    checkpointsRotated
+                    && walTailVerified
+                    && recovered.Passed
+                    && afterSnapshot.Passed
+                    && finalRecovery.Passed
+                    && snapshotVerified
+                    && schemaRecoveryVerified
+                    && tornTailRepairVerified
+                    && Array.isEmpty stateMismatches
+
                 let detail =
                     if not checkpointsRotated then "two automatic checkpoint rotations were not observed"
                     elif not walTailWritten then "the post-checkpoint commit did not leave a WAL tail"
                     elif not walTailVerified then "the WAL-tail commit was absent after crash recovery"
                     elif not recovered.Passed then recovered.Detail
                     elif not afterSnapshot.Passed then "snapshot restart: " + afterSnapshot.Detail
+                    elif not finalRecovery.Passed then "torn-tail restart: " + finalRecovery.Detail
                     elif not snapshotVerified then "the graceful snapshot restart changed recovered rows"
+                    elif not schemaRecoveryVerified then "schema objects did not survive crash and snapshot recovery"
+                    elif not tornTailRepairVerified then "the repaired WAL tail lost a surrounding acknowledged commit"
+                    elif not (Array.isEmpty stateMismatches) then String.concat "; " stateMismatches
                     else
                         recovered.Detail
-                        + "; repeated automatic checkpoints, WAL-tail recovery, and graceful snapshot restart preserved the same state"
+                        + "; insert, update, delete, replace, schema, WAL-tail, torn-tail repair, and snapshot recovery preserved their state"
 
                 let classification = if passed then "pass" else "durability_failure"
                 let currentProcess = Process.GetCurrentProcess()
                 currentProcess.Refresh()
                 let signature = if passed then "" else Hashing.combine [ classification; string options.Seed; detail ]
                 let manifest =
-                    { SchemaVersion = 2
+                    { SchemaVersion = 3
                       RunId = runId
                       CaseId = caseId
                       StartedUtc = started.ToString("O", CultureInfo.InvariantCulture)
@@ -450,18 +683,21 @@ module DurabilityRunner =
                       Seed = options.Seed
                       Workers = options.Workers
                       OperationsPerWorker = options.OperationsPerWorker
-                      CrashRestarts = options.Restarts + 1
+                      CrashRestarts = options.Restarts + 4
                       CheckpointEntries = options.CheckpointEntries
                       AttemptedOperations = attempted.Count
                       AcknowledgedOperations = acknowledged.Count
                       AmbiguousOperations = ambiguous.Count
-                      RecoveredOperations = afterSnapshot.RecoveredOperations
-                      MissingAcknowledged = afterSnapshot.MissingAcknowledged
-                      PartialTransactions = afterSnapshot.PartialTransactions
-                      UnattemptedRows = afterSnapshot.UnattemptedRows
+                      RecoveredOperations = finalRecovery.RecoveredOperations
+                      MissingAcknowledged = finalRecovery.MissingAcknowledged
+                      PartialTransactions = finalRecovery.PartialTransactions
+                      UnattemptedRows = finalRecovery.UnattemptedRows
+                      StateMismatches = stateMismatches
                       AutomaticCheckpointsVerified = checkpointsRotated
                       WalTailVerified = walTailVerified
                       SnapshotVerified = snapshotVerified
+                      SchemaRecoveryVerified = schemaRecoveryVerified
+                      TornTailRepairVerified = tornTailRepairVerified
                       PeakWorkingSetBytes = max currentProcess.PeakWorkingSet64 currentProcess.WorkingSet64
                       Classification = classification
                       ClassificationDetail = detail

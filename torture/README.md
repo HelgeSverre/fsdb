@@ -143,15 +143,19 @@ Run the crash/restart durability lane without Docker or a MySQL oracle:
   --restarts 20 --checkpoint-entries 16 --timeout-seconds 15
 ```
 
-Each operation inserts the same identity into two tables inside one explicit
-transaction. The harness kills the server during every work phase, restarts it
-against the same data directory, and distinguishes acknowledged commits from
-commits whose reply was lost. Recovery must retain every acknowledgement,
-never expose one side of a transaction, and never invent an operation.
+Each operation writes a paired transaction journal and performs an insert,
+update, delete, or replacement against paired state tables. The harness kills
+the server during every work phase, restarts it against the same data
+directory, and distinguishes acknowledged commits from commits whose reply was
+lost. Recovery must retain every acknowledgement, preserve the mutation's
+expected state, never expose one side of a transaction, and never invent an
+operation.
 
 The lane then crosses automatic snapshot rotation, appends a commit to the new
-WAL, and crashes again. Recovery must include that WAL tail. The last restart
-follows a graceful checkpoint and must preserve the same recovered sets.
+WAL, and crashes again. Recovery must include that WAL tail. Table, index,
+view, trigger, and alter events must survive both crash and snapshot recovery.
+Finally, an incomplete WAL record is injected between acknowledged writes;
+recovery must discard the torn tail and accept later durable commits.
 
 ## Syntax mutation
 

@@ -143,7 +143,27 @@ let tests =
                     Expect.isFalse result.Passed "each durability violation fails the run"
                     Expect.sequenceEqual result.MissingAcknowledged [| 2L |] "the incomplete acknowledgement is lost"
                     Expect.sequenceEqual result.PartialTransactions [| 2L; 9L |] "one-sided rows are partial transactions"
-                    Expect.sequenceEqual result.UnattemptedRows [| 9L |] "unattempted rows are impossible" ]
+                    Expect.sequenceEqual result.UnattemptedRows [| 9L |] "unattempted rows are impossible"
+
+                testCase "validates mixed recovered row mutations"
+                <| fun _ ->
+                    let possible = Set.ofList [ 0L; 1L; 2L; 3L; 5L ]
+                    let attempted = Set.ofList [ 0L; 1L; 2L; 3L ]
+                    let acknowledged = Set.ofList [ 0L; 1L; 2L ]
+                    let recovered =
+                        Map.ofList
+                            [ 0L, "committed-0"
+                              1L, "committed-1"
+                              3L, "seed-3"
+                              5L, "seed-5" ]
+
+                    Expect.isEmpty
+                        (DurabilityChecks.classifyState possible attempted acknowledged recovered recovered)
+                        "insert/update/delete acknowledgements and an ambiguous replace are valid"
+
+                    let partial = Map.add 2L "seed-2" recovered
+                    let mismatches = DurabilityChecks.classifyState possible attempted acknowledged recovered partial
+                    Expect.isNonEmpty mismatches "paired state drift is rejected" ]
 
           testList
               "Canonicalization and comparison"

@@ -105,9 +105,12 @@ type DurabilityManifest =
       MissingAcknowledged: int64 array
       PartialTransactions: int64 array
       UnattemptedRows: int64 array
+      StateMismatches: string array
       AutomaticCheckpointsVerified: bool
       WalTailVerified: bool
       SnapshotVerified: bool
+      SchemaRecoveryVerified: bool
+      TornTailRepairVerified: bool
       PeakWorkingSetBytes: int64
       Classification: string
       ClassificationDetail: string
