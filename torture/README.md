@@ -232,11 +232,18 @@ disconnect cannot hide later evidence. The runner compares response kind,
 first response byte, and exact error code and SQLSTATE. A timeout is an
 infrastructure failure rather than a compatible result.
 
-Before mutation, the runner authenticates once for each non-transport client
-capability profile and verifies that the connection remains usable. TLS,
-compression, and `LOCAL INFILE` framing stay in their dedicated integration
-paths because merely advertising those flags without switching transports
-would not exercise the protocol they select.
+Before mutation, the runner authenticates once for each ordinary capability
+profile and verifies that the connection remains usable. It then exercises the
+transport-changing capabilities through their real protocol paths: TLS and
+TLS-with-zlib through MySqlConnector, zlib and Zstandard packet streams, and a
+`LOCAL INFILE` upload. Malformed TLS records, compressed frames, and upload
+packet ordering verify bounded failure behavior without pretending that merely
+advertising a capability exercises it.
+
+The fsdb subject uses a transient self-signed certificate. The runner briefly
+enables `local_infile` and shortens `connect_timeout` on both servers, restores
+their original global values afterward, and removes its uniquely named account
+and database even when a case fails.
 
 ## Capability coverage
 

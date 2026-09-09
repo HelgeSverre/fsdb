@@ -794,7 +794,22 @@ let tests =
                     Expect.isTrue
                         (multiStatements.Evidence
                          |> Array.exists (fun item -> item.Axis = "connection-lifecycle" && item.Source = "wire-corpus"))
-                        "profile evidence is visible" ]
+                        "profile evidence is visible"
+
+                testCase "transport profiles carry success and malformed evidence"
+                <| fun _ ->
+                    let manifest: CoverageManifest = Fsdb.Torture.Coverage.create ()
+
+                    for name in [ "client_ssl"; "client_compress"; "client_zstd_compression_algorithm"; "client_local_files" ] do
+                        let capability =
+                            manifest.Capabilities
+                            |> Array.find (fun capability -> capability.Id = "protocol-capability:" + name)
+
+                        for axis in [ "wire-success"; "malformed-input" ] do
+                            Expect.isTrue
+                                (capability.Evidence
+                                 |> Array.exists (fun item -> item.Axis = axis && item.Source = "wire-corpus"))
+                                (name + " " + axis) ]
 
           testList
               "Catalog invariants"
