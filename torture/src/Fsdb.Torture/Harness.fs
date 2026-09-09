@@ -474,12 +474,9 @@ module Database =
         parameters
         |> Array.iteri (fun index value -> command.Parameters.AddWithValue(sprintf "@p%d" index, value) |> ignore)
 
-    let private executeCore prepare parameters (target: string) (connection: MySqlConnection) timeoutSeconds (sql: string) =
+    let private executeCommandCore prepare (target: string) timeoutSeconds (command: MySqlCommand) =
         task {
-            use command = connection.CreateCommand()
-            command.CommandText <- sql
             command.CommandTimeout <- timeoutSeconds
-            addParameters command parameters
             use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(float timeoutSeconds))
             let stopwatch = Stopwatch.StartNew()
 
@@ -534,9 +531,18 @@ module Database =
                       ElapsedMs = stopwatch.ElapsedMilliseconds }
         }
 
+    let private executeCore prepare parameters target (connection: MySqlConnection) timeoutSeconds sql =
+        task {
+            use command = connection.CreateCommand()
+            command.CommandText <- sql
+            addParameters command parameters
+            return! executeCommandCore prepare target timeoutSeconds command
+        }
+
     let execute target connection timeoutSeconds sql = executeCore false [||] target connection timeoutSeconds sql
     let executePrepared target connection timeoutSeconds sql = executeCore true [||] target connection timeoutSeconds sql
     let executePreparedWith parameters target connection timeoutSeconds sql = executeCore true parameters target connection timeoutSeconds sql
+    let executeCommand target timeoutSeconds command = executeCommandCore false target timeoutSeconds command
 
     let openConnection connectionString =
         task {
@@ -739,12 +745,9 @@ module Database =
                 | :? (byte array) as bytes -> "bytes:" + Convert.ToHexString(bytes).ToLowerInvariant()
                 | _ -> "text:" + Convert.ToString(value, CultureInfo.InvariantCulture)
 
-    let private queryCore prepare parameters (target: string) (connection: MySqlConnection) timeoutSeconds (sql: string) =
+    let private queryCommandCore prepare (target: string) timeoutSeconds (command: MySqlCommand) =
         task {
-            use command = connection.CreateCommand()
-            command.CommandText <- sql
             command.CommandTimeout <- timeoutSeconds
-            addParameters command parameters
             use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(float timeoutSeconds))
             let stopwatch = Stopwatch.StartNew()
 
@@ -813,9 +816,18 @@ module Database =
                         ElapsedMs = stopwatch.ElapsedMilliseconds }
         }
 
+    let private queryCore prepare parameters target (connection: MySqlConnection) timeoutSeconds sql =
+        task {
+            use command = connection.CreateCommand()
+            command.CommandText <- sql
+            addParameters command parameters
+            return! queryCommandCore prepare target timeoutSeconds command
+        }
+
     let query target connection timeoutSeconds sql = queryCore false [||] target connection timeoutSeconds sql
     let queryPrepared target connection timeoutSeconds sql = queryCore true [||] target connection timeoutSeconds sql
     let queryPreparedWith parameters target connection timeoutSeconds sql = queryCore true parameters target connection timeoutSeconds sql
+    let queryCommand target timeoutSeconds command = queryCommandCore false target timeoutSeconds command
 
     let private readData (connection: MySqlConnection) timeoutSeconds (table: string) (columns: ColumnSnapshot array) =
         task {

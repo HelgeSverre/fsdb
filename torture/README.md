@@ -203,9 +203,10 @@ compare names, compatible result types, and ordered typed rows; mutation
 contracts compare affected rows.
 
 The initial contracts cover comment and precedence boundaries, parser errors,
-typed prepared parameters, implicit DDL commit behavior, and independent
-concurrent writers. Add compact regressions here when a behavior spans protocol
-or session state; keep isolated parser or executor regressions in Expecto.
+typed prepared parameters, prepared-handle invalidation across DDL, implicit
+DDL commit behavior, and independent concurrent writers. Add compact
+regressions here when a behavior spans protocol or session state; keep isolated
+parser or executor regressions in Expecto.
 
 ## Capability coverage
 

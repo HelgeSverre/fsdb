@@ -23,6 +23,9 @@ type ContractAction =
     | Run of operation: ContractOperation * protocol: ContractProtocol * sql: string * parameters: obj array
     | Send of pending: string * operation: ContractOperation * protocol: ContractProtocol * sql: string * parameters: obj array
     | Reap of pending: string
+    | PrepareHandle of handle: string * operation: ContractOperation * sql: string * parameters: obj array
+    | InvokeHandle of handle: string
+    | CloseHandle of handle: string
 
 type ContractStep =
     { Name: string
@@ -119,13 +122,34 @@ module Contract =
         match step.Action with
         | Run(operation, protocol, sql, parameters) -> { step with Action = Send(pending, operation, protocol, sql, parameters) }
         | Send _
-        | Reap _ -> invalidArg (nameof step) "only an ordinary step can be sent"
+        | Reap _
+        | PrepareHandle _
+        | InvokeHandle _
+        | CloseHandle _ -> invalidArg (nameof step) "only an ordinary step can be sent"
 
     let reap name connection pending expectation : ContractStep =
         { Name = name
           Connection = connection
           Action = Reap pending
           Expectation = expectation }
+
+    let prepare name handle operation sql parameters : ContractStep =
+        { Name = name
+          Connection = "main"
+          Action = PrepareHandle(handle, operation, sql, parameters)
+          Expectation = OracleSuccess }
+
+    let invoke name handle expectation : ContractStep =
+        { Name = name
+          Connection = "main"
+          Action = InvokeHandle handle
+          Expectation = expectation }
+
+    let close name handle : ContractStep =
+        { Name = name
+          Connection = "main"
+          Action = CloseHandle handle
+          Expectation = OracleSuccess }
 
 [<RequireQualifiedAccess>]
 module ContractCatalog =
@@ -172,6 +196,23 @@ module ContractCatalog =
                "column-type:t_int", [| "prepared-protocol" |]
                "column-type:t_varchar", [| "prepared-protocol" |] |] }
 
+    let private preparedInvalidation =
+        { Name = "prepared-ddl-invalidation"
+          Setup = [| "DROP TABLE IF EXISTS contract_reprepare"; "CREATE TABLE contract_reprepare (id INT PRIMARY KEY)"; "INSERT INTO contract_reprepare VALUES (1)" |]
+          Steps =
+            [| Contract.prepare "prepare-select" "select-handle" Query "SELECT id FROM contract_reprepare ORDER BY id" [||]
+               Contract.invoke "execute-before-alter" "select-handle" OracleSuccess
+               Contract.execute "alter-under-handle" "ALTER TABLE contract_reprepare ADD COLUMN label VARCHAR(10) DEFAULT 'x'"
+               Contract.invoke "execute-after-alter" "select-handle" OracleSuccess
+               Contract.execute "drop-under-handle" "DROP TABLE contract_reprepare"
+               Contract.invoke "execute-after-drop" "select-handle" (OracleError(1146, "42S02"))
+               Contract.close "close-handle" "select-handle" |]
+          Cleanup = [| "DROP TABLE IF EXISTS contract_reprepare" |]
+          Coverage =
+            [| "statement:select", [| "prepared-protocol"; "error-contract" |]
+               "statement:alter_table", [| "prepared-protocol" |]
+               "statement:drop_table", [| "prepared-protocol" |] |] }
+
     let private implicitCommit =
         { Name = "implicit-ddl-commit"
           Setup = [| "DROP TABLE IF EXISTS contract_commit"; "DROP TABLE IF EXISTS contract_ddl"; "CREATE TABLE contract_commit (id INT PRIMARY KEY)" |]
@@ -205,12 +246,16 @@ module ContractCatalog =
           Cleanup = [| "DROP TABLE IF EXISTS contract_parallel" |]
           Coverage = [| "statement:insert", [| "concurrency" |] |] }
 
-    let all = [| comments; exactErrors; prepared; implicitCommit; concurrentSessions |]
+    let all = [| comments; exactErrors; prepared; preparedInvalidation; implicitCommit; concurrentSessions |]
 
     let coverage = all |> Array.collect _.Coverage
 
 [<RequireQualifiedAccess>]
 module CompatibilityRunner =
+    type private PreparedContract =
+        { Command: MySqlCommand
+          Operation: ContractOperation }
+
     let private empty target status =
         { Target = target
           Status = status
@@ -266,17 +311,24 @@ module CompatibilityRunner =
         | Run(_, PreparedProtocol, _, _) -> "prepared"
         | Send _ -> "send"
         | Reap _ -> "reap"
+        | PrepareHandle _ -> "prepare"
+        | InvokeHandle _ -> "execute-prepared"
+        | CloseHandle _ -> "close-prepared"
 
     let private actionSql =
         function
         | Run(_, _, sql, _)
-        | Send(_, _, _, sql, _) -> sql
-        | Reap _ -> ""
+        | Send(_, _, _, sql, _)
+        | PrepareHandle(_, _, sql, _) -> sql
+        | Reap _
+        | InvokeHandle _
+        | CloseHandle _ -> ""
 
     let private runTarget target connectionString timeoutSeconds (case: ContractCase) =
         task {
             let connections = Dictionary<string, MySqlConnection>(StringComparer.Ordinal)
             let pending = Dictionary<string, Task<ContractTargetOutcome>>(StringComparer.Ordinal)
+            let prepared = Dictionary<string, PreparedContract>(StringComparer.Ordinal)
 
             let getConnection name =
                 task {
@@ -316,6 +368,55 @@ module CompatibilityRunner =
                             pending.Remove name |> ignore
                             outcomes.Add outcome
                         | false, _ -> failwithf "contract %s reaps unknown operation %s" case.Name name
+                    | PrepareHandle(name, operation, sql, parameters) ->
+                        let! connection = getConnection step.Connection
+                        let command = connection.CreateCommand()
+                        command.CommandText <- sql
+                        command.CommandTimeout <- timeoutSeconds
+
+                        parameters
+                        |> Array.iteri (fun index value -> command.Parameters.AddWithValue(sprintf "@p%d" index, value) |> ignore)
+
+                        let stopwatch = Stopwatch.StartNew()
+
+                        try
+                            do! command.PrepareAsync()
+                            stopwatch.Stop()
+                            prepared.Add(name, { Command = command; Operation = operation })
+                            outcomes.Add({ empty target "success" with ElapsedMs = stopwatch.ElapsedMilliseconds })
+                        with
+                        | :? MySqlException as error ->
+                            stopwatch.Stop()
+                            command.Dispose()
+
+                            outcomes.Add
+                                { empty target "server_error" with
+                                    ErrorCode = int error.ErrorCode
+                                    SqlState = error.SqlState |> Option.ofObj |> Option.defaultValue ""
+                                    Message = error.Message
+                                    ElapsedMs = stopwatch.ElapsedMilliseconds }
+                        | error ->
+                            stopwatch.Stop()
+                            command.Dispose()
+                            outcomes.Add { empty target "driver_error" with Message = error.ToString(); ElapsedMs = stopwatch.ElapsedMilliseconds }
+                    | InvokeHandle name ->
+                        match prepared.TryGetValue name with
+                        | true, handle ->
+                            match handle.Operation with
+                            | Execute ->
+                                let! outcome = Database.executeCommand target timeoutSeconds handle.Command
+                                outcomes.Add(fromExecute outcome)
+                            | Query ->
+                                let! outcome = Database.queryCommand target timeoutSeconds handle.Command
+                                outcomes.Add(fromQuery outcome)
+                        | false, _ -> failwithf "contract %s invokes unknown prepared handle %s" case.Name name
+                    | CloseHandle name ->
+                        match prepared.TryGetValue name with
+                        | true, handle ->
+                            handle.Command.Dispose()
+                            prepared.Remove name |> ignore
+                            outcomes.Add(empty target "success")
+                        | false, _ -> failwithf "contract %s closes unknown prepared handle %s" case.Name name
 
                 for operation in pending.Values do
                     let! _ = operation
@@ -331,6 +432,9 @@ module CompatibilityRunner =
 
                 return outcomes.ToArray()
             finally
+                for handle in prepared.Values do
+                    handle.Command.Dispose()
+
                 for connection in connections.Values do
                     connection.Dispose()
         }
