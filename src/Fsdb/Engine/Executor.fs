@@ -130,6 +130,12 @@ type private EqualityAccessPlan =
       TableRowCount: int
       Rows: Lazy<(RowId * Value[]) list> }
 
+type private PhysicalAccessPlan =
+    | EqualityAccess of EqualityAccessPlan
+    | MembershipAccess of EqualityAccessPlan
+    | SpatialAccess of Storage.SpatialLookup
+    | RangeAccess of Storage.RangeLookup
+
 let private equalityAccessPlan (table: Table) (index: EqualityIndex) rowIds =
     { KeyName = index.Name
       ColumnIndices = index.ColumnIndices
@@ -9124,17 +9130,8 @@ and private prepareLockingRead
             | None ->
                 let rowIdsFor (source: LockingReadSource) =
                     if sources.Length = 1 && select.Joins.IsEmpty then
-                        tryEqualityCandidates store registry dbName source.Reference select.Where
-                        |> Option.map (fun plan -> plan.Rows.Value |> List.map fst)
-                        |> Option.orElseWith (fun () ->
-                            tryInCandidates store registry dbName source.Reference select.Where
-                            |> Option.map (fun plan -> plan.Rows.Value |> List.map fst))
-                        |> Option.orElseWith (fun () ->
-                            trySpatialLookup BareOrQualifiedColumn store dbName source.Reference select.Where
-                            |> Option.map (fun (_, rows) -> rows |> List.map fst))
-                        |> Option.orElseWith (fun () ->
-                            tryRangeLookup store registry dbName source.Reference select.Where
-                            |> Option.map (fun (_, rows) -> rows |> List.map fst))
+                        tryPhysicalCandidates store registry dbName source.Reference select.Where
+                        |> Option.map (snd >> List.map fst)
                         |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
                     else
                         source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq
@@ -9313,7 +9310,21 @@ and private runUnlockedSelectStmt
                 | Error error -> error, [], []
                 | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows None narrowed
                 | Ok None ->
-                    let equalityAccess = tryEqualityAccess store registry dbName tref select.Where
+                    let physicalCandidates =
+                        physicalFastPathTable store dbName tref
+                        |> Option.map (fun table ->
+                            physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where)
+                        |> Option.defaultValue []
+
+                    let equalityAccess =
+                        physicalCandidates
+                        |> List.tryPick (function
+                            | EqualityAccess plan -> Some plan
+                            | _ -> None)
+
+                    let physicalAccess = choosePhysicalAccess physicalCandidates
+
+                    let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder physicalCandidates
 
                     let orderedPrefix =
                         tryEqualityPrefixOrder store registry dbName tref select equalityAccess
@@ -9321,12 +9332,7 @@ and private runUnlockedSelectStmt
                     match orderedPrefix with
                     | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
                     | None ->
-                        let indexedLookup =
-                            equalityAccess
-                            |> Option.orElseWith (fun () -> tryInAccess store registry dbName tref select.Where)
-                            |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
-
-                        match indexedLookup with
+                        match earlyPhysicalAccess |> Option.map physicalAccessRows with
                         | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
                         | None ->
                             let projectedLookup =
@@ -9336,23 +9342,20 @@ and private runUnlockedSelectStmt
                             match projectedLookup with
                             | Some(columns, rows) -> runArbitrary columns rows None select
                             | None ->
-                                match trySpatialLookup BareOrQualifiedColumn store dbName tref select.Where with
-                                | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None select
+                                match tryIndexOrder store registry dbName tref select with
+                                | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
                                 | None ->
-                                    match tryIndexOrder store registry dbName tref select with
-                                    | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
-                                    | None ->
-                                        let resolved =
-                                            tryRangeLookup store registry dbName tref select.Where
-                                            |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
-                                            |> Option.orElseWith (fun () ->
-                                                tryInformationSchemaNarrow store registry dbName tref select.Where
-                                                |> Option.map Ok)
-                                            |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+                                    let resolved =
+                                        physicalAccess
+                                        |> Option.map (physicalAccessRows >> fun (columns, rows) -> Ok(columns, rows |> List.map snd))
+                                        |> Option.orElseWith (fun () ->
+                                            tryInformationSchemaNarrow store registry dbName tref select.Where
+                                            |> Option.map Ok)
+                                        |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
 
-                                        match resolved with
-                                        | Error e -> e, [], []
-                                        | Ok(columns, rows) -> runArbitrary columns rows None select
+                                    match resolved with
+                                    | Error e -> e, [], []
+                                    | Ok(columns, rows) -> runArbitrary columns rows None select
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then
@@ -9816,15 +9819,6 @@ and private tryEqualityAccess
     : EqualityAccessPlan option =
     tryEqualityAccessWith CostedRead store registry dbName tref whereExpr
 
-and private tryEqualityCandidates
-    (store: Store)
-    (registry: Registry)
-    (dbName: string)
-    (tref: TableRef)
-    (whereExpr: Expr option)
-    : EqualityAccessPlan option =
-    tryEqualityAccessWith CandidateNarrowing store registry dbName tref whereExpr
-
 and private tryInAccessInTableWith
     (policy: IndexAccessPolicy)
     (store: Store)
@@ -9915,53 +9909,6 @@ and private tryInAccess
     (whereExpr: Expr option)
     : EqualityAccessPlan option =
     tryInAccessWith CostedRead store registry dbName tref whereExpr
-
-and private tryInCandidates
-    (store: Store)
-    (registry: Registry)
-    (dbName: string)
-    (tref: TableRef)
-    (whereExpr: Expr option)
-    : EqualityAccessPlan option =
-    tryInAccessWith CandidateNarrowing store registry dbName tref whereExpr
-
-and private tryIndexedLookup (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
-    tryEqualityAccess store registry dbName tref whereExpr
-    |> Option.orElseWith (fun () -> tryInAccess store registry dbName tref whereExpr)
-    |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
-
-and private tryIndexedCandidates
-    (store: Store)
-    (registry: Registry)
-    (dbName: string)
-    (tref: TableRef)
-    (whereExpr: Expr option)
-    : (ColumnDef list * (RowId * Value[]) list) option =
-    tryEqualityCandidates store registry dbName tref whereExpr
-    |> Option.orElseWith (fun () -> tryInCandidates store registry dbName tref whereExpr)
-    |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
-
-and private tryIndexedLookupInTable
-    (store: Store)
-    (registry: Registry)
-    (table: Table)
-    (tref: TableRef)
-    (whereExpr: Expr option)
-    =
-    tryEqualityAccessInTableWith CostedRead store registry table tref whereExpr
-    |> Option.orElseWith (fun () -> tryInAccessInTableWith CostedRead store registry table tref whereExpr)
-    |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
-
-and private tryIndexedCandidatesInTable
-    (store: Store)
-    (registry: Registry)
-    (table: Table)
-    (tref: TableRef)
-    (whereExpr: Expr option)
-    =
-    tryEqualityAccessInTableWith CandidateNarrowing store registry table tref whereExpr
-    |> Option.orElseWith (fun () -> tryInAccessInTableWith CandidateNarrowing store registry table tref whereExpr)
-    |> Option.map (fun plan -> plan.Columns, plan.Rows.Value)
 
 and private correlatedProbeSource qualifier (columns: ColumnDef list) =
     { Qualifier = qualifier
@@ -10576,7 +10523,8 @@ and private tryCorrelatedEqualityCount (outer: EvalContext) (source: FromItem) (
             |> tryAllSome
             |> Option.bind (countRows projection)))
 
-and private tryRangeAccessInTable
+and private tryRangeAccessInTableWith
+    (policy: IndexAccessPolicy)
     (scope: ColumnReferenceScope)
     (store: Store)
     (registry: Registry)
@@ -10591,7 +10539,11 @@ and private tryRangeAccessInTable
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookupInTable store table bounds.Column bounds.Lower bounds.Upper
         |> Option.filter (fun lookup ->
-            QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange))
+            policy = CandidateNarrowing
+            || QueryPlanner.chooseRange lookup.TableRowCount lookup.RangeRowCount = QueryPlanner.IndexRange))
+
+and private tryRangeAccessInTable scope store registry table tref whereExpr =
+    tryRangeAccessInTableWith CostedRead scope store registry table tref whereExpr
 
 and private tryRangeAccess
     (scope: ColumnReferenceScope)
@@ -10603,16 +10555,6 @@ and private tryRangeAccess
     : Storage.RangeLookup option =
     physicalFastPathTable store dbName tref
     |> Option.bind (fun table -> tryRangeAccessInTable scope store registry table tref whereExpr)
-
-and private tryRangeLookup
-    (store: Store)
-    (registry: Registry)
-    (dbName: string)
-    (tref: TableRef)
-    (whereExpr: Expr option)
-    : (ColumnDef list * (RowId * Value[]) list) option =
-    tryRangeAccess BareOrQualifiedColumn store registry dbName tref whereExpr
-    |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value)
 
 and private trySpatialAccessInTable
     (scope: ColumnReferenceScope)
@@ -10642,33 +10584,82 @@ and private trySpatialLookup scope store dbName tref whereExpr =
     trySpatialAccess scope store dbName tref whereExpr
     |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows)
 
+and private physicalAccessCandidateCount = function
+    | EqualityAccess plan
+    | MembershipAccess plan -> plan.CandidateRowIds.Count
+    | SpatialAccess plan -> plan.SpatialRows.Length
+    | RangeAccess plan -> plan.RangeRowCount
+
+and private physicalAccessPreference = function
+    | EqualityAccess _ -> 0
+    | MembershipAccess _ -> 1
+    | SpatialAccess _ -> 2
+    | RangeAccess _ -> 3
+
+and private physicalAccessRows = function
+    | EqualityAccess plan
+    | MembershipAccess plan -> plan.Columns, plan.Rows.Value
+    | SpatialAccess plan -> plan.SpatialColumns, plan.SpatialRows
+    | RangeAccess plan -> plan.RangeColumns, plan.RangeRows.Value
+
+and private physicalAccessCandidatesInTableWith
+    (policy: IndexAccessPolicy)
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : PhysicalAccessPlan list =
+    [ tryEqualityAccessInTableWith policy store registry table tref whereExpr
+      |> Option.map EqualityAccess
+      tryInAccessInTableWith policy store registry table tref whereExpr
+      |> Option.map MembershipAccess
+      trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
+      |> Option.map SpatialAccess
+      tryRangeAccessInTableWith policy BareOrQualifiedColumn store registry table tref whereExpr
+      |> Option.map RangeAccess ]
+    |> List.choose id
+
+and private choosePhysicalAccess candidates =
+    match candidates with
+    | [] -> None
+    | candidates ->
+        candidates
+        |> List.minBy (fun candidate -> physicalAccessCandidateCount candidate, physicalAccessPreference candidate)
+        |> Some
+
+and private choosePhysicalAccessBeforeIndexOrder candidates =
+    let hasPointOrSpatialAccess =
+        candidates
+        |> List.exists (function
+            | RangeAccess _ -> false
+            | _ -> true)
+
+    if hasPointOrSpatialAccess then choosePhysicalAccess candidates else None
+
+and private tryPhysicalAccessInTableWith policy store registry table tref whereExpr =
+    physicalAccessCandidatesInTableWith policy store registry table tref whereExpr
+    |> choosePhysicalAccess
+
+and private tryPhysicalAccessWith policy store registry dbName tref whereExpr =
+    physicalFastPathTable store dbName tref
+    |> Option.bind (fun table -> tryPhysicalAccessInTableWith policy store registry table tref whereExpr)
+
 and private tryPhysicalCandidates store registry dbName tref whereExpr =
-    tryIndexedCandidates store registry dbName tref whereExpr
-    |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tref whereExpr)
-    |> Option.orElseWith (fun () -> tryRangeLookup store registry dbName tref whereExpr)
+    tryPhysicalAccessWith CandidateNarrowing store registry dbName tref whereExpr
+    |> Option.map physicalAccessRows
 
 and private tryPhysicalReadCandidates store registry dbName tref whereExpr =
-    tryIndexedLookup store registry dbName tref whereExpr
-    |> Option.orElseWith (fun () -> trySpatialLookup BareOrQualifiedColumn store dbName tref whereExpr)
-    |> Option.orElseWith (fun () -> tryRangeLookup store registry dbName tref whereExpr)
+    tryPhysicalAccessWith CostedRead store registry dbName tref whereExpr
+    |> Option.map physicalAccessRows
 
 and private tryPhysicalReadCandidatesInTable store registry table tref whereExpr =
-    tryIndexedLookupInTable store registry table tref whereExpr
-    |> Option.orElseWith (fun () ->
-        trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
-        |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows))
-    |> Option.orElseWith (fun () ->
-        tryRangeAccessInTable BareOrQualifiedColumn store registry table tref whereExpr
-        |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value))
+    tryPhysicalAccessInTableWith CostedRead store registry table tref whereExpr
+    |> Option.map physicalAccessRows
 
 and private tryPhysicalCandidatesInTable store registry table tref whereExpr =
-    tryIndexedCandidatesInTable store registry table tref whereExpr
-    |> Option.orElseWith (fun () ->
-        trySpatialAccessInTable BareOrQualifiedColumn store table tref whereExpr
-        |> Option.map (fun lookup -> lookup.SpatialColumns, lookup.SpatialRows))
-    |> Option.orElseWith (fun () ->
-        tryRangeAccessInTable BareOrQualifiedColumn store registry table tref whereExpr
-        |> Option.map (fun lookup -> lookup.RangeColumns, lookup.RangeRows.Value))
+    tryPhysicalAccessInTableWith CandidateNarrowing store registry table tref whereExpr
+    |> Option.map physicalAccessRows
 
 and private tryQualifiedRangeLookup
     (store: Store)
@@ -15521,35 +15512,41 @@ let rec private explainJoinBlock
 
                 true
 
-        match tryEqualityAccess store registry dbName tref whereExpr with
-        | Some plan when not plan.UsesFullKey && indexOrderPlan.IsSome -> tryExplainIndexOrder ()
-        | Some plan when plan.Unique && plan.CandidateRowIds.IsEmpty ->
-            acc.Add
-                { Id = Some id
-                  SelectType = selectType
-                  Table = None
-                  Type = None
-                  Key = None
-                  Ref = None
-                  Rows = None
-                  Extra = [ "no matching row in const table" ] }
+        let candidates =
+            physicalFastPathTable store dbName tref
+            |> Option.map (fun table ->
+                physicalAccessCandidatesInTableWith CostedRead store registry table tref whereExpr)
+            |> Option.defaultValue []
 
-            true
-        | Some plan ->
-            acc.Add
-                { Id = Some id
-                  SelectType = selectType
-                  Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                  Type = Some(if plan.Unique then "const" else "ref")
-                  Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
-                  Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
-                  Rows = Some(uint64 plan.CandidateRowIds.Count)
-                  Extra = if plan.Unique then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
+        let equality =
+            candidates
+            |> List.tryPick (function
+                | EqualityAccess plan -> Some plan
+                | _ -> None)
 
-            true
-        | None ->
-            match tryInAccess store registry dbName tref whereExpr with
-            | Some plan ->
+        let emitAccess access =
+            match access with
+            | EqualityAccess plan when plan.Unique && plan.CandidateRowIds.IsEmpty ->
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = None
+                      Type = None
+                      Key = None
+                      Ref = None
+                      Rows = None
+                      Extra = [ "no matching row in const table" ] }
+            | EqualityAccess plan ->
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                      Type = Some(if plan.Unique then "const" else "ref")
+                      Key = Some(plan.KeyName, explainIndexKeyLen plan.Columns plan.ColumnIndices plan.PrefixLengths)
+                      Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
+                      Rows = Some(uint64 plan.CandidateRowIds.Count)
+                      Extra = if plan.Unique then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
+            | MembershipAccess plan ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
@@ -15559,42 +15556,40 @@ let rec private explainJoinBlock
                       Ref = None
                       Rows = Some(uint64 plan.CandidateRowIds.Count)
                       Extra = accessExtra }
+            | SpatialAccess plan ->
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                      Type = Some "range"
+                      Key = Some(plan.SpatialIndexName, Some 34)
+                      Ref = None
+                      Rows = Some(uint64 plan.SpatialRows.Length)
+                      Extra = accessExtra }
+            | RangeAccess plan ->
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                      Type = Some "range"
+                      Key =
+                        Some(
+                            plan.RangeIndexName,
+                            explainPrefixKeyLen plan.RangeColumns.[plan.RangeColumnIndex] plan.RangePrefixLength
+                        )
+                      Ref = None
+                      Rows = Some(uint64 plan.RangeRowCount)
+                      Extra = accessExtra }
 
-                true
-            | None ->
-                match trySpatialAccess BareOrQualifiedColumn store dbName tref whereExpr with
-                | Some plan ->
-                    acc.Add
-                        { Id = Some id
-                          SelectType = selectType
-                          Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                          Type = Some "range"
-                          Key = Some(plan.SpatialIndexName, Some 34)
-                          Ref = None
-                          Rows = Some(uint64 plan.SpatialRows.Length)
-                          Extra = accessExtra }
+            true
 
-                    true
-                | None ->
-                    match indexOrderPlan with
-                    | Some _ -> tryExplainIndexOrder ()
-                    | None ->
-                        tryRangeAccess BareOrQualifiedColumn store registry dbName tref whereExpr
-                        |> Option.map (fun lookup ->
-                            acc.Add
-                                { Id = Some id
-                                  SelectType = selectType
-                                  Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                                  Type = Some "range"
-                                  Key =
-                                    Some(
-                                        lookup.RangeIndexName,
-                                        explainPrefixKeyLen lookup.RangeColumns.[lookup.RangeColumnIndex] lookup.RangePrefixLength
-                                    )
-                                  Ref = None
-                                  Rows = Some(uint64 lookup.RangeRowCount)
-                                  Extra = accessExtra })
-                        |> Option.isSome
+        match equality with
+        | Some plan when not plan.UsesFullKey && indexOrderPlan.IsSome -> tryExplainIndexOrder ()
+        | _ ->
+            match choosePhysicalAccessBeforeIndexOrder candidates, indexOrderPlan with
+            | Some access, _ -> emitAccess access
+            | None, Some _ -> tryExplainIndexOrder ()
+            | None, None -> candidates |> choosePhysicalAccess |> Option.map emitAccess |> Option.defaultValue false
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.

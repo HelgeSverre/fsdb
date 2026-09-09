@@ -6027,6 +6027,99 @@ let tests =
                     | ResultSet(_, [ [ Some "100" ] ]) -> ()
                     | other -> failtestf "expected all rows through the selected access path, got %A" other
 
+                testCase "competing index families choose the lowest-cardinality access"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE competing (id INT PRIMARY KEY, age INT, sort_key INT, touched INT, KEY ix_age (age), KEY ix_sort_key (sort_key))"
+                    |> ignore
+
+                    [ for id in 1..100 -> sprintf "(%d, %d, %d, 0)" id (if id <= 20 then 30 else 40) id ]
+                    |> String.concat ", "
+                    |> sprintf "INSERT INTO competing VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    runDefault store "CREATE TABLE anchor (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO anchor VALUES (1)" |> ignore
+
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (function
+                            | [ value ] ->
+                                calls <- calls + 1
+                                value
+                            | _ -> raise (SqlError(1582, "touch expects one argument")))
+
+                    let predicate = "age = 30 AND sort_key BETWEEN 10 AND 10 AND TOUCH(id) = id"
+
+                    match run store registry $"SELECT id FROM competing WHERE {predicate}" with
+                    | ResultSet(_, [ [ Some "10" ] ]) -> ()
+                    | other -> failtestf "expected one competing-index row, got %A" other
+
+                    Expect.isLessThan calls 3 "SELECT resolves only the narrowest index candidates"
+
+                    let plan = run store registry $"EXPLAIN SELECT id FROM competing WHERE {predicate}" |> explainRow
+                    Expect.equal plan.AccessType (Some "range") "the narrow range wins over a broader equality bucket"
+                    Expect.equal plan.Key (Some "ix_sort_key") "EXPLAIN reports the selected range index"
+                    Expect.equal plan.EstimatedRows (Some "1") "EXPLAIN reports the selected candidate count"
+
+                    calls <- 0
+
+                    let joinedSql =
+                        "SELECT c.id FROM competing c JOIN anchor a ON a.id = 1 WHERE c.age = 30 AND c.sort_key BETWEEN 10 AND 10 AND TOUCH(c.id) = c.id"
+
+                    let joinedPlan =
+                        run store registry $"EXPLAIN {joinedSql}"
+                        |> explainRows
+                        |> List.find (fun row -> row.Table = Some "c")
+
+                    Expect.equal joinedPlan.AccessType (Some "range") "join-source narrowing uses the narrow range"
+                    Expect.equal joinedPlan.Key (Some "ix_sort_key") "the joined source reports the selected range index"
+
+                    calls <- 0
+
+                    match run store registry joinedSql with
+                    | ResultSet(_, [ [ Some "10" ] ]) -> ()
+                    | other -> failtestf "expected one joined competing-index row, got %A" other
+
+                    Expect.isLessThan calls 3 "join-source narrowing resolves only the narrowest candidates"
+
+                    calls <- 0
+
+                    let updatePlan =
+                        run store registry $"EXPLAIN UPDATE competing SET touched = 1 WHERE {predicate}"
+                        |> explainRow
+
+                    Expect.equal updatePlan.AccessType (Some "range") "UPDATE uses the narrow range"
+                    Expect.equal updatePlan.Key (Some "ix_sort_key") "UPDATE reports the selected range index"
+
+                    calls <- 0
+
+                    match run store registry $"UPDATE competing SET touched = 1 WHERE {predicate}" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one competing-index update, got %A" other
+
+                    Expect.isLessThan calls 4 "UPDATE resolves only the narrowest index candidates"
+
+                    calls <- 0
+
+                    let deletePlan = run store registry $"EXPLAIN DELETE FROM competing WHERE {predicate}" |> explainRow
+                    Expect.equal deletePlan.AccessType (Some "range") "DELETE uses the narrow range"
+                    Expect.equal deletePlan.Key (Some "ix_sort_key") "DELETE reports the selected range index"
+
+                    calls <- 0
+
+                    match run store registry $"DELETE FROM competing WHERE {predicate}" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected one competing-index delete, got %A" other
+
+                    Expect.isLessThan calls 4 "DELETE resolves only the narrowest index candidates"
+
                 testCase "equality planning avoids broad index bucket unions"
                 <| fun _ ->
                     let store = newStore ()
