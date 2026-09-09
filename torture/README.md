@@ -91,11 +91,13 @@ Run the independent prepared-transaction concurrency lane:
 Every worker owns a distinct unpooled connection and two server-side prepared
 commands. Transactions begin together, contend on a deterministic account
 hotset, insert a committed-operation ledger row, and deterministically commit
-or roll back. The oracle checks exact balances, version counts, committed
-operation IDs, rollback absence, total-money conservation, client errors,
-prepared-command counts, throughput, and p50/p95/p99 latency. Its reusable
-phase barrier is asynchronous so the harness does not manufacture thread-pool
-starvation at high connection counts.
+or roll back.
+
+The oracle checks exact balances, version counts, committed operation IDs,
+rollback absence, total-money conservation, client errors, prepared-command
+counts, throughput, and p50/p95/p99 latency. Its reusable phase barrier is
+asynchronous so the harness does not manufacture thread-pool starvation at
+high connection counts.
 
 The same run applies matched fault schedules to MySQL and fsdb. It cancels a
 statement queued for a row lock, rolls a contended write back to a savepoint,

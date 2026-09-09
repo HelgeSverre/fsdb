@@ -142,12 +142,13 @@ hosts can provide either private key through `Db.withAuthenticationRsaKey`;
 fsdb derives and serves its public half. `SHOW STATUS` exposes the active keys
 as `Caching_sha2_password_rsa_public_key` and `Rsa_public_key`.
 
-`--require-secure-transport` rejects plaintext handshakes with 3159.
-Embedding hosts supply already-loaded `X509Certificate2` values through
-`Db.withTlsCertificate` and `Db.withClientCertificateAuthority`;
-`Db.requireSecureTransport` enables the same plaintext restriction. Accounts
-created with `REQUIRE SSL` reject plaintext authentication. Accounts created
-with `REQUIRE X509` also require a client certificate that chains to a
+`--require-secure-transport` rejects plaintext handshakes with 3159. Embedding
+hosts supply already-loaded `X509Certificate2` values through
+`Db.withTlsCertificate` and `Db.withClientCertificateAuthority`, while
+`Db.requireSecureTransport` enables the same plaintext restriction.
+
+Accounts created with `REQUIRE SSL` reject plaintext authentication. Accounts
+created with `REQUIRE X509` also require a client certificate that chains to a
 configured client CA. When extended key usage is present, it must permit client
 authentication.
 
@@ -265,11 +266,12 @@ fsdb supports stored queries broadly and a narrow writable subset:
 Single-table views and nested views over that shape accept `UPDATE` and
 `DELETE`, including predicates over computed projections. A view's `ORDER BY`
 guides limited updates and deletes, survives direct nesting, and yields to an
-explicit outer `ORDER BY`. Direct physical inner-join views accept `UPDATE`
-against one component table and `INSERT` with an explicit column list against
-one insertable component. Outer joins, join-view `DELETE`/`REPLACE`, and one
-statement that writes multiple component tables are refused with MySQL's
-corresponding errors.
+explicit outer `ORDER BY`.
+
+Direct physical inner-join views accept `UPDATE` against one component table
+and `INSERT` with an explicit column list against one insertable component.
+Outer joins, join-view `DELETE`/`REPLACE`, and one statement that writes
+multiple component tables are refused with MySQL's corresponding errors.
 
 Only direct column projections are assignable; computed columns return 1348.
 A component is insertable only when each selected projection for that
@@ -382,9 +384,11 @@ event privileges guard the corresponding operations.
 last-option-wins rule. Unsupported algorithms and incompatible lock requests
 fail before any schema change. The compatibility matrix covers ordinary and
 generated columns, indexes, checks, foreign keys, primary-key replacement,
-table options, and character-set conversion. The in-memory engine publishes
-every accepted schema change as one immutable database-root replacement, so
-InnoDB's physical COPY/INPLACE/INSTANT lock duration does not apply.
+table options, and character-set conversion.
+
+The in-memory engine publishes every accepted schema change as one immutable
+database-root replacement, so InnoDB's physical COPY/INPLACE/INSTANT lock
+duration does not apply.
 
 ## HASH partitioning
 
@@ -400,6 +404,7 @@ partition pruning or separate storage. `ANALYZE`, `CHECK`, `OPTIMIZE`, and
 `REPAIR PARTITION` validate partition names and report MySQL-compatible status
 rows. `TRUNCATE PARTITION` removes rows from named partitions without firing
 DELETE triggers and preserves the table's AUTO_INCREMENT counter.
+
 `DROP PARTITION` returns MySQL's HASH-specific 1512 refusal. Partition renaming
 through `REORGANIZE PARTITION` remains unsupported.
 
@@ -417,8 +422,10 @@ Both column and table forms support explicit names, generated
 `table_chk_N` names, and `[NOT] ENFORCED`. `ALTER TABLE` supports `ADD CHECK`,
 `DROP CHECK`, and `ALTER CHECK ... [NOT] ENFORCED`; enabling a constraint
 validates existing rows before changing its state. Names are unique within a
-schema. Dropping a column removes its column-owned check, while a table check
-that depends on the column blocks drop or rename with error 3959. The MySQL
+schema.
+
+Dropping a column removes its column-owned check, while a table check that
+depends on the column blocks drop or rename with error 3959. The MySQL
 restriction between checked columns and foreign-key `SET NULL`/`ON UPDATE`
 referential actions is enforced at DDL time.
 
@@ -427,9 +434,11 @@ Definitions persist through the ordinary WAL and snapshot paths and appear in
 `information_schema.TABLE_CONSTRAINTS`, including enforcement state. The
 expression validator rejects subqueries, aggregates, window functions,
 nondeterministic functions, cross-table references, auto-increment references,
-and DirectOnly or nondeterministic host extensions. Skipped `INSERT IGNORE`
-rows and ignored CHECK violations appear in the session diagnostics area and
-through `SHOW WARNINGS`; the OK/EOF warning count reports the same conditions.
+and DirectOnly or nondeterministic host extensions.
+
+Skipped `INSERT IGNORE` rows and ignored CHECK violations appear in the
+session diagnostics area and through `SHOW WARNINGS`; the OK/EOF warning count
+reports the same conditions.
 
 ## Server settings
 
@@ -452,14 +461,19 @@ validation path:
 `max_load_data_bytes` and the `wal_*` controls are fsdb-only configuration;
 they do not appear as invented MySQL system variables.
 
-The option-file parser follows MySQL's format rather than a generic ini
-dialect: `[mysqld]` and `[server]` groups, `name = value` and the bare-name
-boolean form, `#`/`;` comments that may start mid-line, single- or
-double-quoted values with `\n`/`\t`/`\r`/`\b`/`\s`/`\\` escapes, `-` and `_`
-interchangeable in names, size suffixes (`64M`, `1G`), `loose-` to tolerate an
-option fsdb doesn't have, and `!include`/`!includedir`. Reading the real format
-is what lets `skip-name-resolve` be reported as an option fsdb lacks instead of
-as a syntax error.
+The option-file parser follows MySQL's format rather than a generic INI
+dialect. It accepts:
+
+- `[mysqld]`, `[mysqld-8.4]`, and `[server]` groups;
+- `name = value` and bare-name booleans;
+- mid-line `#` and `;` comments;
+- single- or double-quoted values with `\n`, `\t`, `\r`, `\b`, `\s`, and `\\`
+  escapes;
+- interchangeable `-` and `_` in names, plus size suffixes such as `64M`;
+- `loose-`, `!include`, and `!includedir`.
+
+Reading the real format lets `skip-name-resolve` be reported as an option fsdb
+lacks instead of as a syntax error.
 
 Groups other than `[mysqld]`, `[mysqld-8.4]`, and `[server]` are skipped, so a
 shared `my.cnf` is safe to use. Within those groups, an unrecognised option is a
@@ -502,8 +516,9 @@ before closing the connection.
 
 fsdb has a real account system backed by the native MySQL 8.4 catalog schemas
 plus fsdb's stored-object catalogs. Native tables use their MySQL column order,
-types, nullability, key membership, defaults, and generated columns. The
-optimizer cost tables include MySQL's bootstrap rows and remain writable,
+types, nullability, key membership, defaults, and generated columns.
+
+The optimizer cost tables include MySQL's bootstrap rows and remain writable,
 although fsdb's planner does not consume their overrides. Group-action
 configuration rows are present without replication execution. Engine-maintained
 help, log, statistics, GTID, NDB, and replication-channel data still differ or

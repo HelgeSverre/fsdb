@@ -152,17 +152,19 @@ Statement-stable scalar, `EXISTS`, `IN`, `ANY`, `SOME`, and `ALL` subqueries
 materialize once per statement. Compatible scalar and row-value membership
 tests reuse typed sets and can narrow a directly indexed outer table.
 Compatible direct-column scalar literal lists use the same statement-scoped
-membership representation. Correlated equality probes use single keys,
-complete composite keys, or safe ordered left prefixes through direct tables
-and pass-through derived tables or CTEs. Outer values and literals may bind
-different key parts. Correlated forms preserve MySQL NULL and multi-column
-error semantics.
+membership representation.
+
+Correlated equality probes use single keys, complete composite keys, or safe
+ordered left prefixes through direct tables and pass-through derived tables or
+CTEs. Outer values and literals may bind different key parts. Correlated forms
+preserve MySQL NULL and multi-column error semantics.
 
 Execution also covers `WITH ROLLUP`, numeric and temporal window frames,
 multi-column `COUNT(DISTINCT ...)`, the `GROUP_CONCAT` byte ceiling,
 statement-atomic multi-table DML, and exact ODKU affected-row counts. Row
 comparisons retain null-safe behavior and MySQL's 1241 error for invalid
 multi-column subqueries; empty-group bit aggregates retain their identities.
+
 Row-local recursive CTE members prepare their invariant predicate, projection,
 and type coercions once; members needing joins, grouping, windows, full-text,
 or locking retain the general SELECT pipeline.
@@ -223,6 +225,7 @@ ENUM, and SET families with per-column charset and collation metadata.
 Temporal values cover DATE, YEAR, and microsecond-precision DATETIME,
 TIMESTAMP, and signed TIME durations. Fractional values round half-up unless
 `TIME_TRUNCATE_FRACTIONAL` applies, and SQL modes control zero-date acceptance.
+
 Numeric offsets appended to DATETIME and TIMESTAMP inputs are converted into
 the session `time_zone`. TIMESTAMP values then retain the UTC instant and
 follow later session-zone changes; DATETIME values retain the converted
@@ -326,21 +329,23 @@ terminates the process rather than claiming a commit.
 
 Snapshot replacement verifies the `.new` file before preferring it and syncs
 the containing directory after rename on Unix. Snapshots retain stable row
-identities. Current update and delete WAL records address those identities and
-verify their before-images, falling back to the image only when a concurrent
-transaction rebase has reassigned a private row identity. Replay applies the
-ordered changes without re-entering checked write paths and maintains derived
-indexes incrementally. Older image-only WAL and snapshot formats remain
-readable.
+identities.
+
+Current update and delete WAL records address those identities and verify their
+before-images, falling back to the image only when a concurrent transaction
+rebase has reassigned a private row identity. Replay applies the ordered
+changes without re-entering checked write paths and maintains derived indexes
+incrementally. Older image-only WAL and snapshot formats remain readable.
 
 Group commit, ordered checkpoint barriers, lock-step rotation, shutdown
 rotation, decode-depth limits, generated-expression codecs, and durable XA
 records share the same persistence path. XA records retain logical lock claims
 so startup can rebuild their row/key ownership. Checkpoint rotation waits for
-prepared XA branches so their recovery base remains in the WAL. The durability
-campaign forces repeated automatic rotations, appends a WAL-only commit,
-crashes the server, and verifies the recovered transaction sets before and
-after a graceful snapshot restart.
+prepared XA branches so their recovery base remains in the WAL.
+
+The durability campaign forces repeated automatic rotations, appends a
+WAL-only commit, crashes the server, and verifies the recovered transaction
+sets before and after a graceful snapshot restart.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -470,6 +475,7 @@ CA certificates, secure-transport enforcement, and per-account SSL, X509,
 subject, issuer, or cipher requirements. Packet, connection, and
 prepared-statement limits are enforced and advertised honestly. Mid-query
 disconnects cancel evaluation through `Server.watchForDisconnect`.
+
 `COM_SET_OPTION` toggles multi-statement handling for negotiated clients.
 The dynamic GLOBAL `protocol_compression_algorithms` policy controls zlib,
 Zstandard, and uncompressed negotiation for new connections.
@@ -569,10 +575,11 @@ It confirms that the bounded access path removes the scan cliff while also
 showing the remaining per-candidate gap to MySQL.
 
 The [correlated composite-prefix profile](benchmarks/results/b2b0bca-quick.md)
-measures the same access shape through a pass-through derived table. It also
-records the previous executor as a control: the maintained prefix reduces
-candidate work, but correlated-query setup remains far more expensive than
-MySQL's execution.
+measures the same access shape through a pass-through derived table and records
+the previous executor as a control. The follow-up
+[text-prefix cardinality profile](benchmarks/results/a50142b-quick.md) shows the
+fully covered `COUNT(*)` path reading a compatible index bucket directly.
+Collation-changing and coercive comparisons deliberately retain row evaluation.
 
 The engine already avoids several earlier cliffs:
 

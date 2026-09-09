@@ -111,9 +111,9 @@ fsdb reads `/etc/my.cnf`, `/etc/mysql/my.cnf`, `$MYSQL_HOME/my.cnf`, and
 `~/.my.cnf` when present. `--defaults-file` reads only the named file instead.
 
 The parser follows MySQL's option-file format rather than a generic INI
-dialect. It understands `[mysqld]` and `[server]` groups, mid-line `#` and `;`
-comments, quoted values with escapes, interchangeable `-` and `_`, size
-suffixes, `!include`, `!includedir`, and `loose-` options.
+dialect. It understands `[mysqld]`, `[mysqld-8.4]`, and `[server]` groups,
+mid-line `#` and `;` comments, quoted values with escapes, interchangeable `-`
+and `_`, size suffixes, `!include`, `!includedir`, and `loose-` options.
 
 Other groups are skipped, so the server can share an option file with MySQL.
 An unrecognised option inside a server group is a startup error that names the
@@ -202,10 +202,13 @@ binding to a non-loopback address:
 New accounts use MySQL 8.4's `caching_sha2_password` by default. The server
 supports its full and cached exchanges: passwords travel inside TLS when the
 connection is encrypted, while plaintext TCP clients can request the server's
-RSA public key. By default that key is generated for the process. The
-`caching_sha2_password_*_key_path` options select a persistent PEM pair instead;
-embedding hosts can call `Db.withAuthenticationRsaKey` with an already-loaded
-private key. Clients that disable public-key retrieval should use TLS.
+RSA public key. By default that key is generated for the process.
+
+The `caching_sha2_password_*_key_path` options select a persistent PEM pair;
+embedding hosts can call
+`Db.withAuthenticationRsaKey Authentication.CachingSha2Password privateKey`
+with an already-loaded key. Clients that disable public-key retrieval should
+use TLS.
 
 `CREATE USER` and `ALTER USER` also accept explicit
 `sha256_password` and `mysql_native_password` credentials for older clients.
@@ -370,8 +373,10 @@ different access pattern:
   Correlated predicates use the same complete-key and safe left-prefix probes
   through direct tables and pass-through derived tables or CTEs. Literal and
   outer-row equalities may supply different key parts; projection aliases are
-  mapped back to their stored columns before the lookup. More complex derived
-  shapes retain the materialized or row-by-row path.
+  mapped back to their stored columns before the lookup. A fully covered
+  `COUNT(*)` reads the index cardinality directly when its comparison semantics
+  match the stored key. More complex or coercive shapes retain the materialized
+  or row-by-row path.
 
 Equality buckets and ordered entries remain separate derived structures. That
 trade spends memory and incremental write work to keep point probes direct and
@@ -534,7 +539,7 @@ Configuration uses pipeline-friendly builders. Most return a new `Db` value;
 | `Db.withLogger` | Route process-wide diagnostics to a host callback. |
 | `Db.withTlsCertificate` | Supply the listener's server certificate. |
 | `Db.withClientCertificateAuthority` | Trust a CA for client certificates. |
-| `Db.withAuthenticationRsaKey` | Supply a private key for plaintext SHA-2 full authentication. |
+| `Db.withAuthenticationRsaKey` | Supply a private key for one plaintext SHA-2 authentication plugin. |
 | `Db.requireSecureTransport` | Reject plaintext sessions. |
 
 Runtime and extension APIs are similarly small:

@@ -74,9 +74,10 @@ from protocol and executor gaps.
 The concurrency lane is separate from generated bulk loading. It constructs a
 deterministic transfer plan, opens one physical connection per worker, prepares
 an account-update command and ledger-insert command on each, and runs explicit
-transactions through synchronized start/finish phases. Because every
-successful transfer has a deterministic additive effect, final balances,
-version counts, committed operation IDs, rollback absence, and total
+transactions through synchronized start/finish phases.
+
+Because every successful transfer has a deterministic additive effect, final
+balances, version counts, committed operation IDs, rollback absence, and total
 conservation have one exact answer regardless of scheduling. MySQL must satisfy
 that answer before fsdb is judged.
 
