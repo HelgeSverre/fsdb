@@ -6105,7 +6105,7 @@ and private tryInformationSchemaNarrow
         None
     else
         match
-            pointLookupEqualities registry tableRef where
+            literalPointLookupEqualities registry tableRef where
             |> List.choose (function
                 | { Column = name; Transform = None; Value = VString value } -> Some(name, value)
                 | _ -> None)
@@ -9383,7 +9383,7 @@ and private runUnlockedSelectStmt
                 | Ok(columns, rows) -> runArbitrary columns rows None select
 
 /// Literal equalities eligible for a single-table index candidate path.
-and private pointLookupEqualities (registry: Registry) (tref: TableRef) (whereExpr: Expr option) : PointEquality list =
+and private literalPointLookupEqualities (registry: Registry) (tref: TableRef) (whereExpr: Expr option) : PointEquality list =
     match whereExpr with
     | None -> []
     | Some whereExpr ->
@@ -9397,6 +9397,84 @@ and private pointLookupEqualities (registry: Registry) (tref: TableRef) (whereEx
                       Transform = transform
                       Value = value })
             | _ -> None)
+
+and private pointLookupEqualities
+    (store: Store)
+    (registry: Registry)
+    (table: Table)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    : PointEquality list =
+    let isNumericType = function
+        | TTinyInt _
+        | TBool
+        | TSmallInt _
+        | TMediumInt _
+        | TInt _
+        | TBigInt _
+        | TBit _
+        | TDecimal _
+        | TDouble _
+        | TFloat _
+        | TYear -> true
+        | _ -> false
+
+    let isNumericValue = function
+        | VInt _
+        | VUInt _
+        | VBit _
+        | VDecimal _
+        | VDouble _ -> true
+        | _ -> false
+
+    let rec isSafeConstant = function
+        | Lit _ -> true
+        | BinOp((Add | Sub | SignedSub | Mul), left, right) -> isSafeConstant left && isSafeConstant right
+        | FuncCall(name, arguments)
+            when FunctionalIndex.tryBuiltin name |> Option.isSome
+                 && Functions.isUnmodifiedBuiltinScalar name registry ->
+            arguments |> List.forall isSafeConstant
+        | _ -> false
+
+    let context = lazy (contextFactory store registry Storage.defaultDatabase Map.empty Map.empty None [||])
+
+    let tryPlannerConstant expression =
+        match expression with
+        | Lit _ -> None
+        | _ when isSafeConstant expression ->
+            evalExpr context.Value expression |> Result.toOption |> Option.filter isNumericValue
+        | _ -> None
+
+    let tryNumericColumn expression =
+        storedIndexedColumnFor registry tref expression
+        |> Option.filter (fun (name, transform) ->
+            transform.IsNone
+            && table.Columns
+               |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+               |> Option.exists (fun column -> isNumericType column.Type))
+
+    let tryPair indexed constant =
+        Option.map2
+            (fun (column, transform) value ->
+                { Column = column
+                  Transform = transform
+                  Value = value })
+            (tryNumericColumn indexed)
+            (tryPlannerConstant constant)
+
+    let tryEquality = function
+        | BinOp(Eq, left, right) ->
+            tryPair left right
+            |> Option.orElseWith (fun () -> tryPair right left)
+        | _ -> None
+
+    let literals = literalPointLookupEqualities registry tref whereExpr
+
+    whereExpr
+    |> optionalConjuncts
+    |> List.choose tryEquality
+    |> List.append literals
+    |> List.distinct
 
 and private indexedColumnFor (tref: TableRef) =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
@@ -9628,7 +9706,7 @@ and private tryEqualityAccessInTableWith
     if not (storedRowsMatchReadRows store table.Columns) then
         None
     else
-        let equalities = pointLookupEqualities registry tref whereExpr
+        let equalities = pointLookupEqualities store registry table tref whereExpr
         let storedEqualities =
             equalities
             |> List.choose (fun equality ->
@@ -11761,8 +11839,8 @@ and private equalityPinsOneStoredKey (table: Table) (name: string) (literal: Val
 
 /// A pinned prefix must identify one stored index key, not merely values
 /// equal after SQL coercion or collation folding.
-and private exactStoredKeyPins (registry: Registry) (table: Table) (tref: TableRef) (whereExpr: Expr option) =
-    pointLookupEqualities registry tref whereExpr
+and private exactStoredKeyPins (store: Store) (registry: Registry) (table: Table) (tref: TableRef) (whereExpr: Expr option) =
+    pointLookupEqualities store registry table tref whereExpr
     |> List.filter (fun equality ->
         equality.Transform.IsNone
         && equalityPinsOneStoredKey table equality.Column equality.Value)
@@ -11891,7 +11969,7 @@ and private orderedIndexPrefixMatches
 
     physicalFastPathTable store dbName tref
     |> Option.map (fun table ->
-        let pins = exactStoredKeyPins registry table tref whereExpr
+        let pins = exactStoredKeyPins store registry table tref whereExpr
         let pinnedColumns = pins |> List.map (_.Column >> _.ToLowerInvariant()) |> Set.ofList
         let conjunctCount = whereExpr |> optionalConjuncts |> List.length
 

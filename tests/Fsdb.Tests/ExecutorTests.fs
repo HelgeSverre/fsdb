@@ -1174,6 +1174,88 @@ let tests =
                         ()
                     | other -> failtestf "expected a const plan for the alias-qualified lookup, got %A" other
 
+                testCase "row-independent numeric key expressions use const access"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY, v INT)" |> ignore
+
+                    [ for id in 1 .. 200 -> sprintf "(%d, %d)" id (id * 10) ]
+                    |> String.concat ", "
+                    |> sprintf "INSERT INTO users VALUES %s"
+                    |> runDefault store
+                    |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE id = 1 + 1" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "users"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected a const plan for a row-independent key, got %A" other
+
+                    match run store registry "SELECT v FROM users WHERE id = 100 + 100 AND TOUCH(id) = id" with
+                    | ResultSet([ "v" ], [ [ Some "2000" ] ]) -> ()
+                    | other -> failtestf "expected the constant-key row, got %A" other
+
+                    Expect.isLessThan calls 3 "the residual runs only for the constant-key candidate"
+
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE ABS(-2) = id" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
+                        ()
+                    | other -> failtestf "expected a const plan for a deterministic numeric function, got %A" other
+
+                    match runDefault store "EXPLAIN UPDATE users SET v = 5 WHERE id = 1 + 1" with
+                    | ResultSet(_, [ [ _; Some "UPDATE"; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
+                        ()
+                    | other -> failtestf "expected a const UPDATE plan for a row-independent key, got %A" other
+
+                    match runDefault store "EXPLAIN DELETE FROM users WHERE id = 2 * 2" with
+                    | ResultSet(_, [ [ _; Some "DELETE"; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
+                        ()
+                    | other -> failtestf "expected a const DELETE plan for a row-independent key, got %A" other
+
+                    runDefault store "CREATE TABLE amounts (amount DECIMAL(10,2) PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO amounts VALUES (2.00), (3.00)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT amount FROM amounts WHERE amount = 1.25 + 0.75" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) -> ()
+                    | other -> failtestf "expected const access for an exact decimal expression, got %A" other
+
+                    match runDefault store "SELECT amount FROM amounts WHERE amount = 1.25 + 0.75" with
+                    | ResultSet([ "amount" ], [ [ Some "2.00" ] ]) -> ()
+                    | other -> failtestf "expected an exact decimal constant-key row, got %A" other
+
+                testCase "planner constant folding does not invoke overridden built-ins"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "ABS" (fun _ ->
+                            calls <- calls + 1
+                            VInt 2L)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1), (2), (3)" |> ignore
+
+                    match run store registry "EXPLAIN SELECT id FROM users WHERE id = ABS(-9)" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "ALL"; _; _; _; _; Some "3"; _; Some "Using where" ] ]) -> ()
+                    | other -> failtestf "expected an overridden builtin to retain scan access, got %A" other
+
+                    Expect.equal calls 0 "planning does not call extension code"
+
+                    match run store registry "SELECT id FROM users WHERE id = ABS(-9) ORDER BY id" with
+                    | ResultSet([ "id" ], [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected overridden ABS to retain row-by-row semantics, got %A" other
+
+                    Expect.isGreaterThan calls 2 "the overridden function remains on the scan path"
+
                 testCase "EXPLAIN reports a primary-key literal IN list as a range"
                 <| fun _ ->
                     let store = newStore ()
@@ -6063,7 +6145,7 @@ let tests =
                     Expect.equal plan.Key (Some "ix_tenant_priority") "the ordered key is reported"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("filesort"))) "the plan does not report a filesort"
 
-                testCase "literal equalities unlock a composite index ORDER BY suffix"
+                testCase "constant equalities unlock a composite index ORDER BY suffix"
                 <| fun _ ->
                     let store = newStore ()
 
@@ -6133,6 +6215,15 @@ let tests =
                     Expect.equal plan.Key (Some "ix_tenant_priority_created") "the composite key is reported"
                     Expect.equal plan.EstimatedRows (Some "4") "the order plan estimates only the pinned tenant slice"
                     Expect.isFalse (plan.Extra |> Option.exists (_.Contains("filesort"))) "the suffix plan avoids a filesort"
+
+                    let constantPlan =
+                        runDefault
+                            store
+                            "EXPLAIN SELECT id FROM indexed WHERE tenant_id = 1 + 1 AND keep_row = 1 ORDER BY priority DESC, created_at DESC"
+                        |> explainRow
+
+                    Expect.equal constantPlan.AccessType (Some "index") "a constant expression pins the ordered prefix"
+                    Expect.equal constantPlan.Key (Some "ix_tenant_priority_created") "the constant prefix retains the composite key"
 
                 testCase "composite prefix indexes do not claim full-value ORDER BY"
                 <| fun _ ->
