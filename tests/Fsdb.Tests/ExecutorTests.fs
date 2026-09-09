@@ -7771,7 +7771,7 @@ let tests =
                     runDefault store "CREATE TABLE scanned_rows (id INT PRIMARY KEY, bucket INT)" |> ignore
 
                     let values =
-                        [ 1..100 ]
+                        [ 1 .. 100 ]
                         |> List.map (fun id -> sprintf "(%d, %d)" id (id % 2))
                         |> String.concat ","
 
@@ -11686,7 +11686,45 @@ let tests =
 
                     match runDefault store "SELECT id FROM places" with
                     | ResultSet(_, [ [ Some "3" ] ]) -> ()
-                    | other -> failtestf "expected the outside row, got %A" other ]
+                    | other -> failtestf "expected the outside row, got %A" other
+
+                testCase "spatial and equality branches share an index union"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE places (id INT PRIMARY KEY, category INT, shape GEOMETRY NOT NULL SRID 0, KEY ix_category (category), SPATIAL INDEX sx(shape))"
+                    |> ignore
+
+                    let values =
+                        [ 1..100 ]
+                        |> List.map (fun id ->
+                            sprintf
+                                "(%d,%d,ST_GeomFromText('POINT(%d %d)',0))"
+                                id
+                                (if id <= 10 then 1 else 2)
+                                id
+                                id)
+                        |> String.concat ","
+
+                    runDefault store ("INSERT INTO places VALUES " + values) |> ignore
+
+                    let predicate =
+                        "category = 1 OR MBRINTERSECTS(shape, ST_GeomFromText('POLYGON((90 90,92 90,92 92,90 92,90 90))',0))"
+
+                    match runDefault store $"SELECT id FROM places WHERE {predicate}" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            ([ 1 .. 10 ] @ [ 90 .. 92 ] |> List.map (string >> Some >> List.singleton))
+                            "the union retains equality and spatial candidates"
+                    | other -> failtestf "expected spatial index-union rows, got %A" other
+
+                    let plan = runDefault store $"EXPLAIN SELECT id FROM places WHERE {predicate}" |> explainRow
+                    Expect.equal plan.AccessType (Some "index_merge") "spatial branches use index-union access"
+                    Expect.equal plan.Key (Some "ix_category,sx") "EXPLAIN lists the equality and spatial indexes"
+                    Expect.equal plan.EstimatedRows (Some "13") "the spatial union reports distinct candidate rows" ]
 
           // Expectations read off the MySQL 8.4.11 oracle over
           //   t = (1,10,1) (2,20,1) (3,30,2) (4,40,2) (5,50,2)  [id, v, g]
