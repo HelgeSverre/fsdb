@@ -213,6 +213,12 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale", "Planner")>]
+    member this.FilterByCompetingSecondaryIndexes() =
+        let value = randomUserId () - 1
+        this.Query $"SELECT id, name FROM users WHERE age = 30 AND sort_key BETWEEN {value} AND {value}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CountSelectiveIndexedRange() =
         let lower = randomUserId () - 1
         this.Query $"SELECT COUNT(*) FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 1}"
