@@ -211,8 +211,9 @@ runs:
   [indexed implementation](results/e1c2bbe-quick.md);
 - indexed `BETWEEN`: the [scan baseline](results/c54f2f0-quick.md) and
   [indexed implementation](results/89b9846-quick.md);
-- competing physical indexes: the [fixed-priority baseline](results/cef5118-quick.md)
-  and [cardinality-arbitrated follow-up](results/0cc8aee-quick.md);
+- competing physical indexes: the
+  [fixed-priority baseline](results/cef5118-quick.md) and
+  [cardinality-arbitrated follow-up](results/0cc8aee-quick.md);
 - fully covered OR predicates: the
   [indexed-union and forced-scan profile](results/ba86713-quick.md).
 
