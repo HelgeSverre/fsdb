@@ -2998,9 +2998,15 @@ let tests =
 
                   do! expectError [||] 1047 "08S01"
                   do! expectError [| 0x03uy |] 1065 "42000"
+                  do! expectError [| 0x03uy; byte ';' |] 1065 "42000"
+                  do! expectError [| 0x03uy; byte ';'; byte '#'; byte '9' |] 1064 "42000"
                   do! expectError [| 0x02uy |] 1046 "3D000"
+                  do! expectError [| 0x02uy; byte ' ' |] 1102 "42000"
+                  do! expectError [| 0x02uy; byte ' '; byte 'h'; byte ' ' |] 1102 "42000"
                   do! expectError [| 0x19uy |] 1835 "HY000"
                   do! expectError [| 0x1buy; 2uy; 0uy |] 1047 "08S01"
+                  do! expectError [| 0x16uy; byte ';' |] 1065 "42000"
+                  do! expectError [| 0x16uy; byte '#' |] 1295 "HY000"
                   do! expectError (Array.append [| 0x03uy |] (Array.append (Text.Encoding.ASCII.GetBytes "SELECT (") [| 0xffuy |])) 1064 "42000"
 
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }

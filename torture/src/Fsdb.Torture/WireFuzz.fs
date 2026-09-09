@@ -63,12 +63,15 @@ module WireCorpus =
         [| "empty-command", [||]
            "unknown-command", [| 0xffuy |]
            "empty-query", [| 0x03uy |]
+           "delimiter-only-query", query ";"
            "invalid-query", query "SELECT ("
            "invalid-utf8-query", Array.append (query "SELECT (") [| 0xffuy |]
            "ping-with-trailing-data", [| 0x0euy; 0xaauy; 0x55uy |]
            "empty-init-db", [| 0x02uy |]
+           "whitespace-init-db", [| 0x02uy; byte ' ' |]
            "empty-field-list", [| 0x04uy |]
            "empty-statement-prepare", [| 0x16uy |]
+           "comment-only-statement-prepare", [| 0x16uy; byte '#' |]
            "short-statement-execute", [| 0x17uy; 1uy |]
            "short-statement-fetch", [| 0x1cuy; 1uy |]
            "short-set-option", [| 0x1buy |]
@@ -107,12 +110,13 @@ module WireCorpus =
     let cases seed requested =
         let mutable state = if seed = 0UL then 0x9e3779b97f4a7c15UL else seed
         let generated = ResizeArray<string * byte array>()
+        let mutationSources = baselines |> Array.filter (snd >> Array.isEmpty >> not)
         let seen = Collections.Generic.HashSet<string>(StringComparer.Ordinal)
         baselines |> Array.iter (snd >> Convert.ToHexString >> seen.Add >> ignore)
         let mutable attempts = 0
 
         while generated.Count < requested && attempts < requested * 32 + 32 do
-            let baselineName, baseline = baselines.[int (nextUInt64 &state % uint64 baselines.Length)]
+            let baselineName, baseline = mutationSources.[int (nextUInt64 &state % uint64 mutationSources.Length)]
             let payload = mutate &state baseline
             let hex = Convert.ToHexString payload
 

@@ -344,6 +344,9 @@ let private malformedCommandError command =
         1835, "Malformed communication packet."
     | _ -> 1047, "Unknown command"
 
+let private isDelimiterOnlyQuery (sql: string) =
+    sql |> Seq.forall (fun value -> Char.IsWhiteSpace value || value = ';')
+
 let private isShutdownStatement (sql: string) : bool =
     let text = sql.Trim()
     let text = if text.EndsWith ';' then text.[..text.Length - 2].TrimEnd() else text
@@ -1803,6 +1806,15 @@ let private handleConnection
                                     |> Async.Ignore
 
                                 return! loop session
+                            | Some(InitDb db) when String.IsNullOrWhiteSpace db || db <> db.TrimEnd() ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload = errPayload capabilities 1102 (sprintf "Incorrect database name '%s'" db) }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(ChangeUser request) ->
                                 let supportsPluginAuth = hasCapability ClientPluginAuth capabilities
                                 let changeAuthData = if supportsPluginAuth then randomAuthPluginData () else authData
@@ -1925,7 +1937,7 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
-                            | Some(Query sql) when String.IsNullOrWhiteSpace sql ->
+                            | Some(Query sql) when isDelimiterOnlyQuery sql ->
                                 do!
                                     writePacketAsync
                                         stream
@@ -1974,6 +1986,15 @@ let private handleConnection
                                             writePacketAsync
                                                 stream
                                                 { SeqId = seqId; Payload = errPayload capabilities 1064 "You have an error in your SQL syntax" }
+                                            |> Async.Ignore
+
+                                        return! loop session
+                                    | Result.Ok [] when sql.Contains ';' ->
+                                        do!
+                                            writePacketAsync
+                                                stream
+                                                { SeqId = seqId
+                                                  Payload = errPayload capabilities 1064 "You have an error in your SQL syntax" }
                                             |> Async.Ignore
 
                                         return! loop session
@@ -2207,11 +2228,24 @@ let private handleConnection
                                     |> Async.Ignore
 
                                 return! loop session
-                            | Some(StmtPrepare sql) when String.IsNullOrWhiteSpace sql ->
+                            | Some(StmtPrepare sql) when isDelimiterOnlyQuery sql ->
                                 do!
                                     writePacketAsync
                                         stream
                                         { SeqId = seqId; Payload = errPayload capabilities 1065 "Query was empty" }
+                                    |> Async.Ignore
+
+                                return! loop session
+                            | Some(StmtPrepare sql) when Parser.isBlank sql ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload =
+                                            errPayload
+                                                capabilities
+                                                1295
+                                                "This command is not supported in the prepared statement protocol yet" }
                                     |> Async.Ignore
 
                                 return! loop session

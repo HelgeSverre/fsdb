@@ -189,6 +189,7 @@ let tests =
           <| fun _ ->
               Expect.equal (sqlStateForCode 1046) "3D000" "no database selected"
               Expect.equal (sqlStateForCode 1065) "42000" "empty query"
+              Expect.equal (sqlStateForCode 1102) "42000" "incorrect database name"
 
           testCase "ERR payload for an unmapped code falls back to HY000"
           <| fun _ ->
