@@ -522,6 +522,8 @@ let tests =
                           "constant_expression_membership"
                           "constant_expression_range"
                           "constant_expression_between"
+                          "indexed_disjunction"
+                          "nested_indexed_disjunction"
                           "allow_invalid_dates" ] do
                         Expect.contains features feature feature
 

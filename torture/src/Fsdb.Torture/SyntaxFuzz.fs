@@ -76,6 +76,9 @@ module SyntaxFuzz =
            "constant_expression_membership", "SELECT id, n FROM syntax_target WHERE id IN (0 + 1, ABS(-99))"
            "constant_expression_range", "SELECT id, n FROM syntax_target WHERE n >= 5 + 5 AND n < ABS(-11)"
            "constant_expression_between", "SELECT id, n FROM syntax_target WHERE n BETWEEN 5 + 5 AND ABS(-11)"
+           "indexed_disjunction", "SELECT id, n FROM syntax_target WHERE id = 1 OR n BETWEEN 10 AND 10"
+           "nested_indexed_disjunction",
+           "SELECT id, n FROM syntax_target WHERE id = 99 OR n IN (10, 20) OR (n BETWEEN 30 AND 40 AND label = 'missing')"
            "straight_join",
            "SELECT STRAIGHT_JOIN t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1"
            "correlated_index", "SELECT t.id, (SELECT COUNT(*) FROM syntax_source AS s WHERE s.n = t.n) FROM syntax_target AS t"
